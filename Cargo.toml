@@ -1,0 +1,7 @@
+[workspace]
+members = [
+    "sdk",
+    "examples/*",
+    "tools/*",
+]
+resolver = "2"
