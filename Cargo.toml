@@ -4,4 +4,7 @@ members = [
     "examples/*",
     "tools/*",
 ]
+exclude = [
+    "examples",
+]
 resolver = "2"
