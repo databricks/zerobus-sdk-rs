@@ -12,10 +12,7 @@ use clap::Parser;
 
 mod generate;
 use generate::{
-    clean_filename,
-    fetch_table_info,
-    generate_proto_file,
-    generate_rust_and_descriptor,
+    clean_filename, fetch_table_info, generate_proto_file, generate_rust_and_descriptor,
 };
 
 /// CLI arguments.
