@@ -29,13 +29,8 @@ use proto_zerobus::ephemeral_stream_response::Payload as ResponsePayload;
 use proto_zerobus::ingest_record_request::Record;
 use proto_zerobus::zerobus_client::ZerobusClient;
 use proto_zerobus::{
-    CloseStreamSignal,
-    CreateIngestStreamRequest,
-    EphemeralStreamRequest,
-    EphemeralStreamResponse,
-    IngestRecordRequest,
-    IngestRecordResponse,
-    RecordType,
+    CloseStreamSignal, CreateIngestStreamRequest, EphemeralStreamRequest, EphemeralStreamResponse,
+    IngestRecordRequest, IngestRecordResponse, RecordType,
 };
 use tokio::sync::RwLock;
 use tokio::time::{sleep, Duration};
@@ -59,7 +54,7 @@ pub enum StreamType {
     /// Ephemeral streams exist only for the duration of the connection.
     /// They are not persisted and are not recoverable.
     Ephemeral,
-    /// Persistent streams are durable and recoverable.
+    /// UNSUPPORTED: Persistent streams are durable and recoverable.
     Persistent,
 }
 
@@ -72,7 +67,6 @@ pub enum StreamType {
 /// -`InvalidTableName`: table_name contains invalid characters or doesn't exist
 /// -`PermissionDenied`: insufficient permissions to write to the specified table
 /// -`InvalidArgument`: invalid or missing descriptor_proto or auth token
-
 #[derive(Debug, Clone)]
 pub struct TableProperties {
     pub table_name: String,
@@ -111,15 +105,18 @@ pub struct ZerobusStream {
     /// not just within a single table. The server returns this ID in the CreateStreamResponse
     /// after validating the table properties and establishing the gRPC connection.
     stream_id: Option<String>,
+    /// Type of gRPC stream that is used when sending records.
     pub stream_type: StreamType,
+    /// The stream configuration options related to recovery, fetching OAuth tokens, etc.
     pub options: StreamConfigurationOptions,
-    /// The table properties.
+    /// The table properties - table name and descriptor of the table.
     pub table_properties: TableProperties,
-    /// The landing zone for the stream.
+    /// Logical landing zone that is used to store records that have been sent by user but not yet sent over the network.
     landing_zone: RecordLandingZone,
-    /// Map of logical offset to oneshot sender
+    /// Map of logical offset to oneshot sender.
     oneshot_map: Arc<tokio::sync::Mutex<OneshotMap>>,
-    /// Supervisor task that manages the stream.
+    /// Supervisor task that manages the stream lifecycle such as stream creation, recovery, etc.
+    /// It orchestrates the receiver and sender tasks.
     supervisor_task: tokio::task::JoinHandle<Result<(), ZerobusError>>,
     /// The generator of logical offset IDs. Used to generate monotonically increasing offset IDs, even if the stream recovers.
     logical_offset_id_generator: OffsetIdGenerator,
@@ -210,12 +207,8 @@ impl ZerobusSdk {
                 .await
                 .map_err(|err| ZerobusError::ChannelCreationError(err.to_string()))?
         };
-        let stream = ZerobusStream::new_stream(
-            channel,
-            table_properties,
-            options.unwrap_or_default(),
-        )
-        .await;
+        let stream =
+            ZerobusStream::new_stream(channel, table_properties, options.unwrap_or_default()).await;
         match stream {
             Ok(stream) => {
                 if let Some(stream_id) = stream.stream_id.as_ref() {
@@ -359,11 +352,7 @@ impl ZerobusStream {
                 async move {
                     tokio::time::timeout(
                         Duration::from_millis(options.recovery_timeout_ms),
-                        Self::create_stream_connection(
-                            channel,
-                            &table_properties,
-                            &token_factory,
-                        ),
+                        Self::create_stream_connection(channel, &table_properties, &token_factory),
                     )
                     .await
                     .map_err(|_| {

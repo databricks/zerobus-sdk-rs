@@ -1,14 +1,42 @@
 use crate::{TokenFactory, ZerobusError, ZerobusResult};
 
+/// This is the default token factory implementation for fetching OAuth tokens.
+/// It has one method, `get_token`, which fetches an OAuth access token from
+/// the Databricks OIDC endpoint using the client credentials flow.
+///
+/// # Example
+///
+/// ```rust
+/// use zerobus_sdk::{DefaultTokenFactory, ZerobusError, ZerobusResult};
+///
+/// let token_factory = DefaultTokenFactory {
+///     uc_endpoint: "https://unitycatalog.cloud.databricks.com".to_string(),
+///     table_name: "myworkspace.default.table_orders".to_string(),
+///     client_id: "myclientid".to_string(),
+///     client_secret: "myclientsecret".to_string(),
+///     workspace_id: "myworkspaceid".to_string(),
+/// };
+///
+/// let token = token_factory.get_token().await.unwrap();
+/// ```
+/// For more examples on how to use this, see examples/basic_example.rs.
 pub struct DefaultTokenFactory {
+    /// The URL of the Unity Catalog endpoint.
     pub uc_endpoint: String,
+    /// The full three-part name of the target table (e.g., `catalog.schema.table`).
     pub table_name: String,
+    /// The client ID for the OAuth application.
     pub client_id: String,
+    /// The client secret for the OAuth application.
     pub client_secret: String,
+    /// The ID of the Databricks workspace.
     pub workspace_id: String,
 }
 
 impl TokenFactory for DefaultTokenFactory {
+    /// This method sends an HTTP request to fetch OAuth access token.
+    /// The requested token is scoped with the necessary Unity Catalog privileges for writing to the target table
+    /// (`USE CATALOG`, `USE SCHEMA`, `SELECT`, `MODIFY`) and for accessing only `zerobusDirectWriteApi` resource.
     fn get_token(
         &self,
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ZerobusResult<String>> + Send + '_>>

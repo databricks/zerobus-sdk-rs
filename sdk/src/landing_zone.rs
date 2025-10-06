@@ -141,10 +141,8 @@ mod tests {
     async fn test_add_and_observe() {
         let lz = Arc::new(LandingZone::new(10));
 
-        // Add an item.
         lz.add("test_item".to_string()).await;
 
-        // Observe it.
         let observed = lz.observe().await;
         assert_eq!(observed, "test_item");
     }
@@ -160,7 +158,6 @@ mod tests {
         // Give it time to start waiting.
         tokio::time::sleep(Duration::from_millis(10)).await;
 
-        // Add item.
         lz.add("delayed_item".to_string()).await;
 
         // Should unblock and return the item.
@@ -173,11 +170,9 @@ mod tests {
     async fn test_remove_observed() {
         let lz = Arc::new(LandingZone::new(10));
 
-        // Add and observe.
         lz.add("item1".to_string()).await;
         let _observed = lz.observe().await;
 
-        // Should be able to remove observed item.
         let removed = lz.remove_observed().unwrap();
         assert_eq!(removed, "item1");
     }
@@ -186,7 +181,6 @@ mod tests {
     async fn test_remove_non_observed_fails() {
         let lz = Arc::new(LandingZone::<String>::new(10));
 
-        // Try to remove without observing.
         let result = lz.remove_observed();
         assert!(matches!(
             result,
@@ -198,28 +192,23 @@ mod tests {
     async fn test_remove_all() {
         let lz = Arc::new(LandingZone::new(10));
 
-        // Add some items.
         lz.add("item1".to_string()).await;
         lz.add("item2".to_string()).await;
 
-        // Observe one.
         let _observed = lz.observe().await;
 
-        // Remove all should get both items.
         let all_items = lz.remove_all();
         assert_eq!(all_items.len(), 2);
         assert!(all_items.contains(&"item1".to_string()));
         assert!(all_items.contains(&"item2".to_string()));
 
-        // Should be empty now.
         assert!(lz.len() == 0);
     }
 
     #[tokio::test]
     async fn test_semaphore_limits_capacity() {
-        let lz = Arc::new(LandingZone::new(2)); // Only allow 2 items
+        let lz = Arc::new(LandingZone::new(2));
 
-        // Add two items.
         lz.add("item1".to_string()).await;
         lz.add("item2".to_string()).await;
 
@@ -247,7 +236,6 @@ mod tests {
         // Now the add_task should complete.
         add_task.await.unwrap();
 
-        // Check that we now have item2 and item3.
         let all_items = lz.remove_all();
         assert_eq!(all_items.len(), 2);
         assert!(all_items.contains(&"item2".to_string()));
@@ -258,12 +246,10 @@ mod tests {
     async fn test_reset_observe_with_concurrent_add() {
         let lz = Arc::new(LandingZone::new(10));
 
-        // Add three items to queue.
         lz.add("item1".to_string()).await;
         lz.add("item2".to_string()).await;
         lz.add("item3".to_string()).await;
 
-        // Observe first item (moves it to observed_items).
         let observed = lz.observe().await;
         assert_eq!(observed, "item1");
 
@@ -273,13 +259,10 @@ mod tests {
             lz_clone.add("item4".to_string()).await;
         });
 
-        // Wait for the add to complete.
         add_task.await.unwrap();
 
-        // Reset observe (puts item1 back to front of queue).
         lz.reset_observe();
 
-        // Now observe items in order, should be 1,2,3,4.
         assert_eq!(lz.observe().await, "item1");
         assert_eq!(lz.observe().await, "item2");
         assert_eq!(lz.observe().await, "item3");
@@ -290,7 +273,6 @@ mod tests {
     async fn test_semaphore_with_observe_reset() {
         let lz = Arc::new(LandingZone::new(2));
 
-        // Fill capacity.
         lz.add("item1".to_string()).await;
         lz.add("item2".to_string()).await;
 

@@ -1,20 +1,20 @@
 use std::error::Error;
-use zerobus_sdk::{ZerobusSdk,TableProperties,StreamConfigurationOptions,DefaultTokenFactory};
-use prost_reflect::{prost_types};
-use std::{fs};
+use std::fs;
+
+use prost_reflect::prost_types;
 use prost::Message;
 
-//Change constants to match your data
+use zerobus_sdk::{DefaultTokenFactory, StreamConfigurationOptions, TableProperties, ZerobusSdk};
+pub mod <your_output_file> {include!("<your_output_file>.rs");} 
+use crate::orders::TableOrders; 
+
+
+// Change constants to match your data.
 const DATABRICKS_WORKSPACE_URL: &str = <your_workspace_url>;
 const TABLE_NAME: &str = <your_table_name>; 
 const DATABRICKS_CLIENT_ID: &str = <your_databricks_client_id>;
 const DATABRICKS_CLIENT_SECRET: &str = <your_databricks_client_secret>;
 const SERVER_ENDPOINT: &str = <your_server_endpoint>; 
-pub mod <your_output_file> {include!("<your_output_file>.rs");} 
-use crate::orders::TableOrders; 
-
-
-
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error>> {
@@ -42,11 +42,11 @@ async fn main() -> Result<(), Box<dyn Error>> {
    let mut stream = sdk_handle.create_stream(table_properties.clone(),Some(stream_configuration_options)).await
        .expect("Failed to create a stream.");
 
-
+   // Change the values to match your data.
    let ack_future = stream.ingest_record(TableOrders {
-       id: 1,
+        id: 1,
     	customer_name: "Alice Smith".to_string(),
-   	product_name: "Wireless Mouse".to_string(),
+   	    product_name: "Wireless Mouse".to_string(),
     	quantity: 2,
     	price: 25.99,
     	status: "pending".to_string(),
