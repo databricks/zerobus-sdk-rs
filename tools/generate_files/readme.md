@@ -27,7 +27,7 @@ This tool fetches table schema information from Unity Catalog and generates:
 
 ## How to use
 
-### Cargo
+### Basic example
 
 ```bash
 cargo run -- \
@@ -36,7 +36,7 @@ cargo run -- \
   --table "catalog.schema.table_name"
 ```
 
-### Cargo with full Options
+### Full Options
 
 ```bash
 cargo run -- \
@@ -48,23 +48,6 @@ cargo run -- \
   --output-dir "generated"
 ```
 
-### Bazel
-
-```bash
-bazel run //shinkansen/sdks/rust/tools:generate_proto -- \
-  --uc-endpoint "https://your-workspace.cloud.databricks.com" \
-  --uc-token "dapi123..." \
-  --table "catalog.schema.table_name"
-```
-
-Running like this generates files in universe/bin-bazel/... directory.
-To generate files in your current working directory instead, use the `--run_under` flag:
-```bash
-bazel run --run_under="cd $PWD &&" //shinkansen/sdks/rust/tools:generate_proto -- \
-  --uc-endpoint "https://your-workspace.cloud.databricks.com" \
-  --uc-token "dapi123..." \
-  --table "catalog.schema.table_name"
-```
 
 ## Command Line Arguments
 

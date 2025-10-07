@@ -142,11 +142,12 @@ zerobus_rust_sdk/
 │       ├── src/
 │       │   ├── main.rs          # CLI entry point
 │       │   └── generate.rs      # Unity Catalog -> Proto conversion
-│       ├── readme.md            # Tool documentation
+│       ├── README.md            # Tool documentation
 │       └── Cargo.toml
 │
 ├── examples/
 │   └── basic_example/           # Working example application
+│       ├── README.md            # Example documentation
 │       ├── src/main.rs          # Example usage code
 │       ├── output/              # Generated schema files
 │       │   ├── orders.proto
@@ -161,8 +162,8 @@ zerobus_rust_sdk/
 ### Key Components
 
 - **`sdk/`** - The main library crate containing all SDK functionality
-- **`tools/generate_files/`** - CLI tool for generating Protocol Buffer schemas from Unity Catalog tables
-- **`examples/basic_example/`** - Complete working example demonstrating SDK usage
+- **`tools/`** - CLI tool for generating Protocol Buffer schemas from Unity Catalog tables
+- **`examples/`** - Complete working examples demonstrating SDK usage
 - **Workspace** - Root `Cargo.toml` defines a Cargo workspace for unified builds
 
 ## How It Works
@@ -275,6 +276,8 @@ The SDK handles authentication automatically. You just need to provide:
 let client_id = "your-client-id".to_string();
 let client_secret = "your-client-secret".to_string();
 ```
+
+See [`examples/basic_example/README.md`](examples/basic_example/README.md) for more information on how to get these credentials.
 
 ### 4. Create a Stream
 
@@ -660,36 +663,25 @@ Returns `true` if the error can be automatically recovered by the SDK.
 
 ## Building from Source
 
-**Clone and build:**
+For contributors or those who want to build and test the SDK:
 
 ```bash
 git clone https://github.com/YOUR_USERNAME/zerobus_rust_sdk.git
 cd zerobus_rust_sdk
-cargo build --release
-```
-
-This builds:
-- SDK library: `sdk/target/release/libzerobus.rlib`
-- Example binary: `examples/basic_example/target/release/basic_example`
-- Schema tool: `tools/generate_files/target/release/generate_files`
-
-**Run tests:**
-
-```bash
-cargo test --workspace
+cargo build --workspace
 ```
 
 **Build specific components:**
 
 ```bash
 # Build only SDK
-cargo build --release -p zerobus
+cargo build -p zerobus
 
 # Build only schema tool
-cargo build --release -p generate_files
+cargo build -p generate_files
 
-# Build example
-cargo build --release -p basic_example
+# Build and run example
+cargo run -p basic_example
 ```
 
 ## Requirements
