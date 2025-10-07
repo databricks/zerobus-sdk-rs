@@ -2,9 +2,9 @@ use std::fs::File;
 use std::io::Write;
 use std::path::PathBuf;
 
-use anyhow::{anyhow, Context, Result};
+use anyhow::{Context, Result, anyhow};
 use regex::Regex;
-use reqwest::header::{HeaderMap, HeaderValue, AUTHORIZATION, CONTENT_TYPE};
+use reqwest::header::{AUTHORIZATION, CONTENT_TYPE, HeaderMap, HeaderValue};
 use serde::Deserialize;
 use urlencoding::encode;
 
@@ -646,10 +646,12 @@ mod tests {
         let result =
             generate_proto_file("TestMessage", &table_info.columns, &proto_path, &output_dir);
         assert!(result.is_err());
-        assert!(result
-            .unwrap_err()
-            .to_string()
-            .contains("Invalid Protobuf field name 'invalid-name'"));
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("Invalid Protobuf field name 'invalid-name'")
+        );
     }
 
     #[test]
@@ -669,10 +671,12 @@ mod tests {
         let result =
             generate_proto_file("TestMessage", &table_info.columns, &proto_path, &output_dir);
         assert!(result.is_err());
-        assert!(result
-            .unwrap_err()
-            .to_string()
-            .contains("Invalid Protobuf field name 'message'. It is a reserved keyword."));
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("Invalid Protobuf field name 'message'. It is a reserved keyword.")
+        );
     }
 
     #[test]
@@ -692,9 +696,11 @@ mod tests {
         let result =
             generate_proto_file("TestMessage", &table_info.columns, &proto_path, &output_dir);
         assert!(result.is_err());
-        assert!(result
-            .unwrap_err()
-            .to_string()
-            .contains("Invalid Protobuf field name '1field'. Cannot start with a digit."));
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("Invalid Protobuf field name '1field'. Cannot start with a digit.")
+        );
     }
 }
