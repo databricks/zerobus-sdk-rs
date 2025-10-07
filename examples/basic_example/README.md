@@ -51,7 +51,19 @@ This generates:
 - `output/orders.rs` - Rust structs
 - `output/orders.descriptor` - Binary descriptor file
 
-### 3. Configure Credentials
+### 3. Set Up OAuth Service Principal
+
+You'll need a Databricks service principal with OAuth credentials:
+
+1. In your Databricks workspace, go to **Settings** → **Identity and Access**
+2. Create a service principal or use an existing one
+3. Generate OAuth credentials (client ID and secret)
+4. Grant the service principal the following permissions on your table:
+   - `SELECT` - Read table schema
+   - `MODIFY` - Write data to the table
+   - `USE CATALOG` and `USE SCHEMA` - Access catalog and schema
+
+### 4. Configure Credentials
 
 Edit `src/main.rs` and update the following constants with your actual values:
 
@@ -69,18 +81,6 @@ const SERVER_ENDPOINT: &str = "https://workspace-id.zerobus.region.cloud.databri
 - **DATABRICKS_CLIENT_ID** - OAuth 2.0 client ID from your service principal
 - **DATABRICKS_CLIENT_SECRET** - OAuth 2.0 client secret from your service principal
 - **SERVER_ENDPOINT** - Zerobus ingestion endpoint (usually `https://<workspace-id>.zerobus.<region>databricks.com`)
-
-### 4. Set Up OAuth Service Principal
-
-You'll need a Databricks service principal with OAuth credentials:
-
-1. In your Databricks workspace, go to **Settings** → **Identity and Access**
-2. Create a service principal or use an existing one
-3. Generate OAuth credentials (client ID and secret)
-4. Grant the service principal the following permissions on your table:
-   - `SELECT` - Read table schema
-   - `MODIFY` - Write data to the table
-   - `USE CATALOG` and `USE SCHEMA` - Access catalog and schema
 
 ## Running the Example
 
@@ -131,7 +131,7 @@ let stream_configuration_options = StreamConfigurationOptions {
 };
 ```
 
-Sets the maximum number of unacknowledged records. Default options enable recovery and set reasonable timeouts.
+Sets the maximum number of inflight records. Default options enable recovery and set reasonable timeouts.
 
 ### 4. Initialize SDK
 
