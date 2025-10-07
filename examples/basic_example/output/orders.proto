@@ -1,0 +1,14 @@
+syntax = "proto2";
+
+package orders;
+
+message table_Orders {
+	optional int32 id = 1;
+	optional string customer_name = 2;
+	optional string product_name = 3;
+	optional int32 quantity = 4;
+	optional double price = 5;
+	optional string status = 6;
+	optional int64 created_at = 7;
+	optional int64 updated_at = 8;
+}
