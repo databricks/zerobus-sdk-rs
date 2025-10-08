@@ -68,11 +68,11 @@ When you run the tool, it generates:
 
 ## Limitations
 - Direct nested arrays (e.g., `ARRAY<ARRAY<STRING>>`) are not supported as top-level column types.
-- MAP<STRUCT<_>, _> - STRUCT can't be key.
-- MAP<MAP<_>, _> - use MAP<STRUCT<m: MAP<_>>, _> instead.
-- MAP<_, MAP<_>> - use MAP<_, STRUCT<m: MAP<_>>> instead.
-- MAP<ARRAY<_>, _> - use MAP<STRUCT<a: ARRAY<_>>, _> instead.
-- MAP<_, ARRAY<_>> - use MAP<_, STRUCT<a: ARRAY<_>>> instead.
-- ARRAY<MAP<_, _>> - use ARRAY<STRUCT<m: MAP<_, _>>> instead.
-- ARRAY<ARRAY<_>> - use ARRAY<STRUCT<a: ARRAY<_>>> instead.
+- `MAP<STRUCT<_>, _>` - `STRUCT` can't be key.
+- `MAP<MAP<_>, _>` - use `MAP<STRUCT<m: MAP<_>>, _>` instead.
+- `MAP<_, MAP<_>>` - use `MAP<_, STRUCT<m: MAP<_>>>` instead.
+- `MAP<ARRAY<_>, _>` - use `MAP<STRUCT<a: ARRAY<_>>, _>` instead.
+- `MAP<_, ARRAY<_>>` - use `MAP<_, STRUCT<a: ARRAY<_>>>` instead.
+- `ARRAY<MAP<_, _>>` - use `ARRAY<STRUCT<m: MAP<_, _>>>` instead.
+- `ARRAY<ARRAY<_>>` - use `ARRAY<STRUCT<a: ARRAY<_>>>` instead.
 
