@@ -32,7 +32,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
     let sdk_handle = ZerobusSdk::new(
         SERVER_ENDPOINT.to_string(),
         DATABRICKS_WORKSPACE_URL.to_string(),
-    );
+    )?;
 
     let mut stream = sdk_handle
         .create_stream(

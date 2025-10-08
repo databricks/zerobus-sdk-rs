@@ -141,7 +141,7 @@ pub struct ZerobusStream {
 /// # async fn write_single_row(row: impl prost::Message) -> Result<(), ZerobusError> {
 ///
 /// // Open SDK with the Zerobus API endpoint.
-/// let sdk = ZerobusSdk::new("https://ingest.api.databricks.com".to_string());
+/// let sdk = ZerobusSdk::new("https://your-workspace.zerobus.region.cloud.databricks.com".to_string(),"https://your-workspace.cloud.databricks.com".to_string()).await?;
 ///
 /// // Define the arguments for the ephemeral stream.
 /// let table_properties = TableProperties {
@@ -154,7 +154,7 @@ pub struct ZerobusStream {
 /// };
 ///
 /// // Create a stream
-/// let stream = sdk.create_stream(table_properties, Some(options), Some(unity_catalog_url), Some(client_id), Some(client_secret), Some(workspace_id)).await?;
+/// let stream = sdk.create_stream(table_properties, client_id, client_secret, Some(options)).await?;
 ///
 /// // Ingest a single record and await its acknowledgment
 /// let ack_future = stream.ingest_record(row.encode_to_vec()).await?;
@@ -170,15 +170,27 @@ pub struct ZerobusSdk {
     pub zerobus_endpoint: String,
     pub use_tls: bool,
     pub unity_catalog_url: String,
+    workspace_id: String,
 }
 
 impl ZerobusSdk {
-    pub fn new(zerobus_endpoint: String, unity_catalog_url: String) -> Self {
-        ZerobusSdk {
+    pub fn new(zerobus_endpoint: String, unity_catalog_url: String) -> ZerobusResult<Self> {
+        let workspace_id = zerobus_endpoint
+            .strip_prefix("https://")
+            .and_then(|s| s.split('.').next())
+            .map(|s| s.to_string())
+            .ok_or_else(|| {
+                ZerobusError::ChannelCreationError(
+                    "Failed to extract workspace_id from zerobus_endpoint".to_string(),
+                )
+            })?;
+
+        Ok(ZerobusSdk {
             zerobus_endpoint,
             use_tls: true,
             unity_catalog_url,
-        }
+            workspace_id,
+        })
     }
 
     #[instrument(level = "debug", skip_all, fields(table_name = %table_properties.table_name))]
@@ -189,17 +201,6 @@ impl ZerobusSdk {
         client_secret: String,
         options: Option<StreamConfigurationOptions>,
     ) -> ZerobusResult<ZerobusStream> {
-        let workspace_id = self
-            .zerobus_endpoint
-            .strip_prefix("https://")
-            .and_then(|s| s.split('.').next())
-            .map(|s| s.to_string())
-            .ok_or_else(|| {
-                ZerobusError::ChannelCreationError(
-                    "Failed to extract workspace_id from zerobus_endpoint".to_string(),
-                )
-            })?;
-
         // TODO: For now we are opening a new channel for each stream.
         // In the future we should consider reusing the channel.
         let channel = if self.use_tls {
@@ -215,7 +216,7 @@ impl ZerobusSdk {
             self.unity_catalog_url.clone(),
             client_id,
             client_secret,
-            workspace_id,
+            self.workspace_id.clone(),
             options.unwrap_or_default(),
         )
         .await;

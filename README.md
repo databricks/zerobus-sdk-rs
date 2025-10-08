@@ -88,7 +88,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let sdk = ZerobusSdk::new(
         "https://your-workspace-id.cloud.databricks.com".to_string(),
         "https://your-workspace.cloud.databricks.com".to_string(),
-    );
+    )?;
 
     // Configure table properties
     let table_properties = TableProperties {
@@ -125,38 +125,38 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 ```
 zerobus_rust_sdk/
-├── sdk/                          # Core SDK library
+├── sdk/                                # Core SDK library
 │   ├── src/
-│   │   ├── lib.rs               # Main SDK and stream implementation
-│   │   ├── default_token_factory.rs  # OAuth 2.0 token handling
-│   │   ├── errors.rs            # Error types and retryable logic
-│   │   ├── stream_configuration.rs   # Stream options
-│   │   ├── landing_zone.rs      # Inflight record buffer
-│   │   └── offset_generator.rs  # Logical offset tracking
-│   ├── zerobus_service.proto    # gRPC protocol definition
-│   ├── build.rs                 # Build script for protobuf compilation
+│   │   ├── lib.rs                      # Main SDK and stream implementation
+│   │   ├── default_token_factory.rs    # OAuth 2.0 token handling
+│   │   ├── errors.rs                   # Error types and retryable logic
+│   │   ├── stream_configuration.rs     # Stream options
+│   │   ├── landing_zone.rs             # Inflight record buffer
+│   │   └── offset_generator.rs         # Logical offset tracking
+│   ├── zerobus_service.proto           # gRPC protocol definition
+│   ├── build.rs                        # Build script for protobuf compilation
 │   └── Cargo.toml
 │
 ├── tools/
-│   └── generate_files/          # Schema generation CLI tool
+│   └── generate_files/                 # Schema generation CLI tool
 │       ├── src/
-│       │   ├── main.rs          # CLI entry point
-│       │   └── generate.rs      # Unity Catalog -> Proto conversion
-│       ├── README.md            # Tool documentation
+│       │   ├── main.rs                 # CLI entry point
+│       │   └── generate.rs             # Unity Catalog -> Proto conversion
+│       ├── README.md                   # Tool documentation
 │       └── Cargo.toml
 │
 ├── examples/
-│   └── basic_example/           # Working example application
-│       ├── README.md            # Example documentation
-│       ├── src/main.rs          # Example usage code
-│       ├── output/              # Generated schema files
+│   └── basic_example/                  # Working example application
+│       ├── README.md                   # Example documentation
+│       ├── src/main.rs                 # Example usage code
+│       ├── output/                     # Generated schema files
 │       │   ├── orders.proto
 │       │   ├── orders.rs
 │       │   └── orders.descriptor
 │       └── Cargo.toml
 │
-├── Cargo.toml                   # Workspace configuration
-└── README.md                    # This file
+├── Cargo.toml                          # Workspace configuration
+└── README.md                           # This file
 ```
 
 ### Key Components
@@ -192,14 +192,14 @@ zerobus_rust_sdk/
 |                  |                   |
 |      +-----------+-----------+       |
 |      v                       v       |
-| +----------+          +----------+   | Parallel tasks
-| |  Sender  |          | Receiver |   |
+| +----------+          +----------+   | 
+| |  Sender  |          | Receiver |   | Parallel tasks
 | |  Task    |          |  Task    |   |
 | +----------+          +----------+   |
 |      ^                       |       |
 |      |                       v       |
 | +----------------------------------+ |
-| |          Landing Zone          | | Inflight buffer
+| |          Landing Zone            | | Inflight buffer
 | +----------------------------------+ |
 +--------------------------------------+
             | 3. gRPC stream
@@ -259,10 +259,10 @@ Create an SDK instance with your Databricks workspace endpoints:
 let sdk = ZerobusSdk::new(
     "https://workspace-id.cloud.databricks.com".to_string(),  // Zerobus endpoint
     "https://workspace.cloud.databricks.com".to_string(),     // Unity Catalog endpoint
-);
+)?;
 ```
 
-**Note:** The workspace ID is automatically extracted from the Zerobus endpoint.
+**Note:** The workspace ID is automatically extracted from the Zerobus endpoint when `ZerobusSdk::new()` is called.
 
 ### 3. Configure Authentication
 
@@ -567,7 +567,7 @@ Main entry point for the SDK.
 
 **Constructor:**
 ```rust
-pub fn new(zerobus_endpoint: String, unity_catalog_url: String) -> Self
+pub fn new(zerobus_endpoint: String, unity_catalog_url: String) -> ZerobusResult<Self>
 ```
 
 **Methods:**
@@ -692,9 +692,6 @@ cargo run -p basic_example
 - **Unity Catalog** endpoint access
 - **TLS Certificates** - `/etc/ssl/certs/ca-certificates.crt` (Linux) or `/etc/ssl/cert.pem` (macOS)
 
-## License
-
-Apache License 2.0
 
 ---
 
