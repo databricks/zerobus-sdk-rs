@@ -1,7 +1,3 @@
-use std::sync::Arc;
-
-use crate::TokenFactory;
-
 /// Configuration options for stream creation, recovery of broken streams and flushing.
 #[derive(Clone)]
 pub struct StreamConfigurationOptions {
@@ -19,8 +15,6 @@ pub struct StreamConfigurationOptions {
     pub server_lack_of_ack_timeout_ms: u64,
     /// Timeout for flush.
     pub flush_timeout_ms: u64,
-    /// Token factory for authentication.
-    pub token_factory: Option<Arc<dyn TokenFactory>>,
 }
 
 impl Default for StreamConfigurationOptions {
@@ -33,7 +27,6 @@ impl Default for StreamConfigurationOptions {
             recovery_retries: 4,
             server_lack_of_ack_timeout_ms: 60000,
             flush_timeout_ms: 300000,
-            token_factory: None,
         }
     }
 }

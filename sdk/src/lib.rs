@@ -91,15 +91,6 @@ type OneshotMap = HashMap<OffsetId, tokio::sync::oneshot::Sender<ZerobusResult<O
 /// Landing zone for ingest records.
 type RecordLandingZone = Arc<LandingZone<Box<IngestRecord>>>;
 
-/// Trait for creating authentication tokens.
-pub trait TokenFactory: Send + Sync {
-    /// This method will be called each time a stream connection is established,
-    /// allowing for dynamic token refresh.
-    fn get_token(
-        &self,
-    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ZerobusResult<String>> + Send + '_>>;
-}
-
 pub struct ZerobusStream {
     /// This is a 128-bit UUID that is unique across all streams in the system,
     /// not just within a single table. The server returns this ID in the CreateStreamResponse
@@ -107,6 +98,14 @@ pub struct ZerobusStream {
     stream_id: Option<String>,
     /// Type of gRPC stream that is used when sending records.
     pub stream_type: StreamType,
+    /// The Unity Catalog endpoint
+    pub unity_catalog_url: String,
+    /// The Databricks client ID, needed to get the OAuth token
+    pub client_id: String,
+    /// The Databricks client secret, needed to get the OAuth token
+    pub client_secret: String,
+    /// The Databricks workspace ID, needed to get the OAuth token
+    pub workspace_id: String,
     /// The stream configuration options related to recovery, fetching OAuth tokens, etc.
     pub options: StreamConfigurationOptions,
     /// The table properties - table name and descriptor of the table.
@@ -137,23 +136,12 @@ pub struct ZerobusStream {
 /// ```no_run
 /// # use std::error::Error;
 /// # use std::sync::Arc;
-/// # use universe_shinkansen_sdks_rust_sdk::{ZerobusSdk, StreamConfigurationOptions, TableProperties, ZerobusError, TokenFactory, ZerobusResult};
-/// #
-/// # struct MyTokenFactory { token: String }
-/// # impl TokenFactory for MyTokenFactory {
-/// #     fn get_token(&self) -> std::pin::Pin<Box<dyn std::future::Future<Output = ZerobusResult<String>> + Send + '_>> {
-/// #         Box::pin(async { Ok(self.token.clone()) })
-/// #     }
-/// # }
+/// # use universe_shinkansen_sdks_rust_sdk::{ZerobusSdk, StreamConfigurationOptions, TableProperties, ZerobusError, ZerobusResult};
 /// #
 /// # async fn write_single_row(row: impl prost::Message) -> Result<(), ZerobusError> {
-/// // Create a token factory
-/// let token_factory = Arc::new(MyTokenFactory {
-///     token: std::env::var("UC_TOKEN").unwrap(),
-/// });
 ///
 /// // Open SDK with the Zerobus API endpoint.
-/// let sdk = ZerobusSdk::new("https://ingest.api.databricks.com".to_string());
+/// let sdk = ZerobusSdk::new("https://your-workspace.zerobus.region.cloud.databricks.com".to_string(),"https://your-workspace.cloud.databricks.com".to_string()).await?;
 ///
 /// // Define the arguments for the ephemeral stream.
 /// let table_properties = TableProperties {
@@ -162,12 +150,11 @@ pub struct ZerobusStream {
 /// };
 /// let options = StreamConfigurationOptions {
 ///     max_inflight_records: 100,
-///     token_factory: Some(token_factory),
 ///     ..Default::default()
 /// };
 ///
 /// // Create a stream
-/// let stream = sdk.create_stream(table_properties, Some(options)).await?;
+/// let stream = sdk.create_stream(table_properties, client_id, client_secret, Some(options)).await?;
 ///
 /// // Ingest a single record and await its acknowledgment
 /// let ack_future = stream.ingest_record(row.encode_to_vec()).await?;
@@ -182,20 +169,36 @@ pub struct ZerobusStream {
 pub struct ZerobusSdk {
     pub zerobus_endpoint: String,
     pub use_tls: bool,
+    pub unity_catalog_url: String,
+    workspace_id: String,
 }
 
 impl ZerobusSdk {
-    pub fn new(zerobus_endpoint: String) -> Self {
-        ZerobusSdk {
+    pub fn new(zerobus_endpoint: String, unity_catalog_url: String) -> ZerobusResult<Self> {
+        let workspace_id = zerobus_endpoint
+            .strip_prefix("https://")
+            .and_then(|s| s.split('.').next())
+            .map(|s| s.to_string())
+            .ok_or_else(|| {
+                ZerobusError::ChannelCreationError(
+                    "Failed to extract workspace_id from zerobus_endpoint".to_string(),
+                )
+            })?;
+
+        Ok(ZerobusSdk {
             zerobus_endpoint,
             use_tls: true,
-        }
+            unity_catalog_url,
+            workspace_id,
+        })
     }
 
     #[instrument(level = "debug", skip_all, fields(table_name = %table_properties.table_name))]
     pub async fn create_stream(
         &self,
         table_properties: TableProperties,
+        client_id: String,
+        client_secret: String,
         options: Option<StreamConfigurationOptions>,
     ) -> ZerobusResult<ZerobusStream> {
         // TODO: For now we are opening a new channel for each stream.
@@ -207,8 +210,16 @@ impl ZerobusSdk {
                 .await
                 .map_err(|err| ZerobusError::ChannelCreationError(err.to_string()))?
         };
-        let stream =
-            ZerobusStream::new_stream(channel, table_properties, options.unwrap_or_default()).await;
+        let stream = ZerobusStream::new_stream(
+            channel,
+            table_properties,
+            self.unity_catalog_url.clone(),
+            client_id,
+            client_secret,
+            self.workspace_id.clone(),
+            options.unwrap_or_default(),
+        )
+        .await;
         match stream {
             Ok(stream) => {
                 if let Some(stream_id) = stream.stream_id.as_ref() {
@@ -229,7 +240,12 @@ impl ZerobusSdk {
     pub async fn recreate_stream(&self, stream: ZerobusStream) -> ZerobusResult<ZerobusStream> {
         let records = stream.get_unacked_records().await?;
         let new_stream = self
-            .create_stream(stream.table_properties, Some(stream.options))
+            .create_stream(
+                stream.table_properties,
+                stream.client_id,
+                stream.client_secret,
+                Some(stream.options),
+            )
             .await?;
         for record in records {
             let ack = new_stream.ingest_record(record).await?;
@@ -264,6 +280,10 @@ impl ZerobusStream {
     async fn new_stream(
         channel: ZerobusClient<Channel>,
         table_properties: TableProperties,
+        unity_catalog_url: String,
+        client_id: String,
+        client_secret: String,
+        workspace_id: String,
         options: StreamConfigurationOptions,
     ) -> ZerobusResult<Self> {
         let (stream_init_result_tx, stream_init_result_rx) =
@@ -279,6 +299,10 @@ impl ZerobusStream {
         let supervisor_task = tokio::task::spawn(Self::supervisor_task(
             channel,
             table_properties.clone(),
+            unity_catalog_url.clone(),
+            client_id.clone(),
+            client_secret.clone(),
+            workspace_id.clone(),
             options.clone(),
             Arc::clone(&landing_zone),
             Arc::clone(&oneshot_map),
@@ -295,6 +319,10 @@ impl ZerobusStream {
 
         let stream = Self {
             stream_type: StreamType::Ephemeral,
+            unity_catalog_url,
+            client_id,
+            client_secret,
+            workspace_id,
             options: options.clone(),
             table_properties,
             stream_id,
@@ -319,6 +347,10 @@ impl ZerobusStream {
     async fn supervisor_task(
         channel: ZerobusClient<Channel>,
         table_properties: TableProperties,
+        unity_catalog_url: String,
+        client_id: String,
+        client_secret: String,
+        workspace_id: String,
         options: StreamConfigurationOptions,
         landing_zone: RecordLandingZone,
         oneshot_map: Arc<tokio::sync::Mutex<OneshotMap>>,
@@ -347,12 +379,22 @@ impl ZerobusStream {
             let create_attempt = || {
                 let channel = channel.clone();
                 let table_properties = table_properties.clone();
-                let token_factory = options.token_factory.clone();
+                let unity_catalog_url = unity_catalog_url.clone();
+                let client_id = client_id.clone();
+                let client_secret = client_secret.clone();
+                let workspace_id = workspace_id.clone();
 
                 async move {
                     tokio::time::timeout(
                         Duration::from_millis(options.recovery_timeout_ms),
-                        Self::create_stream_connection(channel, &table_properties, &token_factory),
+                        Self::create_stream_connection(
+                            channel,
+                            &table_properties,
+                            &unity_catalog_url,
+                            &client_id,
+                            &client_secret,
+                            &workspace_id,
+                        ),
                     )
                     .await
                     .map_err(|_| {
@@ -467,7 +509,10 @@ impl ZerobusStream {
     async fn create_stream_connection(
         mut channel: ZerobusClient<Channel>,
         table_properties: &TableProperties,
-        token_factory: &Option<Arc<dyn TokenFactory>>,
+        unity_catalog_url: &String,
+        client_id: &String,
+        client_secret: &String,
+        workspace_id: &String,
     ) -> ZerobusResult<(
         tokio::sync::mpsc::Sender<EphemeralStreamRequest>,
         tonic::Streaming<EphemeralStreamResponse>,
@@ -484,17 +529,24 @@ impl ZerobusStream {
                 ZerobusError::InvalidTableName(table_properties.table_name.to_string())
             })?,
         );
-        if let Some(ref token_factory) = token_factory {
-            let token = token_factory.get_token().await?;
-            let prefixed_token = format!("Bearer {}", token);
-            let mut authorization_info =
-                MetadataValue::try_from(prefixed_token.as_str()).map_err(|_| {
-                    error!(table_name = %table_properties.table_name, "Invalid token: {}", token);
-                    ZerobusError::InvalidUCTokenError(token)
-                })?;
-            authorization_info.set_sensitive(true);
-            stream_metadata.insert("authorization", authorization_info);
-        }
+
+        let token = DefaultTokenFactory::get_token(
+            unity_catalog_url,
+            &table_properties.table_name,
+            client_id,
+            client_secret,
+            workspace_id,
+        )
+        .await?;
+        let prefixed_token = format!("Bearer {}", token);
+        let mut authorization_info =
+            MetadataValue::try_from(prefixed_token.as_str()).map_err(|_| {
+                error!(table_name = %table_properties.table_name, "Invalid token: {}", token);
+                ZerobusError::InvalidUCTokenError(token)
+            })?;
+        authorization_info.set_sensitive(true);
+        stream_metadata.insert("authorization", authorization_info);
+
         let mut response_grpc_stream = channel
             .ephemeral_stream(request_stream)
             .await

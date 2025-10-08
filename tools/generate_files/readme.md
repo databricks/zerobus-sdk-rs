@@ -27,7 +27,7 @@ This tool fetches table schema information from Unity Catalog and generates:
 
 ## How to use
 
-### Cargo
+### Basic example
 
 ```bash
 cargo run -- \
@@ -36,7 +36,7 @@ cargo run -- \
   --table "catalog.schema.table_name"
 ```
 
-### Cargo with full Options
+### Full Options
 
 ```bash
 cargo run -- \
@@ -48,23 +48,6 @@ cargo run -- \
   --output-dir "generated"
 ```
 
-### Bazel
-
-```bash
-bazel run //shinkansen/sdks/rust/tools:generate_proto -- \
-  --uc-endpoint "https://your-workspace.cloud.databricks.com" \
-  --uc-token "dapi123..." \
-  --table "catalog.schema.table_name"
-```
-
-Running like this generates files in universe/bin-bazel/... directory.
-To generate files in your current working directory instead, use the `--run_under` flag:
-```bash
-bazel run --run_under="cd $PWD &&" //shinkansen/sdks/rust/tools:generate_proto -- \
-  --uc-endpoint "https://your-workspace.cloud.databricks.com" \
-  --uc-token "dapi123..." \
-  --table "catalog.schema.table_name"
-```
 
 ## Command Line Arguments
 
@@ -85,11 +68,11 @@ When you run the tool, it generates:
 
 ## Limitations
 - Direct nested arrays (e.g., `ARRAY<ARRAY<STRING>>`) are not supported as top-level column types.
-- MAP<STRUCT<_>, _> - STRUCT can't be key.
-- MAP<MAP<_>, _> - use MAP<STRUCT<m: MAP<_>>, _> instead.
-- MAP<_, MAP<_>> - use MAP<_, STRUCT<m: MAP<_>>> instead.
-- MAP<ARRAY<_>, _> - use MAP<STRUCT<a: ARRAY<_>>, _> instead.
-- MAP<_, ARRAY<_>> - use MAP<_, STRUCT<a: ARRAY<_>>> instead.
-- ARRAY<MAP<_, _>> - use ARRAY<STRUCT<m: MAP<_, _>>> instead.
-- ARRAY<ARRAY<_>> - use ARRAY<STRUCT<a: ARRAY<_>>> instead.
+- `MAP<STRUCT<_>, _>` - `STRUCT` can't be key.
+- `MAP<MAP<_>, _>` - use `MAP<STRUCT<m: MAP<_>>, _>` instead.
+- `MAP<_, MAP<_>>` - use `MAP<_, STRUCT<m: MAP<_>>>` instead.
+- `MAP<ARRAY<_>, _>` - use `MAP<STRUCT<a: ARRAY<_>>, _>` instead.
+- `MAP<_, ARRAY<_>>` - use `MAP<_, STRUCT<a: ARRAY<_>>>` instead.
+- `ARRAY<MAP<_, _>>` - use `ARRAY<STRUCT<m: MAP<_, _>>>` instead.
+- `ARRAY<ARRAY<_>>` - use `ARRAY<STRUCT<a: ARRAY<_>>>` instead.
 
