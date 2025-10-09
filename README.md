@@ -84,48 +84,7 @@ tokio = { version = "1.42.0", features = ["macros", "rt-multi-thread"] }
 
 ## Quick Start
 
-```rust
-use prost::Message;
-use zerobus::{ZerobusSdk, TableProperties, StreamConfigurationOptions};
-
-#[tokio::main]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    // Initialize SDK
-    let sdk = ZerobusSdk::new(
-        "https://your-workspace-id.cloud.databricks.com".to_string(),
-        "https://your-workspace.cloud.databricks.com".to_string(),
-    )?;
-
-    // Configure table properties
-    let table_properties = TableProperties {
-        table_name: "catalog.schema.table".to_string(),
-        descriptor_proto: your_descriptor_proto, // loaded from generated files
-    };
-
-    // Create stream with authentication
-    let mut stream = sdk.create_stream(
-        table_properties,
-        "your-client-id".to_string(),
-        "your-client-secret".to_string(),
-        Some(StreamConfigurationOptions {
-            max_inflight_records: 1000,
-            ..Default::default()
-        }),
-    ).await?;
-
-    // Ingest a record
-    let record = YourMessage { /* your data */ };
-    let ack_future = stream.ingest_record(record.encode_to_vec()).await?;
-
-    // Wait for acknowledgment
-    let offset = ack_future.await?;
-    println!("Record ingested at offset: {}", offset);
-
-    // Close stream gracefully
-    stream.close().await?;
-    Ok(())
-}
-```
+See [`examples/basic_example/README.md`](examples/basic_example/README.md) for more details on how to setup an example client quickly.
 
 ## Repository Structure
 
@@ -256,6 +215,9 @@ This generates three files:
 - `{table}.descriptor` - Binary descriptor for runtime validation
 
 See [`tools/generate_files/readme.md`](tools/generate_files/readme.md) for supported data types and limitations.
+
+**Note:** UC token ([`PAT token`](https://docs.databricks.com/aws/en/dev-tools/auth/pat#databricks-personal-access-tokens-for-workspace-users)) is needed for this tool.
+Go to: Workspace -> Click user located on top right -> Settings -> Developer -> Access Token -> Manage -> Generate New Token 
 
 ### 2. Initialize the SDK
 
@@ -490,22 +452,8 @@ match stream.ingest_record(payload).await {
 
 ### Complete Working Example
 
-See [`examples/basic_example/`](examples/basic_example/) for a fully functional example.
+See [`examples/`](examples/) for more information.
 
-**Run the example:**
-
-```bash
-cd examples/basic_example
-
-# Edit src/main.rs with your credentials:
-# - DATABRICKS_WORKSPACE_URL
-# - TABLE_NAME
-# - DATABRICKS_CLIENT_ID
-# - DATABRICKS_CLIENT_SECRET
-# - SERVER_ENDPOINT
-
-cargo run
-```
 
 ### High-Throughput Ingestion
 

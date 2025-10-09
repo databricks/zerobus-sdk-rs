@@ -63,8 +63,10 @@ async fn main() -> Result<(), Box<dyn Error>> {
         .unwrap();
 
     let _ack = ack_future.await.unwrap();
+    println!("Record acknowledged with offset Id: 0");
     let close_future = stream.close();
     close_future.await?;
+    println!("Stream closed successfully");
     Ok(())
 }
 
