@@ -260,7 +260,11 @@ impl ZerobusSdk {
         let tls_config = {
             #[cfg(target_os = "windows")]
             {
-                ClientTlsConfig::new()
+                let mut root_config = rustls::ClientConfig::builder()
+                    .with_safe_defaults()
+                    .with_platform_verifier()
+                    .with_no_client_auth();
+                ClientTlsConfig::new().rustls_client_config(root_config)
             }
 
             #[cfg(not(target_os = "windows"))]
