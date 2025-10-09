@@ -2,6 +2,12 @@
 
 A high-performance Rust client for streaming data ingestion into Databricks Delta tables using the Zerobus protocol.
 
+## Disclaimer
+
+[Public Preview](https://docs.databricks.com/release-notes/release-types.html): This SDK is supported for production use cases and is available to all customers. Databricks is actively working on stabilizing the Zerobus Ingest SDK for Rust. Minor version updates may include backwards-incompatible changes.
+
+We are keen to hear feedback from you on this SDK. Please [file issues](https://github.com/databricks/zerobus-sdk-rs/issues), and we will address them.
+
 ## Table of Contents
 
 - [Overview](#overview)
