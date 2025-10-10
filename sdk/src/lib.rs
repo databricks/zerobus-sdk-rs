@@ -206,9 +206,12 @@ impl ZerobusSdk {
         let channel = if self.use_tls {
             self.create_secure_channel_zerobus_client().await?
         } else {
-            ZerobusClient::connect(self.zerobus_endpoint.to_string())
-                .await
-                .map_err(|err| ZerobusError::ChannelCreationError(err.to_string()))?
+            let endpoint = Channel::from_shared(self.zerobus_endpoint.clone())
+                .map_err(|err| ZerobusError::ChannelCreationError(err.to_string()))?;
+            let client = ZerobusClient::new(endpoint.connect_lazy())
+                .max_decoding_message_size(usize::MAX)
+                .max_encoding_message_size(usize::MAX);
+            client
         };
         let stream = ZerobusStream::new_stream(
             channel,
@@ -270,7 +273,12 @@ impl ZerobusSdk {
             .map_err(|_| ZerobusError::FailedToEstablishTlsConnectionError)?
             .connect_lazy();
 
-        Ok(ZerobusClient::new(channel))
+        // Set unlimited message sizes (equivalent to -1 in Python gRPC)
+        let client = ZerobusClient::new(channel)
+            .max_decoding_message_size(usize::MAX) // Max receive message length
+            .max_encoding_message_size(usize::MAX); // Max send message length
+
+        Ok(client)
     }
 }
 
