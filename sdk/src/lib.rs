@@ -38,14 +38,8 @@ use tokio_retry::strategy::FixedInterval;
 use tokio_retry::RetryIf;
 use tokio_stream::wrappers::ReceiverStream;
 use tonic::metadata::MetadataValue;
-use tonic::transport::{Certificate, Channel, ClientTlsConfig};
+use tonic::transport::{Channel, ClientTlsConfig};
 use tracing::{debug, error, info, instrument, span, Level};
-
-#[cfg(target_os = "linux")]
-const DEFAULT_CERT_FILE: &str = "/etc/ssl/certs/ca-certificates.crt";
-
-#[cfg(target_os = "macos")]
-const DEFAULT_CERT_FILE: &str = "/etc/ssl/cert.pem";
 
 /// The type of the stream connection created with the server.
 /// Currently we only support ephemeral streams on the server side, so we support only that in the SDK as well.
@@ -258,27 +252,8 @@ impl ZerobusSdk {
     }
 
     async fn create_secure_channel_zerobus_client(&self) -> ZerobusResult<ZerobusClient<Channel>> {
-        // ClientTlsConfig doesn't see true native roots by default, so we need to load them manually.
-        // TODO: Use certificates provided by Databricks tls rust platform.
-        let tls_config = {
-            #[cfg(target_os = "windows")]
-            {
-                let mut root_config = rustls::ClientConfig::builder()
-                    .with_safe_defaults()
-                    .with_platform_verifier()
-                    .with_no_client_auth();
-                ClientTlsConfig::new().rustls_client_config(root_config)
-            }
-
-            #[cfg(not(target_os = "windows"))]
-            {
-                let pem = tokio::fs::read(DEFAULT_CERT_FILE)
-                    .await
-                    .map_err(|_| ZerobusError::FailedToEstablishTlsConnectionError)?;
-                let cert = Certificate::from_pem(pem);
-                ClientTlsConfig::new().ca_certificate(cert)
-            }
-        };
+        // Use native OS certificate store (works on Windows, macOS, and Linux)
+        let tls_config = ClientTlsConfig::new().with_native_roots();
 
         let channel = Channel::from_shared(self.zerobus_endpoint.clone())
             .map_err(|_| ZerobusError::InvalidZerobusEndpointError(self.zerobus_endpoint.clone()))?
