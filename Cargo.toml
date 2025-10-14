@@ -3,5 +3,6 @@ members = [
     "sdk",
     "examples/*",
     "tools/*",
+    "tests",
 ]
 resolver = "2"

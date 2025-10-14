@@ -177,6 +177,7 @@ impl ZerobusSdk {
     pub fn new(zerobus_endpoint: String, unity_catalog_url: String) -> ZerobusResult<Self> {
         let workspace_id = zerobus_endpoint
             .strip_prefix("https://")
+            .or_else(|| zerobus_endpoint.strip_prefix("http://"))
             .and_then(|s| s.split('.').next())
             .map(|s| s.to_string())
             .ok_or_else(|| {
@@ -907,6 +908,9 @@ impl ZerobusStream {
 
     /// Flushes all pending records first, aborts the supervisor task and sets the stream state to closed.
     pub async fn close(&mut self) -> ZerobusResult<()> {
+        if self.is_closed.load(Ordering::Relaxed) {
+            return Ok(());
+        }
         if let Some(stream_id) = self.stream_id.as_deref() {
             info!(stream_id = %stream_id, "Closing stream");
         } else {
