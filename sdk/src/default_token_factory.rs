@@ -12,11 +12,6 @@ impl DefaultTokenFactory {
     ) -> ZerobusResult<String> {
         #[cfg(any(test, feature = "testing"))]
         {
-            if table_name.split('.').count() != 3 {
-                return Err(ZerobusError::InvalidUCTokenError(
-                    "Missing schema in table name".to_string(),
-                ));
-            }
             return Ok("mock-test-token".to_string());
         }
 
