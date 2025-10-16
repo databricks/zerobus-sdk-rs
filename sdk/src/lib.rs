@@ -38,14 +38,8 @@ use tokio_retry::strategy::FixedInterval;
 use tokio_retry::RetryIf;
 use tokio_stream::wrappers::ReceiverStream;
 use tonic::metadata::MetadataValue;
-use tonic::transport::{Certificate, Channel, ClientTlsConfig};
+use tonic::transport::{Channel, ClientTlsConfig};
 use tracing::{debug, error, info, instrument, span, Level};
-
-#[cfg(target_os = "linux")]
-const DEFAULT_CERT_FILE: &str = "/etc/ssl/certs/ca-certificates.crt";
-
-#[cfg(not(target_os = "linux"))]
-const DEFAULT_CERT_FILE: &str = "/etc/ssl/cert.pem";
 
 /// The type of the stream connection created with the server.
 /// Currently we only support ephemeral streams on the server side, so we support only that in the SDK as well.
@@ -174,9 +168,11 @@ pub struct ZerobusSdk {
 }
 
 impl ZerobusSdk {
+    #[allow(clippy::result_large_err)]
     pub fn new(zerobus_endpoint: String, unity_catalog_url: String) -> ZerobusResult<Self> {
         let workspace_id = zerobus_endpoint
             .strip_prefix("https://")
+            .or_else(|| zerobus_endpoint.strip_prefix("http://"))
             .and_then(|s| s.split('.').next())
             .map(|s| s.to_string())
             .ok_or_else(|| {
@@ -193,7 +189,7 @@ impl ZerobusSdk {
         })
     }
 
-    #[instrument(level = "debug", skip_all, fields(table_name = %table_properties.table_name))]
+    #[instrument(level = "debug", skip_all)]
     pub async fn create_stream(
         &self,
         table_properties: TableProperties,
@@ -206,9 +202,11 @@ impl ZerobusSdk {
         let channel = if self.use_tls {
             self.create_secure_channel_zerobus_client().await?
         } else {
-            ZerobusClient::connect(self.zerobus_endpoint.to_string())
-                .await
-                .map_err(|err| ZerobusError::ChannelCreationError(err.to_string()))?
+            let endpoint = Channel::from_shared(self.zerobus_endpoint.clone())
+                .map_err(|err| ZerobusError::ChannelCreationError(err.to_string()))?;
+            ZerobusClient::new(endpoint.connect_lazy())
+                .max_decoding_message_size(usize::MAX)
+                .max_encoding_message_size(usize::MAX)
         };
         let stream = ZerobusStream::new_stream(
             channel,
@@ -255,14 +253,8 @@ impl ZerobusSdk {
     }
 
     async fn create_secure_channel_zerobus_client(&self) -> ZerobusResult<ZerobusClient<Channel>> {
-        // ClientTlsConfig doesn't see true native roots by default, so we need to load them manually.
-        // TODO: Use certificates provided by Databricks tls rust platform.
-        let pem = tokio::fs::read(DEFAULT_CERT_FILE)
-            .await
-            .map_err(|_| ZerobusError::FailedToEstablishTlsConnectionError)?;
-        let cert = Certificate::from_pem(pem);
-
-        let tls_config = ClientTlsConfig::new().ca_certificate(cert);
+        // Use native OS certificate store (works on Windows, macOS, and Linux)
+        let tls_config = ClientTlsConfig::new().with_native_roots();
 
         let channel = Channel::from_shared(self.zerobus_endpoint.clone())
             .map_err(|_| ZerobusError::InvalidZerobusEndpointError(self.zerobus_endpoint.clone()))?
@@ -270,7 +262,12 @@ impl ZerobusSdk {
             .map_err(|_| ZerobusError::FailedToEstablishTlsConnectionError)?
             .connect_lazy();
 
-        Ok(ZerobusClient::new(channel))
+        // Set unlimited message sizes (equivalent to -1 in Python gRPC)
+        let client = ZerobusClient::new(channel)
+            .max_decoding_message_size(usize::MAX) // Max receive message length
+            .max_encoding_message_size(usize::MAX); // Max send message length
+
+        Ok(client)
     }
 }
 
@@ -509,10 +506,10 @@ impl ZerobusStream {
     async fn create_stream_connection(
         mut channel: ZerobusClient<Channel>,
         table_properties: &TableProperties,
-        unity_catalog_url: &String,
-        client_id: &String,
-        client_secret: &String,
-        workspace_id: &String,
+        unity_catalog_url: &str,
+        client_id: &str,
+        client_secret: &str,
+        workspace_id: &str,
     ) -> ZerobusResult<(
         tokio::sync::mpsc::Sender<EphemeralStreamRequest>,
         tonic::Streaming<EphemeralStreamResponse>,
@@ -529,15 +526,29 @@ impl ZerobusStream {
                 ZerobusError::InvalidTableName(table_properties.table_name.to_string())
             })?,
         );
-
-        let token = DefaultTokenFactory::get_token(
-            unity_catalog_url,
-            &table_properties.table_name,
-            client_id,
-            client_secret,
-            workspace_id,
-        )
-        .await?;
+        let token = {
+            #[cfg(feature = "testing")]
+            {
+                // For testing purposes we hardcode the token and don't use the DefaultTokenFactory.
+                // Reassigning the variables to suppress the unused warnings.
+                let _unity_catalog_url = unity_catalog_url;
+                let _client_id = client_id;
+                let _client_secret = client_secret;
+                let _workspace_id = workspace_id;
+                "mock-test-token".to_string()
+            }
+            #[cfg(not(feature = "testing"))]
+            {
+                DefaultTokenFactory::get_token(
+                    unity_catalog_url,
+                    &table_properties.table_name,
+                    client_id,
+                    client_secret,
+                    workspace_id,
+                )
+                .await?
+            }
+        };
         let prefixed_token = format!("Bearer {}", token);
         let mut authorization_info =
             MetadataValue::try_from(prefixed_token.as_str()).map_err(|_| {
@@ -886,6 +897,9 @@ impl ZerobusStream {
 
     /// Flushes all pending records first, aborts the supervisor task and sets the stream state to closed.
     pub async fn close(&mut self) -> ZerobusResult<()> {
+        if self.is_closed.load(Ordering::Relaxed) {
+            return Ok(());
+        }
         if let Some(stream_id) = self.stream_id.as_deref() {
             info!(stream_id = %stream_id, "Closing stream");
         } else {

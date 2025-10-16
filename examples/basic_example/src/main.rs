@@ -82,12 +82,12 @@ fn load_descriptor_proto(
     let file_descriptor_proto = file_descriptor_set
         .file
         .into_iter()
-        .find(|f| f.name.as_ref().map(|n| n.as_str()) == Some(file_name))
+        .find(|f| f.name.as_deref() == Some(file_name))
         .unwrap();
 
     file_descriptor_proto
         .message_type
         .into_iter()
-        .find(|m| m.name.as_ref().map(|n| n.as_str()) == Some(message_name))
+        .find(|m| m.name.as_deref() == Some(message_name))
         .unwrap()
 }
