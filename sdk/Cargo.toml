@@ -2,6 +2,7 @@
 name = "zerobus"
 version = "0.0.1"
 edition = "2021"
+license-file = "LICENSE"
 
 [dependencies]
 prost = "0.13.3"

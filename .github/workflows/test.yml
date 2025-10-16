@@ -1,0 +1,38 @@
+name: Test Workflow
+
+on:
+  workflow_call:
+    inputs:
+        os:
+            required: true
+            type: string
+
+jobs:
+  test:
+    strategy:
+        fail-fast: false
+    runs-on:
+      group: databricks-protected-runner-group
+      labels: ${{ inputs.os }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Unshallow
+        run: git fetch --prune --unshallow
+
+      - name: Install Rust toolchain
+        uses: actions-rs/toolchain@v1
+        with:
+          toolchain: stable
+          profile: minimal
+          override: true
+
+      - name: Check formatting
+        run: make fmt
+
+      - name: Run linter
+        run: make lint
+
+      - name: Run tests
+        run: make test

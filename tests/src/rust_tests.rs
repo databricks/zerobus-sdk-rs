@@ -301,7 +301,7 @@ mod stream_initialization_and_basic_lifecycle_tests {
         let ack_future = stream.ingest_record(test_record).await?;
         let _offset_id = ack_future.await?;
 
-        let _close_result = stream.close().await?;
+        stream.close().await?;
 
         let write_count = mock_server.get_write_count().await;
         let max_offset = mock_server.get_max_offset_sent().await;
@@ -352,8 +352,8 @@ mod stream_initialization_and_basic_lifecycle_tests {
             )
             .await?;
 
-        let _close_result = stream.close().await?;
-        let _close_result2 = stream.close().await?;
+        stream.close().await?;
+        stream.close().await?;
 
         Ok(())
     }
@@ -398,7 +398,7 @@ mod stream_initialization_and_basic_lifecycle_tests {
             )
             .await?;
 
-        let _close_result = stream.close().await?;
+        stream.close().await?;
         let flush_result = stream.flush().await;
 
         assert!(flush_result.is_err());
@@ -451,7 +451,7 @@ mod stream_initialization_and_basic_lifecycle_tests {
             )
             .await?;
 
-        let _close_result = stream.close().await?;
+        stream.close().await?;
 
         let ingest_result = stream.ingest_record(b"test record data".to_vec()).await;
         assert!(matches!(
@@ -635,7 +635,7 @@ mod standard_operation_and_state_management_tests {
             let _ingest_future = stream.ingest_record(b"test record data".to_vec()).await?;
         }
 
-        let _flush_result = stream.flush().await?;
+        stream.flush().await?;
 
         assert_eq!(mock_server.get_write_count().await, 5);
         assert_eq!(mock_server.get_max_offset_sent().await, 4);
@@ -752,7 +752,7 @@ mod standard_operation_and_state_management_tests {
             .await?;
 
         let start_time = std::time::Instant::now();
-        let _flush_result = stream.flush().await?;
+        stream.flush().await?;
 
         let duration = start_time.elapsed();
         assert!(duration.as_millis() <= 100);
@@ -1393,7 +1393,7 @@ mod failure_scenarios_tests {
 
             for i in 0..3 {
                 let payload = format!("test-record-{}", i).into_bytes();
-                let _ = stream.ingest_record(payload).await?;
+                let _ack_future = stream.ingest_record(payload).await?;
             }
 
             stream.flush().await?;

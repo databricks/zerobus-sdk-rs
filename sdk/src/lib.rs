@@ -130,12 +130,12 @@ pub struct ZerobusStream {
 /// ```no_run
 /// # use std::error::Error;
 /// # use std::sync::Arc;
-/// # use universe_shinkansen_sdks_rust_sdk::{ZerobusSdk, StreamConfigurationOptions, TableProperties, ZerobusError, ZerobusResult};
+/// # use zerobus::{ZerobusSdk, StreamConfigurationOptions, TableProperties, ZerobusError, ZerobusResult};
 /// #
 /// # async fn write_single_row(row: impl prost::Message) -> Result<(), ZerobusError> {
 ///
 /// // Open SDK with the Zerobus API endpoint.
-/// let sdk = ZerobusSdk::new("https://your-workspace.zerobus.region.cloud.databricks.com".to_string(),"https://your-workspace.cloud.databricks.com".to_string()).await?;
+/// let sdk = ZerobusSdk::new("https://your-workspace.zerobus.region.cloud.databricks.com".to_string(),"https://your-workspace.cloud.databricks.com".to_string())?;
 ///
 /// // Define the arguments for the ephemeral stream.
 /// let table_properties = TableProperties {
@@ -146,6 +146,8 @@ pub struct ZerobusStream {
 ///     max_inflight_records: 100,
 ///     ..Default::default()
 /// };
+/// let client_id = "your-client-id".to_string();
+/// let client_secret = "your-client-secret".to_string();
 ///
 /// // Create a stream
 /// let stream = sdk.create_stream(table_properties, client_id, client_secret, Some(options)).await?;
