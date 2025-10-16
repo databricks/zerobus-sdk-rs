@@ -168,9 +168,11 @@ pub struct ZerobusSdk {
 }
 
 impl ZerobusSdk {
+    #[allow(clippy::result_large_err)]
     pub fn new(zerobus_endpoint: String, unity_catalog_url: String) -> ZerobusResult<Self> {
         let workspace_id = zerobus_endpoint
             .strip_prefix("https://")
+            .or_else(|| zerobus_endpoint.strip_prefix("http://"))
             .and_then(|s| s.split('.').next())
             .map(|s| s.to_string())
             .ok_or_else(|| {
@@ -187,7 +189,7 @@ impl ZerobusSdk {
         })
     }
 
-    #[instrument(level = "debug", skip_all, fields(table_name = %table_properties.table_name))]
+    #[instrument(level = "debug", skip_all)]
     pub async fn create_stream(
         &self,
         table_properties: TableProperties,
@@ -202,10 +204,9 @@ impl ZerobusSdk {
         } else {
             let endpoint = Channel::from_shared(self.zerobus_endpoint.clone())
                 .map_err(|err| ZerobusError::ChannelCreationError(err.to_string()))?;
-            let client = ZerobusClient::new(endpoint.connect_lazy())
+            ZerobusClient::new(endpoint.connect_lazy())
                 .max_decoding_message_size(usize::MAX)
-                .max_encoding_message_size(usize::MAX);
-            client
+                .max_encoding_message_size(usize::MAX)
         };
         let stream = ZerobusStream::new_stream(
             channel,
@@ -505,10 +506,10 @@ impl ZerobusStream {
     async fn create_stream_connection(
         mut channel: ZerobusClient<Channel>,
         table_properties: &TableProperties,
-        unity_catalog_url: &String,
-        client_id: &String,
-        client_secret: &String,
-        workspace_id: &String,
+        unity_catalog_url: &str,
+        client_id: &str,
+        client_secret: &str,
+        workspace_id: &str,
     ) -> ZerobusResult<(
         tokio::sync::mpsc::Sender<EphemeralStreamRequest>,
         tonic::Streaming<EphemeralStreamResponse>,
@@ -525,15 +526,29 @@ impl ZerobusStream {
                 ZerobusError::InvalidTableName(table_properties.table_name.to_string())
             })?,
         );
-
-        let token = DefaultTokenFactory::get_token(
-            unity_catalog_url,
-            &table_properties.table_name,
-            client_id,
-            client_secret,
-            workspace_id,
-        )
-        .await?;
+        let token = {
+            #[cfg(feature = "testing")]
+            {
+                // For testing purposes we hardcode the token and don't use the DefaultTokenFactory.
+                // Reassigning the variables to suppress the unused warnings.
+                let _unity_catalog_url = unity_catalog_url;
+                let _client_id = client_id;
+                let _client_secret = client_secret;
+                let _workspace_id = workspace_id;
+                "mock-test-token".to_string()
+            }
+            #[cfg(not(feature = "testing"))]
+            {
+                DefaultTokenFactory::get_token(
+                    unity_catalog_url,
+                    &table_properties.table_name,
+                    client_id,
+                    client_secret,
+                    workspace_id,
+                )
+                .await?
+            }
+        };
         let prefixed_token = format!("Bearer {}", token);
         let mut authorization_info =
             MetadataValue::try_from(prefixed_token.as_str()).map_err(|_| {
@@ -882,6 +897,9 @@ impl ZerobusStream {
 
     /// Flushes all pending records first, aborts the supervisor task and sets the stream state to closed.
     pub async fn close(&mut self) -> ZerobusResult<()> {
+        if self.is_closed.load(Ordering::Relaxed) {
+            return Ok(());
+        }
         if let Some(stream_id) = self.stream_id.as_deref() {
             info!(stream_id = %stream_id, "Closing stream");
         } else {

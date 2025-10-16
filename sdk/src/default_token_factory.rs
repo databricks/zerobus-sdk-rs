@@ -89,6 +89,7 @@ impl DefaultTokenFactory {
         Ok(token)
     }
 
+    #[allow(clippy::result_large_err)]
     fn parse_table_name(table_name: &str) -> Result<(String, String, String), ZerobusError> {
         let mut parts = table_name.splitn(3, '.');
 
