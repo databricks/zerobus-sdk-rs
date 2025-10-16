@@ -361,5 +361,5 @@ stream.flush().await?;
 ## Additional Resources
 
 - [Main SDK Documentation](../../README.md)
-- [Schema Generation Tool](../../tools/generate_files/readme.md)
+- [Schema Generation Tool](../../tools/generate_files/README.md)
 - [Databricks Unity Catalog Documentation](https://docs.databricks.com/unity-catalog/index.html)
