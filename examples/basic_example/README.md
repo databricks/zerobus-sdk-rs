@@ -5,11 +5,11 @@ This example demonstrates how to use the Zerobus Rust SDK to ingest data into a 
 ## Overview
 
 This example shows:
-- Loading Protocol Buffer schema descriptors
 - Creating a stream with authentication
 - Ingesting a single record
 - Waiting for acknowledgment
 - Properly closing the stream
+- How to configure your table into this example
 
 ## Prerequisites
 
@@ -32,26 +32,7 @@ CREATE TABLE catalog.schema.orders (
 
 Replace `catalog.schema.orders` with your actual catalog, schema, and table name.
 
-### 2. Generate Protocol Buffer Schema
-
-Use the schema generation tool to create the necessary files:
-
-```bash
-cd ../../tools/generate_files
-
-cargo run -- \
-  --uc-endpoint "https://your-workspace.cloud.databricks.com" \
-  --uc-token "dapi123..." \
-  --table "catalog.schema.orders" \
-  --output-dir "../../examples/basic_example/output"
-```
-
-This generates:
-- `output/orders.proto` - Protocol Buffer schema
-- `output/orders.rs` - Rust structs
-- `output/orders.descriptor` - Binary descriptor file
-
-### 3. Set Up OAuth Service Principal
+### 2. Set Up OAuth Service Principal
 
 You'll need a Databricks service principal with OAuth credentials:
 
@@ -63,7 +44,7 @@ You'll need a Databricks service principal with OAuth credentials:
    - `MODIFY` - Write data to the table
    - `USE CATALOG` and `USE SCHEMA` - Access catalog and schema
 
-### 4. Configure Credentials
+### 3. Configure Credentials
 
 Edit `src/main.rs` and update the following constants with your actual values:
 
@@ -95,6 +76,104 @@ cargo run
 ```
 Record acknowledged with offset Id: 0
 Stream closed successfully
+```
+
+## Adapting for a Custom Table
+
+To adapt this example for your own table, follow these steps:
+
+### 1. Generate Schema Files
+
+First, use the schema generation tool to create the necessary Rust and descriptor files for your table. Run this from the `zerobus_sdk/` root directory:
+
+```bash
+cd ../../tools/generate_files
+
+cargo run -- \
+  --uc-endpoint "https://<your-workspace-id>.zerobus.<region>.cloud.databricks.com" \
+  --uc-token "<your_pat_token>" \
+  --table "<catalog.schema.orders>" \
+  --output-dir "examples/basic_example/output"
+```
+
+This generates:
+- `output/<YOUR_TABLE>.proto` - Protocol Buffer schema
+- `output/<YOUR_TABLE>.rs` - Rust structs
+- `output/<YOUR_TABLE>.descriptor` - Binary descriptor file
+
+### 2. Update `src/main.rs`
+
+You'll need to make three changes to `src/main.rs` to use your new schema.
+
+**A. Update the `mod` and `use` statements:**
+Change `orders` to match the name of your generated Rust file (e.g., `your_table`).
+
+*Before:*
+```rust
+pub mod orders {
+    include!("../output/orders.rs");
+}
+use crate::orders::TableOrders;
+```
+
+*After (for a table named `inventory`):*
+```rust
+pub mod inventory {
+    include!("../output/inventory.rs");
+}
+use crate::inventory::TableInventory;
+```
+
+**B. Update the `load_descriptor_proto` call:**
+Change the filenames and message name to match your generated files.
+
+*Before:*
+```rust
+let descriptor_proto = load_descriptor_proto(
+    "output/orders.descriptor",
+    "orders.proto",
+    "table_Orders"
+);
+```
+
+*After (for a table named `inventory`):*
+```rust
+let descriptor_proto = load_descriptor_proto(
+    "output/inventory.descriptor",
+    "inventory.proto",
+    "table_Inventory"
+);
+
+**C. Update the record creation:**
+Modify the code to create an instance of your new table struct with your own data.
+
+*Before:*
+```rust
+let ack_future = stream.ingest_record(
+    TableOrders {
+        id: Some(1),
+        customer_name: Some("Alice Smith".to_string()),
+        // ... other fields
+    }.encode_to_vec()
+).await.unwrap();
+```
+
+*After (for a table named `inventory`):*
+```rust
+let ack_future = stream.ingest_record(
+    TableInventory {
+        item_id: Some(123),
+        sku: Some("SKU-XYZ".to_string()),
+        // ... other fields
+    }.encode_to_vec()
+).await.unwrap();
+```
+
+### 3. Run the Example
+After making these changes, you can run the example:
+
+```bash
+cargo run
 ```
 
 ## Code Walkthrough
@@ -282,5 +361,5 @@ stream.flush().await?;
 ## Additional Resources
 
 - [Main SDK Documentation](../../README.md)
-- [Schema Generation Tool](../../tools/generate_files/readme.md)
+- [Schema Generation Tool](../../tools/generate_files/README.md)
 - [Databricks Unity Catalog Documentation](https://docs.databricks.com/unity-catalog/index.html)

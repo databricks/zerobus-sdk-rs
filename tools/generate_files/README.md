@@ -58,6 +58,9 @@ cargo run -- \
 - `--proto-msg` - Message name in proto (optional, defaults to table name)
 - `--output-dir` - Output directory for generated files (optional, defaults to "output"). Can be relative or absolute path
 
+**Note:** UC token ([`PAT token`](https://docs.databricks.com/aws/en/dev-tools/auth/pat#databricks-personal-access-tokens-for-workspace-users)) is needed for this tool.
+Go to: Workspace -> Click user located on top right -> Settings -> Developer -> Access Token -> Manage -> Generate New Token 
+
 ## Output Files
 
 When you run the tool, it generates:

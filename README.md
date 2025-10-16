@@ -1,6 +1,6 @@
 # Zerobus Rust SDK
 
-A high-performance Rust client for streaming data ingestion into Databricks Delta tables using the Zerobus protocol.
+A high-performance Rust client for streaming data ingestion into Databricks Delta tables using the Zerobus service.
 
 ## Disclaimer
 
@@ -34,9 +34,9 @@ We are keen to hear feedback from you on this SDK. Please [file issues](https://
 
 ## Overview
 
-The Zerobus Rust SDK provides a robust, async-first interface for ingesting large volumes of data into Databricks Delta tables. It abstracts the complexity of the Zerobus streaming protocol and handles authentication, retries, stream recovery, and acknowledgment tracking automatically.
+The Zerobus Rust SDK provides a robust, async-first interface for ingesting large volumes of data into Databricks Delta tables. It abstracts the complexity of the Zerobus service and handles authentication, retries, stream recovery, and acknowledgment tracking automatically.
 
-**What is Zerobus?** Zerobus is a high-throughput streaming protocol for direct data ingestion into Databricks Delta tables, optimized for real-time data pipelines and high-volume workloads.
+**What is Zerobus?** Zerobus is a high-throughput streaming service for direct data ingestion into Databricks Delta tables, optimized for real-time data pipelines and high-volume workloads.
 
 ## Features
 
@@ -84,48 +84,7 @@ tokio = { version = "1.42.0", features = ["macros", "rt-multi-thread"] }
 
 ## Quick Start
 
-```rust
-use prost::Message;
-use zerobus::{ZerobusSdk, TableProperties, StreamConfigurationOptions};
-
-#[tokio::main]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    // Initialize SDK
-    let sdk = ZerobusSdk::new(
-        "https://your-workspace-id.cloud.databricks.com".to_string(),
-        "https://your-workspace.cloud.databricks.com".to_string(),
-    )?;
-
-    // Configure table properties
-    let table_properties = TableProperties {
-        table_name: "catalog.schema.table".to_string(),
-        descriptor_proto: your_descriptor_proto, // loaded from generated files
-    };
-
-    // Create stream with authentication
-    let mut stream = sdk.create_stream(
-        table_properties,
-        "your-client-id".to_string(),
-        "your-client-secret".to_string(),
-        Some(StreamConfigurationOptions {
-            max_inflight_records: 1000,
-            ..Default::default()
-        }),
-    ).await?;
-
-    // Ingest a record
-    let record = YourMessage { /* your data */ };
-    let ack_future = stream.ingest_record(record.encode_to_vec()).await?;
-
-    // Wait for acknowledgment
-    let offset = ack_future.await?;
-    println!("Record ingested at offset: {}", offset);
-
-    // Close stream gracefully
-    stream.close().await?;
-    Ok(())
-}
-```
+See [`examples/basic_example/README.md`](examples/basic_example/README.md) for more details on how to setup an example client quickly.
 
 ## Repository Structure
 
@@ -160,6 +119,13 @@ zerobus_rust_sdk/
 │       │   ├── orders.rs
 │       │   └── orders.descriptor
 │       └── Cargo.toml
+│
+├── tests/                              # Integration tests crate
+│   ├── src/
+│   │   ├── mock_grpc.rs                # Mock Zerobus gRPC server
+│   │   └── rust_tests.rs               # Test suite
+│   ├── build.rs
+│   └── Cargo.toml
 │
 ├── Cargo.toml                          # Workspace configuration
 └── README.md                           # This file
@@ -255,7 +221,10 @@ This generates three files:
 - `{table}.rs` - Rust structs with serialization code
 - `{table}.descriptor` - Binary descriptor for runtime validation
 
-See [`tools/generate_files/readme.md`](tools/generate_files/readme.md) for supported data types and limitations.
+See [`tools/generate_files/README.md`](tools/generate_files/README.md) for supported data types and limitations.
+
+**Note:** UC token ([`PAT token`](https://docs.databricks.com/aws/en/dev-tools/auth/pat#databricks-personal-access-tokens-for-workspace-users)) is needed for this tool.
+Go to: Workspace -> Click user located on top right -> Settings -> Developer -> Access Token -> Manage -> Generate New Token 
 
 ### 2. Initialize the SDK
 
@@ -300,11 +269,11 @@ fn load_descriptor(path: &str, file: &str, msg: &str) -> DescriptorProto {
     let file_set = FileDescriptorSet::decode(bytes.as_ref()).unwrap();
 
     let file_desc = file_set.file.into_iter()
-        .find(|f| f.name.as_ref().map(|n| n.as_str()) == Some(file))
+        .find(|f| f.name.as_deref() == Some(file))
         .unwrap();
 
     file_desc.message_type.into_iter()
-        .find(|m| m.name.as_ref().map(|n| n.as_str()) == Some(msg))
+        .find(|m| m.name.as_deref() == Some(msg))
         .unwrap()
 }
 
@@ -490,22 +459,8 @@ match stream.ingest_record(payload).await {
 
 ### Complete Working Example
 
-See [`examples/basic_example/`](examples/basic_example/) for a fully functional example.
+See [`examples/`](examples/) for more information.
 
-**Run the example:**
-
-```bash
-cd examples/basic_example
-
-# Edit src/main.rs with your credentials:
-# - DATABRICKS_WORKSPACE_URL
-# - TABLE_NAME
-# - DATABRICKS_CLIENT_ID
-# - DATABRICKS_CLIENT_SECRET
-# - SERVER_ENDPOINT
-
-cargo run
-```
 
 ### High-Throughput Ingestion
 
@@ -550,6 +505,19 @@ match stream.close().await {
     }
     Ok(_) => println!("Closed successfully"),
 }
+```
+
+## Tests
+
+Integration tests live in the `tests/` crate and run against a lightweight mock Zerobus gRPC server.
+
+- Mock server: `tests/src/mock_grpc.rs`
+- Test suite: `tests/src/rust_tests.rs`
+
+Run tests with logs:
+
+```bash
+cargo test -p tests -- --nocapture
 ```
 
 ## Best Practices
@@ -696,7 +664,7 @@ cargo run -p basic_example
 - **Databricks** workspace with Zerobus access enabled
 - **OAuth 2.0** client credentials (client ID and secret)
 - **Unity Catalog** endpoint access
-- **TLS Certificates** - `/etc/ssl/certs/ca-certificates.crt` (Linux) or `/etc/ssl/cert.pem` (macOS)
+- **TLS** - Uses native OS certificate store
 
 
 ---
