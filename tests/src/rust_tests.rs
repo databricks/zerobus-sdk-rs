@@ -18,7 +18,7 @@ fn setup_tracing() {
         let _ = tracing_subscriber::fmt()
             .with_writer(std::io::stdout)
             .with_env_filter(
-                EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("debug")),
+                EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")),
             )
             .try_init()
             .ok();
