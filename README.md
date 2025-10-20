@@ -658,6 +658,10 @@ cargo build -p generate_files
 cargo run -p basic_example
 ```
 
+## License
+
+This SDK is licensed under the Databricks License. See the [LICENSE](LICENSE) file for the full license text. The license is also available online at [https://www.databricks.com/legal/db-license](https://www.databricks.com/legal/db-license).
+
 ## Requirements
 
 - **Rust** 1.70 or higher (2021 edition)

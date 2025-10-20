@@ -1,4 +1,4 @@
-name: Format Check
+name: CI
 
 on:
   pull_request:
@@ -7,7 +7,17 @@ on:
     types: [checks_requested]
 
 jobs:
-  fmt-and-lint:
+  tests-ubuntu:
+    uses: ./.github/workflows/test.yml
+    with:
+      os: linux-ubuntu-latest
+
+  tests-windows:
+    uses: ./.github/workflows/test.yml
+    with:
+      os: windows-server-latest
+
+  fmt:
     runs-on:
       group: databricks-protected-runner-group
       labels: linux-ubuntu-latest
@@ -16,6 +26,19 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt
+      - name: Format all files
+        run: make fmt
+      - name: Fail on differences
+        run: git diff --exit-code
 
-      - name: Check formatting
-        run: cargo fmt --all -- --check
+  lint:
+    runs-on:
+      group: databricks-protected-runner-group
+      labels: linux-ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - name: Lint code
+        run: make lint
