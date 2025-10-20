@@ -1,0 +1,25 @@
+Copyright (2025) Databricks, Inc.
+
+This Software includes software developed at Databricks (https://www.databricks.com/) and its use is subject to the included LICENSE file.
+
+---
+
+This Software includes the following open source components, which are subject to the MIT License and the Apache License 2.0.
+
+## MIT License
+
+This component is licensed under the MIT license.
+- **tokio**: Copyright (c) 2021 Tokio Contributors (https://github.com/tokio-rs/tokio)
+- **tonic**: Copyright (c) 2019-2021, Luc Perkins and contributors (https://github.com/hyperium/tonic)
+- **tokio-stream**: Copyright (c) 2019 Tokio Contributors (https://github.com/tokio-rs/tokio)
+- **tracing**: Copyright (c) 2019-2021, The `tracing` project authors (https://github.com/tokio-rs/tracing)
+
+## Apache License 2.0
+
+This component is licensed under the Apache License 2.0.
+- **prost**: Copyright 2017, Dan Burkert (https://github.com/tokio-rs/prost)
+- **prost-types**: Copyright 2017, Dan Burkert (https://github.com/tokio-rs/prost)
+- **tokio-retry**: Copyright 2018, App-Tech-Crew (https://github.com/app-tech-crew/tokio-retry)
+- **reqwest**: Copyright (c) 2016-2021, Sean McArthur (https://github.com/seanmonstar/reqwest)
+- **serde_json**: Copyright (c) 2014-2021, David Tolnay (https://github.com/serde-rs/json)
+- **thiserror**: Copyright (c) 2019-2021, David Tolnay (https://github.com/dtolnay/thiserror)
