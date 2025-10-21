@@ -1,6 +1,6 @@
 [package]
 name = "databricks-zerobus-ingest-sdk"
-version = "0.0.1"
+version = "0.1.0"
 authors = ["Databricks"]
 edition = "2021"
 license-file = "../LICENSE"
