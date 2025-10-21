@@ -3,7 +3,7 @@ name = "databricks-zerobus-ingest-sdk"
 version = "0.0.1"
 authors = ["Databricks"]
 edition = "2021"
-license-file = "LICENSE"
+license-file = "../LICENSE"
 description = ""
 repository = "https://github.com/databricks/zerobus-sdk-rs"
 
