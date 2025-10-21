@@ -14,6 +14,7 @@ mod generate;
 use generate::{
     clean_filename, fetch_table_info, generate_proto_file, generate_rust_and_descriptor,
 };
+mod token_factory;
 
 /// CLI arguments.
 #[derive(Parser, Debug)]
@@ -23,9 +24,13 @@ struct Args {
     #[arg(long = "uc-endpoint")]
     uc_endpoint: String,
 
-    /// Unity Catalog authentication token (e.g., dapi123...)
-    #[arg(long = "uc-token")]
-    uc_token: String,
+    /// OAuth client ID for authentication
+    #[arg(long = "client-id")]
+    client_id: String,
+
+    /// OAuth client secret for authentication
+    #[arg(long = "client-secret")]
+    client_secret: String,
 
     /// Full table name in format: catalog.schema.table_name
     #[arg(long = "table")]
@@ -44,10 +49,21 @@ struct Args {
     output_dir: PathBuf,
 }
 
-fn main() -> Result<()> {
+#[tokio::main]
+async fn main() -> Result<()> {
     let args = Args::parse();
 
-    let table_info = fetch_table_info(&args.uc_endpoint, &args.uc_token, &args.table)
+    let token = token_factory::get_token(
+        &args.uc_endpoint,
+        &args.table,
+        &args.client_id,
+        &args.client_secret,
+    )
+    .await
+    .context("Failed to get OAuth token")?;
+
+    let table_info = fetch_table_info(&args.uc_endpoint, &token, &args.table)
+        .await
         .context("UC request failed")?;
 
     let msg_name = args.proto_msg.unwrap_or_else(|| {

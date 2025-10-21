@@ -32,7 +32,8 @@ This tool fetches table schema information from Unity Catalog and generates:
 ```bash
 cargo run -- \
   --uc-endpoint "https://your-workspace.cloud.databricks.com" \
-  --uc-token "dapi123..." \
+  --client-id "your-client-id" \
+  --client-secret "your-client-secret" \
   --table "catalog.schema.table_name"
 ```
 
@@ -41,7 +42,8 @@ cargo run -- \
 ```bash
 cargo run -- \
   --uc-endpoint "https://your-workspace.cloud.databricks.com" \
-  --uc-token "dapi123..." \
+  --client-id "your-client-id" \
+  --client-secret "your-client-secret" \
   --table "catalog.schema.table_name" \
   --output "my_table.proto" \
   --proto-msg "MyTableMessage" \
@@ -52,14 +54,14 @@ cargo run -- \
 ## Command Line Arguments
 
 - `--uc-endpoint` - Unity Catalog endpoint URL (e.g., "https://your-workspace.cloud.databricks.com")
-- `--uc-token` - UC authentication token (e.g., "dapi123...")
+- `--client-id` - OAuth client ID for authentication
+- `--client-secret` - OAuth client secret for authentication
 - `--table` - Full table name in format "catalog.schema.table_name"
 - `--output` - Output proto file path (optional, defaults to "{table_name}.proto")
 - `--proto-msg` - Message name in proto (optional, defaults to table name)
 - `--output-dir` - Output directory for generated files (optional, defaults to "output"). Can be relative or absolute path
 
-**Note:** UC token ([`PAT token`](https://docs.databricks.com/aws/en/dev-tools/auth/pat#databricks-personal-access-tokens-for-workspace-users)) is needed for this tool.
-Go to: Workspace -> Click user located on top right -> Settings -> Developer -> Access Token -> Manage -> Generate New Token 
+See [`../../examples/basic_example/README.md`](../../examples/basic_example/README.md) for more information on how to get OAuth credentials.
 
 ## Output Files
 
