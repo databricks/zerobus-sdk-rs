@@ -212,7 +212,8 @@ cd tools/generate_files
 
 cargo run -- \
   --uc-endpoint "https://your-workspace.cloud.databricks.com" \
-  --uc-token "dapi123..." \
+  --client-id "your-client-id" \
+  --client-secret "your-client-secret" \
   --table "catalog.schema.table" \
   --output-dir "../../output"
 ```
@@ -224,8 +225,7 @@ This generates three files:
 
 See [`tools/generate_files/README.md`](tools/generate_files/README.md) for supported data types and limitations.
 
-**Note:** UC token ([`PAT token`](https://docs.databricks.com/aws/en/dev-tools/auth/pat#databricks-personal-access-tokens-for-workspace-users)) is needed for this tool.
-Go to: Workspace -> Click user located on top right -> Settings -> Developer -> Access Token -> Manage -> Generate New Token 
+See [`examples/basic_example/README.md`](examples/basic_example/README.md) for more information on how to get OAuth credentials.
 
 ### 2. Initialize the SDK
 

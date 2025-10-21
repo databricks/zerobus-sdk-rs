@@ -331,7 +331,7 @@ pub struct Column {
     pub nullable: bool,
 }
 
-pub fn fetch_table_info(endpoint: &str, token: &str, table: &str) -> Result<TableInfo> {
+pub async fn fetch_table_info(endpoint: &str, token: &str, table: &str) -> Result<TableInfo> {
     let encoded_table = encode(table);
     let base = endpoint.trim_end_matches('/');
     let url = format!("{base}/api/2.1/unity-catalog/tables/{encoded_table}");
@@ -343,19 +343,19 @@ pub fn fetch_table_info(endpoint: &str, token: &str, table: &str) -> Result<Tabl
     );
     headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
 
-    let client = reqwest::blocking::Client::builder()
+    let client = reqwest::Client::builder()
         .user_agent("generate-proto-rs/1.0")
         .default_headers(headers)
         .build()?;
 
-    let resp = client.get(&url).send()?;
+    let resp = client.get(&url).send().await?;
     let status = resp.status();
     if !status.is_success() {
-        let body = resp.text().unwrap_or_default();
+        let body = resp.text().await.unwrap_or_default();
         return Err(anyhow!("UC request failed: {status} {body}"));
     }
 
-    Ok(resp.json()?)
+    Ok(resp.json().await?)
 }
 
 pub fn generate_proto_file(
