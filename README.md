@@ -55,12 +55,12 @@ The Zerobus Rust SDK provides a robust, async-first interface for ingesting larg
 Add the SDK to your `Cargo.toml`:
 
 ```bash
-cargo add --git https://github.com/databricks/zerobus-sdk-rs zerobus
+cargo add databricks-zerobus-ingest-sdk
 cargo add prost prost-types
 cargo add tokio --features macros,rt-multi-thread
 ```
 **Why these dependencies?**
-- **`zerobus`** - The SDK itself
+- **`databricks-zerobus-ingest-sdk`** - The SDK itself
 - **`prost`** and **`prost-types`** - Required for encoding your data to Protocol Buffers and loading schema descriptors
 - **`tokio`** - Async runtime required for running async functions (the SDK is fully async)
 
@@ -77,7 +77,7 @@ Then in your `Cargo.toml`:
 
 ```toml
 [dependencies]
-zerobus = { path = "../zerobus-sdk-rs/sdk" }
+databricks-zerobus-ingest-sdk = { path = "../zerobus-sdk-rs/sdk" }
 prost = "0.13.3"
 prost-types = "0.13.3"
 tokio = { version = "1.42.0", features = ["macros", "rt-multi-thread"] }
@@ -650,7 +650,7 @@ cargo build --workspace
 
 ```bash
 # Build only SDK
-cargo build -p zerobus
+cargo build -p databricks-zerobus-ingest-sdk
 
 # Build only schema tool
 cargo build -p generate_files

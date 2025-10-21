@@ -130,7 +130,7 @@ pub struct ZerobusStream {
 /// ```no_run
 /// # use std::error::Error;
 /// # use std::sync::Arc;
-/// # use zerobus::{ZerobusSdk, StreamConfigurationOptions, TableProperties, ZerobusError, ZerobusResult};
+/// # use databricks_zerobus_ingest_sdk::{ZerobusSdk, StreamConfigurationOptions, TableProperties, ZerobusError, ZerobusResult};
 /// #
 /// # async fn write_single_row(row: impl prost::Message) -> Result<(), ZerobusError> {
 ///

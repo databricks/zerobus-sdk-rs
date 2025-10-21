@@ -2,11 +2,13 @@ mod mock_grpc;
 
 use std::sync::{Arc, Once};
 
+use databricks_zerobus_ingest_sdk::{
+    StreamConfigurationOptions, StreamType, TableProperties, ZerobusError, ZerobusSdk,
+};
 use mock_grpc::{start_mock_server, MockResponse};
 use prost_reflect::prost_types;
 use tracing::info;
 use tracing_subscriber::EnvFilter;
-use zerobus::{StreamConfigurationOptions, StreamType, TableProperties, ZerobusError, ZerobusSdk};
 
 const TABLE_NAME: &str = "test_catalog.test_schema.test_table";
 
