@@ -30,6 +30,7 @@ We are keen to hear feedback from you on this SDK. Please [file issues](https://
 - [Best Practices](#best-practices)
 - [API Reference](#api-reference)
 - [Building from Source](#building-from-source)
+- [Community and Contributing](#community-and-contributing)
 - [License](#license)
 
 ## Overview
@@ -657,6 +658,16 @@ cargo build -p generate_files
 # Build and run example
 cargo run -p basic_example
 ```
+
+## Community and Contributing
+
+This is an open source project. We welcome contributions, feedback, and bug reports.
+
+- **[Contributing Guide](CONTRIBUTING.md)**: Learn how to contribute, including our development process and coding style.
+- **[Changelog](CHANGELOG.md)**: See the history of changes in the SDK.
+- **[Security Policy](SECURITY.md)**: Read about our security process and how to report vulnerabilities.
+- **[Developer Certificate of Origin (DCO)](DCO)**: Understand the agreement for contributions.
+- **[Open Source Attributions](NOTICE)**: See a list of the open source libraries we use.
 
 ## License
 
