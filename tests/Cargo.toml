@@ -2,6 +2,7 @@
 name = "tests"
 version = "0.1.0"
 edition = "2021"
+publish = false
 
 [[test]]
 name = "rust_tests"
@@ -16,7 +17,7 @@ tokio-stream = { version = "0.1.16", features = ["net"] }
 tonic = { version = "0.12.3", features = ["transport"] }
 tracing = "0.1.41"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
-zerobus = { path = "../sdk", features = ["testing"] }
+databricks-zerobus-ingest-sdk = { path = "../sdk", features = ["testing"] }
 
 [build-dependencies]
 tonic-build = "0.12.3"

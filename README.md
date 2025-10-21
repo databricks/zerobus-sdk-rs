@@ -30,6 +30,7 @@ We are keen to hear feedback from you on this SDK. Please [file issues](https://
 - [Best Practices](#best-practices)
 - [API Reference](#api-reference)
 - [Building from Source](#building-from-source)
+- [Community and Contributing](#community-and-contributing)
 - [License](#license)
 
 ## Overview
@@ -54,12 +55,12 @@ The Zerobus Rust SDK provides a robust, async-first interface for ingesting larg
 Add the SDK to your `Cargo.toml`:
 
 ```bash
-cargo add --git https://github.com/databricks/zerobus-sdk-rs zerobus
+cargo add databricks-zerobus-ingest-sdk
 cargo add prost prost-types
 cargo add tokio --features macros,rt-multi-thread
 ```
 **Why these dependencies?**
-- **`zerobus`** - The SDK itself
+- **`databricks-zerobus-ingest-sdk`** - The SDK itself
 - **`prost`** and **`prost-types`** - Required for encoding your data to Protocol Buffers and loading schema descriptors
 - **`tokio`** - Async runtime required for running async functions (the SDK is fully async)
 
@@ -76,7 +77,7 @@ Then in your `Cargo.toml`:
 
 ```toml
 [dependencies]
-zerobus = { path = "../zerobus-sdk-rs/sdk" }
+databricks-zerobus-ingest-sdk = { path = "../zerobus-sdk-rs/sdk" }
 prost = "0.13.3"
 prost-types = "0.13.3"
 tokio = { version = "1.42.0", features = ["macros", "rt-multi-thread"] }
@@ -649,7 +650,7 @@ cargo build --workspace
 
 ```bash
 # Build only SDK
-cargo build -p zerobus
+cargo build -p databricks-zerobus-ingest-sdk
 
 # Build only schema tool
 cargo build -p generate_files
@@ -657,6 +658,16 @@ cargo build -p generate_files
 # Build and run example
 cargo run -p basic_example
 ```
+
+## Community and Contributing
+
+This is an open source project. We welcome contributions, feedback, and bug reports.
+
+- **[Contributing Guide](CONTRIBUTING.md)**: Learn how to contribute, including our development process and coding style.
+- **[Changelog](CHANGELOG.md)**: See the history of changes in the SDK.
+- **[Security Policy](SECURITY.md)**: Read about our security process and how to report vulnerabilities.
+- **[Developer Certificate of Origin (DCO)](DCO)**: Understand the agreement for contributions.
+- **[Open Source Attributions](NOTICE)**: See a list of the open source libraries we use.
 
 ## License
 

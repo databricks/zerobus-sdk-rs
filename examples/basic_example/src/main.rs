@@ -4,7 +4,7 @@ use std::fs;
 use prost::Message;
 use prost_reflect::prost_types;
 
-use zerobus::{StreamConfigurationOptions, TableProperties, ZerobusSdk};
+use databricks_zerobus_ingest_sdk::{StreamConfigurationOptions, TableProperties, ZerobusSdk};
 pub mod orders {
     include!("../output/orders.rs");
 }
