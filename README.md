@@ -64,6 +64,8 @@ cargo add tokio --features macros,rt-multi-thread
 - **`prost`** and **`prost-types`** - Required for encoding your data to Protocol Buffers and loading schema descriptors
 - **`tokio`** - Async runtime required for running async functions (the SDK is fully async)
 
+> **What's in the crates.io package?** The published crate contains only the core Zerobus ingestion SDK. Tools for schema generation (`tools/generate_files`) and working examples (`examples/`) are only available in the [GitHub repository](https://github.com/databricks/zerobus-sdk-rs). You'll need to clone the repo to generate protobuf schemas from your Unity Catalog tables.
+
 ### For Local Development
 
 Clone the repository and use a path dependency:
@@ -84,6 +86,8 @@ tokio = { version = "1.42.0", features = ["macros", "rt-multi-thread"] }
 ```
 
 ## Quick Start
+
+> **Note on crates.io**: The package on [crates.io](https://crates.io/crates/databricks-zerobus-ingest-sdk) contains only the core SDK. For the schema generation tool, working examples, and complete documentation, please refer to the [GitHub repository](https://github.com/databricks/zerobus-sdk-rs).
 
 See [`examples/basic_example/README.md`](examples/basic_example/README.md) for more details on how to setup an example client quickly.
 
@@ -204,6 +208,13 @@ The SDK uses OAuth 2.0 client credentials flow:
 ## Usage Guide
 
 ### 1. Generate Protocol Buffer Schema
+
+> **Important Note**: The schema generation tool and examples are **only available in the GitHub repository**. The crate published on [crates.io](https://crates.io/crates/databricks-zerobus-ingest-sdk) contains only the core Zerobus ingestion SDK logic. To generate protobuf schemas or see working examples, clone the repository:
+> 
+> ```bash
+> git clone https://github.com/databricks/zerobus-sdk-rs.git
+> cd zerobus-sdk-rs
+> ```
 
 Use the included tool to generate schema files from your Unity Catalog table:
 

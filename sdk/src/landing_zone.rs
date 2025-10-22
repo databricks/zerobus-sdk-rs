@@ -10,34 +10,49 @@ pub enum LandingZoneError {
     RemovingNonObservedElement,
 }
 
-/// LandingZone has following properties:
-/// 1. It keeps a queue of T.
-/// 2. It provides a way to add to the queue.
-/// 3. It provides a way to remove from the queue.
-/// 4. It provides a way to read from the queue in
-///    a blocking, non-consumable manner.
+/// Internal state for the landing zone.
 ///
-/// Remove from the queue only works if an element has been observed, i.e. that
-/// observe() has been called against the given element.
-///
-/// Iteration can be restarted from the beginning.
+/// Maintains two queues: one for unobserved items and one for observed items
+/// that are waiting for acknowledgement.
 struct LandingZoneState<T> {
+    /// Queue of items that haven't been observed yet.
     queue: VecDeque<T>,
+    /// Queue of items that have been observed but not yet removed.
     observed_items: VecDeque<T>,
 }
 
+/// A thread-safe queue with observation semantics and backpressure control.
+///
+/// The `LandingZone` provides a specialized queue where items must be "observed"
+/// before they can be removed. This enables the sender and receiver tasks to
+/// coordinate: the sender observes items from the queue and sends them over the
+/// network, while the receiver removes observed items only after receiving
+/// acknowledgements.
+///
+/// Key features:
+/// - **Observe before remove**: Items must be observed before removal
+/// - **Reset capability**: Observed items can be moved back to the queue for retry
+/// - **Backpressure**: Enforces a maximum number of inflight items via semaphore
+/// - **Thread-safe**: Safe for concurrent access from multiple tasks
 pub struct LandingZone<T: Clone> {
     /// Synchronizes access to the landing zone.
     state: Arc<std::sync::Mutex<LandingZoneState<T>>>,
-    /// Notifies waiting observe() calls when new items are added.
+    /// Notifies waiting `observe()` calls when new items are added.
     new_item_notify: Arc<Notify>,
-    /// Controls maximum number of inflight records.
+    /// Controls maximum number of inflight records to enforce backpressure.
     semaphore: Arc<Semaphore>,
     /// Tracks semaphore permits to release them when items are removed.
     permits: std::sync::Mutex<VecDeque<OwnedSemaphorePermit>>,
 }
 
 impl<T: Clone> LandingZone<T> {
+    /// Creates a new `LandingZone` with the specified capacity.
+    ///
+    /// # Arguments
+    ///
+    /// * `max_inflight_records` - Maximum number of items that can be in the landing zone
+    ///   (both observed and unobserved) at any time. When this limit is reached, `add()`
+    ///   calls will block until items are removed.
     pub fn new(max_inflight_records: usize) -> Self {
         Self {
             state: Arc::new(std::sync::Mutex::new(LandingZoneState {
@@ -50,7 +65,13 @@ impl<T: Clone> LandingZone<T> {
         }
     }
 
-    /// Removes all items from the landing zone.
+    /// Removes all items from the landing zone, both observed and unobserved.
+    ///
+    /// This is typically used during stream failure to retrieve all pending records.
+    ///
+    /// # Returns
+    ///
+    /// A vector containing all items that were in the landing zone.
     pub fn remove_all(&self) -> Vec<T> {
         let mut state = self.state.lock().expect("Lock poisoned");
 
@@ -64,7 +85,14 @@ impl<T: Clone> LandingZone<T> {
         all_items
     }
 
-    /// Adds an item to queue. Blocks if the semaphore has reached max_inflight_records.
+    /// Adds an item to the queue.
+    ///
+    /// This method will block if the maximum number of inflight records has been reached,
+    /// providing automatic backpressure control.
+    ///
+    /// # Arguments
+    ///
+    /// * `request` - The item to add to the queue
     pub async fn add(&self, request: T) {
         let _permit = self
             .semaphore
@@ -82,7 +110,15 @@ impl<T: Clone> LandingZone<T> {
         self.new_item_notify.notify_one();
     }
 
-    /// Removes an observed element. If element hasn't been observed, it will return an error.
+    /// Removes and returns the next observed item.
+    ///
+    /// Items must be observed via `observe()` before they can be removed. This ensures
+    /// proper coordination between sender and receiver tasks.
+    ///
+    /// # Returns
+    ///
+    /// * `Ok(T)` - The removed item
+    /// * `Err(LandingZoneError::RemovingNonObservedElement)` - If no items have been observed
     pub fn remove_observed(&self) -> Result<T, LandingZoneError> {
         let mut state = self.state.lock().expect("Lock poisoned");
         if let Some(item) = state.observed_items.pop_front() {
@@ -93,7 +129,17 @@ impl<T: Clone> LandingZone<T> {
         }
     }
 
-    /// Observes the next element in the queue by moving it to observed_items. Blocks if there are no items in the queue.
+    /// Observes the next item in the queue without removing it.
+    ///
+    /// This moves the item from the unobserved queue to the observed queue. The item
+    /// remains in the landing zone until `remove_observed()` is called. This allows the
+    /// sender to send items over the network while keeping them buffered for potential retry.
+    ///
+    /// This method will block if there are no items available to observe.
+    ///
+    /// # Returns
+    ///
+    /// The observed item (still retained in the landing zone).
     pub async fn observe(&self) -> T {
         loop {
             let notified = self.new_item_notify.notified();
@@ -108,7 +154,10 @@ impl<T: Clone> LandingZone<T> {
         }
     }
 
-    /// Resets observed_items to the beginning by moving all observed items back to queue.
+    /// Resets observation by moving all observed items back to the queue.
+    ///
+    /// This is used during stream recovery to re-send items that were observed but
+    /// not yet acknowledged by the server.
     pub fn reset_observe(&self) {
         let mut state = self.state.lock().expect("Lock poisoned");
         while let Some(observed_item) = state.observed_items.pop_back() {
@@ -116,7 +165,11 @@ impl<T: Clone> LandingZone<T> {
         }
     }
 
-    /// Returns true if observed_items is empty.
+    /// Checks if there are no observed items waiting for acknowledgement.
+    ///
+    /// # Returns
+    ///
+    /// `true` if the observed queue is empty, `false` otherwise.
     pub fn is_observed_empty(&self) -> bool {
         let state = self.state.lock().expect("Lock poisoned");
         state.observed_items.is_empty()

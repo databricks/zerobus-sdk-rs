@@ -4,7 +4,8 @@ version = "0.1.0"
 authors = ["Databricks"]
 edition = "2021"
 license-file = "../LICENSE"
-description = ""
+description = "A high-performance Rust client for streaming data ingestion into Databricks Delta tables using the Zerobus service"
+readme = "../README.md"
 repository = "https://github.com/databricks/zerobus-sdk-rs"
 
 [dependencies]

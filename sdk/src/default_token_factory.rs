@@ -1,8 +1,29 @@
 use crate::{ZerobusError, ZerobusResult};
 
+/// Default OAuth 2.0 token factory for Unity Catalog authentication.
+///
+/// This factory implements the OAuth 2.0 client credentials flow with Unity Catalog
+/// authorization details to obtain access tokens for Zerobus API access.
 pub struct DefaultTokenFactory {}
 
 impl DefaultTokenFactory {
+    /// Obtains an OAuth 2.0 access token for Zerobus API access.
+    ///
+    /// # Arguments
+    ///
+    /// * `uc_endpoint` - Unity Catalog endpoint URL
+    /// * `table_name` - Full table name in format "catalog.schema.table"
+    /// * `client_id` - OAuth client ID
+    /// * `client_secret` - OAuth client secret
+    /// * `workspace_id` - Databricks workspace ID
+    ///
+    /// # Returns
+    ///
+    /// Returns an access token string on success, or a `ZerobusError` on failure.
+    ///
+    /// # Errors
+    ///
+    /// * `InvalidUCTokenError` - If the token request fails or returns invalid data
     pub async fn get_token(
         uc_endpoint: &str,
         table_name: &str,
@@ -89,6 +110,19 @@ impl DefaultTokenFactory {
         Ok(token)
     }
 
+    /// Parses a fully qualified table name into its components.
+    ///
+    /// # Arguments
+    ///
+    /// * `table_name` - Full table name in format "catalog.schema.table"
+    ///
+    /// # Returns
+    ///
+    /// Returns a tuple of (catalog, schema, table) on success.
+    ///
+    /// # Errors
+    ///
+    /// * `InvalidUCTokenError` - If the table name is missing catalog, schema, or table components
     #[allow(clippy::result_large_err)]
     fn parse_table_name(table_name: &str) -> Result<(String, String, String), ZerobusError> {
         let mut parts = table_name.splitn(3, '.');
