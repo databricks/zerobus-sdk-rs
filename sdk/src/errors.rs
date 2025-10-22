@@ -49,7 +49,15 @@ const UNRETRIABLE_STATUS_CODES: &[tonic::Code] = &[
 ];
 
 impl ZerobusError {
-    /// Returns true if this error should trigger recovery.
+    /// Determines whether this error can be automatically recovered through stream recovery.
+    ///
+    /// Retryable errors typically indicate transient issues like network failures or
+    /// temporary server problems. Non-retryable errors indicate permanent issues like
+    /// authentication failures or invalid configurations that require manual intervention.
+    ///
+    /// # Returns
+    ///
+    /// `true` if the SDK should attempt automatic recovery, `false` otherwise.
     pub fn is_retryable(&self) -> bool {
         match self {
             ZerobusError::InvalidArgument(_) => false,

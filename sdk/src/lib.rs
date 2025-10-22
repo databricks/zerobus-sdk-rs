@@ -85,6 +85,34 @@ type OneshotMap = HashMap<OffsetId, tokio::sync::oneshot::Sender<ZerobusResult<O
 /// Landing zone for ingest records.
 type RecordLandingZone = Arc<LandingZone<Box<IngestRecord>>>;
 
+/// Represents an active ingestion stream to a Databricks Delta table.
+///
+/// A `ZerobusStream` manages a bidirectional gRPC stream for ingesting records into
+/// a Unity Catalog table. It handles authentication, automatic recovery, acknowledgment
+/// tracking, and graceful shutdown.
+///
+/// # Lifecycle
+///
+/// 1. Create a stream via `ZerobusSdk::create_stream()`
+/// 2. Ingest records with `ingest_record()` and await acknowledgments
+/// 3. Optionally call `flush()` to ensure all records are persisted
+/// 4. Close the stream with `close()` to release resources
+///
+/// # Examples
+///
+/// ```no_run
+/// # use databricks_zerobus_ingest_sdk::*;
+/// # async fn example(mut stream: ZerobusStream, data: Vec<u8>) -> Result<(), ZerobusError> {
+/// // Ingest a single record
+/// let ack = stream.ingest_record(data).await?;
+/// let offset = ack.await?;
+/// println!("Record acknowledged at offset: {}", offset);
+///
+/// // Close the stream gracefully
+/// stream.close().await?;
+/// # Ok(())
+/// # }
+/// ```
 pub struct ZerobusStream {
     /// This is a 128-bit UUID that is unique across all streams in the system,
     /// not just within a single table. The server returns this ID in the CreateStreamResponse
@@ -170,6 +198,34 @@ pub struct ZerobusSdk {
 }
 
 impl ZerobusSdk {
+    /// Creates a new Zerobus SDK instance.
+    ///
+    /// This initializes the SDK with the required endpoints. The workspace ID is automatically
+    /// extracted from the Zerobus endpoint URL.
+    ///
+    /// # Arguments
+    ///
+    /// * `zerobus_endpoint` - The Zerobus API endpoint URL (e.g., "https://workspace-id.cloud.databricks.com")
+    /// * `unity_catalog_url` - The Unity Catalog endpoint URL (e.g., "https://workspace.cloud.databricks.com")
+    ///
+    /// # Returns
+    ///
+    /// A new `ZerobusSdk` instance configured to use TLS.
+    ///
+    /// # Errors
+    ///
+    /// * `ChannelCreationError` - If the workspace ID cannot be extracted from the Zerobus endpoint
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// # use databricks_zerobus_ingest_sdk::*;
+    /// let sdk = ZerobusSdk::new(
+    ///     "https://workspace-id.cloud.databricks.com".to_string(),
+    ///     "https://workspace.cloud.databricks.com".to_string(),
+    /// )?;
+    /// # Ok::<(), ZerobusError>(())
+    /// ```
     #[allow(clippy::result_large_err)]
     pub fn new(zerobus_endpoint: String, unity_catalog_url: String) -> ZerobusResult<Self> {
         let workspace_id = zerobus_endpoint
@@ -191,6 +247,48 @@ impl ZerobusSdk {
         })
     }
 
+    /// Creates a new ingestion stream to a Unity Catalog table.
+    ///
+    /// This establishes a bidirectional gRPC stream for ingesting records. Authentication
+    /// is handled automatically using the provided OAuth credentials.
+    ///
+    /// # Arguments
+    ///
+    /// * `table_properties` - Table name and protobuf descriptor
+    /// * `client_id` - OAuth client ID for authentication
+    /// * `client_secret` - OAuth client secret for authentication
+    /// * `options` - Optional stream configuration (uses defaults if `None`)
+    ///
+    /// # Returns
+    ///
+    /// A `ZerobusStream` ready for ingesting records.
+    ///
+    /// # Errors
+    ///
+    /// * `CreateStreamError` - If stream creation fails
+    /// * `InvalidTableName` - If the table name is invalid or table doesn't exist
+    /// * `InvalidUCTokenError` - If OAuth authentication fails
+    /// * `PermissionDenied` - If credentials lack required permissions
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// # use databricks_zerobus_ingest_sdk::*;
+    /// # async fn example(sdk: ZerobusSdk) -> Result<(), ZerobusError> {
+    /// let table_props = TableProperties {
+    ///     table_name: "catalog.schema.table".to_string(),
+    ///     descriptor_proto: Default::default(), // Load from generated files
+    /// };
+    ///
+    /// let stream = sdk.create_stream(
+    ///     table_props,
+    ///     "client-id".to_string(),
+    ///     "client-secret".to_string(),
+    ///     None,
+    /// ).await?;
+    /// # Ok(())
+    /// # }
+    /// ```
     #[instrument(level = "debug", skip_all)]
     pub async fn create_stream(
         &self,
@@ -236,6 +334,40 @@ impl ZerobusSdk {
         }
     }
 
+    /// Recreates a failed stream and re-ingests unacknowledged records.
+    ///
+    /// This is useful when a stream encounters an error and you want to preserve
+    /// unacknowledged records. The method creates a new stream with the same
+    /// configuration and automatically re-ingests all records that weren't acknowledged.
+    ///
+    /// # Arguments
+    ///
+    /// * `stream` - The failed stream to recreate
+    ///
+    /// # Returns
+    ///
+    /// A new `ZerobusStream` with unacknowledged records already submitted.
+    ///
+    /// # Errors
+    ///
+    /// Returns any errors from stream creation or re-ingestion.
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// # use databricks_zerobus_ingest_sdk::*;
+    /// # async fn example(sdk: ZerobusSdk, mut stream: ZerobusStream) -> Result<(), ZerobusError> {
+    /// match stream.close().await {
+    ///     Err(_) => {
+    ///         // Stream failed, recreate it
+    ///         let new_stream = sdk.recreate_stream(stream).await?;
+    ///         // Continue using new_stream
+    ///     }
+    ///     Ok(_) => println!("Stream closed successfully"),
+    /// }
+    /// # Ok(())
+    /// # }
+    /// ```
     #[instrument(level = "debug", skip_all)]
     pub async fn recreate_stream(&self, stream: ZerobusStream) -> ZerobusResult<ZerobusStream> {
         let records = stream.get_unacked_records().await?;
@@ -619,8 +751,39 @@ impl ZerobusStream {
         }
     }
 
-    /// Non-blocking ingestion of a record into the stream.
-    /// Returns a future that resolves to the offset ID of the ingested record.
+    /// Ingests a protobuf-encoded record into the stream.
+    ///
+    /// This method is non-blocking and returns immediately with a future. The record is
+    /// queued for transmission and the returned future resolves when the server acknowledges
+    /// the record has been durably written.
+    ///
+    /// # Arguments
+    ///
+    /// * `payload` - Protobuf-encoded record bytes (use `prost::Message::encode_to_vec()`)
+    ///
+    /// # Returns
+    ///
+    /// A future that resolves to the logical offset ID of the acknowledged record.
+    ///
+    /// # Errors
+    ///
+    /// * `StreamClosedError` - If the stream has been closed
+    /// * Other errors may be returned via the acknowledgment future
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// # use databricks_zerobus_ingest_sdk::*;
+    /// # use prost::Message;
+    /// # async fn example(stream: ZerobusStream) -> Result<(), ZerobusError> {
+    /// # let my_record = vec![1, 2, 3]; // Example protobuf-encoded data
+    /// // Ingest and immediately await acknowledgment
+    /// let ack = stream.ingest_record(my_record).await?;
+    /// let offset = ack.await?;
+    /// println!("Record written at offset: {}", offset);
+    /// # Ok(())
+    /// # }
+    /// ```
     pub async fn ingest_record(
         &self,
         payload: ProtoEncodedRecord,
@@ -819,11 +982,37 @@ impl ZerobusStream {
         *failed_records.write().await = failed_payloads;
     }
 
-    /// Flushes the stream up to the latest sent offset.
-    /// Returns a future that resolves when the stream is caught up to the given offset.
-    /// Note that stream can continue to ingest while flush is in progress. The flush
-    /// request will capture the state of the stream at the time of the request and
-    /// will not wait for records that are ingested while the flush is in progress.
+    /// Flushes all currently pending records and waits for their acknowledgments.
+    ///
+    /// This method captures the current highest offset and waits until all records up to
+    /// that offset have been acknowledged by the server. Records ingested during the flush
+    /// operation are not included in this flush.
+    ///
+    /// # Returns
+    ///
+    /// `Ok(())` when all pending records at the time of the call have been acknowledged.
+    ///
+    /// # Errors
+    ///
+    /// * `StreamClosedError` - If the stream is closed or times out
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// # use databricks_zerobus_ingest_sdk::*;
+    /// # async fn example(stream: ZerobusStream) -> Result<(), ZerobusError> {
+    /// // Ingest many records
+    /// for i in 0..1000 {
+    ///     let ack = stream.ingest_record(vec![i as u8]).await?;
+    ///     tokio::spawn(ack); // Fire and forget
+    /// }
+    ///
+    /// // Wait for all to be acknowledged
+    /// stream.flush().await?;
+    /// println!("All 1000 records have been acknowledged");
+    /// # Ok(())
+    /// # }
+    /// ```
     #[instrument(level = "debug", skip_all, fields(table_name = %self.table_properties.table_name))]
     pub async fn flush(&self) -> ZerobusResult<()> {
         let flush_operation = async {
@@ -897,7 +1086,31 @@ impl ZerobusStream {
         }
     }
 
-    /// Flushes all pending records first, aborts the supervisor task and sets the stream state to closed.
+    /// Closes the stream gracefully after flushing all pending records.
+    ///
+    /// This method first calls `flush()` to ensure all pending records are acknowledged,
+    /// then shuts down the stream and releases all resources. Always call this method
+    /// when you're done with a stream to ensure data integrity.
+    ///
+    /// # Returns
+    ///
+    /// `Ok(())` if the stream was closed successfully after flushing all records.
+    ///
+    /// # Errors
+    ///
+    /// Returns any errors from the flush operation. If flush fails, some records
+    /// may not have been acknowledged. Use `get_unacked_records()` to retrieve them.
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// # use databricks_zerobus_ingest_sdk::*;
+    /// # async fn example(mut stream: ZerobusStream) -> Result<(), ZerobusError> {
+    /// // After ingesting records...
+    /// stream.close().await?;
+    /// # Ok(())
+    /// # }
+    /// ```
     pub async fn close(&mut self) -> ZerobusResult<()> {
         if self.is_closed.load(Ordering::Relaxed) {
             return Ok(());
@@ -913,8 +1126,38 @@ impl ZerobusStream {
         Ok(())
     }
 
-    /// Returns a vector of payloads for records that were sent but not acknowledged.
-    /// To be called only after the stream failed, returns error otherwise.
+    /// Returns all records that were ingested but not acknowledged by the server.
+    ///
+    /// This method should only be called after a stream has failed or been closed.
+    /// It's useful for implementing retry logic or persisting failed records.
+    ///
+    /// # Returns
+    ///
+    /// A vector of protobuf-encoded record payloads that weren't acknowledged.
+    ///
+    /// # Errors
+    ///
+    /// * `InvalidStateError` - If called on an active (not closed) stream
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// # use databricks_zerobus_ingest_sdk::*;
+    /// # async fn example(sdk: ZerobusSdk, mut stream: ZerobusStream) -> Result<(), ZerobusError> {
+    /// match stream.close().await {
+    ///     Err(e) => {
+    ///         // Stream failed, get unacked records
+    ///         let unacked = stream.get_unacked_records().await?;
+    ///         println!("Failed to acknowledge {} records", unacked.len());
+    ///         
+    ///         // Recreate stream with unacked records
+    ///         let new_stream = sdk.recreate_stream(stream).await?;
+    ///     }
+    ///     Ok(_) => println!("All records acknowledged"),
+    /// }
+    /// # Ok(())
+    /// # }
+    /// ```
     pub async fn get_unacked_records(&self) -> ZerobusResult<Vec<ProtoEncodedRecord>> {
         if self.is_closed.load(Ordering::Relaxed) {
             let failed = self.failed_records.read().await.clone();
