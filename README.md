@@ -87,8 +87,6 @@ tokio = { version = "1.42.0", features = ["macros", "rt-multi-thread"] }
 
 ## Quick Start
 
-> **Note on crates.io**: The package on [crates.io](https://crates.io/crates/databricks-zerobus-ingest-sdk) contains only the core SDK. For the schema generation tool, working examples, and complete documentation, please refer to the [GitHub repository](https://github.com/databricks/zerobus-sdk-rs).
-
 See [`examples/basic_example/README.md`](examples/basic_example/README.md) for more details on how to setup an example client quickly.
 
 ## Repository Structure
