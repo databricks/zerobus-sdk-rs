@@ -7,12 +7,15 @@ use databricks::zerobus as proto_zerobus;
 
 pub use default_token_factory::DefaultTokenFactory;
 pub use errors::ZerobusError;
+pub use headers_provider::HeadersProvider;
+use headers_provider::OAuthHeadersProvider;
 use landing_zone::LandingZone;
 pub use offset_generator::{OffsetId, OffsetIdGenerator};
 pub use stream_configuration::StreamConfigurationOptions;
 
 mod default_token_factory;
 mod errors;
+mod headers_provider;
 mod landing_zone;
 mod offset_generator;
 mod stream_configuration;
@@ -120,14 +123,8 @@ pub struct ZerobusStream {
     stream_id: Option<String>,
     /// Type of gRPC stream that is used when sending records.
     pub stream_type: StreamType,
-    /// The Unity Catalog endpoint
-    pub unity_catalog_url: String,
-    /// The Databricks client ID, needed to get the OAuth token
-    pub client_id: String,
-    /// The Databricks client secret, needed to get the OAuth token
-    pub client_secret: String,
-    /// The Databricks workspace ID, needed to get the OAuth token
-    pub workspace_id: String,
+    /// Gets headers which are used in the first request to establish connection with the server.
+    pub headers_provider: Arc<dyn HeadersProvider>,
     /// The stream configuration options related to recovery, fetching OAuth tokens, etc.
     pub options: StreamConfigurationOptions,
     /// The table properties - table name and descriptor of the table.
@@ -221,8 +218,8 @@ impl ZerobusSdk {
     /// ```no_run
     /// # use databricks_zerobus_ingest_sdk::*;
     /// let sdk = ZerobusSdk::new(
-    ///     "https://workspace-id.cloud.databricks.com".to_string(),
-    ///     "https://workspace.cloud.databricks.com".to_string(),
+    ///     "https://<your-zerobus-endpoint>".to_string(),
+    ///     "https://<your-uc-endpoint>".to_string(),
     /// )?;
     /// # Ok::<(), ZerobusError>(())
     /// ```
@@ -297,6 +294,78 @@ impl ZerobusSdk {
         client_secret: String,
         options: Option<StreamConfigurationOptions>,
     ) -> ZerobusResult<ZerobusStream> {
+        let headers_provider = OAuthHeadersProvider::new(
+            client_id,
+            client_secret,
+            table_properties.table_name.clone(),
+            self.workspace_id.clone(),
+            self.unity_catalog_url.clone(),
+        );
+        self.create_stream_with_headers_provider(
+            table_properties,
+            Arc::new(headers_provider),
+            options,
+        )
+        .await
+    }
+
+    /// Creates a new ingestion stream with a custom headers provider.
+    ///
+    /// This is an advanced method that allows you to implement your own authentication
+    /// logic by providing a custom implementation of the `HeadersProvider` trait.
+    ///
+    /// # Arguments
+    ///
+    /// * `table_properties` - Table name and protobuf descriptor
+    /// * `headers_provider` - An `Arc` holding your custom `HeadersProvider` implementation
+    /// * `options` - Optional stream configuration (uses defaults if `None`)
+    ///
+    /// # Returns
+    ///
+    /// A `ZerobusStream` ready for ingesting records.
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// # use databricks_zerobus_ingest_sdk::*;
+    /// # use std::collections::HashMap;
+    /// # use std::sync::Arc;
+    /// # use async_trait::async_trait;
+    /// #
+    /// # struct MyHeadersProvider;
+    /// #
+    /// # #[async_trait]
+    /// # impl HeadersProvider for MyHeadersProvider {
+    /// #     async fn get_headers(&self) -> ZerobusResult<HashMap<&'static str, String>> {
+    /// #         let mut headers = HashMap::new();
+    /// #         headers.insert("some_key", "some_value".to_string());
+    /// #         Ok(headers)
+    /// #     }
+    /// # }
+    /// #
+    /// # async fn example(sdk: ZerobusSdk) -> Result<(), ZerobusError> {
+    /// let table_props = TableProperties {
+    ///     table_name: "catalog.schema.table".to_string(),
+    ///     descriptor_proto: Default::default(),
+    /// };
+    ///
+    /// let headers_provider = Arc::new(MyHeadersProvider);
+    ///
+    /// let stream = sdk.create_stream_with_headers_provider(
+    ///     table_props,
+    ///     headers_provider,
+    ///     None,
+    /// ).await?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    #[instrument(level = "debug", skip_all)]
+    pub async fn create_stream_with_headers_provider(
+        &self,
+        table_properties: TableProperties,
+        headers_provider: Arc<dyn HeadersProvider>,
+        options: Option<StreamConfigurationOptions>,
+    ) -> ZerobusResult<ZerobusStream> {
         // TODO: For now we are opening a new channel for each stream.
         // In the future we should consider reusing the channel.
         let channel = if self.use_tls {
@@ -311,10 +380,7 @@ impl ZerobusSdk {
         let stream = ZerobusStream::new_stream(
             channel,
             table_properties,
-            self.unity_catalog_url.clone(),
-            client_id,
-            client_secret,
-            self.workspace_id.clone(),
+            Arc::clone(&headers_provider),
             options.unwrap_or_default(),
         )
         .await;
@@ -372,10 +438,9 @@ impl ZerobusSdk {
     pub async fn recreate_stream(&self, stream: ZerobusStream) -> ZerobusResult<ZerobusStream> {
         let records = stream.get_unacked_records().await?;
         let new_stream = self
-            .create_stream(
+            .create_stream_with_headers_provider(
                 stream.table_properties,
-                stream.client_id,
-                stream.client_secret,
+                Arc::clone(&stream.headers_provider),
                 Some(stream.options),
             )
             .await?;
@@ -411,10 +476,7 @@ impl ZerobusStream {
     async fn new_stream(
         channel: ZerobusClient<Channel>,
         table_properties: TableProperties,
-        unity_catalog_url: String,
-        client_id: String,
-        client_secret: String,
-        workspace_id: String,
+        headers_provider: Arc<dyn HeadersProvider>,
         options: StreamConfigurationOptions,
     ) -> ZerobusResult<Self> {
         let (stream_init_result_tx, stream_init_result_rx) =
@@ -430,10 +492,7 @@ impl ZerobusStream {
         let supervisor_task = tokio::task::spawn(Self::supervisor_task(
             channel,
             table_properties.clone(),
-            unity_catalog_url.clone(),
-            client_id.clone(),
-            client_secret.clone(),
-            workspace_id.clone(),
+            Arc::clone(&headers_provider),
             options.clone(),
             Arc::clone(&landing_zone),
             Arc::clone(&oneshot_map),
@@ -450,10 +509,7 @@ impl ZerobusStream {
 
         let stream = Self {
             stream_type: StreamType::Ephemeral,
-            unity_catalog_url,
-            client_id,
-            client_secret,
-            workspace_id,
+            headers_provider,
             options: options.clone(),
             table_properties,
             stream_id,
@@ -478,10 +534,7 @@ impl ZerobusStream {
     async fn supervisor_task(
         channel: ZerobusClient<Channel>,
         table_properties: TableProperties,
-        unity_catalog_url: String,
-        client_id: String,
-        client_secret: String,
-        workspace_id: String,
+        headers_provider: Arc<dyn HeadersProvider>,
         options: StreamConfigurationOptions,
         landing_zone: RecordLandingZone,
         oneshot_map: Arc<tokio::sync::Mutex<OneshotMap>>,
@@ -510,10 +563,7 @@ impl ZerobusStream {
             let create_attempt = || {
                 let channel = channel.clone();
                 let table_properties = table_properties.clone();
-                let unity_catalog_url = unity_catalog_url.clone();
-                let client_id = client_id.clone();
-                let client_secret = client_secret.clone();
-                let workspace_id = workspace_id.clone();
+                let headers_provider = Arc::clone(&headers_provider);
 
                 async move {
                     tokio::time::timeout(
@@ -521,10 +571,7 @@ impl ZerobusStream {
                         Self::create_stream_connection(
                             channel,
                             &table_properties,
-                            &unity_catalog_url,
-                            &client_id,
-                            &client_secret,
-                            &workspace_id,
+                            &headers_provider,
                         ),
                     )
                     .await
@@ -640,10 +687,7 @@ impl ZerobusStream {
     async fn create_stream_connection(
         mut channel: ZerobusClient<Channel>,
         table_properties: &TableProperties,
-        unity_catalog_url: &str,
-        client_id: &str,
-        client_secret: &str,
-        workspace_id: &str,
+        headers_provider: &Arc<dyn HeadersProvider>,
     ) -> ZerobusResult<(
         tokio::sync::mpsc::Sender<EphemeralStreamRequest>,
         tonic::Streaming<EphemeralStreamResponse>,
@@ -654,43 +698,30 @@ impl ZerobusStream {
         let mut request_stream = tonic::Request::new(ReceiverStream::new(rx));
 
         let stream_metadata = request_stream.metadata_mut();
-        stream_metadata.insert(
-            "x-databricks-zerobus-table-name",
-            MetadataValue::try_from(table_properties.table_name.as_str()).map_err(|_| {
-                ZerobusError::InvalidTableName(table_properties.table_name.to_string())
-            })?,
-        );
-        let token = {
-            #[cfg(feature = "testing")]
-            {
-                // For testing purposes we hardcode the token and don't use the DefaultTokenFactory.
-                // Reassigning the variables to suppress the unused warnings.
-                let _unity_catalog_url = unity_catalog_url;
-                let _client_id = client_id;
-                let _client_secret = client_secret;
-                let _workspace_id = workspace_id;
-                "mock-test-token".to_string()
+        let headers = headers_provider.get_headers().await?;
+        for (key, value) in headers {
+            if key == "x-databricks-zerobus-table-name" {
+                stream_metadata.insert(
+                    key,
+                    MetadataValue::try_from(value.as_str())
+                        .map_err(|_| ZerobusError::InvalidTableName(key.to_owned()))?,
+                );
+            } else if key == "authorization" {
+                let mut authorization_info =
+                    MetadataValue::try_from(value.as_str()).map_err(|_| {
+                        error!(table_name = %table_properties.table_name, "Invalid token: {}", value);
+                        ZerobusError::InvalidUCTokenError(value.clone())
+                    })?;
+                authorization_info.set_sensitive(true);
+                stream_metadata.insert(key, authorization_info);
+            } else {
+                stream_metadata.insert(
+                    key,
+                    MetadataValue::try_from(value.as_str())
+                        .map_err(|_| ZerobusError::InvalidArgument(key.to_owned()))?,
+                );
             }
-            #[cfg(not(feature = "testing"))]
-            {
-                DefaultTokenFactory::get_token(
-                    unity_catalog_url,
-                    &table_properties.table_name,
-                    client_id,
-                    client_secret,
-                    workspace_id,
-                )
-                .await?
-            }
-        };
-        let prefixed_token = format!("Bearer {}", token);
-        let mut authorization_info =
-            MetadataValue::try_from(prefixed_token.as_str()).map_err(|_| {
-                error!(table_name = %table_properties.table_name, "Invalid token: {}", token);
-                ZerobusError::InvalidUCTokenError(token)
-            })?;
-        authorization_info.set_sensitive(true);
-        stream_metadata.insert("authorization", authorization_info);
+        }
 
         let mut response_grpc_stream = channel
             .ephemeral_stream(request_stream)
