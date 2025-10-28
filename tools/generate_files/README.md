@@ -27,11 +27,15 @@ This tool fetches table schema information from Unity Catalog and generates:
 
 ## How to use
 
+**Note** 
+For AWS your `uc-endpoint` should be in the following format `https://<your-workspace>.cloud.databricks.com`.
+For Azure your `uc-endpoint` should be in the following format `https://<your-workspace>.azuredatabricks.net`.
+
 ### Basic example
 
 ```bash
 cargo run -- \
-  --uc-endpoint "https://your-workspace.cloud.databricks.com" \
+  --uc-endpoint "<your_uc_endpoint>" \
   --client-id "your-client-id" \
   --client-secret "your-client-secret" \
   --table "catalog.schema.table_name"
@@ -41,7 +45,7 @@ cargo run -- \
 
 ```bash
 cargo run -- \
-  --uc-endpoint "https://your-workspace.cloud.databricks.com" \
+  --uc-endpoint ""<your_uc_endpoint>" \
   --client-id "your-client-id" \
   --client-secret "your-client-secret" \
   --table "catalog.schema.table_name" \
@@ -53,7 +57,7 @@ cargo run -- \
 
 ## Command Line Arguments
 
-- `--uc-endpoint` - Unity Catalog endpoint URL (e.g., "https://your-workspace.cloud.databricks.com")
+- `--uc-endpoint` - Unity Catalog endpoint URL (e.g., "https://<your-workspace>.cloud.databricks.com")
 - `--client-id` - OAuth client ID for authentication
 - `--client-secret` - OAuth client secret for authentication
 - `--table` - Full table name in format "catalog.schema.table_name"

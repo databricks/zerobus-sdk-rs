@@ -98,6 +98,7 @@ zerobus_rust_sdk/
 │   │   ├── lib.rs                      # Main SDK and stream implementation
 │   │   ├── default_token_factory.rs    # OAuth 2.0 token handling
 │   │   ├── errors.rs                   # Error types and retryable logic
+│   │   ├── headers_provider.rs         # Trait for custom authentication headers
 │   │   ├── stream_configuration.rs     # Stream options
 │   │   ├── landing_zone.rs             # Inflight record buffer
 │   │   └── offset_generator.rs         # Logical offset tracking
@@ -203,6 +204,44 @@ The SDK uses OAuth 2.0 client credentials flow:
 4. Token is attached to gRPC metadata as Bearer token
 5. Fresh tokens are fetched automatically on each connection
 
+### Custom Authentication
+
+For advanced use cases, you can implement the `HeadersProvider` trait to supply your own authentication headers. This is useful for integrating with a different OAuth provider, using a centralized token caching service, or implementing alternative authentication mechanisms.
+
+> **Note:** The headers you provide must still conform to the authentication protocol expected by the Zerobus service. The default implementation, `OAuthHeadersProvider`, serves as the reference for the required headers (`authorization` and `x-databricks-zerobus-table-name`). This feature provides flexibility in *how* you source your credentials, not in changing the authentication protocol itself.
+
+**Example:**
+
+```rust
+use databricks_zerobus_ingest_sdk::*;
+use std::collections::HashMap;
+use std::sync::Arc;
+use async_trait::async_trait;
+
+struct MyCustomAuthProvider;
+
+#[async_trait]
+impl HeadersProvider for MyCustomAuthProvider {
+    async fn get_headers(&self) -> ZerobusResult<HashMap<&'static str, String>> {
+        let mut headers = HashMap::new();
+        // Custom logic to fetch and cache a token would go here.
+        headers.insert("authorization", "Bearer <your-token>".to_string());
+        headers.insert("x-databricks-zerobus-table-name", "<your-table-name>".to_string());
+        Ok(headers)
+    }
+}
+
+async fn example(sdk: ZerobusSdk, table_properties: TableProperties) -> ZerobusResult<()> {
+    let custom_provider = Arc::new(MyCustomAuthProvider {});
+    let stream = sdk.create_stream_with_headers_provider(
+        table_properties,
+        custom_provider,
+        None,
+    ).await?;
+    Ok(())
+}
+```
+
 ## Usage Guide
 
 ### 1. Generate Protocol Buffer Schema
@@ -219,8 +258,17 @@ Use the included tool to generate schema files from your Unity Catalog table:
 ```bash
 cd tools/generate_files
 
+# For AWS
 cargo run -- \
-  --uc-endpoint "https://your-workspace.cloud.databricks.com" \
+  --uc-endpoint "https://<your-workspace>.cloud.databricks.com" \
+  --client-id "your-client-id" \
+  --client-secret "your-client-secret" \
+  --table "catalog.schema.table" \
+  --output-dir "../../output"
+
+# For Azure
+cargo run -- \
+  --uc-endpoint "https://<your-workspace>.azuredatabricks.net" \
   --client-id "your-client-id" \
   --client-secret "your-client-secret" \
   --table "catalog.schema.table" \
@@ -241,9 +289,16 @@ See [`examples/basic_example/README.md`](examples/basic_example/README.md) for m
 Create an SDK instance with your Databricks workspace endpoints:
 
 ```rust
+// For AWS
 let sdk = ZerobusSdk::new(
-    "https://workspace-id.cloud.databricks.com".to_string(),  // Zerobus endpoint
-    "https://workspace.cloud.databricks.com".to_string(),     // Unity Catalog endpoint
+    "https://<your-shard-id>.zerobus.<region>.cloud.databricks.com".to_string(),  // Zerobus endpoint
+    "https://<your-workspace>.cloud.databricks.com".to_string(),     // Unity Catalog endpoint
+)?;
+
+// For Azure
+let sdk = ZerobusSdk::new(
+    "https://<your-shard-id>.zerobus.<region>.azuredatabricks.net".to_string(),  // Zerobus endpoint
+    "https://<your-workspace>.azuredatabricks.net".to_string(),     // Unity Catalog endpoint
 )?;
 ```
 
@@ -572,6 +627,16 @@ pub async fn recreate_stream(
 ) -> ZerobusResult<ZerobusStream>
 ```
 Recreates a failed stream, preserving and re-ingesting unacknowledged records.
+
+```rust
+pub async fn create_stream_with_headers_provider(
+    &self,
+    table_properties: TableProperties,
+    headers_provider: Arc<dyn HeadersProvider>,
+    options: Option<StreamConfigurationOptions>,
+) -> ZerobusResult<ZerobusStream>
+```
+Creates a stream with a custom headers provider for advanced authentication.
 
 ### `ZerobusStream`
 

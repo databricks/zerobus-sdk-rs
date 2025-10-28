@@ -9,6 +9,7 @@ name = "rust_tests"
 path = "src/rust_tests.rs"
 
 [dependencies]
+async-trait = "0.1"
 prost = "0.13.3"
 prost-reflect = "0.14"
 prost-types = "0.13.3"
