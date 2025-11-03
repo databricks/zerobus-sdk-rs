@@ -28,7 +28,9 @@ This tool fetches table schema information from Unity Catalog and generates:
 ## How to use
 
 **Note** 
+
 For AWS your `uc-endpoint` should be in the following format `https://<your-workspace>.cloud.databricks.com`.
+
 For Azure your `uc-endpoint` should be in the following format `https://<your-workspace>.azuredatabricks.net`.
 
 ### Basic example

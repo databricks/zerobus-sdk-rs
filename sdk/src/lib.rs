@@ -699,27 +699,27 @@ impl ZerobusStream {
 
         let stream_metadata = request_stream.metadata_mut();
         let headers = headers_provider.get_headers().await?;
+
         for (key, value) in headers {
-            if key == "x-databricks-zerobus-table-name" {
-                stream_metadata.insert(
-                    key,
-                    MetadataValue::try_from(value.as_str())
-                        .map_err(|_| ZerobusError::InvalidTableName(key.to_owned()))?,
-                );
-            } else if key == "authorization" {
-                let mut authorization_info =
-                    MetadataValue::try_from(value.as_str()).map_err(|_| {
+            match key {
+                "x-databricks-zerobus-table-name" => {
+                    let table_name = MetadataValue::try_from(value.as_str())
+                        .map_err(|_| ZerobusError::InvalidTableName(key.to_string()))?;
+                    stream_metadata.insert("x-databricks-zerobus-table-name", table_name);
+                }
+                "authorization" => {
+                    let mut auth_value = MetadataValue::try_from(value.as_str()).map_err(|_| {
                         error!(table_name = %table_properties.table_name, "Invalid token: {}", value);
-                        ZerobusError::InvalidUCTokenError(value.clone())
+                        ZerobusError::InvalidUCTokenError(value)
                     })?;
-                authorization_info.set_sensitive(true);
-                stream_metadata.insert(key, authorization_info);
-            } else {
-                stream_metadata.insert(
-                    key,
-                    MetadataValue::try_from(value.as_str())
-                        .map_err(|_| ZerobusError::InvalidArgument(key.to_owned()))?,
-                );
+                    auth_value.set_sensitive(true);
+                    stream_metadata.insert("authorization", auth_value);
+                }
+                other_key => {
+                    let header_value = MetadataValue::try_from(value.as_str())
+                        .map_err(|_| ZerobusError::InvalidArgument(other_key.to_string()))?;
+                    stream_metadata.insert(other_key, header_value);
+                }
             }
         }
 

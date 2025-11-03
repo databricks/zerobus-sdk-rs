@@ -2,6 +2,8 @@ use async_trait::async_trait;
 use databricks_zerobus_ingest_sdk::HeadersProvider;
 use databricks_zerobus_ingest_sdk::ZerobusResult;
 use std::collections::HashMap;
+
+#[derive(Default)]
 pub struct TestHeadersProvider {}
 
 #[async_trait]
