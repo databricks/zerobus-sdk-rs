@@ -143,6 +143,7 @@ let descriptor_proto = load_descriptor_proto(
     "inventory.proto",
     "table_Inventory"
 );
+```
 
 **C. Update the record creation:**
 Modify the code to create an instance of your new table struct with your own data.

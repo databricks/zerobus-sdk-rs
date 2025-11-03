@@ -1,6 +1,8 @@
 mod mock_grpc;
+mod utils;
 
 use std::sync::{Arc, Once};
+use utils::TestHeadersProvider;
 
 use databricks_zerobus_ingest_sdk::{
     StreamConfigurationOptions, StreamType, TableProperties, ZerobusError, ZerobusSdk,
@@ -84,10 +86,9 @@ mod stream_initialization_and_basic_lifecycle_tests {
         };
 
         let result = sdk
-            .create_stream(
+            .create_stream_with_headers_provider(
                 table_properties,
-                "test_client_id".to_string(),
-                "test_client_secret".to_string(),
+                Arc::new(TestHeadersProvider::default()),
                 Some(options),
             )
             .await;
@@ -136,10 +137,9 @@ mod stream_initialization_and_basic_lifecycle_tests {
         };
 
         let result = sdk
-            .create_stream(
+            .create_stream_with_headers_provider(
                 table_properties,
-                "test_client_id".to_string(),
-                "test_client_secret".to_string(),
+                Arc::new(TestHeadersProvider::default()),
                 Some(options),
             )
             .await;
@@ -185,10 +185,9 @@ mod stream_initialization_and_basic_lifecycle_tests {
         };
 
         let result = sdk
-            .create_stream(
+            .create_stream_with_headers_provider(
                 table_properties,
-                "test_client_id".to_string(),
-                "test_client_secret".to_string(),
+                Arc::new(TestHeadersProvider::default()),
                 Some(options),
             )
             .await;
@@ -239,10 +238,9 @@ mod stream_initialization_and_basic_lifecycle_tests {
         let start_time = std::time::Instant::now();
 
         let result = sdk
-            .create_stream(
+            .create_stream_with_headers_provider(
                 table_properties,
-                "test_client_id".to_string(),
-                "test_client_secret".to_string(),
+                Arc::new(TestHeadersProvider::default()),
                 Some(options),
             )
             .await;
@@ -290,10 +288,9 @@ mod stream_initialization_and_basic_lifecycle_tests {
         };
 
         let mut stream = sdk
-            .create_stream(
+            .create_stream_with_headers_provider(
                 table_properties,
-                "test_client_id".to_string(),
-                "test_client_secret".to_string(),
+                Arc::new(TestHeadersProvider::default()),
                 Some(options),
             )
             .await?;
@@ -346,10 +343,9 @@ mod stream_initialization_and_basic_lifecycle_tests {
         };
 
         let mut stream = sdk
-            .create_stream(
+            .create_stream_with_headers_provider(
                 table_properties,
-                "test_client_id".to_string(),
-                "test_client_secret".to_string(),
+                Arc::new(TestHeadersProvider::default()),
                 Some(options),
             )
             .await?;
@@ -392,10 +388,9 @@ mod stream_initialization_and_basic_lifecycle_tests {
         };
 
         let mut stream = sdk
-            .create_stream(
+            .create_stream_with_headers_provider(
                 table_properties,
-                "test_client_id".to_string(),
-                "test_client_secret".to_string(),
+                Arc::new(TestHeadersProvider::default()),
                 Some(options),
             )
             .await?;
@@ -445,10 +440,9 @@ mod stream_initialization_and_basic_lifecycle_tests {
         };
 
         let mut stream = sdk
-            .create_stream(
+            .create_stream_with_headers_provider(
                 table_properties,
-                "test_client_id".to_string(),
-                "test_client_secret".to_string(),
+                Arc::new(TestHeadersProvider::default()),
                 Some(options),
             )
             .await?;
@@ -506,10 +500,9 @@ mod standard_operation_and_state_management_tests {
         };
 
         let stream = sdk
-            .create_stream(
+            .create_stream_with_headers_provider(
                 table_properties,
-                "test_client_id".to_string(),
-                "test_client_secret".to_string(),
+                Arc::new(TestHeadersProvider::default()),
                 Some(options),
             )
             .await?;
@@ -562,10 +555,9 @@ mod standard_operation_and_state_management_tests {
         };
 
         let stream = sdk
-            .create_stream(
+            .create_stream_with_headers_provider(
                 table_properties,
-                "test_client_id".to_string(),
-                "test_client_secret".to_string(),
+                Arc::new(TestHeadersProvider::default()),
                 Some(options),
             )
             .await?;
@@ -625,10 +617,9 @@ mod standard_operation_and_state_management_tests {
         };
 
         let stream = sdk
-            .create_stream(
+            .create_stream_with_headers_provider(
                 table_properties,
-                "test_client_id".to_string(),
-                "test_client_secret".to_string(),
+                Arc::new(TestHeadersProvider::default()),
                 Some(options),
             )
             .await?;
@@ -684,10 +675,9 @@ mod standard_operation_and_state_management_tests {
         };
 
         let stream = sdk
-            .create_stream(
+            .create_stream_with_headers_provider(
                 table_properties,
-                "test_client_id".to_string(),
-                "test_client_secret".to_string(),
+                Arc::new(TestHeadersProvider::default()),
                 Some(options),
             )
             .await?;
@@ -745,10 +735,9 @@ mod standard_operation_and_state_management_tests {
         };
 
         let stream = sdk
-            .create_stream(
+            .create_stream_with_headers_provider(
                 table_properties,
-                "test_client_id".to_string(),
-                "test_client_secret".to_string(),
+                Arc::new(TestHeadersProvider::default()),
                 Some(options),
             )
             .await?;
@@ -805,10 +794,9 @@ mod concurrency_and_race_condition_tests {
         };
 
         let stream = sdk
-            .create_stream(
+            .create_stream_with_headers_provider(
                 table_properties,
-                "test_client_id".to_string(),
-                "test_client_secret".to_string(),
+                Arc::new(TestHeadersProvider::default()),
                 Some(options),
             )
             .await?;
@@ -909,10 +897,9 @@ mod concurrency_and_race_condition_tests {
         };
 
         let stream = sdk
-            .create_stream(
+            .create_stream_with_headers_provider(
                 table_properties,
-                "test_client_id".to_string(),
-                "test_client_secret".to_string(),
+                Arc::new(TestHeadersProvider::default()),
                 Some(options),
             )
             .await?;
@@ -991,13 +978,12 @@ mod concurrency_and_race_condition_tests {
         let mut sdk = ZerobusSdk::new(server_url.clone(), "https://mock-uc.com".to_string())?;
         sdk.use_tls = false;
         let stream = sdk
-            .create_stream(
+            .create_stream_with_headers_provider(
                 TableProperties {
                     table_name: TABLE_NAME.to_string(),
                     descriptor_proto: create_test_descriptor_proto(),
                 },
-                "test_client_id".to_string(),
-                "test_client_secret".to_string(),
+                Arc::new(TestHeadersProvider::default()),
                 Some(StreamConfigurationOptions {
                     max_inflight_records: TOTAL_RECORDS + 5,
                     ..Default::default()
@@ -1098,13 +1084,12 @@ mod failure_scenarios_tests {
             let mut sdk = ZerobusSdk::new(server_url.clone(), "https://mock-uc.com".to_string())?;
             sdk.use_tls = false;
             let stream = sdk
-                .create_stream(
+                .create_stream_with_headers_provider(
                     TableProperties {
                         table_name: TABLE_NAME.to_string(),
                         descriptor_proto: create_test_descriptor_proto(),
                     },
-                    "test_client_id".to_string(),
-                    "test_client_secret".to_string(),
+                    Arc::new(TestHeadersProvider::default()),
                     Some(StreamConfigurationOptions {
                         recovery: false,
                         ..Default::default()
@@ -1152,13 +1137,12 @@ mod failure_scenarios_tests {
             let mut sdk = ZerobusSdk::new(server_url.clone(), "https://mock-uc.com".to_string())?;
             sdk.use_tls = false;
             let stream = sdk
-                .create_stream(
+                .create_stream_with_headers_provider(
                     TableProperties {
                         table_name: TABLE_NAME.to_string(),
                         descriptor_proto: create_test_descriptor_proto(),
                     },
-                    "test_client_id".to_string(),
-                    "test_client_secret".to_string(),
+                    Arc::new(TestHeadersProvider::default()),
                     Some(StreamConfigurationOptions {
                         recovery: false,
                         server_lack_of_ack_timeout_ms: ACK_TIMEOUT_MS,
@@ -1213,13 +1197,12 @@ mod failure_scenarios_tests {
             let mut sdk = ZerobusSdk::new(server_url.clone(), "https://mock-uc.com".to_string())?;
             sdk.use_tls = false;
             let stream = sdk
-                .create_stream(
+                .create_stream_with_headers_provider(
                     TableProperties {
                         table_name: TABLE_NAME.to_string(),
                         descriptor_proto: create_test_descriptor_proto(),
                     },
-                    "test_client_id".to_string(),
-                    "test_client_secret".to_string(),
+                    Arc::new(TestHeadersProvider::default()),
                     Some(StreamConfigurationOptions {
                         recovery: false,
                         ..Default::default()
@@ -1285,13 +1268,12 @@ mod failure_scenarios_tests {
             let mut sdk = ZerobusSdk::new(server_url.clone(), "https://mock-uc.com".to_string())?;
             sdk.use_tls = false;
             let stream = sdk
-                .create_stream(
+                .create_stream_with_headers_provider(
                     TableProperties {
                         table_name: TABLE_NAME.to_string(),
                         descriptor_proto: create_test_descriptor_proto(),
                     },
-                    "test_client_id".to_string(),
-                    "test_client_secret".to_string(),
+                    Arc::new(TestHeadersProvider::default()),
                     Some(StreamConfigurationOptions {
                         recovery: false,
                         ..Default::default()
@@ -1369,10 +1351,9 @@ mod failure_scenarios_tests {
 
             let start_time = std::time::Instant::now();
             let result = sdk
-                .create_stream(
+                .create_stream_with_headers_provider(
                     table_properties,
-                    "test_client_id".to_string(),
-                    "test_client_secret".to_string(),
+                    Arc::new(TestHeadersProvider::default()),
                     Some(options),
                 )
                 .await;
@@ -1459,10 +1440,9 @@ mod failure_scenarios_tests {
 
             let start_time = std::time::Instant::now();
             let result = sdk
-                .create_stream(
+                .create_stream_with_headers_provider(
                     table_properties,
-                    "test_client_id".to_string(),
-                    "test_client_secret".to_string(),
+                    Arc::new(TestHeadersProvider::default()),
                     Some(options),
                 )
                 .await;
@@ -1538,10 +1518,9 @@ mod failure_scenarios_tests {
             };
 
             let stream = sdk
-                .create_stream(
+                .create_stream_with_headers_provider(
                     table_properties,
-                    "test_client_id".to_string(),
-                    "test_client_secret".to_string(),
+                    Arc::new(TestHeadersProvider::default()),
                     Some(options),
                 )
                 .await?;
@@ -1624,10 +1603,9 @@ mod failure_scenarios_tests {
             };
 
             let stream = sdk
-                .create_stream(
+                .create_stream_with_headers_provider(
                     table_properties,
-                    "test_client_id".to_string(),
-                    "test_client_secret".to_string(),
+                    Arc::new(TestHeadersProvider::default()),
                     Some(options),
                 )
                 .await?;
@@ -1690,10 +1668,9 @@ mod failure_scenarios_tests {
             };
 
             let mut stream = sdk
-                .create_stream(
+                .create_stream_with_headers_provider(
                     table_properties,
-                    "test_client_id".to_string(),
-                    "test_client_secret".to_string(),
+                    Arc::new(TestHeadersProvider::default()),
                     Some(options),
                 )
                 .await?;
@@ -1780,10 +1757,9 @@ mod failure_scenarios_tests {
             };
 
             let stream = sdk
-                .create_stream(
+                .create_stream_with_headers_provider(
                     table_properties,
-                    "test_client_id".to_string(),
-                    "test_client_secret".to_string(),
+                    Arc::new(TestHeadersProvider::default()),
                     Some(options),
                 )
                 .await?;

@@ -11,11 +11,19 @@ pub mod orders {
 use crate::orders::TableOrders;
 
 // Change constants to match your data.
-const DATABRICKS_WORKSPACE_URL: &str = "<your_workspace_url>";
 const TABLE_NAME: &str = "<your_table_name>";
 const DATABRICKS_CLIENT_ID: &str = "<your_databricks_client_id>";
 const DATABRICKS_CLIENT_SECRET: &str = "<your_databricks_client_secret>";
-const SERVER_ENDPOINT: &str = "<your_server_endpoint>";
+
+// Uncomment the appropriate lines for your cloud.
+
+// For AWS:
+const DATABRICKS_WORKSPACE_URL: &str = "https://<your-workspace>.cloud.databricks.com";
+const SERVER_ENDPOINT: &str = "<your-shard-id>.zerobus.<region>.cloud.databricks.com";
+
+// For Azure:
+// const DATABRICKS_WORKSPACE_URL: &str = "https://<your-workspace>.azuredatabricks.net";
+// const SERVER_ENDPOINT: &str = "<your-shard-id>.zerobus.<region>.azuredatabricks.net";
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error>> {
