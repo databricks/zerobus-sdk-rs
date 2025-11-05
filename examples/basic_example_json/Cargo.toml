@@ -1,0 +1,10 @@
+[package]
+name = "json_example"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[dependencies]
+databricks-zerobus-ingest-sdk = { path = "../../sdk" }
+tokio = { version = "1", features = ["full"] }
+chrono = "0.4"

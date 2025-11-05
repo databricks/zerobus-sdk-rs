@@ -1,3 +1,5 @@
+use crate::databricks::zerobus::RecordType;
+
 /// Configuration options for stream creation, recovery of broken streams and flushing.
 ///
 /// These options control the behavior of ingestion streams, including memory limits,
@@ -69,6 +71,15 @@ pub struct StreamConfigurationOptions {
     ///
     /// Default: 300,000 (5 minutes)
     pub flush_timeout_ms: u64,
+    /// Type of record to ingest.
+    ///
+    /// Supported values:
+    /// - RecordType::Proto
+    /// - RecordType::Json
+    /// - RecordType::Unspecified
+    ///
+    /// Default: RecordType::Proto
+    pub record_type: RecordType,
 }
 
 impl Default for StreamConfigurationOptions {
@@ -81,6 +92,7 @@ impl Default for StreamConfigurationOptions {
             recovery_retries: 4,
             server_lack_of_ack_timeout_ms: 60000,
             flush_timeout_ms: 300000,
+            record_type: RecordType::Proto,
         }
     }
 }

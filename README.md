@@ -45,6 +45,7 @@ The Zerobus Rust SDK provides a robust, async-first interface for ingesting larg
 - **Automatic OAuth 2.0 Authentication** - Seamless token management with Unity Catalog
 - **Built-in Recovery** - Automatic retry and reconnection for transient failures
 - **High Throughput** - Configurable inflight record limits for optimal performance
+- **Flexible Serialization** - Support for both JSON (simple) and Protocol Buffers (type-safe) data formats
 - **Type Safety** - Protocol Buffers ensure schema validation at compile time
 - **Schema Generation** - CLI tool to generate protobuf schemas from Unity Catalog tables
 - **Flexible Configuration** - Fine-tune timeouts, retries, and recovery behavior
@@ -87,7 +88,12 @@ tokio = { version = "1.42.0", features = ["macros", "rt-multi-thread"] }
 
 ## Quick Start
 
-See [`examples/basic_example/README.md`](examples/basic_example/README.md) for more details on how to setup an example client quickly.
+The SDK supports two approaches for data serialization:
+
+- **JSON Example** (Recommended for getting started): Simpler approach using JSON strings, no schema generation required
+- **Protocol Buffers Example** (Recommended for production): Type-safe approach with schema validation at compile time
+
+See [`examples/README.md`](examples/README.md) for detailed setup instructions for both approaches.
 
 ## Repository Structure
 
@@ -115,8 +121,11 @@ zerobus_rust_sdk/
 │       └── Cargo.toml
 │
 ├── examples/
-│   └── basic_example/                  # Working example application
-│       ├── README.md                   # Example documentation
+│   ├── README.md                       # Examples documentation
+│   ├── basic_example_json/             # JSON-based example (simpler)
+│   │   ├── src/main.rs                 # Example usage code
+│   │   └── Cargo.toml
+│   └── basic_example_proto/            # Protocol Buffers example (production)
 │       ├── src/main.rs                 # Example usage code
 │       ├── output/                     # Generated schema files
 │       │   ├── orders.proto
@@ -244,7 +253,14 @@ async fn example(sdk: ZerobusSdk, table_properties: TableProperties) -> ZerobusR
 
 ## Usage Guide
 
-### 1. Generate Protocol Buffer Schema
+The SDK supports two approaches for data serialization:
+
+1. **JSON** - Simpler approach that uses JSON strings. No schema generation required, making it ideal for quick prototyping. See [`examples/README.md`](examples/README.md) for a complete example.
+2. **Protocol Buffers** - Type-safe approach with schema validation at compile time. Recommended for production use cases. This guide focuses on the Protocol Buffers approach.
+
+For JSON-based ingestion, you can skip the schema generation step and directly pass JSON strings to `ingest_record()`.
+
+### 1. Generate Protocol Buffer Schema (Protocol Buffers approach only)
 
 > **Important Note**: The schema generation tool and examples are **only available in the GitHub repository**. The crate published on [crates.io](https://crates.io/crates/databricks-zerobus-ingest-sdk) contains only the core Zerobus ingestion SDK logic. To generate protobuf schemas or see working examples, clone the repository:
 > 
@@ -282,7 +298,7 @@ This generates three files:
 
 See [`tools/generate_files/README.md`](tools/generate_files/README.md) for supported data types and limitations.
 
-See [`examples/basic_example/README.md`](examples/basic_example/README.md) for more information on how to get OAuth credentials.
+See [`examples/README.md`](examples/README.md) for more information on how to get OAuth credentials.
 
 ### 2. Initialize the SDK
 
@@ -317,7 +333,7 @@ let client_id = "your-client-id".to_string();
 let client_secret = "your-client-secret".to_string();
 ```
 
-See [`examples/basic_example/README.md`](examples/basic_example/README.md) for more information on how to get these credentials.
+See [`examples/README.md`](examples/README.md) for more information on how to get these credentials.
 
 ### 4. Create a Stream
 
@@ -522,9 +538,23 @@ match stream.ingest_record(payload).await {
 
 ## Examples
 
-### Complete Working Example
+### Complete Working Examples
 
-See [`examples/`](examples/) for more information.
+The repository provides two complete examples demonstrating different approaches:
+
+**JSON Example** (`examples/basic_example_json/`)
+- Simpler approach using JSON strings for data serialization
+- No schema generation required
+- Ideal for quick prototyping and getting started
+- Direct JSON string ingestion
+
+**Protocol Buffers Example** (`examples/basic_example_proto/`)
+- Type-safe approach using Protocol Buffers
+- Schema validation at compile time
+- Recommended for production use cases
+- More efficient binary encoding
+
+See [`examples/README.md`](examples/README.md) for detailed comparison and setup instructions for both approaches.
 
 
 ### High-Throughput Ingestion
@@ -729,8 +759,11 @@ cargo build -p databricks-zerobus-ingest-sdk
 # Build only schema tool
 cargo build -p generate_files
 
-# Build and run example
-cargo run -p basic_example
+# Build and run JSON example
+cargo run -p basic_example_json
+
+# Build and run Protocol Buffers example
+cargo run -p basic_example_proto
 ```
 
 ## Community and Contributing

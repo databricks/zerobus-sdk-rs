@@ -31,7 +31,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
         load_descriptor_proto("output/orders.descriptor", "orders.proto", "table_Orders"); //<your_descriptor_file>, <your_proto_file>, <your_proto_message_name>
     let table_properties = TableProperties {
         table_name: TABLE_NAME.to_string(),
-        descriptor_proto,
+        descriptor_proto: Some(descriptor_proto),
     };
     let stream_configuration_options = StreamConfigurationOptions {
         max_inflight_records: 100,
