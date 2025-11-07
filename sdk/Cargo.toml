@@ -28,6 +28,7 @@ tracing = "0.1.41"
 
 [build-dependencies]
 tonic-prost-build = "0.14.2"
+protoc-bin-vendored = "3"
 
 [features]
 testing = []

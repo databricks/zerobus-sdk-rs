@@ -16,3 +16,6 @@ tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
 urlencoding = "2"
 tonic-prost-build = "0.14.2"
 tempfile = "3.21.0"
+
+[build-dependencies]
+protoc-bin-vendored = "3"

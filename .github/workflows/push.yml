@@ -40,7 +40,5 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy
-      - name: Install protoc
-        uses: arduino/setup-protoc@v3
       - name: Lint code
         run: make lint
