@@ -21,7 +21,7 @@
 ### Internal Changes
 
 ### API Changes
-- `TableProperties` struct now has `descriptor_proto` field as optional.
+- `TableProperties` struct now has `descriptor_proto` field as optional (**breaking change**).
 - Added `HeadersProvider` trait for custom header strategies
 - Added `OAuthHeadersProvider` struct for OAuth 2.0 authentication with Databricks OIDC endpoint
 - Added `create_stream_with_headers_provider` method to `ZerobusSdk` for custom authentication header providers

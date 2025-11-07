@@ -42,7 +42,7 @@ use tokio_retry::RetryIf;
 use tokio_stream::wrappers::ReceiverStream;
 use tonic::metadata::MetadataValue;
 use tonic::transport::{Channel, ClientTlsConfig};
-use tracing::{debug, error, info, instrument, span, Level};
+use tracing::{debug, error, info, instrument, span, warn, Level};
 
 /// The type of the stream connection created with the server.
 /// Currently we only support ephemeral streams on the server side, so we support only that in the SDK as well.
@@ -400,11 +400,27 @@ impl ZerobusSdk {
         options: Option<StreamConfigurationOptions>,
     ) -> ZerobusResult<ZerobusStream> {
         let options = options.unwrap_or_default();
-        if options.record_type == RecordType::Unspecified {
-            return Err(ZerobusError::InvalidArgument(
-                "Record type is not specified".to_string(),
-            ));
+
+        match options.record_type {
+            RecordType::Proto => {
+                if table_properties.descriptor_proto.is_none() {
+                    return Err(ZerobusError::InvalidArgument(
+                        "Proto descriptor is required for Proto record type".to_string(),
+                    ));
+                }
+            }
+            RecordType::Json => {
+                if table_properties.descriptor_proto.is_some() {
+                    warn!("JSON descriptor is not supported for Proto record type");
+                }
+            }
+            RecordType::Unspecified => {
+                return Err(ZerobusError::InvalidArgument(
+                    "Record type is not specified".to_string(),
+                ));
+            }
         }
+
         // TODO: For now we are opening a new channel for each stream.
         // In the future we should consider reusing the channel.
         let channel = if self.use_tls {
@@ -774,24 +790,18 @@ impl ZerobusStream {
             .map_err(ZerobusError::CreateStreamError)?
             .into_inner();
 
-        let descriptor_proto = match record_type {
-            RecordType::Proto => Some(
+        let descriptor_proto = if record_type == RecordType::Proto {
+            Some(
                 table_properties
                     .descriptor_proto
                     .as_ref()
-                    .ok_or(ZerobusError::InvalidArgument(
-                        "Descriptor proto is not specified, but required for Proto record type"
-                            .to_string(),
-                    ))?
+                    .unwrap()
                     .encode_to_vec(),
-            ),
-            RecordType::Json => None,
-            RecordType::Unspecified => {
-                return Err(ZerobusError::InvalidArgument(
-                    "Record type is not specified".to_string(),
-                ));
-            }
+            )
+        } else {
+            None
         };
+
         let create_stream_request = RequestPayload::CreateStream(CreateIngestStreamRequest {
             table_name: Some(table_properties.table_name.to_string()),
             descriptor_proto,
