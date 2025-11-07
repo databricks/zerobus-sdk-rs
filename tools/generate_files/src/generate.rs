@@ -434,7 +434,7 @@ pub fn generate_rust_and_descriptor(
         .context("bad filename")?;
     let desc_file = output_dir.join(format!("{}.descriptor", file_name));
 
-    tonic_build::configure()
+    tonic_prost_build::configure()
         .out_dir(output_dir)
         .file_descriptor_set_path(&desc_file)
         .compile_protos(

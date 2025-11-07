@@ -6,12 +6,7 @@ publish = false
 
 [dependencies]
 databricks-zerobus-ingest-sdk = { path = "../../sdk" }
-tonic-build = "0.13.1"
-prost = "0.13.3"
-prost-build = "0.12"
-prost-reflect = "0.14.2"
-tokio = { version = "1.0", features = ["macros", "rt-multi-thread"] }
-tokio-stream = "0.1.16"
-tonic = { version = "0.12.3", features = ["tls"] }
-tracing = "0.1.41"
+prost = "0.14.1"
+prost-reflect = "0.16.2"
+tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
 chrono = "0.4"

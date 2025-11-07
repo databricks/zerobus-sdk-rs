@@ -255,7 +255,7 @@ mod tests {
         assert!(all_items.contains(&"item1".to_string()));
         assert!(all_items.contains(&"item2".to_string()));
 
-        assert!(lz.len() == 0);
+        assert_eq!(lz.len(), 0);
     }
 
     #[tokio::test]
@@ -280,7 +280,7 @@ mod tests {
             _ = tokio::time::sleep(Duration::from_millis(50)) => {
                 // This is expected, the task is still blocked.
             }
-        };
+        }
 
         // Remove one item to free up space.
         let _observed = lz.observe().await;
