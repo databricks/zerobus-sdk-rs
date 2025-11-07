@@ -402,13 +402,19 @@ let record = YourMessage {
 let ack_future = stream.ingest_record(record.encode_to_vec()).await?;
 ```
 
-**Batch ingestion** for high throughput:
+**Multiple records** for high throughput:
+
+The `ingest_record()` call returns two futures:
+1. The outer future (awaited immediately) confirms the record is queued for sending
+2. The inner future (the acknowledgment) resolves when the server confirms receipt
+
+You don't need to wait for each acknowledgment before sending the next record. Instead, collect the ack futures and flush after N records:
 
 ```rust
-use futures::future::join_all;
 
 let mut ack_futures = Vec::new();
 
+// Ingest records without blocking on acknowledgments
 for i in 0..100_000 {
     let record = YourMessage {
         id: Some(i),
@@ -416,15 +422,60 @@ for i in 0..100_000 {
         data: Some(format!("record-{}", i)),
     };
 
-    let ack = stream.ingest_record(record.encode_to_vec()).await?;
-    ack_futures.push(ack);
+    // This await only waits for the record to be queued, not for server ack
+    let _ack = stream.ingest_record(record.encode_to_vec()).await?;
+
+    // Periodically flush and wait for acks to avoid unbounded memory growth
+    if ack_futures.len() >= 10_000 {
+        stream.flush().await?;
+    }
 }
 
-// Flush all pending records
+// Flush remaining records
 stream.flush().await?;
-
-// Wait for all acknowledgments
 let results = join_all(ack_futures).await;
+```
+
+**Parallelizing with multiple streams:**
+
+Since each stream uses a single gRPC connection, opening multiple threads on the same stream doesn't improve throughput. For true parallelization, open multiple streams (e.g., partition your data):
+
+```rust
+use tokio::task::JoinSet;
+
+let mut tasks = JoinSet::new();
+
+// Partition data across multiple streams for parallel ingestion
+for partition in 0..4 {
+    let sdk_clone = sdk.clone();
+    let table_properties = table_properties.clone();
+    let client_id = client_id.clone();
+    let client_secret = client_secret.clone();
+
+    tasks.spawn(async move {
+        let mut stream = sdk_clone.create_stream(
+            table_properties,
+            client_id,
+            client_secret,
+            None,
+        ).await?;
+
+        // Ingest partition data...
+        for i in (partition * 25_000)..((partition + 1) * 25_000) {
+            let record = YourMessage { id: Some(i), /* ... */ };
+            let _ack = stream.ingest_record(record.encode_to_vec()).await?;
+        }
+
+        //Clsoe implicitly waits for all acknowledgments from the server.
+        stream.close().await?; 
+        Ok::<_, ZerobusError>(())
+    });
+}
+
+// Wait for all streams to complete
+while let Some(result) = tasks.join_next().await {
+    result??;
+}
 ```
 
 ### 6. Handle Acknowledgments
@@ -555,30 +606,6 @@ The repository provides two complete examples demonstrating different approaches
 - More efficient binary encoding
 
 See [`examples/README.md`](examples/README.md) for detailed comparison and setup instructions for both approaches.
-
-
-### High-Throughput Ingestion
-
-```rust
-use futures::future::join_all;
-
-let mut ack_futures = Vec::with_capacity(100_000);
-
-for i in 0..100_000 {
-    let record = MyRecord {
-        id: Some(i),
-        value: Some(rand::random()),
-    };
-
-    let ack = stream.ingest_record(record.encode_to_vec()).await?;
-    ack_futures.push(ack);
-}
-
-stream.flush().await?;
-let results = join_all(ack_futures).await;
-
-println!("Ingested {} records", results.len());
-```
 
 ### Stream Recovery
 

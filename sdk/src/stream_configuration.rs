@@ -71,6 +71,7 @@ pub struct StreamConfigurationOptions {
     ///
     /// Default: 300,000 (5 minutes)
     pub flush_timeout_ms: u64,
+
     /// Type of record to ingest.
     ///
     /// Supported values:

@@ -427,10 +427,7 @@ for i in 0..100 {
         r#"{{"id": {}, "customer_name": "Customer {}"}}"#,
         i, i
     );
-    let ack_future = stream.ingest_record(json_record).await?;
-
-    // Option 1: Fire and forget
-    tokio::spawn(ack_future);
+    let _ack_future = stream.ingest_record(json_record).await?;
 }
 
 // Flush all pending records
@@ -440,7 +437,7 @@ stream.flush().await?;
 **Protocol Buffers Example:**
 ```rust
 for i in 0..100 {
-    let ack_future = stream
+    let _ack_future = stream
         .ingest_record(
             TableOrders {
                 id: Some(i),
@@ -450,9 +447,6 @@ for i in 0..100 {
             .encode_to_vec(),
         )
         .await?;
-
-    // Option 1: Fire and forget
-    tokio::spawn(ack_future);
 }
 
 // Flush all pending records

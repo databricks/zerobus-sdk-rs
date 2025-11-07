@@ -1,56 +1,17 @@
 mod mock_grpc;
 mod utils;
 
-use std::sync::{Arc, Once};
-use utils::TestHeadersProvider;
+use std::sync::Arc;
+use utils::{create_test_descriptor_proto, setup_tracing, TestHeadersProvider};
 
 use databricks_zerobus_ingest_sdk::{
     databricks::zerobus::RecordType, RecordPayload, StreamConfigurationOptions, StreamType,
     TableProperties, ZerobusError, ZerobusSdk,
 };
 use mock_grpc::{start_mock_server, MockResponse};
-use prost_reflect::prost_types;
 use tracing::info;
-use tracing_subscriber::EnvFilter;
 
 const TABLE_NAME: &str = "test_catalog.test_schema.test_table";
-
-static SETUP: Once = Once::new();
-
-/// Setup tracing for tests.
-fn setup_tracing() {
-    SETUP.call_once(|| {
-        let _ = tracing_subscriber::fmt()
-            .with_writer(std::io::stdout)
-            .with_env_filter(
-                EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")),
-            )
-            .try_init()
-            .ok();
-    });
-}
-
-/// Helper function to create a simple descriptor proto for testing.
-fn create_test_descriptor_proto() -> Option<prost_types::DescriptorProto> {
-    Some(prost_types::DescriptorProto {
-        name: Some("TestMessage".to_string()),
-        field: vec![
-            prost_types::FieldDescriptorProto {
-                name: Some("id".to_string()),
-                number: Some(1),
-                r#type: Some(prost_types::field_descriptor_proto::Type::Int64 as i32),
-                ..Default::default()
-            },
-            prost_types::FieldDescriptorProto {
-                name: Some("message".to_string()),
-                number: Some(2),
-                r#type: Some(prost_types::field_descriptor_proto::Type::String as i32),
-                ..Default::default()
-            },
-        ],
-        ..Default::default()
-    })
-}
 
 mod stream_initialization_and_basic_lifecycle_tests {
     use super::*;
@@ -460,6 +421,136 @@ mod stream_initialization_and_basic_lifecycle_tests {
     }
 }
 
+mod schema_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn test_json_record_ingestion() -> Result<(), Box<dyn std::error::Error>> {
+        setup_tracing();
+        info!("Starting test_json_record_ingestion");
+
+        let (mock_server, server_url) = start_mock_server().await?;
+
+        mock_server
+            .inject_responses(
+                TABLE_NAME,
+                vec![
+                    MockResponse::CreateStream {
+                        stream_id: "test_stream_json".to_string(),
+                        delay_ms: 0,
+                    },
+                    MockResponse::RecordAck {
+                        ack_up_to_offset: 0,
+                        delay_ms: 50,
+                    },
+                ],
+            )
+            .await;
+
+        let mut sdk = ZerobusSdk::new(server_url.clone(), "https://mock-uc.com".to_string())?;
+        sdk.use_tls = false;
+
+        let table_properties = TableProperties {
+            table_name: TABLE_NAME.to_string(),
+            descriptor_proto: None,
+        };
+
+        let options = StreamConfigurationOptions {
+            max_inflight_records: 100,
+            recovery: false,
+            record_type: RecordType::Json,
+            ..Default::default()
+        };
+
+        let stream = sdk
+            .create_stream_with_headers_provider(
+                table_properties,
+                Arc::new(TestHeadersProvider::default()),
+                Some(options),
+            )
+            .await?;
+
+        let json_record = r#"{"id": 1, "name": "test"}"#.to_string();
+        let ingest_future = stream.ingest_record(json_record.clone()).await?;
+        let ingest_result = ingest_future.await?;
+
+        assert_eq!(ingest_result, 0);
+        assert_eq!(mock_server.get_write_count().await, 1);
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_ingest_json_into_proto_stream_fails() -> Result<(), Box<dyn std::error::Error>> {
+        setup_tracing();
+        info!("Starting test_ingest_json_into_proto_stream_fails");
+
+        let (_mock_server, server_url) = start_mock_server().await?;
+        let mut sdk = ZerobusSdk::new(server_url.clone(), "https://mock-uc.com".to_string())?;
+        sdk.use_tls = false;
+
+        let table_properties = TableProperties {
+            table_name: TABLE_NAME.to_string(),
+            descriptor_proto: Some(Default::default()),
+        };
+
+        let options = StreamConfigurationOptions {
+            record_type: RecordType::Proto,
+            ..Default::default()
+        };
+
+        let stream = sdk
+            .create_stream_with_headers_provider(
+                table_properties,
+                Arc::new(TestHeadersProvider::default()),
+                Some(options),
+            )
+            .await?;
+
+        let json_record = r#"{"id": 1, "name": "test"}"#.to_string();
+        let result = stream.ingest_record(json_record).await;
+
+        assert!(matches!(result, Err(ZerobusError::InvalidArgument(_))));
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_ingest_proto_into_json_stream_fails() -> Result<(), Box<dyn std::error::Error>> {
+        setup_tracing();
+        info!("Starting test_ingest_proto_into_json_stream_fails");
+
+        let (_mock_server, server_url) = start_mock_server().await?;
+        let mut sdk = ZerobusSdk::new(server_url.clone(), "https://mock-uc.com".to_string())?;
+        sdk.use_tls = false;
+
+        let table_properties = TableProperties {
+            table_name: TABLE_NAME.to_string(),
+            descriptor_proto: None,
+        };
+
+        let options = StreamConfigurationOptions {
+            record_type: RecordType::Json,
+            ..Default::default()
+        };
+
+        let stream = sdk
+            .create_stream_with_headers_provider(
+                table_properties,
+                Arc::new(TestHeadersProvider::default()),
+                Some(options),
+            )
+            .await?;
+
+        let proto_record = vec![1, 2, 3];
+        let result = stream.ingest_record(proto_record).await;
+
+        assert!(matches!(result, Err(ZerobusError::InvalidArgument(_))));
+
+        Ok(())
+    }
+}
+
 mod standard_operation_and_state_management_tests {
     use super::*;
 
@@ -576,62 +667,6 @@ mod standard_operation_and_state_management_tests {
 
         assert_eq!(mock_server.get_write_count().await, 100);
         assert_eq!(mock_server.get_max_offset_sent().await, 99);
-
-        Ok(())
-    }
-
-    #[tokio::test]
-    async fn test_json_record_ingestion() -> Result<(), Box<dyn std::error::Error>> {
-        setup_tracing();
-        info!("Starting test_json_record_ingestion");
-
-        let (mock_server, server_url) = start_mock_server().await?;
-
-        mock_server
-            .inject_responses(
-                TABLE_NAME,
-                vec![
-                    MockResponse::CreateStream {
-                        stream_id: "test_stream_json".to_string(),
-                        delay_ms: 0,
-                    },
-                    MockResponse::RecordAck {
-                        ack_up_to_offset: 0,
-                        delay_ms: 50,
-                    },
-                ],
-            )
-            .await;
-
-        let mut sdk = ZerobusSdk::new(server_url.clone(), "https://mock-uc.com".to_string())?;
-        sdk.use_tls = false;
-
-        let table_properties = TableProperties {
-            table_name: TABLE_NAME.to_string(),
-            descriptor_proto: None,
-        };
-
-        let options = StreamConfigurationOptions {
-            max_inflight_records: 100,
-            recovery: false,
-            record_type: RecordType::Json,
-            ..Default::default()
-        };
-
-        let stream = sdk
-            .create_stream_with_headers_provider(
-                table_properties,
-                Arc::new(TestHeadersProvider::default()),
-                Some(options),
-            )
-            .await?;
-
-        let json_record = r#"{"id": 1, "name": "test"}"#.to_string();
-        let ingest_future = stream.ingest_record(json_record.clone()).await?;
-        let ingest_result = ingest_future.await?;
-
-        assert_eq!(ingest_result, 0);
-        assert_eq!(mock_server.get_write_count().await, 1);
 
         Ok(())
     }
