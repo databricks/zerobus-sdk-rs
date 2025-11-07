@@ -49,13 +49,13 @@ impl DefaultTokenFactory {
                 "type": "unity_catalog_privileges",
                 "privileges": ["USE SCHEMA"],
                 "object_type": "SCHEMA",
-                "object_full_path": format!("{}.{}", catalog, schema)
+                "object_full_path": format!("{catalog}.{schema}")
             },
             {
                 "type": "unity_catalog_privileges",
                 "privileges": ["SELECT", "MODIFY"],
                 "object_type": "TABLE",
-                "object_full_path": format!("{}.{}.{}", catalog, schema, table)
+                "object_full_path": format!("{catalog}.{schema}.{table}")
             }
         ]);
 
@@ -66,16 +66,13 @@ impl DefaultTokenFactory {
             ("scope", "all-apis".to_string()),
             (
                 "resource",
-                format!(
-                    "api://databricks/workspaces/{}/zerobusDirectWriteApi",
-                    workspace_id
-                )
-                .to_string(),
+                format!("api://databricks/workspaces/{workspace_id}/zerobusDirectWriteApi")
+                    .to_string(),
             ),
             ("authorization_details", authorization_details.to_string()),
         ];
 
-        let token_endpoint = format!("{}/oidc/v1/token", uc_endpoint);
+        let token_endpoint = format!("{uc_endpoint}/oidc/v1/token");
         let resp = client
             .post(&token_endpoint)
             .basic_auth(databricks_client_id, Some(databricks_client_secret))
@@ -83,7 +80,7 @@ impl DefaultTokenFactory {
             .send()
             .await
             .map_err(|e| {
-                ZerobusError::InvalidUCTokenError(format!("Request failed with error: {}", e))
+                ZerobusError::InvalidUCTokenError(format!("Request failed with error: {e}"))
             })?;
 
         if !resp.status().is_success() {
@@ -100,7 +97,7 @@ impl DefaultTokenFactory {
         }
 
         let body: serde_json::Value = resp.json().await.map_err(|e| {
-            ZerobusError::InvalidUCTokenError(format!("Parse failed with error: {}", e))
+            ZerobusError::InvalidUCTokenError(format!("Parse failed with error: {e}"))
         })?;
 
         let token = body["access_token"]

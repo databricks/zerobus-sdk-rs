@@ -84,7 +84,7 @@ impl HeadersProvider for OAuthHeadersProvider {
         )
         .await?;
         let mut headers = HashMap::new();
-        headers.insert("authorization", format!("Bearer {}", token));
+        headers.insert("authorization", format!("Bearer {token}"));
         headers.insert("x-databricks-zerobus-table-name", self.table_name.clone());
         Ok(headers)
     }

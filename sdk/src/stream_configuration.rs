@@ -23,7 +23,7 @@ pub struct StreamConfigurationOptions {
     /// Maximum number of records that can be sending or pending acknowledgement at any given time.
     ///
     /// This limit controls memory usage and backpressure. When this limit is reached,
-    /// `ingest_record()` calls will block until acknowledgments free up space.
+    /// `ingest_record()` calls will block until acknowledgements free up space.
     ///
     /// Default: 1,000,000
     pub max_inflight_records: usize,
