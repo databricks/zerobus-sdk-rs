@@ -42,7 +42,7 @@ use tokio_retry::RetryIf;
 use tokio_stream::wrappers::ReceiverStream;
 use tonic::metadata::MetadataValue;
 use tonic::transport::{Channel, ClientTlsConfig};
-use tracing::{debug, error, info, instrument, span, Level};
+use tracing::{debug, error, info, instrument, span, warn, Level};
 
 /// The type of the stream connection created with the server.
 /// Currently we only support ephemeral streams on the server side, so we support only that in the SDK as well.
@@ -67,26 +67,59 @@ pub enum StreamType {
 #[derive(Debug, Clone)]
 pub struct TableProperties {
     pub table_name: String,
-    pub descriptor_proto: prost_types::DescriptorProto,
+    pub descriptor_proto: Option<prost_types::DescriptorProto>,
 }
 
 pub type ZerobusResult<T> = Result<T, ZerobusError>;
 
 /// A type alias for a protobuf-encoded record.
 pub type ProtoEncodedRecord = Vec<u8>;
+/// A type alias for a JSON-encoded record.
+pub type JsonEncodedRecord = String;
+
+impl From<Vec<u8>> for RecordPayload {
+    fn from(v: Vec<u8>) -> Self {
+        RecordPayload::Proto(v)
+    }
+}
+
+impl From<String> for RecordPayload {
+    fn from(s: String) -> Self {
+        RecordPayload::Json(s)
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub enum RecordPayload {
+    Json(JsonEncodedRecord),
+    Proto(ProtoEncodedRecord),
+}
+
+pub trait IntoRecord {
+    fn into_record(self) -> Record;
+}
+
+impl IntoRecord for RecordPayload {
+    fn into_record(self) -> Record {
+        match self {
+            RecordPayload::Json(json) => Record::JsonRecord(json),
+            RecordPayload::Proto(proto) => Record::ProtoEncodedRecord(proto),
+        }
+    }
+}
 
 /// Logical representation of a record to be ingested.
 /// Contains the payload and the offset on which the record was sent.
 #[derive(Debug, Clone)]
-struct IngestRecord {
-    payload: ProtoEncodedRecord,
+struct IngestRecord<RecordPayload> {
+    payload: RecordPayload,
     offset_id: OffsetId,
 }
 
 /// Map of logical offset to oneshot sender used to send acknowledgments back to the client.
 type OneshotMap = HashMap<OffsetId, tokio::sync::oneshot::Sender<ZerobusResult<OffsetId>>>;
 /// Landing zone for ingest records.
-type RecordLandingZone = Arc<LandingZone<Box<IngestRecord>>>;
+type RecordLandingZone<RecordPayload> = Arc<LandingZone<Box<IngestRecord<RecordPayload>>>>;
 
 /// Represents an active ingestion stream to a Databricks Delta table.
 ///
@@ -130,7 +163,7 @@ pub struct ZerobusStream {
     /// The table properties - table name and descriptor of the table.
     pub table_properties: TableProperties,
     /// Logical landing zone that is used to store records that have been sent by user but not yet sent over the network.
-    landing_zone: RecordLandingZone,
+    landing_zone: RecordLandingZone<RecordPayload>,
     /// Map of logical offset to oneshot sender.
     oneshot_map: Arc<tokio::sync::Mutex<OneshotMap>>,
     /// Supervisor task that manages the stream lifecycle such as stream creation, recovery, etc.
@@ -143,7 +176,7 @@ pub struct ZerobusStream {
     /// Persistent offset ID receiver to ensure at least one receiver exists, preventing SendError
     _logical_last_received_offset_id_rx: tokio::sync::watch::Receiver<Option<OffsetId>>,
     /// A vector of records that have failed to be acknowledged.
-    failed_records: Arc<RwLock<Vec<ProtoEncodedRecord>>>,
+    failed_records: Arc<RwLock<Vec<RecordPayload>>>,
     /// Flag indicating if the stream has been closed.
     is_closed: Arc<AtomicBool>,
     /// Sync mutex to ensure that offset generation and record ingestion happen atomically.
@@ -366,6 +399,28 @@ impl ZerobusSdk {
         headers_provider: Arc<dyn HeadersProvider>,
         options: Option<StreamConfigurationOptions>,
     ) -> ZerobusResult<ZerobusStream> {
+        let options = options.unwrap_or_default();
+
+        match options.record_type {
+            RecordType::Proto => {
+                if table_properties.descriptor_proto.is_none() {
+                    return Err(ZerobusError::InvalidArgument(
+                        "Proto descriptor is required for Proto record type".to_string(),
+                    ));
+                }
+            }
+            RecordType::Json => {
+                if table_properties.descriptor_proto.is_some() {
+                    warn!("JSON descriptor is not supported for Proto record type");
+                }
+            }
+            RecordType::Unspecified => {
+                return Err(ZerobusError::InvalidArgument(
+                    "Record type is not specified".to_string(),
+                ));
+            }
+        }
+
         // TODO: For now we are opening a new channel for each stream.
         // In the future we should consider reusing the channel.
         let channel = if self.use_tls {
@@ -381,7 +436,7 @@ impl ZerobusSdk {
             channel,
             table_properties,
             Arc::clone(&headers_provider),
-            options.unwrap_or_default(),
+            options,
         )
         .await;
         match stream {
@@ -484,7 +539,10 @@ impl ZerobusStream {
 
         let (logical_last_received_offset_id_tx, _logical_last_received_offset_id_rx) =
             tokio::sync::watch::channel(None);
-        let landing_zone = Arc::new(LandingZone::new(options.max_inflight_records));
+        let landing_zone = Arc::new(LandingZone::<Box<IngestRecord<RecordPayload>>>::new(
+            options.max_inflight_records,
+        ));
+
         let oneshot_map = Arc::new(tokio::sync::Mutex::new(HashMap::new()));
         let is_closed = Arc::new(AtomicBool::new(false));
         let failed_records = Arc::new(RwLock::new(Vec::new()));
@@ -536,11 +594,11 @@ impl ZerobusStream {
         table_properties: TableProperties,
         headers_provider: Arc<dyn HeadersProvider>,
         options: StreamConfigurationOptions,
-        landing_zone: RecordLandingZone,
+        landing_zone: RecordLandingZone<RecordPayload>,
         oneshot_map: Arc<tokio::sync::Mutex<OneshotMap>>,
         logical_last_received_offset_id_tx: tokio::sync::watch::Sender<Option<OffsetId>>,
         is_closed: Arc<AtomicBool>,
-        failed_records: Arc<RwLock<Vec<ProtoEncodedRecord>>>,
+        failed_records: Arc<RwLock<Vec<RecordPayload>>>,
         stream_init_result_tx: tokio::sync::oneshot::Sender<ZerobusResult<String>>,
     ) -> ZerobusResult<()> {
         let mut initial_stream_creation = true;
@@ -564,6 +622,7 @@ impl ZerobusStream {
                 let channel = channel.clone();
                 let table_properties = table_properties.clone();
                 let headers_provider = Arc::clone(&headers_provider);
+                let record_type = options.record_type;
 
                 async move {
                     tokio::time::timeout(
@@ -572,6 +631,7 @@ impl ZerobusStream {
                             channel,
                             &table_properties,
                             &headers_provider,
+                            record_type,
                         ),
                     )
                     .await
@@ -688,6 +748,7 @@ impl ZerobusStream {
         mut channel: ZerobusClient<Channel>,
         table_properties: &TableProperties,
         headers_provider: &Arc<dyn HeadersProvider>,
+        record_type: RecordType,
     ) -> ZerobusResult<(
         tokio::sync::mpsc::Sender<EphemeralStreamRequest>,
         tonic::Streaming<EphemeralStreamResponse>,
@@ -729,10 +790,22 @@ impl ZerobusStream {
             .map_err(ZerobusError::CreateStreamError)?
             .into_inner();
 
+        let descriptor_proto = if record_type == RecordType::Proto {
+            Some(
+                table_properties
+                    .descriptor_proto
+                    .as_ref()
+                    .unwrap()
+                    .encode_to_vec(),
+            )
+        } else {
+            None
+        };
+
         let create_stream_request = RequestPayload::CreateStream(CreateIngestStreamRequest {
             table_name: Some(table_properties.table_name.to_string()),
-            descriptor_proto: Some(table_properties.descriptor_proto.encode_to_vec()),
-            record_type: Some(RecordType::Proto.into()),
+            descriptor_proto,
+            record_type: Some(record_type.into()),
         });
 
         debug!("Sending CreateStream request.");
@@ -817,22 +890,33 @@ impl ZerobusStream {
     /// ```
     pub async fn ingest_record(
         &self,
-        payload: ProtoEncodedRecord,
+        payload: impl Into<RecordPayload>,
     ) -> ZerobusResult<impl Future<Output = ZerobusResult<i64>>> {
+        // Convert to RecordPayload first
+        let payload: RecordPayload = payload.into();
         if self.is_closed.load(Ordering::Relaxed) {
             error!(table_name = %self.table_properties.table_name, "Stream closed");
             return Err(ZerobusError::StreamClosedError(tonic::Status::internal(
                 "Stream closed",
             )));
         }
+        match (&payload, self.options.record_type) {
+            (RecordPayload::Json(_), RecordType::Proto) => {
+                return Err(ZerobusError::InvalidArgument(
+                    "Json record type is not supported for proto stream".to_string(),
+                ));
+            }
+            (RecordPayload::Proto(_), RecordType::Json) => {
+                return Err(ZerobusError::InvalidArgument(
+                    "Proto record type is not supported for json stream".to_string(),
+                ));
+            }
+            _ => {}
+        }
         let _guard = self.sync_mutex.lock().await;
 
         let offset_id = self.logical_offset_id_generator.next();
-        debug!(
-            offset_id = offset_id,
-            payload_size = payload.len(),
-            "Ingesting record"
-        );
+        debug!(offset_id = offset_id, "Ingesting record");
 
         if let Some(stream_id) = self.stream_id.as_ref() {
             let (tx, rx) = tokio::sync::oneshot::channel();
@@ -868,7 +952,7 @@ impl ZerobusStream {
         mut response_grpc_stream: tonic::Streaming<EphemeralStreamResponse>,
         last_received_offset_id_tx: tokio::sync::watch::Sender<Option<OffsetId>>,
         ack_timeout_ms: u64,
-        landing_zone: RecordLandingZone,
+        landing_zone: RecordLandingZone<RecordPayload>,
         oneshot_map: Arc<tokio::sync::Mutex<OneshotMap>>,
         recovery_enabled: bool,
     ) -> tokio::task::JoinHandle<ZerobusResult<()>> {
@@ -969,7 +1053,7 @@ impl ZerobusStream {
     /// to get records and sending them through the outbound stream to the gRPC stream.
     fn spawn_sender_task(
         outbound_stream: tokio::sync::mpsc::Sender<EphemeralStreamRequest>,
-        landing_zone: RecordLandingZone,
+        landing_zone: RecordLandingZone<RecordPayload>,
     ) -> tokio::task::JoinHandle<ZerobusResult<()>> {
         tokio::spawn(async move {
             let physical_offset_id_generator = OffsetIdGenerator::default();
@@ -978,7 +1062,7 @@ impl ZerobusStream {
                 let send_result = outbound_stream
                     .send(EphemeralStreamRequest {
                         payload: Some(RequestPayload::IngestRecord(IngestRecordRequest {
-                            record: Some(Record::ProtoEncodedRecord(item.payload.clone())),
+                            record: Some(item.payload.clone().into_record()),
                             offset_id: Some(physical_offset_id_generator.next()),
                         })),
                     })
@@ -996,9 +1080,9 @@ impl ZerobusStream {
 
     /// Fails all pending records by removing them from the landing zone and sending error to all pending acks promises.
     async fn fail_all_pending_records(
-        landing_zone: RecordLandingZone,
+        landing_zone: RecordLandingZone<RecordPayload>,
         oneshot_map: Arc<tokio::sync::Mutex<OneshotMap>>,
-        failed_records: Arc<RwLock<Vec<ProtoEncodedRecord>>>,
+        failed_records: Arc<RwLock<Vec<RecordPayload>>>,
         error: &ZerobusError,
     ) {
         let mut failed_payloads = Vec::with_capacity(landing_zone.len());
@@ -1189,7 +1273,7 @@ impl ZerobusStream {
     /// # Ok(())
     /// # }
     /// ```
-    pub async fn get_unacked_records(&self) -> ZerobusResult<Vec<ProtoEncodedRecord>> {
+    pub async fn get_unacked_records(&self) -> ZerobusResult<Vec<RecordPayload>> {
         if self.is_closed.load(Ordering::Relaxed) {
             let failed = self.failed_records.read().await.clone();
             return Ok(failed);
