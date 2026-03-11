@@ -2,6 +2,7 @@
 
 use pyo3::prelude::*;
 
+mod arrow;
 mod async_wrapper;
 mod auth;
 mod common;
@@ -42,6 +43,13 @@ fn _zerobus_core(py: Python, m: &PyModule) -> PyResult<()> {
 
     // Add authentication classes
     m.add_class::<auth::HeadersProvider>()?;
+
+    // Add arrow submodule
+    let arrow_module = PyModule::new(py, "arrow")?;
+    arrow_module.add_class::<arrow::ArrowStreamConfigurationOptions>()?;
+    arrow_module.add_class::<arrow::ZerobusArrowStream>()?;
+    arrow_module.add_class::<arrow::AsyncZerobusArrowStream>()?;
+    m.add_submodule(arrow_module)?;
 
     // Add sync submodule
     let sync_module = PyModule::new(py, "sync")?;

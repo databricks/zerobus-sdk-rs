@@ -11,6 +11,7 @@ from zerobus.sdk.aio.zerobus_sdk import (
     RecordType,
     StreamConfigurationOptions,
     TableProperties,
+    ZerobusArrowStream,
     ZerobusException,
     ZerobusSdk,
     ZerobusStream,
@@ -19,6 +20,7 @@ from zerobus.sdk.aio.zerobus_sdk import (
 __all__ = [
     "ZerobusSdk",
     "ZerobusStream",
+    "ZerobusArrowStream",
     "TableProperties",
     "StreamConfigurationOptions",
     "RecordType",

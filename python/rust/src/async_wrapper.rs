@@ -14,6 +14,7 @@ use databricks_zerobus_ingest_sdk::{
     ZerobusStream as RustStream,
 };
 
+use crate::arrow::{self, ArrowStreamConfigurationOptions, AsyncZerobusArrowStream};
 use crate::auth::HeadersProviderWrapper;
 use crate::common::{map_error, AckCallback, StreamConfigurationOptions, TableProperties};
 
@@ -467,6 +468,57 @@ impl ZerobusSdk {
                 })
                 .map_err(|e| Python::with_gil(|_py| map_rust_error_to_pyerr(e)))
         })
+    }
+
+    /// Create a new Arrow Flight stream with OAuth authentication (async).
+    #[pyo3(signature = (table_name, schema_ipc_bytes, client_id, client_secret, options = None))]
+    fn create_arrow_stream<'py>(
+        &self,
+        py: Python<'py>,
+        table_name: String,
+        schema_ipc_bytes: Vec<u8>,
+        client_id: String,
+        client_secret: String,
+        options: Option<ArrowStreamConfigurationOptions>,
+    ) -> PyResult<&'py PyAny> {
+        arrow::create_arrow_stream_async(
+            &self.inner,
+            py,
+            table_name,
+            schema_ipc_bytes,
+            client_id,
+            client_secret,
+            options,
+        )
+    }
+
+    /// Create a new Arrow Flight stream with custom headers provider (async).
+    #[pyo3(signature = (table_name, schema_ipc_bytes, headers_provider, options = None))]
+    fn create_arrow_stream_with_headers_provider<'py>(
+        &self,
+        py: Python<'py>,
+        table_name: String,
+        schema_ipc_bytes: Vec<u8>,
+        headers_provider: PyObject,
+        options: Option<ArrowStreamConfigurationOptions>,
+    ) -> PyResult<&'py PyAny> {
+        arrow::create_arrow_stream_with_headers_provider_async(
+            &self.inner,
+            py,
+            table_name,
+            schema_ipc_bytes,
+            headers_provider,
+            options,
+        )
+    }
+
+    /// Recreate a closed Arrow stream (async).
+    fn recreate_arrow_stream<'py>(
+        &self,
+        py: Python<'py>,
+        old_stream: &AsyncZerobusArrowStream,
+    ) -> PyResult<&'py PyAny> {
+        arrow::recreate_arrow_stream_async(&self.inner, py, old_stream)
     }
 
     /// Recreate a stream from an old stream (async)

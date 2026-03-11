@@ -45,7 +45,8 @@ Example (Async):
 
 # Import from Rust core
 import zerobus._zerobus_core as _core
-from zerobus.sdk.sync import ZerobusSdk, ZerobusStream
+from zerobus.sdk.sync import ZerobusSdk, ZerobusStream, ZerobusArrowStream
+from zerobus.sdk.shared.arrow import ArrowStreamConfigurationOptions
 
 __version__ = "1.1.0"
 
@@ -63,6 +64,9 @@ __all__ = [
     # Sync SDK (default)
     "ZerobusSdk",
     "ZerobusStream",
+    # Arrow (experimental)
+    "ZerobusArrowStream",
+    "ArrowStreamConfigurationOptions",
     "RecordAcknowledgment",
     # Common types
     "TableProperties",

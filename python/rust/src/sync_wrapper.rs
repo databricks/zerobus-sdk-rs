@@ -14,6 +14,7 @@ use databricks_zerobus_ingest_sdk::{
     ZerobusSdk as RustSdk, ZerobusStream as RustStream,
 };
 
+use crate::arrow::{self, ArrowStreamConfigurationOptions, ZerobusArrowStream};
 use crate::auth::HeadersProviderWrapper;
 use crate::common::{map_error, AckCallback, StreamConfigurationOptions, TableProperties};
 
@@ -565,6 +566,66 @@ impl ZerobusSdk {
             inner: Arc::new(RwLock::new(stream)),
             runtime,
         })
+    }
+
+    /// Create a new Arrow Flight stream with OAuth authentication.
+    ///
+    /// Args:
+    ///     table_name: Fully qualified table name (catalog.schema.table)
+    ///     schema_ipc_bytes: Arrow IPC serialized schema bytes
+    ///     client_id: OAuth client ID
+    ///     client_secret: OAuth client secret
+    ///     options: Optional ArrowStreamConfigurationOptions
+    #[pyo3(signature = (table_name, schema_ipc_bytes, client_id, client_secret, options = None))]
+    fn create_arrow_stream(
+        &self,
+        py: Python,
+        table_name: String,
+        schema_ipc_bytes: &PyBytes,
+        client_id: String,
+        client_secret: String,
+        options: Option<&ArrowStreamConfigurationOptions>,
+    ) -> PyResult<ZerobusArrowStream> {
+        arrow::create_arrow_stream_sync(
+            &self.inner,
+            &self.runtime,
+            py,
+            table_name,
+            schema_ipc_bytes.as_bytes(),
+            client_id,
+            client_secret,
+            options,
+        )
+    }
+
+    /// Create a new Arrow Flight stream with custom headers provider.
+    #[pyo3(signature = (table_name, schema_ipc_bytes, headers_provider, options = None))]
+    fn create_arrow_stream_with_headers_provider(
+        &self,
+        py: Python,
+        table_name: String,
+        schema_ipc_bytes: &PyBytes,
+        headers_provider: PyObject,
+        options: Option<&ArrowStreamConfigurationOptions>,
+    ) -> PyResult<ZerobusArrowStream> {
+        arrow::create_arrow_stream_with_headers_provider_sync(
+            &self.inner,
+            &self.runtime,
+            py,
+            table_name,
+            schema_ipc_bytes.as_bytes(),
+            headers_provider,
+            options,
+        )
+    }
+
+    /// Recreate a closed Arrow stream with the same configuration.
+    fn recreate_arrow_stream(
+        &self,
+        py: Python,
+        old_stream: &ZerobusArrowStream,
+    ) -> PyResult<ZerobusArrowStream> {
+        arrow::recreate_arrow_stream_sync(&self.inner, &self.runtime, py, old_stream)
     }
 
     /// Recreate a closed stream with the same configuration

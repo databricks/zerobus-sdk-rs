@@ -39,13 +39,14 @@ Example:
     >>> asyncio.run(main())
 """
 
-from typing import Any
+from typing import Any, List, Optional
 
 # Import Rust-backed implementations
 import zerobus._zerobus_core as _core
 
 # Import base Rust stream class
 _RustZerobusStream = _core.aio.ZerobusStream
+_RustAsyncZerobusArrowStream = _core.arrow.AsyncZerobusArrowStream
 
 
 class ZerobusStream:
@@ -155,11 +156,108 @@ class ZerobusStream:
         return 1  # OPENED state
 
 
+class ZerobusArrowStream:
+    """
+    Asynchronous Arrow Flight stream for ingesting pyarrow RecordBatches.
+
+    **Experimental/Unsupported**: Arrow Flight support is experimental and not yet
+    supported for production use. The API may change in future releases.
+    """
+
+    def __init__(self, rust_stream: _RustAsyncZerobusArrowStream):
+        self._inner = rust_stream
+
+    async def ingest_batch(self, batch) -> int:
+        """
+        Ingest a pyarrow.RecordBatch or pyarrow.Table.
+
+        Args:
+            batch: A pyarrow.RecordBatch or pyarrow.Table to ingest.
+
+        Returns:
+            The offset ID assigned to this batch.
+        """
+        from zerobus.sdk.shared.arrow import _serialize_batch
+
+        ipc_bytes = _serialize_batch(batch)
+        return await self._inner.ingest_batch(ipc_bytes)
+
+    async def wait_for_offset(self, offset: int):
+        """Wait for a specific offset to be acknowledged."""
+        return await self._inner.wait_for_offset(offset)
+
+    async def flush(self):
+        """Flush all pending batches, waiting for acknowledgment."""
+        return await self._inner.flush()
+
+    async def close(self):
+        """Close the stream gracefully."""
+        return await self._inner.close()
+
+    @property
+    def is_closed(self) -> bool:
+        """Check if the stream has been closed."""
+        return self._inner.is_closed
+
+    @property
+    def table_name(self) -> str:
+        """Get the table name."""
+        return self._inner.table_name
+
+    async def get_unacked_batches(self) -> list:
+        """
+        Get unacknowledged batches as a list of pyarrow.RecordBatch.
+
+        Returns:
+            List of pyarrow.RecordBatch objects.
+        """
+        from zerobus.sdk.shared.arrow import _deserialize_batch
+
+        ipc_list = await self._inner.get_unacked_batches()
+        return [_deserialize_batch(ipc_bytes) for ipc_bytes in ipc_list]
+
+
 class ZerobusSdk:
     """Python wrapper around Rust ZerobusSdk that returns wrapped streams."""
 
     def __init__(self, host: str, unity_catalog_url: str):
         self._inner = _core.aio.ZerobusSdk(host, unity_catalog_url)
+
+    async def create_arrow_stream(self, table_name: str, schema, client_id: str, client_secret: str, options=None, headers_provider=None) -> ZerobusArrowStream:
+        """
+        Create an Arrow Flight stream for ingesting pyarrow RecordBatches (async).
+
+        **Experimental/Unsupported**: Arrow Flight support is experimental.
+
+        Args:
+            table_name: Fully qualified table name (catalog.schema.table).
+            schema: A pyarrow.Schema defining the table schema.
+            client_id: OAuth client ID.
+            client_secret: OAuth client secret.
+            options: Optional ArrowStreamConfigurationOptions.
+            headers_provider: Optional custom headers provider.
+
+        Returns:
+            A ZerobusArrowStream ready for ingesting RecordBatches.
+        """
+        from zerobus.sdk.shared.arrow import _serialize_schema
+
+        schema_bytes = _serialize_schema(schema)
+
+        if headers_provider is not None:
+            rust_stream = await self._inner.create_arrow_stream_with_headers_provider(
+                table_name, schema_bytes, headers_provider, options
+            )
+        else:
+            rust_stream = await self._inner.create_arrow_stream(
+                table_name, schema_bytes, client_id, client_secret, options
+            )
+        return ZerobusArrowStream(rust_stream)
+
+    async def recreate_arrow_stream(self, old_stream: ZerobusArrowStream) -> ZerobusArrowStream:
+        """Recreate a closed Arrow stream with the same configuration."""
+        rust_stream = await self._inner.recreate_arrow_stream(old_stream._inner)
+        return ZerobusArrowStream(rust_stream)
 
     async def create_stream(
         self, client_id: str, client_secret: str, table_properties, options=None, headers_provider=None
@@ -202,6 +300,7 @@ NonRetriableException = _core.NonRetriableException
 __all__ = [
     "ZerobusSdk",
     "ZerobusStream",
+    "ZerobusArrowStream",
     "TableProperties",
     "StreamConfigurationOptions",
     "RecordType",
