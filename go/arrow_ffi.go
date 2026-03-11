@@ -196,15 +196,15 @@ func convertArrowConfigToC(opts *ArrowStreamConfigurationOptions) C.CArrowStream
 	}
 
 	return C.CArrowStreamConfigurationOptions{
-		max_inflight_batches:         C.uintptr_t(maxInflight),
-		recovery:                     C.bool(recovery),
-		recovery_timeout_ms:          C.uint64_t(recoveryTimeout),
-		recovery_backoff_ms:          C.uint64_t(recoveryBackoff),
-		recovery_retries:             C.uint32_t(recoveryRetries),
+		max_inflight_batches:          C.uintptr_t(maxInflight),
+		recovery:                      C.bool(recovery),
+		recovery_timeout_ms:           C.uint64_t(recoveryTimeout),
+		recovery_backoff_ms:           C.uint64_t(recoveryBackoff),
+		recovery_retries:              C.uint32_t(recoveryRetries),
 		server_lack_of_ack_timeout_ms: C.uint64_t(serverAckTimeout),
-		flush_timeout_ms:             C.uint64_t(flushTimeout),
-		connection_timeout_ms:        C.uint64_t(connTimeout),
-		ipc_compression:              C.int32_t(ipcCompression),
+		flush_timeout_ms:              C.uint64_t(flushTimeout),
+		connection_timeout_ms:         C.uint64_t(connTimeout),
+		ipc_compression:               C.int32_t(ipcCompression),
 	}
 }
 
