@@ -13,11 +13,15 @@ use tokio::runtime::Runtime;
 use tracing_subscriber::{fmt, EnvFilter};
 extern crate libc;
 
+use arrow_ipc::{reader::StreamReader, writer::StreamWriter, CompressionType};
 use async_trait::async_trait;
 use databricks_zerobus_ingest_sdk::databricks::zerobus::RecordType;
 use databricks_zerobus_ingest_sdk::{
-    EncodedRecord, HeadersProvider, StreamConfigurationOptions, TableProperties, ZerobusError,
-    ZerobusResult, ZerobusSdk, ZerobusStream,
+    ArrowStreamConfigurationOptions, ArrowTableProperties, RecordBatch, ZerobusArrowStream,
+};
+use databricks_zerobus_ingest_sdk::{
+    EncodedRecord, HeadersProvider, NoTlsConfig, StreamConfigurationOptions, TableProperties,
+    ZerobusError, ZerobusResult, ZerobusSdk, ZerobusStream,
 };
 use prost::Message;
 use std::sync::Arc;
@@ -25,6 +29,556 @@ use std::sync::Arc;
 // Test module
 #[cfg(test)]
 mod tests;
+
+// ============================================================================
+// Arrow Flight FFI
+// ============================================================================
+
+/// Opaque handle for an Arrow Flight stream.
+#[repr(C)]
+pub struct CArrowStream {
+    _private: [u8; 0],
+}
+
+/// Configuration options for Arrow Flight streams.
+///
+/// `ipc_compression`: -1 = None, 0 = LZ4_FRAME, 1 = ZSTD
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct CArrowStreamConfigurationOptions {
+    pub max_inflight_batches: usize,
+    pub recovery: bool,
+    pub recovery_timeout_ms: u64,
+    pub recovery_backoff_ms: u64,
+    pub recovery_retries: u32,
+    pub server_lack_of_ack_timeout_ms: u64,
+    pub flush_timeout_ms: u64,
+    pub connection_timeout_ms: u64,
+    /// -1 = None, 0 = LZ4_FRAME, 1 = ZSTD
+    pub ipc_compression: i32,
+}
+
+impl From<CArrowStreamConfigurationOptions> for ArrowStreamConfigurationOptions {
+    fn from(c_opts: CArrowStreamConfigurationOptions) -> Self {
+        let ipc_compression = match c_opts.ipc_compression {
+            0 => Some(CompressionType::LZ4_FRAME),
+            1 => Some(CompressionType::ZSTD),
+            _ => None,
+        };
+        ArrowStreamConfigurationOptions {
+            max_inflight_batches: c_opts.max_inflight_batches,
+            recovery: c_opts.recovery,
+            recovery_timeout_ms: c_opts.recovery_timeout_ms,
+            recovery_backoff_ms: c_opts.recovery_backoff_ms,
+            recovery_retries: c_opts.recovery_retries,
+            server_lack_of_ack_timeout_ms: c_opts.server_lack_of_ack_timeout_ms,
+            flush_timeout_ms: c_opts.flush_timeout_ms,
+            connection_timeout_ms: c_opts.connection_timeout_ms,
+            ipc_compression,
+        }
+    }
+}
+
+/// An array of Arrow IPC-encoded batches, returned by `zerobus_arrow_stream_get_unacked_batches`.
+/// Must be freed with `zerobus_arrow_free_batch_array`.
+#[repr(C)]
+pub struct CArrowBatchArray {
+    /// Array of pointers to IPC-encoded batch bytes.
+    pub batches: *mut *mut u8,
+    /// Array of byte lengths, one per batch.
+    pub lengths: *mut usize,
+    /// Number of batches.
+    pub count: usize,
+}
+
+// ---- Arrow pointer validation helpers ----
+
+fn validate_arrow_stream_ptr<'a>(
+    stream: *mut CArrowStream,
+) -> Result<&'a ZerobusArrowStream, &'static str> {
+    if stream.is_null() {
+        return Err("Arrow stream pointer is null");
+    }
+    unsafe { Ok(&*(stream as *const ZerobusArrowStream)) }
+}
+
+fn validate_arrow_stream_ptr_mut<'a>(
+    stream: *mut CArrowStream,
+) -> Result<&'a mut ZerobusArrowStream, &'static str> {
+    if stream.is_null() {
+        return Err("Arrow stream pointer is null");
+    }
+    unsafe { Ok(&mut *(stream as *mut ZerobusArrowStream)) }
+}
+
+// ---- Arrow IPC helpers ----
+
+/// Deserializes an `Arc<ArrowSchema>` from Arrow IPC stream bytes (schema-only stream).
+fn ipc_bytes_to_schema(
+    bytes: &[u8],
+) -> ZerobusResult<std::sync::Arc<databricks_zerobus_ingest_sdk::ArrowSchema>> {
+    use std::io::Cursor;
+    let cursor = Cursor::new(bytes);
+    let reader = StreamReader::try_new(cursor, None).map_err(|e| {
+        ZerobusError::InvalidArgument(format!("Failed to parse Arrow IPC schema: {e}"))
+    })?;
+    Ok(reader.schema().clone())
+}
+
+/// Deserializes the first `RecordBatch` from Arrow IPC stream bytes.
+fn ipc_bytes_to_record_batch(bytes: &[u8]) -> ZerobusResult<RecordBatch> {
+    use std::io::Cursor;
+    let cursor = Cursor::new(bytes);
+    let mut reader = StreamReader::try_new(cursor, None).map_err(|e| {
+        ZerobusError::InvalidArgument(format!("Failed to parse Arrow IPC stream: {e}"))
+    })?;
+    reader
+        .next()
+        .ok_or_else(|| ZerobusError::InvalidArgument("No record batch in IPC stream".to_string()))?
+        .map_err(|e| ZerobusError::InvalidArgument(format!("Failed to read Arrow IPC batch: {e}")))
+}
+
+/// Serializes a `RecordBatch` to Arrow IPC stream bytes (schema + one batch).
+fn record_batch_to_ipc_bytes(batch: &RecordBatch) -> ZerobusResult<Vec<u8>> {
+    let mut buf = Vec::new();
+    let mut writer = StreamWriter::try_new(&mut buf, batch.schema().as_ref()).map_err(|e| {
+        ZerobusError::InvalidArgument(format!("Failed to create Arrow IPC writer: {e}"))
+    })?;
+    writer.write(batch).map_err(|e| {
+        ZerobusError::InvalidArgument(format!("Failed to write Arrow IPC batch: {e}"))
+    })?;
+    writer.finish().map_err(|e| {
+        ZerobusError::InvalidArgument(format!("Failed to finish Arrow IPC stream: {e}"))
+    })?;
+    Ok(buf)
+}
+
+// ---- Arrow FFI functions ----
+
+/// Creates an Arrow Flight stream authenticated with OAuth client credentials.
+///
+/// `schema_ipc_bytes` must point to Arrow IPC stream bytes encoding only the schema
+/// (write an empty IPC stream with just the schema message).
+#[no_mangle]
+pub extern "C" fn zerobus_sdk_create_arrow_stream(
+    sdk: *mut CZerobusSdk,
+    table_name: *const c_char,
+    schema_ipc_bytes: *const u8,
+    schema_ipc_len: usize,
+    client_id: *const c_char,
+    client_secret: *const c_char,
+    options: *const CArrowStreamConfigurationOptions,
+    result: *mut CResult,
+) -> *mut CArrowStream {
+    let sdk_ref = match validate_sdk_ptr(sdk) {
+        Ok(s) => s,
+        Err(msg) => {
+            write_error_result(result, msg, false);
+            return ptr::null_mut();
+        }
+    };
+
+    let res = RUNTIME.block_on(async {
+        let table_name_str = unsafe { c_str_to_string(table_name).map_err(|e| e.to_string())? };
+        let client_id_str = unsafe { c_str_to_string(client_id).map_err(|e| e.to_string())? };
+        let client_secret_str =
+            unsafe { c_str_to_string(client_secret).map_err(|e| e.to_string())? };
+
+        if schema_ipc_bytes.is_null() || schema_ipc_len == 0 {
+            return Err("Schema IPC bytes are required for Arrow stream".to_string());
+        }
+        let schema_bytes = unsafe { std::slice::from_raw_parts(schema_ipc_bytes, schema_ipc_len) };
+        let schema = ipc_bytes_to_schema(schema_bytes).map_err(|e| e.to_string())?;
+
+        let table_props = ArrowTableProperties {
+            table_name: table_name_str,
+            schema,
+        };
+        let stream_options = if !options.is_null() {
+            Some(unsafe { (*options).into() })
+        } else {
+            None
+        };
+
+        let stream = sdk_ref
+            .create_arrow_stream(
+                table_props,
+                client_id_str,
+                client_secret_str,
+                stream_options,
+            )
+            .await
+            .map_err(|e| e.to_string())?;
+
+        let boxed = Box::new(stream);
+        Ok::<*mut CArrowStream, String>(Box::into_raw(boxed) as *mut CArrowStream)
+    });
+
+    match res {
+        Ok(ptr) => {
+            write_success_result(result);
+            ptr
+        }
+        Err(err) => {
+            write_error_result(result, &err, false);
+            ptr::null_mut()
+        }
+    }
+}
+
+/// Creates an Arrow Flight stream with a custom headers provider callback.
+///
+/// `schema_ipc_bytes` must point to Arrow IPC stream bytes encoding only the schema.
+#[no_mangle]
+pub extern "C" fn zerobus_sdk_create_arrow_stream_with_headers_provider(
+    sdk: *mut CZerobusSdk,
+    table_name: *const c_char,
+    schema_ipc_bytes: *const u8,
+    schema_ipc_len: usize,
+    headers_callback: HeadersProviderCallback,
+    user_data: *mut std::ffi::c_void,
+    options: *const CArrowStreamConfigurationOptions,
+    result: *mut CResult,
+) -> *mut CArrowStream {
+    let sdk_ref = match validate_sdk_ptr(sdk) {
+        Ok(s) => s,
+        Err(msg) => {
+            write_error_result(result, msg, false);
+            return ptr::null_mut();
+        }
+    };
+
+    let res = RUNTIME.block_on(async {
+        let table_name_str = unsafe { c_str_to_string(table_name).map_err(|e| e.to_string())? };
+
+        if schema_ipc_bytes.is_null() || schema_ipc_len == 0 {
+            return Err("Schema IPC bytes are required for Arrow stream".to_string());
+        }
+        let schema_bytes = unsafe { std::slice::from_raw_parts(schema_ipc_bytes, schema_ipc_len) };
+        let schema = ipc_bytes_to_schema(schema_bytes).map_err(|e| e.to_string())?;
+
+        let table_props = ArrowTableProperties {
+            table_name: table_name_str,
+            schema,
+        };
+        let stream_options = if !options.is_null() {
+            Some(unsafe { (*options).into() })
+        } else {
+            None
+        };
+
+        let headers_provider = Arc::new(CallbackHeadersProvider::new(headers_callback, user_data));
+
+        let stream = sdk_ref
+            .create_arrow_stream_with_headers_provider(
+                table_props,
+                headers_provider,
+                stream_options,
+            )
+            .await
+            .map_err(|e| e.to_string())?;
+
+        let boxed = Box::new(stream);
+        Ok::<*mut CArrowStream, String>(Box::into_raw(boxed) as *mut CArrowStream)
+    });
+
+    match res {
+        Ok(ptr) => {
+            write_success_result(result);
+            ptr
+        }
+        Err(err) => {
+            write_error_result(result, &err, false);
+            ptr::null_mut()
+        }
+    }
+}
+
+/// Frees an Arrow Flight stream instance.
+#[no_mangle]
+pub extern "C" fn zerobus_arrow_stream_free(stream: *mut CArrowStream) {
+    if !stream.is_null() {
+        unsafe {
+            let _ = Box::from_raw(stream as *mut ZerobusArrowStream);
+        }
+    }
+}
+
+/// Ingests one Arrow RecordBatch supplied as Arrow IPC stream bytes.
+///
+/// `ipc_bytes` must be a valid Arrow IPC stream (schema + one record batch).
+/// Returns the logical offset assigned to this batch, or -1 on error.
+#[no_mangle]
+pub extern "C" fn zerobus_arrow_stream_ingest_batch(
+    stream: *mut CArrowStream,
+    ipc_bytes: *const u8,
+    ipc_len: usize,
+    result: *mut CResult,
+) -> i64 {
+    if ipc_bytes.is_null() || ipc_len == 0 {
+        write_error_result(result, "IPC bytes are required", false);
+        return -1;
+    }
+
+    let stream_ref = match validate_arrow_stream_ptr(stream) {
+        Ok(s) => s,
+        Err(msg) => {
+            write_error_result(result, msg, false);
+            return -1;
+        }
+    };
+
+    let bytes = unsafe { std::slice::from_raw_parts(ipc_bytes, ipc_len) };
+
+    let offset_res = RUNTIME.block_on(async {
+        let batch = ipc_bytes_to_record_batch(bytes)?;
+        stream_ref.ingest_batch(batch).await
+    });
+
+    match offset_res {
+        Ok(offset) => {
+            write_success_result(result);
+            offset
+        }
+        Err(err) => {
+            if !result.is_null() {
+                unsafe {
+                    *result = CResult::error(err);
+                }
+            }
+            -1
+        }
+    }
+}
+
+/// Waits until the server acknowledges the batch at the given logical offset.
+#[no_mangle]
+pub extern "C" fn zerobus_arrow_stream_wait_for_offset(
+    stream: *mut CArrowStream,
+    offset: i64,
+    result: *mut CResult,
+) -> bool {
+    let stream_ref = match validate_arrow_stream_ptr(stream) {
+        Ok(s) => s,
+        Err(msg) => {
+            write_error_result(result, msg, false);
+            return false;
+        }
+    };
+
+    let res = RUNTIME.block_on(async { stream_ref.wait_for_offset(offset).await });
+
+    match res {
+        Ok(()) => {
+            write_success_result(result);
+            true
+        }
+        Err(err) => {
+            if !result.is_null() {
+                unsafe {
+                    *result = CResult::error(err);
+                }
+            }
+            false
+        }
+    }
+}
+
+/// Flushes all pending batches and waits for their acknowledgment.
+#[no_mangle]
+pub extern "C" fn zerobus_arrow_stream_flush(
+    stream: *mut CArrowStream,
+    result: *mut CResult,
+) -> bool {
+    let stream_ref = match validate_arrow_stream_ptr(stream) {
+        Ok(s) => s,
+        Err(msg) => {
+            write_error_result(result, msg, false);
+            return false;
+        }
+    };
+
+    let res = RUNTIME.block_on(async { stream_ref.flush().await });
+
+    match res {
+        Ok(()) => {
+            write_success_result(result);
+            true
+        }
+        Err(err) => {
+            if !result.is_null() {
+                unsafe {
+                    *result = CResult::error(err);
+                }
+            }
+            false
+        }
+    }
+}
+
+/// Gracefully closes the stream, flushing all pending batches first.
+#[no_mangle]
+pub extern "C" fn zerobus_arrow_stream_close(
+    stream: *mut CArrowStream,
+    result: *mut CResult,
+) -> bool {
+    let stream_ref = match validate_arrow_stream_ptr_mut(stream) {
+        Ok(s) => s,
+        Err(msg) => {
+            write_error_result(result, msg, false);
+            return false;
+        }
+    };
+
+    let res = RUNTIME.block_on(async { stream_ref.close().await });
+
+    match res {
+        Ok(()) => {
+            write_success_result(result);
+            true
+        }
+        Err(err) => {
+            if !result.is_null() {
+                unsafe {
+                    *result = CResult::error(err);
+                }
+            }
+            false
+        }
+    }
+}
+
+/// Returns all unacknowledged batches from a closed or failed stream as Arrow IPC bytes.
+///
+/// Each batch is serialized as a self-contained Arrow IPC stream (schema + one batch).
+/// The returned array must be freed with `zerobus_arrow_free_batch_array`.
+#[no_mangle]
+pub extern "C" fn zerobus_arrow_stream_get_unacked_batches(
+    stream: *mut CArrowStream,
+    result: *mut CResult,
+) -> CArrowBatchArray {
+    let empty = CArrowBatchArray {
+        batches: ptr::null_mut(),
+        lengths: ptr::null_mut(),
+        count: 0,
+    };
+
+    let stream_ref = match validate_arrow_stream_ptr(stream) {
+        Ok(s) => s,
+        Err(msg) => {
+            write_error_result(result, msg, false);
+            return empty;
+        }
+    };
+
+    let batches_res = RUNTIME.block_on(async { stream_ref.get_unacked_batches().await });
+
+    match batches_res {
+        Ok(batches) => {
+            if batches.is_empty() {
+                write_success_result(result);
+                return empty;
+            }
+
+            let count = batches.len();
+            let mut batch_ptrs: Vec<*mut u8> = Vec::with_capacity(count);
+            let mut batch_lens: Vec<usize> = Vec::with_capacity(count);
+
+            for batch in &batches {
+                match record_batch_to_ipc_bytes(batch) {
+                    Ok(bytes) => {
+                        let len = bytes.len();
+                        let ptr = Box::into_raw(bytes.into_boxed_slice()) as *mut u8;
+                        batch_ptrs.push(ptr);
+                        batch_lens.push(len);
+                    }
+                    Err(e) => {
+                        // Free already-allocated batches before returning error.
+                        for (&ptr, &len) in batch_ptrs.iter().zip(batch_lens.iter()) {
+                            if !ptr.is_null() && len > 0 {
+                                unsafe {
+                                    let _ = Vec::from_raw_parts(ptr, len, len);
+                                }
+                            }
+                        }
+                        write_error_result(result, &e.to_string(), false);
+                        return empty;
+                    }
+                }
+            }
+
+            let ptrs_ptr = batch_ptrs.as_mut_ptr();
+            let lens_ptr = batch_lens.as_mut_ptr();
+            std::mem::forget(batch_ptrs);
+            std::mem::forget(batch_lens);
+
+            write_success_result(result);
+            CArrowBatchArray {
+                batches: ptrs_ptr,
+                lengths: lens_ptr,
+                count,
+            }
+        }
+        Err(err) => {
+            if !result.is_null() {
+                unsafe {
+                    *result = CResult::error(err);
+                }
+            }
+            empty
+        }
+    }
+}
+
+/// Frees a `CArrowBatchArray` returned by `zerobus_arrow_stream_get_unacked_batches`.
+#[no_mangle]
+pub extern "C" fn zerobus_arrow_free_batch_array(array: CArrowBatchArray) {
+    if array.count == 0 {
+        return;
+    }
+    unsafe {
+        if !array.batches.is_null() && !array.lengths.is_null() {
+            let ptrs = Vec::from_raw_parts(array.batches, array.count, array.count);
+            let lens = Vec::from_raw_parts(array.lengths, array.count, array.count);
+            for (&ptr, &len) in ptrs.iter().zip(lens.iter()) {
+                if !ptr.is_null() && len > 0 {
+                    let _ = Vec::from_raw_parts(ptr, len, len);
+                }
+            }
+        }
+    }
+}
+
+/// Returns whether the Arrow stream has been closed.
+#[no_mangle]
+pub extern "C" fn zerobus_arrow_stream_is_closed(stream: *mut CArrowStream) -> bool {
+    match validate_arrow_stream_ptr(stream) {
+        Ok(s) => s.is_closed(),
+        Err(_) => true,
+    }
+}
+
+/// Returns the default Arrow stream configuration options.
+#[no_mangle]
+pub extern "C" fn zerobus_arrow_get_default_config() -> CArrowStreamConfigurationOptions {
+    let d = ArrowStreamConfigurationOptions::default();
+    let ipc_compression = match d.ipc_compression {
+        Some(ct) if ct == CompressionType::LZ4_FRAME => 0,
+        Some(ct) if ct == CompressionType::ZSTD => 1,
+        _ => -1,
+    };
+    CArrowStreamConfigurationOptions {
+        max_inflight_batches: d.max_inflight_batches,
+        recovery: d.recovery,
+        recovery_timeout_ms: d.recovery_timeout_ms,
+        recovery_backoff_ms: d.recovery_backoff_ms,
+        recovery_retries: d.recovery_retries,
+        server_lack_of_ack_timeout_ms: d.server_lack_of_ack_timeout_ms,
+        flush_timeout_ms: d.flush_timeout_ms,
+        connection_timeout_ms: d.connection_timeout_ms,
+        ipc_compression,
+    }
+}
 
 // Global Tokio runtime for handling async Rust calls
 static RUNTIME: Lazy<Runtime> =
@@ -389,11 +943,13 @@ pub extern "C" fn zerobus_sdk_new(
         let endpoint = unsafe { c_str_to_string(zerobus_endpoint).map_err(|e| e.to_string())? };
         let catalog_url = unsafe { c_str_to_string(unity_catalog_url).map_err(|e| e.to_string())? };
 
-        let sdk = ZerobusSdk::builder()
-            .endpoint(endpoint)
-            .unity_catalog_url(catalog_url)
-            .build()
-            .map_err(|e| e.to_string())?;
+        let mut builder = ZerobusSdk::builder()
+            .endpoint(endpoint.clone())
+            .unity_catalog_url(catalog_url);
+        if endpoint.starts_with("http://") {
+            builder = builder.tls_config(Arc::new(NoTlsConfig));
+        }
+        let sdk = builder.build().map_err(|e| e.to_string())?;
         let boxed = Box::new(sdk);
         Ok(Box::into_raw(boxed) as *mut CZerobusSdk)
     })();
@@ -1024,7 +1580,7 @@ pub extern "C" fn zerobus_free_error_message(message: *mut c_char) {
     }
 }
 
-/// Get default configuration options
+/// Get default stream configuration options
 #[no_mangle]
 pub extern "C" fn zerobus_get_default_config() -> CStreamConfigurationOptions {
     let default_opts = StreamConfigurationOptions::default();

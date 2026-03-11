@@ -19,6 +19,43 @@ namespace zerobus {
 #endif  // __cplusplus
 
 /**
+ * Opaque handle for an Arrow Flight stream.
+ */
+typedef struct CArrowStream {
+  uint8_t _private[0];
+} CArrowStream;
+
+typedef struct CZerobusSdk {
+  uint8_t _private[0];
+} CZerobusSdk;
+
+/**
+ * Configuration options for Arrow Flight streams.
+ *
+ * `ipc_compression`: -1 = None, 0 = LZ4_FRAME, 1 = ZSTD
+ */
+typedef struct CArrowStreamConfigurationOptions {
+  uintptr_t max_inflight_batches;
+  bool recovery;
+  uint64_t recovery_timeout_ms;
+  uint64_t recovery_backoff_ms;
+  uint32_t recovery_retries;
+  uint64_t server_lack_of_ack_timeout_ms;
+  uint64_t flush_timeout_ms;
+  uint64_t connection_timeout_ms;
+  /**
+   * -1 = None, 0 = LZ4_FRAME, 1 = ZSTD
+   */
+  int32_t ipc_compression;
+} CArrowStreamConfigurationOptions;
+
+typedef struct CResult {
+  bool success;
+  char *error_message;
+  bool is_retryable;
+} CResult;
+
+/**
  * A single header key-value pair for C FFI
  */
 typedef struct CHeader {
@@ -35,15 +72,31 @@ typedef struct CHeaders {
   char *error_message;
 } CHeaders;
 
-typedef struct CZerobusSdk {
-  uint8_t _private[0];
-} CZerobusSdk;
+/**
+ * Function pointer type for the headers provider callback
+ * The callback should return a CHeaders struct
+ * The caller is responsible for freeing the returned CHeaders using zerobus_free_headers
+ */
+typedef struct CHeaders (*HeadersProviderCallback)(void *user_data);
 
-typedef struct CResult {
-  bool success;
-  char *error_message;
-  bool is_retryable;
-} CResult;
+/**
+ * An array of Arrow IPC-encoded batches, returned by `zerobus_arrow_stream_get_unacked_batches`.
+ * Must be freed with `zerobus_arrow_free_batch_array`.
+ */
+typedef struct CArrowBatchArray {
+  /**
+   * Array of pointers to IPC-encoded batch bytes.
+   */
+  uint8_t **batches;
+  /**
+   * Array of byte lengths, one per batch.
+   */
+  uintptr_t *lengths;
+  /**
+   * Number of batches.
+   */
+  uintptr_t count;
+} CArrowBatchArray;
 
 typedef struct CZerobusStream {
   uint8_t _private[0];
@@ -65,13 +118,6 @@ typedef struct CStreamConfigurationOptions {
 } CStreamConfigurationOptions;
 
 /**
- * Function pointer type for the headers provider callback
- * The callback should return a CHeaders struct
- * The caller is responsible for freeing the returned CHeaders using zerobus_free_headers
- */
-typedef struct CHeaders (*HeadersProviderCallback)(void *user_data);
-
-/**
  * Represents a single record (either Proto or JSON)
  */
 typedef struct CRecord {
@@ -91,6 +137,92 @@ typedef struct CRecordArray {
 #ifdef __cplusplus
 extern "C" {
 #endif // __cplusplus
+
+/**
+ * Creates an Arrow Flight stream authenticated with OAuth client credentials.
+ *
+ * `schema_ipc_bytes` must point to Arrow IPC stream bytes encoding only the schema
+ * (write an empty IPC stream with just the schema message).
+ */
+struct CArrowStream *zerobus_sdk_create_arrow_stream(struct CZerobusSdk *sdk,
+                                                     const char *table_name,
+                                                     const uint8_t *schema_ipc_bytes,
+                                                     uintptr_t schema_ipc_len,
+                                                     const char *client_id,
+                                                     const char *client_secret,
+                                                     const struct CArrowStreamConfigurationOptions *options,
+                                                     struct CResult *result);
+
+/**
+ * Creates an Arrow Flight stream with a custom headers provider callback.
+ *
+ * `schema_ipc_bytes` must point to Arrow IPC stream bytes encoding only the schema.
+ */
+struct CArrowStream *zerobus_sdk_create_arrow_stream_with_headers_provider(struct CZerobusSdk *sdk,
+                                                                           const char *table_name,
+                                                                           const uint8_t *schema_ipc_bytes,
+                                                                           uintptr_t schema_ipc_len,
+                                                                           HeadersProviderCallback headers_callback,
+                                                                           void *user_data,
+                                                                           const struct CArrowStreamConfigurationOptions *options,
+                                                                           struct CResult *result);
+
+/**
+ * Frees an Arrow Flight stream instance.
+ */
+void zerobus_arrow_stream_free(struct CArrowStream *stream);
+
+/**
+ * Ingests one Arrow RecordBatch supplied as Arrow IPC stream bytes.
+ *
+ * `ipc_bytes` must be a valid Arrow IPC stream (schema + one record batch).
+ * Returns the logical offset assigned to this batch, or -1 on error.
+ */
+int64_t zerobus_arrow_stream_ingest_batch(struct CArrowStream *stream,
+                                          const uint8_t *ipc_bytes,
+                                          uintptr_t ipc_len,
+                                          struct CResult *result);
+
+/**
+ * Waits until the server acknowledges the batch at the given logical offset.
+ */
+bool zerobus_arrow_stream_wait_for_offset(struct CArrowStream *stream,
+                                          int64_t offset,
+                                          struct CResult *result);
+
+/**
+ * Flushes all pending batches and waits for their acknowledgment.
+ */
+bool zerobus_arrow_stream_flush(struct CArrowStream *stream, struct CResult *result);
+
+/**
+ * Gracefully closes the stream, flushing all pending batches first.
+ */
+bool zerobus_arrow_stream_close(struct CArrowStream *stream, struct CResult *result);
+
+/**
+ * Returns all unacknowledged batches from a closed or failed stream as Arrow IPC bytes.
+ *
+ * Each batch is serialized as a self-contained Arrow IPC stream (schema + one batch).
+ * The returned array must be freed with `zerobus_arrow_free_batch_array`.
+ */
+struct CArrowBatchArray zerobus_arrow_stream_get_unacked_batches(struct CArrowStream *stream,
+                                                                 struct CResult *result);
+
+/**
+ * Frees a `CArrowBatchArray` returned by `zerobus_arrow_stream_get_unacked_batches`.
+ */
+void zerobus_arrow_free_batch_array(struct CArrowBatchArray array);
+
+/**
+ * Returns whether the Arrow stream has been closed.
+ */
+bool zerobus_arrow_stream_is_closed(struct CArrowStream *stream);
+
+/**
+ * Returns the default Arrow stream configuration options.
+ */
+struct CArrowStreamConfigurationOptions zerobus_arrow_get_default_config(void);
 
 /**
  * Free headers returned from callback
@@ -224,7 +356,7 @@ bool zerobus_stream_close(struct CZerobusStream *stream, struct CResult *result)
 void zerobus_free_error_message(char *message);
 
 /**
- * Get default configuration options
+ * Get default stream configuration options
  */
 struct CStreamConfigurationOptions zerobus_get_default_config(void);
 
