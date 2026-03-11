@@ -37,13 +37,15 @@ class TestSerializeSchema(unittest.TestCase):
         self.assertGreater(len(ipc_bytes), 0)
 
     def test_schema_with_various_types(self):
-        schema = pa.schema([
-            ("int_col", pa.int32()),
-            ("float_col", pa.float64()),
-            ("str_col", pa.large_utf8()),
-            ("bool_col", pa.bool_()),
-            ("list_col", pa.list_(pa.int64())),
-        ])
+        schema = pa.schema(
+            [
+                ("int_col", pa.int32()),
+                ("float_col", pa.float64()),
+                ("str_col", pa.large_utf8()),
+                ("bool_col", pa.bool_()),
+                ("list_col", pa.list_(pa.int64())),
+            ]
+        )
         ipc_bytes = _serialize_schema(schema)
         self.assertIsInstance(ipc_bytes, bytes)
 
@@ -228,22 +230,27 @@ class TestArrowImports(unittest.TestCase):
 
     def test_import_from_shared_arrow(self):
         from zerobus.sdk.shared.arrow import ArrowStreamConfigurationOptions
+
         self.assertIsNotNone(ArrowStreamConfigurationOptions)
 
     def test_import_from_top_level(self):
         from zerobus import ArrowStreamConfigurationOptions
+
         self.assertIsNotNone(ArrowStreamConfigurationOptions)
 
     def test_import_arrow_stream_from_sync(self):
         from zerobus.sdk.sync import ZerobusArrowStream
+
         self.assertIsNotNone(ZerobusArrowStream)
 
     def test_import_arrow_stream_from_aio(self):
         from zerobus.sdk.aio import ZerobusArrowStream
+
         self.assertIsNotNone(ZerobusArrowStream)
 
     def test_import_arrow_stream_from_top_level(self):
         from zerobus import ZerobusArrowStream
+
         self.assertIsNotNone(ZerobusArrowStream)
 
 
@@ -252,16 +259,19 @@ class TestArrowSDKAPISurface(unittest.TestCase):
 
     def test_sync_sdk_has_arrow_methods(self):
         from zerobus.sdk.sync import ZerobusSdk
+
         self.assertTrue(hasattr(ZerobusSdk, "create_arrow_stream"))
         self.assertTrue(hasattr(ZerobusSdk, "recreate_arrow_stream"))
 
     def test_async_sdk_has_arrow_methods(self):
         from zerobus.sdk.aio import ZerobusSdk
+
         self.assertTrue(hasattr(ZerobusSdk, "create_arrow_stream"))
         self.assertTrue(hasattr(ZerobusSdk, "recreate_arrow_stream"))
 
     def test_sync_arrow_stream_has_methods(self):
         from zerobus.sdk.sync import ZerobusArrowStream
+
         expected_methods = [
             "ingest_batch",
             "wait_for_offset",
@@ -277,6 +287,7 @@ class TestArrowSDKAPISurface(unittest.TestCase):
 
     def test_async_arrow_stream_has_methods(self):
         from zerobus.sdk.aio import ZerobusArrowStream
+
         expected_methods = [
             "ingest_batch",
             "wait_for_offset",
@@ -293,6 +304,7 @@ class TestArrowSDKAPISurface(unittest.TestCase):
     def test_arrow_types_not_on_core_top_level(self):
         """Arrow types should be in _core.arrow submodule, not on _core directly."""
         import zerobus._zerobus_core as _core
+
         self.assertFalse(hasattr(_core, "ArrowStreamConfigurationOptions"))
         self.assertFalse(hasattr(_core, "ZerobusArrowStream"))
         self.assertFalse(hasattr(_core, "AsyncZerobusArrowStream"))
@@ -300,6 +312,7 @@ class TestArrowSDKAPISurface(unittest.TestCase):
     def test_arrow_types_in_core_arrow_submodule(self):
         """Arrow types should be accessible via _core.arrow."""
         import zerobus._zerobus_core as _core
+
         self.assertTrue(hasattr(_core.arrow, "ArrowStreamConfigurationOptions"))
         self.assertTrue(hasattr(_core.arrow, "ZerobusArrowStream"))
         self.assertTrue(hasattr(_core.arrow, "AsyncZerobusArrowStream"))

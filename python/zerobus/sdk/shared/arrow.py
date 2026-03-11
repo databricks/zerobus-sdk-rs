@@ -23,9 +23,10 @@ Example (Sync):
     >>> stream.close()
 """
 
+import zerobus._zerobus_core as _core
+
 _PYARROW_IMPORT_ERROR = (
-    "pyarrow is required for Arrow Flight support. "
-    "Install with: pip install databricks-zerobus-ingest-sdk[arrow]"
+    "pyarrow is required for Arrow Flight support. " "Install with: pip install databricks-zerobus-ingest-sdk[arrow]"
 )
 
 
@@ -66,9 +67,7 @@ def _serialize_batch(batch):
         else:
             batch = batches[0]
     elif not isinstance(batch, pa.RecordBatch):
-        raise TypeError(
-            f"Expected pyarrow.RecordBatch or pyarrow.Table, got {type(batch).__name__}"
-        )
+        raise TypeError(f"Expected pyarrow.RecordBatch or pyarrow.Table, got {type(batch).__name__}")
 
     sink = pa.BufferOutputStream()
     writer = pa.ipc.new_stream(sink, batch.schema)
@@ -85,6 +84,4 @@ def _deserialize_batch(ipc_bytes):
 
 
 # Re-export configuration from Rust core
-import zerobus._zerobus_core as _core
-
 ArrowStreamConfigurationOptions = _core.arrow.ArrowStreamConfigurationOptions

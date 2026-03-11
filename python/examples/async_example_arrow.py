@@ -43,11 +43,13 @@ NUM_BATCHES = 10
 ROWS_PER_BATCH = 100
 
 # Define the Arrow schema
-SCHEMA = pa.schema([
-    ("device_name", pa.large_utf8()),
-    ("temp", pa.int32()),
-    ("humidity", pa.int64()),
-])
+SCHEMA = pa.schema(
+    [
+        ("device_name", pa.large_utf8()),
+        ("temp", pa.int32()),
+        ("humidity", pa.int64()),
+    ]
+)
 
 
 def create_sample_batch(batch_index):
@@ -104,9 +106,7 @@ async def main():
         # The SDK automatically:
         #   - Includes authorization header with OAuth token
         #   - Includes x-databricks-zerobus-table-name header
-        stream = await sdk.create_arrow_stream(
-            TABLE_NAME, SCHEMA, CLIENT_ID, CLIENT_SECRET, options
-        )
+        stream = await sdk.create_arrow_stream(TABLE_NAME, SCHEMA, CLIENT_ID, CLIENT_SECRET, options)
         logger.info(f"Arrow stream created for table: {stream.table_name}")
 
         # Step 4: Ingest Arrow RecordBatches asynchronously

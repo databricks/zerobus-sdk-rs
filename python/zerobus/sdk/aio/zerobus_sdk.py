@@ -39,7 +39,7 @@ Example:
     >>> asyncio.run(main())
 """
 
-from typing import Any, List, Optional
+from typing import Any
 
 # Import Rust-backed implementations
 import zerobus._zerobus_core as _core
@@ -223,7 +223,9 @@ class ZerobusSdk:
     def __init__(self, host: str, unity_catalog_url: str):
         self._inner = _core.aio.ZerobusSdk(host, unity_catalog_url)
 
-    async def create_arrow_stream(self, table_name: str, schema, client_id: str, client_secret: str, options=None, headers_provider=None) -> ZerobusArrowStream:
+    async def create_arrow_stream(
+        self, table_name: str, schema, client_id: str, client_secret: str, options=None, headers_provider=None
+    ) -> ZerobusArrowStream:
         """
         Create an Arrow Flight stream for ingesting pyarrow RecordBatches (async).
 

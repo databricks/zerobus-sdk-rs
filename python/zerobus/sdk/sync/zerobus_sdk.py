@@ -38,7 +38,7 @@ Example:
     >>> offset = ack.wait_for_ack(timeout_sec=30)
 """
 
-from typing import Iterator, List, Optional
+from typing import Iterator
 
 # Import Rust-backed implementations
 import zerobus._zerobus_core as _core
@@ -200,7 +200,9 @@ class ZerobusSdk:
     def __init__(self, host: str, unity_catalog_url: str):
         self._inner = _RustZerobusSdk(host, unity_catalog_url)
 
-    def create_arrow_stream(self, table_name: str, schema, client_id: str, client_secret: str, options=None, headers_provider=None) -> ZerobusArrowStream:
+    def create_arrow_stream(
+        self, table_name: str, schema, client_id: str, client_secret: str, options=None, headers_provider=None
+    ) -> ZerobusArrowStream:
         """
         Create an Arrow Flight stream for ingesting pyarrow RecordBatches.
 
@@ -226,9 +228,7 @@ class ZerobusSdk:
                 table_name, schema_bytes, headers_provider, options
             )
         else:
-            rust_stream = self._inner.create_arrow_stream(
-                table_name, schema_bytes, client_id, client_secret, options
-            )
+            rust_stream = self._inner.create_arrow_stream(table_name, schema_bytes, client_id, client_secret, options)
         return ZerobusArrowStream(rust_stream)
 
     def recreate_arrow_stream(self, old_stream: ZerobusArrowStream) -> ZerobusArrowStream:
