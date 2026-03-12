@@ -214,6 +214,54 @@ pub extern "C" fn zerobus_sdk_create_stream_with_headers_provider(
     })
 }
 
+/// Recreate a stream from an existing stream
+/// This is used for recovery scenarios where the stream needs to be re-established
+#[no_mangle]
+pub extern "C" fn zerobus_sdk_recreate_stream(
+    sdk: *mut CZerobusSdk,
+    stream: *mut CZerobusStream,
+    result: *mut CResult,
+) -> *mut CZerobusStream {
+    ffi_guard(result, ptr::null_mut(), move || {
+        let sdk_ref = match validate_sdk_ptr(sdk) {
+            Ok(s) => s,
+            Err(msg) => {
+                write_error_result(result, msg, false);
+                return ptr::null_mut();
+            }
+        };
+
+        let stream_ref = match validate_stream_ptr(stream) {
+            Ok(s) => s,
+            Err(msg) => {
+                write_error_result(result, msg, false);
+                return ptr::null_mut();
+            }
+        };
+
+        let res = RUNTIME.block_on(async {
+            let new_stream = sdk_ref
+                .recreate_stream(stream_ref)
+                .await
+                .map_err(|e| e.to_string())?;
+
+            let arc = Arc::new(new_stream);
+            Ok::<*mut CZerobusStream, String>(Arc::into_raw(arc) as *mut CZerobusStream)
+        });
+
+        match res {
+            Ok(stream_ptr) => {
+                write_success_result(result);
+                stream_ptr
+            }
+            Err(err) => {
+                write_error_result(result, &err, false);
+                ptr::null_mut()
+            }
+        }
+    })
+}
+
 /// Free a stream instance
 #[no_mangle]
 pub extern "C" fn zerobus_stream_free(stream: *mut CZerobusStream) {

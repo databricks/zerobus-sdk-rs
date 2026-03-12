@@ -407,6 +407,14 @@ struct CZerobusStream *zerobus_sdk_create_stream_with_headers_provider(struct CZ
                                                                        struct CResult *result);
 
 /**
+ * Recreate a stream from an existing stream
+ * This is used for recovery scenarios where the stream needs to be re-established
+ */
+struct CZerobusStream *zerobus_sdk_recreate_stream(struct CZerobusSdk *sdk,
+                                                   struct CZerobusStream *stream,
+                                                   struct CResult *result);
+
+/**
  * Free a stream instance
  */
 void zerobus_stream_free(struct CZerobusStream *stream);
