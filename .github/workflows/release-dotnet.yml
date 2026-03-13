@@ -1,0 +1,194 @@
+name: Build & Release .NET SDK
+run-name: "Release .NET SDK ${{ github.ref_name }}"
+
+on:
+  push:
+    tags:
+      - 'dotnet/v*'
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: write
+  id-token: write # Required for attestation
+  attestations: write # Required for attestation
+
+jobs:
+  build-ffi:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: { group: databricks-protected-runner-group, labels: linux-ubuntu-latest }
+            target: x86_64-unknown-linux-gnu
+            static_lib: libzerobus_ffi.a
+            dynamic_lib: libzerobus_ffi.so
+            artifact_dir: linux-x64
+            cross: false
+          - runner: { group: databricks-protected-runner-group, labels: linux-ubuntu-latest }
+            target: aarch64-unknown-linux-gnu
+            static_lib: libzerobus_ffi.a
+            dynamic_lib: libzerobus_ffi.so
+            artifact_dir: linux-arm64
+            cross: true
+          - runner: { group: databricks-protected-runner-group, labels: windows-server-latest }
+            target: x86_64-pc-windows-msvc
+            static_lib: zerobus_ffi.lib
+            dynamic_lib: zerobus_ffi.dll
+            artifact_dir: win-x64
+            cross: false
+          - runner: [self-hosted, macOS, ARM64, zerobus-sdk]
+            target: aarch64-apple-darwin
+            static_lib: libzerobus_ffi.a
+            dynamic_lib: libzerobus_ffi.dylib
+            artifact_dir: osx-arm64
+            cross: false
+          - runner: [self-hosted, macOS, ARM64, zerobus-sdk]
+            target: x86_64-apple-darwin
+            static_lib: libzerobus_ffi.a
+            dynamic_lib: libzerobus_ffi.dylib
+            artifact_dir: osx-x64
+            cross: false
+
+    name: Build FFI - ${{ matrix.artifact_dir }}
+    runs-on: ${{ matrix.runner }}
+
+    defaults:
+      run:
+        working-directory: rust
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install protoc
+        uses: arduino/setup-protoc@v3
+
+      - name: Install cross-compilation toolchain (Linux ARM64)
+        if: matrix.cross
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq gcc-aarch64-linux-gnu
+          mkdir -p .cargo
+          echo '[target.aarch64-unknown-linux-gnu]' > .cargo/config.toml
+          echo 'linker = "aarch64-linux-gnu-gcc"' >> .cargo/config.toml
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Build FFI library
+        run: cargo build --release -p zerobus-ffi --target ${{ matrix.target }}
+
+      - name: Prepare artifacts
+        shell: bash
+        run: |
+          mkdir -p artifacts/${{ matrix.artifact_dir }}/native
+          cp target/${{ matrix.target }}/release/${{ matrix.static_lib }} artifacts/${{ matrix.artifact_dir }}/native/
+          cp target/${{ matrix.target }}/release/${{ matrix.dynamic_lib }} artifacts/${{ matrix.artifact_dir }}/native/
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ffi-${{ matrix.artifact_dir }}
+          path: rust/artifacts/${{ matrix.artifact_dir }}
+
+  publish:
+    needs: build-ffi
+    runs-on:
+      group: databricks-protected-runner-group
+      labels: linux-ubuntu-latest
+    defaults:
+      run:
+        working-directory: dotnet
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up .NET
+        uses: actions/setup-dotnet@v5
+        with:
+          dotnet-version: 10.0.x
+
+      - name: Download all native libraries
+        uses: actions/download-artifact@v8
+        with:
+          path: native
+          pattern: ffi-*
+          merge-multiple: false
+
+      - name: Consolidate native libraries
+        run: |
+          mkdir -p src/Zerobus/runtimes
+          cp -r native/ffi-linux-x64/linux-x64 src/Zerobus/runtimes/
+          cp -r native/ffi-linux-arm64/linux-arm64 src/Zerobus/runtimes/
+          cp -r native/ffi-osx-x64/osx-x64 src/Zerobus/runtimes/
+          cp -r native/ffi-osx-arm64/osx-arm64 src/Zerobus/runtimes/
+          cp -r native/ffi-win-x64/win-x64 src/Zerobus/runtimes/
+
+      - name: Extract version from tag
+        id: version
+        run: echo "version=${GITHUB_REF#refs/tags/dotnet/v}" >> "$GITHUB_OUTPUT"
+
+      - name: Package NuGet
+        env:
+          CI: true
+        run: |
+          dotnet pack src/Zerobus/Zerobus.csproj \
+            --configuration Release \
+            --output ./packages \
+            -p:SkipNativeBuild=true \
+            -p:Version=${{ steps.version.outputs.version }} \
+            -p:PackageVersion=${{ steps.version.outputs.version }} \
+            -p:AssemblyVersion=${{ steps.version.outputs.version }} \
+            -p:FileVersion=${{ steps.version.outputs.version }} \
+            -p:InformationalVersion=${{ steps.version.outputs.version }} \
+            -p:CI=true
+
+      - name: Generate attestation
+        uses: actions/attest-build-provenance@v4
+        with:
+          subject-path: "packages/*.nupkg"
+
+      - name: NuGet login (OIDC → temp API key)
+        uses: NuGet/login@v1
+        id: login
+        with:
+          user: ${{ secrets.NUGET_USERNAME }}
+
+      - name: Publish to Nuget Packages
+        env:
+          NUGET_AUTH_TOKEN: ${{ steps.login.outputs.NUGET_API_KEY }}
+        run: |
+          dotnet nuget push packages/*.nupkg \
+            --api-key "${{ steps.login.outputs.NUGET_API_KEY }}" \
+            --skip-duplicate  \
+            --source https://api.nuget.org/v3/index.json
+
+  release:
+    name: Create GitHub Release
+    runs-on:
+      group: databricks-protected-runner-group
+      labels: linux-ubuntu-latest
+    needs: publish
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Extract version from tag
+        id: version
+        run: echo "version=${GITHUB_REF#refs/tags/dotnet/v}" >> "$GITHUB_OUTPUT"
+
+      - name: Extract release notes from changelog
+        run: |
+          version="v${{ steps.version.outputs.version }}"
+          awk "/^## Release ${version}/{found=1; next} /^## /{if(found) exit} found{print}" dotnet/CHANGELOG.md > /tmp/release-notes.md
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          name: .NET SDK v${{ steps.version.outputs.version }}
+          body_path: /tmp/release-notes.md
