@@ -58,12 +58,12 @@ def _serialize_batch(batch):
     """Serialize a pyarrow.RecordBatch (or Table) to IPC bytes."""
     pa = _check_pyarrow()
     if isinstance(batch, pa.Table):
-        # Convert Table to a single RecordBatch
-        batches = batch.to_batches()
-        if len(batches) == 0:
+        if batch.num_rows == 0:
             raise ValueError("Cannot ingest an empty pyarrow.Table")
+        # Convert Table to a single RecordBatch, combining chunks if needed
+        batches = batch.to_batches()
         if len(batches) > 1:
-            batch = pa.concat_tables([pa.Table.from_batches([b]) for b in batches]).combine_chunks().to_batches()[0]
+            batch = pa.concat_batches(batches)
         else:
             batch = batches[0]
     elif not isinstance(batch, pa.RecordBatch):

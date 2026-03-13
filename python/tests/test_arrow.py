@@ -104,8 +104,9 @@ class TestSerializeBatch(unittest.TestCase):
     def test_empty_table_raises(self):
         schema = pa.schema([("a", pa.int64())])
         table = pa.table({"a": pa.array([], type=pa.int64())}, schema=schema)
-        with self.assertRaises(ValueError):
+        with self.assertRaises(ValueError) as cm:
             _serialize_batch(table)
+        self.assertIn("empty", str(cm.exception).lower())
 
     def test_rejects_wrong_type(self):
         with self.assertRaises(TypeError):
