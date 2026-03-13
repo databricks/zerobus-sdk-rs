@@ -77,19 +77,18 @@ fn record_batch_to_ipc_bytes(
     Ok(buffer)
 }
 
-/// Build an ArrowSchema from IPC-serialized schema bytes.
+/// Build an ArrowSchema from Arrow IPC stream bytes (schema-only, no batches).
 ///
-/// Python side calls `schema.serialize().to_pybytes()` on a `pyarrow.Schema`
-/// to produce the IPC stream bytes. The schema is the first message in the stream.
+/// Python side uses `pa.ipc.new_stream(sink, schema)` followed by `writer.close()`
+/// to produce a full IPC stream containing only the schema message.
 fn ipc_schema_bytes_to_arrow_schema(
     schema_bytes: &[u8],
 ) -> Result<arrow_schema::Schema, RustError> {
     let reader = arrow_ipc::reader::StreamReader::try_new(schema_bytes, None)
         .map_err(|e| {
             RustError::InvalidArgument(format!(
-                "Failed to parse Arrow schema bytes: {}. \
-                 Pass schema bytes obtained from pyarrow.Schema via \
-                 schema.serialize().to_pybytes()",
+                "Failed to parse Arrow IPC schema bytes: {}. \
+                 Pass bytes from pa.ipc.new_stream(sink, schema) with no batches written.",
                 e
             ))
         })?;
