@@ -508,3 +508,109 @@ class aio:
                 A new ZerobusStream
             """
             ...
+
+# =============================================================================
+# ARROW (EXPERIMENTAL)
+# =============================================================================
+
+class arrow:
+    """Arrow Flight support submodule."""
+
+    class ArrowStreamConfigurationOptions:
+        """Configuration options for Arrow Flight streams."""
+
+        max_inflight_batches: int
+        """Maximum number of batches in-flight (pending acknowledgment). Default: 1000"""
+
+        recovery: bool
+        """Enable automatic stream recovery on retryable failures. Default: True"""
+
+        recovery_timeout_ms: int
+        """Timeout per recovery attempt in milliseconds. Default: 15000"""
+
+        recovery_backoff_ms: int
+        """Backoff between recovery attempts in milliseconds. Default: 2000"""
+
+        recovery_retries: int
+        """Maximum recovery retry attempts. Default: 4"""
+
+        server_lack_of_ack_timeout_ms: int
+        """Server acknowledgment timeout in milliseconds. Default: 60000"""
+
+        flush_timeout_ms: int
+        """Flush timeout in milliseconds. Default: 300000"""
+
+        connection_timeout_ms: int
+        """Connection establishment timeout in milliseconds. Default: 30000"""
+
+        def __init__(
+            self,
+            *,
+            max_inflight_batches: int = 1000,
+            recovery: bool = True,
+            recovery_timeout_ms: int = 15000,
+            recovery_backoff_ms: int = 2000,
+            recovery_retries: int = 4,
+            server_lack_of_ack_timeout_ms: int = 60000,
+            flush_timeout_ms: int = 300000,
+            connection_timeout_ms: int = 30000,
+        ) -> None: ...
+        def __repr__(self) -> str: ...
+
+    class ZerobusArrowStream:
+        """Synchronous Arrow Flight stream for ingesting pyarrow RecordBatches."""
+
+        @property
+        def is_closed(self) -> bool: ...
+
+        @property
+        def table_name(self) -> str: ...
+
+        def ingest_batch(self, ipc_bytes: bytes) -> int:
+            """Ingest a RecordBatch (as IPC bytes) and return the logical offset."""
+            ...
+
+        def wait_for_offset(self, offset: int) -> None:
+            """Wait for the server to acknowledge the batch at the given offset."""
+            ...
+
+        def flush(self) -> None:
+            """Flush all pending batches, waiting for acknowledgment."""
+            ...
+
+        def close(self) -> None:
+            """Close the stream gracefully."""
+            ...
+
+        def get_unacked_batches(self) -> List[bytes]:
+            """Return unacknowledged batches as Arrow IPC bytes."""
+            ...
+
+    class AsyncZerobusArrowStream:
+        """Asynchronous Arrow Flight stream for ingesting pyarrow RecordBatches."""
+
+        @property
+        def is_closed(self) -> bool: ...
+
+        @property
+        def table_name(self) -> str: ...
+
+        async def ingest_batch(self, ipc_bytes: bytes) -> int:
+            """Ingest a RecordBatch (as IPC bytes) and return the logical offset."""
+            ...
+
+        async def wait_for_offset(self, offset: int) -> None:
+            """Wait for the server to acknowledge the batch at the given offset."""
+            ...
+
+        async def flush(self) -> None:
+            """Flush all pending batches, waiting for acknowledgment."""
+            ...
+
+        async def close(self) -> None:
+            """Close the stream gracefully."""
+            ...
+
+        async def get_unacked_batches(self) -> List[bytes]:
+            """Return unacknowledged batches as Arrow IPC bytes."""
+            ...
