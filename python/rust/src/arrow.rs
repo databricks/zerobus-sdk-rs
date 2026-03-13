@@ -19,10 +19,6 @@ use databricks_zerobus_ingest_sdk::{
 use crate::auth::HeadersProviderWrapper;
 use crate::common::map_error;
 
-fn map_rust_error_to_pyerr(err: RustError) -> PyErr {
-    map_error(err)
-}
-
 /// Deserialize Arrow IPC bytes into exactly one RecordBatch.
 fn ipc_bytes_to_record_batch(
     ipc_bytes: &[u8],
@@ -277,7 +273,7 @@ impl ZerobusArrowStream {
         // then RecordBatch-to-IPC again inside the Rust SDK for Flight. Pass IPC bytes
         // directly to the SDK instead.
         let batch = ipc_bytes_to_record_batch(ipc_bytes.as_bytes())
-            .map_err(|e| map_rust_error_to_pyerr(e))?;
+            .map_err(|e| map_error(e))?;
 
         let stream_clone = self.inner.clone();
         let runtime = self.runtime.clone();
@@ -288,7 +284,7 @@ impl ZerobusArrowStream {
                 stream_guard
                     .ingest_batch(batch)
                     .await
-                    .map_err(|e| Python::with_gil(|_py| map_rust_error_to_pyerr(e)))
+                    .map_err(|e| Python::with_gil(|_py| map_error(e)))
             })
         })
     }
@@ -304,7 +300,7 @@ impl ZerobusArrowStream {
                 stream_guard
                     .wait_for_offset(offset)
                     .await
-                    .map_err(|e| Python::with_gil(|_py| map_rust_error_to_pyerr(e)))
+                    .map_err(|e| Python::with_gil(|_py| map_error(e)))
             })
         })
     }
@@ -320,7 +316,7 @@ impl ZerobusArrowStream {
                 stream_guard
                     .flush()
                     .await
-                    .map_err(|e| Python::with_gil(|_py| map_rust_error_to_pyerr(e)))
+                    .map_err(|e| Python::with_gil(|_py| map_error(e)))
             })
         })
     }
@@ -336,7 +332,7 @@ impl ZerobusArrowStream {
                 stream_guard
                     .close()
                     .await
-                    .map_err(|e| Python::with_gil(|_py| map_rust_error_to_pyerr(e)))
+                    .map_err(|e| Python::with_gil(|_py| map_error(e)))
             })
         })
     }
@@ -378,13 +374,13 @@ impl ZerobusArrowStream {
                 let batches = stream_guard
                     .get_unacked_batches()
                     .await
-                    .map_err(|e| Python::with_gil(|_py| map_rust_error_to_pyerr(e)))?;
+                    .map_err(|e| Python::with_gil(|_py| map_error(e)))?;
 
                 Python::with_gil(|py| {
                     let mut py_batches: Vec<PyObject> = Vec::with_capacity(batches.len());
                     for batch in &batches {
                         let ipc_bytes = record_batch_to_ipc_bytes(batch)
-                            .map_err(|e| map_rust_error_to_pyerr(e))?;
+                            .map_err(|e| map_error(e))?;
                         py_batches
                             .push(PyBytes::new(py, &ipc_bytes).into());
                     }
@@ -414,7 +410,7 @@ impl AsyncZerobusArrowStream {
         ipc_bytes: &PyBytes,
     ) -> PyResult<&'py PyAny> {
         let batch = ipc_bytes_to_record_batch(ipc_bytes.as_bytes())
-            .map_err(|e| map_rust_error_to_pyerr(e))?;
+            .map_err(|e| map_error(e))?;
 
         let stream_clone = self.inner.clone();
 
@@ -423,7 +419,7 @@ impl AsyncZerobusArrowStream {
             stream_guard
                 .ingest_batch(batch)
                 .await
-                .map_err(|e| Python::with_gil(|_py| map_rust_error_to_pyerr(e)))
+                .map_err(|e| Python::with_gil(|_py| map_error(e)))
         })
     }
 
@@ -440,7 +436,7 @@ impl AsyncZerobusArrowStream {
             stream_guard
                 .wait_for_offset(offset)
                 .await
-                .map_err(|e| Python::with_gil(|_py| map_rust_error_to_pyerr(e)))?;
+                .map_err(|e| Python::with_gil(|_py| map_error(e)))?;
             Ok(())
         })
     }
@@ -454,7 +450,7 @@ impl AsyncZerobusArrowStream {
             stream_guard
                 .flush()
                 .await
-                .map_err(|e| Python::with_gil(|_py| map_rust_error_to_pyerr(e)))?;
+                .map_err(|e| Python::with_gil(|_py| map_error(e)))?;
             Ok(())
         })
     }
@@ -468,7 +464,7 @@ impl AsyncZerobusArrowStream {
             stream_guard
                 .close()
                 .await
-                .map_err(|e| Python::with_gil(|_py| map_rust_error_to_pyerr(e)))?;
+                .map_err(|e| Python::with_gil(|_py| map_error(e)))?;
             Ok(())
         })
     }
@@ -504,13 +500,13 @@ impl AsyncZerobusArrowStream {
             let batches = stream_guard
                 .get_unacked_batches()
                 .await
-                .map_err(|e| Python::with_gil(|_py| map_rust_error_to_pyerr(e)))?;
+                .map_err(|e| Python::with_gil(|_py| map_error(e)))?;
 
             Python::with_gil(|py| {
                 let mut py_batches: Vec<PyObject> = Vec::with_capacity(batches.len());
                 for batch in &batches {
                     let ipc_bytes = record_batch_to_ipc_bytes(batch)
-                        .map_err(|e| map_rust_error_to_pyerr(e))?;
+                        .map_err(|e| map_error(e))?;
                     py_batches.push(PyBytes::new(py, &ipc_bytes).into());
                 }
                 Ok(py_batches)
@@ -535,7 +531,7 @@ pub fn create_arrow_stream_sync(
     options: Option<&ArrowStreamConfigurationOptions>,
 ) -> PyResult<ZerobusArrowStream> {
     let schema = ipc_schema_bytes_to_arrow_schema(schema_ipc_bytes)
-        .map_err(|e| map_rust_error_to_pyerr(e))?;
+        .map_err(|e| map_error(e))?;
 
     let table_props = RustArrowTableProperties {
         table_name,
@@ -553,7 +549,7 @@ pub fn create_arrow_stream_sync(
             sdk_guard
                 .create_arrow_stream(table_props, client_id, client_secret, rust_options)
                 .await
-                .map_err(|e| Python::with_gil(|_py| map_rust_error_to_pyerr(e)))
+                .map_err(|e| Python::with_gil(|_py| map_error(e)))
         })
     })?;
 
@@ -574,7 +570,7 @@ pub fn create_arrow_stream_with_headers_provider_sync(
     options: Option<&ArrowStreamConfigurationOptions>,
 ) -> PyResult<ZerobusArrowStream> {
     let schema = ipc_schema_bytes_to_arrow_schema(schema_ipc_bytes)
-        .map_err(|e| map_rust_error_to_pyerr(e))?;
+        .map_err(|e| map_error(e))?;
 
     let table_props = RustArrowTableProperties {
         table_name,
@@ -597,7 +593,7 @@ pub fn create_arrow_stream_with_headers_provider_sync(
                     rust_options,
                 )
                 .await
-                .map_err(|e| Python::with_gil(|_py| map_rust_error_to_pyerr(e)))
+                .map_err(|e| Python::with_gil(|_py| map_error(e)))
         })
     })?;
 
@@ -625,7 +621,7 @@ pub fn recreate_arrow_stream_sync(
             sdk_guard
                 .recreate_arrow_stream(&*old_guard)
                 .await
-                .map_err(|e| Python::with_gil(|_py| map_rust_error_to_pyerr(e)))
+                .map_err(|e| Python::with_gil(|_py| map_error(e)))
         })
     })?;
 
@@ -646,7 +642,7 @@ pub fn create_arrow_stream_async<'py>(
     options: Option<ArrowStreamConfigurationOptions>,
 ) -> PyResult<&'py PyAny> {
     let schema = ipc_schema_bytes_to_arrow_schema(&schema_ipc_bytes)
-        .map_err(|e| map_rust_error_to_pyerr(e))?;
+        .map_err(|e| map_error(e))?;
 
     let table_props = RustArrowTableProperties {
         table_name,
@@ -661,7 +657,7 @@ pub fn create_arrow_stream_async<'py>(
         let stream = sdk_guard
             .create_arrow_stream(table_props, client_id, client_secret, rust_options)
             .await
-            .map_err(|e| Python::with_gil(|_py| map_rust_error_to_pyerr(e)))?;
+            .map_err(|e| Python::with_gil(|_py| map_error(e)))?;
 
         Ok(AsyncZerobusArrowStream {
             inner: Arc::new(RwLock::new(stream)),
@@ -679,7 +675,7 @@ pub fn create_arrow_stream_with_headers_provider_async<'py>(
     options: Option<ArrowStreamConfigurationOptions>,
 ) -> PyResult<&'py PyAny> {
     let schema = ipc_schema_bytes_to_arrow_schema(&schema_ipc_bytes)
-        .map_err(|e| map_rust_error_to_pyerr(e))?;
+        .map_err(|e| map_error(e))?;
 
     let table_props = RustArrowTableProperties {
         table_name,
@@ -699,7 +695,7 @@ pub fn create_arrow_stream_with_headers_provider_async<'py>(
                 rust_options,
             )
             .await
-            .map_err(|e| Python::with_gil(|_py| map_rust_error_to_pyerr(e)))?;
+            .map_err(|e| Python::with_gil(|_py| map_error(e)))?;
 
         Ok(AsyncZerobusArrowStream {
             inner: Arc::new(RwLock::new(stream)),
@@ -722,7 +718,7 @@ pub fn recreate_arrow_stream_async<'py>(
         let stream = sdk_guard
             .recreate_arrow_stream(&*old_guard)
             .await
-            .map_err(|e| Python::with_gil(|_py| map_rust_error_to_pyerr(e)))?;
+            .map_err(|e| Python::with_gil(|_py| map_error(e)))?;
 
         Ok(AsyncZerobusArrowStream {
             inner: Arc::new(RwLock::new(stream)),
