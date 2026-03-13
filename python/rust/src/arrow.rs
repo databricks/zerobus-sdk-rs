@@ -23,30 +23,31 @@ fn map_rust_error_to_pyerr(err: RustError) -> PyErr {
     map_error(err)
 }
 
-/// Deserialize Arrow IPC bytes into a RecordBatch.
+/// Deserialize Arrow IPC bytes into exactly one RecordBatch.
 fn ipc_bytes_to_record_batch(
     ipc_bytes: &[u8],
 ) -> Result<arrow_array::RecordBatch, RustError> {
-    let reader =
+    let mut reader =
         arrow_ipc::reader::StreamReader::try_new(ipc_bytes, None).map_err(|e| {
             RustError::InvalidArgument(format!("Failed to parse Arrow IPC data: {}", e))
         })?;
 
-    let mut batches = Vec::new();
-    for batch_result in reader {
-        let batch = batch_result.map_err(|e| {
+    let batch = reader
+        .next()
+        .ok_or_else(|| {
+            RustError::InvalidArgument("No batches found in Arrow IPC data".to_string())
+        })?
+        .map_err(|e| {
             RustError::InvalidArgument(format!("Failed to read Arrow batch: {}", e))
         })?;
-        batches.push(batch);
-    }
 
-    if batches.is_empty() {
+    if reader.next().is_some() {
         return Err(RustError::InvalidArgument(
-            "No batches found in Arrow IPC data".to_string(),
+            "Expected exactly one RecordBatch in Arrow IPC data, found multiple".to_string(),
         ));
     }
 
-    Ok(batches.into_iter().next().unwrap())
+    Ok(batch)
 }
 
 /// Serialize a RecordBatch to Arrow IPC bytes.
