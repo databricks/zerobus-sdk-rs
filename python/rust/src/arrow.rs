@@ -340,21 +340,27 @@ impl ZerobusArrowStream {
 
     /// Check if the stream has been closed.
     #[getter]
-    fn is_closed(&self) -> bool {
+    fn is_closed(&self, py: Python) -> bool {
         let stream_clone = self.inner.clone();
-        self.runtime.block_on(async move {
-            let stream_guard = stream_clone.read().await;
-            stream_guard.is_closed()
+        let runtime = self.runtime.clone();
+        py.allow_threads(|| {
+            runtime.block_on(async move {
+                let stream_guard = stream_clone.read().await;
+                stream_guard.is_closed()
+            })
         })
     }
 
     /// Get the table name.
     #[getter]
-    fn table_name(&self) -> String {
+    fn table_name(&self, py: Python) -> String {
         let stream_clone = self.inner.clone();
-        self.runtime.block_on(async move {
-            let stream_guard = stream_clone.read().await;
-            stream_guard.table_name().to_string()
+        let runtime = self.runtime.clone();
+        py.allow_threads(|| {
+            runtime.block_on(async move {
+                let stream_guard = stream_clone.read().await;
+                stream_guard.table_name().to_string()
+            })
         })
     }
 
@@ -466,24 +472,24 @@ impl AsyncZerobusArrowStream {
 
     /// Check if the stream has been closed.
     #[getter]
-    fn is_closed(&self) -> bool {
-        // This needs a runtime to lock, but is_closed is atomic so
-        // we can use try_read or spawn.
-        let stream_clone = self.inner.clone();
-        pyo3_asyncio::tokio::get_runtime().block_on(async move {
-            let stream_guard = stream_clone.read().await;
-            stream_guard.is_closed()
-        })
+    fn is_closed(&self) -> PyResult<bool> {
+        match self.inner.try_read() {
+            Ok(stream_guard) => Ok(stream_guard.is_closed()),
+            Err(_) => Err(pyo3::exceptions::PyRuntimeError::new_err(
+                "Cannot read stream state: lock is held by another operation",
+            )),
+        }
     }
 
     /// Get the table name.
     #[getter]
-    fn table_name(&self) -> String {
-        let stream_clone = self.inner.clone();
-        pyo3_asyncio::tokio::get_runtime().block_on(async move {
-            let stream_guard = stream_clone.read().await;
-            stream_guard.table_name().to_string()
-        })
+    fn table_name(&self) -> PyResult<String> {
+        match self.inner.try_read() {
+            Ok(stream_guard) => Ok(stream_guard.table_name().to_string()),
+            Err(_) => Err(pyo3::exceptions::PyRuntimeError::new_err(
+                "Cannot read stream state: lock is held by another operation",
+            )),
+        }
     }
 
     /// Get unacknowledged batches as a list of Arrow IPC byte buffers.
