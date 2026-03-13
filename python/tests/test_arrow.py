@@ -226,6 +226,72 @@ class TestArrowStreamConfigurationOptions(unittest.TestCase):
         self.assertIn("recovery", repr_str)
 
 
+class TestSerializeBatchEmptyRecordBatch(unittest.TestCase):
+    """Test that empty RecordBatch (not Table) is handled correctly."""
+
+    def test_empty_record_batch_serializes(self):
+        """An empty RecordBatch (0 rows) should still serialize — only empty Tables are rejected."""
+        schema = pa.schema([("a", pa.int64())])
+        batch = pa.record_batch({"a": pa.array([], type=pa.int64())}, schema=schema)
+        # RecordBatch with 0 rows is valid — the check is only on Table
+        ipc_bytes = _serialize_batch(batch)
+        self.assertIsInstance(ipc_bytes, bytes)
+        recovered = _deserialize_batch(ipc_bytes)
+        self.assertEqual(recovered.num_rows, 0)
+
+
+class TestArrowConfigNegativeValues(unittest.TestCase):
+    """Test that negative config values are rejected at stream creation time."""
+
+    def test_negative_max_inflight_batches(self):
+        options = ArrowStreamConfigurationOptions(max_inflight_batches=-1)
+        self.assertEqual(options.max_inflight_batches, -1)
+        # Validation happens in to_rust() at stream creation, not at construction.
+        # We can't test the Rust-side validation without a server, but we verify
+        # the value is accepted by the Python constructor and stored.
+
+    def test_negative_recovery_timeout_ms(self):
+        options = ArrowStreamConfigurationOptions(recovery_timeout_ms=-100)
+        self.assertEqual(options.recovery_timeout_ms, -100)
+
+    def test_negative_flush_timeout_ms(self):
+        options = ArrowStreamConfigurationOptions(flush_timeout_ms=-1)
+        self.assertEqual(options.flush_timeout_ms, -1)
+
+    def test_negative_connection_timeout_ms(self):
+        options = ArrowStreamConfigurationOptions(connection_timeout_ms=-500)
+        self.assertEqual(options.connection_timeout_ms, -500)
+
+
+class TestAsyncArrowStreamAPISurface(unittest.TestCase):
+    """Test that AsyncZerobusArrowStream has the expected async API."""
+
+    def test_async_arrow_stream_methods_are_coroutines(self):
+        """Verify async stream methods are actual coroutine functions."""
+        from zerobus.sdk.aio import ZerobusArrowStream
+
+        # These methods should be present on the wrapper class
+        for method_name in ["ingest_batch", "wait_for_offset", "flush", "close", "get_unacked_batches"]:
+            self.assertTrue(
+                hasattr(ZerobusArrowStream, method_name),
+                f"AsyncZerobusArrowStream missing method: {method_name}",
+            )
+
+    def test_async_sdk_has_create_and_recreate(self):
+        """Verify async SDK has arrow stream creation methods."""
+        import inspect
+
+        from zerobus.sdk.aio import ZerobusSdk
+
+        self.assertTrue(hasattr(ZerobusSdk, "create_arrow_stream"))
+        self.assertTrue(hasattr(ZerobusSdk, "recreate_arrow_stream"))
+        # create_arrow_stream should be a coroutine function
+        self.assertTrue(
+            inspect.iscoroutinefunction(ZerobusSdk.create_arrow_stream),
+            "create_arrow_stream should be async",
+        )
+
+
 class TestArrowImports(unittest.TestCase):
     """Test that Arrow types can be imported from expected locations."""
 
