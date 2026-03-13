@@ -274,6 +274,9 @@ impl ZerobusArrowStream {
     /// Args:
     ///     ipc_bytes: Arrow IPC serialized bytes from pyarrow.RecordBatch.serialize()
     fn ingest_batch(&self, py: Python, ipc_bytes: &PyBytes) -> PyResult<i64> {
+        // TODO(perf): eliminate double IPC serialization - Python-to-IPC-to-RecordBatch here,
+        // then RecordBatch-to-IPC again inside the Rust SDK for Flight. Pass IPC bytes
+        // directly to the SDK instead.
         let batch = ipc_bytes_to_record_batch(ipc_bytes.as_bytes())
             .map_err(|e| map_rust_error_to_pyerr(e))?;
 
