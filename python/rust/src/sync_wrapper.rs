@@ -449,6 +449,7 @@ impl ZerobusSdk {
         };
 
         let rust_options = if let Some(opts) = options.clone() {
+            opts.validate()?;
             let ack_callback = opts
                 .ack_callback
                 .map(|cb| Arc::new(AckCallbackWrapper::new(cb)) as Arc<dyn RustAckCallback>);
@@ -516,6 +517,7 @@ impl ZerobusSdk {
         };
 
         let rust_options = if let Some(opts) = options.clone() {
+            opts.validate()?;
             let ack_callback = opts
                 .ack_callback
                 .map(|cb| Arc::new(AckCallbackWrapper::new(cb)) as Arc<dyn RustAckCallback>);

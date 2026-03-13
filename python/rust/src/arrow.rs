@@ -205,8 +205,43 @@ impl ArrowStreamConfigurationOptions {
 }
 
 impl ArrowStreamConfigurationOptions {
-    pub fn to_rust(&self) -> RustArrowStreamOptions {
-        RustArrowStreamOptions {
+    pub fn to_rust(&self) -> Result<RustArrowStreamOptions, PyErr> {
+        if self.max_inflight_batches < 0 {
+            return Err(pyo3::exceptions::PyValueError::new_err(
+                "max_inflight_batches must be non-negative",
+            ));
+        }
+        if self.recovery_timeout_ms < 0 {
+            return Err(pyo3::exceptions::PyValueError::new_err(
+                "recovery_timeout_ms must be non-negative",
+            ));
+        }
+        if self.recovery_backoff_ms < 0 {
+            return Err(pyo3::exceptions::PyValueError::new_err(
+                "recovery_backoff_ms must be non-negative",
+            ));
+        }
+        if self.recovery_retries < 0 {
+            return Err(pyo3::exceptions::PyValueError::new_err(
+                "recovery_retries must be non-negative",
+            ));
+        }
+        if self.server_lack_of_ack_timeout_ms < 0 {
+            return Err(pyo3::exceptions::PyValueError::new_err(
+                "server_lack_of_ack_timeout_ms must be non-negative",
+            ));
+        }
+        if self.flush_timeout_ms < 0 {
+            return Err(pyo3::exceptions::PyValueError::new_err(
+                "flush_timeout_ms must be non-negative",
+            ));
+        }
+        if self.connection_timeout_ms < 0 {
+            return Err(pyo3::exceptions::PyValueError::new_err(
+                "connection_timeout_ms must be non-negative",
+            ));
+        }
+        Ok(RustArrowStreamOptions {
             max_inflight_batches: self.max_inflight_batches as usize,
             recovery: self.recovery,
             recovery_timeout_ms: self.recovery_timeout_ms as u64,
@@ -216,7 +251,7 @@ impl ArrowStreamConfigurationOptions {
             flush_timeout_ms: self.flush_timeout_ms as u64,
             connection_timeout_ms: self.connection_timeout_ms as u64,
             ipc_compression: None,
-        }
+        })
     }
 }
 
@@ -498,7 +533,7 @@ pub fn create_arrow_stream_sync(
         schema: Arc::new(schema),
     };
 
-    let rust_options = options.map(|o| o.to_rust());
+    let rust_options = options.map(|o| o.to_rust()).transpose()?;
 
     let sdk_clone = sdk.clone();
     let runtime_clone = runtime.clone();
@@ -537,7 +572,7 @@ pub fn create_arrow_stream_with_headers_provider_sync(
         schema: Arc::new(schema),
     };
 
-    let rust_options = options.map(|o| o.to_rust());
+    let rust_options = options.map(|o| o.to_rust()).transpose()?;
     let provider = Arc::new(HeadersProviderWrapper::new(headers_provider));
 
     let sdk_clone = sdk.clone();
@@ -609,7 +644,7 @@ pub fn create_arrow_stream_async<'py>(
         schema: Arc::new(schema),
     };
 
-    let rust_options = options.map(|o| o.to_rust());
+    let rust_options = options.map(|o| o.to_rust()).transpose()?;
     let sdk_clone = sdk.clone();
 
     pyo3_asyncio::tokio::future_into_py(py, async move {
@@ -642,7 +677,7 @@ pub fn create_arrow_stream_with_headers_provider_async<'py>(
         schema: Arc::new(schema),
     };
 
-    let rust_options = options.map(|o| o.to_rust());
+    let rust_options = options.map(|o| o.to_rust()).transpose()?;
     let provider = Arc::new(HeadersProviderWrapper::new(headers_provider));
     let sdk_clone = sdk.clone();
 

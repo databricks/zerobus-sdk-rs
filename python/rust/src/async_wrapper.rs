@@ -425,7 +425,7 @@ impl ZerobusSdk {
             descriptor_proto: table_properties.descriptor_proto.clone(),
         };
 
-        let opts = convert_stream_options(options);
+        let opts = convert_stream_options(options)?;
 
         future_into_py(py, async move {
             let sdk_guard = sdk.read().await;
@@ -455,7 +455,7 @@ impl ZerobusSdk {
             descriptor_proto: table_properties.descriptor_proto.clone(),
         };
 
-        let opts = convert_stream_options(options);
+        let opts = convert_stream_options(options)?;
         let wrapper = Arc::new(HeadersProviderWrapper::new(headers_provider));
 
         future_into_py(py, async move {
@@ -548,30 +548,34 @@ impl ZerobusSdk {
 // Helper to convert Python StreamConfigurationOptions to Rust options
 fn convert_stream_options(
     options: Option<&StreamConfigurationOptions>,
-) -> Option<RustStreamOptions> {
-    options.map(|opts| {
-        let ack_callback = opts
-            .ack_callback
-            .clone()
-            .map(|cb| Arc::new(AckCallbackWrapper::new(cb)) as Arc<dyn RustAckCallback>);
+) -> PyResult<Option<RustStreamOptions>> {
+    match options {
+        Some(opts) => {
+            opts.validate()?;
+            let ack_callback = opts
+                .ack_callback
+                .clone()
+                .map(|cb| Arc::new(AckCallbackWrapper::new(cb)) as Arc<dyn RustAckCallback>);
 
-        RustStreamOptions {
-            max_inflight_requests: opts.max_inflight_records as usize,
-            recovery: opts.recovery,
-            recovery_timeout_ms: opts.recovery_timeout_ms as u64,
-            recovery_backoff_ms: opts.recovery_backoff_ms as u64,
-            recovery_retries: opts.recovery_retries as u32,
-            server_lack_of_ack_timeout_ms: opts.server_lack_of_ack_timeout_ms as u64,
-            flush_timeout_ms: opts.flush_timeout_ms as u64,
-            record_type: match opts.record_type.value {
-                1 => RustRecordType::Proto,
-                2 => RustRecordType::Json,
-                _ => RustRecordType::Proto,
-            },
-            stream_paused_max_wait_time_ms: opts.stream_paused_max_wait_time_ms.map(|v| v as u64),
-            callback_max_wait_time_ms: opts.callback_max_wait_time_ms.map(|v| v as u64),
-            ack_callback,
-            ..Default::default()
+            Ok(Some(RustStreamOptions {
+                max_inflight_requests: opts.max_inflight_records as usize,
+                recovery: opts.recovery,
+                recovery_timeout_ms: opts.recovery_timeout_ms as u64,
+                recovery_backoff_ms: opts.recovery_backoff_ms as u64,
+                recovery_retries: opts.recovery_retries as u32,
+                server_lack_of_ack_timeout_ms: opts.server_lack_of_ack_timeout_ms as u64,
+                flush_timeout_ms: opts.flush_timeout_ms as u64,
+                record_type: match opts.record_type.value {
+                    1 => RustRecordType::Proto,
+                    2 => RustRecordType::Json,
+                    _ => RustRecordType::Proto,
+                },
+                stream_paused_max_wait_time_ms: opts.stream_paused_max_wait_time_ms.map(|v| v as u64),
+                callback_max_wait_time_ms: opts.callback_max_wait_time_ms.map(|v| v as u64),
+                ack_callback,
+                ..Default::default()
+            }))
         }
-    })
+        None => Ok(None),
+    }
 }
