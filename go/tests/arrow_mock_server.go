@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"net"
 	"sync"
 	"time"
 
@@ -152,8 +153,16 @@ func StartMockArrowServer() (*MockArrowFlightServer, string, func(), error) {
 		srv.Serve() //nolint:errcheck
 	}()
 
-	// Let the server finish binding before returning.
-	time.Sleep(100 * time.Millisecond)
+	addr := srv.Addr().String()
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		conn, err := net.DialTimeout("tcp", addr, 10*time.Millisecond)
+		if err == nil {
+			conn.Close()
+			break
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
 
 	serverURL := fmt.Sprintf("http://%s", srv.Addr().String())
 	stop := func() { srv.Shutdown() }
