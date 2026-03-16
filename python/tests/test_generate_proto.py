@@ -157,140 +157,188 @@ class TestGetProtoFieldInfo:
 
     # Scalar types
     def test_tinyint(self):
-        modifier, proto_type, nested = get_proto_field_info("f", "TINYINT", True, {"count": 0})
+        modifier, proto_type, nested = get_proto_field_info(
+            "f", "TINYINT", True, {"count": 0}
+        )
         assert proto_type == "int32"
         assert modifier == "optional"
         assert nested is None
 
     def test_byte(self):
-        modifier, proto_type, nested = get_proto_field_info("f", "BYTE", True, {"count": 0})
+        modifier, proto_type, nested = get_proto_field_info(
+            "f", "BYTE", True, {"count": 0}
+        )
         assert proto_type == "int32"
         assert modifier == "optional"
         assert nested is None
 
     def test_smallint(self):
-        modifier, proto_type, nested = get_proto_field_info("f", "SMALLINT", True, {"count": 0})
+        modifier, proto_type, nested = get_proto_field_info(
+            "f", "SMALLINT", True, {"count": 0}
+        )
         assert proto_type == "int32"
         assert modifier == "optional"
         assert nested is None
 
     def test_short(self):
-        modifier, proto_type, nested = get_proto_field_info("f", "SHORT", True, {"count": 0})
+        modifier, proto_type, nested = get_proto_field_info(
+            "f", "SHORT", True, {"count": 0}
+        )
         assert proto_type == "int32"
         assert modifier == "optional"
         assert nested is None
 
     def test_int(self):
-        modifier, proto_type, nested = get_proto_field_info("f", "INT", True, {"count": 0})
+        modifier, proto_type, nested = get_proto_field_info(
+            "f", "INT", True, {"count": 0}
+        )
         assert proto_type == "int32"
         assert modifier == "optional"
         assert nested is None
 
     def test_bigint(self):
-        modifier, proto_type, nested = get_proto_field_info("f", "BIGINT", True, {"count": 0})
+        modifier, proto_type, nested = get_proto_field_info(
+            "f", "BIGINT", True, {"count": 0}
+        )
         assert proto_type == "int64"
         assert modifier == "optional"
         assert nested is None
 
     def test_long(self):
-        modifier, proto_type, nested = get_proto_field_info("f", "LONG", True, {"count": 0})
+        modifier, proto_type, nested = get_proto_field_info(
+            "f", "LONG", True, {"count": 0}
+        )
         assert proto_type == "int64"
         assert modifier == "optional"
         assert nested is None
 
     def test_float(self):
-        modifier, proto_type, nested = get_proto_field_info("f", "FLOAT", True, {"count": 0})
+        modifier, proto_type, nested = get_proto_field_info(
+            "f", "FLOAT", True, {"count": 0}
+        )
         assert proto_type == "float"
         assert modifier == "optional"
         assert nested is None
 
     def test_double(self):
-        modifier, proto_type, nested = get_proto_field_info("f", "DOUBLE", True, {"count": 0})
+        modifier, proto_type, nested = get_proto_field_info(
+            "f", "DOUBLE", True, {"count": 0}
+        )
         assert proto_type == "double"
         assert modifier == "optional"
         assert nested is None
 
     def test_string(self):
-        modifier, proto_type, nested = get_proto_field_info("f", "STRING", True, {"count": 0})
+        modifier, proto_type, nested = get_proto_field_info(
+            "f", "STRING", True, {"count": 0}
+        )
         assert proto_type == "string"
         assert modifier == "optional"
         assert nested is None
 
     def test_varchar(self):
-        modifier, proto_type, nested = get_proto_field_info("f", "VARCHAR(255)", True, {"count": 0})
+        modifier, proto_type, nested = get_proto_field_info(
+            "f", "VARCHAR(255)", True, {"count": 0}
+        )
         assert proto_type == "string"
         assert modifier == "optional"
         assert nested is None
 
     def test_boolean(self):
-        modifier, proto_type, nested = get_proto_field_info("f", "BOOLEAN", True, {"count": 0})
+        modifier, proto_type, nested = get_proto_field_info(
+            "f", "BOOLEAN", True, {"count": 0}
+        )
         assert proto_type == "bool"
         assert modifier == "optional"
         assert nested is None
 
     def test_binary(self):
-        modifier, proto_type, nested = get_proto_field_info("f", "BINARY", True, {"count": 0})
+        modifier, proto_type, nested = get_proto_field_info(
+            "f", "BINARY", True, {"count": 0}
+        )
         assert proto_type == "bytes"
         assert modifier == "optional"
         assert nested is None
 
     def test_date(self):
-        modifier, proto_type, nested = get_proto_field_info("f", "DATE", True, {"count": 0})
+        modifier, proto_type, nested = get_proto_field_info(
+            "f", "DATE", True, {"count": 0}
+        )
         assert proto_type == "int32"
         assert modifier == "optional"
         assert nested is None
 
     def test_timestamp(self):
-        modifier, proto_type, nested = get_proto_field_info("f", "TIMESTAMP", True, {"count": 0})
+        modifier, proto_type, nested = get_proto_field_info(
+            "f", "TIMESTAMP", True, {"count": 0}
+        )
         assert proto_type == "int64"
         assert modifier == "optional"
         assert nested is None
 
     def test_timestamp_ntz(self):
-        modifier, proto_type, nested = get_proto_field_info("f", "TIMESTAMP_NTZ", True, {"count": 0})
+        modifier, proto_type, nested = get_proto_field_info(
+            "f", "TIMESTAMP_NTZ", True, {"count": 0}
+        )
         assert proto_type == "int64"
         assert modifier == "optional"
         assert nested is None
 
     def test_variant(self):
-        modifier, proto_type, nested = get_proto_field_info("f", "VARIANT", True, {"count": 0})
+        modifier, proto_type, nested = get_proto_field_info(
+            "f", "VARIANT", True, {"count": 0}
+        )
         assert proto_type == "string"
         assert modifier == "optional"
         assert nested is None
 
     # Nullable vs required
     def test_nullable_true(self):
-        modifier, proto_type, nested = get_proto_field_info("f", "INT", True, {"count": 0})
+        modifier, proto_type, nested = get_proto_field_info(
+            "f", "INT", True, {"count": 0}
+        )
         assert modifier == "optional"
 
     def test_nullable_false(self):
-        modifier, proto_type, nested = get_proto_field_info("f", "INT", False, {"count": 0})
+        modifier, proto_type, nested = get_proto_field_info(
+            "f", "INT", False, {"count": 0}
+        )
         assert modifier == "required"
 
     # Case insensitivity
     def test_lowercase_type(self):
-        modifier, proto_type, nested = get_proto_field_info("f", "timestamp_ntz", True, {"count": 0})
+        modifier, proto_type, nested = get_proto_field_info(
+            "f", "timestamp_ntz", True, {"count": 0}
+        )
         assert proto_type == "int64"
 
     def test_mixed_case_type(self):
-        modifier, proto_type, nested = get_proto_field_info("f", "Variant", True, {"count": 0})
+        modifier, proto_type, nested = get_proto_field_info(
+            "f", "Variant", True, {"count": 0}
+        )
         assert proto_type == "string"
 
     # Array types
     def test_array_of_string(self):
-        modifier, proto_type, nested = get_proto_field_info("f", "ARRAY<STRING>", True, {"count": 0})
+        modifier, proto_type, nested = get_proto_field_info(
+            "f", "ARRAY<STRING>", True, {"count": 0}
+        )
         assert proto_type == "string"
         assert modifier == "repeated"
         assert nested is None
 
     def test_array_of_int(self):
-        modifier, proto_type, nested = get_proto_field_info("f", "ARRAY<INT>", True, {"count": 0})
+        modifier, proto_type, nested = get_proto_field_info(
+            "f", "ARRAY<INT>", True, {"count": 0}
+        )
         assert proto_type == "int32"
         assert modifier == "repeated"
         assert nested is None
 
     def test_array_of_struct(self):
-        modifier, proto_type, nested = get_proto_field_info("items", "ARRAY<STRUCT<name:STRING>>", True, {"count": 0})
+        modifier, proto_type, nested = get_proto_field_info(
+            "items", "ARRAY<STRUCT<name:STRING>>", True, {"count": 0}
+        )
         assert modifier == "repeated"
         assert proto_type == "Items"
         assert nested is not None
@@ -306,19 +354,25 @@ class TestGetProtoFieldInfo:
 
     # Map types
     def test_map_string_to_int(self):
-        modifier, proto_type, nested = get_proto_field_info("f", "MAP<STRING,INT>", True, {"count": 0})
+        modifier, proto_type, nested = get_proto_field_info(
+            "f", "MAP<STRING,INT>", True, {"count": 0}
+        )
         assert proto_type == "map<string, int32>"
         assert modifier == ""
         assert nested is None
 
     def test_map_int_to_string(self):
-        modifier, proto_type, nested = get_proto_field_info("f", "MAP<INT,STRING>", True, {"count": 0})
+        modifier, proto_type, nested = get_proto_field_info(
+            "f", "MAP<INT,STRING>", True, {"count": 0}
+        )
         assert proto_type == "map<int32, string>"
         assert modifier == ""
         assert nested is None
 
     def test_map_with_struct_value(self):
-        modifier, proto_type, nested = get_proto_field_info("data", "MAP<STRING,STRUCT<a:INT>>", True, {"count": 0})
+        modifier, proto_type, nested = get_proto_field_info(
+            "data", "MAP<STRING,STRUCT<a:INT>>", True, {"count": 0}
+        )
         assert modifier == ""
         assert "map<string, Data>" in proto_type
         assert nested is not None
@@ -336,7 +390,9 @@ class TestGetProtoFieldInfo:
             get_proto_field_info("f", "MAP<STRING,MAP<INT,STRING>>", True, {"count": 0})
 
     def test_map_with_array_value_raises(self):
-        with pytest.raises(ValueError, match="Maps with array values are not supported"):
+        with pytest.raises(
+            ValueError, match="Maps with array values are not supported"
+        ):
             get_proto_field_info("f", "MAP<STRING,ARRAY<INT>>", True, {"count": 0})
 
     # Struct types
@@ -390,7 +446,9 @@ class TestExtractColumns:
             extract_columns({})
 
     def test_missing_column_field(self):
-        table_info = {"columns": [{"name": "id", "type_text": "INT"}]}  # missing nullable
+        table_info = {
+            "columns": [{"name": "id", "type_text": "INT"}]
+        }  # missing nullable
         with pytest.raises(KeyError):
             extract_columns(table_info)
 
@@ -419,7 +477,9 @@ class TestGenerateProtoFile:
             os.unlink(output_path)
 
     def test_generate_proto_with_timestamp_ntz(self):
-        columns = [{"name": "event_time", "type_text": "TIMESTAMP_NTZ", "nullable": True}]
+        columns = [
+            {"name": "event_time", "type_text": "TIMESTAMP_NTZ", "nullable": True}
+        ]
 
         with tempfile.NamedTemporaryFile(mode="w", suffix=".proto", delete=False) as f:
             output_path = f.name
@@ -489,7 +549,9 @@ class TestGenerateProtoFile:
             os.unlink(output_path)
 
     def test_generate_proto_with_map(self):
-        columns = [{"name": "metadata", "type_text": "MAP<STRING,INT>", "nullable": True}]
+        columns = [
+            {"name": "metadata", "type_text": "MAP<STRING,INT>", "nullable": True}
+        ]
 
         with tempfile.NamedTemporaryFile(mode="w", suffix=".proto", delete=False) as f:
             output_path = f.name
@@ -505,7 +567,13 @@ class TestGenerateProtoFile:
             os.unlink(output_path)
 
     def test_generate_proto_with_struct(self):
-        columns = [{"name": "address", "type_text": "STRUCT<city:STRING,zip:INT>", "nullable": True}]
+        columns = [
+            {
+                "name": "address",
+                "type_text": "STRUCT<city:STRING,zip:INT>",
+                "nullable": True,
+            }
+        ]
 
         with tempfile.NamedTemporaryFile(mode="w", suffix=".proto", delete=False) as f:
             output_path = f.name

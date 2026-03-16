@@ -269,7 +269,13 @@ class TestAsyncArrowStreamAPISurface(unittest.TestCase):
         from zerobus.sdk.aio import ZerobusArrowStream
 
         # These methods should be present on the wrapper class
-        for method_name in ["ingest_batch", "wait_for_offset", "flush", "close", "get_unacked_batches"]:
+        for method_name in [
+            "ingest_batch",
+            "wait_for_offset",
+            "flush",
+            "close",
+            "get_unacked_batches",
+        ]:
             self.assertTrue(
                 hasattr(ZerobusArrowStream, method_name),
                 f"AsyncZerobusArrowStream missing method: {method_name}",

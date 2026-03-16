@@ -115,7 +115,11 @@ class ZerobusStream:
     @property
     def stream_id(self):
         """Get the stream ID (placeholder)."""
-        return self._inner.stream_id if hasattr(self._inner, "stream_id") else "stream-placeholder-id"
+        return (
+            self._inner.stream_id
+            if hasattr(self._inner, "stream_id")
+            else "stream-placeholder-id"
+        )
 
     def get_state(self):
         """Get the current stream state (placeholder)."""
@@ -201,7 +205,13 @@ class ZerobusSdk:
         self._inner = _RustZerobusSdk(host, unity_catalog_url)
 
     def create_arrow_stream(
-        self, table_name: str, schema, client_id: str, client_secret: str, options=None, headers_provider=None
+        self,
+        table_name: str,
+        schema,
+        client_id: str,
+        client_secret: str,
+        options=None,
+        headers_provider=None,
     ) -> ZerobusArrowStream:
         """
         Create an Arrow Flight stream for ingesting pyarrow RecordBatches.
@@ -228,10 +238,14 @@ class ZerobusSdk:
                 table_name, schema_bytes, headers_provider, options
             )
         else:
-            rust_stream = self._inner.create_arrow_stream(table_name, schema_bytes, client_id, client_secret, options)
+            rust_stream = self._inner.create_arrow_stream(
+                table_name, schema_bytes, client_id, client_secret, options
+            )
         return ZerobusArrowStream(rust_stream)
 
-    def recreate_arrow_stream(self, old_stream: ZerobusArrowStream) -> ZerobusArrowStream:
+    def recreate_arrow_stream(
+        self, old_stream: ZerobusArrowStream
+    ) -> ZerobusArrowStream:
         """
         Recreate a closed Arrow stream with the same configuration,
         re-ingesting unacknowledged batches.
@@ -245,7 +259,14 @@ class ZerobusSdk:
         rust_stream = self._inner.recreate_arrow_stream(old_stream._inner)
         return ZerobusArrowStream(rust_stream)
 
-    def create_stream(self, client_id: str, client_secret: str, table_properties, options=None, headers_provider=None):
+    def create_stream(
+        self,
+        client_id: str,
+        client_secret: str,
+        table_properties,
+        options=None,
+        headers_provider=None,
+    ):
         """
         Create a stream with OAuth authentication or custom headers provider.
 
@@ -258,10 +279,14 @@ class ZerobusSdk:
         """
         if headers_provider is not None:
             # Use custom headers provider (ignores client_id/client_secret)
-            rust_stream = self._inner.create_stream_with_headers_provider(table_properties, headers_provider, options)
+            rust_stream = self._inner.create_stream_with_headers_provider(
+                table_properties, headers_provider, options
+            )
         else:
             # Use OAuth authentication
-            rust_stream = self._inner.create_stream(client_id, client_secret, table_properties, options)
+            rust_stream = self._inner.create_stream(
+                client_id, client_secret, table_properties, options
+            )
         return ZerobusStream(rust_stream)
 
     def recreate_stream(self, old_stream: ZerobusStream):

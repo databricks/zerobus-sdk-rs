@@ -224,7 +224,13 @@ class ZerobusSdk:
         self._inner = _core.aio.ZerobusSdk(host, unity_catalog_url)
 
     async def create_arrow_stream(
-        self, table_name: str, schema, client_id: str, client_secret: str, options=None, headers_provider=None
+        self,
+        table_name: str,
+        schema,
+        client_id: str,
+        client_secret: str,
+        options=None,
+        headers_provider=None,
     ) -> ZerobusArrowStream:
         """
         Create an Arrow Flight stream for ingesting pyarrow RecordBatches (async).
@@ -256,13 +262,20 @@ class ZerobusSdk:
             )
         return ZerobusArrowStream(rust_stream)
 
-    async def recreate_arrow_stream(self, old_stream: ZerobusArrowStream) -> ZerobusArrowStream:
+    async def recreate_arrow_stream(
+        self, old_stream: ZerobusArrowStream
+    ) -> ZerobusArrowStream:
         """Recreate a closed Arrow stream with the same configuration."""
         rust_stream = await self._inner.recreate_arrow_stream(old_stream._inner)
         return ZerobusArrowStream(rust_stream)
 
     async def create_stream(
-        self, client_id: str, client_secret: str, table_properties, options=None, headers_provider=None
+        self,
+        client_id: str,
+        client_secret: str,
+        table_properties,
+        options=None,
+        headers_provider=None,
     ):
         """
         Create a stream with OAuth authentication or custom headers provider.
@@ -281,7 +294,9 @@ class ZerobusSdk:
             )
         else:
             # Use OAuth authentication
-            rust_stream = await self._inner.create_stream(client_id, client_secret, table_properties, options)
+            rust_stream = await self._inner.create_stream(
+                client_id, client_secret, table_properties, options
+            )
         return ZerobusStream(rust_stream)
 
     async def recreate_stream(self, old_stream: ZerobusStream):
