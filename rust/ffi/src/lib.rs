@@ -114,6 +114,7 @@ fn validate_arrow_stream_ptr_mut<'a>(
 // ---- Arrow IPC helpers ----
 
 /// Deserializes an `Arc<ArrowSchema>` from Arrow IPC stream bytes (schema-only stream).
+#[allow(clippy::result_large_err)]
 fn ipc_bytes_to_schema(
     bytes: &[u8],
 ) -> ZerobusResult<std::sync::Arc<databricks_zerobus_ingest_sdk::ArrowSchema>> {
@@ -126,6 +127,7 @@ fn ipc_bytes_to_schema(
 }
 
 /// Deserializes the first `RecordBatch` from Arrow IPC stream bytes.
+#[allow(clippy::result_large_err)]
 fn ipc_bytes_to_record_batch(bytes: &[u8]) -> ZerobusResult<RecordBatch> {
     use std::io::Cursor;
     let cursor = Cursor::new(bytes);
@@ -139,6 +141,7 @@ fn ipc_bytes_to_record_batch(bytes: &[u8]) -> ZerobusResult<RecordBatch> {
 }
 
 /// Serializes a `RecordBatch` to Arrow IPC stream bytes (schema + one batch).
+#[allow(clippy::result_large_err)]
 fn record_batch_to_ipc_bytes(batch: &RecordBatch) -> ZerobusResult<Vec<u8>> {
     let mut buf = Vec::new();
     let mut writer = StreamWriter::try_new(&mut buf, batch.schema().as_ref()).map_err(|e| {
