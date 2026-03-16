@@ -224,16 +224,10 @@ class ZerobusSdk:
         self._inner = _core.aio.ZerobusSdk(host, unity_catalog_url)
 
     async def create_arrow_stream(
-        self,
-        table_name: str,
-        schema,
-        client_id: str,
-        client_secret: str,
-        options=None,
-        headers_provider=None,
+        self, table_name: str, schema, client_id: str, client_secret: str, options=None
     ) -> ZerobusArrowStream:
         """
-        Create an Arrow Flight stream for ingesting pyarrow RecordBatches (async).
+        Create an Arrow Flight stream with OAuth client credentials (async).
 
         **Experimental/Unsupported**: Arrow Flight support is experimental.
 
@@ -243,7 +237,6 @@ class ZerobusSdk:
             client_id: OAuth client ID.
             client_secret: OAuth client secret.
             options: Optional ArrowStreamConfigurationOptions.
-            headers_provider: Optional custom headers provider.
 
         Returns:
             A ZerobusArrowStream ready for ingesting RecordBatches.
@@ -251,15 +244,32 @@ class ZerobusSdk:
         from zerobus.sdk.shared.arrow import _serialize_schema
 
         schema_bytes = _serialize_schema(schema)
+        rust_stream = await self._inner.create_arrow_stream(table_name, schema_bytes, client_id, client_secret, options)
+        return ZerobusArrowStream(rust_stream)
 
-        if headers_provider is not None:
-            rust_stream = await self._inner.create_arrow_stream_with_headers_provider(
-                table_name, schema_bytes, headers_provider, options
-            )
-        else:
-            rust_stream = await self._inner.create_arrow_stream(
-                table_name, schema_bytes, client_id, client_secret, options
-            )
+    async def create_arrow_stream_with_headers_provider(
+        self, table_name: str, schema, headers_provider, options=None
+    ) -> ZerobusArrowStream:
+        """
+        Create an Arrow Flight stream with a custom headers provider (async).
+
+        **Experimental/Unsupported**: Arrow Flight support is experimental.
+
+        Args:
+            table_name: Fully qualified table name (catalog.schema.table).
+            schema: A pyarrow.Schema defining the table schema.
+            headers_provider: Custom headers provider for authentication.
+            options: Optional ArrowStreamConfigurationOptions.
+
+        Returns:
+            A ZerobusArrowStream ready for ingesting RecordBatches.
+        """
+        from zerobus.sdk.shared.arrow import _serialize_schema
+
+        schema_bytes = _serialize_schema(schema)
+        rust_stream = await self._inner.create_arrow_stream_with_headers_provider(
+            table_name, schema_bytes, headers_provider, options
+        )
         return ZerobusArrowStream(rust_stream)
 
     async def recreate_arrow_stream(self, old_stream: ZerobusArrowStream) -> ZerobusArrowStream:
