@@ -250,6 +250,11 @@ class TestArrowStreamConfigurationOptions(unittest.TestCase):
         self.assertEqual(IPCCompression.LZ4_FRAME, "lz4_frame")
         self.assertEqual(IPCCompression.ZSTD, "zstd")
 
+    def test_ipc_compression_invalid_string_stored(self):
+        """Invalid compression strings are accepted at construction but rejected at stream creation."""
+        options = ArrowStreamConfigurationOptions(ipc_compression="invalid")
+        self.assertEqual(options.ipc_compression, "invalid")
+
     def test_repr(self):
         options = ArrowStreamConfigurationOptions()
         repr_str = repr(options)
