@@ -595,7 +595,9 @@ def generate_proto_file(
         if field_modifier == "":
             fields_and_definitions += f"\t{proto_type} {field_name} = {field_number};\n"
         else:
-            fields_and_definitions += f"\t{field_modifier} {proto_type} {field_name} = {field_number};\n"
+            fields_and_definitions += (
+                f"\t{field_modifier} {proto_type} {field_name} = {field_number};\n"
+            )
 
         field_number += 1
 
