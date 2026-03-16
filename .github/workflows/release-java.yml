@@ -10,17 +10,106 @@ permissions:
   contents: write
 
 jobs:
+  build-jni:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: linux-ubuntu-latest
+            runner: { group: databricks-protected-runner-group, labels: linux-ubuntu-latest }
+            target: x86_64-unknown-linux-gnu
+            artifact: libzerobus_jni.so
+            native_dir: linux-x86_64
+            cross: false
+          - os: linux-ubuntu-latest
+            runner: { group: databricks-protected-runner-group, labels: linux-ubuntu-latest }
+            target: aarch64-unknown-linux-gnu
+            artifact: libzerobus_jni.so
+            native_dir: linux-aarch64
+            cross: true
+          - os: windows-server-latest
+            runner: { group: databricks-protected-runner-group, labels: windows-server-latest }
+            target: x86_64-pc-windows-msvc
+            artifact: zerobus_jni.dll
+            native_dir: windows-x86_64
+            cross: false
+          - os: macos-arm64
+            runner: [self-hosted, macOS, ARM64, zerobus-sdk]
+            target: aarch64-apple-darwin
+            artifact: libzerobus_jni.dylib
+            native_dir: osx-aarch64
+            cross: false
+          - os: macos-arm64
+            runner: [self-hosted, macOS, ARM64, zerobus-sdk]
+            target: x86_64-apple-darwin
+            artifact: libzerobus_jni.dylib
+            native_dir: osx-x86_64
+            cross: false
+
+    name: Build JNI - ${{ matrix.native_dir }}
+    runs-on: ${{ matrix.runner }}
+
+    defaults:
+      run:
+        working-directory: rust
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install protoc
+        uses: arduino/setup-protoc@v3
+
+      - name: Install cross-compilation toolchain (Linux ARM64)
+        if: matrix.cross
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq gcc-aarch64-linux-gnu
+          mkdir -p .cargo
+          echo '[target.aarch64-unknown-linux-gnu]' > .cargo/config.toml
+          echo 'linker = "aarch64-linux-gnu-gcc"' >> .cargo/config.toml
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Build JNI library
+        run: cargo build --release -p zerobus-jni --target ${{ matrix.target }}
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: jni-${{ matrix.native_dir }}
+          path: rust/target/${{ matrix.target }}/release/${{ matrix.artifact }}
+          if-no-files-found: error
+
   publish:
     name: Publish to Maven Central
     runs-on:
       group: databricks-protected-runner-group
       labels: linux-ubuntu-latest
+    needs: build-jni
     defaults:
       run:
         working-directory: java
 
     steps:
       - uses: actions/checkout@v4
+
+      - name: Download all JNI artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: jni-artifacts
+          pattern: jni-*
+
+      - name: Place JNI libraries in native directory
+        run: |
+          for dir in ../jni-artifacts/jni-*/; do
+            platform=$(basename "$dir" | sed 's/jni-//')
+            mkdir -p src/main/resources/native/"$platform"
+            cp "$dir"/* src/main/resources/native/"$platform"/
+          done
+          find src/main/resources/native -type f | sort
 
       - name: Set up Java
         uses: actions/setup-java@v4
@@ -54,6 +143,22 @@ jobs:
         id: version
         run: echo "version=${GITHUB_REF#refs/tags/java/v}" >> "$GITHUB_OUTPUT"
 
+      - name: Download all JNI artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: jni-artifacts
+          pattern: jni-*
+
+      - name: Create JNI archive
+        run: |
+          mkdir -p native
+          for dir in jni-artifacts/jni-*/; do
+            platform=$(basename "$dir" | sed 's/jni-//')
+            mkdir -p "native/$platform"
+            cp "$dir"/* "native/$platform/"
+          done
+          tar -czvf zerobus-jni-${{ steps.version.outputs.version }}.tar.gz native/
+
       - name: Extract release notes from changelog
         run: |
           version="v${{ steps.version.outputs.version }}"
@@ -64,3 +169,4 @@ jobs:
         with:
           name: Java SDK v${{ steps.version.outputs.version }}
           body_path: /tmp/release-notes.md
+          files: zerobus-jni-${{ steps.version.outputs.version }}.tar.gz

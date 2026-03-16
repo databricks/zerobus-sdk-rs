@@ -40,11 +40,23 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [linux-ubuntu-latest, windows-server-latest]
-        javaVersion: ['11', '17', '21']
-    runs-on:
-      group: databricks-protected-runner-group
-      labels: ${{ matrix.os }}
+        include:
+          - os: linux-ubuntu-latest
+            runner: { group: databricks-protected-runner-group, labels: linux-ubuntu-latest }
+            javaVersion: '11'
+          - os: linux-ubuntu-latest
+            runner: { group: databricks-protected-runner-group, labels: linux-ubuntu-latest }
+            javaVersion: '17'
+          - os: linux-ubuntu-latest
+            runner: { group: databricks-protected-runner-group, labels: linux-ubuntu-latest }
+            javaVersion: '21'
+          - os: windows-server-latest
+            runner: { group: databricks-protected-runner-group, labels: windows-server-latest }
+            javaVersion: '11'
+          - os: macos-arm64
+            runner: [self-hosted, macOS, ARM64, zerobus-sdk]
+            javaVersion: '11'
+    runs-on: ${{ matrix.runner }}
     defaults:
       run:
         working-directory: java
