@@ -162,9 +162,9 @@ func convertArrowConfigToC(opts *ArrowStreamConfigurationOptions) C.CArrowStream
 	if maxInflight == 0 {
 		maxInflight = d.MaxInflightBatches
 	}
-	recovery := opts.Recovery
-	if opts.RecoveryTimeoutMs == 0 && opts.RecoveryBackoffMs == 0 && opts.RecoveryRetries == 0 {
-		recovery = d.Recovery
+	recovery := true
+	if opts.Recovery == RecoveryDisabled {
+		recovery = false
 	}
 	recoveryTimeout := opts.RecoveryTimeoutMs
 	if recoveryTimeout == 0 {
@@ -190,9 +190,15 @@ func convertArrowConfigToC(opts *ArrowStreamConfigurationOptions) C.CArrowStream
 	if connTimeout == 0 {
 		connTimeout = d.ConnectionTimeoutMs
 	}
-	ipcCompression := opts.IPCCompression
-	if ipcCompression == 0 && opts.IPCCompression == 0 {
-		ipcCompression = d.IPCCompression
+	// Map Go IPCCompressionType to the C wire values: -1=None, 0=LZ4, 1=Zstd.
+	var ipcCompression int32
+	switch opts.IPCCompression {
+	case IPCCompressionLZ4Frame:
+		ipcCompression = 0
+	case IPCCompressionZstd:
+		ipcCompression = 1
+	default: // IPCCompressionDefault, IPCCompressionNone
+		ipcCompression = -1
 	}
 
 	return C.CArrowStreamConfigurationOptions{
@@ -325,7 +331,7 @@ func arrowStreamIngestBatch(streamPtr unsafe.Pointer, ipcBytes []byte) (int64, e
 		C.uintptr_t(len(ipcBytes)),
 		&cres,
 	)
-	if offset < 0 {
+	if !cres.success {
 		return -1, arrowFfiResult(cres)
 	}
 	return int64(offset), nil
@@ -371,10 +377,10 @@ func arrowStreamGetUnackedBatches(streamPtr unsafe.Pointer) ([][]byte, error) {
 	var cres C.CResult
 	cArray := C.zerobus_arrow_stream_get_unacked_batches((*C.CArrowStream)(streamPtr), &cres)
 
+	if err := arrowFfiResult(cres); err != nil {
+		return nil, err
+	}
 	if cArray.count == 0 {
-		if err := arrowFfiResult(cres); err != nil {
-			return nil, err
-		}
 		return [][]byte{}, nil
 	}
 

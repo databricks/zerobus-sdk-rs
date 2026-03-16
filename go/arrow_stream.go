@@ -13,43 +13,77 @@ import (
 	"unsafe"
 )
 
-// Arrow IPC compression options for ArrowStreamConfigurationOptions.IPCCompression.
+// RecoverySetting controls automatic stream recovery.
+// The zero value is RecoveryEnabled (default).
+type RecoverySetting int8
+
 const (
-	// IPCCompressionNone disables Arrow IPC compression (default).
-	IPCCompressionNone int32 = -1
-	// IPCCompressionLZ4Frame enables LZ4 frame compression.
-	IPCCompressionLZ4Frame int32 = 0
-	// IPCCompressionZstd enables Zstandard compression.
-	IPCCompressionZstd int32 = 1
+	// RecoveryEnabled enables automatic stream recovery (default).
+	RecoveryEnabled RecoverySetting = 0
+	// RecoveryDisabled disables automatic stream recovery.
+	RecoveryDisabled RecoverySetting = 1
 )
 
-// ArrowStreamConfigurationOptions holds configuration for an Arrow Flight stream.
+// IPCCompressionType controls Arrow IPC compression. The zero value (IPCCompressionDefault)
+// is no compression.
+type IPCCompressionType int8
+
+const (
+	// IPCCompressionDefault is no compression.
+	IPCCompressionDefault IPCCompressionType = 0
+	// IPCCompressionNone explicitly disables Arrow IPC compression.
+	IPCCompressionNone IPCCompressionType = 1
+	// IPCCompressionLZ4Frame enables LZ4 frame compression.
+	IPCCompressionLZ4Frame IPCCompressionType = 2
+	// IPCCompressionZstd enables Zstandard compression.
+	IPCCompressionZstd IPCCompressionType = 3
+)
+
+// ArrowStreamConfigurationOptions contains configuration options for creating an Arrow Flight stream.
 type ArrowStreamConfigurationOptions struct {
-	// Maximum number of batches in-flight (pending acknowledgment). Default: 1,000
+	// Maximum number of batches in-flight (pending acknowledgment) at once.
+	// Default: 1,000
 	MaxInflightBatches uint64
-	// Enable automatic stream recovery on retryable failures. Default: true
-	Recovery bool
-	// Timeout per recovery attempt in milliseconds. Default: 15,000
+
+	// Enable automatic stream recovery on retryable failures.
+	// Default: RecoveryEnabled
+	Recovery RecoverySetting
+
+	// Timeout for each recovery attempt in milliseconds.
+	// Default: 15,000
 	RecoveryTimeoutMs uint64
-	// Backoff between recovery attempts in milliseconds. Default: 2,000
+
+	// Backoff delay between recovery attempts in milliseconds.
+	// Default: 2,000
 	RecoveryBackoffMs uint64
-	// Maximum recovery retry attempts. Default: 4
+
+	// Maximum number of recovery retry attempts.
+	// Default: 4
 	RecoveryRetries uint32
-	// Server acknowledgment timeout in milliseconds. Default: 60,000
+
+	// Server acknowledgment timeout in milliseconds.
+	// Default: 60,000
 	ServerLackOfAckTimeoutMs uint64
-	// Flush timeout in milliseconds. Default: 300,000
+
+	// Flush operation timeout in milliseconds.
+	// Default: 300,000
 	FlushTimeoutMs uint64
-	// Connection establishment timeout in milliseconds. Default: 30,000
+
+	// Connection establishment timeout in milliseconds.
+	// Default: 30,000
 	ConnectionTimeoutMs uint64
-	// Arrow IPC compression codec. Default: IPCCompressionNone
-	IPCCompression int32
+
+	// Arrow IPC compression codec.
+	// Default: IPCCompressionNone
+	IPCCompression IPCCompressionType
 }
 
-// DefaultArrowStreamConfigurationOptions returns default configuration for Arrow streams.
+// DefaultArrowStreamConfigurationOptions returns default configuration for Arrow streams
+// with all fields set to their explicit default values.
 func DefaultArrowStreamConfigurationOptions() *ArrowStreamConfigurationOptions {
 	return &ArrowStreamConfigurationOptions{
 		MaxInflightBatches:       1_000,
-		Recovery:                 true,
+		Recovery:                 RecoveryEnabled,
 		RecoveryTimeoutMs:        15_000,
 		RecoveryBackoffMs:        2_000,
 		RecoveryRetries:          4,

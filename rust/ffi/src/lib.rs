@@ -114,7 +114,6 @@ fn validate_arrow_stream_ptr_mut<'a>(
 // ---- Arrow IPC helpers ----
 
 /// Deserializes an `Arc<ArrowSchema>` from Arrow IPC stream bytes (schema-only stream).
-#[allow(clippy::result_large_err)]
 fn ipc_bytes_to_schema(
     bytes: &[u8],
 ) -> ZerobusResult<std::sync::Arc<databricks_zerobus_ingest_sdk::ArrowSchema>> {
@@ -127,7 +126,6 @@ fn ipc_bytes_to_schema(
 }
 
 /// Deserializes the first `RecordBatch` from Arrow IPC stream bytes.
-#[allow(clippy::result_large_err)]
 fn ipc_bytes_to_record_batch(bytes: &[u8]) -> ZerobusResult<RecordBatch> {
     use std::io::Cursor;
     let cursor = Cursor::new(bytes);
@@ -141,7 +139,6 @@ fn ipc_bytes_to_record_batch(bytes: &[u8]) -> ZerobusResult<RecordBatch> {
 }
 
 /// Serializes a `RecordBatch` to Arrow IPC stream bytes (schema + one batch).
-#[allow(clippy::result_large_err)]
 fn record_batch_to_ipc_bytes(batch: &RecordBatch) -> ZerobusResult<Vec<u8>> {
     let mut buf = Vec::new();
     let mut writer = StreamWriter::try_new(&mut buf, batch.schema().as_ref()).map_err(|e| {
@@ -499,8 +496,12 @@ pub extern "C" fn zerobus_arrow_stream_get_unacked_batches(
                         // Free already-allocated batches before returning error.
                         for (&ptr, &len) in batch_ptrs.iter().zip(batch_lens.iter()) {
                             if !ptr.is_null() && len > 0 {
+                                // Safe: ptr came from Box::into_raw(bytes.into_boxed_slice()),
+                                // so capacity == len.
                                 unsafe {
-                                    let _ = Vec::from_raw_parts(ptr, len, len);
+                                    let _ = Box::from_raw(std::ptr::slice_from_raw_parts_mut(
+                                        ptr, len,
+                                    ));
                                 }
                             }
                         }
@@ -510,10 +511,12 @@ pub extern "C" fn zerobus_arrow_stream_get_unacked_batches(
                 }
             }
 
-            let ptrs_ptr = batch_ptrs.as_mut_ptr();
-            let lens_ptr = batch_lens.as_mut_ptr();
-            std::mem::forget(batch_ptrs);
-            std::mem::forget(batch_lens);
+            // into_boxed_slice() shrinks to fit, guaranteeing capacity == len
+            // so the corresponding Box::from_raw in free_batch_array is sound.
+            let ptrs_box = batch_ptrs.into_boxed_slice();
+            let lens_box = batch_lens.into_boxed_slice();
+            let ptrs_ptr = Box::into_raw(ptrs_box) as *mut *mut u8;
+            let lens_ptr = Box::into_raw(lens_box) as *mut usize;
 
             write_success_result(result);
             CArrowBatchArray {
@@ -541,11 +544,22 @@ pub extern "C" fn zerobus_arrow_free_batch_array(array: CArrowBatchArray) {
     }
     unsafe {
         if !array.batches.is_null() && !array.lengths.is_null() {
-            let ptrs = Vec::from_raw_parts(array.batches, array.count, array.count);
-            let lens = Vec::from_raw_parts(array.lengths, array.count, array.count);
+            // Reconstruct as Box<[T]> using the original length. This is safe because
+            // the pointers were produced by Box::into_raw(vec.into_boxed_slice()),
+            // which guarantees capacity == len.
+            let ptrs = Box::from_raw(std::ptr::slice_from_raw_parts_mut(
+                array.batches,
+                array.count,
+            ));
+            let lens = Box::from_raw(std::ptr::slice_from_raw_parts_mut(
+                array.lengths,
+                array.count,
+            ));
             for (&ptr, &len) in ptrs.iter().zip(lens.iter()) {
                 if !ptr.is_null() && len > 0 {
-                    let _ = Vec::from_raw_parts(ptr, len, len);
+                    // Each batch slice was produced by Box::into_raw(bytes.into_boxed_slice()),
+                    // so capacity == len and this reconstruction is sound.
+                    let _ = Box::from_raw(std::ptr::slice_from_raw_parts_mut(ptr, len));
                 }
             }
         }
@@ -946,10 +960,11 @@ pub extern "C" fn zerobus_sdk_new(
         let endpoint = unsafe { c_str_to_string(zerobus_endpoint).map_err(|e| e.to_string())? };
         let catalog_url = unsafe { c_str_to_string(unity_catalog_url).map_err(|e| e.to_string())? };
 
+        let uses_plain_http = endpoint.starts_with("http://");
         let mut builder = ZerobusSdk::builder()
-            .endpoint(endpoint.clone())
+            .endpoint(endpoint)
             .unity_catalog_url(catalog_url);
-        if endpoint.starts_with("http://") {
+        if uses_plain_http {
             builder = builder.tls_config(Arc::new(NoTlsConfig));
         }
         let sdk = builder.build().map_err(|e| e.to_string())?;

@@ -2,8 +2,8 @@ package tests
 
 import (
 	"bytes"
+	"fmt"
 	"testing"
-	"time"
 
 	"github.com/apache/arrow-go/v18/arrow"
 	"github.com/apache/arrow-go/v18/arrow/array"
@@ -25,7 +25,9 @@ func testArrowSchema() *arrow.Schema {
 func makeSchemaIPC(schema *arrow.Schema) []byte {
 	var buf bytes.Buffer
 	w := ipc.NewWriter(&buf, ipc.WithSchema(schema))
-	w.Close()
+	if err := w.Close(); err != nil {
+		panic(fmt.Sprintf("makeSchemaIPC: ipc.Writer.Close: %v", err))
+	}
 	return buf.Bytes()
 }
 
@@ -41,15 +43,19 @@ func makeBatchIPC(schema *arrow.Schema, ids []int32) []byte {
 
 	var buf bytes.Buffer
 	w := ipc.NewWriter(&buf, ipc.WithSchema(schema))
-	w.Write(rec) //nolint:errcheck
-	w.Close()
+	if err := w.Write(rec); err != nil {
+		panic(fmt.Sprintf("makeBatchIPC: ipc.Writer.Write: %v", err))
+	}
+	if err := w.Close(); err != nil {
+		panic(fmt.Sprintf("makeBatchIPC: ipc.Writer.Close: %v", err))
+	}
 	return buf.Bytes()
 }
 
 // arrowOpts returns default options with Recovery disabled and short timeouts.
 func arrowOpts() *zerobus.ArrowStreamConfigurationOptions {
 	opts := zerobus.DefaultArrowStreamConfigurationOptions()
-	opts.Recovery = false
+	opts.Recovery = zerobus.RecoveryDisabled
 	opts.FlushTimeoutMs = 15_000
 	opts.ConnectionTimeoutMs = 10_000
 	return opts
@@ -315,7 +321,7 @@ func TestArrowStreamGetUnackedBatches(t *testing.T) {
 
 	// Use a very short flush timeout so Close succeeds quickly.
 	opts := zerobus.DefaultArrowStreamConfigurationOptions()
-	opts.Recovery = false
+	opts.Recovery = zerobus.RecoveryDisabled
 	opts.ConnectionTimeoutMs = 5_000
 	opts.FlushTimeoutMs = 500
 
@@ -352,9 +358,6 @@ func TestArrowStreamMultipleBatches(t *testing.T) {
 		t.Fatalf("Failed to start Arrow mock server: %v", err)
 	}
 	defer stop()
-
-	// Give server a moment to be fully ready.
-	time.Sleep(200 * time.Millisecond)
 
 	sdk, err := zerobus.NewZerobusSdk(serverURL, "https://mock-uc.com")
 	if err != nil {

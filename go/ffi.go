@@ -190,9 +190,12 @@ func convertConfigToC(opts *StreamConfigurationOptions) C.CStreamConfigurationOp
 	}
 
 	recovery := opts.Recovery
-	// Note: Recovery is a bool, so we check if it was explicitly set to false
-	// by checking if ANY other field is non-zero (indicates intentional config)
-	// If all fields are default-like, we use the default Recovery value
+	// BUG: Recovery = false is indistinguishable from the zero value, so if all
+	// timeout fields are also zero we fall back to the default (true). This heuristic
+	// works when callers start from DefaultStreamConfigurationOptions(), but silently
+	// ignores Recovery = false on a zero-value struct. Fixing this properly would
+	// require a breaking API change (e.g. a RecoverySetting enum like ArrowStream uses).
+	// Callers must use DefaultStreamConfigurationOptions() as a starting point.
 	if opts.RecoveryTimeoutMs == 0 && opts.RecoveryBackoffMs == 0 && opts.RecoveryRetries == 0 {
 		recovery = defaults.Recovery
 	}

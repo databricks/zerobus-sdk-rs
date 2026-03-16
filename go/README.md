@@ -776,9 +776,101 @@ Each example includes detailed comments and demonstrates best practices for prod
 
 > **Experimental/Unsupported**: Arrow Flight ingestion is experimental and not yet supported for production use. The API may change in future releases.
 
-The SDK supports high-throughput ingestion of Apache Arrow RecordBatches via the Arrow Flight protocol. This is useful for pipelines that already work with columnar Arrow data.
+Ingest Apache Arrow RecordBatches directly into Databricks Delta tables using the Arrow Flight protocol. Use this if your pipeline already works with Arrow data. For JSON or Protocol Buffers, use the standard `ZerobusStream`.
 
-See [`examples/arrow/`](examples/arrow/) for a complete working example and setup instructions.
+See [`examples/arrow/`](examples/arrow/) for a complete working example.
+
+### Quick Start
+
+```go
+// 1. Create the SDK (same as always)
+sdk, err := zerobus.NewZerobusSdk(endpoint, ucURL)
+if err != nil { log.Fatal(err) }
+defer sdk.Free()
+
+// 2. Serialize your Arrow schema to IPC bytes (no data batches)
+var schemaBuf bytes.Buffer
+w := ipc.NewWriter(&schemaBuf, ipc.WithSchema(schema))
+if err := w.Close(); err != nil { log.Fatal(err) }
+
+// 3. Create the Arrow stream
+stream, err := sdk.CreateArrowStream(
+    "catalog.schema.table",
+    schemaBuf.Bytes(),
+    clientID, clientSecret,
+    zerobus.DefaultArrowStreamConfigurationOptions(),
+)
+if err != nil { log.Fatal(err) }
+defer stream.Close()
+
+// 4. Serialize a RecordBatch and ingest it
+var batchBuf bytes.Buffer
+w = ipc.NewWriter(&batchBuf, ipc.WithSchema(schema))
+if err := w.Write(rec); err != nil { log.Fatal(err) }
+if err := w.Close(); err != nil { log.Fatal(err) }
+
+offset, err := stream.IngestBatch(batchBuf.Bytes())
+if err != nil { log.Fatal(err) }
+
+// 5. Wait for acknowledgment
+if err := stream.WaitForOffset(offset); err != nil { log.Fatal(err) }
+```
+
+### Schema and Batch Serialization
+
+`CreateArrowStream` takes Arrow IPC stream bytes containing only the schema — write with `ipc.NewWriter` and close without writing any batches.
+
+`IngestBatch` takes Arrow IPC stream bytes containing exactly one RecordBatch — write the schema, write one batch, then close.
+
+The schema must match the target Delta table's column names and types.
+
+### Custom Authentication
+
+Same pattern as `CreateStreamWithHeadersProvider`:
+
+```go
+stream, err := sdk.CreateArrowStreamWithHeadersProvider(
+    "catalog.schema.table",
+    schemaIPC,
+    &MyCustomAuthProvider{},
+    zerobus.DefaultArrowStreamConfigurationOptions(),
+)
+```
+
+### Unacked Batches
+
+If the stream fails, retrieve unacknowledged batches to retry on a new stream:
+
+```go
+if err := stream.Close(); err != nil {
+    unacked, _ := stream.GetUnackedBatches()
+    // re-ingest unacked on a new stream
+}
+```
+
+### ArrowStreamConfigurationOptions
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `MaxInflightBatches` | `uint64` | 1,000 | Maximum in-flight batches |
+| `Recovery` | `RecoverySetting` | RecoveryEnabled | Automatic recovery on failure |
+| `RecoveryTimeoutMs` | `uint64` | 15,000 | Timeout per recovery attempt (ms) |
+| `RecoveryBackoffMs` | `uint64` | 2,000 | Delay between recovery attempts (ms) |
+| `RecoveryRetries` | `uint32` | 4 | Maximum recovery attempts |
+| `ServerLackOfAckTimeoutMs` | `uint64` | 60,000 | Server ack timeout (ms) |
+| `FlushTimeoutMs` | `uint64` | 300,000 | Flush timeout (ms) |
+| `ConnectionTimeoutMs` | `uint64` | 30,000 | Connection timeout (ms) |
+| `IPCCompression` | `IPCCompressionType` | IPCCompressionNone | IPC compression codec |
+
+`RecoverySetting`: `RecoveryEnabled` (default), `RecoveryDisabled`
+
+`IPCCompressionType`: `IPCCompressionNone` (default), `IPCCompressionLZ4Frame`, `IPCCompressionZstd`
+
+```go
+opts := zerobus.DefaultArrowStreamConfigurationOptions()
+opts.RecoveryRetries = 10
+opts.IPCCompression = zerobus.IPCCompressionLZ4Frame
+```
 
 ## Tests
 
@@ -1298,18 +1390,7 @@ Returns unacknowledged batches as Arrow IPC bytes. Call only after stream failur
 
 ### `ArrowStreamConfigurationOptions` (Experimental)
 
-```go
-type ArrowStreamConfigurationOptions struct {
-    MaxInflightBatches uint64
-    Recovery           bool
-    RecoveryTimeoutMs  uint64
-    RecoveryBackoffMs  uint64
-    RecoveryRetries    uint32
-    IpcCompression     IpcCompressionType  // None, LZ4Frame, or Zstd
-}
-```
-
-Use `DefaultArrowStreamConfigurationOptions()` to get sensible defaults.
+Arrow stream configuration. See [ArrowStreamConfigurationOptions](#arrowstreamconfigurationoptions) for details.
 
 **`ZerobusSdk` Arrow methods:**
 
