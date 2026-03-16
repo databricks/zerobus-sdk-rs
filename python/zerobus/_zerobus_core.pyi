@@ -562,10 +562,8 @@ class arrow:
 
         @property
         def is_closed(self) -> bool: ...
-
         @property
         def table_name(self) -> str: ...
-
         def ingest_batch(self, ipc_bytes: bytes) -> int:
             """Ingest a RecordBatch (as IPC bytes) and return the logical offset."""
             ...
@@ -591,10 +589,8 @@ class arrow:
 
         @property
         def is_closed(self) -> bool: ...
-
         @property
         def table_name(self) -> str: ...
-
         async def ingest_batch(self, ipc_bytes: bytes) -> int:
             """Ingest a RecordBatch (as IPC bytes) and return the logical offset."""
             ...
