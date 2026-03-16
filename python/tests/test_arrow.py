@@ -3,7 +3,7 @@ Tests for Arrow Flight support in the Python SDK.
 
 These tests verify the Python-side Arrow serialization/deserialization helpers,
 the ArrowStreamConfigurationOptions pyclass, and the API surface of Arrow stream
-classe, without making network connections.
+classes, without making network connections.
 """
 
 import unittest
