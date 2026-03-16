@@ -46,8 +46,7 @@ def _serialize_schema(schema):
     if not isinstance(schema, pa.Schema):
         raise TypeError(f"Expected pyarrow.Schema, got {type(schema).__name__}")
 
-    # Create an empty RecordBatch with the schema and serialize it.
-    # This produces a valid IPC stream that the Rust side can parse for the schema.
+    # Write a schema-only IPC stream (no batches) that the Rust side can parse.
     sink = pa.BufferOutputStream()
     writer = pa.ipc.new_stream(sink, schema)
     writer.close()
