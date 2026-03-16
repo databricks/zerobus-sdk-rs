@@ -227,17 +227,15 @@ class TestArrowStreamConfigurationOptions(unittest.TestCase):
 
 
 class TestSerializeBatchEmptyRecordBatch(unittest.TestCase):
-    """Test that empty RecordBatch (not Table) is handled correctly."""
+    """Test that empty RecordBatch is rejected."""
 
-    def test_empty_record_batch_serializes(self):
-        """An empty RecordBatch (0 rows) should still serialize — only empty Tables are rejected."""
+    def test_empty_record_batch_raises(self):
+        """An empty RecordBatch (0 rows) should be rejected."""
         schema = pa.schema([("a", pa.int64())])
         batch = pa.record_batch({"a": pa.array([], type=pa.int64())}, schema=schema)
-        # RecordBatch with 0 rows is valid — the check is only on Table
-        ipc_bytes = _serialize_batch(batch)
-        self.assertIsInstance(ipc_bytes, bytes)
-        recovered = _deserialize_batch(ipc_bytes)
-        self.assertEqual(recovered.num_rows, 0)
+        with self.assertRaises(ValueError) as cm:
+            _serialize_batch(batch)
+        self.assertIn("empty", str(cm.exception).lower())
 
 
 class TestArrowConfigNegativeValues(unittest.TestCase):

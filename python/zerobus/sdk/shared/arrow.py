@@ -68,6 +68,9 @@ def _serialize_batch(batch):
     elif not isinstance(batch, pa.RecordBatch):
         raise TypeError(f"Expected pyarrow.RecordBatch or pyarrow.Table, got {type(batch).__name__}")
 
+    if batch.num_rows == 0:
+        raise ValueError("Cannot ingest an empty RecordBatch")
+
     sink = pa.BufferOutputStream()
     writer = pa.ipc.new_stream(sink, batch.schema)
     writer.write_batch(batch)
