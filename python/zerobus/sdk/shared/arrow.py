@@ -26,8 +26,7 @@ Example (Sync):
 import zerobus._zerobus_core as _core
 
 _PYARROW_IMPORT_ERROR = (
-    "pyarrow is required for Arrow Flight support. "
-    "Install with: pip install databricks-zerobus-ingest-sdk[arrow]"
+    "pyarrow is required for Arrow Flight support. " "Install with: pip install databricks-zerobus-ingest-sdk[arrow]"
 )
 
 
@@ -67,9 +66,7 @@ def _serialize_batch(batch):
         else:
             batch = batches[0]
     elif not isinstance(batch, pa.RecordBatch):
-        raise TypeError(
-            f"Expected pyarrow.RecordBatch or pyarrow.Table, got {type(batch).__name__}"
-        )
+        raise TypeError(f"Expected pyarrow.RecordBatch or pyarrow.Table, got {type(batch).__name__}")
 
     if batch.num_rows == 0:
         raise ValueError("Cannot ingest an empty RecordBatch")

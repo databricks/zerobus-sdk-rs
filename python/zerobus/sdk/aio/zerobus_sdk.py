@@ -262,9 +262,7 @@ class ZerobusSdk:
             )
         return ZerobusArrowStream(rust_stream)
 
-    async def recreate_arrow_stream(
-        self, old_stream: ZerobusArrowStream
-    ) -> ZerobusArrowStream:
+    async def recreate_arrow_stream(self, old_stream: ZerobusArrowStream) -> ZerobusArrowStream:
         """Recreate a closed Arrow stream with the same configuration."""
         rust_stream = await self._inner.recreate_arrow_stream(old_stream._inner)
         return ZerobusArrowStream(rust_stream)
@@ -294,9 +292,7 @@ class ZerobusSdk:
             )
         else:
             # Use OAuth authentication
-            rust_stream = await self._inner.create_stream(
-                client_id, client_secret, table_properties, options
-            )
+            rust_stream = await self._inner.create_stream(client_id, client_secret, table_properties, options)
         return ZerobusStream(rust_stream)
 
     async def recreate_stream(self, old_stream: ZerobusStream):

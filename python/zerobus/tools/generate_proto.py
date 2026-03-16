@@ -143,9 +143,7 @@ def get_oauth_token(uc_endpoint: str, client_id: str, client_secret: str) -> str
     access_token = response_json.get("access_token")
 
     if not access_token:
-        raise requests.exceptions.RequestException(
-            "No access token received from OAuth response"
-        )
+        raise requests.exceptions.RequestException("No access token received from OAuth response")
 
     return access_token
 
@@ -375,15 +373,11 @@ def validate_field_name(name: str) -> str:
 
     # Check if name starts with a digit
     if name and name[0].isdigit():
-        raise ValueError(
-            f"Invalid Protobuf field name '{name}'. Cannot start with a digit."
-        )
+        raise ValueError(f"Invalid Protobuf field name '{name}'. Cannot start with a digit.")
 
     # Check if name is a reserved keyword
     if name in reserved:
-        raise ValueError(
-            f"Invalid Protobuf field name '{name}'. It is a reserved keyword."
-        )
+        raise ValueError(f"Invalid Protobuf field name '{name}'. It is a reserved keyword.")
 
     return name
 
@@ -473,14 +467,10 @@ def get_proto_field_info(
 
         # Protobuf map keys cannot be arrays
         if parse_array_type(key_type) is not None:
-            raise ValueError(
-                "Maps with array keys are not supported: map<array<...>, ...>"
-            )
+            raise ValueError("Maps with array keys are not supported: map<array<...>, ...>")
 
         # Protobuf map keys must be integral or string types
-        _, key_proto_type, key_nested_def = get_proto_field_info(
-            field_name, key_type, False, struct_counter, level + 1
-        )
+        _, key_proto_type, key_nested_def = get_proto_field_info(field_name, key_type, False, struct_counter, level + 1)
 
         valid_key_types = [
             "int32",
@@ -502,15 +492,11 @@ def get_proto_field_info(
 
         # Protobuf map values cannot be other maps
         if parse_map_type(value_type) is not None:
-            raise ValueError(
-                "Maps with map values are not supported: map<..., map<...>>"
-            )
+            raise ValueError("Maps with map values are not supported: map<..., map<...>>")
 
         # Protobuf map values cannot be arrays
         if parse_array_type(value_type) is not None:
-            raise ValueError(
-                "Maps with array values are not supported: map<..., array<...>>"
-            )
+            raise ValueError("Maps with array values are not supported: map<..., array<...>>")
 
         _, value_proto_type, value_nested_def = get_proto_field_info(
             field_name, value_type, False, struct_counter, level + 1
@@ -535,9 +521,7 @@ def get_proto_field_info(
 
         for i, (fname, ftype) in enumerate(struct_fields, start=1):
             # Struct fields are always optional to avoid issues with required fields
-            modifier, field_type, nested_def = get_proto_field_info(
-                fname, ftype, True, struct_counter, level + 1
-            )
+            modifier, field_type, nested_def = get_proto_field_info(fname, ftype, True, struct_counter, level + 1)
 
             if nested_def is not None:
                 struct_def += nested_def + "\n\n"
@@ -546,9 +530,7 @@ def get_proto_field_info(
             if modifier == "":
                 struct_def += f"{inner_indent}{field_type} {cleaned_name} = {i};\n"
             else:
-                struct_def += (
-                    f"{inner_indent}{modifier} {field_type} {cleaned_name} = {i};\n"
-                )
+                struct_def += f"{inner_indent}{modifier} {field_type} {cleaned_name} = {i};\n"
 
         struct_def += f"{indent}}}"
 
@@ -557,9 +539,7 @@ def get_proto_field_info(
     raise ValueError(f"Unknown column type: {column_type}")
 
 
-def generate_proto_file(
-    message_name: str, columns: List[Dict[str, str]], output_path: str
-) -> None:
+def generate_proto_file(message_name: str, columns: List[Dict[str, str]], output_path: str) -> None:
     """
     Generate a proto2 file from the column information.
 
@@ -595,9 +575,7 @@ def generate_proto_file(
         if field_modifier == "":
             fields_and_definitions += f"\t{proto_type} {field_name} = {field_number};\n"
         else:
-            fields_and_definitions += (
-                f"\t{field_modifier} {proto_type} {field_name} = {field_number};\n"
-            )
+            fields_and_definitions += f"\t{field_modifier} {proto_type} {field_name} = {field_number};\n"
 
         field_number += 1
 

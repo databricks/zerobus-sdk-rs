@@ -35,9 +35,7 @@ from zerobus.sdk.shared import (
 from zerobus.sdk.shared.headers_provider import HeadersProvider
 
 # Configure logging
-logging.basicConfig(
-    level=logging.INFO, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s"
-)
+logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s")
 logger = logging.getLogger(__name__)
 
 
@@ -47,9 +45,7 @@ SERVER_ENDPOINT = os.getenv(
     "ZEROBUS_SERVER_ENDPOINT",
     "https://your-shard-id.zerobus.region.cloud.databricks.com",
 )
-UNITY_CATALOG_ENDPOINT = os.getenv(
-    "DATABRICKS_WORKSPACE_URL", "https://your-workspace.cloud.databricks.com"
-)
+UNITY_CATALOG_ENDPOINT = os.getenv("DATABRICKS_WORKSPACE_URL", "https://your-workspace.cloud.databricks.com")
 # For Azure:
 # SERVER_ENDPOINT = os.getenv(
 #     "ZEROBUS_SERVER_ENDPOINT", "https://your-shard-id.zerobus.region.azuredatabricks.net"
@@ -121,9 +117,7 @@ class MyAckCallback(AckCallback):
         self.ack_count += 1
         # Log every 100 acknowledgments
         if self.ack_count % 100 == 0:
-            logger.info(
-                f"  Acknowledged up to offset: {offset} (batch #{self.ack_count})"
-            )
+            logger.info(f"  Acknowledged up to offset: {offset} (batch #{self.ack_count})")
 
 
 async def main():
@@ -131,13 +125,8 @@ async def main():
     print("=" * 60)
 
     # Check if credentials are configured
-    if (
-        CLIENT_ID == "your-oauth-client-id"
-        or CLIENT_SECRET == "your-oauth-client-secret"
-    ):
-        logger.error(
-            "Please set DATABRICKS_CLIENT_ID and DATABRICKS_CLIENT_SECRET environment variables"
-        )
+    if CLIENT_ID == "your-oauth-client-id" or CLIENT_SECRET == "your-oauth-client-secret":
+        logger.error("Please set DATABRICKS_CLIENT_ID and DATABRICKS_CLIENT_SECRET environment variables")
         logger.info("Or update the CLIENT_ID and CLIENT_SECRET values in this file")
         return
 
@@ -175,9 +164,7 @@ async def main():
         # The SDK automatically:
         #   - Includes authorization header with OAuth token
         #   - Includes x-databricks-zerobus-table-name header
-        stream = await sdk.create_stream(
-            CLIENT_ID, CLIENT_SECRET, table_properties, options
-        )
+        stream = await sdk.create_stream(CLIENT_ID, CLIENT_SECRET, table_properties, options)
 
         # Advanced: Custom headers provider (for special use cases only)
         # Uncomment to use custom headers instead of OAuth:
@@ -227,9 +214,7 @@ async def main():
 
                 if batch:
                     batch_offset = await stream.ingest_records_offset(batch)
-                    logger.info(
-                        f"  Batch {batch_num + 1}: {len(batch)} records, offset: {batch_offset}"
-                    )
+                    logger.info(f"  Batch {batch_num + 1}: {len(batch)} records, offset: {batch_offset}")
                     success_count += len(batch)
 
             # ========================================================================
@@ -244,9 +229,7 @@ async def main():
                     record_dict = create_sample_json_record(idx)
                     stream.ingest_record_nowait(record_dict)
 
-                logger.info(
-                    f"  Queued {min(100, remaining)} records (tracking via callback)"
-                )
+                logger.info(f"  Queued {min(100, remaining)} records (tracking via callback)")
                 success_count += min(100, remaining)
 
             # ========================================================================
@@ -256,14 +239,9 @@ async def main():
             logger.info("\n4. Using ingest_records_nowait() - batch fire-and-forget")
             remaining = NUM_RECORDS - success_count
             if remaining > 0:
-                batch = [
-                    create_sample_json_record(success_count + i)
-                    for i in range(remaining)
-                ]
+                batch = [create_sample_json_record(success_count + i) for i in range(remaining)]
                 stream.ingest_records_nowait(batch)
-                logger.info(
-                    f"  Queued {len(batch)} records in batch (tracking via callback)"
-                )
+                logger.info(f"  Queued {len(batch)} records in batch (tracking via callback)")
                 success_count += len(batch)
 
             submit_end_time = time.time()

@@ -24,9 +24,7 @@ from zerobus.sdk.shared.arrow import ArrowStreamConfigurationOptions
 from zerobus.sdk.sync import ZerobusSdk
 
 # Configure logging
-logging.basicConfig(
-    level=logging.INFO, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s"
-)
+logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s")
 logger = logging.getLogger(__name__)
 
 
@@ -35,9 +33,7 @@ SERVER_ENDPOINT = os.getenv(
     "ZEROBUS_SERVER_ENDPOINT",
     "https://your-shard-id.zerobus.region.cloud.databricks.com",
 )
-UNITY_CATALOG_ENDPOINT = os.getenv(
-    "DATABRICKS_WORKSPACE_URL", "https://your-workspace.cloud.databricks.com"
-)
+UNITY_CATALOG_ENDPOINT = os.getenv("DATABRICKS_WORKSPACE_URL", "https://your-workspace.cloud.databricks.com")
 TABLE_NAME = os.getenv("ZEROBUS_TABLE_NAME", "catalog.schema.table")
 
 # For OAuth authentication
@@ -66,18 +62,9 @@ def create_sample_batch(batch_index):
     """
     return pa.record_batch(
         {
-            "device_name": [
-                f"sensor-{(batch_index * ROWS_PER_BATCH + i) % 10}"
-                for i in range(ROWS_PER_BATCH)
-            ],
-            "temp": [
-                20 + ((batch_index * ROWS_PER_BATCH + i) % 15)
-                for i in range(ROWS_PER_BATCH)
-            ],
-            "humidity": [
-                50 + ((batch_index * ROWS_PER_BATCH + i) % 40)
-                for i in range(ROWS_PER_BATCH)
-            ],
+            "device_name": [f"sensor-{(batch_index * ROWS_PER_BATCH + i) % 10}" for i in range(ROWS_PER_BATCH)],
+            "temp": [20 + ((batch_index * ROWS_PER_BATCH + i) % 15) for i in range(ROWS_PER_BATCH)],
+            "humidity": [50 + ((batch_index * ROWS_PER_BATCH + i) % 40) for i in range(ROWS_PER_BATCH)],
         },
         schema=SCHEMA,
     )
@@ -88,13 +75,8 @@ def main():
     print("=" * 60)
 
     # Check if credentials are configured
-    if (
-        CLIENT_ID == "your-oauth-client-id"
-        or CLIENT_SECRET == "your-oauth-client-secret"
-    ):
-        logger.error(
-            "Please set DATABRICKS_CLIENT_ID and DATABRICKS_CLIENT_SECRET environment variables"
-        )
+    if CLIENT_ID == "your-oauth-client-id" or CLIENT_SECRET == "your-oauth-client-secret":
+        logger.error("Please set DATABRICKS_CLIENT_ID and DATABRICKS_CLIENT_SECRET environment variables")
         return
 
     if SERVER_ENDPOINT == "https://your-shard-id.zerobus.region.cloud.databricks.com":
@@ -126,15 +108,11 @@ def main():
         # The SDK automatically:
         #   - Includes authorization header with OAuth token
         #   - Includes x-databricks-zerobus-table-name header
-        stream = sdk.create_arrow_stream(
-            TABLE_NAME, SCHEMA, CLIENT_ID, CLIENT_SECRET, options
-        )
+        stream = sdk.create_arrow_stream(TABLE_NAME, SCHEMA, CLIENT_ID, CLIENT_SECRET, options)
         logger.info(f"Arrow stream created for table: {stream.table_name}")
 
         # Step 4: Ingest Arrow RecordBatches
-        logger.info(
-            f"\nIngesting {NUM_BATCHES} batches of {ROWS_PER_BATCH} rows each..."
-        )
+        logger.info(f"\nIngesting {NUM_BATCHES} batches of {ROWS_PER_BATCH} rows each...")
         start_time = time.time()
         total_rows = 0
 
@@ -202,9 +180,7 @@ def main():
                 if unacked:
                     logger.info(f"  {len(unacked)} unacked batches available for retry")
                     for i, batch in enumerate(unacked):
-                        logger.info(
-                            f"    Batch {i}: {batch.num_rows} rows, schema: {batch.schema}"
-                        )
+                        logger.info(f"    Batch {i}: {batch.num_rows} rows, schema: {batch.schema}")
 
             stream.close()
             raise

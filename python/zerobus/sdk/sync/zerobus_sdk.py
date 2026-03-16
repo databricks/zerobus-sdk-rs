@@ -115,11 +115,7 @@ class ZerobusStream:
     @property
     def stream_id(self):
         """Get the stream ID (placeholder)."""
-        return (
-            self._inner.stream_id
-            if hasattr(self._inner, "stream_id")
-            else "stream-placeholder-id"
-        )
+        return self._inner.stream_id if hasattr(self._inner, "stream_id") else "stream-placeholder-id"
 
     def get_state(self):
         """Get the current stream state (placeholder)."""
@@ -238,14 +234,10 @@ class ZerobusSdk:
                 table_name, schema_bytes, headers_provider, options
             )
         else:
-            rust_stream = self._inner.create_arrow_stream(
-                table_name, schema_bytes, client_id, client_secret, options
-            )
+            rust_stream = self._inner.create_arrow_stream(table_name, schema_bytes, client_id, client_secret, options)
         return ZerobusArrowStream(rust_stream)
 
-    def recreate_arrow_stream(
-        self, old_stream: ZerobusArrowStream
-    ) -> ZerobusArrowStream:
+    def recreate_arrow_stream(self, old_stream: ZerobusArrowStream) -> ZerobusArrowStream:
         """
         Recreate a closed Arrow stream with the same configuration,
         re-ingesting unacknowledged batches.
@@ -279,14 +271,10 @@ class ZerobusSdk:
         """
         if headers_provider is not None:
             # Use custom headers provider (ignores client_id/client_secret)
-            rust_stream = self._inner.create_stream_with_headers_provider(
-                table_properties, headers_provider, options
-            )
+            rust_stream = self._inner.create_stream_with_headers_provider(table_properties, headers_provider, options)
         else:
             # Use OAuth authentication
-            rust_stream = self._inner.create_stream(
-                client_id, client_secret, table_properties, options
-            )
+            rust_stream = self._inner.create_stream(client_id, client_secret, table_properties, options)
         return ZerobusStream(rust_stream)
 
     def recreate_stream(self, old_stream: ZerobusStream):
