@@ -499,9 +499,8 @@ pub extern "C" fn zerobus_arrow_stream_get_unacked_batches(
                                 // Safe: ptr came from Box::into_raw(bytes.into_boxed_slice()),
                                 // so capacity == len.
                                 unsafe {
-                                    let _ = Box::from_raw(std::ptr::slice_from_raw_parts_mut(
-                                        ptr, len,
-                                    ));
+                                    let _ =
+                                        Box::from_raw(std::ptr::slice_from_raw_parts_mut(ptr, len));
                                 }
                             }
                         }
