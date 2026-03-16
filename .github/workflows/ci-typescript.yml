@@ -7,6 +7,10 @@ on:
         description: 'Override databricks-zerobus-ingest-sdk with the local path dep (for integration testing unreleased Rust changes)'
         type: boolean
         default: false
+      artifact_suffix:
+        description: 'Suffix to append to artifact names to avoid conflicts when called multiple times in one workflow run'
+        type: string
+        default: ''
 
 jobs:
   build:
@@ -92,7 +96,7 @@ jobs:
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: bindings-${{ matrix.settings.target }}
+          name: bindings-${{ matrix.settings.target }}${{ inputs.artifact_suffix }}
           path: 'typescript/*.node'
           if-no-files-found: error
 

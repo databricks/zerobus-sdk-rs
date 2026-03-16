@@ -15,13 +15,17 @@ jobs:
     if: always()
     steps:
       - run: |
-          if [[ "${{ needs.rust.result }}" == "failure" ]] || \
-             [[ "${{ needs.java.result }}" == "failure" ]] || \
-             [[ "${{ needs.typescript.result }}" == "failure" ]] || \
-             [[ "${{ needs.python.result }}" == "failure" ]] || \
-             [[ "${{ needs.go.result }}" == "failure" ]]; then
-            exit 1
-          fi
+          for result in \
+            "${{ needs.rust.result }}" \
+            "${{ needs.java.result }}" \
+            "${{ needs.typescript.result }}" \
+            "${{ needs.python.result }}" \
+            "${{ needs.go.result }}"; do
+            if [[ "$result" != "success" && "$result" != "skipped" ]]; then
+              echo "Job failed or was cancelled: $result"
+              exit 1
+            fi
+          done
 
   changes:
     runs-on:
@@ -104,6 +108,7 @@ jobs:
     uses: ./.github/workflows/ci-typescript.yml
     with:
       use_local_sdk: true
+      artifact_suffix: '-local-sdk'
 
   cross-sdk-java:
     needs: changes
@@ -111,3 +116,4 @@ jobs:
     uses: ./.github/workflows/ci-java.yml
     with:
       use_local_sdk: true
+      artifact_suffix: '-local-sdk'

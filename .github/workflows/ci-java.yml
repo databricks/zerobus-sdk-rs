@@ -7,6 +7,10 @@ on:
         description: 'Override databricks-zerobus-ingest-sdk with the local path dep (for integration testing unreleased Rust changes)'
         type: boolean
         default: false
+      artifact_suffix:
+        description: 'Suffix to append to artifact names to avoid conflicts when called multiple times in one workflow run'
+        type: string
+        default: ''
 
 jobs:
   fmt:
@@ -67,7 +71,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: test-results-${{ matrix.os }}-java-${{ matrix.javaVersion }}
+          name: test-results-${{ matrix.os }}-java-${{ matrix.javaVersion }}${{ inputs.artifact_suffix }}
           path: |
             java/target/surefire-reports/
             java/target/test-classes/
