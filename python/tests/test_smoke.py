@@ -134,16 +134,23 @@ class TestStreamAPISurface(unittest.TestCase):
         sync_stream_class = _zerobus_core.sync.ZerobusStream
         sync_methods = common_methods + ["ingest_record"]  # Sync has deprecated method
         for method in sync_methods:
-            self.assertTrue(hasattr(sync_stream_class, method), f"Sync stream missing method: {method}")
+            self.assertTrue(
+                hasattr(sync_stream_class, method),
+                f"Sync stream missing method: {method}",
+            )
 
         # Check async stream (no deprecated method)
         async_stream_class = _zerobus_core.aio.ZerobusStream
         for method in common_methods:
-            self.assertTrue(hasattr(async_stream_class, method), f"Async stream missing method: {method}")
+            self.assertTrue(
+                hasattr(async_stream_class, method),
+                f"Async stream missing method: {method}",
+            )
 
         # Verify async also has deprecated method (for backwards compatibility)
         self.assertTrue(
-            hasattr(async_stream_class, "ingest_record"), "Async stream should have deprecated ingest_record method"
+            hasattr(async_stream_class, "ingest_record"),
+            "Async stream should have deprecated ingest_record method",
         )
 
 

@@ -51,7 +51,9 @@ Type mappings:
     """
 
     parser = argparse.ArgumentParser(
-        description=description, epilog=epilog, formatter_class=argparse.RawDescriptionHelpFormatter
+        description=description,
+        epilog=epilog,
+        formatter_class=argparse.RawDescriptionHelpFormatter,
     )
 
     parser.add_argument(
@@ -186,7 +188,14 @@ def extract_columns(table_info: dict) -> List[Dict[str, str]]:
     """
     try:
         columns = table_info["columns"]
-        return [{"name": col["name"], "type_text": col["type_text"], "nullable": col["nullable"]} for col in columns]
+        return [
+            {
+                "name": col["name"],
+                "type_text": col["type_text"],
+                "nullable": col["nullable"],
+            }
+            for col in columns
+        ]
     except KeyError as e:
         raise KeyError(f"Failed to extract column information: missing key {e}")
 
@@ -374,7 +383,11 @@ def validate_field_name(name: str) -> str:
 
 
 def get_proto_field_info(
-    field_name: str, column_type: str, nullable: bool, struct_counter: Dict[str, int], level: int = 0
+    field_name: str,
+    column_type: str,
+    nullable: bool,
+    struct_counter: Dict[str, int],
+    level: int = 0,
 ) -> Tuple[str, str, Optional[str]]:
     """
     Map Unity Catalog column types to proto2 field information.

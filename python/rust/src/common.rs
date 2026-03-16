@@ -207,6 +207,57 @@ pub struct StreamConfigurationOptions {
     pub ack_callback: Option<Py<AckCallback>>,
 }
 
+impl StreamConfigurationOptions {
+    /// Validate that all numeric fields are non-negative before casting to unsigned types.
+    pub fn validate(&self) -> PyResult<()> {
+        if self.max_inflight_records < 0 {
+            return Err(PyValueError::new_err(
+                "max_inflight_records must be non-negative",
+            ));
+        }
+        if self.recovery_timeout_ms < 0 {
+            return Err(PyValueError::new_err(
+                "recovery_timeout_ms must be non-negative",
+            ));
+        }
+        if self.recovery_backoff_ms < 0 {
+            return Err(PyValueError::new_err(
+                "recovery_backoff_ms must be non-negative",
+            ));
+        }
+        if self.recovery_retries < 0 {
+            return Err(PyValueError::new_err(
+                "recovery_retries must be non-negative",
+            ));
+        }
+        if self.server_lack_of_ack_timeout_ms < 0 {
+            return Err(PyValueError::new_err(
+                "server_lack_of_ack_timeout_ms must be non-negative",
+            ));
+        }
+        if self.flush_timeout_ms < 0 {
+            return Err(PyValueError::new_err(
+                "flush_timeout_ms must be non-negative",
+            ));
+        }
+        if let Some(v) = self.stream_paused_max_wait_time_ms {
+            if v < 0 {
+                return Err(PyValueError::new_err(
+                    "stream_paused_max_wait_time_ms must be non-negative",
+                ));
+            }
+        }
+        if let Some(v) = self.callback_max_wait_time_ms {
+            if v < 0 {
+                return Err(PyValueError::new_err(
+                    "callback_max_wait_time_ms must be non-negative",
+                ));
+            }
+        }
+        Ok(())
+    }
+}
+
 impl Default for StreamConfigurationOptions {
     fn default() -> Self {
         Self {
