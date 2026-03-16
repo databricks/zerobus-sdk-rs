@@ -87,3 +87,20 @@ def _deserialize_batch(ipc_bytes):
 
 # Re-export configuration from Rust core
 ArrowStreamConfigurationOptions = _core.arrow.ArrowStreamConfigurationOptions
+
+
+class IPCCompression:
+    """Arrow IPC compression codecs for use with ArrowStreamConfigurationOptions.
+
+    Example:
+        >>> opts = ArrowStreamConfigurationOptions(ipc_compression=IPCCompression.LZ4_FRAME)
+    """
+
+    NONE = None
+    """No compression (default)."""
+
+    LZ4_FRAME = "lz4_frame"
+    """LZ4 frame compression."""
+
+    ZSTD = "zstd"
+    """Zstandard compression."""

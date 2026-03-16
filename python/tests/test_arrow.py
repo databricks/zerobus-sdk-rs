@@ -12,6 +12,7 @@ import pyarrow as pa
 
 from zerobus.sdk.shared.arrow import (
     ArrowStreamConfigurationOptions,
+    IPCCompression,
     _check_pyarrow,
     _deserialize_batch,
     _serialize_batch,
@@ -176,6 +177,7 @@ class TestArrowStreamConfigurationOptions(unittest.TestCase):
         self.assertIsInstance(options.server_lack_of_ack_timeout_ms, int)
         self.assertIsInstance(options.flush_timeout_ms, int)
         self.assertIsInstance(options.connection_timeout_ms, int)
+        self.assertIsNone(options.ipc_compression)
 
     def test_kwargs_construction(self):
         options = ArrowStreamConfigurationOptions(
@@ -218,12 +220,43 @@ class TestArrowStreamConfigurationOptions(unittest.TestCase):
         self.assertEqual(options.max_inflight_batches, 99)
         self.assertFalse(options.recovery)
 
+    def test_ipc_compression_lz4(self):
+        options = ArrowStreamConfigurationOptions(ipc_compression=IPCCompression.LZ4_FRAME)
+        self.assertEqual(options.ipc_compression, "lz4_frame")
+
+    def test_ipc_compression_zstd(self):
+        options = ArrowStreamConfigurationOptions(ipc_compression=IPCCompression.ZSTD)
+        self.assertEqual(options.ipc_compression, "zstd")
+
+    def test_ipc_compression_none_explicit(self):
+        options = ArrowStreamConfigurationOptions(ipc_compression=IPCCompression.NONE)
+        self.assertIsNone(options.ipc_compression)
+
+    def test_ipc_compression_string(self):
+        """Raw strings should also work."""
+        options = ArrowStreamConfigurationOptions(ipc_compression="lz4_frame")
+        self.assertEqual(options.ipc_compression, "lz4_frame")
+
+    def test_ipc_compression_setter(self):
+        options = ArrowStreamConfigurationOptions()
+        options.ipc_compression = IPCCompression.ZSTD
+        self.assertEqual(options.ipc_compression, "zstd")
+        options.ipc_compression = IPCCompression.NONE
+        self.assertIsNone(options.ipc_compression)
+
+    def test_ipc_compression_constants(self):
+        """Verify IPCCompression constant values."""
+        self.assertIsNone(IPCCompression.NONE)
+        self.assertEqual(IPCCompression.LZ4_FRAME, "lz4_frame")
+        self.assertEqual(IPCCompression.ZSTD, "zstd")
+
     def test_repr(self):
         options = ArrowStreamConfigurationOptions()
         repr_str = repr(options)
         self.assertIn("ArrowStreamConfigurationOptions", repr_str)
         self.assertIn("max_inflight_batches", repr_str)
         self.assertIn("recovery", repr_str)
+        self.assertIn("ipc_compression", repr_str)
 
 
 class TestSerializeBatchEmptyRecordBatch(unittest.TestCase):

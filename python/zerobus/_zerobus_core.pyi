@@ -543,6 +543,9 @@ class arrow:
         connection_timeout_ms: int
         """Connection establishment timeout in milliseconds. Default: 30000"""
 
+        ipc_compression: Optional[str]
+        """IPC compression codec: None (default), 'lz4_frame', or 'zstd'."""
+
         def __init__(
             self,
             *,
@@ -554,6 +557,7 @@ class arrow:
             server_lack_of_ack_timeout_ms: int = 60000,
             flush_timeout_ms: int = 300000,
             connection_timeout_ms: int = 30000,
+            ipc_compression: Optional[str] = None,
         ) -> None: ...
         def __repr__(self) -> str: ...
 

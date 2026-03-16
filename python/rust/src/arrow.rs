@@ -122,6 +122,10 @@ pub struct ArrowStreamConfigurationOptions {
 
     #[pyo3(get, set)]
     pub connection_timeout_ms: i64,
+
+    /// IPC compression codec: None (default), "lz4_frame", or "zstd".
+    #[pyo3(get, set)]
+    pub ipc_compression: Option<String>,
 }
 
 impl Default for ArrowStreamConfigurationOptions {
@@ -137,6 +141,7 @@ impl Default for ArrowStreamConfigurationOptions {
                 as i64,
             flush_timeout_ms: rust_default.flush_timeout_ms as i64,
             connection_timeout_ms: rust_default.connection_timeout_ms as i64,
+            ipc_compression: None,
         }
     }
 }
@@ -170,6 +175,13 @@ impl ArrowStreamConfigurationOptions {
                     "connection_timeout_ms" => {
                         options.connection_timeout_ms = value.extract()?
                     }
+                    "ipc_compression" => {
+                        options.ipc_compression = if value.is_none() {
+                            None
+                        } else {
+                            Some(value.extract()?)
+                        };
+                    }
                     _ => {
                         return Err(pyo3::exceptions::PyValueError::new_err(format!(
                             "Unknown configuration option: {}",
@@ -187,7 +199,8 @@ impl ArrowStreamConfigurationOptions {
         format!(
             "ArrowStreamConfigurationOptions(max_inflight_batches={}, recovery={}, \
              recovery_timeout_ms={}, recovery_backoff_ms={}, recovery_retries={}, \
-             server_lack_of_ack_timeout_ms={}, flush_timeout_ms={}, connection_timeout_ms={})",
+             server_lack_of_ack_timeout_ms={}, flush_timeout_ms={}, connection_timeout_ms={}, \
+             ipc_compression={:?})",
             self.max_inflight_batches,
             self.recovery,
             self.recovery_timeout_ms,
@@ -196,6 +209,7 @@ impl ArrowStreamConfigurationOptions {
             self.server_lack_of_ack_timeout_ms,
             self.flush_timeout_ms,
             self.connection_timeout_ms,
+            self.ipc_compression,
         )
     }
 }
@@ -237,6 +251,20 @@ impl ArrowStreamConfigurationOptions {
                 "connection_timeout_ms must be non-negative",
             ));
         }
+        let ipc_compression = match &self.ipc_compression {
+            None => None,
+            Some(s) => match s.to_lowercase().as_str() {
+                "lz4_frame" | "lz4" => Some(arrow_ipc::CompressionType::LZ4_FRAME),
+                "zstd" | "zstandard" => Some(arrow_ipc::CompressionType::ZSTD),
+                "none" => None,
+                other => {
+                    return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                        "Unknown ipc_compression: '{}'. Use 'lz4_frame', 'zstd', or None",
+                        other
+                    )));
+                }
+            },
+        };
         Ok(RustArrowStreamOptions {
             max_inflight_batches: self.max_inflight_batches as usize,
             recovery: self.recovery,
@@ -246,7 +274,7 @@ impl ArrowStreamConfigurationOptions {
             server_lack_of_ack_timeout_ms: self.server_lack_of_ack_timeout_ms as u64,
             flush_timeout_ms: self.flush_timeout_ms as u64,
             connection_timeout_ms: self.connection_timeout_ms as u64,
-            ipc_compression: None,
+            ipc_compression,
         })
     }
 }
