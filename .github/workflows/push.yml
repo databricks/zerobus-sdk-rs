@@ -47,12 +47,15 @@ jobs:
               - '.github/workflows/ci-java.yml'
             typescript:
               - 'typescript/**'
+              - 'rust/**'
               - '.github/workflows/ci-typescript.yml'
             python:
               - 'python/**'
+              - 'rust/**'
               - '.github/workflows/ci-python.yml'
             go:
               - 'go/**'
+              - 'rust/**'
               - '.github/workflows/ci-go.yml'
 
   rust:
@@ -69,12 +72,16 @@ jobs:
     needs: changes
     if: needs.changes.outputs.typescript == 'true'
     uses: ./.github/workflows/ci-typescript.yml
-    
+    with:
+      use_local_sdk: ${{ needs.changes.outputs.rust == 'true' }}
+
   python:
     needs: changes
     if: needs.changes.outputs.python == 'true'
     uses: ./.github/workflows/ci-python.yml
-    
+    with:
+      use_local_sdk: ${{ needs.changes.outputs.rust == 'true' }}
+
   go:
     needs: changes
     if: needs.changes.outputs.go == 'true'
