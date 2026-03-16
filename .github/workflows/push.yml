@@ -47,17 +47,15 @@ jobs:
               - '.github/workflows/ci-java.yml'
             typescript:
               - 'typescript/**'
-              - 'rust/**'
               - '.github/workflows/ci-typescript.yml'
             python:
               - 'python/**'
-              - 'rust/**'
               - '.github/workflows/ci-python.yml'
             go:
               - 'go/**'
-              - 'rust/**'
               - '.github/workflows/ci-go.yml'
 
+  # Blocking jobs — required for merge
   rust:
     needs: changes
     if: needs.changes.outputs.rust == 'true'
@@ -72,18 +70,44 @@ jobs:
     needs: changes
     if: needs.changes.outputs.typescript == 'true'
     uses: ./.github/workflows/ci-typescript.yml
-    with:
-      use_local_sdk: ${{ needs.changes.outputs.rust == 'true' }}
 
   python:
     needs: changes
     if: needs.changes.outputs.python == 'true'
     uses: ./.github/workflows/ci-python.yml
-    with:
-      use_local_sdk: ${{ needs.changes.outputs.rust == 'true' }}
 
   go:
     needs: changes
     if: needs.changes.outputs.go == 'true'
     uses: ./.github/workflows/ci-go.yml
-  
+
+  # Non-blocking cross-SDK jobs — run all SDK tests against the local Rust
+  # source when rust/** changes, to catch breakage before a new FFI release.
+  # These are intentionally excluded from `gate` so they don't block merging.
+  cross-sdk-go:
+    needs: changes
+    if: needs.changes.outputs.rust == 'true'
+    uses: ./.github/workflows/ci-go.yml
+    with:
+      use_local_sdk: true
+
+  cross-sdk-python:
+    needs: changes
+    if: needs.changes.outputs.rust == 'true'
+    uses: ./.github/workflows/ci-python.yml
+    with:
+      use_local_sdk: true
+
+  cross-sdk-typescript:
+    needs: changes
+    if: needs.changes.outputs.rust == 'true'
+    uses: ./.github/workflows/ci-typescript.yml
+    with:
+      use_local_sdk: true
+
+  cross-sdk-java:
+    needs: changes
+    if: needs.changes.outputs.rust == 'true'
+    uses: ./.github/workflows/ci-java.yml
+    with:
+      use_local_sdk: true
