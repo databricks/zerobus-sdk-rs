@@ -1,4 +1,4 @@
-name: Build & Release to PyPI
+name: Release Python
 run-name: "Release Python SDK ${{ github.ref_name }}"
 
 on:
@@ -12,14 +12,15 @@ concurrency:
   cancel-in-progress: true
 
 permissions:
-  contents: read
+  contents: write
 
 jobs:
-  linux:
+  build-linux:
     runs-on:
       group: databricks-protected-runner-group
       labels: linux-ubuntu-latest
     strategy:
+      fail-fast: false
       matrix:
         target: [x86_64, aarch64]
     steps:
@@ -65,7 +66,7 @@ jobs:
           path: dist
           if-no-files-found: error
 
-  windows:
+  build-windows:
     runs-on:
       group: databricks-protected-runner-group
       labels: windows-server-latest
@@ -96,6 +97,39 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: wheels-windows
+          path: dist
+          if-no-files-found: error
+
+  build-macos:
+    runs-on: [self-hosted, macOS, ARM64, zerobus-sdk]
+    strategy:
+      fail-fast: false
+      matrix:
+        target: [aarch64-apple-darwin, x86_64-apple-darwin]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.9'
+
+      - name: Copy root LICENSE for maturin
+        run: cp LICENSE python/LICENSE
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Install maturin
+        run: pip install maturin
+
+      - name: Build wheels
+        run: maturin build --release --target ${{ matrix.target }} --manifest-path python/rust/Cargo.toml --out dist
+
+      - name: Upload wheels
+        uses: actions/upload-artifact@v4
+        with:
+          name: wheels-macos-${{ matrix.target }}
           path: dist
           if-no-files-found: error
 
@@ -130,13 +164,13 @@ jobs:
           path: dist
           if-no-files-found: error
 
-  release:
-    name: Release to PyPI
+  publish:
+    name: Publish to PyPI
     runs-on:
       group: databricks-protected-runner-group
       labels: linux-ubuntu-latest
     if: startsWith(github.ref, 'refs/tags/python/')
-    needs: [linux, windows, sdist]
+    needs: [build-linux, build-windows, build-macos, sdist]
     permissions:
       id-token: write
     steps:
@@ -154,3 +188,28 @@ jobs:
         uses: pypa/gh-action-pypi-publish@release/v1
         with:
           skip-existing: true
+
+  release:
+    name: Create GitHub Release
+    runs-on:
+      group: databricks-protected-runner-group
+      labels: linux-ubuntu-latest
+    needs: publish
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Extract version from tag
+        id: version
+        run: echo "version=${GITHUB_REF#refs/tags/python/v}" >> "$GITHUB_OUTPUT"
+
+      - name: Extract release notes from changelog
+        run: |
+          version="v${{ steps.version.outputs.version }}"
+          awk "/^## Release ${version}/{found=1; next} /^## /{if(found) exit} found{print}" python/CHANGELOG.md > /tmp/release-notes.md
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          name: Python SDK v${{ steps.version.outputs.version }}
+          body_path: /tmp/release-notes.md
