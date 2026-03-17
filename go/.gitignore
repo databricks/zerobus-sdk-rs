@@ -1,10 +1,8 @@
-# Build artifacts - DO NOT COMMIT
+# Build artifacts
 zerobus-ffi/target/
-lib/
 libzerobus_ffi.a
 *.dylib
 *.so
-*.a
 
 # Release artifacts
 releases/

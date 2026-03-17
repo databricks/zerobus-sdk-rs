@@ -1,158 +1,35 @@
-name: Go Release
+name: Release Go
 run-name: "Release Go SDK ${{ github.ref_name }}"
 
 on:
   push:
     tags:
-      - 'go/v*'
-  workflow_dispatch:
+      - "go/v*"
+
+permissions:
+  contents: write
 
 jobs:
-  build-rust:
-    name: Build Rust (${{ matrix.target }})
-    runs-on:
-      group: databricks-protected-runner-group
-      labels: ${{ matrix.os-label }}
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - os-label: linux-ubuntu-latest
-            arch: amd64
-            target: x86_64-unknown-linux-gnu
-            use-zig: false
-          - os-label: linux-ubuntu-latest
-            arch: arm64
-            target: aarch64-unknown-linux-gnu
-            use-zig: false
-          - os-label: linux-ubuntu-latest
-            arch: amd64
-            target: x86_64-apple-darwin
-            use-zig: true
-          - os-label: linux-ubuntu-latest
-            arch: arm64
-            target: aarch64-apple-darwin
-            use-zig: true
-          - os-label: windows-server-latest
-            arch: amd64
-            target: x86_64-pc-windows-gnu
-            use-zig: false
-
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Install Rust
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: ${{ matrix.target }}
-
-      - name: Install Cross-Compilation Tools (Linux ARM64)
-        if: matrix.target == 'aarch64-unknown-linux-gnu'
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y gcc-aarch64-linux-gnu
-
-      - name: Install Zig and cargo-zigbuild (for macOS cross-compilation)
-        if: matrix.use-zig == true
-        shell: bash
-        run: |
-          ARCH=$(uname -m)
-          case "$ARCH" in
-            x86_64) ZIG_ARCH="x86_64" ;;
-            aarch64) ZIG_ARCH="aarch64" ;;
-            *) echo "Unsupported architecture: $ARCH"; exit 1 ;;
-          esac
-
-          ZIG_VERSION="0.13.0"
-          ZIG_URL="https://ziglang.org/download/${ZIG_VERSION}/zig-linux-${ZIG_ARCH}-${ZIG_VERSION}.tar.xz"
-
-          echo "Downloading Zig from $ZIG_URL"
-          wget -q "$ZIG_URL"
-          tar -xf "zig-linux-${ZIG_ARCH}-${ZIG_VERSION}.tar.xz"
-
-          mkdir -p $HOME/.local/bin
-          rm -rf $HOME/.local/zig
-          mv "zig-linux-${ZIG_ARCH}-${ZIG_VERSION}" $HOME/.local/zig
-          ln -sf $HOME/.local/zig/zig $HOME/.local/bin/zig
-          echo "$HOME/.local/bin" >> $GITHUB_PATH
-
-          if ! command -v cargo-zigbuild &> /dev/null; then
-            cargo install cargo-zigbuild
-          fi
-
-      - name: Build Rust Library (Standard)
-        if: matrix.use-zig == false
-        working-directory: rust/ffi
-        run: |
-          cargo build --release --target ${{ matrix.target }}
-        env:
-          CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: aarch64-linux-gnu-gcc
-
-      - name: Build Rust Library (Zig Cross-Compile)
-        if: matrix.use-zig == true
-        working-directory: rust/ffi
-        run: |
-          cargo zigbuild --release --target ${{ matrix.target }}
-
-      - name: Prepare Artifact
-        shell: bash
-        run: |
-          case "${{ matrix.target }}" in
-            *-apple-darwin)  OS_NAME="darwin"  ;;
-            *-pc-windows-*)  OS_NAME="windows" ;;
-            *-linux-*)       OS_NAME="linux"   ;;
-            *)               OS_NAME="unknown" ;;
-          esac
-
-          mkdir -p dist/${OS_NAME}_${{ matrix.arch }}
-
-          if [ "${{ runner.os }}" = "Windows" ]; then
-            cp rust/target/${{ matrix.target }}/release/libzerobus_ffi.a dist/windows_${{ matrix.arch }}/libzerobus_ffi.a || \
-            cp rust/target/${{ matrix.target }}/release/zerobus_ffi.lib dist/windows_${{ matrix.arch }}/libzerobus_ffi.a
-          else
-            cp rust/target/${{ matrix.target }}/release/libzerobus_ffi.a dist/${OS_NAME}_${{ matrix.arch }}/libzerobus_ffi.a
-          fi
-
-      - name: Upload Artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: lib-${{ matrix.target }}
-          path: dist/
-
-  update-tag:
-    name: Update Tag with Binaries
-    if: startsWith(github.ref, 'refs/tags/go/')
-    needs: build-rust
+  release:
+    name: Create GitHub Release
     runs-on:
       group: databricks-protected-runner-group
       labels: linux-ubuntu-latest
-    permissions:
-      contents: write
+
     steps:
       - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
 
-      - name: Download all artifacts
-        uses: actions/download-artifact@v4
-        with:
-          path: lib-artifacts
-          merge-multiple: true
+      - name: Extract version from tag
+        id: version
+        run: echo "version=${GITHUB_REF#refs/tags/go/v}" >> "$GITHUB_OUTPUT"
 
-      - name: Prepare lib directory
+      - name: Extract release notes from changelog
         run: |
-          mkdir -p go/lib
-          cp -r lib-artifacts/* go/lib/
-          rm -rf lib-artifacts
+          version="v${{ steps.version.outputs.version }}"
+          awk "/^## Release ${version}/{found=1; next} /^## /{if(found) exit} found{print}" go/CHANGELOG.md > /tmp/release-notes.md
 
-      - name: Commit and Force-Push Tag
-        run: |
-          git config --global user.name "github-actions[bot]"
-          git config --global user.email "github-actions[bot]@users.noreply.github.com"
-
-          git add -f go/lib/
-
-          git commit -m "Release ${{ github.ref_name }} with pre-built binaries"
-
-          git tag -f ${{ github.ref_name }}
-          git push origin ${{ github.ref_name }} --force
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          name: Go SDK v${{ steps.version.outputs.version }}
+          body_path: /tmp/release-notes.md
