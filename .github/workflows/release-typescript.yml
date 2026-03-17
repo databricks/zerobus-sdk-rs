@@ -41,8 +41,6 @@ jobs:
         with:
           node-version: 24
 
-      - name: Use latest npm
-        run: npm install -g npm@latest
 
       - name: Install Rust (Unix)
         if: runner.os != 'Windows'
@@ -101,8 +99,6 @@ jobs:
           node-version: 24
           registry-url: 'https://registry.npmjs.org'
 
-      - name: Use latest npm
-        run: npm install -g npm@latest
 
       - name: Install dependencies
         run: npm ci
