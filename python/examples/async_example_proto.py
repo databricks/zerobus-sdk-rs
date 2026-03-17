@@ -118,7 +118,7 @@ class MyAckCallback(AckCallback):
 
 
 async def main():
-    print("Starting asynchronous ingestion example (Protobuf)...")
+    print("Starting asynchronous ingestion example (Protobuf)... random line change")
     print("=" * 60)
 
     # Check if credentials are configured
