@@ -11,7 +11,10 @@ crate-type = ["staticlib"]
 
 [dependencies]
 # Core SDK logic - use local path dependency
-databricks-zerobus-ingest-sdk = { path = "../sdk" }
+databricks-zerobus-ingest-sdk = { path = "../sdk", features = ["arrow-flight", "testing"] }
+
+# Arrow IPC for serializing/deserializing RecordBatches across the FFI boundary
+arrow-ipc = { version = "56.2.0", default-features = false }
 
 # FFI helpers
 tokio = { version = "1.42", features = ["rt", "rt-multi-thread"] }

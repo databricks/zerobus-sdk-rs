@@ -12,6 +12,7 @@ Examples are organized by data format and ingestion pattern:
 | JSON Batch | JSON | Batch | `examples/json/batch/main.go` |
 | Proto Single | Protocol Buffers | Single-record | `examples/proto/single/main.go` |
 | Proto Batch | Protocol Buffers | Batch | `examples/proto/batch/main.go` |
+| Arrow Flight | Arrow IPC | Batch (RecordBatch) | `examples/arrow/main.go` |
 
 ## Prerequisites
 
@@ -139,6 +140,28 @@ for i := 0; i < 5; i++ {
     records = append(records, data)
 }
 batchOffset, err := stream.IngestRecordsOffset(records)
+```
+
+## Running Arrow Flight Examples (Experimental)
+
+> **Experimental/Unsupported**: Arrow Flight ingestion is experimental and not yet supported for production use. The API may change in future releases.
+
+The Arrow Flight example demonstrates ingestion of Apache Arrow RecordBatches. The schema defined in the example must match the target Delta table's column names and types.
+
+### Prerequisites
+
+In addition to the general prerequisites above, install the Arrow Go library:
+
+```bash
+go get github.com/apache/arrow-go/v18/arrow
+go get github.com/apache/arrow-go/v18/arrow/array
+go get github.com/apache/arrow-go/v18/arrow/ipc
+go get github.com/apache/arrow-go/v18/arrow/memory
+```
+
+```bash
+cd examples/arrow
+go run main.go
 ```
 
 ## Additional Resources

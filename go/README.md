@@ -33,6 +33,7 @@ We are keen to hear feedback from you on this SDK. Please [file issues](https://
 - [Configuration Options](#configuration-options)
 - [Error Handling](#error-handling)
 - [Examples](#examples)
+- [Arrow Flight Ingestion (Experimental)](#arrow-flight-ingestion-experimental)
 - [Tests](#tests)
 - [Performance Benchmarks](#performance-benchmarks)
 - [Best Practices](#best-practices)
@@ -64,6 +65,7 @@ This SDK wraps the [Rust SDK](https://github.com/databricks/zerobus-sdk/tree/mai
 - **Configurable timeouts and retry policies**
 - **Immediate offset returns** for ingested records
 - **Graceful stream management** - Proper flushing and resource cleanup
+- **[Experimental] Arrow Flight ingestion** - High-throughput Apache Arrow RecordBatch ingestion via the Arrow Flight protocol
 ## Getting Started
 
 Choose your installation path:
@@ -748,6 +750,9 @@ The `examples/` directory contains complete, runnable examples organized by form
 - **`examples/proto/single/`** - Single record ingestion with protobuf
 - **`examples/proto/batch/`** - Batch ingestion with protobuf
 
+**Arrow Flight Examples (Experimental):**
+- **`examples/arrow/`** - Arrow RecordBatch ingestion via Arrow Flight protocol
+
 **To run an example:**
 
 ```bash
@@ -766,6 +771,106 @@ go run main.go
 ```
 
 Each example includes detailed comments and demonstrates best practices for production use. See [`examples/README.md`](examples/README.md) for complete setup instructions, prerequisites, and detailed comparisons between examples.
+
+## Arrow Flight Ingestion (Experimental)
+
+> **Experimental/Unsupported**: Arrow Flight ingestion is experimental and not yet supported for production use. The API may change in future releases.
+
+Ingest Apache Arrow RecordBatches directly into Databricks Delta tables using the Arrow Flight protocol. Use this if your pipeline already works with Arrow data. For JSON or Protocol Buffers, use the standard `ZerobusStream`.
+
+See [`examples/arrow/`](examples/arrow/) for a complete working example.
+
+### Quick Start
+
+```go
+// 1. Create the SDK (same as always)
+sdk, err := zerobus.NewZerobusSdk(endpoint, ucURL)
+if err != nil { log.Fatal(err) }
+defer sdk.Free()
+
+// 2. Serialize your Arrow schema to IPC bytes (no data batches)
+var schemaBuf bytes.Buffer
+w := ipc.NewWriter(&schemaBuf, ipc.WithSchema(schema))
+if err := w.Close(); err != nil { log.Fatal(err) }
+
+// 3. Create the Arrow stream
+stream, err := sdk.CreateArrowStream(
+    "catalog.schema.table",
+    schemaBuf.Bytes(),
+    clientID, clientSecret,
+    zerobus.DefaultArrowStreamConfigurationOptions(),
+)
+if err != nil { log.Fatal(err) }
+defer stream.Close()
+
+// 4. Serialize a RecordBatch and ingest it
+var batchBuf bytes.Buffer
+w = ipc.NewWriter(&batchBuf, ipc.WithSchema(schema))
+if err := w.Write(rec); err != nil { log.Fatal(err) }
+if err := w.Close(); err != nil { log.Fatal(err) }
+
+offset, err := stream.IngestBatch(batchBuf.Bytes())
+if err != nil { log.Fatal(err) }
+
+// 5. Wait for acknowledgment
+if err := stream.WaitForOffset(offset); err != nil { log.Fatal(err) }
+```
+
+### Schema and Batch Serialization
+
+`CreateArrowStream` takes Arrow IPC stream bytes containing only the schema — write with `ipc.NewWriter` and close without writing any batches.
+
+`IngestBatch` takes Arrow IPC stream bytes containing exactly one RecordBatch — write the schema, write one batch, then close.
+
+The schema must match the target Delta table's column names and types.
+
+### Custom Authentication
+
+Same pattern as `CreateStreamWithHeadersProvider`:
+
+```go
+stream, err := sdk.CreateArrowStreamWithHeadersProvider(
+    "catalog.schema.table",
+    schemaIPC,
+    &MyCustomAuthProvider{},
+    zerobus.DefaultArrowStreamConfigurationOptions(),
+)
+```
+
+### Unacked Batches
+
+If the stream fails, retrieve unacknowledged batches to retry on a new stream:
+
+```go
+if err := stream.Close(); err != nil {
+    unacked, _ := stream.GetUnackedBatches()
+    // re-ingest unacked on a new stream
+}
+```
+
+### ArrowStreamConfigurationOptions
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `MaxInflightBatches` | `uint64` | 1,000 | Maximum in-flight batches |
+| `Recovery` | `RecoverySetting` | RecoveryEnabled | Automatic recovery on failure |
+| `RecoveryTimeoutMs` | `uint64` | 15,000 | Timeout per recovery attempt (ms) |
+| `RecoveryBackoffMs` | `uint64` | 2,000 | Delay between recovery attempts (ms) |
+| `RecoveryRetries` | `uint32` | 4 | Maximum recovery attempts |
+| `ServerLackOfAckTimeoutMs` | `uint64` | 60,000 | Server ack timeout (ms) |
+| `FlushTimeoutMs` | `uint64` | 300,000 | Flush timeout (ms) |
+| `ConnectionTimeoutMs` | `uint64` | 30,000 | Connection timeout (ms) |
+| `IPCCompression` | `IPCCompressionType` | IPCCompressionNone | IPC compression codec |
+
+`RecoverySetting`: `RecoveryEnabled` (default), `RecoveryDisabled`
+
+`IPCCompressionType`: `IPCCompressionNone` (default), `IPCCompressionLZ4Frame`, `IPCCompressionZstd`
+
+```go
+opts := zerobus.DefaultArrowStreamConfigurationOptions()
+opts.RecoveryRetries = 10
+opts.IPCCompression = zerobus.IPCCompressionLZ4Frame
+```
 
 ## Tests
 
@@ -1246,6 +1351,66 @@ func (e *ZerobusError) Retryable() bool
 ```
 
 Returns `true` if the error can be automatically recovered by the SDK.
+
+### `ZerobusArrowStream` (Experimental)
+
+Represents an active Arrow Flight ingestion stream.
+
+**Methods:**
+
+```go
+func (s *ZerobusArrowStream) IngestBatch(ipcBytes []byte) (int64, error)
+```
+
+Ingests an Arrow RecordBatch serialized as Arrow IPC stream bytes. Returns the logical offset.
+
+```go
+func (s *ZerobusArrowStream) WaitForOffset(offset int64) error
+```
+
+Blocks until the server acknowledges the batch at the given offset.
+
+```go
+func (s *ZerobusArrowStream) Flush() error
+```
+
+Waits for all pending batches to be acknowledged.
+
+```go
+func (s *ZerobusArrowStream) Close() error
+```
+
+Flushes and closes the stream.
+
+```go
+func (s *ZerobusArrowStream) GetUnackedBatches() ([][]byte, error)
+```
+
+Returns unacknowledged batches as Arrow IPC bytes. Call only after stream failure.
+
+### `ArrowStreamConfigurationOptions` (Experimental)
+
+Arrow stream configuration. See [ArrowStreamConfigurationOptions](#arrowstreamconfigurationoptions) for details.
+
+**`ZerobusSdk` Arrow methods:**
+
+```go
+func (s *ZerobusSdk) CreateArrowStream(
+    tableName string,
+    schemaIpcBytes []byte,
+    clientID, clientSecret string,
+    options *ArrowStreamConfigurationOptions,
+) (*ZerobusArrowStream, error)
+```
+
+```go
+func (s *ZerobusSdk) CreateArrowStreamWithHeadersProvider(
+    tableName string,
+    schemaIpcBytes []byte,
+    headersProvider HeadersProvider,
+    options *ArrowStreamConfigurationOptions,
+) (*ZerobusArrowStream, error)
+```
 
 ## Building from Source
 

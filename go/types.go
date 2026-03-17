@@ -18,8 +18,16 @@ type StreamConfigurationOptions struct {
 	// Default: 1,000,000
 	MaxInflightRequests uint64
 
-	// Enable automatic stream recovery on retryable failures
+	// Enable automatic stream recovery on retryable failures.
 	// Default: true
+	//
+	// NOTE: Because false is Go's zero value for bool, setting Recovery = false
+	// on a zero-value struct is indistinguishable from "not set" and will be
+	// overridden with the default (true). Always start from
+	// DefaultStreamConfigurationOptions() before setting Recovery = false:
+	//
+	//   opts := zerobus.DefaultStreamConfigurationOptions()
+	//   opts.Recovery = false
 	Recovery bool
 
 	// Timeout for each recovery attempt in milliseconds
