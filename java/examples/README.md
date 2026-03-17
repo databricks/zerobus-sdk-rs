@@ -9,6 +9,7 @@ The examples are organized by stream type and demonstrate both single-record and
 **Features demonstrated:**
 - `ZerobusProtoStream` - Protocol Buffer ingestion with method-level generics
 - `ZerobusJsonStream` - JSON ingestion with flexible serialization
+- `ZerobusArrowStream` (experimental) - Arrow Flight columnar ingestion
 - `ZerobusStream` (deprecated) - Legacy Future-based API for backward compatibility
 
 ## Directory Structure
@@ -25,6 +26,9 @@ examples/
 │   ├── README.md
 │   ├── SingleRecordExample.java
 │   └── BatchIngestionExample.java
+├── arrow/                 (Arrow Flight examples - ZerobusArrowStream, experimental)
+│   ├── README.md
+│   └── ArrowIngestionExample.java
 └── legacy/                (Legacy examples - ZerobusStream)
     └── LegacyStreamExample.java
 ```
@@ -37,6 +41,7 @@ examples/
 | `proto/BatchIngestionExample` | `ZerobusProtoStream` | Batch ingestion |
 | `json/SingleRecordExample` | `ZerobusJsonStream` | Single record ingestion (Object + String) |
 | `json/BatchIngestionExample` | `ZerobusJsonStream` | Batch ingestion |
+| `arrow/ArrowIngestionExample` | `ZerobusArrowStream` | Arrow Flight columnar ingestion (experimental) |
 | `legacy/LegacyStreamExample` | `ZerobusStream` | Legacy Future-based API |
 
 Each example demonstrates: single ingestion + wait, batch ingestion + wait for last, and recreateStream.
@@ -74,6 +79,23 @@ stream.ingestRecordOffset(object, gson::toJson);  // Object + serializer
 stream.ingestRecordOffset(jsonString);            // String
 stream.ingestRecordsOffset(objects, gson::toJson);// batch
 stream.ingestRecordsOffset(jsonStrings);          // batch
+```
+
+### ZerobusArrowStream (Experimental - Arrow Flight)
+
+```java
+Schema schema = new Schema(Arrays.asList(
+    Field.nullable("device_name", ArrowType.LargeUtf8.INSTANCE),
+    Field.nullable("temp", new ArrowType.Int(32, true))
+));
+
+ZerobusArrowStream stream = sdk.createArrowStream(
+    tableName, schema, clientId, clientSecret
+).join();
+
+// Columnar batch ingestion
+Optional<Long> offset = stream.ingestBatch(vectorSchemaRoot);
+offset.ifPresent(stream::waitForOffset);
 ```
 
 ### ZerobusStream (Deprecated)
@@ -183,16 +205,18 @@ java -cp ".:../target/classes:$(cd .. && mvn dependency:build-classpath -q -Dinc
 |----------|--------------|-----|
 | Protocol Buffers (new code) | `ZerobusProtoStream` | Method-level generics, batch support |
 | JSON (new code) | `ZerobusJsonStream` | Clean API, no proto dependency |
+| Large columnar datasets | `ZerobusArrowStream` | Arrow Flight, high throughput (experimental) |
 | Existing code with `ZerobusStream` | `ZerobusStream` | Backward compatible, migrate later |
 
 ## API Comparison
 
-| Feature | ZerobusProtoStream | ZerobusJsonStream | ZerobusStream |
-|---------|-------------------|-------------------|---------------|
-| Generics | Method-level | Method-level | Class-level |
-| Return Type | `long` offset | `long` offset | `CompletableFuture` |
-| Batch Support | Yes | Yes | No |
-| Status | **Recommended** | **Recommended** | Deprecated |
+| Feature | ZerobusProtoStream | ZerobusJsonStream | ZerobusArrowStream | ZerobusStream |
+|---------|-------------------|-------------------|--------------------|---------------|
+| Input | `Message` / `byte[]` | `Object` / `String` | `VectorSchemaRoot` | `Message` |
+| Return Type | `long` offset | `long` offset | `Optional<Long>` | `CompletableFuture` |
+| Batch Support | Yes | Yes | Yes (columnar) | No |
+| Extra Deps | protobuf-java | None | arrow-vector, arrow-memory-netty | protobuf-java |
+| Status | **Recommended** | **Recommended** | **Experimental** | Deprecated |
 
 ## Additional Resources
 

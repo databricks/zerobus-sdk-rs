@@ -3,6 +3,7 @@ package com.databricks.zerobus;
 import com.google.protobuf.Message;
 import java.util.List;
 import java.util.concurrent.CompletableFuture;
+import org.apache.arrow.vector.types.pojo.Schema;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -73,6 +74,9 @@ public class ZerobusSdk implements AutoCloseable {
 
   private static final StreamConfigurationOptions DEFAULT_OPTIONS =
       StreamConfigurationOptions.getDefault();
+
+  private static final ArrowStreamConfigurationOptions DEFAULT_ARROW_OPTIONS =
+      ArrowStreamConfigurationOptions.getDefault();
 
   // Native handle to the Rust SDK object.
   private volatile long nativeHandle;
@@ -319,6 +323,72 @@ public class ZerobusSdk implements AutoCloseable {
     return this.createStream(tableProperties, clientId, clientSecret, DEFAULT_OPTIONS);
   }
 
+  // ==================== Arrow Stream Creation ====================
+
+  /**
+   * Creates a new Arrow Flight stream for ingesting Arrow record batches into a table.
+   *
+   * @param tableName The fully qualified table name (catalog.schema.table).
+   * @param schema The Arrow schema describing the columns of the target table.
+   * @param clientId The OAuth client ID for authentication.
+   * @param clientSecret The OAuth client secret for authentication.
+   * @return A CompletableFuture that completes with the ZerobusArrowStream when the stream is
+   *     ready.
+   */
+  public CompletableFuture<ZerobusArrowStream> createArrowStream(
+      String tableName, Schema schema, String clientId, String clientSecret) {
+    return createArrowStream(tableName, schema, clientId, clientSecret, DEFAULT_ARROW_OPTIONS);
+  }
+
+  /**
+   * Creates a new Arrow Flight stream for ingesting Arrow record batches into a table with custom
+   * options.
+   *
+   * @param tableName The fully qualified table name (catalog.schema.table).
+   * @param schema The Arrow schema describing the columns of the target table.
+   * @param clientId The OAuth client ID for authentication.
+   * @param clientSecret The OAuth client secret for authentication.
+   * @param options Configuration options for the Arrow stream.
+   * @return A CompletableFuture that completes with the ZerobusArrowStream when the stream is
+   *     ready.
+   */
+  public CompletableFuture<ZerobusArrowStream> createArrowStream(
+      String tableName,
+      Schema schema,
+      String clientId,
+      String clientSecret,
+      ArrowStreamConfigurationOptions options) {
+
+    ensureOpen();
+
+    ArrowStreamConfigurationOptions effectiveOptions =
+        options != null ? options : DEFAULT_ARROW_OPTIONS;
+
+    logger.debug("Creating Arrow stream for table: {}", tableName);
+
+    byte[] schemaIpc;
+    try {
+      schemaIpc = ZerobusArrowStream.serializeSchemaToIpc(schema);
+    } catch (ZerobusException e) {
+      CompletableFuture<ZerobusArrowStream> failed = new CompletableFuture<>();
+      failed.completeExceptionally(e);
+      return failed;
+    }
+
+    CompletableFuture<Long> handleFuture =
+        nativeCreateArrowStream(
+            nativeHandle, tableName, schemaIpc, clientId, clientSecret, effectiveOptions);
+
+    return handleFuture.thenApply(
+        handle -> {
+          if (handle == null || handle == 0) {
+            throw new RuntimeException("Failed to create Arrow stream: null handle returned");
+          }
+          return new ZerobusArrowStream(
+              handle, tableName, effectiveOptions, schemaIpc, clientId, clientSecret);
+        });
+  }
+
   // ==================== Stream Recreation ====================
 
   /**
@@ -459,6 +529,67 @@ public class ZerobusSdk implements AutoCloseable {
   }
 
   /**
+   * Recreates an Arrow stream from a closed stream, re-ingesting unacknowledged batches.
+   *
+   * @param closedStream the closed Arrow stream to recreate
+   * @return a CompletableFuture that completes with the new stream after unacked batches are
+   *     re-ingested
+   * @throws IllegalStateException if the original stream is not closed
+   */
+  public CompletableFuture<ZerobusArrowStream> recreateArrowStream(
+      ZerobusArrowStream closedStream) {
+    if (!closedStream.isClosed()) {
+      throw new IllegalStateException("Arrow stream must be closed before recreation");
+    }
+
+    ensureOpen();
+
+    List<byte[]> unackedBatches;
+    try {
+      unackedBatches = closedStream.getUnackedBatches();
+    } catch (ZerobusException e) {
+      CompletableFuture<ZerobusArrowStream> failed = new CompletableFuture<>();
+      failed.completeExceptionally(e);
+      return failed;
+    }
+
+    CompletableFuture<Long> handleFuture =
+        nativeCreateArrowStream(
+            nativeHandle,
+            closedStream.getTableName(),
+            closedStream.getSchemaIpc(),
+            closedStream.getClientId(),
+            closedStream.getClientSecret(),
+            closedStream.getOptions());
+
+    return handleFuture.thenApply(
+        handle -> {
+          if (handle == null || handle == 0) {
+            throw new RuntimeException("Failed to recreate Arrow stream: null handle returned");
+          }
+          ZerobusArrowStream newStream =
+              new ZerobusArrowStream(
+                  handle,
+                  closedStream.getTableName(),
+                  closedStream.getOptions(),
+                  closedStream.getSchemaIpc(),
+                  closedStream.getClientId(),
+                  closedStream.getClientSecret());
+
+          try {
+            for (byte[] batchIpc : unackedBatches) {
+              newStream.ingestBatchIpc(batchIpc);
+            }
+            newStream.flush();
+          } catch (ZerobusException e) {
+            throw new RuntimeException("Failed to re-ingest unacked Arrow batches", e);
+          }
+
+          return newStream;
+        });
+  }
+
+  /**
    * Recreates a legacy stream from a closed stream, re-ingesting unacknowledged records.
    *
    * <p>This method creates a new stream with the same configuration as the original stream, then
@@ -561,4 +692,12 @@ public class ZerobusSdk implements AutoCloseable {
       String clientSecret,
       Object options,
       boolean isJson);
+
+  private native CompletableFuture<Long> nativeCreateArrowStream(
+      long sdkHandle,
+      String tableName,
+      byte[] arrowSchema,
+      String clientId,
+      String clientSecret,
+      Object options);
 }

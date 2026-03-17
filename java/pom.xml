@@ -28,6 +28,7 @@
     <url>https://github.com/databricks/zerobus-sdk-java/tree/main</url>
   </scm>
   <properties>
+    <arrow.version>17.0.0</arrow.version>
     <maven.compiler.source>1.8</maven.compiler.source>
     <maven.compiler.target>1.8</maven.compiler.target>
     <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
@@ -44,6 +45,21 @@
       <groupId>org.slf4j</groupId>
       <artifactId>slf4j-api</artifactId>
       <version>2.0.17</version>
+    </dependency>
+    <!-- Apache Arrow (provided - users must supply arrow-vector >= 15.0.0 and a memory
+         allocator such as arrow-memory-netty). Only needed for Arrow Flight ingestion. -->
+    <dependency>
+      <groupId>org.apache.arrow</groupId>
+      <artifactId>arrow-vector</artifactId>
+      <version>${arrow.version}</version>
+      <scope>provided</scope>
+    </dependency>
+    <!-- Apache Arrow memory allocator (for tests only) -->
+    <dependency>
+      <groupId>org.apache.arrow</groupId>
+      <artifactId>arrow-memory-netty</artifactId>
+      <version>${arrow.version}</version>
+      <scope>test</scope>
     </dependency>
     <!-- SLF4J Simple Implementation (for tests only) -->
     <dependency>
