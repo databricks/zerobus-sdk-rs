@@ -1,0 +1,90 @@
+name: Cleanup macOS Runner
+run-name: "Cleanup macOS self-hosted runner"
+
+on:
+  schedule:
+    - cron: '0 3 * * 0'  # Sunday at 3 AM UTC
+  workflow_dispatch:
+
+jobs:
+  cleanup:
+    name: Cleanup
+    runs-on: [self-hosted, macOS, ARM64, zerobus-sdk]
+
+    steps:
+      - name: Disk usage before cleanup
+        run: |
+          echo "=== Disk Usage Before ==="
+          df -h /
+          echo ""
+          echo "=== Large directories ==="
+          du -sh ~/.cargo 2>/dev/null || echo "~/.cargo: not found"
+          du -sh ~/.rustup 2>/dev/null || echo "~/.rustup: not found"
+          du -sh ~/.npm 2>/dev/null || echo "~/.npm: not found"
+          du -sh ~/.m2 2>/dev/null || echo "~/.m2: not found"
+          du -sh ~/Library/Caches/Homebrew 2>/dev/null || echo "Homebrew cache: not found"
+          du -sh ${{ runner.tool_cache }} 2>/dev/null || echo "Tool cache: not found"
+
+      - name: Clean Cargo registry and cache
+        run: |
+          echo "=== Cleaning Cargo ==="
+          du -sh ~/.cargo/registry 2>/dev/null || true
+          rm -rf ~/.cargo/registry/cache
+          rm -rf ~/.cargo/registry/src
+          rm -rf ~/.cargo/git/checkouts
+          echo "Cargo registry and git checkouts cleaned"
+
+      - name: Clean npm cache
+        run: |
+          echo "=== Cleaning npm ==="
+          du -sh ~/.npm 2>/dev/null || true
+          npm cache clean --force 2>/dev/null || true
+          echo "npm cache cleaned"
+
+      - name: Clean Homebrew cache
+        run: |
+          echo "=== Cleaning Homebrew ==="
+          du -sh ~/Library/Caches/Homebrew 2>/dev/null || true
+          brew cleanup --prune=7 2>/dev/null || true
+          echo "Homebrew cache cleaned"
+
+      - name: Clean Maven cache
+        run: |
+          echo "=== Cleaning Maven ==="
+          du -sh ~/.m2/repository 2>/dev/null || true
+          rm -rf ~/.m2/repository
+          echo "Maven repository cleaned"
+
+      - name: Clean old tool cache versions
+        run: |
+          echo "=== Tool cache ==="
+          du -sh ${{ runner.tool_cache }}/* 2>/dev/null || true
+          echo "Keeping tool cache intact (managed by setup-* actions)"
+
+      - name: Clean workspace temp files
+        run: |
+          echo "=== Cleaning workspace temp ==="
+          WORK_DIR="${{ runner.workspace }}"
+          if [ -d "$WORK_DIR" ]; then
+            find "$WORK_DIR" -name "target" -type d -maxdepth 4 -exec du -sh {} \; 2>/dev/null || true
+            find "$WORK_DIR" -name "target" -type d -maxdepth 4 -exec rm -rf {} \; 2>/dev/null || true
+            echo "Workspace target directories cleaned"
+          fi
+
+      - name: Kill orphan processes
+        run: |
+          echo "=== Checking for orphan processes ==="
+          ps aux | grep -E "(cargo|rustc|node|java|python|mvn)" | grep -v grep || echo "No orphan processes found"
+
+      - name: Disk usage after cleanup
+        run: |
+          echo "=== Disk Usage After ==="
+          df -h /
+          echo ""
+          echo "=== Large directories ==="
+          du -sh ~/.cargo 2>/dev/null || echo "~/.cargo: not found"
+          du -sh ~/.rustup 2>/dev/null || echo "~/.rustup: not found"
+          du -sh ~/.npm 2>/dev/null || echo "~/.npm: not found"
+          du -sh ~/.m2 2>/dev/null || echo "~/.m2: not found"
+          du -sh ~/Library/Caches/Homebrew 2>/dev/null || echo "Homebrew cache: not found"
+          du -sh ${{ runner.tool_cache }} 2>/dev/null || echo "Tool cache: not found"
