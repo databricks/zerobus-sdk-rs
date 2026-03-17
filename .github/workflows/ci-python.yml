@@ -36,8 +36,6 @@ jobs:
     defaults:
       run:
         working-directory: python
-    env:
-      AGENT_TOOLSDIRECTORY: ${{ runner.tool_cache }}
     steps:
       - uses: actions/checkout@v4
 
