@@ -570,7 +570,9 @@ fn convert_stream_options(
                     2 => RustRecordType::Json,
                     _ => RustRecordType::Proto,
                 },
-                stream_paused_max_wait_time_ms: opts.stream_paused_max_wait_time_ms.map(|v| v as u64),
+                stream_paused_max_wait_time_ms: opts
+                    .stream_paused_max_wait_time_ms
+                    .map(|v| v as u64),
                 callback_max_wait_time_ms: opts.callback_max_wait_time_ms.map(|v| v as u64),
                 ack_callback,
                 ..Default::default()
