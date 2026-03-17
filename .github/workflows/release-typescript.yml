@@ -112,19 +112,27 @@ jobs:
         with:
           path: typescript/artifacts
 
-      - name: List downloaded artifacts
-        run: ls -R artifacts/
+      - name: Move artifacts into place
+        run: npx napi artifacts --artifacts-dir artifacts --output-dir .
 
-      - name: Copy bindings
+      - name: List bindings
+        run: ls -la *.node
+
+      - name: Generate platform packages
+        run: npx napi prepublish -t npm --skip-gh-release
+
+      - name: Publish platform packages
         run: |
-          cp artifacts/bindings-x86_64-unknown-linux-gnu/*.node .
-          cp artifacts/bindings-aarch64-unknown-linux-gnu/*.node .
-          cp artifacts/bindings-x86_64-pc-windows-msvc/*.node .
-          cp artifacts/bindings-aarch64-apple-darwin/*.node .
-          cp artifacts/bindings-x86_64-apple-darwin/*.node .
+          for dir in npm/*/; do
+            npm publish "$dir" --access public --provenance
+          done
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
 
-      - name: Publish
+      - name: Publish main package
         run: npm publish --access public --provenance --ignore-scripts
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
 
   release:
     name: Create GitHub Release

@@ -28,8 +28,7 @@
     "schemas/",
     "Cargo.toml",
     "Cargo.lock",
-    "build.rs",
-    "*.node"
+    "build.rs"
   ],
   "napi": {
     "name": "zerobus-ingest-sdk",
@@ -54,7 +53,6 @@
     "build:debug": "napi build --platform",
     "build:debug:arrow": "napi build --platform --features arrow-flight",
     "build:proto": "mkdir -p examples/generated && pbjs -t static-module -w commonjs -o examples/generated/air_quality.js schemas/air_quality.proto && pbts -o examples/generated/air_quality.d.ts examples/generated/air_quality.js && protoc --descriptor_set_out=schemas/air_quality_descriptor.pb --include_imports schemas/air_quality.proto",
-    "prepublishOnly": "napi prepublish -t npm",
     "test": "tsx --test test/unit.test.ts test/integration.test.ts",
     "test:unit": "tsx --test test/unit.test.ts",
     "test:integration": "tsx --test test/integration.test.ts",
@@ -91,12 +89,5 @@
   },
   "overrides": {
     "glob": "^10.0.0"
-  },
-  "optionalDependencies": {
-    "@databricks/zerobus-ingest-sdk-linux-x64-gnu": "1.0.0",
-    "@databricks/zerobus-ingest-sdk-linux-arm64-gnu": "1.0.0",
-    "@databricks/zerobus-ingest-sdk-win32-x64-msvc": "1.0.0",
-    "@databricks/zerobus-ingest-sdk-darwin-x64": "1.0.0",
-    "@databricks/zerobus-ingest-sdk-darwin-arm64": "1.0.0"
   }
 }
