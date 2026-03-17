@@ -1,5 +1,6 @@
 # IDE
 .idea/
+*/flycheck*
 *.iml
 *.iws
 *.ipr
