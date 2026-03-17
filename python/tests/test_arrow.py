@@ -177,7 +177,7 @@ class TestArrowStreamConfigurationOptions(unittest.TestCase):
         self.assertIsInstance(options.server_lack_of_ack_timeout_ms, int)
         self.assertIsInstance(options.flush_timeout_ms, int)
         self.assertIsInstance(options.connection_timeout_ms, int)
-        self.assertIsNone(options.ipc_compression)
+        self.assertEqual(options.ipc_compression, IPCCompression.NONE)
 
     def test_kwargs_construction(self):
         options = ArrowStreamConfigurationOptions(
