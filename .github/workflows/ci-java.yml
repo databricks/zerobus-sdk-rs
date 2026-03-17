@@ -63,7 +63,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Unshallow
-        run: git fetch --prune --unshallow
+        run: git fetch --prune --unshallow || true
       - name: Set up JDK ${{ matrix.javaVersion }}
         uses: actions/setup-java@v4
         with:
@@ -75,6 +75,9 @@ jobs:
         shell: bash
         run: printf '\n[patch.crates-io]\ndatabricks-zerobus-ingest-sdk = { path = "sdk" }\n' >> ../rust/Cargo.toml
 
+      - name: Install Maven (macOS)
+        if: runner.os == 'macOS'
+        run: brew install maven 2>/dev/null || true
       - name: Build with Maven
         run: mvn clean compile
       - name: Run tests

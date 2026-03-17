@@ -36,11 +36,13 @@ jobs:
     defaults:
       run:
         working-directory: python
+    env:
+      AGENT_TOOLSDIRECTORY: ${{ runner.tool_cache }}
     steps:
       - uses: actions/checkout@v4
 
       - name: Unshallow
-        run: git fetch --prune --unshallow
+        run: git fetch --prune --unshallow || true
 
       - uses: actions/setup-python@v5
         with:
