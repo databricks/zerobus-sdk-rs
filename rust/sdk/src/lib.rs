@@ -527,7 +527,7 @@ impl ZerobusSdk {
         match stream {
             Ok(stream) => {
                 if let Some(stream_id) = stream.stream_id.as_ref() {
-                    info!(stream_id = %stream_id, "Successfully created new ephemeral stream. random line change");
+                    info!(stream_id = %stream_id, "Successfully created new ephemeral stream");
                 } else {
                     error!("Successfully created a stream but stream_id is None");
                 }
