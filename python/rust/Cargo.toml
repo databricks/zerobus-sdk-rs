@@ -11,9 +11,12 @@ crate-type = ["cdylib"]
 pyo3 = { version = "0.20", features = ["extension-module", "abi3-py39"] }
 pyo3-asyncio = { version = "0.20", features = ["tokio-runtime"] }
 tokio = { version = "1", features = ["full"] }
-databricks-zerobus-ingest-sdk = "1.0.0"
+databricks-zerobus-ingest-sdk = { version = "1.0.1", features = ["arrow-flight"] }
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 async-trait = "0.1"
 prost = "0.13"
 prost-types = "0.13"
 tonic = "0.13"
+arrow-ipc = { version = "56.2.0", default-features = false }
+arrow-schema = { version = "56.2.0", default-features = false }
+arrow-array = { version = "56.2.0", default-features = false }

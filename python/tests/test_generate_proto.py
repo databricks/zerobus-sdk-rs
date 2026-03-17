@@ -505,7 +505,13 @@ class TestGenerateProtoFile:
             os.unlink(output_path)
 
     def test_generate_proto_with_struct(self):
-        columns = [{"name": "address", "type_text": "STRUCT<city:STRING,zip:INT>", "nullable": True}]
+        columns = [
+            {
+                "name": "address",
+                "type_text": "STRUCT<city:STRING,zip:INT>",
+                "nullable": True,
+            }
+        ]
 
         with tempfile.NamedTemporaryFile(mode="w", suffix=".proto", delete=False) as f:
             output_path = f.name

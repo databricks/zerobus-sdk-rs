@@ -38,7 +38,10 @@ logger = logging.getLogger(__name__)
 
 # Configuration - update these with your values
 # For AWS:
-SERVER_ENDPOINT = os.getenv("ZEROBUS_SERVER_ENDPOINT", "https://your-shard-id.zerobus.region.cloud.databricks.com")
+SERVER_ENDPOINT = os.getenv(
+    "ZEROBUS_SERVER_ENDPOINT",
+    "https://your-shard-id.zerobus.region.cloud.databricks.com",
+)
 UNITY_CATALOG_ENDPOINT = os.getenv("DATABRICKS_WORKSPACE_URL", "https://your-workspace.cloud.databricks.com")
 # For Azure:
 # SERVER_ENDPOINT = os.getenv(

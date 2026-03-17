@@ -11,6 +11,9 @@
 .bsp/
 .bazelbsp/
 
+# Tools
+pyrefly.toml
+
 # OS
 .DS_Store
 Thumbs.db
