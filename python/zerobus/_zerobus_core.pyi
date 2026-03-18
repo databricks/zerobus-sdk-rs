@@ -516,6 +516,18 @@ class aio:
 class arrow:
     """Arrow Flight support submodule."""
 
+    class IPCCompression:
+        """Arrow IPC compression codec."""
+
+        NONE: "IPCCompression"
+        """No compression (default)."""
+
+        LZ4_FRAME: "IPCCompression"
+        """LZ4 frame compression."""
+
+        ZSTD: "IPCCompression"
+        """Zstandard compression."""
+
     class ArrowStreamConfigurationOptions:
         """Configuration options for Arrow Flight streams."""
 
@@ -543,6 +555,9 @@ class arrow:
         connection_timeout_ms: int
         """Connection establishment timeout in milliseconds. Default: 30000"""
 
+        ipc_compression: "arrow.IPCCompression"
+        """IPC compression codec. Default: IPCCompression.None"""
+
         def __init__(
             self,
             *,
@@ -554,6 +569,7 @@ class arrow:
             server_lack_of_ack_timeout_ms: int = 60000,
             flush_timeout_ms: int = 300000,
             connection_timeout_ms: int = 30000,
+            ipc_compression: "arrow.IPCCompression" = ...,
         ) -> None: ...
         def __repr__(self) -> str: ...
 

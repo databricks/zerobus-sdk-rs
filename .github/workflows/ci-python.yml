@@ -57,6 +57,10 @@ jobs:
         with:
           python-version: '3.12'
 
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+
       - name: Copy root LICENSE for maturin
         run: cp ../LICENSE LICENSE
 
