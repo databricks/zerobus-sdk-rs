@@ -2,6 +2,15 @@ name: TypeScript CI
 
 on:
   workflow_call:
+    inputs:
+      use_local_sdk:
+        description: 'Override databricks-zerobus-ingest-sdk with the local path dep (for integration testing unreleased Rust changes)'
+        type: boolean
+        default: false
+      artifact_suffix:
+        description: 'Suffix to append to artifact names to avoid conflicts when called multiple times in one workflow run'
+        type: string
+        default: ''
 
 jobs:
   build:
@@ -67,6 +76,15 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y gcc-aarch64-linux-gnu g++-aarch64-linux-gnu
 
+      - name: Patch Cargo.toml to use local Rust SDK (Unix)
+        if: inputs.use_local_sdk && runner.os != 'Windows'
+        run: printf '\n[patch.crates-io]\ndatabricks-zerobus-ingest-sdk = { path = "../rust/sdk" }\n' >> Cargo.toml
+
+      - name: Patch Cargo.toml to use local Rust SDK (Windows)
+        if: inputs.use_local_sdk && runner.os == 'Windows'
+        run: Add-Content -Path Cargo.toml -Value "`n[patch.crates-io]`ndatabricks-zerobus-ingest-sdk = { path = `"../rust/sdk`" }`n"
+        shell: powershell
+
       - name: Install dependencies
         run: npm ci
 
@@ -78,7 +96,7 @@ jobs:
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: bindings-${{ matrix.settings.target }}
+          name: bindings-${{ matrix.settings.target }}${{ inputs.artifact_suffix }}
           path: 'typescript/*.node'
           if-no-files-found: error
 
@@ -118,6 +136,15 @@ jobs:
           Invoke-WebRequest -Uri https://win.rustup.rs/x86_64 -OutFile rustup-init.exe
           .\rustup-init.exe -y --default-toolchain stable
           echo "$env:USERPROFILE\.cargo\bin" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+        shell: powershell
+
+      - name: Patch Cargo.toml to use local Rust SDK (Unix)
+        if: inputs.use_local_sdk && runner.os != 'Windows'
+        run: printf '\n[patch.crates-io]\ndatabricks-zerobus-ingest-sdk = { path = "../rust/sdk" }\n' >> Cargo.toml
+
+      - name: Patch Cargo.toml to use local Rust SDK (Windows)
+        if: inputs.use_local_sdk && runner.os == 'Windows'
+        run: Add-Content -Path Cargo.toml -Value "`n[patch.crates-io]`ndatabricks-zerobus-ingest-sdk = { path = `"../rust/sdk`" }`n"
         shell: powershell
 
       - name: Install dependencies

@@ -15,13 +15,17 @@ jobs:
     if: always()
     steps:
       - run: |
-          if [[ "${{ needs.rust.result }}" == "failure" ]] || \
-             [[ "${{ needs.java.result }}" == "failure" ]] || \
-             [[ "${{ needs.typescript.result }}" == "failure" ]] || \
-             [[ "${{ needs.python.result }}" == "failure" ]] || \
-             [[ "${{ needs.go.result }}" == "failure" ]]; then
-            exit 1
-          fi
+          for result in \
+            "${{ needs.rust.result }}" \
+            "${{ needs.java.result }}" \
+            "${{ needs.typescript.result }}" \
+            "${{ needs.python.result }}" \
+            "${{ needs.go.result }}"; do
+            if [[ "$result" != "success" && "$result" != "skipped" ]]; then
+              echo "Job failed or was cancelled: $result"
+              exit 1
+            fi
+          done
 
   changes:
     runs-on:
@@ -55,6 +59,7 @@ jobs:
               - 'go/**'
               - '.github/workflows/ci-go.yml'
 
+  # Blocking jobs — required for merge
   rust:
     needs: changes
     if: needs.changes.outputs.rust == 'true'
@@ -69,14 +74,46 @@ jobs:
     needs: changes
     if: needs.changes.outputs.typescript == 'true'
     uses: ./.github/workflows/ci-typescript.yml
-    
+
   python:
     needs: changes
     if: needs.changes.outputs.python == 'true'
     uses: ./.github/workflows/ci-python.yml
-    
+
   go:
     needs: changes
     if: needs.changes.outputs.go == 'true'
     uses: ./.github/workflows/ci-go.yml
-  
+
+  # Non-blocking cross-SDK jobs — run all SDK tests against the local Rust
+  # source when rust/** changes, to catch breakage before a new FFI release.
+  # These are intentionally excluded from `gate` so they don't block merging.
+  cross-sdk-go:
+    needs: changes
+    if: needs.changes.outputs.rust == 'true'
+    uses: ./.github/workflows/ci-go.yml
+    with:
+      use_local_sdk: true
+
+  cross-sdk-python:
+    needs: changes
+    if: needs.changes.outputs.rust == 'true'
+    uses: ./.github/workflows/ci-python.yml
+    with:
+      use_local_sdk: true
+
+  cross-sdk-typescript:
+    needs: changes
+    if: needs.changes.outputs.rust == 'true'
+    uses: ./.github/workflows/ci-typescript.yml
+    with:
+      use_local_sdk: true
+      artifact_suffix: '-local-sdk'
+
+  cross-sdk-java:
+    needs: changes
+    if: needs.changes.outputs.rust == 'true'
+    uses: ./.github/workflows/ci-java.yml
+    with:
+      use_local_sdk: true
+      artifact_suffix: '-local-sdk'

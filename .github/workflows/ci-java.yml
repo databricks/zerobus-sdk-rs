@@ -2,6 +2,15 @@ name: Java CI
 
 on:
   workflow_call:
+    inputs:
+      use_local_sdk:
+        description: 'Override databricks-zerobus-ingest-sdk with the local path dep (for integration testing unreleased Rust changes)'
+        type: boolean
+        default: false
+      artifact_suffix:
+        description: 'Suffix to append to artifact names to avoid conflicts when called multiple times in one workflow run'
+        type: string
+        default: ''
 
 jobs:
   fmt:
@@ -49,6 +58,11 @@ jobs:
           java-version: ${{ matrix.javaVersion }}
           distribution: 'temurin'
           cache: 'maven'
+      - name: Patch Rust workspace to use local SDK
+        if: inputs.use_local_sdk
+        shell: bash
+        run: printf '\n[patch.crates-io]\ndatabricks-zerobus-ingest-sdk = { path = "sdk" }\n' >> ../rust/Cargo.toml
+
       - name: Build with Maven
         run: mvn clean compile
       - name: Run tests
@@ -57,7 +71,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: test-results-${{ matrix.os }}-java-${{ matrix.javaVersion }}
+          name: test-results-${{ matrix.os }}-java-${{ matrix.javaVersion }}${{ inputs.artifact_suffix }}
           path: |
             java/target/surefire-reports/
             java/target/test-classes/
