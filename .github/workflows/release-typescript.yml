@@ -122,13 +122,9 @@ jobs:
           for dir in npm/*/; do
             npm publish "$dir" --access public --provenance
           done
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
 
       - name: Publish main package
         run: npm publish --access public --provenance --ignore-scripts
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
 
   release:
     name: Create GitHub Release
