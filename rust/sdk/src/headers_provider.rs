@@ -93,3 +93,16 @@ impl HeadersProvider for OAuthHeadersProvider {
         Ok(headers)
     }
 }
+
+/// A no-op headers provider that returns an empty headers map.
+///
+/// Useful for local development, testing, or scenarios where authentication
+/// is handled externally (e.g., via a sidecar proxy).
+pub struct NoOpHeadersProvider;
+
+#[async_trait]
+impl HeadersProvider for NoOpHeadersProvider {
+    async fn get_headers(&self) -> ZerobusResult<HashMap<&'static str, String>> {
+        Ok(HashMap::new())
+    }
+}

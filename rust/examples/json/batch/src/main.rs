@@ -1,9 +1,6 @@
 use std::error::Error;
 
-use databricks_zerobus_ingest_sdk::{
-    databricks::zerobus::RecordType, JsonString, JsonValue, StreamConfigurationOptions,
-    TableProperties, ZerobusSdk, ZerobusStream,
-};
+use databricks_zerobus_ingest_sdk::{JsonString, JsonValue, ZerobusSdk, ZerobusStream};
 use serde::Serialize;
 
 /// Order struct that can be automatically serialized to JSON using JsonValue wrapper.
@@ -36,28 +33,17 @@ const SERVER_ENDPOINT: &str = "https://<your-shard-id>.zerobus.<region>.cloud.da
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error>> {
-    let table_properties = TableProperties {
-        table_name: TABLE_NAME.to_string(),
-        // Not needed for JSON.
-        descriptor_proto: None,
-    };
-    let stream_configuration_options = StreamConfigurationOptions {
-        max_inflight_requests: 100,
-        record_type: RecordType::Json,
-        ..Default::default()
-    };
     let sdk_handle = ZerobusSdk::builder()
         .endpoint(SERVER_ENDPOINT)
         .unity_catalog_url(DATABRICKS_WORKSPACE_URL)
         .build()?;
 
     let mut stream = sdk_handle
-        .create_stream(
-            table_properties.clone(),
-            DATABRICKS_CLIENT_ID.to_string(),
-            DATABRICKS_CLIENT_SECRET.to_string(),
-            Some(stream_configuration_options),
-        )
+        .stream_builder(TABLE_NAME)
+        .oauth(DATABRICKS_CLIENT_ID, DATABRICKS_CLIENT_SECRET)
+        .json()
+        .max_inflight_requests(100)
+        .build()
         .await?;
 
     ingest_with_offset_api(&mut stream).await?;
