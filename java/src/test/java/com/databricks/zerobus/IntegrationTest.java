@@ -1174,7 +1174,6 @@ public class IntegrationTest {
       // Expected — flush timeout
     }
 
-    // These must not throw — this was broken before the nativeClose fix
     List<byte[]> protoUnacked = protoStream.getUnackedRecords();
     assertNotNull(protoUnacked, "Proto getUnackedRecords() should not return null after close");
     List<EncodedBatch> protoBatches = protoStream.getUnackedBatches();

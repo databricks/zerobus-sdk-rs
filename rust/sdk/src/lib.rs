@@ -206,7 +206,7 @@ pub struct ZerobusStream {
     /// A vector of records that have failed to be acknowledged.
     failed_records: Arc<RwLock<Vec<EncodedBatch>>>,
     /// Flag indicating if the stream has been closed.
-    pub is_closed: Arc<AtomicBool>,
+    is_closed: Arc<AtomicBool>,
     /// Sync mutex to ensure that offset generation and record ingestion happen atomically.
     sync_mutex: Arc<tokio::sync::Mutex<()>>,
     /// Watch channel for last error received from the server.
@@ -2086,6 +2086,11 @@ impl ZerobusStream {
     /// # Ok(())
     /// # }
     /// ```
+    /// Returns whether the stream has been closed.
+    pub fn is_closed(&self) -> bool {
+        self.is_closed.load(Ordering::Relaxed)
+    }
+
     pub async fn close(&mut self) -> ZerobusResult<()> {
         if self.is_closed.load(Ordering::Relaxed) {
             return Ok(());

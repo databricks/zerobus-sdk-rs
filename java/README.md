@@ -710,62 +710,7 @@ For high-performance columnar ingestion using Apache Arrow Flight. Best when you
 </dependency>
 ```
 
-**Usage:**
-
-```java
-import org.apache.arrow.memory.RootAllocator;
-import org.apache.arrow.vector.*;
-import org.apache.arrow.vector.types.pojo.*;
-
-// Define schema
-Schema schema = new Schema(Arrays.asList(
-    Field.nullable("name", new ArrowType.Utf8()),
-    Field.nullable("age", new ArrowType.Int(32, true))
-));
-
-// Create Arrow stream
-ZerobusArrowStream stream = sdk.createArrowStream(
-    "catalog.schema.table", schema, clientId, clientSecret
-).join();
-
-// Populate and ingest a batch
-try (RootAllocator allocator = new RootAllocator();
-     VectorSchemaRoot root = VectorSchemaRoot.create(schema, allocator)) {
-    VarCharVector nameVec = (VarCharVector) root.getVector("name");
-    IntVector ageVec = (IntVector) root.getVector("age");
-
-    nameVec.allocateNew(2);
-    ageVec.allocateNew(2);
-    nameVec.setSafe(0, "Alice".getBytes());
-    ageVec.setSafe(0, 30);
-    nameVec.setSafe(1, "Bob".getBytes());
-    ageVec.setSafe(1, 25);
-    root.setRowCount(2);
-
-    Optional<Long> offset = stream.ingestBatch(root);
-    offset.ifPresent(o -> {
-        try { stream.waitForOffset(o); } catch (Exception e) { throw new RuntimeException(e); }
-    });
-}
-
-stream.close();
-```
-
-Arrow streams have their own configuration via `ArrowStreamConfigurationOptions`:
-
-```java
-ArrowStreamConfigurationOptions options = ArrowStreamConfigurationOptions.builder()
-    .setMaxInflightBatches(2000)
-    .setRecovery(true)
-    .setFlushTimeoutMs(600000)
-    .build();
-
-ZerobusArrowStream stream = sdk.createArrowStream(
-    tableName, schema, clientId, clientSecret, options
-).join();
-```
-
-See [`examples/arrow/`](https://github.com/databricks/zerobus-sdk/blob/main/java/examples/arrow/) for complete working examples.
+Arrow streams have their own configuration via `ArrowStreamConfigurationOptions`. See [`examples/arrow/`](https://github.com/databricks/zerobus-sdk/blob/main/java/examples/arrow/) for usage examples and documentation.
 
 ## Configuration
 

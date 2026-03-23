@@ -256,13 +256,11 @@ pub extern "system" fn Java_com_databricks_zerobus_ZerobusArrowStream_nativeIsCl
     // Get stream handle
     let stream_handle = unsafe { NativeArrowStreamHandle::borrow_from_raw(handle) };
 
-    // Block on the async operation.
-    // Stream stays Some after close, so check the underlying is_closed flag.
     let is_closed = block_on(async {
         let guard = stream_handle.stream.lock().await;
         match guard.as_ref() {
             None => true,
-            Some(stream) => stream.is_closed.load(std::sync::atomic::Ordering::Relaxed),
+            Some(stream) => stream.is_closed(),
         }
     });
 

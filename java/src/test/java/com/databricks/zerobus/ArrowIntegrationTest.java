@@ -638,7 +638,6 @@ public class ArrowIntegrationTest {
 
       assertTrue(stream.isClosed(), "Stream should be closed");
 
-      // This must not throw — this was broken before the nativeClose fix
       List<byte[]> unacked = stream.getUnackedBatches();
       assertNotNull(unacked, "getUnackedBatches() should not return null after close");
 
