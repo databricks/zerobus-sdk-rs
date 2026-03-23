@@ -92,6 +92,12 @@ public class ZerobusSdk implements AutoCloseable {
    * @throws ZerobusException if the SDK cannot be initialized
    */
   public ZerobusSdk(String serverEndpoint, String unityCatalogEndpoint) {
+    if (serverEndpoint == null || serverEndpoint.isEmpty()) {
+      throw new IllegalArgumentException("serverEndpoint must not be null or empty");
+    }
+    if (unityCatalogEndpoint == null || unityCatalogEndpoint.isEmpty()) {
+      throw new IllegalArgumentException("unityCatalogEndpoint must not be null or empty");
+    }
     this.serverEndpoint = serverEndpoint;
     this.unityCatalogEndpoint = unityCatalogEndpoint;
     this.nativeHandle = nativeCreate(serverEndpoint, unityCatalogEndpoint);
@@ -157,6 +163,19 @@ public class ZerobusSdk implements AutoCloseable {
       String clientId,
       String clientSecret,
       StreamConfigurationOptions options) {
+
+    if (tableName == null || tableName.isEmpty()) {
+      throw new IllegalArgumentException("tableName must not be null or empty");
+    }
+    if (descriptorProto == null) {
+      throw new IllegalArgumentException("descriptorProto must not be null");
+    }
+    if (clientId == null || clientId.isEmpty()) {
+      throw new IllegalArgumentException("clientId must not be null or empty");
+    }
+    if (clientSecret == null || clientSecret.isEmpty()) {
+      throw new IllegalArgumentException("clientSecret must not be null or empty");
+    }
 
     ensureOpen();
 
@@ -235,6 +254,16 @@ public class ZerobusSdk implements AutoCloseable {
    */
   public CompletableFuture<ZerobusJsonStream> createJsonStream(
       String tableName, String clientId, String clientSecret, StreamConfigurationOptions options) {
+
+    if (tableName == null || tableName.isEmpty()) {
+      throw new IllegalArgumentException("tableName must not be null or empty");
+    }
+    if (clientId == null || clientId.isEmpty()) {
+      throw new IllegalArgumentException("clientId must not be null or empty");
+    }
+    if (clientSecret == null || clientSecret.isEmpty()) {
+      throw new IllegalArgumentException("clientSecret must not be null or empty");
+    }
 
     ensureOpen();
 
@@ -358,6 +387,19 @@ public class ZerobusSdk implements AutoCloseable {
       String clientId,
       String clientSecret,
       ArrowStreamConfigurationOptions options) {
+
+    if (tableName == null || tableName.isEmpty()) {
+      throw new IllegalArgumentException("tableName must not be null or empty");
+    }
+    if (schema == null) {
+      throw new IllegalArgumentException("schema must not be null");
+    }
+    if (clientId == null || clientId.isEmpty()) {
+      throw new IllegalArgumentException("clientId must not be null or empty");
+    }
+    if (clientSecret == null || clientSecret.isEmpty()) {
+      throw new IllegalArgumentException("clientSecret must not be null or empty");
+    }
 
     ensureOpen();
 
@@ -616,7 +658,14 @@ public class ZerobusSdk implements AutoCloseable {
     TableProperties<RecordType> tableProperties = closedStream.getTableProperties();
 
     // Get cached unacked records from the closed stream
-    List<byte[]> unackedRecords = closedStream.getCachedUnackedRecords();
+    List<byte[]> unackedRecords;
+    try {
+      unackedRecords = closedStream.getCachedUnackedRecords();
+    } catch (ZerobusException e) {
+      CompletableFuture<ZerobusStream<RecordType>> failed = new CompletableFuture<>();
+      failed.completeExceptionally(e);
+      return failed;
+    }
 
     byte[] descriptorProtoBytes = tableProperties.getDescriptorProto().toByteArray();
 
@@ -666,8 +715,11 @@ public class ZerobusSdk implements AutoCloseable {
   public void close() {
     long handle = nativeHandle;
     if (handle != 0) {
-      nativeHandle = 0;
-      nativeDestroy(handle);
+      try {
+        nativeDestroy(handle);
+      } finally {
+        nativeHandle = 0;
+      }
       logger.debug("ZerobusSdk closed");
     }
   }

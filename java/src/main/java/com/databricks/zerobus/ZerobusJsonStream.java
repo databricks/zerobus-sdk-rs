@@ -152,6 +152,9 @@ public class ZerobusJsonStream extends BaseZerobusStream {
    */
   public <T> long ingestRecordOffset(T object, JsonSerializer<T> serializer)
       throws ZerobusException {
+    if (serializer == null) {
+      throw new IllegalArgumentException("serializer must not be null");
+    }
     ensureOpen();
     String json = serializer.serialize(object);
     return nativeIngestRecordOffset(nativeHandle, json.getBytes(StandardCharsets.UTF_8), true);
@@ -167,6 +170,9 @@ public class ZerobusJsonStream extends BaseZerobusStream {
    * @throws ZerobusException if the stream is not in a valid state or an error occurs
    */
   public long ingestRecordOffset(String json) throws ZerobusException {
+    if (json == null) {
+      throw new IllegalArgumentException("json must not be null");
+    }
     ensureOpen();
     return nativeIngestRecordOffset(nativeHandle, json.getBytes(StandardCharsets.UTF_8), true);
   }

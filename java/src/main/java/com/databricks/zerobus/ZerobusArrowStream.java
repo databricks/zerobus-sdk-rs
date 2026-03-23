@@ -85,6 +85,7 @@ public class ZerobusArrowStream implements AutoCloseable {
 
   // Cached unacked batches (populated on close for use in recreateArrowStream).
   private volatile List<byte[]> cachedUnackedBatches;
+  private volatile Exception cachedUnackedBatchesError;
 
   /** Package-private constructor. Use {@link ZerobusSdk#createArrowStream} to create instances. */
   ZerobusArrowStream(
@@ -166,21 +167,23 @@ public class ZerobusArrowStream implements AutoCloseable {
   public void close() throws ZerobusException {
     long handle = nativeHandle;
     if (handle != 0) {
-      // Close the stream first (flushes pending batches)
-      nativeClose(handle);
-
-      // Cache unacked batches before destroying the handle (for recreateArrowStream)
       try {
-        cachedUnackedBatches = nativeGetUnackedBatches(handle);
-      } catch (Exception e) {
-        logger.warn("Failed to cache unacked batches: {}", e.getMessage());
-        cachedUnackedBatches = new ArrayList<>();
-      }
+        // Close the stream first (flushes pending batches)
+        nativeClose(handle);
 
-      // Now destroy the handle
-      nativeHandle = 0;
-      nativeDestroy(handle);
-      logger.info("Arrow stream closed");
+        // Cache unacked batches before destroying the handle (for recreateArrowStream)
+        try {
+          cachedUnackedBatches = nativeGetUnackedBatches(handle);
+        } catch (Exception e) {
+          logger.warn("Failed to cache unacked batches: {}", e.getMessage());
+          cachedUnackedBatchesError = e;
+          cachedUnackedBatches = null;
+        }
+      } finally {
+        nativeHandle = 0;
+        nativeDestroy(handle);
+        logger.info("Arrow stream closed");
+      }
     }
   }
 
@@ -229,6 +232,12 @@ public class ZerobusArrowStream implements AutoCloseable {
    */
   public List<byte[]> getUnackedBatches() throws ZerobusException {
     if (nativeHandle == 0) {
+      if (cachedUnackedBatchesError != null) {
+        throw new ZerobusException(
+            "Failed to retrieve unacked batches on close: "
+                + cachedUnackedBatchesError.getMessage(),
+            cachedUnackedBatchesError);
+      }
       return cachedUnackedBatches != null ? cachedUnackedBatches : new ArrayList<>();
     }
     return nativeGetUnackedBatches(nativeHandle);
@@ -242,12 +251,12 @@ public class ZerobusArrowStream implements AutoCloseable {
   }
 
   /** Returns the client ID used to create this stream. */
-  String getClientId() {
+  public String getClientId() {
     return clientId;
   }
 
   /** Returns the client secret used to create this stream. */
-  String getClientSecret() {
+  public String getClientSecret() {
     return clientSecret;
   }
 
@@ -321,8 +330,6 @@ public class ZerobusArrowStream implements AutoCloseable {
   private native void nativeClose(long handle);
 
   private native boolean nativeIsClosed(long handle);
-
-  private native String nativeGetTableName(long handle);
 
   @SuppressWarnings("unchecked")
   private native List<byte[]> nativeGetUnackedBatches(long handle);

@@ -51,6 +51,7 @@ abstract class BaseZerobusStream implements AutoCloseable {
   // Cached unacked records (populated on close for use in recreateStream).
   protected volatile List<byte[]> cachedUnackedRecords;
   protected volatile List<EncodedBatch> cachedUnackedBatches;
+  protected volatile Exception cachedUnackedRecordsError;
 
   /**
    * Creates a new BaseZerobusStream.
@@ -102,23 +103,25 @@ abstract class BaseZerobusStream implements AutoCloseable {
   public void close() throws ZerobusException {
     long handle = nativeHandle;
     if (handle != 0) {
-      // Close the stream first (flushes pending records)
-      nativeClose(handle);
-
-      // Cache unacked records before destroying the handle (for recreateStream)
       try {
-        cachedUnackedRecords = nativeGetUnackedRecords(handle);
-        cachedUnackedBatches = nativeGetUnackedBatches(handle);
-      } catch (Exception e) {
-        logger.warn("Failed to cache unacked records: {}", e.getMessage());
-        cachedUnackedRecords = new ArrayList<>();
-        cachedUnackedBatches = new ArrayList<>();
-      }
+        // Close the stream first (flushes pending records)
+        nativeClose(handle);
 
-      // Now destroy the handle
-      nativeHandle = 0;
-      nativeDestroy(handle);
-      logger.info("Stream closed");
+        // Cache unacked records before destroying the handle (for recreateStream)
+        try {
+          cachedUnackedRecords = nativeGetUnackedRecords(handle);
+          cachedUnackedBatches = nativeGetUnackedBatches(handle);
+        } catch (Exception e) {
+          logger.warn("Failed to cache unacked records: {}", e.getMessage());
+          cachedUnackedRecordsError = e;
+          cachedUnackedRecords = null;
+          cachedUnackedBatches = null;
+        }
+      } finally {
+        nativeHandle = 0;
+        nativeDestroy(handle);
+        logger.info("Stream closed");
+      }
     }
   }
 
@@ -130,7 +133,13 @@ abstract class BaseZerobusStream implements AutoCloseable {
    *
    * @return a list of unacknowledged records as raw bytes, or empty list if none
    */
-  protected List<byte[]> getCachedUnackedRecords() {
+  protected List<byte[]> getCachedUnackedRecords() throws ZerobusException {
+    if (cachedUnackedRecordsError != null) {
+      throw new ZerobusException(
+          "Failed to retrieve unacked records on close: "
+              + cachedUnackedRecordsError.getMessage(),
+          cachedUnackedRecordsError);
+    }
     return cachedUnackedRecords != null ? cachedUnackedRecords : new ArrayList<>();
   }
 
@@ -142,7 +151,13 @@ abstract class BaseZerobusStream implements AutoCloseable {
    *
    * @return a list of unacknowledged batches, or empty list if none
    */
-  protected List<EncodedBatch> getCachedUnackedBatches() {
+  protected List<EncodedBatch> getCachedUnackedBatches() throws ZerobusException {
+    if (cachedUnackedRecordsError != null) {
+      throw new ZerobusException(
+          "Failed to retrieve unacked batches on close: "
+              + cachedUnackedRecordsError.getMessage(),
+          cachedUnackedRecordsError);
+    }
     return cachedUnackedBatches != null ? cachedUnackedBatches : new ArrayList<>();
   }
 

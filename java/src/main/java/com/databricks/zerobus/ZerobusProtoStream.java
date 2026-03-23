@@ -90,6 +90,9 @@ public class ZerobusProtoStream extends BaseZerobusStream {
    * @throws ZerobusException if the stream is not in a valid state or an error occurs
    */
   public <T extends Message> long ingestRecordOffset(T record) throws ZerobusException {
+    if (record == null) {
+      throw new IllegalArgumentException("record must not be null");
+    }
     ensureOpen();
     return nativeIngestRecordOffset(nativeHandle, record.toByteArray(), false);
   }
@@ -105,6 +108,9 @@ public class ZerobusProtoStream extends BaseZerobusStream {
    * @throws ZerobusException if the stream is not in a valid state or an error occurs
    */
   public long ingestRecordOffset(byte[] encodedBytes) throws ZerobusException {
+    if (encodedBytes == null) {
+      throw new IllegalArgumentException("encodedBytes must not be null");
+    }
     ensureOpen();
     return nativeIngestRecordOffset(nativeHandle, encodedBytes, false);
   }
