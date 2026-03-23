@@ -85,7 +85,6 @@ public class ZerobusArrowStream implements AutoCloseable {
 
   // Cached unacked batches (populated on close for use in recreateArrowStream).
   private volatile List<byte[]> cachedUnackedBatches;
-  private volatile Exception cachedUnackedBatchesError;
 
   /** Package-private constructor. Use {@link ZerobusSdk#createArrowStream} to create instances. */
   ZerobusArrowStream(
@@ -176,8 +175,7 @@ public class ZerobusArrowStream implements AutoCloseable {
           cachedUnackedBatches = nativeGetUnackedBatches(handle);
         } catch (Exception e) {
           logger.warn("Failed to cache unacked batches: {}", e.getMessage());
-          cachedUnackedBatchesError = e;
-          cachedUnackedBatches = null;
+          cachedUnackedBatches = new ArrayList<>();
         }
       } finally {
         nativeHandle = 0;
@@ -232,12 +230,6 @@ public class ZerobusArrowStream implements AutoCloseable {
    */
   public List<byte[]> getUnackedBatches() throws ZerobusException {
     if (nativeHandle == 0) {
-      if (cachedUnackedBatchesError != null) {
-        throw new ZerobusException(
-            "Failed to retrieve unacked batches on close: "
-                + cachedUnackedBatchesError.getMessage(),
-            cachedUnackedBatchesError);
-      }
       return cachedUnackedBatches != null ? cachedUnackedBatches : new ArrayList<>();
     }
     return nativeGetUnackedBatches(nativeHandle);

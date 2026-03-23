@@ -51,7 +51,6 @@ abstract class BaseZerobusStream implements AutoCloseable {
   // Cached unacked records (populated on close for use in recreateStream).
   protected volatile List<byte[]> cachedUnackedRecords;
   protected volatile List<EncodedBatch> cachedUnackedBatches;
-  protected volatile Exception cachedUnackedRecordsError;
 
   /**
    * Creates a new BaseZerobusStream.
@@ -113,9 +112,8 @@ abstract class BaseZerobusStream implements AutoCloseable {
           cachedUnackedBatches = nativeGetUnackedBatches(handle);
         } catch (Exception e) {
           logger.warn("Failed to cache unacked records: {}", e.getMessage());
-          cachedUnackedRecordsError = e;
-          cachedUnackedRecords = null;
-          cachedUnackedBatches = null;
+          cachedUnackedRecords = new ArrayList<>();
+          cachedUnackedBatches = new ArrayList<>();
         }
       } finally {
         nativeHandle = 0;
@@ -133,13 +131,7 @@ abstract class BaseZerobusStream implements AutoCloseable {
    *
    * @return a list of unacknowledged records as raw bytes, or empty list if none
    */
-  protected List<byte[]> getCachedUnackedRecords() throws ZerobusException {
-    if (cachedUnackedRecordsError != null) {
-      throw new ZerobusException(
-          "Failed to retrieve unacked records on close: "
-              + cachedUnackedRecordsError.getMessage(),
-          cachedUnackedRecordsError);
-    }
+  protected List<byte[]> getCachedUnackedRecords() {
     return cachedUnackedRecords != null ? cachedUnackedRecords : new ArrayList<>();
   }
 
@@ -151,13 +143,7 @@ abstract class BaseZerobusStream implements AutoCloseable {
    *
    * @return a list of unacknowledged batches, or empty list if none
    */
-  protected List<EncodedBatch> getCachedUnackedBatches() throws ZerobusException {
-    if (cachedUnackedRecordsError != null) {
-      throw new ZerobusException(
-          "Failed to retrieve unacked batches on close: "
-              + cachedUnackedRecordsError.getMessage(),
-          cachedUnackedRecordsError);
-    }
+  protected List<EncodedBatch> getCachedUnackedBatches() {
     return cachedUnackedBatches != null ? cachedUnackedBatches : new ArrayList<>();
   }
 

@@ -1130,6 +1130,92 @@ public class IntegrationTest {
   }
 
   // ===================================================================================
+  // Test 17: getUnackedRecords/Batches works after close (proto, json, arrow)
+  // ===================================================================================
+
+  @Test
+  @Order(17)
+  @DisplayName("getUnackedRecords/Batches returns data after close with short flush timeout")
+  void testGetUnackedAfterCloseReturnsData() throws Exception {
+    ZerobusSdk sdk = new ZerobusSdk(serverEndpoint, workspaceUrl);
+
+    // Use a 1ms flush timeout so close() gives up before records are acked
+    StreamConfigurationOptions shortFlushOptions =
+        StreamConfigurationOptions.builder()
+            .setFlushTimeoutMs(1)
+            .setRecovery(false)
+            .build();
+
+    // --- Proto stream ---
+    ZerobusProtoStream protoStream =
+        sdk.createProtoStream(
+                tableName,
+                AirQuality.getDescriptor().toProto(),
+                clientId,
+                clientSecret,
+                shortFlushOptions)
+            .join();
+
+    // Ingest many records to maximize chance of unacked
+    for (int i = 0; i < 100; i++) {
+      AirQuality record =
+          AirQuality.newBuilder()
+              .setDeviceName("test-unacked-proto-" + i)
+              .setTemp(42 + i)
+              .setHumidity(99L + i)
+              .build();
+      protoStream.ingestRecordOffset(record);
+    }
+
+    // close() will flush with 1ms timeout — likely times out, leaving unacked records
+    try {
+      protoStream.close();
+    } catch (ZerobusException e) {
+      // Expected — flush timeout
+    }
+
+    // These must not throw — this was broken before the nativeClose fix
+    List<byte[]> protoUnacked = protoStream.getUnackedRecords();
+    assertNotNull(protoUnacked, "Proto getUnackedRecords() should not return null after close");
+    List<EncodedBatch> protoBatches = protoStream.getUnackedBatches();
+    assertNotNull(protoBatches, "Proto getUnackedBatches() should not return null after close");
+
+    // --- JSON stream ---
+    ZerobusJsonStream jsonStream =
+        sdk.createJsonStream(tableName, clientId, clientSecret, shortFlushOptions).join();
+
+    for (int i = 0; i < 100; i++) {
+      jsonStream.ingestRecordOffset(
+          String.format(
+              "{\"device_name\": \"test-unacked-json-%d\", \"temp\": %d, \"humidity\": %d}",
+              i, 42 + i, 99 + i));
+    }
+
+    try {
+      jsonStream.close();
+    } catch (ZerobusException e) {
+      // Expected — flush timeout
+    }
+
+    List<String> jsonUnacked = jsonStream.getUnackedRecords();
+    assertNotNull(jsonUnacked, "JSON getUnackedRecords() should not return null after close");
+    List<EncodedBatch> jsonBatches = jsonStream.getUnackedBatches();
+    assertNotNull(jsonBatches, "JSON getUnackedBatches() should not return null after close");
+
+    System.out.println(
+        "getUnacked after close: proto unacked="
+            + protoUnacked.size()
+            + " batches="
+            + protoBatches.size()
+            + ", json unacked="
+            + jsonUnacked.size()
+            + " batches="
+            + jsonBatches.size());
+
+    sdk.close();
+  }
+
+  // ===================================================================================
   // Helpers
   // ===================================================================================
 

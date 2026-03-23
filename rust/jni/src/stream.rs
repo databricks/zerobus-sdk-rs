@@ -388,10 +388,11 @@ pub extern "system" fn Java_com_databricks_zerobus_BaseZerobusStream_nativeClose
     // Get stream handle
     let stream_handle = unsafe { NativeStreamHandle::borrow_from_raw(handle) };
 
-    // Block on the async operation
+    // Block on the async operation.
+    // Close in place (not .take()) so nativeGetUnackedRecords/Batches can still access the stream.
     let result = block_on(async {
         let mut guard = stream_handle.stream.lock().await;
-        if let Some(mut stream) = guard.take() {
+        if let Some(stream) = guard.as_mut() {
             stream.close().await?;
         }
         Ok::<_, databricks_zerobus_ingest_sdk::ZerobusError>(())
@@ -417,10 +418,14 @@ pub extern "system" fn Java_com_databricks_zerobus_BaseZerobusStream_nativeIsClo
     // Get stream handle
     let stream_handle = unsafe { NativeStreamHandle::borrow_from_raw(handle) };
 
-    // Block on the async operation
+    // Block on the async operation.
+    // Stream stays Some after close, so check the underlying is_closed flag.
     let is_closed = block_on(async {
         let guard = stream_handle.stream.lock().await;
-        guard.is_none()
+        match guard.as_ref() {
+            None => true,
+            Some(stream) => stream.is_closed.load(std::sync::atomic::Ordering::Relaxed),
+        }
     });
 
     if is_closed {

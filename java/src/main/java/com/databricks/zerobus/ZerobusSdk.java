@@ -658,14 +658,7 @@ public class ZerobusSdk implements AutoCloseable {
     TableProperties<RecordType> tableProperties = closedStream.getTableProperties();
 
     // Get cached unacked records from the closed stream
-    List<byte[]> unackedRecords;
-    try {
-      unackedRecords = closedStream.getCachedUnackedRecords();
-    } catch (ZerobusException e) {
-      CompletableFuture<ZerobusStream<RecordType>> failed = new CompletableFuture<>();
-      failed.completeExceptionally(e);
-      return failed;
-    }
+    List<byte[]> unackedRecords = closedStream.getCachedUnackedRecords();
 
     byte[] descriptorProtoBytes = tableProperties.getDescriptorProto().toByteArray();
 

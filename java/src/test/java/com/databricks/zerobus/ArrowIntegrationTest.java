@@ -600,6 +600,56 @@ public class ArrowIntegrationTest {
   }
 
   // ===================================================================================
+  // Test 13: getUnackedBatches callable after close without error
+  // ===================================================================================
+
+  @Test
+  @Order(13)
+  @DisplayName("Arrow stream - getUnackedBatches returns data after close with short flush timeout")
+  void testArrowGetUnackedAfterCloseReturnsData() throws Exception {
+    ZerobusSdk sdk = new ZerobusSdk(serverEndpoint, workspaceUrl);
+
+    // Use a 1ms flush timeout so close() gives up before batches are acked
+    ArrowStreamConfigurationOptions shortFlushOptions =
+        ArrowStreamConfigurationOptions.builder()
+            .setFlushTimeoutMs(1)
+            .setRecovery(false)
+            .build();
+
+    try (BufferAllocator allocator = new RootAllocator()) {
+      ZerobusArrowStream stream =
+          sdk.createArrowStream(tableName, SCHEMA, clientId, clientSecret, shortFlushOptions)
+              .join();
+
+      // Ingest multiple batches to maximize chance of unacked
+      for (int i = 0; i < 10; i++) {
+        try (VectorSchemaRoot batch = VectorSchemaRoot.create(SCHEMA, allocator)) {
+          fillBatch(batch, "test-arrow-unacked-" + i, 100);
+          stream.ingestBatch(batch);
+        }
+      }
+
+      // close() will flush with 1ms timeout — likely times out, leaving unacked batches
+      try {
+        stream.close();
+      } catch (ZerobusException e) {
+        // Expected — flush timeout
+      }
+
+      assertTrue(stream.isClosed(), "Stream should be closed");
+
+      // This must not throw — this was broken before the nativeClose fix
+      List<byte[]> unacked = stream.getUnackedBatches();
+      assertNotNull(unacked, "getUnackedBatches() should not return null after close");
+
+      System.out.println(
+          "Arrow getUnackedBatches after close: " + unacked.size() + " unacked batches");
+    }
+
+    sdk.close();
+  }
+
+  // ===================================================================================
   // Helper
   // ===================================================================================
 

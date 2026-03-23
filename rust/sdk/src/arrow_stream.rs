@@ -159,7 +159,7 @@ pub struct ZerobusArrowStream {
     /// Receiver for the watch channel (kept alive to prevent sender errors).
     _last_ack_rx: tokio::sync::watch::Receiver<Option<OffsetId>>,
     /// Flag indicating if the stream has been closed.
-    is_closed: Arc<AtomicBool>,
+    pub is_closed: Arc<AtomicBool>,
     /// Handle to the receiver task processing server responses.
     receiver_task: Arc<Mutex<Option<tokio::task::JoinHandle<ZerobusResult<()>>>>>,
     /// Batches that have been sent but not yet acknowledged (for recovery).
