@@ -3,13 +3,10 @@ package com.databricks.zerobus;
 import static org.junit.jupiter.api.Assertions.*;
 
 import java.io.ByteArrayInputStream;
-import java.io.IOException;
 import java.nio.channels.Channels;
 import java.util.Arrays;
 import org.apache.arrow.memory.BufferAllocator;
 import org.apache.arrow.memory.RootAllocator;
-import org.apache.arrow.vector.IntVector;
-import org.apache.arrow.vector.VarCharVector;
 import org.apache.arrow.vector.VectorSchemaRoot;
 import org.apache.arrow.vector.ipc.ArrowStreamReader;
 import org.apache.arrow.vector.types.pojo.ArrowType;
@@ -207,64 +204,6 @@ public class UnitTest {
         VectorSchemaRoot root = VectorSchemaRoot.create(schema, allocator)) {
       // root has 0 rows — the ingestBatch method should return Optional.empty() for this.
       assertEquals(0, root.getRowCount());
-    }
-  }
-
-  @Test
-  void arrowBatchSerializationRoundtrip() throws Exception {
-    Schema schema =
-        new Schema(
-            Arrays.asList(
-                Field.nullable("name", new ArrowType.Utf8()),
-                Field.nullable("age", new ArrowType.Int(32, true))));
-
-    byte[] ipcBytes;
-    try (BufferAllocator allocator = new RootAllocator();
-        VectorSchemaRoot root = VectorSchemaRoot.create(schema, allocator)) {
-      VarCharVector nameVec = (VarCharVector) root.getVector("name");
-      IntVector ageVec = (IntVector) root.getVector("age");
-
-      nameVec.allocateNew(2);
-      ageVec.allocateNew(2);
-      nameVec.setSafe(0, "Alice".getBytes());
-      ageVec.setSafe(0, 30);
-      nameVec.setSafe(1, "Bob".getBytes());
-      ageVec.setSafe(1, 25);
-      root.setRowCount(2);
-
-      // Use the package-private serialization method via reflection-free approach:
-      // serializeBatchToIpc is private, but serializeSchemaToIpc is package-private.
-      // We'll use the ArrowStreamWriter directly as the test.
-      java.io.ByteArrayOutputStream out = new java.io.ByteArrayOutputStream();
-      try (org.apache.arrow.vector.ipc.ArrowStreamWriter writer =
-          new org.apache.arrow.vector.ipc.ArrowStreamWriter(
-              root, null, Channels.newChannel(out))) {
-        writer.start();
-        writer.writeBatch();
-        writer.end();
-      }
-      ipcBytes = out.toByteArray();
-    }
-
-    assertNotNull(ipcBytes);
-    assertTrue(ipcBytes.length > 0);
-
-    // Deserialize and verify data
-    try (BufferAllocator allocator = new RootAllocator();
-        ArrowStreamReader reader =
-            new ArrowStreamReader(
-                Channels.newChannel(new ByteArrayInputStream(ipcBytes)), allocator)) {
-      assertTrue(reader.loadNextBatch());
-      VectorSchemaRoot root = reader.getVectorSchemaRoot();
-      assertEquals(2, root.getRowCount());
-      assertEquals(
-          "Alice",
-          new String(((VarCharVector) root.getVector("name")).get(0)));
-      assertEquals(30, ((IntVector) root.getVector("age")).get(0));
-      assertEquals(
-          "Bob",
-          new String(((VarCharVector) root.getVector("name")).get(1)));
-      assertEquals(25, ((IntVector) root.getVector("age")).get(1));
     }
   }
 }

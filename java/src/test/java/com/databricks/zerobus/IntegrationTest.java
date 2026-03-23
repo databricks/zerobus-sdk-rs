@@ -1141,10 +1141,7 @@ public class IntegrationTest {
 
     // Use a 1ms flush timeout so close() gives up before records are acked
     StreamConfigurationOptions shortFlushOptions =
-        StreamConfigurationOptions.builder()
-            .setFlushTimeoutMs(1)
-            .setRecovery(false)
-            .build();
+        StreamConfigurationOptions.builder().setFlushTimeoutMs(1).setRecovery(false).build();
 
     // --- Proto stream ---
     ZerobusProtoStream protoStream =

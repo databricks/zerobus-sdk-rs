@@ -611,10 +611,7 @@ public class ArrowIntegrationTest {
 
     // Use a 1ms flush timeout so close() gives up before batches are acked
     ArrowStreamConfigurationOptions shortFlushOptions =
-        ArrowStreamConfigurationOptions.builder()
-            .setFlushTimeoutMs(1)
-            .setRecovery(false)
-            .build();
+        ArrowStreamConfigurationOptions.builder().setFlushTimeoutMs(1).setRecovery(false).build();
 
     try (BufferAllocator allocator = new RootAllocator()) {
       ZerobusArrowStream stream =

@@ -251,7 +251,8 @@ public class StreamConfigurationOptions {
      */
     public StreamConfigurationOptionsBuilder setMaxInflightRecords(int maxInflightRecords) {
       if (maxInflightRecords <= 0) {
-        throw new IllegalArgumentException("maxInflightRecords must be > 0, got: " + maxInflightRecords);
+        throw new IllegalArgumentException(
+            "maxInflightRecords must be > 0, got: " + maxInflightRecords);
       }
       this.maxInflightRecords = maxInflightRecords;
       return this;
@@ -282,7 +283,8 @@ public class StreamConfigurationOptions {
      */
     public StreamConfigurationOptionsBuilder setRecoveryTimeoutMs(int recoveryTimeoutMs) {
       if (recoveryTimeoutMs < 0) {
-        throw new IllegalArgumentException("recoveryTimeoutMs must be >= 0, got: " + recoveryTimeoutMs);
+        throw new IllegalArgumentException(
+            "recoveryTimeoutMs must be >= 0, got: " + recoveryTimeoutMs);
       }
       this.recoveryTimeoutMs = recoveryTimeoutMs;
       return this;
@@ -300,7 +302,8 @@ public class StreamConfigurationOptions {
      */
     public StreamConfigurationOptionsBuilder setRecoveryBackoffMs(int recoveryBackoffMs) {
       if (recoveryBackoffMs < 0) {
-        throw new IllegalArgumentException("recoveryBackoffMs must be >= 0, got: " + recoveryBackoffMs);
+        throw new IllegalArgumentException(
+            "recoveryBackoffMs must be >= 0, got: " + recoveryBackoffMs);
       }
       this.recoveryBackoffMs = recoveryBackoffMs;
       return this;
