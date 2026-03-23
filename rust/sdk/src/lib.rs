@@ -2061,6 +2061,11 @@ impl ZerobusStream {
             .await
     }
 
+    /// Returns whether the stream has been closed.
+    pub fn is_closed(&self) -> bool {
+        self.is_closed.load(Ordering::Relaxed)
+    }
+
     /// Closes the stream gracefully after flushing all pending records.
     ///
     /// This method first calls `flush()` to ensure all pending records are acknowledged,
