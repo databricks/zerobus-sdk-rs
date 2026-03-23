@@ -105,16 +105,18 @@ abstract class BaseZerobusStream implements AutoCloseable {
       try {
         // Close the stream first (flushes pending records)
         nativeClose(handle);
+      } catch (ZerobusException e) {
+        logger.warn("nativeClose failed: {}", e.getMessage());
+      }
 
-        // Cache unacked records before destroying the handle (for recreateStream)
-        try {
-          cachedUnackedRecords = nativeGetUnackedRecords(handle);
-          cachedUnackedBatches = nativeGetUnackedBatches(handle);
-        } catch (Exception e) {
-          logger.warn("Failed to cache unacked records: {}", e.getMessage());
-          cachedUnackedRecords = new ArrayList<>();
-          cachedUnackedBatches = new ArrayList<>();
-        }
+      // Cache unacked records before destroying the handle (for recreateStream)
+      try {
+        cachedUnackedRecords = nativeGetUnackedRecords(handle);
+        cachedUnackedBatches = nativeGetUnackedBatches(handle);
+      } catch (Exception e) {
+        logger.warn("Failed to cache unacked records: {}", e.getMessage());
+        cachedUnackedRecords = new ArrayList<>();
+        cachedUnackedBatches = new ArrayList<>();
       } finally {
         nativeHandle = 0;
         nativeDestroy(handle);

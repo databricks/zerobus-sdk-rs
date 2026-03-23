@@ -708,11 +708,8 @@ public class ZerobusSdk implements AutoCloseable {
   public void close() {
     long handle = nativeHandle;
     if (handle != 0) {
-      try {
-        nativeDestroy(handle);
-      } finally {
-        nativeHandle = 0;
-      }
+      nativeHandle = 0;
+      nativeDestroy(handle);
       logger.debug("ZerobusSdk closed");
     }
   }
