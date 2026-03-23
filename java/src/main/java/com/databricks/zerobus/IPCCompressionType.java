@@ -3,9 +3,9 @@ package com.databricks.zerobus;
 /**
  * Compression type for Arrow IPC messages.
  *
- * <p>When set on {@link ArrowStreamConfigurationOptions}, the SDK compresses each Arrow record batch
- * before transmitting it over the Arrow Flight connection. This can significantly reduce network
- * bandwidth at the cost of additional CPU usage.
+ * <p>When set on {@link ArrowStreamConfigurationOptions}, the SDK compresses each Arrow record
+ * batch before transmitting it over the Arrow Flight connection. This can significantly reduce
+ * network bandwidth at the cost of additional CPU usage.
  *
  * <p>Supported codecs:
  *
