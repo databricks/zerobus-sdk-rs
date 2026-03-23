@@ -169,7 +169,7 @@ public class ZerobusArrowStream implements AutoCloseable {
       try {
         // Close the stream first (flushes pending batches)
         nativeClose(handle);
-      } catch (ZerobusException e) {
+      } catch (Exception e) {
         logger.warn("nativeClose failed: {}", e.getMessage());
       }
 
