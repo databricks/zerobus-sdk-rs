@@ -600,6 +600,92 @@ public class ArrowIntegrationTest {
   }
 
   // ===================================================================================
+  // Test 13: Arrow stream - LZ4 compression
+  // ===================================================================================
+
+  @Test
+  @Order(13)
+  @DisplayName("Arrow stream - LZ4 compression")
+  void testArrowLz4Compression() throws Exception {
+    ArrowStreamConfigurationOptions options =
+        ArrowStreamConfigurationOptions.builder()
+            .setIpcCompression(IPCCompressionType.LZ4_FRAME)
+            .build();
+
+    try (ZerobusSdk sdk = new ZerobusSdk(serverEndpoint, workspaceUrl);
+        BufferAllocator allocator = new RootAllocator()) {
+      ZerobusArrowStream stream =
+          sdk.createArrowStream(tableName, SCHEMA, clientId, clientSecret, options).join();
+
+      try {
+        try (VectorSchemaRoot batch = VectorSchemaRoot.create(SCHEMA, allocator)) {
+          fillBatch(batch, "test-arrow-lz4", 5);
+
+          long offset = stream.ingestBatch(batch).get();
+          stream.waitForOffset(offset);
+        }
+
+        assertEquals(IPCCompressionType.LZ4_FRAME, stream.getOptions().ipcCompression());
+        System.out.println("Arrow LZ4 compression: 5 rows ingested");
+      } finally {
+        stream.close();
+      }
+    }
+  }
+
+  // ===================================================================================
+  // Test 14: Arrow stream - ZSTD compression
+  // ===================================================================================
+
+  @Test
+  @Order(14)
+  @DisplayName("Arrow stream - ZSTD compression")
+  void testArrowZstdCompression() throws Exception {
+    ArrowStreamConfigurationOptions options =
+        ArrowStreamConfigurationOptions.builder()
+            .setIpcCompression(IPCCompressionType.ZSTD)
+            .build();
+
+    try (ZerobusSdk sdk = new ZerobusSdk(serverEndpoint, workspaceUrl);
+        BufferAllocator allocator = new RootAllocator()) {
+      ZerobusArrowStream stream =
+          sdk.createArrowStream(tableName, SCHEMA, clientId, clientSecret, options).join();
+
+      try {
+        try (VectorSchemaRoot batch = VectorSchemaRoot.create(SCHEMA, allocator)) {
+          fillBatch(batch, "test-arrow-zstd", 5);
+
+          long offset = stream.ingestBatch(batch).get();
+          stream.waitForOffset(offset);
+        }
+
+        assertEquals(IPCCompressionType.ZSTD, stream.getOptions().ipcCompression());
+        System.out.println("Arrow ZSTD compression: 5 rows ingested");
+      } finally {
+        stream.close();
+      }
+    }
+  }
+
+  // ===================================================================================
+  // Test 15: Arrow stream - default compression is NONE
+  // ===================================================================================
+
+  @Test
+  @Order(15)
+  @DisplayName("Arrow stream - default compression is NONE")
+  void testArrowDefaultCompressionIsNone() {
+    ArrowStreamConfigurationOptions defaultOptions = ArrowStreamConfigurationOptions.getDefault();
+    assertEquals(IPCCompressionType.NONE, defaultOptions.ipcCompression());
+
+    ArrowStreamConfigurationOptions builtOptions =
+        ArrowStreamConfigurationOptions.builder().build();
+    assertEquals(IPCCompressionType.NONE, builtOptions.ipcCompression());
+
+    System.out.println("Arrow default compression: NONE verified");
+  }
+
+  // ===================================================================================
   // Helper
   // ===================================================================================
 
