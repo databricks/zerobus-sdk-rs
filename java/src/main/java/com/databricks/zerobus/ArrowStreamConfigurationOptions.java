@@ -302,7 +302,7 @@ public class ArrowStreamConfigurationOptions {
      */
     public ArrowStreamConfigurationOptionsBuilder setIpcCompression(
         IPCCompressionType ipcCompression) {
-      this.ipcCompression = ipcCompression;
+      this.ipcCompression = ipcCompression != null ? ipcCompression : IPCCompressionType.NONE;
       return this;
     }
 
