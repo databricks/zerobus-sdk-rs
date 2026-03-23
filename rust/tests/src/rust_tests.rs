@@ -684,10 +684,12 @@ mod stream_initialization_and_basic_lifecycle_tests {
 
         // Close should work even after error (may return error from flush, but shouldn't hang).
         let _close_result = stream.close().await;
+        assert!(stream.is_closed(), "Stream should be closed after close()");
 
         // Second close should also work.
         let second_close = stream.close().await;
         assert!(second_close.is_ok(), "Second close should be idempotent");
+        assert!(stream.is_closed(), "Stream should still be closed after second close()");
 
         Ok(())
     }
