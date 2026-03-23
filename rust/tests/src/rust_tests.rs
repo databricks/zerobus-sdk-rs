@@ -689,7 +689,10 @@ mod stream_initialization_and_basic_lifecycle_tests {
         // Second close should also work.
         let second_close = stream.close().await;
         assert!(second_close.is_ok(), "Second close should be idempotent");
-        assert!(stream.is_closed(), "Stream should still be closed after second close()");
+        assert!(
+            stream.is_closed(),
+            "Stream should still be closed after second close()"
+        );
 
         Ok(())
     }
