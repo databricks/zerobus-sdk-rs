@@ -50,6 +50,7 @@ enum ArrowPayload {
 impl ArrowPayload {
     /// Converts this payload to a [`RecordBatch`].
     /// For `Ipc` variants this deserialises the IPC bytes.
+    #[allow(clippy::result_large_err)]
     fn materialize(&self) -> ZerobusResult<RecordBatch> {
         match self {
             ArrowPayload::Batch(b) => Ok(b.clone()),
@@ -90,6 +91,7 @@ struct PendingBatch {
 /// - If batch is fully acked: returns `None`
 /// - If batch is partially acked: returns sliced batch with only un-acked records
 /// - If batch is fully un-acked: returns the full batch
+#[allow(clippy::result_large_err)]
 fn slice_batch_for_recovery(
     pb: &PendingBatch,
     acked_before_disconnect: u64,
@@ -128,9 +130,10 @@ fn slice_batch_for_recovery(
                         pb.offset_id
                     ))
                 })?;
-                Ok(Some(ArrowPayload::Batch(
-                    b.slice(records_already_acked as usize, remaining_rows as usize),
-                )))
+                Ok(Some(ArrowPayload::Batch(b.slice(
+                    records_already_acked as usize,
+                    remaining_rows as usize,
+                ))))
             }
         }
     }
@@ -142,7 +145,9 @@ fn slice_batch_for_recovery(
 fn materialize_ipc(bytes: &Bytes) -> ZerobusResult<RecordBatch> {
     use std::io::Cursor;
     let mut reader = arrow_ipc::reader::StreamReader::try_new(Cursor::new(bytes.as_ref()), None)
-        .map_err(|e| ZerobusError::InvalidArgument(format!("IPC: invalid Arrow IPC stream: {e}")))?;
+        .map_err(|e| {
+            ZerobusError::InvalidArgument(format!("IPC: invalid Arrow IPC stream: {e}"))
+        })?;
     let batch = match reader.next() {
         None => {
             return Err(ZerobusError::InvalidArgument(
@@ -172,9 +177,10 @@ fn materialize_ipc(bytes: &Bytes) -> ZerobusResult<RecordBatch> {
 #[allow(clippy::result_large_err)]
 fn validate_ipc_stream_exactly_one_record_batch(bytes: &[u8]) -> ZerobusResult<()> {
     use std::io::Cursor;
-    let mut reader = arrow_ipc::reader::StreamReader::try_new(Cursor::new(bytes), None).map_err(
-        |e| ZerobusError::InvalidArgument(format!("IPC: invalid Arrow IPC stream: {e}")),
-    )?;
+    let mut reader =
+        arrow_ipc::reader::StreamReader::try_new(Cursor::new(bytes), None).map_err(|e| {
+            ZerobusError::InvalidArgument(format!("IPC: invalid Arrow IPC stream: {e}"))
+        })?;
     match reader.next() {
         None => {
             return Err(ZerobusError::InvalidArgument(
