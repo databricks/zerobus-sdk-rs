@@ -10,10 +10,10 @@ use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::Arc;
 
-use arrow_flight::encode::FlightDataEncoderBuilder;
 use arrow_flight::error::FlightError;
-use arrow_flight::{FlightClient, PutResult};
-use arrow_ipc::writer::IpcWriteOptions;
+use arrow_flight::{FlightClient, FlightData, PutResult, SchemaAsIpc};
+use arrow_ipc::writer::{DictionaryTracker, IpcDataGenerator, IpcWriteOptions};
+use bytes::Bytes;
 use futures::{Stream, StreamExt};
 use tokio::sync::{mpsc, watch, Mutex};
 use tokio::time::{sleep, Duration};
@@ -35,7 +35,28 @@ use crate::tls_config::TlsConfig;
 use crate::ZerobusResult;
 
 /// Type alias for the batch sender channel, wrapped for thread-safe sharing.
-type BatchSender = Arc<Mutex<Option<mpsc::Sender<Result<RecordBatch, FlightError>>>>>;
+type BatchSender = Arc<Mutex<Option<mpsc::Sender<Result<FlightData, FlightError>>>>>;
+
+/// Payload stored in pending batches — either raw IPC bytes (from FFI callers) or a
+/// materialised RecordBatch (from native Rust callers).
+#[derive(Clone)]
+enum ArrowPayload {
+    /// Raw Arrow IPC stream bytes from FFI callers.
+    Ipc(Bytes),
+    /// A materialised RecordBatch from native Rust callers.
+    Batch(RecordBatch),
+}
+
+impl ArrowPayload {
+    /// Converts this payload to a [`RecordBatch`].
+    /// For `Ipc` variants this deserialises the IPC bytes.
+    fn materialize(&self) -> ZerobusResult<RecordBatch> {
+        match self {
+            ArrowPayload::Batch(b) => Ok(b.clone()),
+            ArrowPayload::Ipc(bytes) => materialize_ipc(bytes),
+        }
+    }
+}
 
 /// Properties for an Arrow Flight ingestion table.
 ///
@@ -54,7 +75,7 @@ pub struct ArrowTableProperties {
 /// A pending batch waiting for acknowledgment.
 #[derive(Clone)]
 struct PendingBatch {
-    batch: RecordBatch,
+    payload: ArrowPayload,
     /// Logical offset ID assigned by the client for this batch.
     offset_id: OffsetId,
     /// Cumulative record count before this batch.
@@ -72,39 +93,217 @@ struct PendingBatch {
 fn slice_batch_for_recovery(
     pb: &PendingBatch,
     acked_before_disconnect: u64,
-) -> Option<RecordBatch> {
+) -> ZerobusResult<Option<ArrowPayload>> {
     if pb.start_record >= acked_before_disconnect {
-        // Fully un-acked
-        return Some(pb.batch.clone());
+        return Ok(Some(pb.payload.clone()));
     }
 
-    let records_already_acked =
-        (acked_before_disconnect - pb.start_record).min(pb.batch.num_rows() as u64);
-    let remaining_rows = pb
-        .batch
-        .num_rows()
-        .saturating_sub(records_already_acked as usize);
+    let total_rows = pb.end_record - pb.start_record;
+    let records_already_acked = (acked_before_disconnect - pb.start_record).min(total_rows);
+    let remaining_rows = total_rows.saturating_sub(records_already_acked);
 
     if remaining_rows == 0 {
         // Fully acked
-        None
+        Ok(None)
     } else if records_already_acked == 0 {
         // No records acked (shouldn't happen given first check, but be safe)
-        Some(pb.batch.clone())
+        Ok(Some(pb.payload.clone()))
     } else {
-        // Partially acked - slice to get un-acked portion
         debug!(
             offset_id = pb.offset_id,
-            total_rows = pb.batch.num_rows(),
+            total_rows = total_rows,
             records_already_acked = records_already_acked,
             remaining_rows = remaining_rows,
             "Slicing partially-acked batch for recovery"
         );
-        Some(
-            pb.batch
-                .slice(records_already_acked as usize, remaining_rows),
-        )
+        match &pb.payload {
+            ArrowPayload::Batch(b) => Ok(Some(ArrowPayload::Batch(
+                b.slice(records_already_acked as usize, remaining_rows as usize),
+            ))),
+            ArrowPayload::Ipc(bytes) => {
+                // Rare path: partially-acked IPC batch must be deserialised and sliced.
+                let b = materialize_ipc(bytes).map_err(|e| {
+                    ZerobusError::InvalidArgument(format!(
+                        "IPC batch could not be deserialised for partial recovery (offset_id={}): {e}",
+                        pb.offset_id
+                    ))
+                })?;
+                Ok(Some(ArrowPayload::Batch(
+                    b.slice(records_already_acked as usize, remaining_rows as usize),
+                )))
+            }
+        }
     }
+}
+
+/// Deserialises Arrow IPC stream bytes into a [`RecordBatch`].
+/// Enforces the same single-batch contract as [`validate_ipc_stream_exactly_one_record_batch`].
+#[allow(clippy::result_large_err)]
+fn materialize_ipc(bytes: &Bytes) -> ZerobusResult<RecordBatch> {
+    use std::io::Cursor;
+    let mut reader = arrow_ipc::reader::StreamReader::try_new(Cursor::new(bytes.as_ref()), None)
+        .map_err(|e| ZerobusError::InvalidArgument(format!("IPC: invalid Arrow IPC stream: {e}")))?;
+    let batch = match reader.next() {
+        None => {
+            return Err(ZerobusError::InvalidArgument(
+                "IPC stream contains no RecordBatch".into(),
+            ));
+        }
+        Some(Err(e)) => {
+            return Err(ZerobusError::InvalidArgument(format!(
+                "IPC: record batch read failed: {e}"
+            )));
+        }
+        Some(Ok(b)) => b,
+    };
+    match reader.next() {
+        None => Ok(batch),
+        Some(Ok(_)) => Err(ZerobusError::InvalidArgument(
+            "IPC stream must contain exactly one RecordBatch (found extra batch)".into(),
+        )),
+        Some(Err(e)) => Err(ZerobusError::InvalidArgument(format!(
+            "IPC: trailing message read failed: {e}"
+        ))),
+    }
+}
+
+/// Ensures the buffer is a valid IPC stream with exactly one [`RecordBatch`] (matches
+/// `ingest_ipc_batch` contract). Uses the canonical reader so layout matches producers.
+#[allow(clippy::result_large_err)]
+fn validate_ipc_stream_exactly_one_record_batch(bytes: &[u8]) -> ZerobusResult<()> {
+    use std::io::Cursor;
+    let mut reader = arrow_ipc::reader::StreamReader::try_new(Cursor::new(bytes), None).map_err(
+        |e| ZerobusError::InvalidArgument(format!("IPC: invalid Arrow IPC stream: {e}")),
+    )?;
+    match reader.next() {
+        None => {
+            return Err(ZerobusError::InvalidArgument(
+                "IPC stream contains no RecordBatch".into(),
+            ));
+        }
+        Some(Err(e)) => {
+            return Err(ZerobusError::InvalidArgument(format!(
+                "IPC: record batch read failed: {e}"
+            )));
+        }
+        Some(Ok(_)) => {}
+    }
+    match reader.next() {
+        None => Ok(()),
+        Some(Ok(_)) => Err(ZerobusError::InvalidArgument(
+            "IPC stream must contain exactly one RecordBatch (found extra batch)".into(),
+        )),
+        Some(Err(e)) => Err(ZerobusError::InvalidArgument(format!(
+            "IPC: trailing message read failed: {e}"
+        ))),
+    }
+}
+
+/// Converts raw Arrow IPC stream bytes into a [`FlightData`] and the row count.
+/// Does NOT materialise Arrow arrays.
+#[allow(clippy::result_large_err)]
+fn ipc_bytes_to_flight_data(ipc_bytes: Bytes) -> ZerobusResult<(u64, FlightData)> {
+    let bytes = &ipc_bytes[..];
+    validate_ipc_stream_exactly_one_record_batch(bytes)?;
+
+    #[allow(clippy::result_large_err)]
+    fn read_meta_range(bytes: &[u8], mut p: usize) -> ZerobusResult<(usize, usize)> {
+        if p + 4 <= bytes.len() && bytes[p..p + 4] == [0xFF, 0xFF, 0xFF, 0xFF] {
+            p += 4;
+        }
+        if p + 4 > bytes.len() {
+            return Err(ZerobusError::InvalidArgument(
+                "IPC: truncated at length field".into(),
+            ));
+        }
+        let meta_len = i32::from_le_bytes([bytes[p], bytes[p + 1], bytes[p + 2], bytes[p + 3]]);
+        if meta_len <= 0 {
+            return Err(ZerobusError::InvalidArgument(
+                "IPC: invalid metadata length".into(),
+            ));
+        }
+        let meta_start = p + 4;
+        let meta_end = meta_start + meta_len as usize;
+        if meta_end > bytes.len() {
+            return Err(ZerobusError::InvalidArgument(
+                "IPC: truncated metadata".into(),
+            ));
+        }
+        Ok((meta_start, meta_end))
+    }
+
+    let (ms, me) = read_meta_range(bytes, 0)?;
+    let schema_msg = arrow_ipc::root_as_message(&bytes[ms..me])
+        .map_err(|e| ZerobusError::InvalidArgument(format!("IPC flatbuffer: {e}")))?;
+    let after_schema = me + schema_msg.bodyLength().max(0) as usize;
+    if after_schema > bytes.len() {
+        return Err(ZerobusError::InvalidArgument(
+            "IPC: truncated schema body".into(),
+        ));
+    }
+
+    // Parse RecordBatch message — one flatbuffer parse for both body length and row count.
+    let (ms, me) = read_meta_range(bytes, after_schema)?;
+    let msg = arrow_ipc::root_as_message(&bytes[ms..me])
+        .map_err(|e| ZerobusError::InvalidArgument(format!("IPC flatbuffer: {e}")))?;
+    let be = me + msg.bodyLength().max(0) as usize;
+    if be > bytes.len() {
+        return Err(ZerobusError::InvalidArgument(
+            "IPC: truncated RecordBatch body".into(),
+        ));
+    }
+    let num_rows = msg
+        .header_as_record_batch()
+        .ok_or_else(|| ZerobusError::InvalidArgument("IPC: expected RecordBatch message".into()))?
+        .length()
+        .max(0) as u64;
+
+    // `bytes.len()` may exceed `be`: Arrow IPC stream writers typically append an end-of-stream
+    // marker after the RecordBatch. `validate_ipc_stream_exactly_one_record_batch` already
+    // ensures there is exactly one RecordBatch; we only slice the first batch for FlightData.
+
+    Ok((
+        num_rows,
+        FlightData {
+            data_header: ipc_bytes.slice(ms..me),
+            data_body: ipc_bytes.slice(me..be),
+            ..Default::default()
+        },
+    ))
+}
+
+/// Encodes a schema into the first [`FlightData`] message for a DoPut stream.
+#[allow(clippy::result_large_err)]
+fn make_ipc_write_options(
+    compression: Option<arrow_ipc::CompressionType>,
+) -> ZerobusResult<IpcWriteOptions> {
+    match compression {
+        None => Ok(IpcWriteOptions::default()),
+        Some(c) => IpcWriteOptions::default()
+            .try_with_compression(Some(c))
+            .map_err(|e| {
+                ZerobusError::InvalidArgument(format!(
+                    "Failed to enable Arrow IPC compression: {e}"
+                ))
+            }),
+    }
+}
+
+fn schema_to_flight_data(schema: &ArrowSchema, opts: &IpcWriteOptions) -> FlightData {
+    SchemaAsIpc::new(schema, opts).into()
+}
+
+/// Serialises a [`RecordBatch`] into a [`FlightData`] message.
+#[allow(clippy::result_large_err)]
+fn record_batch_to_flight_data(
+    batch: &RecordBatch,
+    opts: &IpcWriteOptions,
+) -> ZerobusResult<FlightData> {
+    let mut dict_tracker = DictionaryTracker::new(false);
+    let (_, encoded) = IpcDataGenerator::default()
+        .encoded_batch(batch, &mut dict_tracker, opts)
+        .map_err(|e| ZerobusError::InvalidArgument(format!("Failed to encode RecordBatch: {e}")))?;
+    Ok(encoded.into())
 }
 
 /// An Arrow Flight stream for ingesting Arrow RecordBatches into a Delta table.
@@ -150,7 +349,7 @@ pub struct ZerobusArrowStream {
     pub(crate) table_properties: ArrowTableProperties,
     /// Configuration options for this stream.
     pub(crate) options: ArrowStreamConfigurationOptions,
-    /// Channel to send RecordBatches to the encoder task.
+    /// Channel to send FlightData to the encoder task.
     batch_tx: BatchSender,
     /// Generator for logical offset IDs.
     offset_generator: OffsetIdGenerator,
@@ -165,7 +364,7 @@ pub struct ZerobusArrowStream {
     /// Batches that have been sent but not yet acknowledged (for recovery).
     pending_batches: Arc<Mutex<Vec<PendingBatch>>>,
     /// Batches that failed and couldn't be recovered.
-    failed_batches: Arc<Mutex<Vec<RecordBatch>>>,
+    failed_batches: Arc<Mutex<Vec<ArrowPayload>>>,
     /// Count of recovery attempts.
     recovery_attempts: Arc<AtomicU32>,
     /// Connection details for recovery.
@@ -241,7 +440,6 @@ impl ZerobusArrowStream {
         let table_properties = stream.table_properties.clone();
         let options = stream.options.clone();
         let headers_provider = Arc::clone(&stream.headers_provider);
-
         let strategy = FixedInterval::from_millis(options.recovery_backoff_ms)
             .take(options.recovery_retries as usize);
 
@@ -330,7 +528,7 @@ impl ZerobusArrowStream {
         headers_provider: &Arc<dyn HeadersProvider>,
     ) -> ZerobusResult<(
         Pin<Box<dyn Stream<Item = Result<PutResult, FlightError>> + Send>>,
-        mpsc::Sender<Result<RecordBatch, FlightError>>,
+        mpsc::Sender<Result<FlightData, FlightError>>,
     )> {
         let client = Self::create_flight_client(
             endpoint,
@@ -403,35 +601,22 @@ impl ZerobusArrowStream {
         options: &ArrowStreamConfigurationOptions,
     ) -> ZerobusResult<(
         Pin<Box<dyn Stream<Item = Result<PutResult, FlightError>> + Send>>,
-        mpsc::Sender<Result<RecordBatch, FlightError>>,
+        mpsc::Sender<Result<FlightData, FlightError>>,
     )> {
-        // Create channel for sending RecordBatches.
+        // Create channel for sending pre-encoded FlightData.
         let (batch_tx, batch_rx) =
-            mpsc::channel::<Result<RecordBatch, FlightError>>(options.max_inflight_batches);
+            mpsc::channel::<Result<FlightData, FlightError>>(options.max_inflight_batches);
 
         // Create offset counter for metadata.
         let offset_counter = Arc::new(std::sync::atomic::AtomicI64::new(0));
         let offset_counter_clone = Arc::clone(&offset_counter);
 
-        // Create the encoded Flight data stream.
-        let batch_stream = tokio_stream::wrappers::ReceiverStream::new(batch_rx);
-        let schema = Arc::clone(&table_properties.schema);
+        let ipc_write_options = make_ipc_write_options(options.ipc_compression)?;
+        let schema_fd = schema_to_flight_data(&table_properties.schema, &ipc_write_options);
+        let data_stream = tokio_stream::wrappers::ReceiverStream::new(batch_rx);
 
-        let ipc_write_options = match options.ipc_compression {
-            None => IpcWriteOptions::default(),
-            Some(compression_type) => IpcWriteOptions::default()
-                .try_with_compression(Some(compression_type))
-                .map_err(|e| {
-                    ZerobusError::InvalidArgument(format!(
-                        "Failed to enable Arrow IPC compression: {e}"
-                    ))
-                })?,
-        };
-
-        let flight_data_stream = FlightDataEncoderBuilder::new()
-            .with_schema(schema)
-            .with_options(ipc_write_options)
-            .build(batch_stream)
+        let flight_data_stream = futures::stream::once(futures::future::ready(Ok(schema_fd)))
+            .chain(data_stream)
             .enumerate()
             .map(move |(idx, result)| {
                 result.map(|mut flight_data| {
@@ -533,7 +718,7 @@ impl ZerobusArrowStream {
         is_closed: Arc<AtomicBool>,
         last_ack_tx: tokio::sync::watch::Sender<Option<OffsetId>>,
         pending_batches: Arc<Mutex<Vec<PendingBatch>>>,
-        failed_batches: Arc<Mutex<Vec<RecordBatch>>>,
+        failed_batches: Arc<Mutex<Vec<ArrowPayload>>>,
         recovery_attempts: Arc<AtomicU32>,
         server_error_tx: watch::Sender<Option<ZerobusError>>,
         cumulative_records_sent: Arc<AtomicU64>,
@@ -692,31 +877,18 @@ impl ZerobusArrowStream {
 
         // Create new channel.
         let (tx, batch_rx) =
-            mpsc::channel::<Result<RecordBatch, FlightError>>(options.max_inflight_batches);
+            mpsc::channel::<Result<FlightData, FlightError>>(options.max_inflight_batches);
 
         // Create offset counter for metadata.
         let offset_counter = Arc::new(std::sync::atomic::AtomicI64::new(0));
         let offset_counter_clone = Arc::clone(&offset_counter);
 
-        // Create the encoded Flight data stream.
-        let batch_stream = tokio_stream::wrappers::ReceiverStream::new(batch_rx);
-        let schema = Arc::clone(&table_properties.schema);
+        let ipc_write_options = make_ipc_write_options(options.ipc_compression)?;
+        let schema_fd = schema_to_flight_data(&table_properties.schema, &ipc_write_options);
+        let data_stream = tokio_stream::wrappers::ReceiverStream::new(batch_rx);
 
-        let ipc_write_options = match options.ipc_compression {
-            None => IpcWriteOptions::default(),
-            Some(compression_type) => IpcWriteOptions::default()
-                .try_with_compression(Some(compression_type))
-                .map_err(|e| {
-                    ZerobusError::InvalidArgument(format!(
-                        "Failed to enable Arrow IPC compression: {e}"
-                    ))
-                })?,
-        };
-
-        let flight_data_stream = FlightDataEncoderBuilder::new()
-            .with_schema(schema)
-            .with_options(ipc_write_options)
-            .build(batch_stream)
+        let flight_data_stream = futures::stream::once(futures::future::ready(Ok(schema_fd)))
+            .chain(data_stream)
             .enumerate()
             .map(move |(idx, result)| {
                 result.map(|mut flight_data| {
@@ -822,24 +994,44 @@ impl ZerobusArrowStream {
                 let mut new_cumulative: u64 = 0;
 
                 for pb in pending.drain(..) {
-                    let Some(batch) = slice_batch_for_recovery(&pb, acked_before_disconnect) else {
-                        debug!(offset_id = pb.offset_id, "Skipping fully-acked batch");
-                        continue;
+                    let payload = match slice_batch_for_recovery(&pb, acked_before_disconnect)? {
+                        None => {
+                            debug!(offset_id = pb.offset_id, "Skipping fully-acked batch");
+                            continue;
+                        }
+                        Some(p) => p,
                     };
 
-                    if tx.send(Ok(batch.clone())).await.is_err() {
+                    let (flight_data, num_records) = match &payload {
+                        ArrowPayload::Batch(b) => (
+                            record_batch_to_flight_data(b, &ipc_write_options).map_err(|e| {
+                                ZerobusError::InvalidArgument(format!(
+                                    "Failed to encode batch for replay: {e}"
+                                ))
+                            })?,
+                            b.num_rows() as u64,
+                        ),
+                        ArrowPayload::Ipc(bytes) => {
+                            let (n, fd) = ipc_bytes_to_flight_data(bytes.clone()).map_err(|e| {
+                                ZerobusError::InvalidArgument(format!(
+                                    "Failed to encode batch for replay: {e}"
+                                ))
+                            })?;
+                            (fd, n)
+                        }
+                    };
+
+                    if tx.send(Ok(flight_data)).await.is_err() {
                         return Err(ZerobusError::StreamClosedError(tonic::Status::internal(
                             "Failed to replay batch during recovery",
                         )));
                     }
-
-                    let num_records = batch.num_rows() as u64;
                     let start_record = new_cumulative;
                     let end_record = new_cumulative + num_records;
                     new_cumulative = end_record;
 
                     new_pending.push(PendingBatch {
-                        batch,
+                        payload,
                         offset_id: pb.offset_id,
                         start_record,
                         end_record,
@@ -857,7 +1049,7 @@ impl ZerobusArrowStream {
     /// Moves all pending batches to the failed batches list.
     async fn move_pending_to_failed(
         pending_batches: &Arc<Mutex<Vec<PendingBatch>>>,
-        failed_batches: &Arc<Mutex<Vec<RecordBatch>>>,
+        failed_batches: &Arc<Mutex<Vec<ArrowPayload>>>,
     ) {
         let pending: Vec<PendingBatch> = {
             let mut pending_guard = pending_batches.lock().await;
@@ -865,7 +1057,7 @@ impl ZerobusArrowStream {
         };
         let mut failed = failed_batches.lock().await;
         for pb in pending {
-            failed.push(pb.batch);
+            failed.push(pb.payload);
         }
     }
 
@@ -978,6 +1170,73 @@ impl ZerobusArrowStream {
         }
     }
 
+    /// Shared send path for both `ingest_batch` and `ingest_ipc_batch`.
+    ///
+    /// Caller must hold `ingest_mutex` and must have already updated `cumulative_records_sent`.
+    async fn send_flight_data_internal(
+        &self,
+        payload: ArrowPayload,
+        flight_data: FlightData,
+        offset_id: OffsetId,
+        start_record: u64,
+        end_record: u64,
+    ) -> ZerobusResult<OffsetId> {
+        {
+            let mut pending = self.pending_batches.lock().await;
+            pending.push(PendingBatch {
+                payload,
+                offset_id,
+                start_record,
+                end_record,
+            });
+        }
+
+        let sender = {
+            let guard = self.batch_tx.lock().await;
+            guard.clone()
+        };
+
+        let sender = match sender {
+            Some(s) => s,
+            None => {
+                if let Some(server_error) = self.server_error_rx.borrow().clone() {
+                    return Err(server_error);
+                }
+                return Err(ZerobusError::StreamClosedError(tonic::Status::internal(
+                    "Stream sender is closed",
+                )));
+            }
+        };
+
+        if let Err(e) = sender.send(Ok(flight_data)).await {
+            warn!("Send failed: {}", e);
+            if self.options.recovery {
+                debug!(
+                    offset_id = offset_id,
+                    "Send failed but recovery enabled - supervisor will handle recovery"
+                );
+            } else {
+                {
+                    let mut pending = self.pending_batches.lock().await;
+                    pending.retain(|pb| pb.offset_id != offset_id);
+                }
+                let _ = tokio::time::timeout(
+                    Duration::from_millis(100),
+                    self.server_error_rx.clone().changed(),
+                )
+                .await;
+                if let Some(server_error) = self.server_error_rx.borrow().clone() {
+                    return Err(server_error);
+                }
+                return Err(ZerobusError::StreamClosedError(tonic::Status::internal(
+                    "Failed to send batch",
+                )));
+            }
+        }
+
+        Ok(offset_id)
+    }
+
     /// Ingests a single Arrow RecordBatch into the stream.
     ///
     /// This method queues the batch for transmission and returns the assigned logical offset
@@ -1029,98 +1288,70 @@ impl ZerobusArrowStream {
             )));
         }
 
-        // Serialize ingestion operations.
         let _guard = self.ingest_mutex.lock().await;
 
-        // Generate offset and calculate cumulative record range.
-        let offset_id = self.offset_generator.next();
-
         let record_count = batch.num_rows() as u64;
+        let offset_id = self.offset_generator.next();
         let start_record = self
             .cumulative_records_sent
             .fetch_add(record_count, Ordering::Relaxed);
         let end_record = start_record + record_count;
 
-        // Store in pending batches for recovery with record range for ack matching.
-        {
-            let mut pending = self.pending_batches.lock().await;
-            pending.push(PendingBatch {
-                batch: batch.clone(),
-                offset_id,
-                start_record,
-                end_record,
-            });
-        }
-
-        // Send the batch.
-        let batch_tx = {
-            let guard = self.batch_tx.lock().await;
-            guard.clone()
-        };
-
-        let sender = match batch_tx {
-            Some(s) => s,
-            None => {
-                // Check if there's a stored server error that caused the stream to close.
-                // Using watch channel borrow() is immediate and race-free.
-                if let Some(server_error) = self.server_error_rx.borrow().clone() {
-                    return Err(server_error);
-                }
-                return Err(ZerobusError::StreamClosedError(tonic::Status::internal(
-                    "Stream sender is closed",
-                )));
-            }
-        };
-
-        if let Err(e) = sender.send(Ok(batch)).await {
-            warn!("Send failed: {}", e);
-
-            // The batch is already in pending_batches and will be replayed during recovery.
-            // The supervisor task handles recovery automatically on retriable errors.
-            if self.options.recovery {
-                // Recovery is handled by supervisor. The batch is in pending_batches
-                // and will be replayed. Return the ack future - it will resolve
-                // after the supervisor recovers and replays the batch.
-                debug!(
-                    offset_id = offset_id,
-                    "Send failed but recovery enabled - supervisor will handle recovery"
-                );
-            } else {
-                // Remove from pending and oneshot map since no recovery.
-                {
-                    let mut pending = self.pending_batches.lock().await;
-                    pending.retain(|pb| pb.offset_id != offset_id);
-                }
-                // Check if there's a stored server error (e.g., schema validation failure)
-                // that caused the stream to close before this send.
-                let error_result = tokio::time::timeout(
-                    Duration::from_millis(100),
-                    self.server_error_rx.clone().changed(),
-                )
-                .await;
-
-                // Check current value regardless of timeout (value might already be set)
-                if let Some(server_error) = self.server_error_rx.borrow().clone() {
-                    return Err(server_error);
-                }
-
-                // If we timed out and still no error, return generic error
-                if error_result.is_err() {
-                    return Err(ZerobusError::StreamClosedError(tonic::Status::internal(
-                        "Failed to send batch",
-                    )));
-                }
-
-                // changed() succeeded but no error - shouldn't happen, but handle gracefully
-                return Err(ZerobusError::StreamClosedError(tonic::Status::internal(
-                    "Failed to send batch",
-                )));
-            }
-        }
+        let flight_data = record_batch_to_flight_data(
+            &batch,
+            &make_ipc_write_options(self.options.ipc_compression)?,
+        )?;
 
         debug!(offset_id = offset_id, "Batch queued for ingestion");
+        self.send_flight_data_internal(
+            ArrowPayload::Batch(batch),
+            flight_data,
+            offset_id,
+            start_record,
+            end_record,
+        )
+        .await
+    }
 
-        Ok(offset_id)
+    /// Ingests a single Arrow RecordBatch supplied as raw Arrow IPC stream bytes.
+    ///
+    /// Preferred entry point for FFI callers (Go, Python, Java, TypeScript) that already
+    /// hold IPC-serialised bytes. Forwards bytes directly to the Flight wire format
+    /// without deserialising to a [`RecordBatch`] — eliminating one IPC round-trip
+    /// compared to calling `ingest_batch`.
+    ///
+    /// The `ipc_bytes` must be a valid Arrow IPC *stream* containing exactly one
+    /// RecordBatch (i.e. the output of `pyarrow.RecordBatch.serialize()`,
+    /// `tableToIPC(table, 'stream')`, etc.). Trailing stream metadata (such as an
+    /// end-of-stream marker after `finish()`) is allowed after that batch.
+    #[instrument(level = "debug", skip_all, fields(table_name = %self.table_properties.table_name))]
+    pub async fn ingest_ipc_batch(&self, ipc_bytes: Bytes) -> ZerobusResult<OffsetId> {
+        if self.is_closed.load(Ordering::Relaxed) {
+            return Err(ZerobusError::StreamClosedError(tonic::Status::internal(
+                "Stream is closed",
+            )));
+        }
+
+        let (record_count, flight_data) = ipc_bytes_to_flight_data(ipc_bytes.clone())
+            .map_err(|e| ZerobusError::InvalidArgument(format!("Invalid Arrow IPC bytes: {e}")))?;
+
+        let _guard = self.ingest_mutex.lock().await;
+
+        let offset_id = self.offset_generator.next();
+        let start_record = self
+            .cumulative_records_sent
+            .fetch_add(record_count, Ordering::Relaxed);
+        let end_record = start_record + record_count;
+
+        debug!(offset_id = offset_id, "IPC batch queued for ingestion");
+        self.send_flight_data_internal(
+            ArrowPayload::Ipc(ipc_bytes),
+            flight_data,
+            offset_id,
+            start_record,
+            end_record,
+        )
+        .await
     }
 
     /// Internal method to wait for a specific offset to be acknowledged.
@@ -1370,6 +1601,7 @@ impl ZerobusArrowStream {
     /// # Errors
     ///
     /// * `InvalidStateError` - If the stream is still active
+    /// * `InvalidArgument` - If an IPC-backed batch cannot be deserialised (e.g. corrupt bytes)
     ///
     /// # Examples
     ///
@@ -1403,19 +1635,30 @@ impl ZerobusArrowStream {
             ));
         }
 
-        // Combine pending and failed batches.
+        // Combine pending and failed batches, materialising RecordBatches from ArrowPayload.
         let mut result = Vec::new();
 
         {
             let pending = self.pending_batches.lock().await;
             for pb in pending.iter() {
-                result.push(pb.batch.clone());
+                result.push(pb.payload.materialize().map_err(|e| {
+                    ZerobusError::InvalidArgument(format!(
+                        "unacked batch at offset_id {} could not be materialised: {e}",
+                        pb.offset_id
+                    ))
+                })?);
             }
         }
 
         {
             let failed = self.failed_batches.lock().await;
-            result.extend(failed.iter().cloned());
+            for (i, payload) in failed.iter().enumerate() {
+                result.push(payload.materialize().map_err(|e| {
+                    ZerobusError::InvalidArgument(format!(
+                        "failed batch at index {i} could not be materialised: {e}"
+                    ))
+                })?);
+            }
         }
 
         Ok(result)

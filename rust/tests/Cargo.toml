@@ -12,6 +12,10 @@ path = "src/rust_tests.rs"
 name = "proxy_tests"
 path = "src/proxy_tests.rs"
 
+[[test]]
+name = "arrow_tests"
+path = "src/arrow_tests.rs"
+
 [dependencies]
 async-trait = "0.1"
 prost = "0.13.3"
@@ -28,6 +32,8 @@ databricks-zerobus-ingest-sdk = { path = "../sdk", features = ["testing", "arrow
 arrow-flight = { version = "56.2.0", default-features = false }
 arrow-array = { version = "56.2.0", default-features = false }
 arrow-schema = { version = "56.2.0", default-features = false }
+arrow-ipc = { version = "56.2.0", default-features = false }
+bytes = "1"
 futures = "0.3"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
