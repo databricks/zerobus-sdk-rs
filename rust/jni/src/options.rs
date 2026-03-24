@@ -158,8 +158,7 @@ pub fn extract_arrow_stream_options(
         .call_method(options, "connectionTimeoutMs", "()J", &[])?
         .j()? as u64;
 
-    // Extract IPC compression type from the Java enum via ordinal().
-    // IPCCompressionType: NONE=0, LZ4_FRAME=1, ZSTD=2
+    // Extract IPC compression type from the Java enum via name().
     let compression_enum = env
         .call_method(
             options,
@@ -168,13 +167,14 @@ pub fn extract_arrow_stream_options(
             &[],
         )?
         .l()?;
-    let compression_ordinal = env
-        .call_method(&compression_enum, "ordinal", "()I", &[])?
-        .i()?;
-    let ipc_compression = match compression_ordinal {
-        1 => Some(CompressionType::LZ4_FRAME),
-        2 => Some(CompressionType::ZSTD),
-        _ => None, // 0 (NONE) or any unknown value
+    let compression_jstring = env
+        .call_method(&compression_enum, "name", "()Ljava/lang/String;", &[])?
+        .l()?;
+    let compression_name: String = env.get_string((&compression_jstring).into())?.into();
+    let ipc_compression = match compression_name.as_str() {
+        "LZ4_FRAME" => Some(CompressionType::LZ4_FRAME),
+        "ZSTD" => Some(CompressionType::ZSTD),
+        _ => None, // "NONE" or any unknown value
     };
 
     Ok(ArrowStreamConfigurationOptions {
