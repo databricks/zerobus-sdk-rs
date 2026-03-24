@@ -1,7 +1,6 @@
 target/
 Cargo.lock
 *.node
-!prebuilt/*.node
 node_modules/
 index.js
 index.d.ts

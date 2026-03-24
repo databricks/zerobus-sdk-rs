@@ -7,7 +7,7 @@ license-file = "../../LICENSE"
 publish = false
 
 [lib]
-crate-type = ["staticlib"]
+crate-type = ["staticlib", "cdylib"]
 
 [dependencies]
 # Core SDK logic - use local path dependency

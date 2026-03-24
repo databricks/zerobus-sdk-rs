@@ -15,18 +15,20 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        settings:
-          - host: linux-ubuntu-latest
+        include:
+          - runner: { group: databricks-protected-runner-group, labels: linux-ubuntu-latest }
             target: x86_64-unknown-linux-gnu
-          - host: linux-ubuntu-latest
+          - runner: { group: databricks-protected-runner-group, labels: linux-ubuntu-latest }
             target: aarch64-unknown-linux-gnu
-          - host: windows-server-latest
+          - runner: { group: databricks-protected-runner-group, labels: windows-server-latest }
             target: x86_64-pc-windows-msvc
+          - runner: [self-hosted, macOS, ARM64, zerobus-sdk]
+            target: aarch64-apple-darwin
+          - runner: [self-hosted, macOS, ARM64, zerobus-sdk]
+            target: x86_64-apple-darwin
 
-    name: Build - ${{ matrix.settings.target }}
-    runs-on:
-      group: databricks-protected-runner-group
-      labels: ${{ matrix.settings.host }}
+    name: Build - ${{ matrix.target }}
+    runs-on: ${{ matrix.runner }}
     defaults:
       run:
         working-directory: typescript
@@ -39,8 +41,6 @@ jobs:
         with:
           node-version: 24
 
-      - name: Use latest npm
-        run: npm install -g npm@latest
 
       - name: Install Rust (Unix)
         if: runner.os != 'Windows'
@@ -57,10 +57,10 @@ jobs:
         shell: powershell
 
       - name: Add Rust target
-        run: rustup target add ${{ matrix.settings.target }}
+        run: rustup target add ${{ matrix.target }}
 
       - name: Install cross-compilation tools (Linux ARM64)
-        if: matrix.settings.target == 'aarch64-unknown-linux-gnu'
+        if: matrix.target == 'aarch64-unknown-linux-gnu'
         run: |
           sudo apt-get update
           sudo apt-get install -y gcc-aarch64-linux-gnu g++-aarch64-linux-gnu
@@ -69,14 +69,14 @@ jobs:
         run: npm ci
 
       - name: Build
-        run: npm run build -- --target ${{ matrix.settings.target }}
+        run: npm run build -- --target ${{ matrix.target }}
         env:
           CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: aarch64-linux-gnu-gcc
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: bindings-${{ matrix.settings.target }}
+          name: bindings-${{ matrix.target }}
           path: 'typescript/*.node'
           if-no-files-found: error
 
@@ -99,8 +99,6 @@ jobs:
           node-version: 24
           registry-url: 'https://registry.npmjs.org'
 
-      - name: Use latest npm
-        run: npm install -g npm@latest
 
       - name: Install dependencies
         run: npm ci
@@ -110,17 +108,22 @@ jobs:
         with:
           path: typescript/artifacts
 
-      - name: List downloaded artifacts
-        run: ls -R artifacts/
+      - name: Move artifacts into place
+        run: npx napi artifacts --artifacts-dir artifacts --output-dir .
 
-      - name: Copy bindings
+      - name: List bindings
+        run: ls -la *.node
+
+      - name: Generate platform packages
+        run: npx napi prepublish -t npm --skip-gh-release
+
+      - name: Publish platform packages
         run: |
-          cp artifacts/bindings-x86_64-unknown-linux-gnu/*.node .
-          cp artifacts/bindings-aarch64-unknown-linux-gnu/*.node .
-          cp artifacts/bindings-x86_64-pc-windows-msvc/*.node .
-          cp prebuilt/*.node .
+          for dir in npm/*/; do
+            npm publish "$dir" --access public --provenance
+          done
 
-      - name: Publish
+      - name: Publish main package
         run: npm publish --access public --provenance --ignore-scripts
 
   release:

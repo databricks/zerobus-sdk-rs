@@ -13,11 +13,26 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [linux-ubuntu-latest, windows-server-latest]
-        pyVersion: ['3.9', '3.10', '3.11', '3.12']
-    runs-on:
-      group: databricks-protected-runner-group
-      labels: ${{ matrix.os }}
+        include:
+          - os: linux-ubuntu-latest
+            runner: { group: databricks-protected-runner-group, labels: linux-ubuntu-latest }
+            pyVersion: '3.9'
+          - os: linux-ubuntu-latest
+            runner: { group: databricks-protected-runner-group, labels: linux-ubuntu-latest }
+            pyVersion: '3.10'
+          - os: linux-ubuntu-latest
+            runner: { group: databricks-protected-runner-group, labels: linux-ubuntu-latest }
+            pyVersion: '3.11'
+          - os: linux-ubuntu-latest
+            runner: { group: databricks-protected-runner-group, labels: linux-ubuntu-latest }
+            pyVersion: '3.12'
+          - os: windows-server-latest
+            runner: { group: databricks-protected-runner-group, labels: windows-server-latest }
+            pyVersion: '3.9'
+          - os: macos-arm64
+            runner: [self-hosted, macOS, ARM64, zerobus-sdk]
+            pyVersion: '3.9'
+    runs-on: ${{ matrix.runner }}
     defaults:
       run:
         working-directory: python
@@ -25,7 +40,7 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Unshallow
-        run: git fetch --prune --unshallow
+        run: git fetch --prune --unshallow || true
 
       - uses: actions/setup-python@v5
         with:

@@ -40,18 +40,30 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [linux-ubuntu-latest, windows-server-latest]
-        javaVersion: ['11', '17', '21']
-    runs-on:
-      group: databricks-protected-runner-group
-      labels: ${{ matrix.os }}
+        include:
+          - os: linux-ubuntu-latest
+            runner: { group: databricks-protected-runner-group, labels: linux-ubuntu-latest }
+            javaVersion: '11'
+          - os: linux-ubuntu-latest
+            runner: { group: databricks-protected-runner-group, labels: linux-ubuntu-latest }
+            javaVersion: '17'
+          - os: linux-ubuntu-latest
+            runner: { group: databricks-protected-runner-group, labels: linux-ubuntu-latest }
+            javaVersion: '21'
+          - os: windows-server-latest
+            runner: { group: databricks-protected-runner-group, labels: windows-server-latest }
+            javaVersion: '11'
+          - os: macos-arm64
+            runner: [self-hosted, macOS, ARM64, zerobus-sdk]
+            javaVersion: '11'
+    runs-on: ${{ matrix.runner }}
     defaults:
       run:
         working-directory: java
     steps:
       - uses: actions/checkout@v4
       - name: Unshallow
-        run: git fetch --prune --unshallow
+        run: git fetch --prune --unshallow || true
       - name: Set up JDK ${{ matrix.javaVersion }}
         uses: actions/setup-java@v4
         with:
@@ -63,6 +75,9 @@ jobs:
         shell: bash
         run: printf '\n[patch.crates-io]\ndatabricks-zerobus-ingest-sdk = { path = "sdk" }\n' >> ../rust/Cargo.toml
 
+      - name: Install Maven (macOS)
+        if: runner.os == 'macOS'
+        run: brew install maven 2>/dev/null || true
       - name: Build with Maven
         run: mvn clean compile
       - name: Run tests

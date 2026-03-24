@@ -41,10 +41,14 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [linux-ubuntu-latest, windows-server-latest]
-    runs-on:
-      group: databricks-protected-runner-group
-      labels: ${{ matrix.os }}
+        include:
+          - os: linux-ubuntu-latest
+            runner: { group: databricks-protected-runner-group, labels: linux-ubuntu-latest }
+          - os: windows-server-latest
+            runner: { group: databricks-protected-runner-group, labels: windows-server-latest }
+          - os: macos-arm64
+            runner: [self-hosted, macOS, ARM64, zerobus-sdk]
+    runs-on: ${{ matrix.runner }}
     defaults:
       run:
         working-directory: rust
