@@ -1407,6 +1407,87 @@ pub extern "C" fn zerobus_stream_ingest_json_records(
     }
 }
 
+/// Wrapper to pass a raw stream pointer across async task boundaries.
+///
+/// # Safety
+/// The caller must ensure the stream outlives all spawned tasks.
+struct RawStreamPtr(usize);
+unsafe impl Send for RawStreamPtr {}
+
+/// Ingest a protobuf record without waiting for the record to be queued (fire-and-forget).
+///
+/// Spawns a background task to queue the record and returns immediately.
+/// The result only reflects argument validation errors; ingestion errors are silently ignored.
+///
+/// # Safety
+/// The stream must remain valid until all background tasks spawned by this function complete.
+#[no_mangle]
+pub extern "C" fn zerobus_stream_ingest_proto_record_nowait(
+    stream: *mut CZerobusStream,
+    data: *const u8,
+    data_len: usize,
+    result: *mut CResult,
+) {
+    if data.is_null() {
+        write_error_result(result, "Invalid data pointer", false);
+        return;
+    }
+
+    if let Err(msg) = validate_stream_ptr(stream) {
+        write_error_result(result, msg, false);
+        return;
+    }
+
+    let data_slice = unsafe { std::slice::from_raw_parts(data, data_len) };
+    let data_vec = data_slice.to_vec();
+    let stream_addr = RawStreamPtr(stream as usize);
+
+    RUNTIME.spawn(async move {
+        let stream_ref = unsafe { &*(stream_addr.0 as *const ZerobusStream) };
+        let payload = EncodedRecord::Proto(data_vec);
+        let _ = stream_ref.ingest_record_offset(payload).await;
+    });
+
+    write_success_result(result);
+}
+
+/// Ingest a JSON record without waiting for the record to be queued (fire-and-forget).
+///
+/// Spawns a background task to queue the record and returns immediately.
+/// The result only reflects argument validation errors; ingestion errors are silently ignored.
+///
+/// # Safety
+/// The stream must remain valid until all background tasks spawned by this function complete.
+#[no_mangle]
+pub extern "C" fn zerobus_stream_ingest_json_record_nowait(
+    stream: *mut CZerobusStream,
+    json_data: *const c_char,
+    result: *mut CResult,
+) {
+    if let Err(msg) = validate_stream_ptr(stream) {
+        write_error_result(result, msg, false);
+        return;
+    }
+
+    let json_str = match unsafe { c_str_to_string(json_data) } {
+        Ok(s) => s,
+        Err(e) => {
+            write_error_result(result, e, false);
+            return;
+        }
+    };
+
+    let stream_addr = RawStreamPtr(stream as usize);
+
+    RUNTIME.spawn(async move {
+        let stream_ref = unsafe { &*(stream_addr.0 as *const ZerobusStream) };
+        let payload = EncodedRecord::Json(json_str);
+        let _ = stream_ref.ingest_record_offset(payload).await;
+    });
+
+    write_success_result(result);
+}
+
 /// Wait for a specific offset to be acknowledged by the server
 #[no_mangle]
 pub extern "C" fn zerobus_stream_wait_for_offset(

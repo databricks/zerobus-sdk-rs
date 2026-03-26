@@ -105,6 +105,13 @@ extern int64_t zerobus_stream_ingest_json_records(CZerobusStream* stream,
                                                     const char** json_records,
                                                     uintptr_t num_records,
                                                     CResult* result);
+extern void zerobus_stream_ingest_proto_record_nowait(CZerobusStream* stream,
+                                                       const uint8_t* data,
+                                                       uintptr_t data_len,
+                                                       CResult* result);
+extern void zerobus_stream_ingest_json_record_nowait(CZerobusStream* stream,
+                                                      const char* json_data,
+                                                      CResult* result);
 extern bool zerobus_stream_wait_for_offset(CZerobusStream* stream,
                                              int64_t offset,
                                              CResult* result);
@@ -504,6 +511,46 @@ func streamIngestJSONRecord(streamPtr unsafe.Pointer, jsonData string) (int64, e
 	}
 
 	return int64(offset), nil
+}
+
+// streamIngestProtoRecordNowait ingests a protobuf record without waiting (fire-and-forget).
+// Returns immediately; ingestion errors are silently ignored by the background task.
+func streamIngestProtoRecordNowait(streamPtr unsafe.Pointer, data []byte) error {
+	if len(data) == 0 {
+		return &ZerobusError{Message: "empty data", IsRetryable: false}
+	}
+
+	var pinner runtime.Pinner
+	defer pinner.Unpin()
+
+	cData := (*C.uint8_t)(unsafe.SliceData(data))
+	pinner.Pin(cData)
+
+	var cres C.CResult
+	C.zerobus_stream_ingest_proto_record_nowait(
+		(*C.CZerobusStream)(streamPtr),
+		cData,
+		C.size_t(len(data)),
+		&cres,
+	)
+
+	return ffiResult(cres)
+}
+
+// streamIngestJSONRecordNowait ingests a JSON record without waiting (fire-and-forget).
+// Returns immediately; ingestion errors are silently ignored by the background task.
+func streamIngestJSONRecordNowait(streamPtr unsafe.Pointer, jsonData string) error {
+	cJSON := C.CString(jsonData)
+	defer C.free(unsafe.Pointer(cJSON))
+
+	var cres C.CResult
+	C.zerobus_stream_ingest_json_record_nowait(
+		(*C.CZerobusStream)(streamPtr),
+		cJSON,
+		&cres,
+	)
+
+	return ffiResult(cres)
 }
 
 // streamIngestProtoRecords ingests a batch of protobuf records

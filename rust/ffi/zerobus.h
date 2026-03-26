@@ -322,6 +322,33 @@ int64_t zerobus_stream_ingest_json_records(struct CZerobusStream *stream,
                                            struct CResult *result);
 
 /**
+ * Ingest a protobuf record without waiting for the record to be queued (fire-and-forget).
+ *
+ * Spawns a background task to queue the record and returns immediately.
+ * The result only reflects argument validation errors; ingestion errors are silently ignored.
+ *
+ * # Safety
+ * The stream must remain valid until all background tasks spawned by this function complete.
+ */
+void zerobus_stream_ingest_proto_record_nowait(struct CZerobusStream *stream,
+                                               const uint8_t *data,
+                                               uintptr_t data_len,
+                                               struct CResult *result);
+
+/**
+ * Ingest a JSON record without waiting for the record to be queued (fire-and-forget).
+ *
+ * Spawns a background task to queue the record and returns immediately.
+ * The result only reflects argument validation errors; ingestion errors are silently ignored.
+ *
+ * # Safety
+ * The stream must remain valid until all background tasks spawned by this function complete.
+ */
+void zerobus_stream_ingest_json_record_nowait(struct CZerobusStream *stream,
+                                              const char *json_data,
+                                              struct CResult *result);
+
+/**
  * Wait for a specific offset to be acknowledged by the server
  */
 bool zerobus_stream_wait_for_offset(struct CZerobusStream *stream,
