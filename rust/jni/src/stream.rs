@@ -4,6 +4,7 @@
 //! record ingestion, acknowledgment waiting, flushing, and closing.
 
 use crate::async_bridge::{create_completable_future, spawn_and_complete_void};
+use crate::class_cache::{as_jclass, get_class_cache};
 use crate::errors::{throw_from_zerobus_error, throw_zerobus_exception};
 use crate::runtime::block_on;
 use databricks_zerobus_ingest_sdk::ZerobusStream;
@@ -468,13 +469,7 @@ pub extern "system" fn Java_com_databricks_zerobus_BaseZerobusStream_nativeGetUn
     };
 
     // Create an ArrayList
-    let array_list_class = match env.find_class("java/util/ArrayList") {
-        Ok(c) => c,
-        Err(e) => {
-            throw_zerobus_exception(&mut env, &format!("Failed to find ArrayList class: {}", e));
-            return JObject::null();
-        }
-    };
+    let array_list_class = as_jclass(&get_class_cache().array_list_class);
 
     let list = match env.new_object(&array_list_class, "()V", &[]) {
         Ok(l) => l,
@@ -551,24 +546,9 @@ pub extern "system" fn Java_com_databricks_zerobus_BaseZerobusStream_nativeGetUn
     };
 
     // Create an ArrayList
-    let array_list_class = match env.find_class("java/util/ArrayList") {
-        Ok(c) => c,
-        Err(e) => {
-            throw_zerobus_exception(&mut env, &format!("Failed to find ArrayList class: {}", e));
-            return JObject::null();
-        }
-    };
+    let array_list_class = as_jclass(&get_class_cache().array_list_class);
 
-    let encoded_batch_class = match env.find_class("com/databricks/zerobus/EncodedBatch") {
-        Ok(c) => c,
-        Err(e) => {
-            throw_zerobus_exception(
-                &mut env,
-                &format!("Failed to find EncodedBatch class: {}", e),
-            );
-            return JObject::null();
-        }
-    };
+    let encoded_batch_class = as_jclass(&get_class_cache().encoded_batch_class);
 
     let list = match env.new_object(&array_list_class, "()V", &[]) {
         Ok(l) => l,
