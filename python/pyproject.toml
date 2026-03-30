@@ -36,6 +36,7 @@ dev = [
     "wheel",
     "build",
     "grpcio-tools>=1.60.0,<2.0",
+    "pip-tools>=7.0,<8",
     # Code formatting
     "black",
     "pycodestyle",
