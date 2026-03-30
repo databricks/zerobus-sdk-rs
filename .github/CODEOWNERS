@@ -1,2 +1,2 @@
 # Require review for all workflow and CI configuration changes
-.github/ @databricks/zerobus-sdk-maintainers
+.github/ @teodordelibasic-db @elenagaljak-db @danilonajkov-db
