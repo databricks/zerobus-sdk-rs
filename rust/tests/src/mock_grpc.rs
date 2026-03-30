@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::pin::Pin;
 use std::sync::Arc;
 use std::time::Duration;
@@ -42,38 +42,122 @@ pub enum MockResponse {
     Error { status: Status, delay_ms: u64 },
 }
 
-/// Mock gRPC server for testing the Rust SDK
+/// A queued stream entry: either a real stream with responses, or an error during creation.
+#[derive(Clone)]
+enum StreamEntry {
+    Stream {
+        stream_id: String,
+        create_delay_ms: u64,
+        responses: Vec<MockResponse>,
+    },
+    CreateError {
+        status: Status,
+        delay_ms: u64,
+    },
+}
+
+/// Mock gRPC server for testing the Rust SDK.
+///
+/// Responses are keyed by `(table_name, stream_id)` and tracked per-stream.
+/// `inject_responses` splits the flat response list at `CreateStream` boundaries
+/// so each stream gets its own independent responses.
 pub struct MockZerobusServer {
-    /// Responses to inject for each stream
-    responses: Arc<Mutex<HashMap<String, Vec<MockResponse>>>>,
+    /// Per-stream responses keyed by (table_name, stream_id)
+    responses: Arc<Mutex<HashMap<(String, String), Vec<MockResponse>>>>,
+    /// Per-stream response indices keyed by (table_name, stream_id)
+    response_indices: Arc<Mutex<HashMap<(String, String), usize>>>,
+    /// Order of streams per table — each connection pops the next entry
+    stream_order: Arc<Mutex<HashMap<String, VecDeque<StreamEntry>>>>,
     /// Counter for generating unique stream IDs
     stream_counter: Arc<Mutex<u32>>,
     /// Track the maximum offset sent by clients
     max_offset_sent: Arc<Mutex<i64>>,
     /// Track number of writes received
     write_count: Arc<Mutex<u64>>,
-    /// Track response index across multiple connection attempts
-    response_indices: Arc<Mutex<HashMap<String, usize>>>,
 }
 
 impl MockZerobusServer {
     pub fn new() -> Self {
         Self {
             responses: Arc::new(Mutex::new(HashMap::new())),
+            response_indices: Arc::new(Mutex::new(HashMap::new())),
+            stream_order: Arc::new(Mutex::new(HashMap::new())),
             stream_counter: Arc::new(Mutex::new(0)),
             max_offset_sent: Arc::new(Mutex::new(-1)),
             write_count: Arc::new(Mutex::new(0)),
-            response_indices: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
-    /// Inject responses for a specific stream (identified by table name for simplicity)
+    /// Inject responses for one or more streams on a table.
+    ///
+    /// The response list is split at `CreateStream` boundaries. Each
+    /// `CreateStream { stream_id }` defines a stream whose responses are
+    /// the items following it until the next `CreateStream` (or end).
+    /// Errors before any `CreateStream` become connection-creation errors.
+    ///
+    /// Internally, responses are stored per `(table_name, stream_id)`.
     pub async fn inject_responses(&self, table_name: &str, responses: Vec<MockResponse>) {
         let mut response_map = self.responses.lock().await;
-        response_map.insert(table_name.to_string(), responses);
-
         let mut indices = self.response_indices.lock().await;
-        indices.insert(table_name.to_string(), 0);
+        let mut order = self.stream_order.lock().await;
+        let mut counter = self.stream_counter.lock().await;
+
+        let queue = order
+            .entry(table_name.to_string())
+            .or_insert_with(VecDeque::new);
+
+        let mut current_stream: Option<(String, u64, Vec<MockResponse>)> = None;
+
+        for response in responses {
+            match response {
+                MockResponse::CreateStream {
+                    stream_id,
+                    delay_ms,
+                } => {
+                    // Flush previous stream
+                    if let Some((sid, delay, resps)) = current_stream.take() {
+                        let key = (table_name.to_string(), sid.clone());
+                        response_map.insert(key.clone(), resps);
+                        indices.insert(key, 0);
+                        queue.push_back(StreamEntry::Stream {
+                            stream_id: sid,
+                            create_delay_ms: delay,
+                            responses: Vec::new(), // responses stored in map
+                        });
+                    }
+                    current_stream = Some((stream_id, delay_ms, Vec::new()));
+                }
+                MockResponse::Error { ref status, delay_ms } if current_stream.is_none() => {
+                    // Error before any CreateStream = connection-creation error
+                    queue.push_back(StreamEntry::CreateError {
+                        status: status.clone(),
+                        delay_ms,
+                    });
+                }
+                other => {
+                    if let Some((_, _, ref mut resps)) = current_stream {
+                        resps.push(other);
+                    } else {
+                        // Responses before any CreateStream with no error — create default stream
+                        *counter += 1;
+                        let auto_id = format!("auto_stream_{}", *counter);
+                        current_stream = Some((auto_id, 0, vec![other]));
+                    }
+                }
+            }
+        }
+
+        // Flush last stream
+        if let Some((sid, delay, resps)) = current_stream {
+            let key = (table_name.to_string(), sid.clone());
+            response_map.insert(key.clone(), resps);
+            indices.insert(key, 0);
+            queue.push_back(StreamEntry::Stream {
+                stream_id: sid,
+                create_delay_ms: delay,
+                responses: Vec::new(),
+            });
+        }
     }
 
     /// Get the maximum offset sent by clients
@@ -89,10 +173,9 @@ impl MockZerobusServer {
     /// Reset the server state
     #[allow(dead_code)]
     pub async fn reset(&self) {
-        let mut responses = self.responses.lock().await;
-        responses.clear();
-        let mut indices = self.response_indices.lock().await;
-        indices.clear();
+        self.responses.lock().await.clear();
+        self.response_indices.lock().await.clear();
+        self.stream_order.lock().await.clear();
         *self.max_offset_sent.lock().await = -1;
         *self.write_count.lock().await = 0;
         *self.stream_counter.lock().await = 0;
@@ -112,17 +195,17 @@ impl Zerobus for MockZerobusServer {
         let (tx, rx) = mpsc::channel(100);
 
         let responses = Arc::clone(&self.responses);
-        let stream_counter = Arc::clone(&self.stream_counter);
+        let response_indices = Arc::clone(&self.response_indices);
+        let stream_order = Arc::clone(&self.stream_order);
         let max_offset_sent = Arc::clone(&self.max_offset_sent);
         let write_count = Arc::clone(&self.write_count);
-        let response_indices = Arc::clone(&self.response_indices);
 
         tokio::spawn(async move {
-            let mut table_name = String::new();
-            let stream_id;
-            let mut stream_responses: Vec<MockResponse> = Vec::new();
-            let mut response_index = 0;
+            let table_name;
+            let stream_responses: Vec<MockResponse>;
+            let stream_key: (String, String);
 
+            // Wait for CreateStream request
             if let Some(request_result) = stream.message().await.transpose() {
                 match request_result {
                     Ok(request) => {
@@ -131,105 +214,73 @@ impl Zerobus for MockZerobusServer {
                             table_name = create_request.table_name.unwrap_or_default();
                             info!("Received CreateStream request for table: {}", table_name);
 
-                            {
-                                let mut counter = stream_counter.lock().await;
-                                *counter += 1;
-                                stream_id = format!("test_stream_{}", *counter);
-                            }
-                            debug!("Generated stream ID: {}", stream_id);
+                            // Pop next stream entry for this table
+                            let entry = {
+                                let mut order = stream_order.lock().await;
+                                order
+                                    .get_mut(&table_name)
+                                    .and_then(|q| q.pop_front())
+                            };
 
-                            {
-                                let response_map = responses.lock().await;
-                                if let Some(responses) = response_map.get(&table_name) {
-                                    stream_responses = responses.clone();
-                                } else {
-                                    warn!(
-                                        "No configured responses found for table: {}",
-                                        table_name
-                                    );
-                                }
-                            }
-
-                            {
-                                let indices = response_indices.lock().await;
-                                response_index = *indices.get(&table_name).unwrap_or(&0);
-                            }
-
-                            // Search for the next CreateStream response starting from response_index.
-                            let mut create_stream_found = false;
-                            for idx in response_index..stream_responses.len() {
-                                if let Some(mock_response) = stream_responses.get(idx) {
-                                    match mock_response {
-                                        MockResponse::CreateStream {
-                                            stream_id: custom_id,
-                                            delay_ms,
-                                        } => {
-                                            response_index = idx;
-                                            create_stream_found = true;
-                                            if *delay_ms > 0 {
-                                                sleep(Duration::from_millis(*delay_ms)).await;
-                                            }
-                                            info!(
-                                                "Sending CreateStream response with stream_id: {} at index {}",
-                                                custom_id, idx
-                                            );
-                                            let response = EphemeralStreamResponse {
-                                                payload: Some(
-                                                    ResponsePayload::CreateStreamResponse(
-                                                        CreateIngestStreamResponse {
-                                                            stream_id: Some(custom_id.clone()),
-                                                        },
-                                                    ),
-                                                ),
-                                            };
-                                            if tx.send(Ok(response)).await.is_err() {
-                                                return;
-                                            }
-                                            response_index += 1;
-
-                                            {
-                                                let mut indices = response_indices.lock().await;
-                                                indices.insert(table_name.clone(), response_index);
-                                            }
-                                            break;
-                                        }
-                                        MockResponse::Error { status, delay_ms } => {
-                                            if *delay_ms > 0 {
-                                                sleep(Duration::from_millis(*delay_ms)).await;
-                                            }
-                                            info!(
-                                                "Sending error response at index {}: {:?}",
-                                                idx, status
-                                            );
-
-                                            {
-                                                let mut indices = response_indices.lock().await;
-                                                indices.insert(table_name.clone(), idx + 1);
-                                            }
-
-                                            let _ = tx.send(Err(status.clone())).await;
-                                            return;
-                                        }
-                                        _ => {
-                                            // Skip non-CreateStream responses.
-                                            continue;
-                                        }
+                            match entry {
+                                Some(StreamEntry::Stream {
+                                    stream_id,
+                                    create_delay_ms,
+                                    ..
+                                }) => {
+                                    if create_delay_ms > 0 {
+                                        sleep(Duration::from_millis(create_delay_ms)).await;
                                     }
+                                    info!(
+                                        "Sending CreateStream response with stream_id: {}",
+                                        stream_id
+                                    );
+                                    let response = EphemeralStreamResponse {
+                                        payload: Some(ResponsePayload::CreateStreamResponse(
+                                            CreateIngestStreamResponse {
+                                                stream_id: Some(stream_id.clone()),
+                                            },
+                                        )),
+                                    };
+                                    if tx.send(Ok(response)).await.is_err() {
+                                        return;
+                                    }
+                                    stream_key = (table_name.clone(), stream_id);
+                                    // Load this stream's responses
+                                    let resp_map = responses.lock().await;
+                                    stream_responses = resp_map
+                                        .get(&stream_key)
+                                        .cloned()
+                                        .unwrap_or_default();
                                 }
-                            }
-
-                            if !create_stream_found {
-                                let response = EphemeralStreamResponse {
-                                    payload: Some(ResponsePayload::CreateStreamResponse(
-                                        CreateIngestStreamResponse {
-                                            stream_id: Some(stream_id.clone()),
-                                        },
-                                    )),
-                                };
-                                if tx.send(Ok(response)).await.is_err() {
+                                Some(StreamEntry::CreateError { status, delay_ms }) => {
+                                    if delay_ms > 0 {
+                                        sleep(Duration::from_millis(delay_ms)).await;
+                                    }
+                                    info!("Sending error during CreateStream: {:?}", status);
+                                    let _ = tx.send(Err(status)).await;
                                     return;
                                 }
+                                None => {
+                                    // No queued streams — auto-create
+                                    warn!("No queued stream entries for table: {}", table_name);
+                                    let response = EphemeralStreamResponse {
+                                        payload: Some(ResponsePayload::CreateStreamResponse(
+                                            CreateIngestStreamResponse {
+                                                stream_id: Some("auto_stream".to_string()),
+                                            },
+                                        )),
+                                    };
+                                    if tx.send(Ok(response)).await.is_err() {
+                                        return;
+                                    }
+                                    stream_key = (table_name.clone(), "auto_stream".to_string());
+                                    stream_responses = Vec::new();
+                                }
                             }
+                        } else {
+                            warn!("Expected CreateStream request");
+                            return;
                         }
                     }
                     Err(status) => {
@@ -237,7 +288,15 @@ impl Zerobus for MockZerobusServer {
                         return;
                     }
                 }
+            } else {
+                return;
             }
+
+            // Per-stream response processing
+            let mut response_index: usize = {
+                let indices = response_indices.lock().await;
+                *indices.get(&stream_key).unwrap_or(&0)
+            };
 
             while let Some(request_result) = stream.message().await.transpose() {
                 match request_result {
@@ -249,7 +308,6 @@ impl Zerobus for MockZerobusServer {
                                     ingest_request.offset_id
                                 );
 
-                                // Update max offset
                                 if let Some(offset_id) = ingest_request.offset_id {
                                     let mut max_offset = max_offset_sent.lock().await;
                                     if offset_id > *max_offset {
@@ -257,14 +315,12 @@ impl Zerobus for MockZerobusServer {
                                     }
                                 }
 
-                                // Increment write count
                                 {
                                     let mut count = write_count.lock().await;
                                     *count += 1;
                                     debug!("Incremented write count to: {}", *count);
                                 }
 
-                                // Process mock response
                                 if response_index < stream_responses.len() {
                                     let (should_continue, new_index) = handle_mock_response(
                                         &stream_responses[response_index],
@@ -275,11 +331,6 @@ impl Zerobus for MockZerobusServer {
                                     )
                                     .await;
                                     response_index = new_index;
-
-                                    {
-                                        let mut indices = response_indices.lock().await;
-                                        indices.insert(table_name.clone(), response_index);
-                                    }
 
                                     if !should_continue {
                                         return;
@@ -292,7 +343,6 @@ impl Zerobus for MockZerobusServer {
                                     batch_request.offset_id
                                 );
 
-                                // Count records in the batch
                                 let record_count = if let Some(batch) = &batch_request.batch {
                                     use databricks::zerobus::ingest_record_batch_request::Batch;
                                     match batch {
@@ -307,7 +357,6 @@ impl Zerobus for MockZerobusServer {
 
                                 debug!("Batch contains {} records", record_count);
 
-                                // Update max offset
                                 if let Some(offset_id) = batch_request.offset_id {
                                     let mut max_offset = max_offset_sent.lock().await;
                                     if offset_id > *max_offset {
@@ -315,7 +364,6 @@ impl Zerobus for MockZerobusServer {
                                     }
                                 }
 
-                                // Increment write count by number of records
                                 {
                                     let mut count = write_count.lock().await;
                                     *count += record_count as u64;
@@ -325,7 +373,6 @@ impl Zerobus for MockZerobusServer {
                                     );
                                 }
 
-                                // Process mock response
                                 if response_index < stream_responses.len() {
                                     let (should_continue, new_index) = handle_mock_response(
                                         &stream_responses[response_index],
@@ -336,11 +383,6 @@ impl Zerobus for MockZerobusServer {
                                     )
                                     .await;
                                     response_index = new_index;
-
-                                    {
-                                        let mut indices = response_indices.lock().await;
-                                        indices.insert(table_name.clone(), response_index);
-                                    }
 
                                     if !should_continue {
                                         return;
@@ -372,10 +414,11 @@ pub async fn start_mock_server() -> Result<(MockZerobusServer, String), Box<dyn 
     let mock_server = MockZerobusServer::new();
     let server_clone = MockZerobusServer {
         responses: Arc::clone(&mock_server.responses),
+        response_indices: Arc::clone(&mock_server.response_indices),
+        stream_order: Arc::clone(&mock_server.stream_order),
         stream_counter: Arc::clone(&mock_server.stream_counter),
         max_offset_sent: Arc::clone(&mock_server.max_offset_sent),
         write_count: Arc::clone(&mock_server.write_count),
-        response_indices: Arc::clone(&mock_server.response_indices),
     };
 
     let addr: std::net::SocketAddr = "127.0.0.1:0".parse()?;
