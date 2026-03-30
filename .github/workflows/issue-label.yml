@@ -14,7 +14,7 @@ jobs:
       labels: linux-ubuntu-latest
     steps:
       - name: Add SDK prefix to title
-        uses: actions/github-script@v7
+        uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b # v7
         with:
           script: |
             const body = context.payload.issue.body || '';
@@ -24,6 +24,13 @@ jobs:
             if (!match) return;
 
             const sdk = match[1].trim();
+
+            // Validate SDK name against known values to prevent injection of arbitrary text
+            const allowedSdks = ['Rust', 'Python', 'Java', 'TypeScript', 'Go', 'All'];
+            if (!allowedSdks.includes(sdk)) {
+              core.warning(`Unknown SDK value: "${sdk}". Skipping title update.`);
+              return;
+            }
 
             const prefix = `[${sdk}]`;
             if (title.startsWith(prefix)) return;
