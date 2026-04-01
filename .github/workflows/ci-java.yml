@@ -53,9 +53,6 @@ jobs:
           - os: windows-server-latest
             runner: { group: databricks-protected-runner-group, labels: windows-server-latest }
             javaVersion: '11'
-          - os: macos-arm64
-            runner: [self-hosted, macOS, ARM64, zerobus-sdk]
-            javaVersion: '11'
     runs-on: ${{ matrix.runner }}
     defaults:
       run:

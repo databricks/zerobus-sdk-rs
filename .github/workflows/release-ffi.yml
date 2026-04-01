@@ -8,6 +8,7 @@ on:
 
 jobs:
   build-ffi:
+    if: false
     strategy:
       fail-fast: false
       matrix:
@@ -88,6 +89,7 @@ jobs:
           path: rust/artifacts/${{ matrix.artifact_dir }}
 
   release:
+    if: false
     name: Create GitHub Release
     needs: build-ffi
     runs-on:

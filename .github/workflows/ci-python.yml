@@ -29,9 +29,6 @@ jobs:
           - os: windows-server-latest
             runner: { group: databricks-protected-runner-group, labels: windows-server-latest }
             pyVersion: '3.9'
-          - os: macos-arm64
-            runner: [self-hosted, macOS, ARM64, zerobus-sdk]
-            pyVersion: '3.9'
     runs-on: ${{ matrix.runner }}
     defaults:
       run:

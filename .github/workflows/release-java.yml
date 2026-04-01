@@ -8,6 +8,7 @@ on:
 
 jobs:
   build-jni:
+    if: false
     strategy:
       fail-fast: false
       matrix:
@@ -81,6 +82,7 @@ jobs:
           if-no-files-found: error
 
   publish:
+    if: false
     name: Publish to Maven Central
     runs-on:
       group: databricks-protected-runner-group
@@ -127,6 +129,7 @@ jobs:
           MAVEN_CENTRAL_PASSWORD: ${{ secrets.MAVEN_CENTRAL_PASSWORD }}
 
   release:
+    if: false
     name: Create GitHub Release
     runs-on:
       group: databricks-protected-runner-group

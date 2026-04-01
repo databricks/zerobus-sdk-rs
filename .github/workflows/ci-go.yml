@@ -63,8 +63,6 @@ jobs:
             runner: { group: databricks-protected-runner-group, labels: linux-ubuntu-latest }
           - os: windows-server-latest
             runner: { group: databricks-protected-runner-group, labels: windows-server-latest }
-          - os: macos-arm64
-            runner: [self-hosted, macOS, ARM64, zerobus-sdk]
     runs-on: ${{ matrix.runner }}
     defaults:
       run:
@@ -113,9 +111,6 @@ jobs:
           - os: windows-server-latest
             runner: { group: databricks-protected-runner-group, labels: windows-server-latest }
             lib: lib/windows_amd64/libzerobus_ffi.a
-          - os: macos-arm64
-            runner: [self-hosted, macOS, ARM64, zerobus-sdk]
-            lib: lib/darwin_arm64/libzerobus_ffi.a
     runs-on: ${{ matrix.runner }}
     defaults:
       run:

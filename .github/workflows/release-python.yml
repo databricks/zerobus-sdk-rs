@@ -13,6 +13,7 @@ concurrency:
 
 jobs:
   build-linux:
+    if: false
     runs-on:
       group: databricks-protected-runner-group
       labels: linux-ubuntu-latest
@@ -65,6 +66,7 @@ jobs:
           if-no-files-found: error
 
   build-windows:
+    if: false
     runs-on:
       group: databricks-protected-runner-group
       labels: windows-server-latest
@@ -98,6 +100,7 @@ jobs:
           if-no-files-found: error
 
   build-macos:
+    if: false
     runs-on: [self-hosted, macOS, ARM64, zerobus-sdk]
     strategy:
       fail-fast: false
@@ -131,6 +134,7 @@ jobs:
           if-no-files-found: error
 
   sdist:
+    if: false
     runs-on:
       group: databricks-protected-runner-group
       labels: linux-ubuntu-latest
@@ -162,6 +166,7 @@ jobs:
           if-no-files-found: error
 
   publish:
+    if: false
     name: Publish to PyPI
     environment: pypi
     runs-on:
@@ -188,6 +193,7 @@ jobs:
           skip-existing: true
 
   release:
+    if: false
     name: Create GitHub Release
     runs-on:
       group: databricks-protected-runner-group

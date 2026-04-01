@@ -8,6 +8,7 @@ on:
 
 jobs:
   build:
+    if: false
     strategy:
       fail-fast: false
       matrix:
@@ -65,6 +66,7 @@ jobs:
           if-no-files-found: error
 
   publish:
+    if: false
     name: Publish to npm
     runs-on:
       group: databricks-protected-runner-group
@@ -112,6 +114,7 @@ jobs:
         run: npm publish --access public --provenance --ignore-scripts
 
   release:
+    if: false
     name: Create GitHub Release
     runs-on:
       group: databricks-protected-runner-group
