@@ -48,4 +48,4 @@ protoc-bin-vendored = "3.0.0"
 default = []
 # Arrow Flight is experimental/unsupported
 arrow-flight = ["dep:arrow-flight", "dep:arrow-array", "dep:arrow-schema", "dep:arrow-ipc", "dep:futures"]
-testing = []
+testing = ["dep:futures"]

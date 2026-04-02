@@ -41,6 +41,8 @@ mod errors;
 mod headers_provider;
 mod landing_zone;
 mod offset_generator;
+#[cfg(feature = "testing")]
+mod multiplexed_stream;
 mod proxy;
 mod record_types;
 mod stream_configuration;
@@ -92,6 +94,9 @@ pub use record_types::{
     ProtoBytes, ProtoEncodedRecord, ProtoMessage,
 };
 pub use stream_configuration::StreamConfigurationOptions;
+#[cfg(feature = "testing")]
+pub use multiplexed_stream::{MessageId, MultiplexedStream};
+
 #[cfg(feature = "testing")]
 pub use tls_config::NoTlsConfig;
 pub use tls_config::{SecureTlsConfig, TlsConfig};
@@ -266,7 +271,6 @@ pub struct ZerobusSdk {
     )]
     pub use_tls: bool,
     pub unity_catalog_url: String,
-    shared_channel: tokio::sync::Mutex<Option<ZerobusClient<Channel>>>,
     workspace_id: String,
     tls_config: Arc<dyn TlsConfig>,
 }
@@ -347,7 +351,6 @@ impl ZerobusSdk {
             use_tls: true,
             unity_catalog_url,
             workspace_id,
-            shared_channel: tokio::sync::Mutex::new(None),
             tls_config: Arc::new(SecureTlsConfig::new()),
         })
     }
@@ -367,7 +370,6 @@ impl ZerobusSdk {
             use_tls: true,
             unity_catalog_url,
             workspace_id,
-            shared_channel: tokio::sync::Mutex::new(None),
             tls_config,
         }
     }
@@ -829,44 +831,34 @@ impl ZerobusSdk {
         Ok(new_stream)
     }
 
-    /// Gets or creates the shared Channel for all streams.
-    /// The first call creates the Channel, subsequent calls clone it.
-    /// All clones share the same underlying TCP connection via HTTP/2 multiplexing.
+    /// Creates a new Channel and TCP connection for each stream.
+    ///
+    /// Each stream gets its own dedicated connection to avoid serialization
+    /// through tonic's tower Buffer worker, which processes requests one at
+    /// a time per channel.
     async fn get_or_create_channel_zerobus_client(&self) -> ZerobusResult<ZerobusClient<Channel>> {
-        let mut guard = self.shared_channel.lock().await;
+        let endpoint = Endpoint::from_shared(self.zerobus_endpoint.clone())
+            .map_err(|err| ZerobusError::ChannelCreationError(err.to_string()))?;
 
-        if guard.is_none() {
-            // Create the channel for the first time.
-            let endpoint = Endpoint::from_shared(self.zerobus_endpoint.clone())
-                .map_err(|err| ZerobusError::ChannelCreationError(err.to_string()))?;
+        let endpoint = self.tls_config.configure_endpoint(endpoint)?;
 
-            let endpoint = self.tls_config.configure_endpoint(endpoint)?;
+        let host = endpoint.uri().host().unwrap_or_default().to_string();
 
-            // Check for HTTP proxy env vars (https_proxy, HTTPS_PROXY, etc.)
-            // and use a proxy connector if one is configured.
-            let host = endpoint.uri().host().unwrap_or_default().to_string();
-
-            let channel = if !proxy::is_no_proxy(&host) {
-                if let Some(proxy_connector) = proxy::create_proxy_connector() {
-                    endpoint.connect_with_connector_lazy(proxy_connector)
-                } else {
-                    endpoint.connect_lazy()
-                }
+        let channel = if !proxy::is_no_proxy(&host) {
+            if let Some(proxy_connector) = proxy::create_proxy_connector() {
+                endpoint.connect_with_connector_lazy(proxy_connector)
             } else {
                 endpoint.connect_lazy()
-            };
+            }
+        } else {
+            endpoint.connect_lazy()
+        };
 
-            let client = ZerobusClient::new(channel)
-                .max_decoding_message_size(usize::MAX)
-                .max_encoding_message_size(usize::MAX);
+        let client = ZerobusClient::new(channel)
+            .max_decoding_message_size(usize::MAX)
+            .max_encoding_message_size(usize::MAX);
 
-            *guard = Some(client);
-        }
-
-        Ok(guard
-            .as_ref()
-            .expect("Channel was just initialized")
-            .clone())
+        Ok(client)
     }
 }
 
@@ -2233,6 +2225,11 @@ impl ZerobusStream {
             "Cannot get unacked records from an active stream. Stream must be closed first."
                 .to_string(),
         ))
+    }
+
+    #[cfg(feature = "testing")]
+    pub(crate) fn has_capacity(&self) -> bool {
+        self.landing_zone.len() < self.options.max_inflight_requests
     }
 }
 
