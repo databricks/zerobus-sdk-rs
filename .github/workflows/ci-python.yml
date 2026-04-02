@@ -8,6 +8,9 @@ on:
         type: boolean
         default: false
 
+env:
+  PIP_INDEX_URL: https://pypi-proxy.dev.databricks.com/simple
+
 jobs:
   test:
     strategy:

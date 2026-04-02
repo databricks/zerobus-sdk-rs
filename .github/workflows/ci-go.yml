@@ -8,6 +8,9 @@ on:
         type: boolean
         default: false
 
+env:
+  GOPROXY: https://go-proxy.dev.databricks.com
+
 jobs:
   fmt:
     runs-on:
