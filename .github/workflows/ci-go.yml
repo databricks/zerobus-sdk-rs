@@ -9,7 +9,9 @@ on:
         default: false
 
 env:
-  GOPROXY: https://go-proxy.dev.databricks.com
+  GOPROXY: "https://go-proxy.dev.databricks.com,direct"
+  GONOSUMDB: "*"
+  GONOSUMCHECK: "*"
 
 jobs:
   fmt:
