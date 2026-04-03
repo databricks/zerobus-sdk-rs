@@ -5,6 +5,7 @@
 
 use std::sync::Arc;
 
+use bytes::Bytes;
 use pyo3::prelude::*;
 use pyo3::types::PyBytes;
 use tokio::sync::RwLock;
@@ -17,28 +18,6 @@ use databricks_zerobus_ingest_sdk::{
 
 use crate::auth::HeadersProviderWrapper;
 use crate::common::map_error;
-
-/// Deserialize Arrow IPC bytes into exactly one RecordBatch.
-fn ipc_bytes_to_record_batch(ipc_bytes: &[u8]) -> Result<arrow_array::RecordBatch, RustError> {
-    let mut reader = arrow_ipc::reader::StreamReader::try_new(ipc_bytes, None).map_err(|e| {
-        RustError::InvalidArgument(format!("Failed to parse Arrow IPC data: {}", e))
-    })?;
-
-    let batch = reader
-        .next()
-        .ok_or_else(|| {
-            RustError::InvalidArgument("No batches found in Arrow IPC data".to_string())
-        })?
-        .map_err(|e| RustError::InvalidArgument(format!("Failed to read Arrow batch: {}", e)))?;
-
-    if reader.next().is_some() {
-        return Err(RustError::InvalidArgument(
-            "Expected exactly one RecordBatch in Arrow IPC data, found multiple".to_string(),
-        ));
-    }
-
-    Ok(batch)
-}
 
 /// Serialize a RecordBatch to Arrow IPC bytes.
 fn record_batch_to_ipc_bytes(batch: &arrow_array::RecordBatch) -> Result<Vec<u8>, RustError> {
@@ -282,13 +261,14 @@ pub struct ZerobusArrowStream {
 impl ZerobusArrowStream {
     /// Ingest a single Arrow RecordBatch (as IPC bytes) and return the offset.
     ///
+    /// Zero-copy: IPC bytes are passed directly to the Rust SDK without
+    /// deserialization, then converted to Flight format without materializing
+    /// Arrow arrays.
+    ///
     /// Args:
     ///     ipc_bytes: Arrow IPC serialized bytes from pyarrow.RecordBatch.serialize()
     fn ingest_batch(&self, py: Python, ipc_bytes: &PyBytes) -> PyResult<i64> {
-        // TODO(perf): eliminate double IPC serialization - Python-to-IPC-to-RecordBatch here,
-        // then RecordBatch-to-IPC again inside the Rust SDK for Flight. Pass IPC bytes
-        // directly to the SDK instead.
-        let batch = ipc_bytes_to_record_batch(ipc_bytes.as_bytes()).map_err(|e| map_error(e))?;
+        let ipc = Bytes::copy_from_slice(ipc_bytes.as_bytes());
 
         let stream_clone = self.inner.clone();
         let runtime = self.runtime.clone();
@@ -297,7 +277,7 @@ impl ZerobusArrowStream {
             runtime.block_on(async move {
                 let stream_guard = stream_clone.read().await;
                 stream_guard
-                    .ingest_batch(batch)
+                    .ingest_ipc_batch(ipc)
                     .await
                     .map_err(|e| Python::with_gil(|_py| map_error(e)))
             })
@@ -418,15 +398,19 @@ pub struct AsyncZerobusArrowStream {
 #[pymethods]
 impl AsyncZerobusArrowStream {
     /// Ingest a single Arrow RecordBatch (as IPC bytes) and return the offset.
+    ///
+    /// Zero-copy: IPC bytes are passed directly to the Rust SDK without
+    /// deserialization, then converted to Flight format without materializing
+    /// Arrow arrays.
     fn ingest_batch<'py>(&self, py: Python<'py>, ipc_bytes: &PyBytes) -> PyResult<&'py PyAny> {
-        let batch = ipc_bytes_to_record_batch(ipc_bytes.as_bytes()).map_err(|e| map_error(e))?;
+        let ipc = Bytes::copy_from_slice(ipc_bytes.as_bytes());
 
         let stream_clone = self.inner.clone();
 
         pyo3_asyncio::tokio::future_into_py(py, async move {
             let stream_guard = stream_clone.read().await;
             stream_guard
-                .ingest_batch(batch)
+                .ingest_ipc_batch(ipc)
                 .await
                 .map_err(|e| Python::with_gil(|_py| map_error(e)))
         })
