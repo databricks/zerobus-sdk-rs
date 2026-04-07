@@ -110,14 +110,8 @@ where
                         }
                         Err(e) => {
                             tracing::error!("Failed to create Long object: {}", e);
-                            if let Some(exc) =
-                                create_zerobus_exception(&mut env, &e.to_string())
-                            {
-                                let _ = complete_future_exceptionally(
-                                    &mut env,
-                                    future,
-                                    exc.into(),
-                                );
+                            if let Some(exc) = create_zerobus_exception(&mut env, &e.to_string()) {
+                                let _ = complete_future_exceptionally(&mut env, future, exc.into());
                             }
                         }
                     }

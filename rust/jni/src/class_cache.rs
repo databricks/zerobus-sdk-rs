@@ -29,19 +29,13 @@ static CLASS_CACHE: OnceLock<CachedClasses> = OnceLock::new();
 /// correct classloader is active.
 pub fn init_class_cache(env: &mut JNIEnv) -> Result<(), String> {
     let cache = CachedClasses {
-        zerobus_exception_class: find_and_cache(
-            env,
-            "com/databricks/zerobus/ZerobusException",
-        )?,
+        zerobus_exception_class: find_and_cache(env, "com/databricks/zerobus/ZerobusException")?,
         non_retriable_exception_class: find_and_cache(
             env,
             "com/databricks/zerobus/NonRetriableException",
         )?,
         long_class: find_and_cache(env, "java/lang/Long")?,
-        completable_future_class: find_and_cache(
-            env,
-            "java/util/concurrent/CompletableFuture",
-        )?,
+        completable_future_class: find_and_cache(env, "java/util/concurrent/CompletableFuture")?,
         array_list_class: find_and_cache(env, "java/util/ArrayList")?,
         encoded_batch_class: find_and_cache(env, "com/databricks/zerobus/EncodedBatch")?,
     };

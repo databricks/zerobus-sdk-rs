@@ -117,16 +117,12 @@ pub extern "system" fn Java_com_databricks_zerobus_NativeTestHelper_nativeTestFi
 
             let cache = get_class_cache();
             let cached_ref = match class_name_str.as_str() {
-                "com/databricks/zerobus/ZerobusException" => {
-                    Some(&cache.zerobus_exception_class)
-                }
+                "com/databricks/zerobus/ZerobusException" => Some(&cache.zerobus_exception_class),
                 "com/databricks/zerobus/NonRetriableException" => {
                     Some(&cache.non_retriable_exception_class)
                 }
                 "java/lang/Long" => Some(&cache.long_class),
-                "java/util/concurrent/CompletableFuture" => {
-                    Some(&cache.completable_future_class)
-                }
+                "java/util/concurrent/CompletableFuture" => Some(&cache.completable_future_class),
                 "java/util/ArrayList" => Some(&cache.array_list_class),
                 "com/databricks/zerobus/EncodedBatch" => Some(&cache.encoded_batch_class),
                 _ => None,
