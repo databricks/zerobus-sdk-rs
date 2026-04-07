@@ -5,6 +5,11 @@ package com.databricks.zerobus;
  *
  * <p>Provides native methods that test class resolution from Tokio daemon threads, used by {@code
  * ClassLoaderIsolationTest} to verify that cached GlobalRefs work across classloader boundaries.
+ *
+ * @apiNote This class is not part of the public SDK API. It lives in {@code src/main} because it
+ *     must be loadable by the isolated {@link java.net.URLClassLoader} in {@code
+ *     ClassLoaderIsolationRunner}, which cannot see classes on the test classpath. The native
+ *     symbols are only compiled when the Rust {@code test-helpers} cargo feature is enabled.
  */
 public class NativeTestHelper {
   static {
