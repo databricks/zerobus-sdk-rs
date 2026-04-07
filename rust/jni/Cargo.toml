@@ -29,3 +29,4 @@ arrow-ipc = { version = "56.2.0", features = ["lz4", "zstd"] }
 
 [features]
 default = []
+test-helpers = []

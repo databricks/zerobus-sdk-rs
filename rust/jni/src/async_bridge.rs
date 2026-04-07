@@ -84,7 +84,7 @@ where
 
         // Complete the future on the blocking thread pool to avoid issues when
         // Java callbacks call back into JNI methods that use block_on.
-        drop(tokio::task::spawn_blocking(move || {
+        let handle = tokio::task::spawn_blocking(move || {
             // Attach to the JVM to complete the future
             let jvm = get_jvm();
             let mut env = match jvm.attach_current_thread_as_daemon() {
@@ -112,6 +112,9 @@ where
                             tracing::error!("Failed to create Long object: {}", e);
                             if let Some(exc) = create_zerobus_exception(&mut env, &e.to_string()) {
                                 let _ = complete_future_exceptionally(&mut env, future, exc.into());
+                            } else {
+                                // Last resort: complete with null to avoid hanging the future
+                                let _ = complete_future_void(&mut env, future);
                             }
                         }
                     }
@@ -122,10 +125,20 @@ where
                         {
                             tracing::error!("Failed to complete future exceptionally: {}", e);
                         }
+                    } else {
+                        // Last resort: complete with null to avoid hanging the future
+                        tracing::error!(
+                            "Failed to create exception for error: {}. Completing future with null.",
+                            error
+                        );
+                        let _ = complete_future_void(&mut env, future);
                     }
                 }
             }
-        }));
+        });
+        if let Err(e) = handle.await {
+            tracing::error!("Blocking task panicked: {}", e);
+        }
     });
 }
 
@@ -144,7 +157,7 @@ where
 
         // Complete the future on the blocking thread pool to avoid issues when
         // Java callbacks call back into JNI methods that use block_on.
-        drop(tokio::task::spawn_blocking(move || {
+        let handle = tokio::task::spawn_blocking(move || {
             // Attach to the JVM to complete the future
             let jvm = get_jvm();
             let mut env = match jvm.attach_current_thread_as_daemon() {
@@ -169,10 +182,20 @@ where
                         {
                             tracing::error!("Failed to complete future exceptionally: {}", e);
                         }
+                    } else {
+                        // Last resort: complete with null to avoid hanging the future
+                        tracing::error!(
+                            "Failed to create exception for error: {}. Completing future with null.",
+                            error
+                        );
+                        let _ = complete_future_void(&mut env, future);
                     }
                 }
             }
-        }));
+        });
+        if let Err(e) = handle.await {
+            tracing::error!("Blocking task panicked: {}", e);
+        }
     });
 }
 

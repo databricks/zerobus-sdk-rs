@@ -1,6 +1,6 @@
 # Makefile for zerobus-sdk-rs
 
-.PHONY: help build build-release clean fmt lint check test build-jni build-ffi
+.PHONY: help build build-release clean fmt lint check test build-jni build-jni-test build-ffi
 
 help:
 	@echo "Available targets:"
@@ -22,6 +22,9 @@ build-release:
 
 build-jni:
 	cargo build --release -p zerobus-jni
+
+build-jni-test:
+	cargo build --release -p zerobus-jni --features test-helpers
 
 build-ffi:
 	cargo build --release -p zerobus-ffi

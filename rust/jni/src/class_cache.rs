@@ -15,11 +15,17 @@ use std::sync::OnceLock;
 
 /// Cached JNI class references, populated during `JNI_OnLoad`.
 pub struct CachedClasses {
+    /// `com.databricks.zerobus.ZerobusException`
     pub zerobus_exception_class: GlobalRef,
+    /// `com.databricks.zerobus.NonRetriableException`
     pub non_retriable_exception_class: GlobalRef,
+    /// `java.lang.Long`
     pub long_class: GlobalRef,
+    /// `java.util.concurrent.CompletableFuture`
     pub completable_future_class: GlobalRef,
+    /// `java.util.ArrayList`
     pub array_list_class: GlobalRef,
+    /// `com.databricks.zerobus.EncodedBatch`
     pub encoded_batch_class: GlobalRef,
 }
 
@@ -58,13 +64,17 @@ pub fn get_class_cache() -> &'static CachedClasses {
 
 /// Convert a `GlobalRef` (known to wrap a `java.lang.Class`) to a `JClass`.
 ///
+/// The returned `JClass` borrows from the `GlobalRef`, so it cannot outlive it.
+/// In practice all `GlobalRef`s live in the `'static` `CLASS_CACHE`, but the
+/// signature enforces soundness even if that changes.
+///
 /// # Safety
 ///
 /// This is safe because:
 /// - The `GlobalRef` was created from `env.find_class()` in `init_class_cache`
 /// - The `GlobalRef` prevents garbage collection of the underlying object
 /// - The raw pointer remains valid for the lifetime of the `GlobalRef`
-pub fn as_jclass<'local>(global: &GlobalRef) -> JClass<'local> {
+pub fn as_jclass<'a>(global: &'a GlobalRef) -> JClass<'a> {
     unsafe { JClass::from(JObject::from_raw(global.as_obj().as_raw())) }
 }
 

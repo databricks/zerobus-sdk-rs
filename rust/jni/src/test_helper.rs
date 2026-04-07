@@ -132,9 +132,21 @@ pub extern "system" fn Java_com_databricks_zerobus_NativeTestHelper_nativeTestFi
                 Some(global_ref) => {
                     let jclass = as_jclass(global_ref);
                     if jclass.is_null() {
-                        "ERROR: cached class reference is null".to_string()
-                    } else {
-                        "OK".to_string()
+                        return "ERROR: cached class reference is null".to_string();
+                    }
+                    // Actually instantiate the class to verify the ref is usable,
+                    // not just non-null. Use ArrayList since it has a no-arg ctor.
+                    let mut env = match jvm.attach_current_thread_as_daemon() {
+                        Ok(env) => env,
+                        Err(e) => return format!("ERROR: Failed to re-attach thread: {}", e),
+                    };
+                    let test_class = as_jclass(&cache.array_list_class);
+                    match env.new_object(test_class, "()V", &[]) {
+                        Ok(_) => "OK".to_string(),
+                        Err(e) => {
+                            let _ = env.exception_clear();
+                            format!("ERROR: cached ref is non-null but unusable: {}", e)
+                        }
                     }
                 }
                 None => format!("ERROR: class {} not found in cache", class_name_str),

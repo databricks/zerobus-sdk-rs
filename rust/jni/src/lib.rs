@@ -12,6 +12,7 @@ mod options;
 mod runtime;
 mod sdk;
 mod stream;
+#[cfg(feature = "test-helpers")]
 mod test_helper;
 
 use jni::sys::jint;
@@ -27,7 +28,6 @@ pub use options::*;
 pub use runtime::*;
 pub use sdk::*;
 pub use stream::*;
-pub use test_helper::*;
 
 /// JNI version required by this library.
 const JNI_VERSION: jint = jni::sys::JNI_VERSION_1_8;

@@ -39,48 +39,48 @@ public class ClassLoaderIsolationRunner {
     // This parent cannot see application classes on the system classpath,
     // simulating Spring Boot's LaunchedURLClassLoader.
     ClassLoader parent = ClassLoader.getSystemClassLoader().getParent();
-    URLClassLoader isolated = new URLClassLoader(urls, parent);
+    try (URLClassLoader isolated = new URLClassLoader(urls, parent)) {
+      // Load NativeLoader through the isolated classloader to trigger JNI_OnLoad
+      // with the correct classloader context
+      Class<?> nativeLoaderClass = isolated.loadClass("com.databricks.zerobus.NativeLoader");
+      nativeLoaderClass.getMethod("ensureLoaded").invoke(null);
+      System.out.println("Native library loaded via isolated classloader");
 
-    // Load NativeLoader through the isolated classloader to trigger JNI_OnLoad
-    // with the correct classloader context
-    Class<?> nativeLoaderClass = isolated.loadClass("com.databricks.zerobus.NativeLoader");
-    nativeLoaderClass.getMethod("ensureLoaded").invoke(null);
-    System.out.println("Native library loaded via isolated classloader");
+      // Load NativeTestHelper through the isolated classloader
+      Class<?> testHelperClass = isolated.loadClass("com.databricks.zerobus.NativeTestHelper");
 
-    // Load NativeTestHelper through the isolated classloader
-    Class<?> testHelperClass = isolated.loadClass("com.databricks.zerobus.NativeTestHelper");
+      // Test 1: Direct find_class from daemon thread (expected to FAIL in isolated classloader)
+      Method directMethod =
+          testHelperClass.getMethod("nativeTestFindClassFromDaemonThread", String.class);
+      String directResult =
+          (String) directMethod.invoke(null, "com/databricks/zerobus/NonRetriableException");
+      System.out.println("Direct find_class result: " + directResult);
 
-    // Test 1: Direct find_class from daemon thread (expected to FAIL in isolated classloader)
-    Method directMethod =
-        testHelperClass.getMethod("nativeTestFindClassFromDaemonThread", String.class);
-    String directResult =
-        (String) directMethod.invoke(null, "com/databricks/zerobus/NonRetriableException");
-    System.out.println("Direct find_class result: " + directResult);
+      // Test 2: Cached GlobalRef from daemon thread (expected to SUCCEED)
+      Method cachedMethod =
+          testHelperClass.getMethod("nativeTestFindClassFromDaemonThreadCached", String.class);
+      String cachedResult =
+          (String) cachedMethod.invoke(null, "com/databricks/zerobus/NonRetriableException");
+      System.out.println("Cached GlobalRef result: " + cachedResult);
 
-    // Test 2: Cached GlobalRef from daemon thread (expected to SUCCEED)
-    Method cachedMethod =
-        testHelperClass.getMethod("nativeTestFindClassFromDaemonThreadCached", String.class);
-    String cachedResult =
-        (String) cachedMethod.invoke(null, "com/databricks/zerobus/NonRetriableException");
-    System.out.println("Cached GlobalRef result: " + cachedResult);
+      // Verify results
+      boolean directFailed = !"OK".equals(directResult);
+      boolean cachedSucceeded = "OK".equals(cachedResult);
 
-    // Verify results
-    boolean directFailed = !"OK".equals(directResult);
-    boolean cachedSucceeded = "OK".equals(cachedResult);
-
-    if (directFailed && cachedSucceeded) {
-      System.out.println(
-          "PASSED: Direct find_class failed as expected, cached GlobalRef succeeded");
-      System.exit(0);
-    } else {
-      System.err.println("FAILED:");
-      if (!directFailed) {
-        System.err.println("  Direct find_class unexpectedly succeeded");
+      if (directFailed && cachedSucceeded) {
+        System.out.println(
+            "PASSED: Direct find_class failed as expected, cached GlobalRef succeeded");
+        System.exit(0);
+      } else {
+        System.err.println("FAILED:");
+        if (!directFailed) {
+          System.err.println("  Direct find_class unexpectedly succeeded");
+        }
+        if (!cachedSucceeded) {
+          System.err.println("  Cached GlobalRef failed: " + cachedResult);
+        }
+        System.exit(1);
       }
-      if (!cachedSucceeded) {
-        System.err.println("  Cached GlobalRef failed: " + cachedResult);
-      }
-      System.exit(1);
     }
   }
 }

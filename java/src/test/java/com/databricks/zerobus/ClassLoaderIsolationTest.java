@@ -7,6 +7,7 @@ import java.io.File;
 import java.io.InputStreamReader;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.concurrent.TimeUnit;
 import java.util.regex.Pattern;
 import org.junit.jupiter.api.Assumptions;
 import org.junit.jupiter.api.Test;
@@ -82,7 +83,12 @@ class ClassLoaderIsolationTest {
       output.append(line).append(System.lineSeparator());
     }
 
-    int exitCode = proc.waitFor();
+    boolean finished = proc.waitFor(30, TimeUnit.SECONDS);
+    if (!finished) {
+      proc.destroyForcibly();
+      fail("ClassLoaderIsolationRunner timed out after 30 seconds");
+    }
+    int exitCode = proc.exitValue();
 
     System.out.println("=== ClassLoaderIsolationRunner output ===");
     System.out.print(output);
