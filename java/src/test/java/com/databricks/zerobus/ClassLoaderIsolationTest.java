@@ -34,6 +34,8 @@ class ClassLoaderIsolationTest {
     // Split classpath:
     // - test-classes → system classpath (so ClassLoaderIsolationRunner is accessible)
     // - everything else → passed as args for URLClassLoader
+    // NOTE: "test-classes" is Maven-specific. Gradle uses different paths (e.g. classes/java/test).
+    // The Assumptions gates below ensure the test skips gracefully in non-Maven environments.
     List<String> systemCpEntries = new ArrayList<>();
     List<String> isolatedCpEntries = new ArrayList<>();
 
