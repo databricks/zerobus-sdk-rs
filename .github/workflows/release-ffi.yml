@@ -6,11 +6,9 @@ on:
     tags:
       - "ffi/v*"
 
-permissions:
-  contents: write
-
 jobs:
   build-ffi:
+    if: false
     strategy:
       fail-fast: false
       matrix:
@@ -54,10 +52,10 @@ jobs:
         working-directory: rust
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
 
       - name: Install protoc
-        uses: arduino/setup-protoc@v3
+        uses: arduino/setup-protoc@c65c819552d16ad3c9b72d9dfd5ba5237b9c906b # v3
 
       - name: Install cross-compilation toolchain (Linux ARM64)
         if: matrix.cross
@@ -69,7 +67,7 @@ jobs:
           echo 'linker = "aarch64-linux-gnu-gcc"' >> .cargo/config.toml
 
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
         with:
           targets: ${{ matrix.target }}
 
@@ -85,27 +83,30 @@ jobs:
           cp ffi/zerobus.h artifacts/${{ matrix.artifact_dir }}/
 
       - name: Upload artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: ffi-${{ matrix.artifact_dir }}
           path: rust/artifacts/${{ matrix.artifact_dir }}
 
   release:
+    if: false
     name: Create GitHub Release
     needs: build-ffi
     runs-on:
       group: databricks-protected-runner-group
       labels: linux-ubuntu-latest
+    permissions:
+      contents: write
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
 
       - name: Extract version from tag
         id: version
         run: echo "version=${GITHUB_REF#refs/tags/ffi/v}" >> "$GITHUB_OUTPUT"
 
       - name: Download all artifacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           path: native
           pattern: ffi-*
@@ -127,7 +128,7 @@ jobs:
           awk "/^## Release ${version}/{found=1; next} /^## /{if(found) exit} found{print}" rust/ffi/CHANGELOG.md > /tmp/release-notes.md
 
       - name: Create GitHub Release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@153bb8e04406b158c6c84fc1615b65b24149a1fe # v2
         with:
           name: FFI Libraries v${{ steps.version.outputs.version }}
           body_path: /tmp/release-notes.md

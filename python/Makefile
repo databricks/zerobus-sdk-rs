@@ -8,7 +8,7 @@ else
     VENV = .venv/bin/python
 endif
 
-.PHONY: dev install build clean clean-all install-wheel help fmt lint test build-rust develop-rust clean-rust
+.PHONY: dev install build clean clean-all install-wheel help fmt lint test build-rust develop-rust clean-rust lock-dev
 
 help:
 	@echo "Available targets:"
@@ -36,6 +36,11 @@ dev:
 	$(VENV) -m pip install --upgrade pip
 	@test -f LICENSE || cp ../LICENSE LICENSE
 	$(VENV) -m pip install -e '.[dev]'
+
+lock-dev:
+	@test -f LICENSE || cp ../LICENSE LICENSE
+	$(VENV) -m pip install pip-tools
+	$(VENV) -m pip-compile --generate-hashes --output-file requirements-dev.lock requirements-dev.in
 
 install:
 	$(VENV) -m pip install -e .

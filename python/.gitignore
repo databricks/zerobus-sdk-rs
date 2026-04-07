@@ -9,7 +9,6 @@ build/
 
 # Rust extension build artifacts
 target/
-Cargo.lock
 *.so
 *.pyd
 *.dylib

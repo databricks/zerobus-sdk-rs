@@ -1,0 +1,4 @@
+# Input file for pip-compile. Run `make lock-dev` to regenerate requirements-dev.lock.
+# The lock file pins every transitive dependency to an exact version with hashes,
+# so CI installs are reproducible and hash-verified.
+-e .[dev]

@@ -1,0 +1,43 @@
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    labels:
+      - dependencies
+
+  - package-ecosystem: pip
+    directory: /python
+    schedule:
+      interval: weekly
+    labels:
+      - dependencies
+
+  - package-ecosystem: npm
+    directory: /typescript
+    schedule:
+      interval: weekly
+    labels:
+      - dependencies
+
+  - package-ecosystem: maven
+    directory: /java
+    schedule:
+      interval: weekly
+    labels:
+      - dependencies
+
+  - package-ecosystem: cargo
+    directory: /rust
+    schedule:
+      interval: weekly
+    labels:
+      - dependencies
+
+  - package-ecosystem: gomod
+    directory: /go
+    schedule:
+      interval: weekly
+    labels:
+      - dependencies
