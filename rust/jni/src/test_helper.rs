@@ -53,7 +53,7 @@ pub extern "system" fn Java_com_databricks_zerobus_NativeTestHelper_nativeTestFi
                                 .filter(|o| !o.is_null())
                                 .and_then(|o| {
                                     let jstr: jni::objects::JString = o.into();
-                                    env.get_string(&jstr).ok().map(|s| String::from(s))
+                                    env.get_string(&jstr).ok().map(String::from)
                                 })
                                 .unwrap_or_default();
                             // Get exception message
@@ -64,7 +64,7 @@ pub extern "system" fn Java_com_databricks_zerobus_NativeTestHelper_nativeTestFi
                                 .filter(|o| !o.is_null())
                                 .and_then(|o| {
                                     let jstr: jni::objects::JString = o.into();
-                                    env.get_string(&jstr).ok().map(|s| String::from(s))
+                                    env.get_string(&jstr).ok().map(String::from)
                                 })
                                 .unwrap_or_default();
                             format!("{}: {}", class_name, message)
