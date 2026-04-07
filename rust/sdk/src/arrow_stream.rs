@@ -5,6 +5,9 @@
 //!
 //! This module provides `ZerobusArrowStream`, a client for ingesting Arrow `RecordBatch`
 //! data into Databricks Delta tables using the Arrow Flight protocol.
+//! Native Rust callers use `ingest_batch` with `RecordBatch` values; FFI callers
+//! (Go, Python, Java, TypeScript) can use `ingest_ipc_batch` with pre-serialised
+//! Arrow IPC bytes to avoid an extra deserialisation round-trip.
 
 use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
@@ -124,6 +127,8 @@ fn slice_batch_for_recovery(
             ))),
             ArrowPayload::Ipc(bytes) => {
                 // Rare path: partially-acked IPC batch must be deserialised and sliced.
+                // TODO: zero-copy partial-ack recovery — slice IPC bytes at buffer level
+                // instead of materializing (tracked in #147).
                 let b = materialize_ipc(bytes).map_err(|e| {
                     ZerobusError::InvalidArgument(format!(
                         "IPC batch could not be deserialised for partial recovery (offset_id={}): {e}",
@@ -172,48 +177,37 @@ fn materialize_ipc(bytes: &Bytes) -> ZerobusResult<RecordBatch> {
     }
 }
 
-/// Ensures the buffer is a valid IPC stream with exactly one [`RecordBatch`] (matches
-/// `ingest_ipc_batch` contract). Uses the canonical reader so layout matches producers.
-#[allow(clippy::result_large_err)]
-fn validate_ipc_stream_exactly_one_record_batch(bytes: &[u8]) -> ZerobusResult<()> {
-    use std::io::Cursor;
-    let mut reader =
-        arrow_ipc::reader::StreamReader::try_new(Cursor::new(bytes), None).map_err(|e| {
-            ZerobusError::InvalidArgument(format!("IPC: invalid Arrow IPC stream: {e}"))
-        })?;
-    match reader.next() {
-        None => {
-            return Err(ZerobusError::InvalidArgument(
-                "IPC stream contains no RecordBatch".into(),
-            ));
-        }
-        Some(Err(e)) => {
-            return Err(ZerobusError::InvalidArgument(format!(
-                "IPC: record batch read failed: {e}"
-            )));
-        }
-        Some(Ok(_)) => {}
-    }
-    match reader.next() {
-        None => Ok(()),
-        Some(Ok(_)) => Err(ZerobusError::InvalidArgument(
-            "IPC stream must contain exactly one RecordBatch (found extra batch)".into(),
-        )),
-        Some(Err(e)) => Err(ZerobusError::InvalidArgument(format!(
-            "IPC: trailing message read failed: {e}"
-        ))),
-    }
+/// Result of parsing raw Arrow IPC stream bytes: the extracted schema, row count,
+/// and FlightData messages (dictionary batches followed by the record batch).
+struct ParsedIpcBatch {
+    /// The Arrow schema extracted from the IPC stream.
+    schema: ArrowSchema,
+    /// Number of rows in the record batch.
+    num_rows: u64,
+    /// FlightData messages: dictionary batches (if any) followed by the record batch.
+    flight_data: Vec<FlightData>,
 }
 
-/// Converts raw Arrow IPC stream bytes into a [`FlightData`] and the row count.
-/// Does NOT materialise Arrow arrays.
+/// Converts raw Arrow IPC stream bytes into [`FlightData`] messages and metadata.
+///
+/// Parses the IPC stream without materialising Arrow arrays (zero-copy). Handles
+/// dictionary messages between the schema and the record batch, and enforces the
+/// single-batch contract (exactly one RecordBatch in the stream).
+///
+/// All offsets are rounded to 8-byte boundaries per the Arrow IPC encapsulated
+/// message format specification.
 #[allow(clippy::result_large_err)]
-fn ipc_bytes_to_flight_data(ipc_bytes: Bytes) -> ZerobusResult<(u64, FlightData)> {
+fn ipc_bytes_to_flight_data(ipc_bytes: &Bytes) -> ZerobusResult<ParsedIpcBatch> {
     let bytes = &ipc_bytes[..];
-    validate_ipc_stream_exactly_one_record_batch(bytes)?;
+
+    /// Round up to next 8-byte boundary (Arrow IPC alignment requirement).
+    fn align8(n: usize) -> usize {
+        (n + 7) & !7
+    }
 
     #[allow(clippy::result_large_err)]
     fn read_meta_range(bytes: &[u8], mut p: usize) -> ZerobusResult<(usize, usize)> {
+        // Optional continuation token (0xFFFFFFFF).
         if p + 4 <= bytes.len() && bytes[p..p + 4] == [0xFF, 0xFF, 0xFF, 0xFF] {
             p += 4;
         }
@@ -238,44 +232,95 @@ fn ipc_bytes_to_flight_data(ipc_bytes: Bytes) -> ZerobusResult<(u64, FlightData)
         Ok((meta_start, meta_end))
     }
 
+    // ── Parse Schema message ──
     let (ms, me) = read_meta_range(bytes, 0)?;
     let schema_msg = arrow_ipc::root_as_message(&bytes[ms..me])
         .map_err(|e| ZerobusError::InvalidArgument(format!("IPC flatbuffer: {e}")))?;
-    let after_schema = me + schema_msg.bodyLength().max(0) as usize;
+    let fb_schema = schema_msg.header_as_schema().ok_or_else(|| {
+        ZerobusError::InvalidArgument("IPC: first message is not a Schema".into())
+    })?;
+    let schema = arrow_ipc::convert::fb_to_schema(fb_schema);
+    let after_schema = align8(me + schema_msg.bodyLength().max(0) as usize);
     if after_schema > bytes.len() {
         return Err(ZerobusError::InvalidArgument(
             "IPC: truncated schema body".into(),
         ));
     }
 
-    // Parse RecordBatch message — one flatbuffer parse for both body length and row count.
-    let (ms, me) = read_meta_range(bytes, after_schema)?;
-    let msg = arrow_ipc::root_as_message(&bytes[ms..me])
-        .map_err(|e| ZerobusError::InvalidArgument(format!("IPC flatbuffer: {e}")))?;
-    let be = me + msg.bodyLength().max(0) as usize;
-    if be > bytes.len() {
-        return Err(ZerobusError::InvalidArgument(
-            "IPC: truncated RecordBatch body".into(),
-        ));
+    // ── Walk remaining messages: collect dictionary batches, find the RecordBatch ──
+    let mut pos = after_schema;
+    let mut flight_data_messages: Vec<FlightData> = Vec::new();
+    let mut num_rows: Option<u64> = None;
+
+    while pos < bytes.len() {
+        // Check for end-of-stream marker (continuation token + zero-length metadata).
+        if pos + 8 <= bytes.len()
+            && bytes[pos..pos + 4] == [0xFF, 0xFF, 0xFF, 0xFF]
+            && bytes[pos + 4..pos + 8] == [0x00, 0x00, 0x00, 0x00]
+        {
+            break; // End-of-stream marker
+        }
+
+        let (msg_ms, msg_me) = match read_meta_range(bytes, pos) {
+            Ok(r) => r,
+            Err(_) => break, // Trailing bytes after EOS — tolerate gracefully
+        };
+        let msg = arrow_ipc::root_as_message(&bytes[msg_ms..msg_me])
+            .map_err(|e| ZerobusError::InvalidArgument(format!("IPC flatbuffer: {e}")))?;
+        let body_end = align8(msg_me + msg.bodyLength().max(0) as usize);
+        if body_end > bytes.len() {
+            return Err(ZerobusError::InvalidArgument(
+                "IPC: truncated message body".into(),
+            ));
+        }
+
+        match msg.header_type() {
+            arrow_ipc::MessageHeader::DictionaryBatch => {
+                flight_data_messages.push(FlightData {
+                    data_header: ipc_bytes.slice(msg_ms..msg_me),
+                    data_body: ipc_bytes.slice(msg_me..body_end),
+                    ..Default::default()
+                });
+            }
+            arrow_ipc::MessageHeader::RecordBatch => {
+                if num_rows.is_some() {
+                    return Err(ZerobusError::InvalidArgument(
+                        "IPC stream must contain exactly one RecordBatch (found extra batch)"
+                            .into(),
+                    ));
+                }
+                let rb = msg.header_as_record_batch().ok_or_else(|| {
+                    ZerobusError::InvalidArgument(
+                        "IPC: RecordBatch header could not be parsed".into(),
+                    )
+                })?;
+                num_rows = Some(rb.length().max(0) as u64);
+                flight_data_messages.push(FlightData {
+                    data_header: ipc_bytes.slice(msg_ms..msg_me),
+                    data_body: ipc_bytes.slice(msg_me..body_end),
+                    ..Default::default()
+                });
+            }
+            _ => {
+                return Err(ZerobusError::InvalidArgument(format!(
+                    "IPC: unexpected message type {:?}",
+                    msg.header_type()
+                )));
+            }
+        }
+
+        pos = body_end;
     }
-    let num_rows = msg
-        .header_as_record_batch()
-        .ok_or_else(|| ZerobusError::InvalidArgument("IPC: expected RecordBatch message".into()))?
-        .length()
-        .max(0) as u64;
 
-    // `bytes.len()` may exceed `be`: Arrow IPC stream writers typically append an end-of-stream
-    // marker after the RecordBatch. `validate_ipc_stream_exactly_one_record_batch` already
-    // ensures there is exactly one RecordBatch; we only slice the first batch for FlightData.
+    let num_rows = num_rows.ok_or_else(|| {
+        ZerobusError::InvalidArgument("IPC stream contains no RecordBatch".into())
+    })?;
 
-    Ok((
+    Ok(ParsedIpcBatch {
+        schema,
         num_rows,
-        FlightData {
-            data_header: ipc_bytes.slice(ms..me),
-            data_body: ipc_bytes.slice(me..be),
-            ..Default::default()
-        },
-    ))
+        flight_data: flight_data_messages,
+    })
 }
 
 /// Encodes a schema into the first [`FlightData`] message for a DoPut stream.
@@ -299,17 +344,29 @@ fn schema_to_flight_data(schema: &ArrowSchema, opts: &IpcWriteOptions) -> Flight
     SchemaAsIpc::new(schema, opts).into()
 }
 
-/// Serialises a [`RecordBatch`] into a [`FlightData`] message.
+/// Serialises a [`RecordBatch`] into [`FlightData`] messages.
+///
+/// Returns dictionary FlightData messages (if the batch contains dictionary-encoded
+/// columns) followed by the record batch FlightData.
 #[allow(clippy::result_large_err)]
 fn record_batch_to_flight_data(
     batch: &RecordBatch,
     opts: &IpcWriteOptions,
-) -> ZerobusResult<FlightData> {
-    let mut dict_tracker = DictionaryTracker::new(false);
-    let (_, encoded) = IpcDataGenerator::default()
+) -> ZerobusResult<Vec<FlightData>> {
+    let data_gen = IpcDataGenerator::default();
+    let mut dict_tracker = DictionaryTracker::new(true);
+    // Register dictionary IDs from the schema so encoded_batch can find them.
+    let _ = data_gen.schema_to_bytes_with_dictionary_tracker(
+        batch.schema_ref(),
+        &mut dict_tracker,
+        opts,
+    );
+    let (dict_batches, encoded) = data_gen
         .encoded_batch(batch, &mut dict_tracker, opts)
         .map_err(|e| ZerobusError::InvalidArgument(format!("Failed to encode RecordBatch: {e}")))?;
-    Ok(encoded.into())
+    let mut flight_data: Vec<FlightData> = dict_batches.into_iter().map(Into::into).collect();
+    flight_data.push(encoded.into());
+    Ok(flight_data)
 }
 
 /// An Arrow Flight stream for ingesting Arrow RecordBatches into a Delta table.
@@ -610,34 +667,18 @@ impl ZerobusArrowStream {
         mpsc::Sender<Result<FlightData, FlightError>>,
     )> {
         // Create channel for sending pre-encoded FlightData.
+        // Metadata (offset IDs) is set by the sender before enqueueing, so the
+        // stream simply forwards messages as-is. Dictionary FlightData messages
+        // carry empty app_metadata; only the RecordBatch FlightData has offset info.
         let (batch_tx, batch_rx) =
             mpsc::channel::<Result<FlightData, FlightError>>(options.max_inflight_batches);
-
-        // Create offset counter for metadata.
-        let offset_counter = Arc::new(std::sync::atomic::AtomicI64::new(0));
-        let offset_counter_clone = Arc::clone(&offset_counter);
 
         let ipc_write_options = make_ipc_write_options(options.ipc_compression)?;
         let schema_fd = schema_to_flight_data(&table_properties.schema, &ipc_write_options);
         let data_stream = tokio_stream::wrappers::ReceiverStream::new(batch_rx);
 
-        let flight_data_stream = futures::stream::once(futures::future::ready(Ok(schema_fd)))
-            .chain(data_stream)
-            .enumerate()
-            .map(move |(idx, result)| {
-                result.map(|mut flight_data| {
-                    // Skip schema message (idx 0), add metadata to data messages.
-                    if idx > 0 {
-                        let offset =
-                            offset_counter_clone.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                        let metadata = FlightBatchMetadata::new(offset);
-                        if let Ok(bytes) = metadata.to_bytes() {
-                            flight_data.app_metadata = bytes.into();
-                        }
-                    }
-                    flight_data
-                })
-            });
+        let flight_data_stream =
+            futures::stream::once(futures::future::ready(Ok(schema_fd))).chain(data_stream);
 
         // Start the DoPut stream.
         let mut response_stream = client
@@ -885,30 +926,12 @@ impl ZerobusArrowStream {
         let (tx, batch_rx) =
             mpsc::channel::<Result<FlightData, FlightError>>(options.max_inflight_batches);
 
-        // Create offset counter for metadata.
-        let offset_counter = Arc::new(std::sync::atomic::AtomicI64::new(0));
-        let offset_counter_clone = Arc::clone(&offset_counter);
-
         let ipc_write_options = make_ipc_write_options(options.ipc_compression)?;
         let schema_fd = schema_to_flight_data(&table_properties.schema, &ipc_write_options);
         let data_stream = tokio_stream::wrappers::ReceiverStream::new(batch_rx);
 
-        let flight_data_stream = futures::stream::once(futures::future::ready(Ok(schema_fd)))
-            .chain(data_stream)
-            .enumerate()
-            .map(move |(idx, result)| {
-                result.map(|mut flight_data| {
-                    if idx > 0 {
-                        let offset =
-                            offset_counter_clone.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                        let metadata = FlightBatchMetadata::new(offset);
-                        if let Ok(bytes) = metadata.to_bytes() {
-                            flight_data.app_metadata = bytes.into();
-                        }
-                    }
-                    flight_data
-                })
-            });
+        let flight_data_stream =
+            futures::stream::once(futures::future::ready(Ok(schema_fd))).chain(data_stream);
 
         // Start the DoPut stream.
         let mut flight_client = client;
@@ -998,6 +1021,7 @@ impl ZerobusArrowStream {
 
                 let mut new_pending = Vec::with_capacity(pending.len());
                 let mut new_cumulative: u64 = 0;
+                let mut replay_offset: i64 = 0;
 
                 for pb in pending.drain(..) {
                     let payload = match slice_batch_for_recovery(&pb, acked_before_disconnect)? {
@@ -1008,7 +1032,7 @@ impl ZerobusArrowStream {
                         Some(p) => p,
                     };
 
-                    let (flight_data, num_records) = match &payload {
+                    let (flight_data_messages, num_records) = match &payload {
                         ArrowPayload::Batch(b) => (
                             record_batch_to_flight_data(b, &ipc_write_options).map_err(|e| {
                                 ZerobusError::InvalidArgument(format!(
@@ -1018,19 +1042,29 @@ impl ZerobusArrowStream {
                             b.num_rows() as u64,
                         ),
                         ArrowPayload::Ipc(bytes) => {
-                            let (n, fd) = ipc_bytes_to_flight_data(bytes.clone()).map_err(|e| {
+                            let parsed = ipc_bytes_to_flight_data(bytes).map_err(|e| {
                                 ZerobusError::InvalidArgument(format!(
                                     "Failed to encode batch for replay: {e}"
                                 ))
                             })?;
-                            (fd, n)
+                            (parsed.flight_data, parsed.num_rows)
                         }
                     };
 
-                    if tx.send(Ok(flight_data)).await.is_err() {
-                        return Err(ZerobusError::StreamClosedError(tonic::Status::internal(
-                            "Failed to replay batch during recovery",
-                        )));
+                    let fd_count = flight_data_messages.len();
+                    for (i, mut fd) in flight_data_messages.into_iter().enumerate() {
+                        if i == fd_count - 1 {
+                            let metadata = FlightBatchMetadata::new(replay_offset);
+                            replay_offset += 1;
+                            if let Ok(bytes) = metadata.to_bytes() {
+                                fd.app_metadata = bytes.into();
+                            }
+                        }
+                        if tx.send(Ok(fd)).await.is_err() {
+                            return Err(ZerobusError::StreamClosedError(tonic::Status::internal(
+                                "Failed to replay batch during recovery",
+                            )));
+                        }
                     }
                     let start_record = new_cumulative;
                     let end_record = new_cumulative + num_records;
@@ -1178,11 +1212,13 @@ impl ZerobusArrowStream {
 
     /// Shared send path for both `ingest_batch` and `ingest_ipc_batch`.
     ///
-    /// Caller must hold `ingest_mutex` and must have already updated `cumulative_records_sent`.
+    /// Sends all `flight_data_messages` (dictionary batches followed by the record batch)
+    /// in order. Caller must hold `ingest_mutex` and must have already updated
+    /// `cumulative_records_sent`.
     async fn send_flight_data_internal(
         &self,
         payload: ArrowPayload,
-        flight_data: FlightData,
+        flight_data_messages: Vec<FlightData>,
         offset_id: OffsetId,
         start_record: u64,
         end_record: u64,
@@ -1214,29 +1250,41 @@ impl ZerobusArrowStream {
             }
         };
 
-        if let Err(e) = sender.send(Ok(flight_data)).await {
-            warn!("Send failed: {}", e);
-            if self.options.recovery {
-                debug!(
-                    offset_id = offset_id,
-                    "Send failed but recovery enabled - supervisor will handle recovery"
-                );
-            } else {
-                {
-                    let mut pending = self.pending_batches.lock().await;
-                    pending.retain(|pb| pb.offset_id != offset_id);
+        // Assign offset metadata only to the last message (the RecordBatch).
+        // Dictionary FlightData messages (if any) are sent with empty app_metadata.
+        let msg_count = flight_data_messages.len();
+        for (i, mut flight_data) in flight_data_messages.into_iter().enumerate() {
+            if i == msg_count - 1 {
+                let metadata = FlightBatchMetadata::new(offset_id);
+                if let Ok(bytes) = metadata.to_bytes() {
+                    flight_data.app_metadata = bytes.into();
                 }
-                let _ = tokio::time::timeout(
-                    Duration::from_millis(100),
-                    self.server_error_rx.clone().changed(),
-                )
-                .await;
-                if let Some(server_error) = self.server_error_rx.borrow().clone() {
-                    return Err(server_error);
+            }
+            if let Err(e) = sender.send(Ok(flight_data)).await {
+                warn!("Send failed: {}", e);
+                if self.options.recovery {
+                    debug!(
+                        offset_id = offset_id,
+                        "Send failed but recovery enabled - supervisor will handle recovery"
+                    );
+                    return Ok(offset_id);
+                } else {
+                    {
+                        let mut pending = self.pending_batches.lock().await;
+                        pending.retain(|pb| pb.offset_id != offset_id);
+                    }
+                    let _ = tokio::time::timeout(
+                        Duration::from_millis(100),
+                        self.server_error_rx.clone().changed(),
+                    )
+                    .await;
+                    if let Some(server_error) = self.server_error_rx.borrow().clone() {
+                        return Err(server_error);
+                    }
+                    return Err(ZerobusError::StreamClosedError(tonic::Status::internal(
+                        "Failed to send batch",
+                    )));
                 }
-                return Err(ZerobusError::StreamClosedError(tonic::Status::internal(
-                    "Failed to send batch",
-                )));
             }
         }
 
@@ -1303,7 +1351,7 @@ impl ZerobusArrowStream {
             .fetch_add(record_count, Ordering::Relaxed);
         let end_record = start_record + record_count;
 
-        let flight_data = record_batch_to_flight_data(
+        let flight_data_messages = record_batch_to_flight_data(
             &batch,
             &make_ipc_write_options(self.options.ipc_compression)?,
         )?;
@@ -1311,7 +1359,7 @@ impl ZerobusArrowStream {
         debug!(offset_id = offset_id, "Batch queued for ingestion");
         self.send_flight_data_internal(
             ArrowPayload::Batch(batch),
-            flight_data,
+            flight_data_messages,
             offset_id,
             start_record,
             end_record,
@@ -1328,8 +1376,15 @@ impl ZerobusArrowStream {
     ///
     /// The `ipc_bytes` must be a valid Arrow IPC *stream* containing exactly one
     /// RecordBatch (i.e. the output of `pyarrow.RecordBatch.serialize()`,
-    /// `tableToIPC(table, 'stream')`, etc.). Trailing stream metadata (such as an
-    /// end-of-stream marker after `finish()`) is allowed after that batch.
+    /// `tableToIPC(table, 'stream')`, etc.). Dictionary messages between the schema and
+    /// the RecordBatch are supported. Trailing stream metadata (such as an end-of-stream
+    /// marker after `finish()`) is allowed after that batch.
+    ///
+    /// # Compression
+    ///
+    /// This method forwards raw IPC bytes as-is. If the stream is configured with
+    /// `ipc_compression`, this method will return an error since the raw IPC bytes
+    /// would not match the expected compression codec.
     #[instrument(level = "debug", skip_all, fields(table_name = %self.table_properties.table_name))]
     pub async fn ingest_ipc_batch(&self, ipc_bytes: Bytes) -> ZerobusResult<OffsetId> {
         if self.is_closed.load(Ordering::Relaxed) {
@@ -1338,21 +1393,37 @@ impl ZerobusArrowStream {
             )));
         }
 
-        let (record_count, flight_data) = ipc_bytes_to_flight_data(ipc_bytes.clone())
+        // Raw IPC bytes are forwarded as-is; they cannot match a compression codec.
+        if let Some(codec) = self.options.ipc_compression {
+            return Err(ZerobusError::InvalidArgument(format!(
+                "ingest_ipc_batch cannot be used when ipc_compression is enabled ({codec:?}). \
+                 Use ingest_batch instead, or disable compression for this stream."
+            )));
+        }
+
+        let parsed = ipc_bytes_to_flight_data(&ipc_bytes)
             .map_err(|e| ZerobusError::InvalidArgument(format!("Invalid Arrow IPC bytes: {e}")))?;
+
+        // Validate schema matches the stream schema.
+        if parsed.schema != *self.table_properties.schema {
+            return Err(ZerobusError::InvalidArgument(format!(
+                "IPC batch schema does not match stream schema. Expected: {:?}, Got: {:?}",
+                self.table_properties.schema, parsed.schema
+            )));
+        }
 
         let _guard = self.ingest_mutex.lock().await;
 
         let offset_id = self.offset_generator.next();
         let start_record = self
             .cumulative_records_sent
-            .fetch_add(record_count, Ordering::Relaxed);
-        let end_record = start_record + record_count;
+            .fetch_add(parsed.num_rows, Ordering::Relaxed);
+        let end_record = start_record + parsed.num_rows;
 
         debug!(offset_id = offset_id, "IPC batch queued for ingestion");
         self.send_flight_data_internal(
             ArrowPayload::Ipc(ipc_bytes),
-            flight_data,
+            parsed.flight_data,
             offset_id,
             start_record,
             end_record,

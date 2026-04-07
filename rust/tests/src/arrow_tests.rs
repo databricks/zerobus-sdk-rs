@@ -11,7 +11,8 @@ mod arrow_flight_tests {
 
     use crate::mock_arrow_flight::{start_mock_flight_server, MockFlightResponse};
     use crate::utils::{
-        create_test_arrow_schema, create_test_record_batch, setup_tracing, TestHeadersProvider,
+        create_test_arrow_schema, create_test_dict_record_batch, create_test_dict_schema,
+        create_test_record_batch, record_batch_to_ipc_bytes, setup_tracing, TestHeadersProvider,
     };
 
     const TABLE_NAME: &str = "test_catalog.test_schema.test_table";
@@ -1525,6 +1526,296 @@ mod arrow_flight_tests {
             let recovered_rt = ipc_bytes_to_record_batch(&recovered_ipc);
             assert_eq!(recovered_rt.column(0), original_batch.column(0));
             assert_eq!(recovered_rt.column(1), original_batch.column(1));
+
+            Ok(())
+        }
+
+        #[tokio::test]
+        async fn test_ingest_ipc_batch_schema_mismatch() -> Result<(), Box<dyn std::error::Error>> {
+            setup_tracing();
+            info!("Starting test_ingest_ipc_batch_schema_mismatch");
+
+            let (_mock_server, server_url) = start_mock_flight_server().await?;
+            let schema = create_test_arrow_schema();
+
+            let sdk = ZerobusSdk::builder()
+                .endpoint(server_url.clone())
+                .unity_catalog_url("https://mock-uc.com")
+                .tls_config(Arc::new(NoTlsConfig))
+                .build()?;
+
+            let table_properties = ArrowTableProperties {
+                table_name: TABLE_NAME.to_string(),
+                schema,
+            };
+
+            let stream = sdk
+                .create_arrow_stream_with_headers_provider(
+                    table_properties,
+                    Arc::new(TestHeadersProvider::default()),
+                    None,
+                )
+                .await?;
+
+            // Create IPC bytes with a different schema.
+            use arrow_array::Int32Array;
+            use arrow_schema::{DataType, Field, Schema};
+            let wrong_schema = Arc::new(Schema::new(vec![Field::new(
+                "different_field",
+                DataType::Int32,
+                false,
+            )]));
+            let wrong_batch = arrow_array::RecordBatch::try_new(
+                wrong_schema,
+                vec![Arc::new(Int32Array::from(vec![1, 2, 3]))],
+            )?;
+            let ipc_bytes = record_batch_to_ipc_bytes(&wrong_batch);
+
+            let result = stream.ingest_ipc_batch(ipc_bytes).await;
+            assert!(result.is_err(), "Expected schema mismatch error");
+            let err_msg = format!("{}", result.unwrap_err());
+            assert!(
+                err_msg.contains("schema does not match"),
+                "Error should mention schema mismatch: {err_msg}"
+            );
+
+            Ok(())
+        }
+
+        #[tokio::test]
+        async fn test_ingest_ipc_batch_compression_mismatch(
+        ) -> Result<(), Box<dyn std::error::Error>> {
+            setup_tracing();
+            info!("Starting test_ingest_ipc_batch_compression_mismatch");
+
+            let (_mock_server, server_url) = start_mock_flight_server().await?;
+            let schema = create_test_arrow_schema();
+
+            let sdk = ZerobusSdk::builder()
+                .endpoint(server_url.clone())
+                .unity_catalog_url("https://mock-uc.com")
+                .tls_config(Arc::new(NoTlsConfig))
+                .build()?;
+
+            let table_properties = ArrowTableProperties {
+                table_name: TABLE_NAME.to_string(),
+                schema: schema.clone(),
+            };
+
+            let stream = sdk
+                .create_arrow_stream_with_headers_provider(
+                    table_properties,
+                    Arc::new(TestHeadersProvider::default()),
+                    Some(ArrowStreamConfigurationOptions {
+                        ipc_compression: Some(arrow_ipc::CompressionType::ZSTD),
+                        ..Default::default()
+                    }),
+                )
+                .await?;
+
+            let batch = create_test_record_batch(schema, vec![1], vec![Some("test")]);
+            let ipc_bytes = record_batch_to_ipc_bytes(&batch);
+
+            let result = stream.ingest_ipc_batch(ipc_bytes).await;
+            assert!(result.is_err(), "Expected compression mismatch error");
+            let err_msg = format!("{}", result.unwrap_err());
+            assert!(
+                err_msg.contains("ipc_compression"),
+                "Error should mention compression: {err_msg}"
+            );
+
+            Ok(())
+        }
+
+        #[tokio::test]
+        async fn test_mixed_ingest_batch_and_ipc() -> Result<(), Box<dyn std::error::Error>> {
+            setup_tracing();
+            info!("Starting test_mixed_ingest_batch_and_ipc");
+
+            let (mock_server, server_url) = start_mock_flight_server().await?;
+            let schema = create_test_arrow_schema();
+
+            mock_server
+                .inject_responses(
+                    TABLE_NAME,
+                    vec![
+                        MockFlightResponse::BatchAck {
+                            ack_up_to_offset: 0,
+                            delay_ms: 0,
+                            ack_up_to_records: 2,
+                        },
+                        MockFlightResponse::BatchAck {
+                            ack_up_to_offset: 1,
+                            delay_ms: 0,
+                            ack_up_to_records: 5,
+                        },
+                        MockFlightResponse::BatchAck {
+                            ack_up_to_offset: 2,
+                            delay_ms: 0,
+                            ack_up_to_records: 7,
+                        },
+                    ],
+                )
+                .await;
+
+            let sdk = ZerobusSdk::builder()
+                .endpoint(server_url.clone())
+                .unity_catalog_url("https://mock-uc.com")
+                .tls_config(Arc::new(NoTlsConfig))
+                .build()?;
+
+            let table_properties = ArrowTableProperties {
+                table_name: TABLE_NAME.to_string(),
+                schema: schema.clone(),
+            };
+
+            let stream = sdk
+                .create_arrow_stream_with_headers_provider(
+                    table_properties,
+                    Arc::new(TestHeadersProvider::default()),
+                    None,
+                )
+                .await?;
+
+            // Interleave RecordBatch and IPC ingestion.
+            let batch1 = create_test_record_batch(
+                schema.clone(),
+                vec![1, 2],
+                vec![Some("native1"), Some("native2")],
+            );
+            let offset1 = stream.ingest_batch(batch1).await?;
+
+            let batch2 = create_test_record_batch(
+                schema.clone(),
+                vec![3, 4, 5],
+                vec![Some("ipc1"), Some("ipc2"), Some("ipc3")],
+            );
+            let ipc_bytes = record_batch_to_ipc_bytes(&batch2);
+            let offset2 = stream.ingest_ipc_batch(ipc_bytes).await?;
+
+            let batch3 = create_test_record_batch(
+                schema,
+                vec![6, 7],
+                vec![Some("native3"), Some("native4")],
+            );
+            let offset3 = stream.ingest_batch(batch3).await?;
+
+            stream.wait_for_offset(offset1).await?;
+            stream.wait_for_offset(offset2).await?;
+            stream.wait_for_offset(offset3).await?;
+
+            assert_eq!(mock_server.get_batch_count().await, 3);
+
+            Ok(())
+        }
+    }
+
+    mod dictionary_tests {
+        use super::*;
+
+        #[tokio::test]
+        async fn test_ingest_dict_batch() -> Result<(), Box<dyn std::error::Error>> {
+            setup_tracing();
+            info!("Starting test_ingest_dict_batch");
+
+            let (mock_server, server_url) = start_mock_flight_server().await?;
+            let schema = create_test_dict_schema();
+
+            mock_server
+                .inject_responses(
+                    TABLE_NAME,
+                    vec![MockFlightResponse::BatchAck {
+                        ack_up_to_offset: 0,
+                        delay_ms: 0,
+                        ack_up_to_records: 3,
+                    }],
+                )
+                .await;
+
+            let sdk = ZerobusSdk::builder()
+                .endpoint(server_url.clone())
+                .unity_catalog_url("https://mock-uc.com")
+                .tls_config(Arc::new(NoTlsConfig))
+                .build()?;
+
+            let table_properties = ArrowTableProperties {
+                table_name: TABLE_NAME.to_string(),
+                schema: schema.clone(),
+            };
+
+            let stream = sdk
+                .create_arrow_stream_with_headers_provider(
+                    table_properties,
+                    Arc::new(TestHeadersProvider::default()),
+                    None,
+                )
+                .await?;
+
+            let batch = create_test_dict_record_batch(
+                schema,
+                vec![1, 2, 3],
+                vec![Some("cat_a"), Some("cat_b"), Some("cat_a")],
+            );
+
+            let offset = stream.ingest_batch(batch).await?;
+            stream.wait_for_offset(offset).await?;
+
+            // The mock server should have received dictionary + batch messages.
+            // get_batch_count counts FlightData messages after schema, so dictionaries count.
+            assert!(mock_server.get_batch_count().await >= 1);
+
+            Ok(())
+        }
+
+        #[tokio::test]
+        async fn test_ingest_dict_ipc_batch() -> Result<(), Box<dyn std::error::Error>> {
+            setup_tracing();
+            info!("Starting test_ingest_dict_ipc_batch");
+
+            let (mock_server, server_url) = start_mock_flight_server().await?;
+            let schema = create_test_dict_schema();
+
+            mock_server
+                .inject_responses(
+                    TABLE_NAME,
+                    vec![MockFlightResponse::BatchAck {
+                        ack_up_to_offset: 0,
+                        delay_ms: 0,
+                        ack_up_to_records: 3,
+                    }],
+                )
+                .await;
+
+            let sdk = ZerobusSdk::builder()
+                .endpoint(server_url.clone())
+                .unity_catalog_url("https://mock-uc.com")
+                .tls_config(Arc::new(NoTlsConfig))
+                .build()?;
+
+            let table_properties = ArrowTableProperties {
+                table_name: TABLE_NAME.to_string(),
+                schema: schema.clone(),
+            };
+
+            let stream = sdk
+                .create_arrow_stream_with_headers_provider(
+                    table_properties,
+                    Arc::new(TestHeadersProvider::default()),
+                    None,
+                )
+                .await?;
+
+            let batch = create_test_dict_record_batch(
+                schema,
+                vec![1, 2, 3],
+                vec![Some("cat_a"), Some("cat_b"), Some("cat_a")],
+            );
+            let ipc_bytes = record_batch_to_ipc_bytes(&batch);
+
+            let offset = stream.ingest_ipc_batch(ipc_bytes).await?;
+            stream.wait_for_offset(offset).await?;
+
+            assert!(mock_server.get_batch_count().await >= 1);
 
             Ok(())
         }
