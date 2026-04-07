@@ -16,16 +16,15 @@ import org.junit.jupiter.api.Test;
  * classloader (as in Spring Boot's {@code LaunchedURLClassLoader}).
  *
  * <p>This test forks a child JVM where SDK classes are NOT on the system classpath but are loaded
- * through a {@link java.net.URLClassLoader} with the extension/platform classloader as parent.
- * This simulates the Spring Boot classloader hierarchy where {@code FindClass} from daemon threads
+ * through a {@link java.net.URLClassLoader} with the extension/platform classloader as parent. This
+ * simulates the Spring Boot classloader hierarchy where {@code FindClass} from daemon threads
  * (which use the system classloader) cannot see SDK classes.
  */
 class ClassLoaderIsolationTest {
 
   @Test
   void classLoaderIsolation() throws Exception {
-    Assumptions.assumeTrue(
-        NativeLoader.isLoaded(), "Native library not available, skipping test");
+    Assumptions.assumeTrue(NativeLoader.isLoaded(), "Native library not available, skipping test");
 
     String classpath = System.getProperty("java.class.path");
     String pathSep = System.getProperty("path.separator");
@@ -45,10 +44,8 @@ class ClassLoaderIsolationTest {
       }
     }
 
-    Assumptions.assumeTrue(
-        !systemCpEntries.isEmpty(), "Could not find test-classes on classpath");
-    Assumptions.assumeTrue(
-        !isolatedCpEntries.isEmpty(), "Could not find SDK classes on classpath");
+    Assumptions.assumeTrue(!systemCpEntries.isEmpty(), "Could not find test-classes on classpath");
+    Assumptions.assumeTrue(!isolatedCpEntries.isEmpty(), "Could not find SDK classes on classpath");
 
     // Build the forked JVM command
     String javaHome = System.getProperty("java.home");
