@@ -34,6 +34,7 @@ The Databricks Zerobus Ingest SDK for Java provides a high-performance client fo
 - **JSON support**: Ingest JSON records without Protocol Buffer schemas
 - **Offset-based API**: Low-overhead alternative to CompletableFuture for high throughput
 - **OAuth 2.0 authentication**: Secure authentication with client credentials
+- **Framework compatible**: Works inside Spring Boot and other frameworks with isolated classloaders
 
 ## Architecture
 

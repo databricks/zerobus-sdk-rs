@@ -16,6 +16,7 @@
 
 ### Bug Fixes
 
+- **Classloader Isolation Compatibility**: Fixed `NoClassDefFoundError` when using the SDK inside Spring Boot. JNI class references are now cached as `GlobalRef`s during `JNI_OnLoad`, so native daemon threads no longer rely on `FindClass` through the system classloader.
 - Fixed proto generation tool to skip reserved field numbers 19000-19999 for tables with more than 19000 columns
 
 ### Documentation
