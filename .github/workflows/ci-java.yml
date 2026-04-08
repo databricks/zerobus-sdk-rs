@@ -192,6 +192,24 @@ jobs:
         if: inputs.use_local_sdk
         shell: bash
         run: printf '\n[patch.crates-io]\ndatabricks-zerobus-ingest-sdk = { path = "sdk" }\n' >> ../rust/Cargo.toml
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+      - name: Build JNI native library
+        working-directory: rust
+        run: make build-jni-test
+      - name: Stage native library for tests
+        shell: bash
+        run: |
+          set -euo pipefail
+          ARCH=$(uname -m)
+          case "$ARCH" in
+            x86_64|amd64) PLATFORM="linux-x86_64" ;;
+            aarch64|arm64) PLATFORM="linux-aarch64" ;;
+            *) echo "Unsupported arch: $ARCH"; exit 1 ;;
+          esac
+          mkdir -p src/main/resources/native/$PLATFORM
+          cp ../rust/target/release/libzerobus_jni.so src/main/resources/native/$PLATFORM/
+          echo "Staged native library for $PLATFORM"
       - name: Install Maven (macOS)
         if: runner.os == 'macOS'
         run: brew install maven 2>/dev/null || true

@@ -3,20 +3,25 @@
 //! This module provides utilities for converting Zerobus SDK errors to
 //! appropriate Java exceptions.
 
+use crate::class_cache::{as_jclass, get_class_cache};
 use databricks_zerobus_ingest_sdk::ZerobusError;
-use jni::objects::{JString, JThrowable, JValue};
+use jni::objects::{GlobalRef, JString, JThrowable, JValue};
 use jni::JNIEnv;
-
-/// Java class names for exceptions.
-const ZEROBUS_EXCEPTION_CLASS: &str = "com/databricks/zerobus/ZerobusException";
-const NON_RETRIABLE_EXCEPTION_CLASS: &str = "com/databricks/zerobus/NonRetriableException";
 
 /// Throw a ZerobusException in Java.
 ///
 /// This function creates and throws a Java ZerobusException with the given message.
 pub fn throw_zerobus_exception(env: &mut JNIEnv, message: &str) {
-    if let Err(e) = env.throw_new(ZEROBUS_EXCEPTION_CLASS, message) {
-        tracing::error!("Failed to throw ZerobusException: {}", e);
+    let cache = get_class_cache();
+    match create_exception(env, &cache.zerobus_exception_class, message) {
+        Some(exc) => {
+            if let Err(e) = env.throw(exc) {
+                tracing::error!("Failed to throw ZerobusException: {}", e);
+            }
+        }
+        None => {
+            tracing::error!("Failed to create ZerobusException");
+        }
     }
 }
 
@@ -24,8 +29,16 @@ pub fn throw_zerobus_exception(env: &mut JNIEnv, message: &str) {
 ///
 /// This function creates and throws a Java NonRetriableException with the given message.
 pub fn throw_non_retriable_exception(env: &mut JNIEnv, message: &str) {
-    if let Err(e) = env.throw_new(NON_RETRIABLE_EXCEPTION_CLASS, message) {
-        tracing::error!("Failed to throw NonRetriableException: {}", e);
+    let cache = get_class_cache();
+    match create_exception(env, &cache.non_retriable_exception_class, message) {
+        Some(exc) => {
+            if let Err(e) = env.throw(exc) {
+                tracing::error!("Failed to throw NonRetriableException: {}", e);
+            }
+        }
+        None => {
+            tracing::error!("Failed to create NonRetriableException");
+        }
     }
 }
 
@@ -51,30 +64,24 @@ pub fn create_exception_from_error<'local>(
     env: &mut JNIEnv<'local>,
     error: &ZerobusError,
 ) -> Option<JThrowable<'local>> {
+    let cache = get_class_cache();
     let message = error.to_string();
-    let class_name = if error.is_retryable() {
-        ZEROBUS_EXCEPTION_CLASS
+    let class_ref = if error.is_retryable() {
+        &cache.zerobus_exception_class
     } else {
-        NON_RETRIABLE_EXCEPTION_CLASS
+        &cache.non_retriable_exception_class
     };
 
-    create_exception(env, class_name, &message)
+    create_exception(env, class_ref, &message)
 }
 
-/// Create a Java exception object with the given class and message.
+/// Create a Java exception object with the given cached class reference and message.
 pub fn create_exception<'local>(
     env: &mut JNIEnv<'local>,
-    class_name: &str,
+    class_ref: &GlobalRef,
     message: &str,
 ) -> Option<JThrowable<'local>> {
-    // Find the exception class
-    let class = match env.find_class(class_name) {
-        Ok(c) => c,
-        Err(e) => {
-            tracing::error!("Failed to find exception class {}: {}", class_name, e);
-            return None;
-        }
-    };
+    let class = as_jclass(class_ref);
 
     // Create the message string
     let j_message = match env.new_string(message) {
@@ -104,7 +111,8 @@ pub fn create_zerobus_exception<'local>(
     env: &mut JNIEnv<'local>,
     message: &str,
 ) -> Option<JThrowable<'local>> {
-    create_exception(env, ZEROBUS_EXCEPTION_CLASS, message)
+    let cache = get_class_cache();
+    create_exception(env, &cache.zerobus_exception_class, message)
 }
 
 /// Create a NonRetriableException Java object.
@@ -112,7 +120,8 @@ pub fn create_non_retriable_exception<'local>(
     env: &mut JNIEnv<'local>,
     message: &str,
 ) -> Option<JThrowable<'local>> {
-    create_exception(env, NON_RETRIABLE_EXCEPTION_CLASS, message)
+    let cache = get_class_cache();
+    create_exception(env, &cache.non_retriable_exception_class, message)
 }
 
 /// Check if a Java exception is pending and clear it.
