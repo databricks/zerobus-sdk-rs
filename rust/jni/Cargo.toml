@@ -24,7 +24,7 @@ tracing = "0.1"
 
 # Arrow dependencies (re-exported from SDK)
 arrow-array = "56.2.0"
-arrow-schema = "56.2.0"
+arrow-schema = "58.1.0"
 arrow-ipc = { version = "56.2.0", features = ["lz4", "zstd"] }
 
 [features]
