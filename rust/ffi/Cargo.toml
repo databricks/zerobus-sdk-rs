@@ -28,4 +28,4 @@ libc = "0.2"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
 
 [build-dependencies]
-cbindgen = "0.27"
+cbindgen = "0.29"
