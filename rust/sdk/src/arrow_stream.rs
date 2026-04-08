@@ -145,7 +145,7 @@ fn slice_batch_for_recovery(
 }
 
 /// Deserialises Arrow IPC stream bytes into a [`RecordBatch`].
-/// Enforces the same single-batch contract as [`validate_ipc_stream_exactly_one_record_batch`].
+/// Enforces the same single-batch contract as [`ipc_bytes_to_flight_data`].
 #[allow(clippy::result_large_err)]
 fn materialize_ipc(bytes: &Bytes) -> ZerobusResult<RecordBatch> {
     use std::io::Cursor;
@@ -263,7 +263,10 @@ fn ipc_bytes_to_flight_data(ipc_bytes: &Bytes) -> ZerobusResult<ParsedIpcBatch> 
 
         let (msg_ms, msg_me) = match read_meta_range(bytes, pos) {
             Ok(r) => r,
-            Err(_) => break, // Trailing bytes after EOS — tolerate gracefully
+            Err(_) => {
+                debug!(pos, "IPC: ignoring trailing bytes");
+                break;
+            }
         };
         let msg = arrow_ipc::root_as_message(&bytes[msg_ms..msg_me])
             .map_err(|e| ZerobusError::InvalidArgument(format!("IPC flatbuffer: {e}")))?;
