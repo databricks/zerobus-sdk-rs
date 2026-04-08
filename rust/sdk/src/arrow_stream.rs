@@ -232,7 +232,7 @@ fn ipc_bytes_to_flight_data(ipc_bytes: &Bytes) -> ZerobusResult<ParsedIpcBatch> 
         Ok((meta_start, meta_end))
     }
 
-    // ── Parse Schema message ──
+    // Parse Schema message
     let (ms, me) = read_meta_range(bytes, 0)?;
     let schema_msg = arrow_ipc::root_as_message(&bytes[ms..me])
         .map_err(|e| ZerobusError::InvalidArgument(format!("IPC flatbuffer: {e}")))?;
@@ -247,7 +247,7 @@ fn ipc_bytes_to_flight_data(ipc_bytes: &Bytes) -> ZerobusResult<ParsedIpcBatch> 
         ));
     }
 
-    // ── Walk remaining messages: collect dictionary batches, find the RecordBatch ──
+    // Walk remaining messages: collect dictionary batches, find the RecordBatch
     let mut pos = after_schema;
     let mut flight_data_messages: Vec<FlightData> = Vec::new();
     let mut num_rows: Option<u64> = None;
