@@ -154,7 +154,7 @@ jobs:
           echo "JFrog OIDC token obtained successfully"
       - name: Get JFrog OIDC token (Windows)
         if: matrix.os == 'windows-server-latest'
-        shell: pwsh
+        shell: powershell
         run: |
           $ErrorActionPreference = 'Stop'
           $IdToken = (Invoke-RestMethod `
@@ -204,7 +204,7 @@ jobs:
           echo "Cargo configured to use JFrog registry"
       - name: Configure Cargo registry (Windows)
         if: matrix.os == 'windows-server-latest'
-        shell: pwsh
+        shell: powershell
         run: |
           $ErrorActionPreference = 'Stop'
           $CargoHome = "$env:USERPROFILE\.cargo"
