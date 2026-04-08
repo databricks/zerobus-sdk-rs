@@ -124,16 +124,13 @@ jobs:
         include:
           - os: linux-ubuntu-latest
             runner: { group: databricks-protected-runner-group, labels: linux-ubuntu-latest }
-          - os: windows-server-latest
-            runner: { group: databricks-protected-runner-group, labels: windows-server-latest }
     runs-on: ${{ matrix.runner }}
     defaults:
       run:
         working-directory: rust
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
-      - name: Get JFrog OIDC token (Linux)
-        if: matrix.os == 'linux-ubuntu-latest'
+      - name: Get JFrog OIDC token
         shell: bash
         run: |
           set -euo pipefail
@@ -152,37 +149,7 @@ jobs:
           fi
           echo "JFROG_ACCESS_TOKEN=${ACCESS_TOKEN}" >> "$GITHUB_ENV"
           echo "JFrog OIDC token obtained successfully"
-      - name: Get JFrog OIDC token (Windows)
-        if: matrix.os == 'windows-server-latest'
-        shell: powershell
-        run: |
-          $ErrorActionPreference = 'Stop'
-          $IdToken = (Invoke-RestMethod `
-            -Uri "$env:ACTIONS_ID_TOKEN_REQUEST_URL&audience=jfrog-github" `
-            -Headers @{ 'User-Agent' = 'actions/oidc-client'; 'Authorization' = "Bearer $env:ACTIONS_ID_TOKEN_REQUEST_TOKEN" } `
-          ).value
-          Write-Output "::add-mask::$IdToken"
-          $Body = @{
-            grant_type         = 'urn:ietf:params:oauth:grant-type:token-exchange'
-            subject_token_type = 'urn:ietf:params:oauth:token-type:id_token'
-            subject_token      = $IdToken
-            provider_name      = 'github-actions'
-          } | ConvertTo-Json
-          $AccessToken = (Invoke-RestMethod `
-            -Method POST `
-            -Uri 'https://databricks.jfrog.io/access/api/v1/oidc/token' `
-            -ContentType 'application/json' `
-            -Body $Body `
-          ).access_token
-          Write-Output "::add-mask::$AccessToken"
-          if (-not $AccessToken -or $AccessToken -eq 'null') {
-            Write-Error 'FAIL: Could not extract JFrog access token'
-            exit 1
-          }
-          "JFROG_ACCESS_TOKEN=$AccessToken" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
-          Write-Output 'JFrog OIDC token obtained successfully'
-      - name: Configure Cargo registry (Linux)
-        if: matrix.os == 'linux-ubuntu-latest'
+      - name: Configure Cargo registry
         shell: bash
         run: |
           set -euo pipefail
@@ -202,28 +169,6 @@ jobs:
           EOF
           echo "CARGO_REGISTRIES_JFROG_TOKEN=Bearer ${JFROG_ACCESS_TOKEN}" >> "$GITHUB_ENV"
           echo "Cargo configured to use JFrog registry"
-      - name: Configure Cargo registry (Windows)
-        if: matrix.os == 'windows-server-latest'
-        shell: powershell
-        run: |
-          $ErrorActionPreference = 'Stop'
-          $CargoHome = "$env:USERPROFILE\.cargo"
-          New-Item -ItemType Directory -Force -Path $CargoHome | Out-Null
-          @"
-          [source.crates-io]
-          replace-with = "jfrog"
-          [source.jfrog]
-          registry = "sparse+https://databricks.jfrog.io/artifactory/api/cargo/db-cargo-remote/index/"
-          [registries.jfrog]
-          index = "sparse+https://databricks.jfrog.io/artifactory/api/cargo/db-cargo-remote/index/"
-          credential-provider = ["cargo:token"]
-          "@ | Set-Content -Path "$CargoHome\config.toml" -Encoding utf8
-                    @"
-          [registries.jfrog]
-          token = "Bearer $env:JFROG_ACCESS_TOKEN"
-          "@ | Set-Content -Path "$CargoHome\credentials.toml" -Encoding utf8
-          "CARGO_REGISTRIES_JFROG_TOKEN=Bearer $env:JFROG_ACCESS_TOKEN" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
-          Write-Output 'Cargo configured to use JFrog registry'
       - name: Unshallow
         run: git fetch --prune --unshallow
       - uses: arduino/setup-protoc@c65c819552d16ad3c9b72d9dfd5ba5237b9c906b # v3
