@@ -1,5 +1,7 @@
 # Version changelog
 
+## Release v1.0.1
+
 ### Major Changes
 
 ### New Features and Improvements
