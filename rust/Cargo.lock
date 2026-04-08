@@ -563,37 +563,6 @@ dependencies = [
 [[package]]
 name = "databricks-zerobus-ingest-sdk"
 version = "1.0.1"
-dependencies = [
- "arrow-array",
- "arrow-flight",
- "arrow-ipc",
- "arrow-schema",
- "async-trait",
- "bytes",
- "futures",
- "hyper-http-proxy",
- "hyper-util",
- "prost 0.13.5",
- "prost-types 0.13.5",
- "protoc-bin-vendored",
- "reqwest",
- "serde",
- "serde_json",
- "smallvec",
- "thiserror 1.0.69",
- "tokio",
- "tokio-retry",
- "tokio-stream",
- "tokio-util",
- "tonic 0.13.1",
- "tonic-build 0.13.1",
- "tracing",
- "tracing-subscriber",
-]
-
-[[package]]
-name = "databricks-zerobus-ingest-sdk"
-version = "1.0.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1f0e6f7302cc7df55f016c4faedb4f9294a288cdc4dabdc15105660f0565c256"
 dependencies = [
@@ -620,6 +589,37 @@ dependencies = [
  "tonic 0.13.1",
  "tonic-build 0.13.1",
  "tracing",
+]
+
+[[package]]
+name = "databricks-zerobus-ingest-sdk"
+version = "1.1.0"
+dependencies = [
+ "arrow-array",
+ "arrow-flight",
+ "arrow-ipc",
+ "arrow-schema",
+ "async-trait",
+ "bytes",
+ "futures",
+ "hyper-http-proxy",
+ "hyper-util",
+ "prost 0.13.5",
+ "prost-types 0.13.5",
+ "protoc-bin-vendored",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "smallvec",
+ "thiserror 1.0.69",
+ "tokio",
+ "tokio-retry",
+ "tokio-stream",
+ "tokio-util",
+ "tonic 0.13.1",
+ "tonic-build 0.13.1",
+ "tracing",
+ "tracing-subscriber",
 ]
 
 [[package]]
@@ -670,7 +670,7 @@ name = "example_json_batch"
 version = "0.1.0"
 dependencies = [
  "chrono",
- "databricks-zerobus-ingest-sdk 1.0.1",
+ "databricks-zerobus-ingest-sdk 1.1.0",
  "serde",
  "tokio",
 ]
@@ -680,7 +680,7 @@ name = "example_json_single"
 version = "0.1.0"
 dependencies = [
  "chrono",
- "databricks-zerobus-ingest-sdk 1.0.1",
+ "databricks-zerobus-ingest-sdk 1.1.0",
  "serde",
  "tokio",
 ]
@@ -690,7 +690,7 @@ name = "example_proto_batch"
 version = "0.1.0"
 dependencies = [
  "chrono",
- "databricks-zerobus-ingest-sdk 1.0.1",
+ "databricks-zerobus-ingest-sdk 1.1.0",
  "prost 0.13.5",
  "prost-build 0.12.6",
  "prost-reflect",
@@ -706,7 +706,7 @@ name = "example_proto_single"
 version = "0.1.0"
 dependencies = [
  "chrono",
- "databricks-zerobus-ingest-sdk 1.0.1",
+ "databricks-zerobus-ingest-sdk 1.1.0",
  "prost 0.13.5",
  "prost-build 0.12.6",
  "prost-reflect",
@@ -2537,7 +2537,7 @@ dependencies = [
  "arrow-schema",
  "async-trait",
  "bytes",
- "databricks-zerobus-ingest-sdk 1.0.1",
+ "databricks-zerobus-ingest-sdk 1.1.0",
  "futures",
  "prost 0.13.5",
  "prost-reflect",
@@ -3658,7 +3658,7 @@ dependencies = [
  "arrow-ipc",
  "async-trait",
  "cbindgen",
- "databricks-zerobus-ingest-sdk 1.0.1 (registry+https://github.com/rust-lang/crates.io-index)",
+ "databricks-zerobus-ingest-sdk 1.0.1",
  "libc",
  "once_cell",
  "prost 0.13.5",
@@ -3674,7 +3674,7 @@ dependencies = [
  "arrow-array",
  "arrow-ipc",
  "arrow-schema",
- "databricks-zerobus-ingest-sdk 1.0.1 (registry+https://github.com/rust-lang/crates.io-index)",
+ "databricks-zerobus-ingest-sdk 1.0.1",
  "jni",
  "prost 0.13.5",
  "prost-types 0.13.5",
