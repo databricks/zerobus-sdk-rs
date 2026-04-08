@@ -569,6 +569,7 @@ dependencies = [
  "arrow-ipc",
  "arrow-schema",
  "async-trait",
+ "bytes",
  "futures",
  "hyper-http-proxy",
  "hyper-util",
@@ -2532,8 +2533,10 @@ version = "0.1.0"
 dependencies = [
  "arrow-array",
  "arrow-flight",
+ "arrow-ipc",
  "arrow-schema",
  "async-trait",
+ "bytes",
  "databricks-zerobus-ingest-sdk 1.0.1",
  "futures",
  "prost 0.13.5",
