@@ -26,6 +26,9 @@ jobs:
           - os: linux-ubuntu-latest
             runner: { group: databricks-protected-runner-group, labels: linux-ubuntu-latest }
             pyVersion: '3.12'
+          - os: windows-server-latest
+            runner: { group: databricks-protected-runner-group, labels: windows-server-latest }
+            pyVersion: '3.12'
     runs-on: ${{ matrix.runner }}
     defaults:
       run:
@@ -84,16 +87,29 @@ jobs:
           python-version: ${{ matrix.pyVersion }}
 
       - name: Copy root LICENSE for maturin
+        shell: bash
         run: cp ../LICENSE LICENSE
 
       - name: Patch Cargo.toml to use local Rust SDK
         if: inputs.use_local_sdk
         working-directory: python/rust
+        shell: bash
         run: |
           printf '\n[patch.crates-io]\ndatabricks-zerobus-ingest-sdk = { path = "../../rust/sdk" }\n' >> Cargo.toml
 
-      - name: Run tests
+      - name: Run tests (Linux)
+        if: runner.os != 'Windows'
         run: make dev test
+
+      - name: Run tests (Windows)
+        if: runner.os == 'Windows'
+        shell: bash
+        run: |
+          python -m venv .venv
+          .venv/Scripts/python -m pip install --upgrade pip
+          test -f LICENSE || cp ../LICENSE LICENSE
+          .venv/Scripts/python -m pip install -e '.[dev]'
+          .venv/Scripts/python -m pytest --cov=zerobus --cov-report html --cov-report xml tests
 
   fmt:
     runs-on:

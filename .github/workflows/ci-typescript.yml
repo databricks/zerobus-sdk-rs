@@ -23,6 +23,8 @@ jobs:
             target: x86_64-unknown-linux-gnu
           - runner: { group: databricks-protected-runner-group, labels: linux-ubuntu-latest }
             target: aarch64-unknown-linux-gnu
+          - runner: { group: databricks-protected-runner-group, labels: windows-server-latest }
+            target: x86_64-pc-windows-msvc
     name: Build - ${{ matrix.target }}
     runs-on: ${{ matrix.runner }}
     defaults:
@@ -147,6 +149,9 @@ jobs:
             node: '18'
           - os: linux-ubuntu-latest
             runner: { group: databricks-protected-runner-group, labels: linux-ubuntu-latest }
+            node: '20'
+          - os: windows-server-latest
+            runner: { group: databricks-protected-runner-group, labels: windows-server-latest }
             node: '20'
     defaults:
       run:

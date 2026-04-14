@@ -161,6 +161,8 @@ jobs:
         include:
           - os: linux-ubuntu-latest
             runner: { group: databricks-protected-runner-group, labels: linux-ubuntu-latest }
+          - os: windows-server-latest
+            runner: { group: databricks-protected-runner-group, labels: windows-server-latest }
     runs-on: ${{ matrix.runner }}
     defaults:
       run:
@@ -226,9 +228,15 @@ jobs:
         with:
           go-version: '1.25'
 
-      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+      - name: Install Rust toolchain (Linux)
+        if: runner.os != 'Windows'
+        uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
         with:
           targets: x86_64-pc-windows-gnu
+
+      - name: Install Rust toolchain (Windows)
+        if: runner.os == 'Windows'
+        uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
 
       - name: Patch Rust workspace to use local SDK
         if: inputs.use_local_sdk
@@ -256,6 +264,9 @@ jobs:
           - os: linux-ubuntu-latest
             runner: { group: databricks-protected-runner-group, labels: linux-ubuntu-latest }
             lib: lib/linux_amd64/libzerobus_ffi.a
+          - os: windows-server-latest
+            runner: { group: databricks-protected-runner-group, labels: windows-server-latest }
+            lib: lib/windows_amd64/libzerobus_ffi.a
     runs-on: ${{ matrix.runner }}
     defaults:
       run:

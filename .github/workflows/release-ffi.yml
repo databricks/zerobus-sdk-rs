@@ -1,5 +1,5 @@
-name: Release FFI
-run-name: "Release FFI ${{ github.ref_name }}"
+name: Build FFI
+run-name: "Build FFI ${{ github.ref_name }}"
 
 on:
   push:
@@ -8,7 +8,6 @@ on:
 
 jobs:
   build-ffi:
-    if: false
     strategy:
       fail-fast: false
       matrix:
@@ -30,18 +29,6 @@ jobs:
             static_lib: zerobus_ffi.lib
             dynamic_lib: zerobus_ffi.dll
             artifact_dir: windows-x86_64
-            cross: false
-          - runner: [self-hosted, macOS, ARM64, zerobus-sdk]
-            target: aarch64-apple-darwin
-            static_lib: libzerobus_ffi.a
-            dynamic_lib: libzerobus_ffi.dylib
-            artifact_dir: macos-aarch64
-            cross: false
-          - runner: [self-hosted, macOS, ARM64, zerobus-sdk]
-            target: x86_64-apple-darwin
-            static_lib: libzerobus_ffi.a
-            dynamic_lib: libzerobus_ffi.dylib
-            artifact_dir: macos-x86_64
             cross: false
 
     name: Build FFI - ${{ matrix.artifact_dir }}
@@ -89,49 +76,3 @@ jobs:
         with:
           name: ffi-${{ matrix.artifact_dir }}
           path: rust/artifacts/${{ matrix.artifact_dir }}
-
-  release:
-    if: false
-    name: Create GitHub Release
-    needs: build-ffi
-    runs-on:
-      group: databricks-protected-runner-group
-      labels: linux-ubuntu-latest
-    permissions:
-      contents: write
-
-    steps:
-      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
-
-      - name: Extract version from tag
-        id: version
-        run: echo "version=${GITHUB_REF#refs/tags/ffi/v}" >> "$GITHUB_OUTPUT"
-
-      - name: Download all artifacts
-        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
-        with:
-          path: native
-          pattern: ffi-*
-          merge-multiple: false
-
-      - name: Create release archive
-        run: |
-          mkdir -p release
-          for dir in native/ffi-*/; do
-            platform=$(basename "$dir" | sed 's/ffi-//')
-            mkdir -p "release/$platform"
-            cp "$dir"/* "release/$platform/"
-          done
-          tar -czvf zerobus-ffi-${{ steps.version.outputs.version }}.tar.gz -C release .
-
-      - name: Extract release notes from changelog
-        run: |
-          version="v${{ steps.version.outputs.version }}"
-          awk "/^## Release ${version}/{found=1; next} /^## /{if(found) exit} found{print}" rust/ffi/CHANGELOG.md > /tmp/release-notes.md
-
-      - name: Create GitHub Release
-        uses: softprops/action-gh-release@153bb8e04406b158c6c84fc1615b65b24149a1fe # v2
-        with:
-          name: FFI Libraries v${{ steps.version.outputs.version }}
-          body_path: /tmp/release-notes.md
-          files: zerobus-ffi-${{ steps.version.outputs.version }}.tar.gz
