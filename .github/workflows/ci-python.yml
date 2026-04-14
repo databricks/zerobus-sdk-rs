@@ -26,6 +26,9 @@ jobs:
           - os: linux-ubuntu-latest
             runner: { group: databricks-protected-runner-group, labels: linux-ubuntu-latest }
             pyVersion: '3.12'
+          - os: windows-server-latest
+            runner: { group: databricks-protected-runner-group, labels: windows-server-latest }
+            pyVersion: '3.12'
     runs-on: ${{ matrix.runner }}
     defaults:
       run:

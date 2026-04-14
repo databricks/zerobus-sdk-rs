@@ -124,6 +124,8 @@ jobs:
         include:
           - os: linux-ubuntu-latest
             runner: { group: databricks-protected-runner-group, labels: linux-ubuntu-latest }
+          - os: windows-server-latest
+            runner: { group: databricks-protected-runner-group, labels: windows-server-latest }
     runs-on: ${{ matrix.runner }}
     defaults:
       run:
