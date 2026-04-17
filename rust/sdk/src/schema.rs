@@ -439,6 +439,15 @@ impl MessageCollector {
         }
     }
 
+    /// Return `base` if unused in this scope, otherwise append an incrementing
+    /// suffix (`base2`, `base3`, …).
+    ///
+    /// The suffix order tracks the order in which the caller registers names,
+    /// which is ultimately the order UC returns columns / struct fields. Callers
+    /// that regenerate descriptors and compare the output bit-for-bit need to
+    /// feed this function in the same order on every run — top-level columns
+    /// are already sorted by `position` in [`descriptor_from_uc_columns`], and
+    /// struct fields preserve the `type_json` order (which UC returns stably).
     fn unique_name(&mut self, base: String) -> String {
         if self.used.insert(base.clone()) {
             return base;
@@ -919,6 +928,39 @@ mod tests {
         };
         let d = descriptor_from_uc_schema(&schema).unwrap();
         assert_eq!(d.name(), "AnalyticsEvents");
+    }
+
+    #[test]
+    fn unique_name_disambiguates_collisions_in_input_order() {
+        // Two sibling struct fields whose path-derived message names collide
+        // under `sanitize_message_name`: both `foo` and `Foo` build path
+        // "Parent_foo" / "Parent_Foo" which PascalCase to the same `ParentFoo`.
+        // The first-registered field must keep the bare name; the second gets
+        // the `2` suffix. This pins the ordering contract documented on
+        // `MessageCollector::unique_name`.
+        let type_json = r#"{
+            "type":"struct",
+            "fields":[
+                {"name":"foo","type":{"type":"struct","fields":[
+                    {"name":"a","type":"string","nullable":true,"metadata":{}}
+                ]},"nullable":true,"metadata":{}},
+                {"name":"Foo","type":{"type":"struct","fields":[
+                    {"name":"b","type":"string","nullable":true,"metadata":{}}
+                ]},"nullable":true,"metadata":{}}
+            ]
+        }"#;
+        let cols = vec![complex_col("parent", "STRUCT", type_json, 0)];
+        let d = descriptor_from_uc_columns(&cols, "m").unwrap();
+
+        let parent = d
+            .nested_type
+            .iter()
+            .find(|n| n.name() == "Parent")
+            .expect("Parent message missing");
+        let foo = field(parent, "foo");
+        let foo_cap = field(parent, "Foo");
+        assert_eq!(foo.type_name.as_deref(), Some("ParentFoo"));
+        assert_eq!(foo_cap.type_name.as_deref(), Some("ParentFoo2"));
     }
 
     #[test]
