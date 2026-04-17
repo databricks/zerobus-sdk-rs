@@ -2,9 +2,6 @@ name: Build Python
 run-name: "Build Python SDK ${{ github.ref_name }}"
 
 on:
-  push:
-    tags:
-      - 'python/v*'
   workflow_dispatch:
 
 concurrency:

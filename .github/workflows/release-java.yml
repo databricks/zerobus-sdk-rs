@@ -2,70 +2,57 @@ name: Build Java
 run-name: "Build Java SDK ${{ github.ref_name }}"
 
 on:
-  push:
-    tags:
-      - "java/v*"
+  workflow_dispatch:
+    inputs:
+      jni-run-id:
+        description: "Run ID of the release-jni.yml build containing JNI artifacts."
+        required: true
+        type: string
 
 jobs:
-  build-jni:
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - os: linux-ubuntu-latest
-            runner: { group: databricks-protected-runner-group, labels: linux-ubuntu-latest }
-            target: x86_64-unknown-linux-gnu
-            artifact: libzerobus_jni.so
-            native_dir: linux-x86_64
-            cross: false
-          - os: linux-ubuntu-latest
-            runner: { group: databricks-protected-runner-group, labels: linux-ubuntu-latest }
-            target: aarch64-unknown-linux-gnu
-            artifact: libzerobus_jni.so
-            native_dir: linux-aarch64
-            cross: true
-          - os: windows-server-latest
-            runner: { group: databricks-protected-runner-group, labels: windows-server-latest }
-            target: x86_64-pc-windows-msvc
-            artifact: zerobus_jni.dll
-            native_dir: windows-x86_64
-            cross: false
-
-    name: Build JNI - ${{ matrix.native_dir }}
-    runs-on: ${{ matrix.runner }}
-
-    defaults:
-      run:
-        working-directory: rust
+  build-jar:
+    runs-on:
+      group: databricks-protected-runner-group
+      labels: linux-ubuntu-latest
 
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
 
-      - name: Install protoc
-        uses: arduino/setup-protoc@c65c819552d16ad3c9b72d9dfd5ba5237b9c906b # v3
-        with:
-          repo-token: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Install cross-compilation toolchain (Linux ARM64)
-        if: matrix.cross
+      - name: Download JNI artifacts
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
-          sudo apt-get update -qq
-          sudo apt-get install -y -qq gcc-aarch64-linux-gnu
-          mkdir -p .cargo
-          echo '[target.aarch64-unknown-linux-gnu]' > .cargo/config.toml
-          echo 'linker = "aarch64-linux-gnu-gcc"' >> .cargo/config.toml
+          gh run download "${{ inputs.jni-run-id }}" \
+            --repo databricks/zerobus-sdk \
+            --pattern 'jni-*' \
+            --dir jni-artifacts/
+          echo "Downloaded JNI artifacts:"
+          find jni-artifacts/ -type f | sort
 
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+      - name: Place JNI libraries in native directory
+        working-directory: java
+        run: |
+          for dir in ../jni-artifacts/jni-*/; do
+            platform=$(basename "$dir" | sed 's/jni-//')
+            mkdir -p src/main/resources/native/"$platform"
+            cp "$dir"/* src/main/resources/native/"$platform"/
+          done
+
+      - name: Set up Java
+        uses: actions/setup-java@c1e323688fd81a25caa38c78aa6df2d33d3e20d9 # v4
         with:
-          targets: ${{ matrix.target }}
+          java-version: 11
+          distribution: temurin
 
-      - name: Build JNI library
-        run: cargo build --release -p zerobus-jni --target ${{ matrix.target }}
+      - name: Build JAR
+        working-directory: java
+        run: mvn -DskipTests=true --batch-mode package
 
-      - name: Upload artifact
+      - name: Upload JAR
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
-          name: jni-${{ matrix.native_dir }}
-          path: rust/target/${{ matrix.target }}/release/${{ matrix.artifact }}
+          name: java-jar
+          path: |
+            java/target/*.jar
+            java/target/*.pom
           if-no-files-found: error

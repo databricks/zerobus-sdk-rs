@@ -1,5 +1,5 @@
-name: Build FFI
-run-name: "Build FFI ${{ github.ref_name }}"
+name: Build Go (FFI libs)
+run-name: "Build Go SDK FFI libs ${{ github.ref_name }}"
 
 on:
   workflow_dispatch:
@@ -12,24 +12,26 @@ jobs:
         include:
           - runner: { group: databricks-protected-runner-group, labels: linux-ubuntu-latest }
             target: x86_64-unknown-linux-gnu
-            static_lib: libzerobus_ffi.a
-            dynamic_lib: libzerobus_ffi.so
-            artifact_dir: linux-x86_64
+            lib_dir: linux_amd64
             cross: false
           - runner: { group: databricks-protected-runner-group, labels: linux-ubuntu-latest }
             target: aarch64-unknown-linux-gnu
-            static_lib: libzerobus_ffi.a
-            dynamic_lib: libzerobus_ffi.so
-            artifact_dir: linux-aarch64
+            lib_dir: linux_arm64
             cross: true
+          - runner: [self-hosted, macOS, ARM64, zerobus-sdk]
+            target: aarch64-apple-darwin
+            lib_dir: darwin_arm64
+            cross: false
+          - runner: [self-hosted, macOS, ARM64, zerobus-sdk]
+            target: x86_64-apple-darwin
+            lib_dir: darwin_amd64
+            cross: false
           - runner: { group: databricks-protected-runner-group, labels: windows-server-latest }
-            target: x86_64-pc-windows-msvc
-            static_lib: zerobus_ffi.lib
-            dynamic_lib: zerobus_ffi.dll
-            artifact_dir: windows-x86_64
+            target: x86_64-pc-windows-gnu
+            lib_dir: windows_amd64
             cross: false
 
-    name: Build FFI - ${{ matrix.artifact_dir }}
+    name: Build FFI - ${{ matrix.lib_dir }}
     runs-on: ${{ matrix.runner }}
 
     defaults:
@@ -61,16 +63,19 @@ jobs:
       - name: Build FFI library
         run: cargo build --release -p zerobus-ffi --target ${{ matrix.target }}
 
-      - name: Prepare artifacts
+      - name: Prepare artifact
         shell: bash
         run: |
-          mkdir -p artifacts/${{ matrix.artifact_dir }}
-          cp target/${{ matrix.target }}/release/${{ matrix.static_lib }} artifacts/${{ matrix.artifact_dir }}/
-          cp target/${{ matrix.target }}/release/${{ matrix.dynamic_lib }} artifacts/${{ matrix.artifact_dir }}/
-          cp ffi/zerobus.h artifacts/${{ matrix.artifact_dir }}/
+          mkdir -p ../go/lib/${{ matrix.lib_dir }}
+          if [ -f target/${{ matrix.target }}/release/libzerobus_ffi.a ]; then
+            cp target/${{ matrix.target }}/release/libzerobus_ffi.a ../go/lib/${{ matrix.lib_dir }}/
+          else
+            cp target/${{ matrix.target }}/release/zerobus_ffi.lib ../go/lib/${{ matrix.lib_dir }}/libzerobus_ffi.a
+          fi
 
       - name: Upload artifact
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
-          name: ffi-${{ matrix.artifact_dir }}
-          path: rust/artifacts/${{ matrix.artifact_dir }}
+          name: go-lib-${{ matrix.lib_dir }}
+          path: go/lib/${{ matrix.lib_dir }}/
+          if-no-files-found: error

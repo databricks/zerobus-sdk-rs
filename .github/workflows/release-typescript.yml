@@ -2,9 +2,7 @@ name: Build TypeScript
 run-name: "Build TypeScript SDK ${{ github.ref_name }}"
 
 on:
-  push:
-    tags:
-      - "typescript/v*"
+  workflow_dispatch:
 
 jobs:
   build:

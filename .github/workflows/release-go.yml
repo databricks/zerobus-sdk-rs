@@ -1,4 +1,5 @@
 name: Release Go
+# LEGACY: This workflow is no longer used.
 run-name: "Release Go SDK ${{ github.ref_name }}"
 
 on:

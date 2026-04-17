@@ -1,4 +1,6 @@
 name: Release Rust
+# LEGACY: This workflow is no longer used.
+
 run-name: "Release Rust SDK ${{ github.ref_name }}"
 
 on:
