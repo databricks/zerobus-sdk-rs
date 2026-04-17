@@ -19,7 +19,21 @@
 
 ### Internal Changes
 
+- The `generate_files` CLI tool now delegates schema → descriptor conversion
+  to the SDK's new `schema` module instead of its own hand-rolled DDL-string
+  parser, and renders the resulting `DescriptorProto` back to proto2 text.
+
 ### Breaking Changes
+
+- `generate_files`: the emitted `.proto` files have changed shape for
+  non-trivial schemas. Consumers regenerating existing files should expect:
+  - Field numbers now follow Unity Catalog's `position + 1` (so gaps from
+    `DROP COLUMN` under Delta column-mapping are preserved) instead of the
+    previous 1,2,3… sequential numbering with a 19000-range skip.
+  - Nested struct messages use path-based names (e.g. `OuterInner` instead of
+    `Inner`) and are emitted hierarchically inside their parent message.
+  - Struct field nullability now honors Unity Catalog's `nullable` flag
+    instead of being forced to `optional`.
 
 ### Deprecations
 
