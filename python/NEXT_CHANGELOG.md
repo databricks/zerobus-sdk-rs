@@ -4,6 +4,8 @@
 
 ### Major Changes
 
+- **License: Migrated from the Databricks License to the Apache License 2.0**
+
 ### New Features and Improvements
 
 - **Arrow Flight Support (Experimental)**: Added support for ingesting `pyarrow.RecordBatch` and `pyarrow.Table` objects via Arrow Flight protocol
