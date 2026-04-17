@@ -1,3 +1,4 @@
+use std::borrow::Cow;
 use std::collections::HashMap;
 use std::fs::File;
 use std::io::Write;
@@ -163,8 +164,8 @@ fn write_field(
 }
 
 struct MapEntry {
-    key: String,
-    value: String,
+    key: Cow<'static, str>,
+    value: Cow<'static, str>,
 }
 
 fn collect_map_entries(desc: &DescriptorProto) -> HashMap<String, MapEntry> {
@@ -205,25 +206,25 @@ fn short_name(type_name: &str) -> &str {
         .trim_start_matches('.')
 }
 
-fn type_to_str(t: Type, type_name: Option<&str>) -> String {
+fn type_to_str(t: Type, type_name: Option<&str>) -> Cow<'static, str> {
     match t {
-        Type::Double => "double".into(),
-        Type::Float => "float".into(),
-        Type::Int64 => "int64".into(),
-        Type::Uint64 => "uint64".into(),
-        Type::Int32 => "int32".into(),
-        Type::Fixed64 => "fixed64".into(),
-        Type::Fixed32 => "fixed32".into(),
-        Type::Bool => "bool".into(),
-        Type::String => "string".into(),
-        Type::Bytes => "bytes".into(),
-        Type::Uint32 => "uint32".into(),
-        Type::Sfixed32 => "sfixed32".into(),
-        Type::Sfixed64 => "sfixed64".into(),
-        Type::Sint32 => "sint32".into(),
-        Type::Sint64 => "sint64".into(),
+        Type::Double => Cow::Borrowed("double"),
+        Type::Float => Cow::Borrowed("float"),
+        Type::Int64 => Cow::Borrowed("int64"),
+        Type::Uint64 => Cow::Borrowed("uint64"),
+        Type::Int32 => Cow::Borrowed("int32"),
+        Type::Fixed64 => Cow::Borrowed("fixed64"),
+        Type::Fixed32 => Cow::Borrowed("fixed32"),
+        Type::Bool => Cow::Borrowed("bool"),
+        Type::String => Cow::Borrowed("string"),
+        Type::Bytes => Cow::Borrowed("bytes"),
+        Type::Uint32 => Cow::Borrowed("uint32"),
+        Type::Sfixed32 => Cow::Borrowed("sfixed32"),
+        Type::Sfixed64 => Cow::Borrowed("sfixed64"),
+        Type::Sint32 => Cow::Borrowed("sint32"),
+        Type::Sint64 => Cow::Borrowed("sint64"),
         Type::Message | Type::Enum | Type::Group => {
-            short_name(type_name.unwrap_or("")).to_string()
+            Cow::Owned(short_name(type_name.unwrap_or("")).to_string())
         }
     }
 }

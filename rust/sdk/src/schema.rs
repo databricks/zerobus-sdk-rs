@@ -506,33 +506,26 @@ fn map_complex_type_to_protobuf(
                     )));
                 }
             };
-            match value.as_ref() {
-                ComplexType::Primitive(v) => {
-                    let entry_name =
-                        collector.unique_name(format!("{}_entry", sanitize_message_name(path)));
-                    let entry = generate_map_entry(&entry_name, key_primitive, MapValue::Primitive(*v));
-                    collector.push(entry.clone());
-                    Ok((ProtoType::Message, Some(entry.name().to_string())))
-                }
+            let base = sanitize_message_name(path);
+            let map_value = match value.as_ref() {
+                ComplexType::Primitive(v) => MapValue::Primitive(*v),
                 ComplexType::Struct(st) => {
-                    let value_name =
-                        collector.unique_name(format!("{}Value", sanitize_message_name(path)));
+                    let value_name = collector.unique_name(format!("{}Value", base));
                     let value_msg = generate_struct_message(&value_name, st)?;
                     collector.push(value_msg);
-                    let entry_name =
-                        collector.unique_name(format!("{}Entry", sanitize_message_name(path)));
-                    let entry = generate_map_entry(
-                        &entry_name,
-                        key_primitive,
-                        MapValue::Message(&value_name),
-                    );
-                    collector.push(entry.clone());
-                    Ok((ProtoType::Message, Some(entry.name().to_string())))
+                    MapValue::Message(value_name)
                 }
-                ComplexType::Array(_) | ComplexType::Map { .. } => Err(SchemaError::Invalid(
-                    format!("maps with complex value types not supported for field '{}'", path),
-                )),
-            }
+                ComplexType::Array(_) | ComplexType::Map { .. } => {
+                    return Err(SchemaError::Invalid(format!(
+                        "maps with complex value types not supported for field '{}'",
+                        path
+                    )));
+                }
+            };
+            let entry_name = collector.unique_name(format!("{}Entry", base));
+            let entry = generate_map_entry(&entry_name, key_primitive, map_value);
+            collector.push(entry);
+            Ok((ProtoType::Message, Some(entry_name)))
         }
     }
 }
@@ -566,12 +559,12 @@ fn generate_struct_message(
     })
 }
 
-enum MapValue<'a> {
+enum MapValue {
     Primitive(PrimitiveType),
-    Message(&'a str),
+    Message(String),
 }
 
-fn generate_map_entry(name: &str, key: PrimitiveType, value: MapValue<'_>) -> DescriptorProto {
+fn generate_map_entry(name: &str, key: PrimitiveType, value: MapValue) -> DescriptorProto {
     let key_field = FieldDescriptorProto {
         name: Some("key".into()),
         number: Some(1),
@@ -583,7 +576,7 @@ fn generate_map_entry(name: &str, key: PrimitiveType, value: MapValue<'_>) -> De
     };
     let (value_type, value_type_name) = match value {
         MapValue::Primitive(p) => (map_primitive_to_protobuf(p), None),
-        MapValue::Message(n) => (ProtoType::Message, Some(n.to_string())),
+        MapValue::Message(n) => (ProtoType::Message, Some(n)),
     };
     let value_field = FieldDescriptorProto {
         name: Some("value".into()),
