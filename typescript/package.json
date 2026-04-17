@@ -17,7 +17,7 @@
     "type": "git",
     "url": "https://github.com/databricks/zerobus-sdk"
   },
-  "license": "Databricks License",
+  "license": "Apache-2.0",
   "files": [
     "index.js",
     "index.d.ts",

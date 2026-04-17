@@ -11,8 +11,8 @@
   <url>https://github.com/databricks/zerobus-sdk-java</url>
   <licenses>
     <license>
-      <name>Databricks License</name>
-      <url>https://github.com/databricks/zerobus-sdk-java/blob/main/LICENSE</url>
+      <name>Apache-2.0</name>
+      <url>https://www.apache.org/licenses/LICENSE-2.0</url>
       <distribution>repo</distribution>
     </license>
   </licenses>

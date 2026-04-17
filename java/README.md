@@ -1253,4 +1253,4 @@ This is an open source project. We welcome contributions, feedback, and bug repo
 
 ## License
 
-This SDK is licensed under the Databricks License. See the [LICENSE](https://github.com/databricks/zerobus-sdk/blob/main/LICENSE) file for the full license text. The license is also available online at [https://www.databricks.com/legal/db-license](https://www.databricks.com/legal/db-license).
+This SDK is licensed under the Apache License 2.0. See the [LICENSE](https://github.com/databricks/zerobus-sdk/blob/main/LICENSE) file for the full license text.
