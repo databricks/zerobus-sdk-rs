@@ -35,12 +35,14 @@ dev:
 	$(PYTHON) -m venv .venv
 	$(VENV) -m pip install --upgrade pip
 	@test -f LICENSE || cp ../LICENSE LICENSE
-	$(VENV) -m pip install -e '.[dev]'
+	$(VENV) -m pip install -r requirements-dev.lock
+	$(VENV) -m pip install -e . --no-deps --no-build-isolation
 
 lock-dev:
+	@test -d .venv || $(PYTHON) -m venv .venv
 	@test -f LICENSE || cp ../LICENSE LICENSE
-	$(VENV) -m pip install pip-tools
-	$(VENV) -m pip-compile --generate-hashes --output-file requirements-dev.lock requirements-dev.in
+	$(VENV) -m pip install --quiet pip-tools
+	.venv/bin/pip-compile --generate-hashes --strip-extras --no-emit-index-url --output-file requirements-dev.lock requirements-dev.in
 
 install:
 	$(VENV) -m pip install -e .

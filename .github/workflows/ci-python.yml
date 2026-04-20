@@ -73,7 +73,8 @@ jobs:
           python -m venv .venv
           .venv/Scripts/python -m pip install --upgrade pip
           test -f LICENSE || cp ../LICENSE LICENSE
-          .venv/Scripts/python -m pip install -e '.[dev]'
+          .venv/Scripts/python -m pip install -r requirements-dev.lock
+          .venv/Scripts/python -m pip install -e . --no-deps --no-build-isolation
           .venv/Scripts/python -m pytest --cov=zerobus --cov-report html --cov-report xml tests
 
   fmt:
