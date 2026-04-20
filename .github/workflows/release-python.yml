@@ -2,9 +2,6 @@ name: Build Python
 run-name: "Build Python SDK ${{ github.ref_name }}"
 
 on:
-  push:
-    tags:
-      - 'python/v*'
   workflow_dispatch:
 
 concurrency:
@@ -20,8 +17,24 @@ jobs:
       fail-fast: false
       matrix:
         target: [x86_64, aarch64]
+    permissions:
+      contents: read
+      id-token: write
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+
+      - name: Get JFrog OIDC token
+        shell: bash
+        run: bash "$GITHUB_WORKSPACE/.github/scripts/jfrog-oidc-token.sh"
+
+      - name: Configure cargo for JFrog
+        shell: bash
+        run: bash "$GITHUB_WORKSPACE/.github/scripts/configure-cargo.sh"
+
+      - name: Configure pip registry
+        shell: bash
+        run: bash "$GITHUB_WORKSPACE/.github/scripts/configure-pip.sh"
+
       - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
         with:
           python-version: '3.9'
@@ -34,6 +47,13 @@ jobs:
         with:
           toolchain: stable
 
+      - name: Install cross-compilation tools (aarch64)
+        if: matrix.target == 'aarch64'
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq gcc-aarch64-linux-gnu g++-aarch64-linux-gnu
+          rustup target add aarch64-unknown-linux-gnu
+
       - name: Install maturin
         run: pip install maturin==1.8.3
 
@@ -41,21 +61,11 @@ jobs:
         if: matrix.target == 'x86_64'
         run: maturin build --release --manifest-path python/rust/Cargo.toml --out dist
 
-      - name: Install Zig (for aarch64)
-        if: matrix.target == 'aarch64'
-        run: |
-          wget -q https://ziglang.org/download/0.13.0/zig-linux-x86_64-0.13.0.tar.xz
-          echo "d45dc85249209f4ae438e863c576af25c089a1442e4b8e3bd51b1d59e0d93ab0  zig-linux-x86_64-0.13.0.tar.xz" | sha256sum -c -
-          tar -xf zig-linux-x86_64-0.13.0.tar.xz
-          echo "$(pwd)/zig-linux-x86_64-0.13.0" >> $GITHUB_PATH
-
       - name: Build wheels (aarch64)
         if: matrix.target == 'aarch64'
-        run: |
-          source "$HOME/.cargo/env"
-          rustup target add aarch64-unknown-linux-gnu
-          cargo install cargo-zigbuild@0.22.1
-          maturin build --release --target aarch64-unknown-linux-gnu --zig --manifest-path python/rust/Cargo.toml --out dist
+        run: maturin build --release --target aarch64-unknown-linux-gnu --manifest-path python/rust/Cargo.toml --out dist
+        env:
+          CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: aarch64-linux-gnu-gcc
 
       - name: Upload wheels
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
@@ -68,8 +78,24 @@ jobs:
     runs-on:
       group: databricks-protected-runner-group
       labels: windows-server-latest
+    permissions:
+      contents: read
+      id-token: write
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+
+      - name: Get JFrog OIDC token
+        shell: bash
+        run: bash "$GITHUB_WORKSPACE/.github/scripts/jfrog-oidc-token.sh"
+
+      - name: Configure cargo for JFrog
+        shell: bash
+        run: bash "$GITHUB_WORKSPACE/.github/scripts/configure-cargo.sh"
+
+      - name: Configure pip registry
+        shell: bash
+        run: bash "$GITHUB_WORKSPACE/.github/scripts/configure-pip.sh"
+
       - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
         with:
           python-version: '3.9'
@@ -101,8 +127,24 @@ jobs:
     runs-on:
       group: databricks-protected-runner-group
       labels: linux-ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+
+      - name: Get JFrog OIDC token
+        shell: bash
+        run: bash "$GITHUB_WORKSPACE/.github/scripts/jfrog-oidc-token.sh"
+
+      - name: Configure cargo for JFrog
+        shell: bash
+        run: bash "$GITHUB_WORKSPACE/.github/scripts/configure-cargo.sh"
+
+      - name: Configure pip registry
+        shell: bash
+        run: bash "$GITHUB_WORKSPACE/.github/scripts/configure-pip.sh"
+
       - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
         with:
           python-version: '3.9'

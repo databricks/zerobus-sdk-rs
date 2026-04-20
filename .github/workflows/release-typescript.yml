@@ -2,9 +2,7 @@ name: Build TypeScript
 run-name: "Build TypeScript SDK ${{ github.ref_name }}"
 
 on:
-  push:
-    tags:
-      - "typescript/v*"
+  workflow_dispatch:
 
 jobs:
   build:
@@ -25,8 +23,24 @@ jobs:
       run:
         working-directory: typescript
 
+    permissions:
+      contents: read
+      id-token: write
+
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+
+      - name: Get JFrog OIDC token
+        shell: bash
+        run: bash "$GITHUB_WORKSPACE/.github/scripts/jfrog-oidc-token.sh"
+
+      - name: Configure cargo for JFrog
+        shell: bash
+        run: bash "$GITHUB_WORKSPACE/.github/scripts/configure-cargo.sh"
+
+      - name: Configure npm registry
+        shell: bash
+        run: bash "$GITHUB_WORKSPACE/.github/scripts/configure-npm.sh"
 
       - name: Setup Node.js
         uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
