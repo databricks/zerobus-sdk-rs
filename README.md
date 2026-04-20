@@ -151,4 +151,4 @@ See [CONTRIBUTING.md](CONTRIBUTING.md). Each SDK also has its own contributing g
 
 ## License
 
-This project is licensed under the Databricks License. See [LICENSE](LICENSE) for the full text.
+This project is licensed under the Apache License 2.0. See [LICENSE](LICENSE) for the full text.

@@ -4,6 +4,8 @@
 
 ### Major Changes
 
+- **License: Migrated from the Databricks License to the Apache License 2.0**
+
 ### New Features and Improvements
 
 - Added dynamic library (.so / .dylib / .dll) output alongside static library

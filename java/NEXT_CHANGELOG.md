@@ -4,6 +4,8 @@
 
 ### Major Changes
 
+- **License: Migrated from the Databricks License to the Apache License 2.0**
+
 ### New Features and Improvements
 
 - **Arrow Flight Support (Experimental)**: Added support for ingesting Apache Arrow `VectorSchemaRoot` batches via Arrow Flight protocol

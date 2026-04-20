@@ -3,7 +3,7 @@ name = "zerobus-ffi"
 version = "1.0.1"
 edition = "2021"
 description = "C FFI bindings for the Zerobus Rust SDK"
-license-file = "../../LICENSE"
+license = "Apache-2.0"
 publish = false
 
 [lib]
