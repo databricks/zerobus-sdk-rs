@@ -587,7 +587,7 @@ dependencies = [
  "tokio-stream",
  "tokio-util",
  "tonic 0.13.1",
- "tonic-build 0.13.1",
+ "tonic-build",
  "tracing",
 ]
 
@@ -617,7 +617,7 @@ dependencies = [
  "tokio-stream",
  "tokio-util",
  "tonic 0.13.1",
- "tonic-build 0.13.1",
+ "tonic-build",
  "tracing",
  "tracing-subscriber",
 ]
@@ -697,7 +697,7 @@ dependencies = [
  "tokio",
  "tokio-stream",
  "tonic 0.12.3",
- "tonic-build 0.13.1",
+ "tonic-build",
  "tracing",
 ]
 
@@ -713,7 +713,7 @@ dependencies = [
  "tokio",
  "tokio-stream",
  "tonic 0.12.3",
- "tonic-build 0.13.1",
+ "tonic-build",
  "tracing",
 ]
 
@@ -2548,7 +2548,7 @@ dependencies = [
  "tokio",
  "tokio-stream",
  "tonic 0.13.1",
- "tonic-build 0.13.1",
+ "tonic-build",
  "tracing",
  "tracing-subscriber",
 ]
@@ -2816,20 +2816,6 @@ dependencies = [
 
 [[package]]
 name = "tonic-build"
-version = "0.12.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9557ce109ea773b399c9b9e5dca39294110b74f1f342cb347a80d1fce8c26a11"
-dependencies = [
- "prettyplease",
- "proc-macro2",
- "prost-build 0.13.5",
- "prost-types 0.13.5",
- "quote",
- "syn",
-]
-
-[[package]]
-name = "tonic-build"
 version = "0.13.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "eac6f67be712d12f0b41328db3137e0d0757645d8904b4cb7d51cd9c2279e847"
@@ -2848,17 +2834,15 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "clap",
- "once_cell",
- "prost 0.12.6",
+ "databricks-zerobus-ingest-sdk 1.1.0",
+ "prost-types 0.13.5",
  "protoc-bin-vendored",
- "regex",
  "reqwest",
  "serde",
  "serde_json",
  "tempfile",
  "tokio",
- "tonic 0.12.3",
- "tonic-build 0.12.3",
+ "tonic-build",
  "urlencoding",
 ]
 
