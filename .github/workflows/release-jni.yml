@@ -28,18 +28,6 @@ jobs:
             artifact: zerobus_jni.dll
             native_dir: windows-x86_64
             cross: false
-          - os: macos-arm64
-            runner: [self-hosted, macOS, ARM64, zerobus-sdk]
-            target: aarch64-apple-darwin
-            artifact: libzerobus_jni.dylib
-            native_dir: osx-aarch64
-            cross: false
-          - os: macos-arm64
-            runner: [self-hosted, macOS, ARM64, zerobus-sdk]
-            target: x86_64-apple-darwin
-            artifact: libzerobus_jni.dylib
-            native_dir: osx-x86_64
-            cross: false
 
     name: Build JNI - ${{ matrix.native_dir }}
     runs-on: ${{ matrix.runner }}

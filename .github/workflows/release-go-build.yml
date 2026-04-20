@@ -18,14 +18,6 @@ jobs:
             target: aarch64-unknown-linux-gnu
             lib_dir: linux_arm64
             cross: true
-          - runner: [self-hosted, macOS, ARM64, zerobus-sdk]
-            target: aarch64-apple-darwin
-            lib_dir: darwin_arm64
-            cross: false
-          - runner: [self-hosted, macOS, ARM64, zerobus-sdk]
-            target: x86_64-apple-darwin
-            lib_dir: darwin_amd64
-            cross: false
           - runner: { group: databricks-protected-runner-group, labels: windows-server-latest }
             target: x86_64-pc-windows-gnu
             lib_dir: windows_amd64
