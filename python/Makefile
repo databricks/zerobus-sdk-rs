@@ -39,10 +39,10 @@ dev:
 	$(VENV) -m pip install -e . --no-deps --no-build-isolation
 
 lock-dev:
-	@test -d .venv || $(PYTHON) -m venv .venv
+	@test -d .venv39 || python3.9 -m venv .venv39
 	@test -f LICENSE || cp ../LICENSE LICENSE
-	$(VENV) -m pip install --quiet pip-tools
-	.venv/bin/pip-compile --generate-hashes --strip-extras --no-emit-index-url --output-file requirements-dev.lock requirements-dev.in
+	.venv39/bin/pip install --quiet --upgrade pip pip-tools
+	.venv39/bin/pip-compile --generate-hashes --strip-extras --no-emit-index-url --allow-unsafe --output-file requirements-dev.lock requirements-dev.in
 
 install:
 	$(VENV) -m pip install -e .
@@ -68,7 +68,7 @@ clean:
 	rm -rf dist *.egg-info .pytest_cache build htmlcov
 
 clean-all: clean clean-rust
-	rm -rf .venv
+	rm -rf .venv .venv39
 
 fmt:
 	$(VENV) -m black zerobus examples tests
