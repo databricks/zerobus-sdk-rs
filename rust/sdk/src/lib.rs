@@ -43,6 +43,7 @@ mod landing_zone;
 mod offset_generator;
 mod proxy;
 mod record_types;
+pub mod schema;
 mod stream_configuration;
 mod stream_options;
 mod tls_config;
