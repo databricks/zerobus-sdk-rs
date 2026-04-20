@@ -84,21 +84,17 @@ jobs:
         if: matrix.target == 'x86_64'
         run: maturin build --release --manifest-path python/rust/Cargo.toml --out dist
 
-      - name: Install Zig (for aarch64)
+      - name: Install cross-compilation tools (aarch64)
         if: matrix.target == 'aarch64'
         run: |
-          wget -q https://ziglang.org/download/0.13.0/zig-linux-x86_64-0.13.0.tar.xz
-          echo "d45dc85249209f4ae438e863c576af25c089a1442e4b8e3bd51b1d59e0d93ab0  zig-linux-x86_64-0.13.0.tar.xz" | sha256sum -c -
-          tar -xf zig-linux-x86_64-0.13.0.tar.xz
-          echo "$(pwd)/zig-linux-x86_64-0.13.0" >> $GITHUB_PATH
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq gcc-aarch64-linux-gnu g++-aarch64-linux-gnu
 
       - name: Build wheels (aarch64)
         if: matrix.target == 'aarch64'
-        run: |
-          source "$HOME/.cargo/env"
-          rustup target add aarch64-unknown-linux-gnu
-          cargo install cargo-zigbuild@0.22.1
-          maturin build --release --target aarch64-unknown-linux-gnu --zig --manifest-path python/rust/Cargo.toml --out dist
+        run: maturin build --release --target aarch64-unknown-linux-gnu --manifest-path python/rust/Cargo.toml --out dist
+        env:
+          CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: aarch64-linux-gnu-gcc
 
       - name: Upload wheels
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
