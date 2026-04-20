@@ -1,36 +1,113 @@
-name: Release Go
-# LEGACY: This workflow is no longer used.
-run-name: "Release Go SDK ${{ github.ref_name }}"
+name: Build Go (FFI libs)
+run-name: "Build Go SDK FFI libs ${{ github.ref_name }}"
 
 on:
-  push:
-    tags:
-      - "go/v*"
+  workflow_dispatch:
 
 jobs:
-  release:
-    if: false
-    name: Create GitHub Release
-    runs-on:
-      group: databricks-protected-runner-group
-      labels: linux-ubuntu-latest
+  build-ffi:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: { group: databricks-protected-runner-group, labels: linux-ubuntu-latest }
+            target: x86_64-unknown-linux-gnu
+            lib_dir: linux_amd64
+            cross: false
+          - runner: { group: databricks-protected-runner-group, labels: linux-ubuntu-latest }
+            target: aarch64-unknown-linux-gnu
+            lib_dir: linux_arm64
+            cross: true
+          - runner: { group: databricks-protected-runner-group, labels: windows-server-latest }
+            target: x86_64-pc-windows-gnu
+            lib_dir: windows_amd64
+            cross: false
+
+    name: Build FFI - ${{ matrix.lib_dir }}
+    runs-on: ${{ matrix.runner }}
     permissions:
-      contents: write
+      contents: read
+      id-token: write
+
+    defaults:
+      run:
+        working-directory: rust
 
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
 
-      - name: Extract version from tag
-        id: version
-        run: echo "version=${GITHUB_REF#refs/tags/go/v}" >> "$GITHUB_OUTPUT"
-
-      - name: Extract release notes from changelog
+      - name: Get JFrog OIDC token
+        shell: bash
         run: |
-          version="v${{ steps.version.outputs.version }}"
-          awk "/^## Release ${version}/{found=1; next} /^## /{if(found) exit} found{print}" go/CHANGELOG.md > /tmp/release-notes.md
+          ID_TOKEN=$(curl -sLS \
+            -H "User-Agent: actions/oidc-client" \
+            -H "Authorization: Bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
+            "${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=jfrog-github" | jq .value | tr -d '"')
+          echo "::add-mask::${ID_TOKEN}"
+          ACCESS_TOKEN=$(curl -sLS -XPOST -H "Content-Type: application/json" \
+            "https://databricks.jfrog.io/access/api/v1/oidc/token" \
+            -d "{\"grant_type\": \"urn:ietf:params:oauth:grant-type:token-exchange\", \"subject_token_type\":\"urn:ietf:params:oauth:token-type:id_token\", \"subject_token\": \"${ID_TOKEN}\", \"provider_name\": \"github-actions\"}" | jq .access_token | tr -d '"')
+          echo "::add-mask::${ACCESS_TOKEN}"
+          if [ -z "$ACCESS_TOKEN" ] || [ "$ACCESS_TOKEN" = "null" ]; then
+            echo "FAIL: Could not extract JFrog access token"
+            exit 1
+          fi
+          echo "JFROG_ACCESS_TOKEN=${ACCESS_TOKEN}" >> "$GITHUB_ENV"
 
-      - name: Create GitHub Release
-        uses: softprops/action-gh-release@153bb8e04406b158c6c84fc1615b65b24149a1fe # v2
+      - name: Configure cargo for JFrog
+        shell: bash
+        run: |
+          mkdir -p ~/.cargo
+          cat > ~/.cargo/config.toml << EOF
+          [source.crates-io]
+          replace-with = "jfrog"
+          [source.jfrog]
+          registry = "sparse+https://databricks.jfrog.io/artifactory/api/cargo/db-cargo-remote/index/"
+          [registries.jfrog]
+          index = "sparse+https://databricks.jfrog.io/artifactory/api/cargo/db-cargo-remote/index/"
+          credential-provider = ["cargo:token"]
+          EOF
+          cat > ~/.cargo/credentials.toml << EOF
+          [registries.jfrog]
+          token = "Bearer ${JFROG_ACCESS_TOKEN}"
+          EOF
+          echo "CARGO_REGISTRIES_JFROG_TOKEN=Bearer ${JFROG_ACCESS_TOKEN}" >> "$GITHUB_ENV"
+
+      - name: Install protoc
+        uses: arduino/setup-protoc@c65c819552d16ad3c9b72d9dfd5ba5237b9c906b # v3
         with:
-          name: Go SDK v${{ steps.version.outputs.version }}
-          body_path: /tmp/release-notes.md
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Install cross-compilation toolchain (Linux ARM64)
+        if: matrix.cross
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq gcc-aarch64-linux-gnu
+          mkdir -p .cargo
+          echo '[target.aarch64-unknown-linux-gnu]' > .cargo/config.toml
+          echo 'linker = "aarch64-linux-gnu-gcc"' >> .cargo/config.toml
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Build FFI library
+        run: cargo build --release -p zerobus-ffi --target ${{ matrix.target }}
+
+      - name: Prepare artifact
+        shell: bash
+        run: |
+          mkdir -p ../go/lib/${{ matrix.lib_dir }}
+          if [ -f target/${{ matrix.target }}/release/libzerobus_ffi.a ]; then
+            cp target/${{ matrix.target }}/release/libzerobus_ffi.a ../go/lib/${{ matrix.lib_dir }}/
+          else
+            cp target/${{ matrix.target }}/release/zerobus_ffi.lib ../go/lib/${{ matrix.lib_dir }}/libzerobus_ffi.a
+          fi
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: go-lib-${{ matrix.lib_dir }}
+          path: go/lib/${{ matrix.lib_dir }}/
+          if-no-files-found: error
