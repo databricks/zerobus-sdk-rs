@@ -14,9 +14,16 @@ jobs:
     runs-on:
       group: databricks-protected-runner-group
       labels: linux-ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
 
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+
+      - name: Get JFrog OIDC token
+        shell: bash
+        run: bash "$GITHUB_WORKSPACE/.github/scripts/jfrog-oidc-token.sh"
 
       - name: Download JNI artifacts
         env:
@@ -43,6 +50,10 @@ jobs:
         with:
           java-version: 11
           distribution: temurin
+
+      - name: Configure Maven registry
+        shell: bash
+        run: bash "$GITHUB_WORKSPACE/.github/scripts/configure-maven.sh"
 
       - name: Build JAR
         working-directory: java
