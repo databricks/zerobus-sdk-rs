@@ -6,21 +6,40 @@ This Software includes software developed at Databricks (https://www.databricks.
 
 This Software includes the following open source components:
 
-## Apache License 2.0
+## Python Dependencies
 
-### requests
-Copyright 2019 Kenneth Reitz
-https://github.com/psf/requests
-License: https://github.com/psf/requests/blob/main/LICENSE
+### Apache License 2.0
 
-### grpcio
-Copyright 2014 gRPC authors
-https://github.com/grpc/grpc
-License: https://github.com/grpc/grpc/blob/master/LICENSE
+- **requests**: Copyright 2019 Kenneth Reitz (https://github.com/psf/requests)
 
-## BSD 3-Clause License
+### BSD 3-Clause License
 
-### protobuf
-Copyright 2008 Google Inc.
-https://github.com/protocolbuffers/protobuf
-License: https://github.com/protocolbuffers/protobuf/blob/main/LICENSE
+- **protobuf**: Copyright 2008 Google Inc. (https://github.com/protocolbuffers/protobuf)
+
+### Optional: Arrow support (Apache License 2.0)
+
+- **pyarrow**: Copyright 2016 The Apache Software Foundation (https://github.com/apache/arrow)
+
+## Rust Dependencies (via PyO3/Maturin)
+
+This SDK wraps a native Rust core. The compiled extension module includes:
+
+### MIT License
+
+- **tokio**: Copyright (c) 2019 Tokio Contributors (https://github.com/tokio-rs/tokio)
+- **tonic**: Copyright (c) 2019 Lucio Franco (https://github.com/hyperium/tonic)
+- **async-trait**: Copyright (c) 2019 David Tolnay (https://github.com/dtolnay/async-trait)
+
+### Apache License 2.0
+
+- **prost**: Copyright (c) 2017 Dan Burkert (https://github.com/tokio-rs/prost)
+- **prost-types**: Copyright (c) 2017 Dan Burkert (https://github.com/tokio-rs/prost)
+- **arrow-ipc**: Copyright (c) 2020 Apache Arrow contributors (https://github.com/apache/arrow-rs)
+- **arrow-schema**: Copyright (c) 2020 Apache Arrow contributors (https://github.com/apache/arrow-rs)
+- **arrow-array**: Copyright (c) 2020 Apache Arrow contributors (https://github.com/apache/arrow-rs)
+
+### Python Binding
+
+- **PyO3**: Copyright (c) 2017 PyO3 Project and Contributors (https://github.com/PyO3/pyo3) — Apache License 2.0 / MIT
+
+For a complete list of dependencies and their licenses, see `pyproject.toml` and `rust/Cargo.toml`.
