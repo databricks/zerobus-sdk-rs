@@ -29,7 +29,7 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 databricks-zerobus-ingest-sdk = { path = "../sdk", features = ["testing", "arrow-flight"] }
 
 # Arrow Flight test dependencies
-arrow-flight = { version = "56.2.0", default-features = false }
+arrow-flight = { version = "58.1.0", default-features = false }
 arrow-array = { version = "56.2.0", default-features = false }
 arrow-schema = { version = "56.2.0", default-features = false }
 arrow-ipc = { version = "56.2.0", default-features = false }
