@@ -1,6 +1,6 @@
 {
   "name": "@databricks/zerobus-ingest-sdk",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "TypeScript/Node.js SDK for streaming data ingestion into Databricks Delta tables using Zerobus",
   "main": "index.js",
   "types": "index.d.ts",
