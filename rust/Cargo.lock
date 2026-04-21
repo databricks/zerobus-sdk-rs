@@ -593,7 +593,7 @@ dependencies = [
 
 [[package]]
 name = "databricks-zerobus-ingest-sdk"
-version = "1.1.0"
+version = "1.2.0"
 dependencies = [
  "arrow-array",
  "arrow-flight",
@@ -670,7 +670,7 @@ name = "example_json_batch"
 version = "0.1.0"
 dependencies = [
  "chrono",
- "databricks-zerobus-ingest-sdk 1.1.0",
+ "databricks-zerobus-ingest-sdk 1.2.0",
  "serde",
  "tokio",
 ]
@@ -680,7 +680,7 @@ name = "example_json_single"
 version = "0.1.0"
 dependencies = [
  "chrono",
- "databricks-zerobus-ingest-sdk 1.1.0",
+ "databricks-zerobus-ingest-sdk 1.2.0",
  "serde",
  "tokio",
 ]
@@ -690,7 +690,7 @@ name = "example_proto_batch"
 version = "0.1.0"
 dependencies = [
  "chrono",
- "databricks-zerobus-ingest-sdk 1.1.0",
+ "databricks-zerobus-ingest-sdk 1.2.0",
  "prost 0.13.5",
  "prost-build 0.12.6",
  "prost-reflect",
@@ -706,7 +706,7 @@ name = "example_proto_single"
 version = "0.1.0"
 dependencies = [
  "chrono",
- "databricks-zerobus-ingest-sdk 1.1.0",
+ "databricks-zerobus-ingest-sdk 1.2.0",
  "prost 0.13.5",
  "prost-build 0.12.6",
  "prost-reflect",
@@ -2537,7 +2537,7 @@ dependencies = [
  "arrow-schema",
  "async-trait",
  "bytes",
- "databricks-zerobus-ingest-sdk 1.1.0",
+ "databricks-zerobus-ingest-sdk 1.2.0",
  "futures",
  "prost 0.13.5",
  "prost-reflect",
@@ -2834,7 +2834,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "clap",
- "databricks-zerobus-ingest-sdk 1.1.0",
+ "databricks-zerobus-ingest-sdk 1.2.0",
  "prost-types 0.13.5",
  "protoc-bin-vendored",
  "reqwest",
