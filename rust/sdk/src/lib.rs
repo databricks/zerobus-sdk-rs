@@ -90,7 +90,7 @@ pub use headers_provider::{HeadersProvider, OAuthHeadersProvider, DEFAULT_X_ZERO
 pub use offset_generator::{OffsetId, OffsetIdGenerator};
 pub use record_types::{
     EncodedBatch, EncodedBatchIter, EncodedRecord, JsonEncodedRecord, JsonString, JsonValue,
-    ProtoBytes, ProtoEncodedRecord, ProtoMessage,
+    ProtoBytes, ProtoEncodedRecord, ProtoMessage, ZerobusDecimal,
 };
 pub use stream_configuration::StreamConfigurationOptions;
 #[cfg(feature = "testing")]

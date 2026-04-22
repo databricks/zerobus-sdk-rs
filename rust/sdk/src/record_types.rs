@@ -149,6 +149,86 @@ impl<T: serde::Serialize> From<JsonValue<T>> for EncodedRecord {
     }
 }
 
+/// A decimal value for Zerobus ingestion.
+///
+/// Represents a fixed-point decimal number that maps to Delta's
+/// `DECIMAL(precision, scale)` type. The value is stored internally as an
+/// unscaled i128 + scale. On the wire, it is encoded as a `DecimalValue`
+/// proto message with `high` (upper 64 bits), `low` (lower 64 bits), and
+/// `scale` fields.
+///
+/// # Examples
+///
+/// ```no_run
+/// # use databricks_zerobus_ingest_sdk::ZerobusDecimal;
+/// let price = ZerobusDecimal::from_str("123.45").unwrap();
+/// let count = ZerobusDecimal::from_i64(42);
+/// ```
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ZerobusDecimal {
+    unscaled: i128,
+    scale: u8,
+}
+
+impl ZerobusDecimal {
+    /// Parse from a decimal string like `"123.45"` or `"-0.007"`.
+    pub fn from_str(s: &str) -> Result<Self, String> {
+        let (is_negative, s) = if let Some(rest) = s.strip_prefix('-') {
+            (true, rest)
+        } else {
+            (false, s)
+        };
+
+        let (int_str, frac_str) = match s.find('.') {
+            Some(pos) => (&s[..pos], &s[pos + 1..]),
+            None => (s, ""),
+        };
+
+        let integer: i128 = if int_str.is_empty() {
+            0
+        } else {
+            int_str.parse().map_err(|e| format!("invalid integer part: {e}"))?
+        };
+
+        let frac: i128 = if frac_str.is_empty() {
+            0
+        } else {
+            frac_str.parse().map_err(|e| format!("invalid fractional part: {e}"))?
+        };
+
+        let scale = frac_str.len() as u8;
+        let unscaled = integer * 10i128.pow(scale as u32) + frac;
+
+        Ok(Self {
+            unscaled: if is_negative { -unscaled } else { unscaled },
+            scale,
+        })
+    }
+
+    /// Create from a whole number (scale = 0).
+    pub fn from_i64(value: i64) -> Self {
+        Self {
+            unscaled: value as i128,
+            scale: 0,
+        }
+    }
+
+    /// Returns the high 64 bits of the unscaled i128 value.
+    pub fn high(&self) -> i64 {
+        (self.unscaled >> 64) as i64
+    }
+
+    /// Returns the low 64 bits of the unscaled i128 value.
+    pub fn low(&self) -> u64 {
+        self.unscaled as u64
+    }
+
+    /// Returns the scale (number of fractional digits).
+    pub fn scale(&self) -> i32 {
+        self.scale as i32
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub enum EncodedBatch {
     Proto(SmallVec<[ProtoEncodedRecord; 1]>),

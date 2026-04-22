@@ -40,7 +40,8 @@
 //!
 //! | Unity Catalog type            | Proto type | Encoding contract                           |
 //! |-------------------------------|------------|---------------------------------------------|
-//! | `STRING`, `VARIANT`, `DECIMAL`| `string`   | UTF-8 text                                  |
+//! | `STRING`, `VARIANT`           | `string`   | UTF-8 text                                  |
+//! | `DECIMAL`                     | nested message | `DecimalValue { high: sint64, low: uint64, scale: int32 }` — use `ZerobusDecimal` helper |
 //! | `INT`, `INTEGER`              | `int32`    |                                             |
 //! | `LONG`, `BIGINT`              | `int64`    |                                             |
 //! | `SHORT`, `SMALLINT`, `BYTE`, `TINYINT` | `int32` | zero-extended; range-checked by the server |
@@ -178,7 +179,9 @@ pub fn descriptor_from_uc_columns(
                 map_complex_type_to_protobuf(&complex, &column.name, &mut collector)?;
             (ty, type_name, is_repeated)
         } else {
-            (map_simple_databricks_type(&column.type_name)?, None, false)
+            let (ty, type_name) =
+                map_simple_databricks_type(&column.type_name, &column.name, &mut collector)?;
+            (ty, type_name, false)
         };
 
         fields.push(field_descriptor(
@@ -239,7 +242,22 @@ fn field_descriptor(
     }
 }
 
-fn map_simple_databricks_type(type_name: &str) -> Result<ProtoType, SchemaError> {
+fn map_simple_databricks_type(
+    type_name: &str,
+    column_name: &str,
+    collector: &mut MessageCollector,
+) -> Result<(ProtoType, Option<String>), SchemaError> {
+    match type_name {
+        "DECIMAL" => {
+            let entry_name = collector.unique_name(sanitize_message_name(column_name));
+            collector.push(generate_decimal_value_message(&entry_name));
+            Ok((ProtoType::Message, Some(entry_name)))
+        }
+        _ => Ok((map_non_decimal_simple_type(type_name)?, None)),
+    }
+}
+
+fn map_non_decimal_simple_type(type_name: &str) -> Result<ProtoType, SchemaError> {
     Ok(match type_name {
         "STRING" => ProtoType::String,
         "INT" | "INTEGER" => ProtoType::Int32,
@@ -251,10 +269,46 @@ fn map_simple_databricks_type(type_name: &str) -> Result<ProtoType, SchemaError>
         "TIMESTAMP" | "TIMESTAMP_NTZ" => ProtoType::Int64,
         "DATE" => ProtoType::Int32,
         "BINARY" => ProtoType::Bytes,
-        "DECIMAL" => ProtoType::String,
         "VARIANT" => ProtoType::String,
         other => return Err(SchemaError::UnsupportedType(other.to_string())),
     })
+}
+
+/// Generates the fixed-shape DecimalValue nested message descriptor.
+fn generate_decimal_value_message(name: &str) -> DescriptorProto {
+    DescriptorProto {
+        name: Some(name.to_string()),
+        field: vec![
+            FieldDescriptorProto {
+                name: Some("high".to_string()),
+                number: Some(1),
+                label: Some(Label::Optional as i32),
+                r#type: Some(ProtoType::Sint64 as i32),
+                json_name: Some("high".to_string()),
+                proto3_optional: Some(true),
+                ..Default::default()
+            },
+            FieldDescriptorProto {
+                name: Some("low".to_string()),
+                number: Some(2),
+                label: Some(Label::Optional as i32),
+                r#type: Some(ProtoType::Uint64 as i32),
+                json_name: Some("low".to_string()),
+                proto3_optional: Some(true),
+                ..Default::default()
+            },
+            FieldDescriptorProto {
+                name: Some("scale".to_string()),
+                number: Some(3),
+                label: Some(Label::Optional as i32),
+                r#type: Some(ProtoType::Int32 as i32),
+                json_name: Some("scale".to_string()),
+                proto3_optional: Some(true),
+                ..Default::default()
+            },
+        ],
+        ..Default::default()
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -417,7 +471,7 @@ const fn map_primitive_to_protobuf(p: PrimitiveType) -> ProtoType {
         PrimitiveType::Binary => ProtoType::Bytes,
         PrimitiveType::Timestamp => ProtoType::Int64,
         PrimitiveType::Date => ProtoType::Int32,
-        PrimitiveType::Decimal => ProtoType::String,
+        PrimitiveType::Decimal => ProtoType::Message,
     }
 }
 
@@ -476,6 +530,11 @@ fn map_complex_type_to_protobuf(
     collector: &mut MessageCollector,
 ) -> Result<(ProtoType, Option<String>), SchemaError> {
     match ct {
+        ComplexType::Primitive(PrimitiveType::Decimal) => {
+            let name = collector.unique_name(sanitize_message_name(path));
+            collector.push(generate_decimal_value_message(&name));
+            Ok((ProtoType::Message, Some(name)))
+        }
         ComplexType::Primitive(p) => Ok((map_primitive_to_protobuf(*p), None)),
         ComplexType::Struct(st) => {
             let name = collector.unique_name(sanitize_message_name(path));
