@@ -23,6 +23,7 @@
     "index.d.ts",
     "README.md",
     "LICENSE",
+    "NOTICE",
     "src/",
     "utils/",
     "schemas/",

@@ -8,29 +8,37 @@ This Software includes the following components:
 
 ## Rust Dependencies (via FFI)
 
-This Go SDK wraps the Zerobus Rust SDK, which includes the following open source components subject to the MIT License and Apache License 2.0:
+This Go SDK wraps the Zerobus Rust SDK via C FFI. The compiled native library includes the following open source components:
 
 ### MIT License
 
-- **tokio**: Copyright (c) 2021 Tokio Contributors (https://github.com/tokio-rs/tokio)
-- **tonic**: Copyright (c) 2019-2021, Luc Perkins and contributors (https://github.com/hyperium/tonic)
+- **tokio**: Copyright (c) 2019 Tokio Contributors (https://github.com/tokio-rs/tokio)
 - **tokio-stream**: Copyright (c) 2019 Tokio Contributors (https://github.com/tokio-rs/tokio)
-- **tracing**: Copyright (c) 2019-2021, The `tracing` project authors (https://github.com/tokio-rs/tracing)
+- **tokio-util**: Copyright (c) 2019 Tokio Contributors (https://github.com/tokio-rs/tokio)
+- **tonic**: Copyright (c) 2019 Lucio Franco (https://github.com/hyperium/tonic)
+- **tracing**: Copyright (c) 2019 Tokio Contributors (https://github.com/tokio-rs/tracing)
+- **async-trait**: Copyright (c) 2019 David Tolnay (https://github.com/dtolnay/async-trait)
+- **thiserror**: Copyright (c) 2019 David Tolnay (https://github.com/dtolnay/thiserror)
+- **serde**: Copyright (c) 2014 David Tolnay (https://github.com/serde-rs/serde)
+- **serde_json**: Copyright (c) 2014 David Tolnay (https://github.com/serde-rs/json)
+- **bytes**: Copyright (c) 2018 Carl Lerche (https://github.com/tokio-rs/bytes)
+- **smallvec**: Copyright (c) 2018 The Servo Project Developers (https://github.com/servo/rust-smallvec)
+- **once_cell**: Copyright (c) 2018 Aleksey Kladov (https://github.com/matklad/once_cell)
 
 ### Apache License 2.0
 
-- **prost**: Copyright 2017, Dan Burkert (https://github.com/tokio-rs/prost)
-- **prost-types**: Copyright 2017, Dan Burkert (https://github.com/tokio-rs/prost)
-- **tokio-retry**: Copyright 2018, App-Tech-Crew (https://github.com/app-tech-crew/tokio-retry)
-- **reqwest**: Copyright (c) 2016-2021, Sean McArthur (https://github.com/seanmonstar/reqwest)
-- **serde_json**: Copyright (c) 2014-2021, David Tolnay (https://github.com/serde-rs/json)
-- **thiserror**: Copyright (c) 2019-2021, David Tolnay (https://github.com/dtolnay/thiserror)
+- **prost**: Copyright (c) 2017 Dan Burkert (https://github.com/tokio-rs/prost)
+- **prost-types**: Copyright (c) 2017 Dan Burkert (https://github.com/tokio-rs/prost)
+- **tokio-retry**: Copyright (c) 2018 Sam Rijs (https://github.com/srijs/rust-tokio-retry)
+- **reqwest**: Copyright (c) 2016 Sean McArthur (https://github.com/seanmonstar/reqwest)
+- **hyper-http-proxy**: Copyright (c) 2019 Trent Mick (https://github.com/tafia/hyper-http-proxy)
+- **hyper-util**: Copyright (c) 2023 Sean McArthur (https://github.com/hyperium/hyper-util)
+- **arrow-ipc**: Copyright (c) 2020 Apache Arrow contributors (https://github.com/apache/arrow-rs)
 
 ## Go Dependencies
 
-This SDK uses the Go standard library and CGO, which are covered by the Go license (BSD-style).
+The Go SDK itself has no external Go runtime dependencies. The Go standard library and CGO are used for the FFI bridge:
 
-- **Go Programming Language**: Copyright (c) 2009 The Go Authors (https://golang.org/)
-- **Protocol Buffers Go**: Copyright (c) 2018 The Go Authors (https://github.com/protocolbuffers/protobuf-go)
+- **Go Programming Language**: Copyright (c) 2009 The Go Authors (https://golang.org/) — BSD-style license
 
-For a complete list of dependencies and their licenses, see the `go.mod` file and the Rust `Cargo.toml` files.
+For a complete list of Rust dependencies and their licenses, see the `../rust/sdk/Cargo.toml` and `../rust/ffi/Cargo.toml` files.

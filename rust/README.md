@@ -1089,7 +1089,7 @@ This is an open source project. We welcome contributions, feedback, and bug repo
 
 ## License
 
-This SDK is licensed under the Apache License 2.0. See the [LICENSE](https://github.com/databricks/zerobus-sdk/blob/main/LICENSE) file for the full license text.
+This SDK is licensed under the Apache License 2.0. See [LICENSE](LICENSE) for the full text.
 
 ## Requirements
 
