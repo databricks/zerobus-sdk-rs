@@ -418,10 +418,13 @@ pub extern "system" fn Java_com_databricks_zerobus_BaseZerobusStream_nativeIsClo
     // Get stream handle
     let stream_handle = unsafe { NativeStreamHandle::borrow_from_raw(handle) };
 
-    // Block on the async operation
+    // Check both: wrapper cleared (nativeClose called) or stream internally closed (error/shutdown)
     let is_closed = block_on(async {
         let guard = stream_handle.stream.lock().await;
-        guard.is_none()
+        match guard.as_ref() {
+            None => true,
+            Some(stream) => stream.is_closed(),
+        }
     });
 
     if is_closed {
