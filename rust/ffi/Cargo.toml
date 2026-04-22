@@ -10,7 +10,7 @@ publish = false
 crate-type = ["staticlib", "cdylib"]
 
 [dependencies]
-databricks-zerobus-ingest-sdk = { version = "1.2.0", features = ["arrow-flight", "testing"] }
+databricks-zerobus-ingest-sdk = { path = "../sdk", version = "1.2.0", features = ["arrow-flight", "testing"] }
 
 # Arrow IPC for serializing/deserializing RecordBatches across the FFI boundary
 arrow-ipc = { version = "56.2.0", default-features = false }
