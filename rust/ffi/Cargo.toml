@@ -1,6 +1,6 @@
 [package]
 name = "zerobus-ffi"
-version = "1.0.1"
+version = "1.1.0"
 edition = "2021"
 description = "C FFI bindings for the Zerobus Rust SDK"
 license = "Apache-2.0"
@@ -10,8 +10,7 @@ publish = false
 crate-type = ["staticlib", "cdylib"]
 
 [dependencies]
-# Core SDK logic - use local path dependency
-databricks-zerobus-ingest-sdk = { version="1.0.1", features = ["arrow-flight", "testing"] }
+databricks-zerobus-ingest-sdk = { version = "1.2.0", features = ["arrow-flight", "testing"] }
 
 # Arrow IPC for serializing/deserializing RecordBatches across the FFI boundary
 arrow-ipc = { version = "56.2.0", default-features = false }
