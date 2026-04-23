@@ -300,9 +300,19 @@ public sealed class ZerobusStream : IDisposable
     {
         var disposed = Interlocked.CompareExchange(ref _disposed, 1, 0);
         ObjectDisposedException.ThrowIf(disposed != 0, this);
+
+        var oldPtr = Interlocked.Exchange(ref _ptr, IntPtr.Zero);
         var newStream = _bridgeHandle.IsAllocated
             ? new ZerobusStream(newPtr, _bridgeHandle, _callbackRef!)
             : new ZerobusStream(newPtr);
+
+        // Prevent accidental double-free of the shared handle from the old wrapper
+        _bridgeHandle = default;
+
+        // Free the old native stream (don't Close — it's already failed/closed)
+        if (oldPtr != IntPtr.Zero)
+            NativeMethods.StreamFree(oldPtr);
+
         return newStream;
     }
 }
