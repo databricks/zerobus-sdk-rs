@@ -1,5 +1,11 @@
 # Version changelog
 
+## Release v1.1.1
+
+### Bug Fixes
+
+- Fixed `isClosed()` returning `false` after the stream internally closed due to non-retryable errors (e.g. server rejection, auth failure). The JNI layer now checks both the wrapper state and the Rust stream's internal closed flag. Affects both proto/JSON streams and Arrow streams.
+
 ## Release v1.1.0
 
 ### Major Changes
