@@ -1,6 +1,7 @@
 # Build artifacts
 zerobus-ffi/target/
 libzerobus_ffi.a
+!lib/**/libzerobus_ffi.a
 *.dylib
 *.so
 
