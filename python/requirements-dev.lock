@@ -183,6 +183,12 @@ click==8.1.8 \
     # via
     #   black
     #   pip-tools
+colorama==0.4.6 \
+    --hash=sha256:08695f5cb7ed6e0531a20572697297d919b842a52ca6a0db6db7b9e96c1c8bbd \
+    --hash=sha256:4f1d9991f5acc0ca119f9d443620b77f9d6b33703e51011c16baf57afb285fc6
+    # via
+    #   -r requirements-dev.in
+    #   build
 coverage==7.10.7 \
     --hash=sha256:03ffc58aacdf65d2a82bbeb1ffe4d01ead4017a21bfd0454983b88ca73af94b9 \
     --hash=sha256:097c1591f5af4496226d5783d036bf6fd6cd0cbc132e071b33861de756efb880 \
