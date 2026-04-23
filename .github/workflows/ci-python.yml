@@ -51,6 +51,8 @@ jobs:
         with:
           python-version: ${{ matrix.pyVersion }}
 
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+
       - name: Copy root LICENSE for maturin
         shell: bash
         run: cp ../LICENSE LICENSE
@@ -74,7 +76,7 @@ jobs:
           .venv/Scripts/python -m pip install --upgrade pip
           test -f LICENSE || cp ../LICENSE LICENSE
           .venv/Scripts/python -m pip install -r requirements-dev.lock
-          .venv/Scripts/python -m pip install -e . --no-deps --no-build-isolation
+          .venv/Scripts/python -m maturin develop
           .venv/Scripts/python -m pytest --cov=zerobus --cov-report html --cov-report xml tests
 
   fmt:

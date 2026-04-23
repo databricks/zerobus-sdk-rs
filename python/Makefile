@@ -36,7 +36,7 @@ dev:
 	$(VENV) -m pip install --upgrade pip
 	@test -f LICENSE || cp ../LICENSE LICENSE
 	$(VENV) -m pip install -r requirements-dev.lock
-	$(VENV) -m pip install -e . --no-deps --no-build-isolation
+	$(VENV) -m maturin develop
 
 lock-dev:
 	@test -d .venv39 || python3.9 -m venv .venv39
