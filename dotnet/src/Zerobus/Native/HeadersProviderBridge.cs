@@ -2,6 +2,7 @@
 // This is the .NET equivalent of the goGetHeaders / cHeadersCallback pattern in ffi.go.
 
 using System.Runtime.InteropServices;
+using System.Text;
 
 namespace Databricks.Zerobus.Native;
 
@@ -22,7 +23,7 @@ internal sealed class HeadersProviderBridge
     /// The native callback that can be passed as a function pointer to Rust.
     /// Called from native code on the Rust runtime thread.
     /// </summary>
-    public CHeaders NativeCallback(IntPtr userData)
+    public unsafe CHeaders NativeCallback(IntPtr userData)
     {
         var result = new CHeaders();
 
@@ -40,7 +41,7 @@ internal sealed class HeadersProviderBridge
 
             // Allocate an array of CHeader structs in unmanaged memory.
             var headerSize = Marshal.SizeOf<CHeader>();
-            var arrayPtr = Marshal.AllocHGlobal(headerSize * headers.Count);
+            var arrayPtr = (nint)NativeMemory.Alloc((nuint)(headerSize * headers.Count));
 
             int idx = 0;
             foreach (var (key, value) in headers)
@@ -48,8 +49,8 @@ internal sealed class HeadersProviderBridge
                 var headerPtr = arrayPtr + idx * headerSize;
                 var cHeader = new CHeader
                 {
-                    Key = Marshal.StringToCoTaskMemUTF8(key),
-                    Value = Marshal.StringToCoTaskMemUTF8(value),
+                    Key = AllocUtf8String(key),
+                    Value = AllocUtf8String(value),
                 };
                 Marshal.StructureToPtr(cHeader, headerPtr, false);
                 idx++;
@@ -63,9 +64,18 @@ internal sealed class HeadersProviderBridge
         {
             result.Headers = IntPtr.Zero;
             result.Count = 0;
-            result.ErrorMessage = Marshal.StringToCoTaskMemUTF8(ex.Message);
+            result.ErrorMessage = AllocUtf8String(ex.Message);
         }
 
         return result;
+    }
+
+    private static unsafe IntPtr AllocUtf8String(string s)
+    {
+        var byteCount = Encoding.UTF8.GetByteCount(s);
+        var ptr = (byte*) NativeMemory.Alloc((nuint)(byteCount + 1));
+        Encoding.UTF8.GetBytes(s, new Span<byte>(ptr, byteCount));
+        ptr[byteCount] = 0;
+        return (IntPtr)ptr;
     }
 }
