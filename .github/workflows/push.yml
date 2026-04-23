@@ -11,7 +11,7 @@ jobs:
     runs-on:
       group: databricks-protected-runner-group
       labels: linux-ubuntu-latest
-    needs: [changes, rust, java, typescript, python, go, purego, cpp]
+    needs: [changes, rust, java, typescript, python, go, purego, cpp, dotnet]
     if: always()
     steps:
       - run: |
@@ -22,7 +22,8 @@ jobs:
             "${{ needs.python.result }}" \
             "${{ needs.go.result }}" \
             "${{ needs.purego.result }}" \
-            "${{ needs.cpp.result }}"; do
+            "${{ needs.cpp.result }}" \
+            "${{ needs.dotnet.result }}"; do
             if [[ "$result" != "success" && "$result" != "skipped" ]]; then
               echo "Job failed or was cancelled: $result"
               exit 1
@@ -41,6 +42,7 @@ jobs:
       go: ${{ steps.filter.outputs.go }}
       purego: ${{ steps.filter.outputs.purego }}
       cpp: ${{ steps.filter.outputs.cpp }}
+      dotnet: ${{ steps.filter.outputs.dotnet }}
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
       - uses: dorny/paths-filter@de90cc6fb38fc0963ad72b210f1f284cd68cea36 # v3
@@ -71,6 +73,9 @@ jobs:
             cpp:
               - 'cpp/**'
               - '.github/workflows/ci-cpp.yml'
+            dotnet:
+              - 'dotnet/**'
+              - '.github/workflows/ci-dotnet.yml'
 
   # Blocking jobs — required for merge
   rust:
@@ -129,6 +134,11 @@ jobs:
       contents: read
     uses: ./.github/workflows/ci-cpp.yml
 
+  dotnet:
+    needs: changes
+    if: needs.changes.outputs.dotnet == 'true'
+    uses: ./.github/workflows/ci-dotnet.yml
+
   # Non-blocking cross-SDK jobs — run all SDK tests against the local Rust
   # source when rust/** changes, to catch breakage before a new FFI release.
   # These are intentionally excluded from `gate` so they don't block merging.
@@ -149,6 +159,13 @@ jobs:
       id-token: write
       contents: read
     uses: ./.github/workflows/ci-cpp.yml
+
+  cross-sdk-dotnet:
+    needs: changes
+    if: needs.changes.outputs.rust == 'true'
+    uses: ./.github/workflows/ci-dotnet.yml
+    with:
+      use_local_sdk: true
 
   cross-sdk-python:
     needs: changes
