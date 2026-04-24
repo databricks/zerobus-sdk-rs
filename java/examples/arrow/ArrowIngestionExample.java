@@ -123,11 +123,13 @@ public class ArrowIngestionExample {
                 .setFlushTimeoutMs(600000)
                 .setRecovery(true)
                 .setRecoveryRetries(5)
+                .setIpcCompression(IPCCompressionType.LZ4_FRAME)
                 .build();
         System.out.println(
             "  maxInflightBatches: " + customOptions.maxInflightBatches());
         System.out.println("  flushTimeoutMs: " + customOptions.flushTimeoutMs());
         System.out.println("  recoveryRetries: " + customOptions.recoveryRetries());
+        System.out.println("  ipcCompression: " + customOptions.ipcCompression());
 
       } finally {
         stream.close();

@@ -1,5 +1,4 @@
 target/
-Cargo.lock
 *.node
 node_modules/
 index.js

@@ -1,4 +1,7 @@
+#![allow(dead_code)]
+
 use std::collections::HashMap;
+use std::io::Cursor;
 use std::sync::{Arc, Mutex, Once};
 
 use arrow_array::{Int64Array, RecordBatch, StringArray};
@@ -64,6 +67,53 @@ pub fn create_test_record_batch(
 
     RecordBatch::try_new(schema, vec![Arc::new(id_array), Arc::new(message_array)])
         .expect("Failed to create RecordBatch")
+}
+
+/// Serialise a [`RecordBatch`] into Arrow IPC stream bytes, as an FFI caller would produce.
+pub fn record_batch_to_ipc_bytes(batch: &RecordBatch) -> bytes::Bytes {
+    let mut buf = Vec::new();
+    let mut writer =
+        arrow_ipc::writer::StreamWriter::try_new(&mut buf, batch.schema_ref()).unwrap();
+    writer.write(batch).unwrap();
+    writer.finish().unwrap();
+    bytes::Bytes::from(buf)
+}
+
+/// Create a test Arrow schema with a dictionary-encoded column.
+pub fn create_test_dict_schema() -> Arc<ArrowSchema> {
+    Arc::new(ArrowSchema::new(vec![
+        Field::new("id", DataType::Int64, false),
+        Field::new(
+            "category",
+            DataType::Dictionary(Box::new(DataType::Int32), Box::new(DataType::Utf8)),
+            true,
+        ),
+    ]))
+}
+
+/// Create a test RecordBatch with a dictionary-encoded column.
+pub fn create_test_dict_record_batch(
+    schema: Arc<ArrowSchema>,
+    ids: Vec<i64>,
+    categories: Vec<Option<&str>>,
+) -> RecordBatch {
+    use arrow_array::types::Int32Type;
+    use arrow_array::DictionaryArray;
+
+    let id_array = Int64Array::from(ids);
+    let category_array: DictionaryArray<Int32Type> = categories
+        .into_iter()
+        .collect::<DictionaryArray<Int32Type>>();
+
+    RecordBatch::try_new(schema, vec![Arc::new(id_array), Arc::new(category_array)])
+        .expect("Failed to create dictionary RecordBatch")
+}
+
+/// Deserialise Arrow IPC stream bytes back into a [`RecordBatch`].
+pub fn ipc_bytes_to_record_batch(bytes: &bytes::Bytes) -> RecordBatch {
+    let mut reader = arrow_ipc::reader::StreamReader::try_new(Cursor::new(bytes.as_ref()), None)
+        .expect("valid IPC stream");
+    reader.next().expect("one batch").expect("no error")
 }
 
 /// Setup tracing for tests.

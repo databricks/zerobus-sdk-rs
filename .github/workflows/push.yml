@@ -38,8 +38,8 @@ jobs:
       python: ${{ steps.filter.outputs.python }}
       go: ${{ steps.filter.outputs.go }}
     steps:
-      - uses: actions/checkout@v4
-      - uses: dorny/paths-filter@v3
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - uses: dorny/paths-filter@de90cc6fb38fc0963ad72b210f1f284cd68cea36 # v3
         id: filter
         with:
           filters: |
@@ -63,26 +63,41 @@ jobs:
   rust:
     needs: changes
     if: needs.changes.outputs.rust == 'true'
+    permissions:
+      id-token: write
+      contents: read
     uses: ./.github/workflows/ci-rust.yml
 
   java:
     needs: changes
     if: needs.changes.outputs.java == 'true'
+    permissions:
+      id-token: write
+      contents: read
     uses: ./.github/workflows/ci-java.yml
 
   typescript:
     needs: changes
     if: needs.changes.outputs.typescript == 'true'
+    permissions:
+      id-token: write
+      contents: read
     uses: ./.github/workflows/ci-typescript.yml
 
   python:
     needs: changes
     if: needs.changes.outputs.python == 'true'
+    permissions:
+      id-token: write
+      contents: read
     uses: ./.github/workflows/ci-python.yml
 
   go:
     needs: changes
     if: needs.changes.outputs.go == 'true'
+    permissions:
+      id-token: write
+      contents: read
     uses: ./.github/workflows/ci-go.yml
 
   # Non-blocking cross-SDK jobs — run all SDK tests against the local Rust
@@ -91,6 +106,9 @@ jobs:
   cross-sdk-go:
     needs: changes
     if: needs.changes.outputs.rust == 'true'
+    permissions:
+      id-token: write
+      contents: read
     uses: ./.github/workflows/ci-go.yml
     with:
       use_local_sdk: true
@@ -98,6 +116,9 @@ jobs:
   cross-sdk-python:
     needs: changes
     if: needs.changes.outputs.rust == 'true'
+    permissions:
+      id-token: write
+      contents: read
     uses: ./.github/workflows/ci-python.yml
     with:
       use_local_sdk: true
@@ -105,6 +126,9 @@ jobs:
   cross-sdk-typescript:
     needs: changes
     if: needs.changes.outputs.rust == 'true'
+    permissions:
+      id-token: write
+      contents: read
     uses: ./.github/workflows/ci-typescript.yml
     with:
       use_local_sdk: true
@@ -113,6 +137,9 @@ jobs:
   cross-sdk-java:
     needs: changes
     if: needs.changes.outputs.rust == 'true'
+    permissions:
+      id-token: write
+      contents: read
     uses: ./.github/workflows/ci-java.yml
     with:
       use_local_sdk: true

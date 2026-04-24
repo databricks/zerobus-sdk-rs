@@ -2,6 +2,7 @@
 
 use std::sync::Arc;
 
+use crate::proxy::ConnectorFactory;
 use crate::{SecureTlsConfig, TlsConfig, ZerobusError, ZerobusResult, ZerobusSdk};
 
 /// Builder for creating a [`ZerobusSdk`] instance with fluent configuration.
@@ -21,6 +22,7 @@ pub struct ZerobusSdkBuilder {
     zerobus_endpoint: Option<String>,
     unity_catalog_url: Option<String>,
     tls_config: Option<Arc<dyn TlsConfig>>,
+    connector_factory: Option<ConnectorFactory>,
 }
 
 impl ZerobusSdkBuilder {
@@ -32,6 +34,7 @@ impl ZerobusSdkBuilder {
             zerobus_endpoint: None,
             unity_catalog_url: None,
             tls_config: None,
+            connector_factory: None,
         }
     }
 
@@ -71,6 +74,13 @@ impl ZerobusSdkBuilder {
     /// * `tls_config` - A TLS configuration implementing the `TlsConfig` trait
     pub fn tls_config(mut self, tls_config: Arc<dyn TlsConfig>) -> Self {
         self.tls_config = Some(tls_config);
+        self
+    }
+
+    /// Override gRPC channel connector construction; see
+    /// [`ConnectorFactory`] for semantics.
+    pub fn connector_factory(mut self, factory: ConnectorFactory) -> Self {
+        self.connector_factory = Some(factory);
         self
     }
 
@@ -117,6 +127,7 @@ impl ZerobusSdkBuilder {
             unity_catalog_url,
             workspace_id,
             tls_config,
+            self.connector_factory,
         ))
     }
 }

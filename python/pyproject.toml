@@ -29,13 +29,14 @@ dependencies = [
 
 [project.optional-dependencies]
 arrow = [
-    "pyarrow>=14.0.0",
+    "pyarrow>=14.0.0,<20.0",
 ]
 dev = [
     # Build tools
     "wheel",
     "build",
     "grpcio-tools>=1.60.0,<2.0",
+    "pip-tools>=7.0,<8",
     # Code formatting
     "black",
     "pycodestyle",
@@ -45,8 +46,8 @@ dev = [
     "pytest",
     "pytest-cov",
     "pytest-xdist>=3.6.1,<4.0",
-    "pytest-asyncio",
-    "pyarrow>=14.0.0",
+    "pytest-asyncio>=0.21,<1.0",
+    "pyarrow>=14.0.0,<20.0",
 ]
 
 [tool.maturin]

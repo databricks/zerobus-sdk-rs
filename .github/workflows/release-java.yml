@@ -1,172 +1,69 @@
-name: Release Java
-run-name: "Release Java SDK ${{ github.ref_name }}"
+name: Build Java
+run-name: "Build Java SDK ${{ github.ref_name }}"
 
 on:
-  push:
-    tags:
-      - "java/v*"
-
-permissions:
-  contents: write
+  workflow_dispatch:
+    inputs:
+      jni-run-id:
+        description: "Run ID of the release-jni.yml build containing JNI artifacts."
+        required: true
+        type: string
 
 jobs:
-  build-jni:
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - os: linux-ubuntu-latest
-            runner: { group: databricks-protected-runner-group, labels: linux-ubuntu-latest }
-            target: x86_64-unknown-linux-gnu
-            artifact: libzerobus_jni.so
-            native_dir: linux-x86_64
-            cross: false
-          - os: linux-ubuntu-latest
-            runner: { group: databricks-protected-runner-group, labels: linux-ubuntu-latest }
-            target: aarch64-unknown-linux-gnu
-            artifact: libzerobus_jni.so
-            native_dir: linux-aarch64
-            cross: true
-          - os: windows-server-latest
-            runner: { group: databricks-protected-runner-group, labels: windows-server-latest }
-            target: x86_64-pc-windows-msvc
-            artifact: zerobus_jni.dll
-            native_dir: windows-x86_64
-            cross: false
-          - os: macos-arm64
-            runner: [self-hosted, macOS, ARM64, zerobus-sdk]
-            target: aarch64-apple-darwin
-            artifact: libzerobus_jni.dylib
-            native_dir: osx-aarch64
-            cross: false
-          - os: macos-arm64
-            runner: [self-hosted, macOS, ARM64, zerobus-sdk]
-            target: x86_64-apple-darwin
-            artifact: libzerobus_jni.dylib
-            native_dir: osx-x86_64
-            cross: false
-
-    name: Build JNI - ${{ matrix.native_dir }}
-    runs-on: ${{ matrix.runner }}
-
-    defaults:
-      run:
-        working-directory: rust
-
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Install protoc
-        uses: arduino/setup-protoc@v3
-
-      - name: Install cross-compilation toolchain (Linux ARM64)
-        if: matrix.cross
-        run: |
-          sudo apt-get update -qq
-          sudo apt-get install -y -qq gcc-aarch64-linux-gnu
-          mkdir -p .cargo
-          echo '[target.aarch64-unknown-linux-gnu]' > .cargo/config.toml
-          echo 'linker = "aarch64-linux-gnu-gcc"' >> .cargo/config.toml
-
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: ${{ matrix.target }}
-
-      - name: Build JNI library
-        run: cargo build --release -p zerobus-jni --target ${{ matrix.target }}
-
-      - name: Upload artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: jni-${{ matrix.native_dir }}
-          path: rust/target/${{ matrix.target }}/release/${{ matrix.artifact }}
-          if-no-files-found: error
-
-  publish:
-    name: Publish to Maven Central
+  build-jar:
     runs-on:
       group: databricks-protected-runner-group
       labels: linux-ubuntu-latest
-    needs: build-jni
-    defaults:
-      run:
-        working-directory: java
+    permissions:
+      contents: read
+      id-token: write
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
 
-      - name: Download all JNI artifacts
-        uses: actions/download-artifact@v4
-        with:
-          path: jni-artifacts
-          pattern: jni-*
+      - name: Get JFrog OIDC token
+        shell: bash
+        run: bash "$GITHUB_WORKSPACE/.github/scripts/jfrog-oidc-token.sh"
+
+      - name: Download JNI artifacts
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh run download "${{ inputs.jni-run-id }}" \
+            --repo databricks/zerobus-sdk \
+            --pattern 'jni-*' \
+            --dir jni-artifacts/
+          echo "Downloaded JNI artifacts:"
+          find jni-artifacts/ -type f | sort
 
       - name: Place JNI libraries in native directory
+        working-directory: java
         run: |
           for dir in ../jni-artifacts/jni-*/; do
             platform=$(basename "$dir" | sed 's/jni-//')
             mkdir -p src/main/resources/native/"$platform"
             cp "$dir"/* src/main/resources/native/"$platform"/
           done
-          find src/main/resources/native -type f | sort
 
       - name: Set up Java
-        uses: actions/setup-java@v4
+        uses: actions/setup-java@c1e323688fd81a25caa38c78aa6df2d33d3e20d9 # v4
         with:
           java-version: 11
           distribution: temurin
-          server-id: central
-          server-username: MAVEN_CENTRAL_USERNAME
-          server-password: MAVEN_CENTRAL_PASSWORD
-          gpg-private-key: ${{ secrets.GPG_PRIVATE_KEY }}
-          gpg-passphrase: GPG_PASSPHRASE
 
-      - name: Publish to Maven Central
-        run: mvn -DskipTests=true --batch-mode deploy
-        env:
-          GPG_PASSPHRASE: ${{ secrets.GPG_PASSPHRASE }}
-          MAVEN_CENTRAL_USERNAME: ${{ secrets.MAVEN_CENTRAL_USERNAME }}
-          MAVEN_CENTRAL_PASSWORD: ${{ secrets.MAVEN_CENTRAL_PASSWORD }}
+      - name: Configure Maven registry
+        shell: bash
+        run: bash "$GITHUB_WORKSPACE/.github/scripts/configure-maven.sh"
 
-  release:
-    name: Create GitHub Release
-    runs-on:
-      group: databricks-protected-runner-group
-      labels: linux-ubuntu-latest
-    needs: publish
+      - name: Build JAR
+        working-directory: java
+        run: mvn -DskipTests=true --batch-mode package
 
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Extract version from tag
-        id: version
-        run: echo "version=${GITHUB_REF#refs/tags/java/v}" >> "$GITHUB_OUTPUT"
-
-      - name: Download all JNI artifacts
-        uses: actions/download-artifact@v4
+      - name: Upload JAR
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
-          path: jni-artifacts
-          pattern: jni-*
-
-      - name: Create JNI archive
-        run: |
-          mkdir -p native
-          for dir in jni-artifacts/jni-*/; do
-            platform=$(basename "$dir" | sed 's/jni-//')
-            mkdir -p "native/$platform"
-            cp "$dir"/* "native/$platform/"
-          done
-          tar -czvf zerobus-jni-${{ steps.version.outputs.version }}.tar.gz native/
-
-      - name: Extract release notes from changelog
-        run: |
-          version="v${{ steps.version.outputs.version }}"
-          awk "/^## Release ${version}/{found=1; next} /^## /{if(found) exit} found{print}" java/CHANGELOG.md > /tmp/release-notes.md
-
-      - name: Create GitHub Release
-        uses: softprops/action-gh-release@v2
-        with:
-          name: Java SDK v${{ steps.version.outputs.version }}
-          body_path: /tmp/release-notes.md
-          files: zerobus-jni-${{ steps.version.outputs.version }}.tar.gz
+          name: java-jar
+          path: |
+            java/target/*.jar
+            java/target/*.pom
+          if-no-files-found: error
