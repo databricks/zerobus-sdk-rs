@@ -1,5 +1,11 @@
 # Version changelog
 
+## Release v1.0.2
+
+### Bug Fixes
+
+- Split platform-specific native binaries into separate npm packages (`@databricks/zerobus-ingest-sdk-linux-x64-gnu`, `-linux-arm64-gnu`, `-win32-x64-msvc`). npm now auto-installs only the binary matching the user's OS/arch via `optionalDependencies`, reducing download size from ~15MB to ~5MB.
+
 ## Release v1.0.1
 
 ### Bug Fixes

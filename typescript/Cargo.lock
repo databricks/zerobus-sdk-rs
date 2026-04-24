@@ -2889,7 +2889,7 @@ dependencies = [
 
 [[package]]
 name = "zerobus-sdk-ts"
-version = "1.0.1"
+version = "1.0.2"
 dependencies = [
  "arrow-array",
  "arrow-ipc",
