@@ -1,5 +1,17 @@
 # Version changelog
 
+## Release v1.0.2
+
+### Bug Fixes
+
+- Split platform-specific native binaries into separate npm packages (`@databricks/zerobus-ingest-sdk-linux-x64-gnu`, `-linux-arm64-gnu`, `-win32-x64-msvc`). npm now auto-installs only the binary matching the user's OS/arch via `optionalDependencies`, reducing download size from ~15MB to ~5MB.
+
+## Release v1.0.1
+
+### Bug Fixes
+
+- Fixed npm packaging: v1.0.0 was published without the napi-rs generated `index.js` loader and `index.d.ts` type declarations, causing `MODULE_NOT_FOUND` on `require('@databricks/zerobus-ingest-sdk')`. The platform-specific native binary packages (e.g. `@databricks/zerobus-ingest-sdk-linux-x64-gnu`) were also missing from npm. This release includes all generated files and platform packages.
+
 ## Release v1.0.0
 
 GA release of the Databricks Zerobus Ingest SDK for TypeScript.

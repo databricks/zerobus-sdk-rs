@@ -43,6 +43,7 @@ mod landing_zone;
 mod offset_generator;
 mod proxy;
 mod record_types;
+pub mod schema;
 mod stream_configuration;
 mod stream_options;
 mod tls_config;
@@ -87,6 +88,7 @@ pub use default_token_factory::DefaultTokenFactory;
 pub use errors::ZerobusError;
 pub use headers_provider::{HeadersProvider, OAuthHeadersProvider, DEFAULT_X_ZEROBUS_SDK};
 pub use offset_generator::{OffsetId, OffsetIdGenerator};
+pub use proxy::{ConnectorFactory, ProxyConnector};
 pub use record_types::{
     EncodedBatch, EncodedBatchIter, EncodedRecord, JsonEncodedRecord, JsonString, JsonValue,
     ProtoBytes, ProtoEncodedRecord, ProtoMessage,
@@ -269,6 +271,7 @@ pub struct ZerobusSdk {
     shared_channel: tokio::sync::Mutex<Option<ZerobusClient<Channel>>>,
     workspace_id: String,
     tls_config: Arc<dyn TlsConfig>,
+    connector_factory: Option<ConnectorFactory>,
 }
 
 impl ZerobusSdk {
@@ -349,6 +352,7 @@ impl ZerobusSdk {
             workspace_id,
             shared_channel: tokio::sync::Mutex::new(None),
             tls_config: Arc::new(SecureTlsConfig::new()),
+            connector_factory: None,
         })
     }
 
@@ -360,6 +364,7 @@ impl ZerobusSdk {
         unity_catalog_url: String,
         workspace_id: String,
         tls_config: Arc<dyn TlsConfig>,
+        connector_factory: Option<ConnectorFactory>,
     ) -> Self {
         #[allow(deprecated)]
         ZerobusSdk {
@@ -369,6 +374,7 @@ impl ZerobusSdk {
             workspace_id,
             shared_channel: tokio::sync::Mutex::new(None),
             tls_config,
+            connector_factory,
         }
     }
 
@@ -842,18 +848,19 @@ impl ZerobusSdk {
 
             let endpoint = self.tls_config.configure_endpoint(endpoint)?;
 
-            // Check for HTTP proxy env vars (https_proxy, HTTPS_PROXY, etc.)
-            // and use a proxy connector if one is configured.
+            // A caller-supplied factory (from `ZerobusSdkBuilder::connector_factory`)
+            // fully replaces the default env-var proxy detection
+            // (`https_proxy`/`HTTPS_PROXY` and friends).
             let host = endpoint.uri().host().unwrap_or_default().to_string();
+            let proxy_connector = match &self.connector_factory {
+                Some(factory) => factory(&host).map(ProxyConnector::into_inner),
+                None if !proxy::is_no_proxy(&host) => proxy::create_proxy_connector(),
+                None => None,
+            };
 
-            let channel = if !proxy::is_no_proxy(&host) {
-                if let Some(proxy_connector) = proxy::create_proxy_connector() {
-                    endpoint.connect_with_connector_lazy(proxy_connector)
-                } else {
-                    endpoint.connect_lazy()
-                }
-            } else {
-                endpoint.connect_lazy()
+            let channel = match proxy_connector {
+                Some(pc) => endpoint.connect_with_connector_lazy(pc),
+                None => endpoint.connect_lazy(),
             };
 
             let client = ZerobusClient::new(channel)

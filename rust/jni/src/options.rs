@@ -4,6 +4,7 @@
 //! objects to Rust StreamConfigurationOptions structs.
 
 use crate::callbacks::JavaAckCallback;
+use arrow_ipc::CompressionType;
 use databricks_zerobus_ingest_sdk::databricks::zerobus::RecordType;
 use databricks_zerobus_ingest_sdk::{
     AckCallback, ArrowStreamConfigurationOptions, StreamConfigurationOptions,
@@ -157,6 +158,25 @@ pub fn extract_arrow_stream_options(
         .call_method(options, "connectionTimeoutMs", "()J", &[])?
         .j()? as u64;
 
+    // Extract IPC compression type from the Java enum via name().
+    let compression_enum = env
+        .call_method(
+            options,
+            "ipcCompression",
+            "()Lcom/databricks/zerobus/IPCCompressionType;",
+            &[],
+        )?
+        .l()?;
+    let compression_jstring = env
+        .call_method(&compression_enum, "name", "()Ljava/lang/String;", &[])?
+        .l()?;
+    let compression_name: String = env.get_string((&compression_jstring).into())?.into();
+    let ipc_compression = match compression_name.as_str() {
+        "LZ4_FRAME" => Some(CompressionType::LZ4_FRAME),
+        "ZSTD" => Some(CompressionType::ZSTD),
+        _ => None, // "NONE" or any unknown value
+    };
+
     Ok(ArrowStreamConfigurationOptions {
         max_inflight_batches,
         recovery,
@@ -166,7 +186,7 @@ pub fn extract_arrow_stream_options(
         server_lack_of_ack_timeout_ms,
         flush_timeout_ms,
         connection_timeout_ms,
-        ipc_compression: None, // Default, could be extended later
+        ipc_compression,
     })
 }
 

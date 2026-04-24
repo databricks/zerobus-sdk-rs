@@ -1,6 +1,6 @@
 {
   "name": "@databricks/zerobus-ingest-sdk",
-  "version": "1.0.0",
+  "version": "1.0.2",
   "description": "TypeScript/Node.js SDK for streaming data ingestion into Databricks Delta tables using Zerobus",
   "main": "index.js",
   "types": "index.d.ts",
@@ -17,19 +17,19 @@
     "type": "git",
     "url": "https://github.com/databricks/zerobus-sdk"
   },
-  "license": "Databricks License",
+  "license": "Apache-2.0",
   "files": [
     "index.js",
     "index.d.ts",
     "README.md",
     "LICENSE",
+    "NOTICE",
     "src/",
     "utils/",
     "schemas/",
     "Cargo.toml",
     "Cargo.lock",
-    "build.rs",
-    "*.node"
+    "build.rs"
   ],
   "napi": {
     "name": "zerobus-ingest-sdk",
@@ -54,7 +54,6 @@
     "build:debug": "napi build --platform",
     "build:debug:arrow": "napi build --platform --features arrow-flight",
     "build:proto": "mkdir -p examples/generated && pbjs -t static-module -w commonjs -o examples/generated/air_quality.js schemas/air_quality.proto && pbts -o examples/generated/air_quality.d.ts examples/generated/air_quality.js && protoc --descriptor_set_out=schemas/air_quality_descriptor.pb --include_imports schemas/air_quality.proto",
-    "prepublishOnly": "napi prepublish -t npm",
     "test": "tsx --test test/unit.test.ts test/integration.test.ts",
     "test:unit": "tsx --test test/unit.test.ts",
     "test:integration": "tsx --test test/integration.test.ts",
@@ -66,6 +65,11 @@
     "example:proto:batch": "tsx examples/proto/batch.ts",
     "example:arrow:single": "tsx examples/arrow/single.ts",
     "example:arrow:batch": "tsx examples/arrow/batch.ts"
+  },
+  "optionalDependencies": {
+    "@databricks/zerobus-ingest-sdk-linux-x64-gnu": "1.0.2",
+    "@databricks/zerobus-ingest-sdk-linux-arm64-gnu": "1.0.2",
+    "@databricks/zerobus-ingest-sdk-win32-x64-msvc": "1.0.2"
   },
   "peerDependencies": {
     "protobufjs": "^7.0.0",
@@ -91,12 +95,5 @@
   },
   "overrides": {
     "glob": "^10.0.0"
-  },
-  "optionalDependencies": {
-    "@databricks/zerobus-ingest-sdk-linux-x64-gnu": "1.0.0",
-    "@databricks/zerobus-ingest-sdk-linux-arm64-gnu": "1.0.0",
-    "@databricks/zerobus-ingest-sdk-win32-x64-msvc": "1.0.0",
-    "@databricks/zerobus-ingest-sdk-darwin-x64": "1.0.0",
-    "@databricks/zerobus-ingest-sdk-darwin-arm64": "1.0.0"
   }
 }

@@ -39,6 +39,7 @@ pub enum MockResponse {
         delay_ms: u64,
     },
     /// Error response
+    #[allow(dead_code)]
     Error { status: Status, delay_ms: u64 },
 }
 
@@ -77,11 +78,13 @@ impl MockZerobusServer {
     }
 
     /// Get the maximum offset sent by clients
+    #[allow(dead_code)]
     pub async fn get_max_offset_sent(&self) -> i64 {
         *self.max_offset_sent.lock().await
     }
 
     /// Get the number of writes received
+    #[allow(dead_code)]
     pub async fn get_write_count(&self) -> u64 {
         *self.write_count.lock().await
     }

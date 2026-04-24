@@ -1,302 +1,16 @@
+use std::borrow::Cow;
+use std::collections::HashMap;
 use std::fs::File;
 use std::io::Write;
 use std::path::PathBuf;
 
 use anyhow::{Context, Result, anyhow};
-use regex::Regex;
+use databricks_zerobus_ingest_sdk::schema::{UcColumn, descriptor_from_uc_columns};
+use prost_types::field_descriptor_proto::{Label, Type};
+use prost_types::{DescriptorProto, FieldDescriptorProto};
 use reqwest::header::{AUTHORIZATION, CONTENT_TYPE, HeaderMap, HeaderValue};
 use serde::Deserialize;
 use urlencoding::encode;
-
-fn to_pascal_case(s: &str) -> String {
-    let mut result = String::new();
-
-    for word in s.split('_') {
-        if word.is_empty() {
-            continue;
-        }
-
-        let mut chars = word.chars();
-        if let Some(first) = chars.next() {
-            result.push_str(&first.to_uppercase().to_string());
-            result.push_str(chars.as_str());
-        }
-    }
-
-    result
-}
-
-fn get_proto_field_info(
-    field_name: &str,
-    column_type: &str,
-    nullable: bool,
-    struct_counter: &mut usize,
-    level: usize,
-) -> Result<(&'static str, String, Option<String>)> {
-    if level > 100 {
-        return Err(anyhow!("Nesting level exceeds maximum depth of 100"));
-    }
-    let col_type = column_type.trim().to_uppercase();
-
-    // Base scalar types
-    let proto_type = match col_type.as_str() {
-        "TINYINT" | "BYTE" => Some("int32"),
-        "SMALLINT" | "SHORT" => Some("int32"),
-        "INT" => Some("int32"),
-        "BIGINT" | "LONG" => Some("int64"),
-        "FLOAT" => Some("float"),
-        "DOUBLE" => Some("double"),
-        "STRING" => Some("string"),
-        "BOOLEAN" => Some("bool"),
-        "BINARY" => Some("bytes"),
-        "DATE" => Some("int32"),
-        "TIMESTAMP" => Some("int64"),
-        "TIMESTAMP_NTZ" => Some("int64"),
-        "VARIANT" => Some("string"),
-        _ => None,
-    };
-
-    if let Some(p) = proto_type {
-        return Ok((
-            if nullable { "optional" } else { "required" },
-            p.to_string(),
-            None,
-        ));
-    }
-
-    // Handle arrays
-    if let Some(elem) = parse_array_type(column_type) {
-        if parse_array_type(&elem).is_some() {
-            return Err(anyhow!("Direct nested arrays are not supported: {}", elem));
-        }
-
-        let (_, elem_proto_type, nested_def) =
-            get_proto_field_info(field_name, &elem, false, struct_counter, level + 1)?;
-        return Ok(("repeated", elem_proto_type, nested_def));
-    }
-
-    // Handle maps
-    if let Some((key_type, value_type)) = parse_map_type(column_type) {
-        // Protobuf map keys must be integral or string types.
-        let (_, key_proto_type, key_nested_def) =
-            get_proto_field_info(field_name, &key_type, false, struct_counter, level + 1)?;
-        if key_nested_def.is_some()
-            || !matches!(
-                key_proto_type.as_str(),
-                "int32"
-                    | "int64"
-                    | "uint32"
-                    | "uint64"
-                    | "sint32"
-                    | "sint64"
-                    | "fixed32"
-                    | "fixed64"
-                    | "sfixed32"
-                    | "sfixed64"
-                    | "bool"
-                    | "string"
-            )
-        {
-            return Err(anyhow!(
-                "Unsupported map key type for Protobuf: {}",
-                key_type
-            ));
-        }
-
-        // Protobuf map values cannot be other maps.
-        if parse_map_type(&value_type).is_some() {
-            return Err(anyhow!(
-                "Protobuf does not support nested maps. Found in: {}",
-                column_type
-            ));
-        }
-
-        let (_, value_proto_type, value_nested_def) =
-            get_proto_field_info(field_name, &value_type, false, struct_counter, level + 1)?;
-
-        let map_type = format!("map<{}, {}>", key_proto_type, value_proto_type);
-
-        // Map fields cannot be repeated, and are not marked optional/required.
-        return Ok(("", map_type, value_nested_def));
-    }
-
-    // Handle structs
-    if let Some(fields) = parse_struct_type(column_type) {
-        *struct_counter += 1;
-        let base_name = to_pascal_case(field_name);
-        let struct_name = if base_name.is_empty() {
-            format!("Struct{}", *struct_counter)
-        } else {
-            base_name
-        };
-
-        let indent = "\t".repeat(level);
-        let inner_indent = "\t".repeat(level + 1);
-
-        let mut struct_def = format!("{}message {} {{\n", indent, struct_name);
-        for (i, (fname, ftype)) in fields.into_iter().enumerate() {
-            // Struct fields are always optional to avoid issues with required fields.
-            let (modifier, field_type, nested_def) =
-                get_proto_field_info(&fname, &ftype, true, struct_counter, level + 1)?;
-
-            if let Some(def) = nested_def {
-                struct_def.push_str(&def);
-                struct_def.push('\n');
-            }
-
-            let cleaned_name = validate_field_name(&fname)?;
-            struct_def.push_str(&format!(
-                "{}{} {} {} = {};\n",
-                inner_indent,
-                modifier,
-                field_type,
-                cleaned_name,
-                i + 1
-            ));
-        }
-        struct_def.push_str(&format!("{}}}", indent));
-
-        return Ok((
-            if nullable { "optional" } else { "required" },
-            struct_name,
-            Some(struct_def),
-        ));
-    }
-
-    Err(anyhow!("Unknown column type: {}", column_type))
-}
-
-/// Validates field names for Protobuf compatibility.
-fn validate_field_name(name: &str) -> Result<&str> {
-    const RESERVED: &[&str] = &[
-        "syntax", "import", "option", "package", "message", "enum", "service", "rpc", "returns",
-        "reserved", "to", "max", "double", "float", "int32", "int64", "uint32", "uint64", "sint32",
-        "sint64", "fixed32", "fixed64", "sfixed32", "sfixed64", "bool", "string", "bytes",
-    ];
-
-    if name.chars().any(|c| !c.is_alphanumeric() && c != '_') {
-        return Err(anyhow!(
-            "Invalid Protobuf field name '{}'. Contains non-alphanumeric characters (besides underscore).",
-            name
-        ));
-    }
-
-    if name.chars().next().is_some_and(|c| c.is_ascii_digit()) {
-        return Err(anyhow!(
-            "Invalid Protobuf field name '{}'. Cannot start with a digit.",
-            name
-        ));
-    }
-
-    if RESERVED.contains(&name) {
-        return Err(anyhow!(
-            "Invalid Protobuf field name '{}'. It is a reserved keyword.",
-            name
-        ));
-    }
-
-    Ok(name)
-}
-
-/// Parses the key and value types from a "MAP<...>" string.
-fn parse_map_type(type_str: &str) -> Option<(String, String)> {
-    let upper_type = type_str.trim().to_uppercase();
-    if !upper_type.starts_with("MAP<") || !upper_type.ends_with('>') {
-        return None;
-    }
-
-    let inner = &type_str[4..type_str.len() - 1];
-
-    let mut depth = 0;
-    let mut split_index = 0;
-
-    for (i, c) in inner.char_indices() {
-        match c {
-            '<' => depth += 1,
-            '>' => depth -= 1,
-            ',' if depth == 0 => {
-                split_index = i;
-                break;
-            }
-            _ => {}
-        }
-    }
-
-    if split_index == 0 {
-        return None;
-    }
-
-    let key_type = inner[..split_index].trim().to_string();
-    let value_type = inner[split_index + 1..].trim().to_string();
-
-    if key_type.is_empty() || value_type.is_empty() {
-        None
-    } else {
-        Some((key_type, value_type))
-    }
-}
-
-/// Parses the element type from an "ARRAY<...>" string, handling nested complex types.
-fn parse_array_type(type_str: &str) -> Option<String> {
-    let upper_type = type_str.trim().to_uppercase();
-    if !upper_type.starts_with("ARRAY<") || !upper_type.ends_with('>') {
-        return None;
-    }
-
-    let start_index = type_str.find('<')? + 1;
-    let end_index = type_str.rfind('>')?;
-
-    if start_index >= end_index {
-        return None;
-    }
-
-    Some(type_str[start_index..end_index].trim().to_string())
-}
-
-/// Parses a struct type string into a vector of field name and type pairs.
-fn parse_struct_type(type_str: &str) -> Option<Vec<(String, String)>> {
-    static STRUCT_REGEX: once_cell::sync::Lazy<Regex> =
-        once_cell::sync::Lazy::new(|| Regex::new(r"(?i)^STRUCT<\s*(.+)\s*>$").unwrap());
-
-    let inner = STRUCT_REGEX.captures(type_str)?.get(1)?.as_str();
-
-    let mut fields = Vec::new();
-    let mut depth = 0;
-    let mut current = String::new();
-    for c in inner.chars() {
-        match c {
-            '<' => {
-                depth += 1;
-                current.push(c);
-            }
-            '>' => {
-                depth -= 1;
-                current.push(c);
-            }
-            ',' if depth == 0 => {
-                fields.push(current.trim().to_string());
-                current.clear();
-            }
-            _ => current.push(c),
-        }
-    }
-    if !current.trim().is_empty() {
-        fields.push(current.trim().to_string());
-    }
-
-    fields
-        .into_iter()
-        .map(|f| {
-            let mut parts = f.splitn(2, ':');
-            match (parts.next(), parts.next()) {
-                (Some(name), Some(type_str)) => {
-                    Some((name.trim().to_string(), type_str.trim().to_string()))
-                }
-                _ => None,
-            }
-        })
-        .collect::<Option<Vec<_>>>()
-}
 
 pub fn clean_filename(name: &str) -> String {
     let mut cleaned = name
@@ -322,16 +36,12 @@ pub fn clean_filename(name: &str) -> String {
     }
 }
 
+/// UC `GET /api/2.1/unity-catalog/tables/{full_name}` response shape. Only
+/// the `columns` array is needed here; the SDK's `UcColumn` covers every
+/// per-column field we care about (`type_json`, `position`, …).
 #[derive(Debug, Deserialize)]
 pub struct TableInfo {
-    pub columns: Vec<Column>,
-}
-
-#[derive(Debug, Deserialize)]
-pub struct Column {
-    pub name: String,
-    pub type_text: String,
-    pub nullable: bool,
+    pub columns: Vec<UcColumn>,
 }
 
 pub async fn fetch_table_info(endpoint: &str, token: &str, table: &str) -> Result<TableInfo> {
@@ -363,64 +73,160 @@ pub async fn fetch_table_info(endpoint: &str, token: &str, table: &str) -> Resul
 
 pub fn generate_proto_file(
     message_name: &str,
-    columns: &[Column],
+    columns: &[UcColumn],
     output_path: &PathBuf,
     output_dir: &PathBuf,
 ) -> Result<()> {
     std::fs::create_dir_all(output_dir)?;
-    let mut out = String::new();
-    out.push_str("syntax = \"proto2\";\n\n");
 
-    if let Some(name) = output_path.file_stem().and_then(|s| s.to_str()) {
-        out.push_str(&format!("package {};\n\n", name));
-    }
+    let package = output_path
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .map(|s| s.to_string());
 
-    let mut struct_counter = 0;
-    let mut fields_and_definitions = String::new();
+    // Delegate schema → descriptor conversion to the SDK, then render the
+    // resulting `DescriptorProto` back to proto2 source. The `table_` prefix
+    // preserves the existing file-naming convention.
+    let top_name = format!("table_{}", message_name);
+    let descriptor = descriptor_from_uc_columns(columns, &top_name)?;
 
-    let mut field_number: usize = 1;
-    for col in columns.iter() {
-        // Skip protobuf reserved field numbers 19000-19999.
-        if field_number == 19000 {
-            field_number = 20000;
-        }
-
-        let (modifier, proto_type, nested_def) = get_proto_field_info(
-            &col.name,
-            &col.type_text,
-            col.nullable,
-            &mut struct_counter,
-            1,
-        )?;
-
-        if let Some(def) = nested_def {
-            fields_and_definitions.push_str(&def);
-            fields_and_definitions.push_str("\n\n");
-        }
-
-        let field_name = validate_field_name(&col.name)?;
-        if modifier.is_empty() {
-            fields_and_definitions.push_str(&format!(
-                "\t{} {} = {};\n",
-                proto_type, field_name, field_number
-            ));
-        } else {
-            fields_and_definitions.push_str(&format!(
-                "\t{} {} {} = {};\n",
-                modifier, proto_type, field_name, field_number
-            ));
-        }
-        field_number += 1;
-    }
-
-    // Constructing the main message.
-    out.push_str(&format!("message table_{} {{\n", message_name));
-    out.push_str(&fields_and_definitions);
-    out.push_str("}\n");
+    let text = render_proto2(&descriptor, package.as_deref());
 
     let mut file = File::create(output_path)?;
-    file.write_all(out.as_bytes())?;
+    file.write_all(text.as_bytes())?;
     Ok(())
+}
+
+fn render_proto2(desc: &DescriptorProto, package: Option<&str>) -> String {
+    let mut out = String::new();
+    out.push_str("syntax = \"proto2\";\n\n");
+    if let Some(p) = package {
+        out.push_str(&format!("package {};\n\n", p));
+    }
+    write_message(&mut out, desc, 0);
+    out
+}
+
+fn write_message(out: &mut String, desc: &DescriptorProto, indent: usize) {
+    let tab = "\t".repeat(indent);
+    let inner_tab = "\t".repeat(indent + 1);
+    let map_entries = collect_map_entries(desc);
+
+    out.push_str(&format!("{}message {} {{\n", tab, desc.name()));
+    for f in &desc.field {
+        write_field(out, f, &map_entries, &inner_tab);
+    }
+    for nested in &desc.nested_type {
+        if is_map_entry(nested) {
+            continue; // rendered inline as `map<k, v>` at the field site
+        }
+        write_message(out, nested, indent + 1);
+    }
+    out.push_str(&format!("{}}}\n", tab));
+}
+
+fn write_field(
+    out: &mut String,
+    f: &FieldDescriptorProto,
+    map_entries: &HashMap<String, MapEntry>,
+    indent: &str,
+) {
+    if f.label() == Label::Repeated
+        && f.r#type() == Type::Message
+        && let Some(type_name) = f.type_name.as_deref()
+        && let Some(entry) = map_entries.get(short_name(type_name))
+    {
+        out.push_str(&format!(
+            "{}map<{}, {}> {} = {};\n",
+            indent,
+            entry.key,
+            entry.value,
+            f.name(),
+            f.number()
+        ));
+        return;
+    }
+
+    let label = match f.label() {
+        Label::Optional => "optional",
+        Label::Required => "required",
+        Label::Repeated => "repeated",
+    };
+    let type_str = type_to_str(f.r#type(), f.type_name.as_deref());
+    out.push_str(&format!(
+        "{}{} {} {} = {};\n",
+        indent,
+        label,
+        type_str,
+        f.name(),
+        f.number()
+    ));
+}
+
+struct MapEntry {
+    key: Cow<'static, str>,
+    value: Cow<'static, str>,
+}
+
+fn collect_map_entries(desc: &DescriptorProto) -> HashMap<String, MapEntry> {
+    let mut out = HashMap::new();
+    for n in &desc.nested_type {
+        if !is_map_entry(n) {
+            continue;
+        }
+        let key = n
+            .field
+            .iter()
+            .find(|f| f.name() == "key")
+            .map(|f| type_to_str(f.r#type(), f.type_name.as_deref()));
+        let value = n
+            .field
+            .iter()
+            .find(|f| f.name() == "value")
+            .map(|f| type_to_str(f.r#type(), f.type_name.as_deref()));
+        if let (Some(key), Some(value)) = (key, value) {
+            out.insert(n.name().to_string(), MapEntry { key, value });
+        }
+    }
+    out
+}
+
+fn is_map_entry(desc: &DescriptorProto) -> bool {
+    desc.options
+        .as_ref()
+        .and_then(|o| o.map_entry)
+        .unwrap_or(false)
+}
+
+fn short_name(type_name: &str) -> &str {
+    type_name
+        .rsplit('.')
+        .next()
+        .unwrap_or(type_name)
+        .trim_start_matches('.')
+}
+
+fn type_to_str(t: Type, type_name: Option<&str>) -> Cow<'static, str> {
+    match t {
+        Type::Double => Cow::Borrowed("double"),
+        Type::Float => Cow::Borrowed("float"),
+        Type::Int64 => Cow::Borrowed("int64"),
+        Type::Uint64 => Cow::Borrowed("uint64"),
+        Type::Int32 => Cow::Borrowed("int32"),
+        Type::Fixed64 => Cow::Borrowed("fixed64"),
+        Type::Fixed32 => Cow::Borrowed("fixed32"),
+        Type::Bool => Cow::Borrowed("bool"),
+        Type::String => Cow::Borrowed("string"),
+        Type::Bytes => Cow::Borrowed("bytes"),
+        Type::Uint32 => Cow::Borrowed("uint32"),
+        Type::Sfixed32 => Cow::Borrowed("sfixed32"),
+        Type::Sfixed64 => Cow::Borrowed("sfixed64"),
+        Type::Sint32 => Cow::Borrowed("sint32"),
+        Type::Sint64 => Cow::Borrowed("sint64"),
+        Type::Message | Type::Enum | Type::Group => {
+            Cow::Owned(short_name(type_name.unwrap_or("")).to_string())
+        }
+    }
 }
 
 pub fn generate_rust_and_descriptor(
@@ -459,51 +265,74 @@ mod tests {
 
     use super::*;
 
+    fn simple(name: &str, type_name: &str, nullable: bool, position: i32) -> UcColumn {
+        UcColumn {
+            name: name.into(),
+            type_name: type_name.into(),
+            type_text: type_name.to_lowercase(),
+            type_json: String::new(),
+            nullable,
+            position,
+        }
+    }
+
+    fn complex(
+        name: &str,
+        type_name: &str,
+        type_json: &str,
+        nullable: bool,
+        position: i32,
+    ) -> UcColumn {
+        UcColumn {
+            name: name.into(),
+            type_name: type_name.into(),
+            type_text: String::new(),
+            type_json: type_json.into(),
+            nullable,
+            position,
+        }
+    }
+
     #[test]
     fn test_generate_proto_file_happy_path() {
-        let table_info = TableInfo {
-            columns: vec![
-                Column {
-                    name: "id".to_string(),
-                    type_text: "INT".to_string(),
-                    nullable: false,
-                },
-                Column {
-                    name: "name".to_string(),
-                    type_text: "STRING".to_string(),
-                    nullable: true,
-                },
-                Column {
-                    name: "data".to_string(),
-                    type_text: "BINARY".to_string(),
-                    nullable: false,
-                },
-                Column {
-                    name: "props".to_string(),
-                    type_text: "MAP<STRING, STRING>".to_string(),
-                    nullable: false,
-                },
-                Column {
-                    name: "scores".to_string(),
-                    type_text: "ARRAY<DOUBLE>".to_string(),
-                    nullable: false,
-                },
-                Column {
-                    name: "address".to_string(),
-                    type_text: "STRUCT<street:STRING, city:STRING>".to_string(),
-                    nullable: true,
-                },
-            ],
-        };
+        let columns = vec![
+            simple("id", "INT", false, 0),
+            simple("name", "STRING", true, 1),
+            simple("data", "BINARY", false, 2),
+            complex(
+                "props",
+                "MAP",
+                r#"{"type":"map","keyType":"string","valueType":"string","valueContainsNull":true}"#,
+                false,
+                3,
+            ),
+            complex(
+                "scores",
+                "ARRAY",
+                r#"{"type":"array","elementType":"double","containsNull":true}"#,
+                false,
+                4,
+            ),
+            complex(
+                "address",
+                "STRUCT",
+                r#"{"type":"struct","fields":[
+                    {"name":"street","type":"string","nullable":true,"metadata":{}},
+                    {"name":"city","type":"string","nullable":true,"metadata":{}}
+                ]}"#,
+                true,
+                5,
+            ),
+        ];
 
         let dir = tempdir().unwrap();
         let proto_path = dir.path().join("test.proto");
         let output_dir = dir.path().to_path_buf();
 
-        generate_proto_file("TestMessage", &table_info.columns, &proto_path, &output_dir).unwrap();
+        generate_proto_file("TestMessage", &columns, &proto_path, &output_dir).unwrap();
 
         let content = fs::read_to_string(proto_path.clone()).unwrap();
-        let expected = "syntax = \"proto2\";\n\npackage test;\n\nmessage table_TestMessage {\n\trequired int32 id = 1;\n\toptional string name = 2;\n\trequired bytes data = 3;\n\tmap<string, string> props = 4;\n\trepeated double scores = 5;\n\tmessage Address {\n\t\toptional string street = 1;\n\t\toptional string city = 2;\n\t}\n\n\toptional Address address = 6;\n}\n";
+        let expected = "syntax = \"proto2\";\n\npackage test;\n\nmessage table_TestMessage {\n\trequired int32 id = 1;\n\toptional string name = 2;\n\trequired bytes data = 3;\n\tmap<string, string> props = 4;\n\trepeated double scores = 5;\n\toptional Address address = 6;\n\tmessage Address {\n\t\toptional string street = 1;\n\t\toptional string city = 2;\n\t}\n}\n";
         assert_eq!(content, expected);
 
         generate_rust_and_descriptor(proto_path.to_str().unwrap(), "TestMessage", &output_dir)
@@ -512,28 +341,28 @@ mod tests {
 
     #[test]
     fn test_nested_structs() {
-        let table_info = TableInfo {
-            columns: vec![Column {
-                name: "outer".to_string(),
-                type_text: "STRUCT<id:INT, inner:STRUCT<value:STRING>>".to_string(),
-                nullable: false,
-            }],
-        };
+        let type_json = r#"{
+            "type":"struct",
+            "fields":[
+                {"name":"id","type":"integer","nullable":true,"metadata":{}},
+                {"name":"inner","type":{
+                    "type":"struct",
+                    "fields":[
+                        {"name":"value","type":"string","nullable":true,"metadata":{}}
+                    ]
+                },"nullable":true,"metadata":{}}
+            ]
+        }"#;
+        let columns = vec![complex("outer", "STRUCT", type_json, false, 0)];
 
         let dir = tempdir().unwrap();
         let proto_path = dir.path().join("nested.proto");
         let output_dir = dir.path().to_path_buf();
 
-        generate_proto_file(
-            "NestedMessage",
-            &table_info.columns,
-            &proto_path,
-            &output_dir,
-        )
-        .unwrap();
+        generate_proto_file("NestedMessage", &columns, &proto_path, &output_dir).unwrap();
 
         let content = fs::read_to_string(proto_path.clone()).unwrap();
-        let expected = "syntax = \"proto2\";\n\npackage nested;\n\nmessage table_NestedMessage {\n\tmessage Outer {\n\t\toptional int32 id = 1;\n\t\tmessage Inner {\n\t\t\toptional string value = 1;\n\t\t}\n\t\toptional Inner inner = 2;\n\t}\n\n\trequired Outer outer = 1;\n}\n";
+        let expected = "syntax = \"proto2\";\n\npackage nested;\n\nmessage table_NestedMessage {\n\trequired Outer outer = 1;\n\tmessage Outer {\n\t\toptional int32 id = 1;\n\t\toptional OuterInner inner = 2;\n\t\tmessage OuterInner {\n\t\t\toptional string value = 1;\n\t\t}\n\t}\n}\n";
         assert_eq!(content, expected);
 
         generate_rust_and_descriptor(proto_path.to_str().unwrap(), "NestedMessage", &output_dir)
@@ -542,237 +371,172 @@ mod tests {
 
     #[test]
     fn test_unsupported_map_key() {
-        let table_info = TableInfo {
-            columns: vec![Column {
-                name: "invalid_map".to_string(),
-                type_text: "MAP<STRUCT<a:INT>, STRING>".to_string(),
-                nullable: false,
-            }],
-        };
+        let type_json = r#"{
+            "type":"map",
+            "keyType":{"type":"struct","fields":[{"name":"a","type":"integer","nullable":false,"metadata":{}}]},
+            "valueType":"string",
+            "valueContainsNull":true
+        }"#;
+        let columns = vec![complex("invalid_map", "MAP", type_json, false, 0)];
 
         let dir = tempdir().unwrap();
         let proto_path = dir.path().join("test.proto");
         let output_dir = dir.path().to_path_buf();
 
-        let result =
-            generate_proto_file("TestMessage", &table_info.columns, &proto_path, &output_dir);
+        let result = generate_proto_file("TestMessage", &columns, &proto_path, &output_dir);
         assert!(result.is_err());
-        assert_eq!(
-            result.unwrap_err().to_string(),
-            "Unsupported map key type for Protobuf: STRUCT<a:INT>"
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("map keys must be primitive types")
         );
     }
 
     #[test]
     fn test_nested_map() {
-        let table_info = TableInfo {
-            columns: vec![Column {
-                name: "nested_map".to_string(),
-                type_text: "MAP<STRING, MAP<STRING, INT>>".to_string(),
-                nullable: false,
-            }],
-        };
+        let type_json = r#"{
+            "type":"map",
+            "keyType":"string",
+            "valueType":{"type":"map","keyType":"string","valueType":"integer","valueContainsNull":true},
+            "valueContainsNull":true
+        }"#;
+        let columns = vec![complex("nested_map", "MAP", type_json, false, 0)];
 
         let dir = tempdir().unwrap();
         let proto_path = dir.path().join("test.proto");
         let output_dir = dir.path().to_path_buf();
 
-        let result =
-            generate_proto_file("TestMessage", &table_info.columns, &proto_path, &output_dir);
+        let result = generate_proto_file("TestMessage", &columns, &proto_path, &output_dir);
         assert!(result.is_err());
-        assert_eq!(
-            result.unwrap_err().to_string(),
-            "Protobuf does not support nested maps. Found in: MAP<STRING, MAP<STRING, INT>>"
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("maps with complex value types not supported")
         );
     }
 
     #[test]
     fn test_nested_array() {
-        let table_info = TableInfo {
-            columns: vec![Column {
-                name: "nested_array".to_string(),
-                type_text: "ARRAY<ARRAY<INT>>".to_string(),
-                nullable: false,
-            }],
-        };
+        let type_json = r#"{
+            "type":"array",
+            "elementType":{"type":"array","elementType":"integer","containsNull":true},
+            "containsNull":true
+        }"#;
+        let columns = vec![complex("nested_array", "ARRAY", type_json, false, 0)];
 
         let dir = tempdir().unwrap();
         let proto_path = dir.path().join("test.proto");
         let output_dir = dir.path().to_path_buf();
 
-        let result =
-            generate_proto_file("TestMessage", &table_info.columns, &proto_path, &output_dir);
+        let result = generate_proto_file("TestMessage", &columns, &proto_path, &output_dir);
         assert!(result.is_err());
-        assert_eq!(
-            result.unwrap_err().to_string(),
-            "Direct nested arrays are not supported: ARRAY<INT>"
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("nested arrays not supported")
         );
     }
 
     #[test]
     fn test_map_field_proto2() {
-        let table_info = TableInfo {
-            columns: vec![Column {
-                name: "attributes".to_string(),
-                type_text: "MAP<STRING, INT>".to_string(),
-                nullable: false,
-            }],
-        };
+        let type_json =
+            r#"{"type":"map","keyType":"string","valueType":"integer","valueContainsNull":true}"#;
+        let columns = vec![complex("attributes", "MAP", type_json, false, 0)];
 
         let dir = tempdir().unwrap();
         let proto_path = dir.path().join("map_test.proto");
         let output_dir = dir.path().to_path_buf();
 
-        generate_proto_file("MapMessage", &table_info.columns, &proto_path, &output_dir).unwrap();
+        generate_proto_file("MapMessage", &columns, &proto_path, &output_dir).unwrap();
 
         let content = fs::read_to_string(proto_path.clone()).unwrap();
         let expected = "syntax = \"proto2\";\n\npackage map_test;\n\nmessage table_MapMessage {\n\tmap<string, int32> attributes = 1;\n}\n";
         assert_eq!(content, expected);
 
-        // Also verify that the generated proto is valid and can be compiled.
         generate_rust_and_descriptor(proto_path.to_str().unwrap(), "MapMessage", &output_dir)
             .unwrap();
     }
 
     #[test]
     fn test_invalid_field_name() {
-        let table_info = TableInfo {
-            columns: vec![Column {
-                name: "invalid-name".to_string(),
-                type_text: "STRING".to_string(),
-                nullable: false,
-            }],
-        };
+        let columns = vec![simple("invalid-name", "STRING", false, 0)];
 
         let dir = tempdir().unwrap();
         let proto_path = dir.path().join("test.proto");
         let output_dir = dir.path().to_path_buf();
 
-        let result =
-            generate_proto_file("TestMessage", &table_info.columns, &proto_path, &output_dir);
+        let result = generate_proto_file("TestMessage", &columns, &proto_path, &output_dir);
         assert!(result.is_err());
         assert!(
             result
                 .unwrap_err()
                 .to_string()
-                .contains("Invalid Protobuf field name 'invalid-name'")
+                .contains("invalid field name 'invalid-name'")
         );
     }
 
     #[test]
     fn test_reserved_field_name() {
-        let table_info = TableInfo {
-            columns: vec![Column {
-                name: "message".to_string(),
-                type_text: "STRING".to_string(),
-                nullable: false,
-            }],
-        };
+        let columns = vec![simple("message", "STRING", false, 0)];
 
         let dir = tempdir().unwrap();
         let proto_path = dir.path().join("test.proto");
         let output_dir = dir.path().to_path_buf();
 
-        let result =
-            generate_proto_file("TestMessage", &table_info.columns, &proto_path, &output_dir);
+        let result = generate_proto_file("TestMessage", &columns, &proto_path, &output_dir);
         assert!(result.is_err());
         assert!(
             result
                 .unwrap_err()
                 .to_string()
-                .contains("Invalid Protobuf field name 'message'. It is a reserved keyword.")
+                .contains("reserved proto keyword")
         );
     }
 
     #[test]
     fn test_digit_start_field_name() {
-        let table_info = TableInfo {
-            columns: vec![Column {
-                name: "1field".to_string(),
-                type_text: "STRING".to_string(),
-                nullable: false,
-            }],
-        };
+        let columns = vec![simple("1field", "STRING", false, 0)];
 
         let dir = tempdir().unwrap();
         let proto_path = dir.path().join("test.proto");
         let output_dir = dir.path().to_path_buf();
 
-        let result =
-            generate_proto_file("TestMessage", &table_info.columns, &proto_path, &output_dir);
+        let result = generate_proto_file("TestMessage", &columns, &proto_path, &output_dir);
         assert!(result.is_err());
         assert!(
             result
                 .unwrap_err()
                 .to_string()
-                .contains("Invalid Protobuf field name '1field'. Cannot start with a digit.")
+                .contains("cannot start with a digit")
         );
     }
 
     #[test]
     fn test_all_scalar_types() {
-        let table_info = TableInfo {
-            columns: vec![
-                Column {
-                    name: "tiny_value".to_string(),
-                    type_text: "TINYINT".to_string(),
-                    nullable: false,
-                },
-                Column {
-                    name: "byte_value".to_string(),
-                    type_text: "BYTE".to_string(),
-                    nullable: true,
-                },
-                Column {
-                    name: "small_value".to_string(),
-                    type_text: "SMALLINT".to_string(),
-                    nullable: false,
-                },
-                Column {
-                    name: "short_value".to_string(),
-                    type_text: "SHORT".to_string(),
-                    nullable: true,
-                },
-                Column {
-                    name: "timestamp_ntz".to_string(),
-                    type_text: "TIMESTAMP_NTZ".to_string(),
-                    nullable: false,
-                },
-                Column {
-                    name: "timestamp_tz".to_string(),
-                    type_text: "TIMESTAMP".to_string(),
-                    nullable: true,
-                },
-                Column {
-                    name: "variant_data".to_string(),
-                    type_text: "VARIANT".to_string(),
-                    nullable: true,
-                },
-                Column {
-                    name: "date_value".to_string(),
-                    type_text: "DATE".to_string(),
-                    nullable: false,
-                },
-            ],
-        };
+        let columns = vec![
+            simple("tiny_value", "TINYINT", false, 0),
+            simple("byte_value", "BYTE", true, 1),
+            simple("small_value", "SMALLINT", false, 2),
+            simple("short_value", "SHORT", true, 3),
+            simple("timestamp_ntz", "TIMESTAMP_NTZ", false, 4),
+            simple("timestamp_tz", "TIMESTAMP", true, 5),
+            simple("variant_data", "VARIANT", true, 6),
+            simple("date_value", "DATE", false, 7),
+        ];
 
         let dir = tempdir().unwrap();
         let proto_path = dir.path().join("types_test.proto");
         let output_dir = dir.path().to_path_buf();
 
-        generate_proto_file(
-            "TypesMessage",
-            &table_info.columns,
-            &proto_path,
-            &output_dir,
-        )
-        .unwrap();
+        generate_proto_file("TypesMessage", &columns, &proto_path, &output_dir).unwrap();
 
         let content = fs::read_to_string(proto_path.clone()).unwrap();
         let expected = "syntax = \"proto2\";\n\npackage types_test;\n\nmessage table_TypesMessage {\n\trequired int32 tiny_value = 1;\n\toptional int32 byte_value = 2;\n\trequired int32 small_value = 3;\n\toptional int32 short_value = 4;\n\trequired int64 timestamp_ntz = 5;\n\toptional int64 timestamp_tz = 6;\n\toptional string variant_data = 7;\n\trequired int32 date_value = 8;\n}\n";
         assert_eq!(content, expected);
 
-        // Verify that the generated proto is valid and can be compiled.
         generate_rust_and_descriptor(proto_path.to_str().unwrap(), "TypesMessage", &output_dir)
             .unwrap();
     }

@@ -10,3 +10,4 @@ buildNumber.properties
 .mvn/timing.properties
 .mvn/wrapper/maven-wrapper.jar
 examples/proto/**/AirQualityProto.java
+src/main/resources/native/

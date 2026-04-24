@@ -1,5 +1,25 @@
 # Version changelog
 
+## Release v1.1.1
+
+Re-release of v1.1.0 with pre-built FFI libraries included. v1.1.0 is retracted due to missing native libraries.
+
+### Major Changes
+
+- **License: Migrated from the Databricks License to the Apache License 2.0**
+
+### New Features and Improvements
+
+**[Experimental] Arrow Flight Ingestion**: Added experimental Arrow Flight support for high-throughput Apache Arrow RecordBatch ingestion
+
+- New `CreateArrowStream` and `CreateArrowStreamWithHeadersProvider` methods on `ZerobusSdk`
+- New `ZerobusArrowStream` type with `IngestBatch`, `WaitForOffset`, `Flush`, `Close`, and `GetUnackedBatches` methods
+- Configurable IPC compression via `ArrowStreamConfigurationOptions.IpcCompression` (supports `LZ4Frame` and `Zstd`)
+
+## Release v1.1.0 (retracted)
+
+Retracted — broken release. Use v1.1.1 instead.
+
 ## Release v1.0.0.
 
 GA release of the Databricks Zerobus Ingest SDK for Go.

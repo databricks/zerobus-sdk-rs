@@ -1,10 +1,10 @@
 [package]
 name = "zerobus-jni"
-version = "1.0.1"
+version = "1.1.1"
 authors = ["Databricks"]
 edition = "2021"
 rust-version = "1.70"
-license-file = "../../LICENSE"
+license = "Apache-2.0"
 description = "JNI bindings for the Zerobus Rust SDK"
 repository = "https://github.com/databricks/zerobus-sdk"
 publish = false
@@ -14,7 +14,7 @@ crate-type = ["cdylib"]
 name = "zerobus_jni"
 
 [dependencies]
-databricks-zerobus-ingest-sdk = { version = "1.0.1", features = ["arrow-flight"] }
+databricks-zerobus-ingest-sdk = { path = "../sdk", version = "1.2.0", features = ["arrow-flight"] }
 jni = "0.21"
 tokio = { version = "1.42", features = ["rt-multi-thread", "sync"] }
 prost = "0.13"
@@ -29,3 +29,4 @@ arrow-ipc = { version = "56.2.0", features = ["lz4", "zstd"] }
 
 [features]
 default = []
+test-helpers = []

@@ -29,6 +29,7 @@ public class ArrowStreamConfigurationOptions {
   private long serverLackOfAckTimeoutMs = 60000;
   private long flushTimeoutMs = 300000;
   private long connectionTimeoutMs = 30000;
+  private IPCCompressionType ipcCompression = IPCCompressionType.NONE;
 
   private ArrowStreamConfigurationOptions() {}
 
@@ -40,7 +41,8 @@ public class ArrowStreamConfigurationOptions {
       int recoveryRetries,
       long serverLackOfAckTimeoutMs,
       long flushTimeoutMs,
-      long connectionTimeoutMs) {
+      long connectionTimeoutMs,
+      IPCCompressionType ipcCompression) {
     this.maxInflightBatches = maxInflightBatches;
     this.recovery = recovery;
     this.recoveryTimeoutMs = recoveryTimeoutMs;
@@ -49,6 +51,7 @@ public class ArrowStreamConfigurationOptions {
     this.serverLackOfAckTimeoutMs = serverLackOfAckTimeoutMs;
     this.flushTimeoutMs = flushTimeoutMs;
     this.connectionTimeoutMs = connectionTimeoutMs;
+    this.ipcCompression = ipcCompression;
   }
 
   /**
@@ -130,6 +133,18 @@ public class ArrowStreamConfigurationOptions {
   }
 
   /**
+   * Returns the IPC compression type for Arrow Flight payloads.
+   *
+   * <p>When set to a value other than {@link IPCCompressionType#NONE}, each Arrow record batch is
+   * compressed before transmission, reducing network bandwidth at the cost of CPU.
+   *
+   * @return the IPC compression type
+   */
+  public IPCCompressionType ipcCompression() {
+    return this.ipcCompression;
+  }
+
+  /**
    * Returns the default Arrow stream configuration options.
    *
    * <p>Default values:
@@ -143,6 +158,7 @@ public class ArrowStreamConfigurationOptions {
    *   <li>serverLackOfAckTimeoutMs: 60000
    *   <li>flushTimeoutMs: 300000
    *   <li>connectionTimeoutMs: 30000
+   *   <li>ipcCompression: {@link IPCCompressionType#NONE}
    * </ul>
    *
    * @return the default Arrow stream configuration options
@@ -177,6 +193,7 @@ public class ArrowStreamConfigurationOptions {
     private long serverLackOfAckTimeoutMs = defaults.serverLackOfAckTimeoutMs;
     private long flushTimeoutMs = defaults.flushTimeoutMs;
     private long connectionTimeoutMs = defaults.connectionTimeoutMs;
+    private IPCCompressionType ipcCompression = defaults.ipcCompression;
 
     private ArrowStreamConfigurationOptionsBuilder() {}
 
@@ -296,6 +313,26 @@ public class ArrowStreamConfigurationOptions {
     }
 
     /**
+     * Sets the IPC compression type for Arrow Flight payloads.
+     *
+     * <p>Compression reduces network bandwidth at the cost of CPU. Supported codecs:
+     *
+     * <ul>
+     *   <li>{@link IPCCompressionType#NONE} - No compression (default)
+     *   <li>{@link IPCCompressionType#LZ4_FRAME} - LZ4 frame compression
+     *   <li>{@link IPCCompressionType#ZSTD} - Zstandard compression
+     * </ul>
+     *
+     * @param ipcCompression the compression type to use
+     * @return this builder for method chaining
+     */
+    public ArrowStreamConfigurationOptionsBuilder setIpcCompression(
+        IPCCompressionType ipcCompression) {
+      this.ipcCompression = ipcCompression != null ? ipcCompression : IPCCompressionType.NONE;
+      return this;
+    }
+
+    /**
      * Builds a new ArrowStreamConfigurationOptions instance.
      *
      * @return a new ArrowStreamConfigurationOptions with the configured settings
@@ -309,7 +346,8 @@ public class ArrowStreamConfigurationOptions {
           this.recoveryRetries,
           this.serverLackOfAckTimeoutMs,
           this.flushTimeoutMs,
-          this.connectionTimeoutMs);
+          this.connectionTimeoutMs,
+          this.ipcCompression);
     }
   }
 }

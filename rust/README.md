@@ -1026,7 +1026,7 @@ cargo build -p zerobus-ffi --release
 # ffi/zerobus.h                        (C header file)
 ```
 
-Pre-built binaries for all platforms are available in [GitHub Releases](https://github.com/databricks/zerobus-sdk/releases) with tags `ffi-vX.X.X`.
+Pre-built binaries for all platforms are available in [GitHub Releases](https://github.com/databricks/zerobus-sdk/releases) with tags `ffi/vX.X.X`.
 
 ### JNI (`jni/`)
 
@@ -1042,7 +1042,7 @@ cargo build -p zerobus-jni --release
 # target/release/zerobus_jni.dll       (Windows)
 ```
 
-Pre-built binaries are available in [GitHub Releases](https://github.com/databricks/zerobus-sdk/releases) with tags `jni-vX.X.X`.
+Pre-built binaries are available in [GitHub Releases](https://github.com/databricks/zerobus-sdk/releases) with tags `jni/vX.X.X`.
 
 ## Building from Source
 
@@ -1089,7 +1089,7 @@ This is an open source project. We welcome contributions, feedback, and bug repo
 
 ## License
 
-This SDK is licensed under the Databricks License. See the [LICENSE](https://github.com/databricks/zerobus-sdk/blob/main/LICENSE) file for the full license text. The license is also available online at [https://www.databricks.com/legal/db-license](https://www.databricks.com/legal/db-license).
+This SDK is licensed under the Apache License 2.0. See [LICENSE](LICENSE) for the full text.
 
 ## Requirements
 

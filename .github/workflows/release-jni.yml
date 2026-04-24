@@ -1,50 +1,61 @@
-name: Release JNI
-run-name: "Release JNI v${{ inputs.version }}"
+name: Build JNI
+run-name: "Build JNI ${{ github.ref_name }}"
 
 on:
   workflow_dispatch:
-    inputs:
-      version:
-        description: 'Release version (e.g., 0.2.0)'
-        required: true
-        type: string
 
 jobs:
   build-jni:
     strategy:
+      fail-fast: false
       matrix:
         include:
           - os: linux-ubuntu-latest
+            runner: { group: databricks-protected-runner-group, labels: linux-ubuntu-latest }
             target: x86_64-unknown-linux-gnu
             artifact: libzerobus_jni.so
-            artifact_dir: linux-x86-64
+            native_dir: linux-x86_64
             cross: false
           - os: linux-ubuntu-latest
+            runner: { group: databricks-protected-runner-group, labels: linux-ubuntu-latest }
             target: aarch64-unknown-linux-gnu
             artifact: libzerobus_jni.so
-            artifact_dir: linux-aarch64
+            native_dir: linux-aarch64
             cross: true
           - os: windows-server-latest
+            runner: { group: databricks-protected-runner-group, labels: windows-server-latest }
             target: x86_64-pc-windows-msvc
             artifact: zerobus_jni.dll
-            artifact_dir: windows-x86-64
+            native_dir: windows-x86_64
             cross: false
 
-    runs-on:
-      group: databricks-protected-runner-group
-      labels: ${{ matrix.os }}
+    name: Build JNI - ${{ matrix.native_dir }}
+    runs-on: ${{ matrix.runner }}
+    permissions:
+      contents: read
+      id-token: write
 
     defaults:
       run:
         working-directory: rust
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+
+      - name: Get JFrog OIDC token
+        shell: bash
+        run: bash "$GITHUB_WORKSPACE/.github/scripts/jfrog-oidc-token.sh"
+
+      - name: Configure cargo for JFrog
+        shell: bash
+        run: bash "$GITHUB_WORKSPACE/.github/scripts/configure-cargo.sh"
 
       - name: Install protoc
-        uses: arduino/setup-protoc@v3
+        uses: arduino/setup-protoc@c65c819552d16ad3c9b72d9dfd5ba5237b9c906b # v3
+        with:
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Install cross-compilation toolchain
+      - name: Install cross-compilation toolchain (Linux ARM64)
         if: matrix.cross
         run: |
           sudo apt-get update -qq
@@ -54,77 +65,16 @@ jobs:
           echo 'linker = "aarch64-linux-gnu-gcc"' >> .cargo/config.toml
 
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
         with:
           targets: ${{ matrix.target }}
 
       - name: Build JNI library
         run: cargo build --release -p zerobus-jni --target ${{ matrix.target }}
 
-      - name: Create artifact directory
-        run: mkdir -p artifacts/${{ matrix.artifact_dir }}
-
-      - name: Copy artifact (Unix)
-        if: runner.os != 'Windows'
-        run: cp target/${{ matrix.target }}/release/${{ matrix.artifact }} artifacts/${{ matrix.artifact_dir }}/
-
-      - name: Copy artifact (Windows)
-        if: runner.os == 'Windows'
-        run: copy target\${{ matrix.target }}\release\${{ matrix.artifact }} artifacts\${{ matrix.artifact_dir }}\
-
       - name: Upload artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
-          name: jni-${{ matrix.artifact_dir }}
-          path: rust/artifacts/${{ matrix.artifact_dir }}
-
-  package:
-    needs: build-jni
-    runs-on:
-      group: databricks-protected-runner-group
-      labels: linux-ubuntu-latest
-
-    steps:
-      - name: Download all artifacts
-        uses: actions/download-artifact@v4
-        with:
-          path: native
-          pattern: jni-*
-          merge-multiple: false
-
-      - name: Organize artifacts
-        run: |
-          mkdir -p release/native
-          for dir in native/jni-*/; do
-            platform=$(basename "$dir" | sed 's/jni-//')
-            mkdir -p "release/native/$platform"
-            cp "$dir"/* "release/native/$platform/"
-          done
-          ls -laR release/
-
-      - name: Create release archive
-        run: |
-          cd release
-          tar -czvf ../zerobus-jni-${{ inputs.version }}.tar.gz native/
-          cd ..
-          ls -la
-
-      - name: Upload release archive
-        uses: actions/upload-artifact@v4
-        with:
-          name: zerobus-jni-${{ inputs.version }}
-          path: zerobus-jni-${{ inputs.version }}.tar.gz
-
-      - name: Create GitHub Release
-        uses: softprops/action-gh-release@v2
-        with:
-          tag_name: jni-v${{ inputs.version }}
-          name: JNI Libraries v${{ inputs.version }}
-          body: |
-            Native JNI libraries for zerobus-sdk-java v${{ inputs.version }}
-
-            Platforms included:
-            - linux-x86-64
-            - linux-aarch64
-            - windows-x86-64
-          files: zerobus-jni-${{ inputs.version }}.tar.gz
+          name: jni-${{ matrix.native_dir }}
+          path: rust/target/${{ matrix.target }}/release/${{ matrix.artifact }}
+          if-no-files-found: error

@@ -6,41 +6,35 @@ This Software includes software developed at Databricks (https://www.databricks.
 
 This Software includes the following open source components:
 
-## MIT License
+## Rust Dependencies
 
-### NAPI-RS (napi, napi-derive)
-Copyright (c) 2020-2024 LongYinan
-https://github.com/napi-rs/napi-rs
-License: https://github.com/napi-rs/napi-rs/blob/main/LICENSE
+### MIT License
 
-### tokio
-Copyright (c) 2021 Tokio Contributors
-https://github.com/tokio-rs/tokio
-License: https://github.com/tokio-rs/tokio/blob/master/LICENSE
+- **napi**: Copyright (c) 2020 LongYinan (https://github.com/napi-rs/napi-rs)
+- **napi-derive**: Copyright (c) 2020 LongYinan (https://github.com/napi-rs/napi-rs)
+- **tokio**: Copyright (c) 2019 Tokio Contributors (https://github.com/tokio-rs/tokio)
+- **serde**: Copyright (c) 2014 David Tolnay (https://github.com/serde-rs/serde)
+- **serde_json**: Copyright (c) 2014 David Tolnay (https://github.com/serde-rs/json)
+- **thiserror**: Copyright (c) 2019 David Tolnay (https://github.com/dtolnay/thiserror)
+- **async-trait**: Copyright (c) 2019 David Tolnay (https://github.com/dtolnay/async-trait)
 
-### serde, serde_json
-Copyright (c) 2014-2021 David Tolnay
-https://github.com/serde-rs/serde
-License: https://github.com/serde-rs/serde/blob/master/LICENSE-MIT
+### Apache License 2.0
 
-### thiserror
-Copyright (c) 2019-2021 David Tolnay
-https://github.com/dtolnay/thiserror
-License: https://github.com/dtolnay/thiserror/blob/master/LICENSE-MIT
+- **prost**: Copyright (c) 2017 Dan Burkert (https://github.com/tokio-rs/prost)
+- **prost-types**: Copyright (c) 2017 Dan Burkert (https://github.com/tokio-rs/prost)
+- **base64**: Copyright (c) 2015 Alice Maz and Marshall Pierce (https://github.com/marshallpierce/rust-base64)
 
-### async-trait
-Copyright (c) 2019-2021 David Tolnay
-https://github.com/dtolnay/async-trait
-License: https://github.com/dtolnay/async-trait/blob/master/LICENSE-MIT
+### Optional: Arrow Flight support (Apache License 2.0)
 
-## Apache License 2.0
+These components are only included when the `arrow-flight` feature is enabled:
 
-### prost, prost-types
-Copyright 2017 Dan Burkert
-https://github.com/tokio-rs/prost
-License: https://github.com/tokio-rs/prost/blob/master/LICENSE
+- **arrow-array**: Copyright (c) 2020 Apache Arrow contributors (https://github.com/apache/arrow-rs)
+- **arrow-schema**: Copyright (c) 2020 Apache Arrow contributors (https://github.com/apache/arrow-rs)
+- **arrow-ipc**: Copyright (c) 2020 Apache Arrow contributors (https://github.com/apache/arrow-rs)
 
-### base64
-Copyright (c) 2015-2023 Alice Maz and Marshall Pierce
-https://github.com/marshallpierce/rust-base64
-License: https://github.com/marshallpierce/rust-base64/blob/master/LICENSE-APACHE
+## JavaScript Peer Dependencies (optional, user-supplied)
+
+- **protobufjs**: Copyright (c) 2016 Daniel Wirtz (https://github.com/protobufjs/protobuf.js) — BSD 3-Clause
+- **apache-arrow**: Copyright (c) 2020 Apache Arrow contributors (https://github.com/apache/arrow-js) — Apache License 2.0
+
+For a complete list of dependencies and their licenses, see `Cargo.toml` and `package.json`.

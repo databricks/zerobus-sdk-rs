@@ -609,7 +609,7 @@ public class ArrowIntegrationTest {
   void testArrowGetUnackedAfterCloseReturnsData() throws Exception {
     ZerobusSdk sdk = new ZerobusSdk(serverEndpoint, workspaceUrl);
 
-    // Use a 1ms flush timeout so close() gives up before batches are acked
+    // Use a 1ms flush timeout so close() gives up before batches are acked.
     ArrowStreamConfigurationOptions shortFlushOptions =
         ArrowStreamConfigurationOptions.builder().setFlushTimeoutMs(1).setRecovery(false).build();
 
@@ -618,7 +618,7 @@ public class ArrowIntegrationTest {
           sdk.createArrowStream(tableName, SCHEMA, clientId, clientSecret, shortFlushOptions)
               .join();
 
-      // Ingest multiple batches to maximize chance of unacked
+      // Ingest multiple batches to maximize the chance that some remain unacked.
       for (int i = 0; i < 10; i++) {
         try (VectorSchemaRoot batch = VectorSchemaRoot.create(SCHEMA, allocator)) {
           fillBatch(batch, "test-arrow-unacked-" + i, 100);
@@ -626,11 +626,11 @@ public class ArrowIntegrationTest {
         }
       }
 
-      // close() will flush with 1ms timeout — likely times out, leaving unacked batches
+      // close() will flush with a 1ms timeout, which may leave unacked batches behind.
       try {
         stream.close();
       } catch (ZerobusException e) {
-        // Expected — flush timeout
+        // Expected when the flush timeout expires.
       }
 
       assertTrue(stream.isClosed(), "Stream should be closed");
@@ -643,6 +643,92 @@ public class ArrowIntegrationTest {
     }
 
     sdk.close();
+  }
+
+  // ===================================================================================
+  // Test 14: Arrow stream - LZ4 compression
+  // ===================================================================================
+
+  @Test
+  @Order(14)
+  @DisplayName("Arrow stream - LZ4 compression")
+  void testArrowLz4Compression() throws Exception {
+    ArrowStreamConfigurationOptions options =
+        ArrowStreamConfigurationOptions.builder()
+            .setIpcCompression(IPCCompressionType.LZ4_FRAME)
+            .build();
+
+    try (ZerobusSdk sdk = new ZerobusSdk(serverEndpoint, workspaceUrl);
+        BufferAllocator allocator = new RootAllocator()) {
+      ZerobusArrowStream stream =
+          sdk.createArrowStream(tableName, SCHEMA, clientId, clientSecret, options).join();
+
+      try {
+        try (VectorSchemaRoot batch = VectorSchemaRoot.create(SCHEMA, allocator)) {
+          fillBatch(batch, "test-arrow-lz4", 5);
+
+          long offset = stream.ingestBatch(batch).get();
+          stream.waitForOffset(offset);
+        }
+
+        assertEquals(IPCCompressionType.LZ4_FRAME, stream.getOptions().ipcCompression());
+        System.out.println("Arrow LZ4 compression: 5 rows ingested");
+      } finally {
+        stream.close();
+      }
+    }
+  }
+
+  // ===================================================================================
+  // Test 15: Arrow stream - ZSTD compression
+  // ===================================================================================
+
+  @Test
+  @Order(15)
+  @DisplayName("Arrow stream - ZSTD compression")
+  void testArrowZstdCompression() throws Exception {
+    ArrowStreamConfigurationOptions options =
+        ArrowStreamConfigurationOptions.builder()
+            .setIpcCompression(IPCCompressionType.ZSTD)
+            .build();
+
+    try (ZerobusSdk sdk = new ZerobusSdk(serverEndpoint, workspaceUrl);
+        BufferAllocator allocator = new RootAllocator()) {
+      ZerobusArrowStream stream =
+          sdk.createArrowStream(tableName, SCHEMA, clientId, clientSecret, options).join();
+
+      try {
+        try (VectorSchemaRoot batch = VectorSchemaRoot.create(SCHEMA, allocator)) {
+          fillBatch(batch, "test-arrow-zstd", 5);
+
+          long offset = stream.ingestBatch(batch).get();
+          stream.waitForOffset(offset);
+        }
+
+        assertEquals(IPCCompressionType.ZSTD, stream.getOptions().ipcCompression());
+        System.out.println("Arrow ZSTD compression: 5 rows ingested");
+      } finally {
+        stream.close();
+      }
+    }
+  }
+
+  // ===================================================================================
+  // Test 16: Arrow stream - default compression is NONE
+  // ===================================================================================
+
+  @Test
+  @Order(16)
+  @DisplayName("Arrow stream - default compression is NONE")
+  void testArrowDefaultCompressionIsNone() {
+    ArrowStreamConfigurationOptions defaultOptions = ArrowStreamConfigurationOptions.getDefault();
+    assertEquals(IPCCompressionType.NONE, defaultOptions.ipcCompression());
+
+    ArrowStreamConfigurationOptions builtOptions =
+        ArrowStreamConfigurationOptions.builder().build();
+    assertEquals(IPCCompressionType.NONE, builtOptions.ipcCompression());
+
+    System.out.println("Arrow default compression: NONE verified");
   }
 
   // ===================================================================================

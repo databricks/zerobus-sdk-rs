@@ -1,5 +1,48 @@
 # Version changelog
 
+## Release v1.2.0
+
+### Major Changes
+
+- **License: Migrated from the Databricks License to the Apache License 2.0**
+
+### New Features and Improvements
+
+- Added the `schema` module with `descriptor_from_uc_columns` /
+  `descriptor_from_uc_schema`, which convert a Unity Catalog table schema
+  (including nested `STRUCT`, `ARRAY`, and `MAP` columns via `type_json`) into
+  a `prost_types::DescriptorProto` that can be passed to
+  `TableProperties::descriptor_proto`. Enables building descriptors at runtime
+  without pre-generating `.proto` files.
+
+### Internal Changes
+
+- The `generate_files` CLI tool now delegates schema → descriptor conversion
+  to the SDK's new `schema` module instead of its own hand-rolled DDL-string
+  parser, and renders the resulting `DescriptorProto` back to proto2 text.
+
+### Breaking Changes
+
+- `generate_files`: the emitted `.proto` files have changed shape for
+  non-trivial schemas. Consumers regenerating existing files should expect:
+  - Field numbers now follow Unity Catalog's `position + 1` (so gaps from
+    `DROP COLUMN` under Delta column-mapping are preserved) instead of the
+    previous 1,2,3… sequential numbering with a 19000-range skip.
+  - Nested struct messages use path-based names (e.g. `OuterInner` instead of
+    `Inner`) and are emitted hierarchically inside their parent message.
+  - Struct field nullability now honors Unity Catalog's `nullable` flag
+    instead of being forced to `optional`.
+
+## Release v1.1.0
+
+### New Features and Improvements
+
+- **[Experimental Arrow Flight] Zero-copy IPC ingestion via `ingest_ipc_batch`**: Added `ZerobusArrowStream::ingest_ipc_batch(Bytes)` for FFI callers (Go, Python, Java, TypeScript) that already hold Arrow IPC stream bytes. Raw bytes are forwarded directly to the Flight wire format without deserialising to a `RecordBatch` and re-serialising, eliminating one IPC round-trip per batch compared to `ingest_batch`. The existing `ingest_batch` API is unchanged.
+
+### Bug Fixes
+
+- Fixed proto generation tool to skip reserved field numbers 19000-19999 for tables with more than 19000 columns
+
 ## Release v1.0.1
 
 ### Bug Fixes

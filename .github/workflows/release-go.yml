@@ -1,158 +1,84 @@
-name: Go Release
-run-name: "Release Go SDK ${{ github.ref_name }}"
+name: Build Go (FFI libs)
+run-name: "Build Go SDK FFI libs ${{ github.ref_name }}"
 
 on:
-  push:
-    tags:
-      - 'go/v*'
   workflow_dispatch:
 
 jobs:
-  build-rust:
-    name: Build Rust (${{ matrix.target }})
-    runs-on:
-      group: databricks-protected-runner-group
-      labels: ${{ matrix.os-label }}
+  build-ffi:
     strategy:
       fail-fast: false
       matrix:
         include:
-          - os-label: linux-ubuntu-latest
-            arch: amd64
+          - runner: { group: databricks-protected-runner-group, labels: linux-ubuntu-latest }
             target: x86_64-unknown-linux-gnu
-            use-zig: false
-          - os-label: linux-ubuntu-latest
-            arch: arm64
+            lib_dir: linux_amd64
+            cross: false
+          - runner: { group: databricks-protected-runner-group, labels: linux-ubuntu-latest }
             target: aarch64-unknown-linux-gnu
-            use-zig: false
-          - os-label: linux-ubuntu-latest
-            arch: amd64
-            target: x86_64-apple-darwin
-            use-zig: true
-          - os-label: linux-ubuntu-latest
-            arch: arm64
-            target: aarch64-apple-darwin
-            use-zig: true
-          - os-label: windows-server-latest
-            arch: amd64
+            lib_dir: linux_arm64
+            cross: true
+          - runner: { group: databricks-protected-runner-group, labels: windows-server-latest }
             target: x86_64-pc-windows-gnu
-            use-zig: false
+            lib_dir: windows_amd64
+            cross: false
+
+    name: Build FFI - ${{ matrix.lib_dir }}
+    runs-on: ${{ matrix.runner }}
+    permissions:
+      contents: read
+      id-token: write
+
+    defaults:
+      run:
+        working-directory: rust
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
 
-      - name: Install Rust
-        uses: dtolnay/rust-toolchain@stable
+      - name: Get JFrog OIDC token
+        shell: bash
+        run: bash "$GITHUB_WORKSPACE/.github/scripts/jfrog-oidc-token.sh"
+
+      - name: Configure cargo for JFrog
+        shell: bash
+        run: bash "$GITHUB_WORKSPACE/.github/scripts/configure-cargo.sh"
+
+      - name: Install protoc
+        uses: arduino/setup-protoc@c65c819552d16ad3c9b72d9dfd5ba5237b9c906b # v3
+        with:
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Install cross-compilation toolchain (Linux ARM64)
+        if: matrix.cross
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq gcc-aarch64-linux-gnu
+          mkdir -p .cargo
+          echo '[target.aarch64-unknown-linux-gnu]' > .cargo/config.toml
+          echo 'linker = "aarch64-linux-gnu-gcc"' >> .cargo/config.toml
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
         with:
           targets: ${{ matrix.target }}
 
-      - name: Install Cross-Compilation Tools (Linux ARM64)
-        if: matrix.target == 'aarch64-unknown-linux-gnu'
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y gcc-aarch64-linux-gnu
+      - name: Build FFI library
+        run: cargo build --release -p zerobus-ffi --target ${{ matrix.target }}
 
-      - name: Install Zig and cargo-zigbuild (for macOS cross-compilation)
-        if: matrix.use-zig == true
+      - name: Prepare artifact
         shell: bash
         run: |
-          ARCH=$(uname -m)
-          case "$ARCH" in
-            x86_64) ZIG_ARCH="x86_64" ;;
-            aarch64) ZIG_ARCH="aarch64" ;;
-            *) echo "Unsupported architecture: $ARCH"; exit 1 ;;
-          esac
-
-          ZIG_VERSION="0.13.0"
-          ZIG_URL="https://ziglang.org/download/${ZIG_VERSION}/zig-linux-${ZIG_ARCH}-${ZIG_VERSION}.tar.xz"
-
-          echo "Downloading Zig from $ZIG_URL"
-          wget -q "$ZIG_URL"
-          tar -xf "zig-linux-${ZIG_ARCH}-${ZIG_VERSION}.tar.xz"
-
-          mkdir -p $HOME/.local/bin
-          rm -rf $HOME/.local/zig
-          mv "zig-linux-${ZIG_ARCH}-${ZIG_VERSION}" $HOME/.local/zig
-          ln -sf $HOME/.local/zig/zig $HOME/.local/bin/zig
-          echo "$HOME/.local/bin" >> $GITHUB_PATH
-
-          if ! command -v cargo-zigbuild &> /dev/null; then
-            cargo install cargo-zigbuild
-          fi
-
-      - name: Build Rust Library (Standard)
-        if: matrix.use-zig == false
-        working-directory: rust/ffi
-        run: |
-          cargo build --release --target ${{ matrix.target }}
-        env:
-          CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: aarch64-linux-gnu-gcc
-
-      - name: Build Rust Library (Zig Cross-Compile)
-        if: matrix.use-zig == true
-        working-directory: rust/ffi
-        run: |
-          cargo zigbuild --release --target ${{ matrix.target }}
-
-      - name: Prepare Artifact
-        shell: bash
-        run: |
-          case "${{ matrix.target }}" in
-            *-apple-darwin)  OS_NAME="darwin"  ;;
-            *-pc-windows-*)  OS_NAME="windows" ;;
-            *-linux-*)       OS_NAME="linux"   ;;
-            *)               OS_NAME="unknown" ;;
-          esac
-
-          mkdir -p dist/${OS_NAME}_${{ matrix.arch }}
-
-          if [ "${{ runner.os }}" = "Windows" ]; then
-            cp rust/target/${{ matrix.target }}/release/libzerobus_ffi.a dist/windows_${{ matrix.arch }}/libzerobus_ffi.a || \
-            cp rust/target/${{ matrix.target }}/release/zerobus_ffi.lib dist/windows_${{ matrix.arch }}/libzerobus_ffi.a
+          mkdir -p ../go/lib/${{ matrix.lib_dir }}
+          if [ -f target/${{ matrix.target }}/release/libzerobus_ffi.a ]; then
+            cp target/${{ matrix.target }}/release/libzerobus_ffi.a ../go/lib/${{ matrix.lib_dir }}/
           else
-            cp rust/target/${{ matrix.target }}/release/libzerobus_ffi.a dist/${OS_NAME}_${{ matrix.arch }}/libzerobus_ffi.a
+            cp target/${{ matrix.target }}/release/zerobus_ffi.lib ../go/lib/${{ matrix.lib_dir }}/libzerobus_ffi.a
           fi
 
-      - name: Upload Artifact
-        uses: actions/upload-artifact@v4
+      - name: Upload artifact
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
-          name: lib-${{ matrix.target }}
-          path: dist/
-
-  update-tag:
-    name: Update Tag with Binaries
-    if: startsWith(github.ref, 'refs/tags/go/')
-    needs: build-rust
-    runs-on:
-      group: databricks-protected-runner-group
-      labels: linux-ubuntu-latest
-    permissions:
-      contents: write
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-
-      - name: Download all artifacts
-        uses: actions/download-artifact@v4
-        with:
-          path: lib-artifacts
-          merge-multiple: true
-
-      - name: Prepare lib directory
-        run: |
-          mkdir -p go/lib
-          cp -r lib-artifacts/* go/lib/
-          rm -rf lib-artifacts
-
-      - name: Commit and Force-Push Tag
-        run: |
-          git config --global user.name "github-actions[bot]"
-          git config --global user.email "github-actions[bot]@users.noreply.github.com"
-
-          git add -f go/lib/
-
-          git commit -m "Release ${{ github.ref_name }} with pre-built binaries"
-
-          git tag -f ${{ github.ref_name }}
-          git push origin ${{ github.ref_name }} --force
+          name: go-lib-${{ matrix.lib_dir }}
+          path: go/lib/${{ matrix.lib_dir }}/
+          if-no-files-found: error
