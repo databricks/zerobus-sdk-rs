@@ -418,6 +418,189 @@ mod failure_tests {
         let result = mux.wait_for_message_id(offset1).await;
         assert!(result.is_err(), "Expected error from failed sub-stream");
 
+        // The sub-stream closed (non-retryable error), so the mux should be poisoned
+        // and further ingest should fail with InvalidStateError.
+        assert!(mux.is_closed(), "Expected mux to be poisoned after sub-stream close");
+        let ingest_after = mux.ingest_record(b"record3".to_vec()).await;
+        assert!(
+            matches!(ingest_after, Err(ZerobusError::InvalidStateError(_))),
+            "Expected InvalidStateError on ingest after poison, got {:?}",
+            ingest_after
+        );
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_flush_error_on_closed_substream_poisons_mux(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        setup_tracing();
+        info!("Starting test_flush_error_on_closed_substream_poisons_mux");
+
+        let (mock_server, server_url) = start_mock_server().await?;
+        mock_server
+            .inject_responses(
+                TABLE_FAIL,
+                vec![
+                    MockResponse::CreateStream {
+                        stream_id: "s1".to_string(),
+                        delay_ms: 0,
+                    },
+                    MockResponse::Error {
+                        status: tonic::Status::permission_denied("fail"),
+                        delay_ms: 0,
+                    },
+                ],
+            )
+            .await;
+
+        let sdk = create_test_sdk(&server_url).await?;
+        let s1 = create_test_stream(&sdk, TABLE_FAIL, default_options()).await?;
+        let mux = MultiplexedStream::new(vec![s1]);
+
+        let _ = mux.ingest_record(b"data".to_vec()).await?;
+
+        // Non-retryable error → sub-stream closes → flush errors → mux poisoned.
+        let flush_result = mux.flush().await;
+        assert!(flush_result.is_err(), "Expected flush to fail");
+        assert!(mux.is_closed(), "Expected mux poisoned after sub-stream close");
+
+        let ingest_after = mux.ingest_record(b"data".to_vec()).await;
+        assert!(
+            matches!(ingest_after, Err(ZerobusError::InvalidStateError(_))),
+            "Expected InvalidStateError after poison, got {:?}",
+            ingest_after
+        );
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_wait_timeout_does_not_poison_mux() -> Result<(), Box<dyn std::error::Error>> {
+        setup_tracing();
+        info!("Starting test_wait_timeout_does_not_poison_mux");
+
+        let (mock_server, server_url) = start_mock_server().await?;
+        // Ack arrives well after our short flush_timeout_ms expires.
+        mock_server
+            .inject_responses(
+                TABLE_OK,
+                vec![
+                    MockResponse::CreateStream {
+                        stream_id: "slow".to_string(),
+                        delay_ms: 0,
+                    },
+                    MockResponse::RecordAck {
+                        ack_up_to_offset: 0,
+                        delay_ms: 2_000,
+                    },
+                    MockResponse::RecordAck {
+                        ack_up_to_offset: 1,
+                        delay_ms: 0,
+                    },
+                ],
+            )
+            .await;
+
+        let sdk = create_test_sdk(&server_url).await?;
+        let opts = StreamConfigurationOptions {
+            flush_timeout_ms: 100,
+            ..default_options()
+        };
+        let s = create_test_stream(&sdk, TABLE_OK, opts).await?;
+        let mux = MultiplexedStream::new(vec![s]);
+
+        let offset = mux.ingest_record(b"slow".to_vec()).await?;
+
+        // First wait times out before the ack arrives; sub-stream is still alive.
+        let result = mux.wait_for_message_id(offset).await;
+        assert!(result.is_err(), "Expected timeout error");
+        assert!(!mux.is_closed(), "Mux should NOT be poisoned by timeout");
+
+        // Further ingest should still succeed.
+        let _ = mux.ingest_record(b"next".to_vec()).await?;
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_get_unacked_records_auto_closes_mux(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        setup_tracing();
+        info!("Starting test_get_unacked_records_auto_closes_mux");
+
+        let (mock_server, server_url) = start_mock_server().await?;
+        mock_server
+            .inject_responses(
+                TABLE_OK,
+                vec![
+                    MockResponse::CreateStream {
+                        stream_id: "s1".to_string(),
+                        delay_ms: 0,
+                    },
+                    MockResponse::RecordAck {
+                        ack_up_to_offset: 0,
+                        delay_ms: 0,
+                    },
+                ],
+            )
+            .await;
+
+        let sdk = create_test_sdk(&server_url).await?;
+        let s = create_test_stream(&sdk, TABLE_OK, default_options()).await?;
+        let mut mux = MultiplexedStream::new(vec![s]);
+
+        let id = mux.ingest_record(b"hello".to_vec()).await?;
+        mux.wait_for_message_id(id).await?;
+        assert!(!mux.is_closed());
+
+        let unacked: Vec<_> = mux.get_unacked_records().await?.collect();
+        assert!(unacked.is_empty(), "All records were acked");
+        assert!(mux.is_closed(), "get_unacked_records should have closed the mux");
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_get_unacked_records_returns_failed_records(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        setup_tracing();
+        info!("Starting test_get_unacked_records_returns_failed_records");
+
+        let (mock_server, server_url) = start_mock_server().await?;
+        mock_server
+            .inject_responses(
+                TABLE_FAIL,
+                vec![
+                    MockResponse::CreateStream {
+                        stream_id: "s1".to_string(),
+                        delay_ms: 0,
+                    },
+                    MockResponse::Error {
+                        status: tonic::Status::permission_denied("boom"),
+                        delay_ms: 0,
+                    },
+                ],
+            )
+            .await;
+
+        let sdk = create_test_sdk(&server_url).await?;
+        let s = create_test_stream(&sdk, TABLE_FAIL, default_options()).await?;
+        let mut mux = MultiplexedStream::new(vec![s]);
+
+        let _id = mux.ingest_record(b"will_fail".to_vec()).await?;
+        // Trigger the failure and poisoning.
+        let _ = mux.flush().await;
+        assert!(mux.is_closed());
+
+        let unacked: Vec<_> = mux.get_unacked_records().await?.collect();
+        assert_eq!(unacked.len(), 1, "Expected the unacked record");
+        assert!(
+            matches!(&unacked[0], databricks_zerobus_ingest_sdk::EncodedRecord::Proto(b) if b == b"will_fail"),
+            "Unexpected record payload: {:?}",
+            unacked[0]
+        );
+
         Ok(())
     }
 

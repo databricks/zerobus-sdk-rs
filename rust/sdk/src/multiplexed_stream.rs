@@ -1,7 +1,6 @@
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::sync::Mutex;
 
 use futures::future::join_all;
 use tracing::{error, info, warn};
@@ -59,7 +58,6 @@ pub struct MultiplexedStream {
     streams: Vec<ZerobusStream>,
     round_robin_counter: AtomicUsize,
     is_closed: AtomicBool,
-    failed_records: Mutex<Vec<EncodedRecord>>,
 }
 
 impl MultiplexedStream {
@@ -77,7 +75,6 @@ impl MultiplexedStream {
             streams,
             round_robin_counter: AtomicUsize::new(0),
             is_closed: AtomicBool::new(false),
-            failed_records: Mutex::new(Vec::new()),
         }
     }
 
@@ -97,7 +94,7 @@ impl MultiplexedStream {
 
         warn!(
             num_streams = self.streams.len(),
-            "MultiplexedStream shutting down due to sub-stream failure"
+            "MultiplexedStream poisoned due to sub-stream failure"
         );
 
         let flush_results = join_all(self.streams.iter().map(|s| s.flush())).await;
@@ -106,31 +103,6 @@ impl MultiplexedStream {
                 warn!(stream_index = i, error = %e, "Failed to flush sub-stream during shutdown");
             }
         }
-
-        let mut all_unacked = Vec::new();
-        for (i, stream) in self.streams.iter().enumerate() {
-            match stream.get_unacked_records().await {
-                Ok(records) => all_unacked.extend(records),
-                Err(e) => {
-                    // Sub-streams that are still open return Err here.
-                    // If they were flushed successfully above, they have no unacked records.
-                    warn!(
-                        stream_index = i,
-                        error = %e,
-                        "Could not retrieve unacked records from sub-stream during shutdown"
-                    );
-                }
-            }
-        }
-
-        if !all_unacked.is_empty() {
-            warn!(count = all_unacked.len(), "Collected unacked records during shutdown");
-        }
-
-        self.failed_records
-            .lock()
-            .expect("failed_records lock poisoned")
-            .extend(all_unacked);
     }
 
     async fn ingest_to_substream<F>(
@@ -183,8 +155,12 @@ impl MultiplexedStream {
         match ingest_fn(stream).await {
             Ok(sub_offset) => Ok(sub_offset.map(|off| MessageId::new(idx, off))),
             Err(e) => {
-                error!(stream_index = idx, error = %e, "Ingest failed on sub-stream, poisoning MultiplexedStream");
-                self.shutdown_on_failure().await;
+                if stream.is_closed() {
+                    error!(stream_index = idx, error = %e, "Ingest failed on closed sub-stream, poisoning MultiplexedStream");
+                    self.shutdown_on_failure().await;
+                } else {
+                    warn!(stream_index = idx, error = %e, "Ingest errored but sub-stream still alive");
+                }
                 Err(e)
             }
         }
@@ -225,8 +201,12 @@ impl MultiplexedStream {
         self.check_closed()?;
         let results = join_all(self.streams.iter().map(|s| s.flush())).await;
         let mut first_error = None;
+        let mut any_closed = false;
         for (i, result) in results.into_iter().enumerate() {
             if let Err(e) = result {
+                if self.streams[i].is_closed() {
+                    any_closed = true;
+                }
                 if first_error.is_none() {
                     first_error = Some(e);
                 } else {
@@ -239,7 +219,15 @@ impl MultiplexedStream {
             }
         }
         match first_error {
-            Some(e) => Err(e),
+            Some(e) => {
+                if any_closed {
+                    error!(error = %e, "flush failed on closed sub-stream, poisoning MultiplexedStream");
+                    self.shutdown_on_failure().await;
+                } else {
+                    warn!(error = %e, "flush errored but sub-streams still alive");
+                }
+                Err(e)
+            }
             None => Ok(()),
         }
     }
@@ -252,9 +240,26 @@ impl MultiplexedStream {
                 idx
             )));
         }
-        self.streams[idx]
-            .wait_for_offset(message_id.sub_offset())
-            .await
+        match self.streams[idx].wait_for_offset(message_id.sub_offset()).await {
+            Ok(()) => Ok(()),
+            Err(e) => {
+                if self.streams[idx].is_closed() {
+                    error!(
+                        stream_index = idx,
+                        error = %e,
+                        "wait_for_offset failed on closed sub-stream, poisoning MultiplexedStream"
+                    );
+                    self.shutdown_on_failure().await;
+                } else {
+                    warn!(
+                        stream_index = idx,
+                        error = %e,
+                        "wait_for_offset errored but sub-stream still alive"
+                    );
+                }
+                Err(e)
+            }
+        }
     }
 
     pub async fn close(&mut self) -> ZerobusResult<()> {
@@ -302,42 +307,32 @@ impl MultiplexedStream {
         self.is_closed.load(Ordering::Relaxed)
     }
 
+    /// Returns records that were ingested but not acknowledged.
+    ///
+    /// Closes the mux first to ensure all sub-streams have reached their terminal state,
+    /// so results are always complete. Any error from close is swallowed — if records can
+    /// still be recovered, they will be returned.
     pub async fn get_unacked_records(
-        &self,
+        &mut self,
     ) -> ZerobusResult<impl Iterator<Item = EncodedRecord>> {
-        let mut all_records = self
-            .failed_records
-            .lock()
-            .expect("failed_records lock poisoned")
-            .clone();
-        for (i, stream) in self.streams.iter().enumerate() {
-            match stream.get_unacked_records().await {
-                Ok(records) => all_records.extend(records),
-                Err(e) => {
-                    warn!(
-                        stream_index = i,
-                        error = %e,
-                        "Could not retrieve unacked records from sub-stream"
-                    );
-                }
-            }
+        let _ = self.close().await;
+        let mut all_records = Vec::new();
+        for stream in &self.streams {
+            all_records.extend(stream.get_unacked_records().await?);
         }
         Ok(all_records.into_iter())
     }
 
-    pub async fn get_unacked_batches(&self) -> ZerobusResult<Vec<EncodedBatch>> {
+    /// Returns batches that were ingested but not acknowledged.
+    ///
+    /// Closes the mux first to ensure all sub-streams have reached their terminal state,
+    /// so results are always complete. Any error from close is swallowed — if records can
+    /// still be recovered, they will be returned.
+    pub async fn get_unacked_batches(&mut self) -> ZerobusResult<Vec<EncodedBatch>> {
+        let _ = self.close().await;
         let mut all_batches = Vec::new();
-        for (i, stream) in self.streams.iter().enumerate() {
-            match stream.get_unacked_batches().await {
-                Ok(batches) => all_batches.extend(batches),
-                Err(e) => {
-                    warn!(
-                        stream_index = i,
-                        error = %e,
-                        "Could not retrieve unacked batches from sub-stream"
-                    );
-                }
-            }
+        for stream in &self.streams {
+            all_batches.extend(stream.get_unacked_batches().await?);
         }
         Ok(all_batches)
     }
