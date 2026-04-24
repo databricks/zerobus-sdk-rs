@@ -29,7 +29,7 @@ dependencies = [
 
 [project.optional-dependencies]
 arrow = [
-    "pyarrow>=14.0.0",
+    "pyarrow>=14.0.0,<20.0",
 ]
 dev = [
     # Build tools
@@ -46,8 +46,8 @@ dev = [
     "pytest",
     "pytest-cov",
     "pytest-xdist>=3.6.1,<4.0",
-    "pytest-asyncio",
-    "pyarrow>=14.0.0",
+    "pytest-asyncio>=0.21,<1.0",
+    "pyarrow>=14.0.0,<20.0",
 ]
 
 [tool.maturin]

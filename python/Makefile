@@ -35,12 +35,12 @@ dev:
 	$(PYTHON) -m venv .venv
 	$(VENV) -m pip install --upgrade pip
 	@test -f LICENSE || cp ../LICENSE LICENSE
-	$(VENV) -m pip install -e '.[dev]'
+	$(VENV) -m pip install -r requirements-dev.lock
+	$(VENV) -m maturin develop
 
-lock-dev:
+lock-dev: # requires uv
 	@test -f LICENSE || cp ../LICENSE LICENSE
-	$(VENV) -m pip install pip-tools
-	$(VENV) -m pip-compile --generate-hashes --output-file requirements-dev.lock requirements-dev.in
+	uv pip compile --generate-hashes --no-emit-index-url --exclude-newer '2026-03-19T00:00:00Z' --output-file requirements-dev.lock requirements-dev.in
 
 install:
 	$(VENV) -m pip install -e .
