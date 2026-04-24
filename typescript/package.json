@@ -1,6 +1,6 @@
 {
   "name": "@databricks/zerobus-ingest-sdk",
-  "version": "1.0.1",
+  "version": "1.0.2",
   "description": "TypeScript/Node.js SDK for streaming data ingestion into Databricks Delta tables using Zerobus",
   "main": "index.js",
   "types": "index.d.ts",
@@ -65,6 +65,11 @@
     "example:proto:batch": "tsx examples/proto/batch.ts",
     "example:arrow:single": "tsx examples/arrow/single.ts",
     "example:arrow:batch": "tsx examples/arrow/batch.ts"
+  },
+  "optionalDependencies": {
+    "@databricks/zerobus-ingest-sdk-linux-x64-gnu": "1.0.2",
+    "@databricks/zerobus-ingest-sdk-linux-arm64-gnu": "1.0.2",
+    "@databricks/zerobus-ingest-sdk-win32-x64-msvc": "1.0.2"
   },
   "peerDependencies": {
     "protobufjs": "^7.0.0",
