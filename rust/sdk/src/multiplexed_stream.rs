@@ -3,9 +3,7 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use futures::future::join_all;
 use tracing::{error, info, warn};
 
-use crate::{
-    EncodedBatch, EncodedRecord, OffsetId, ZerobusError, ZerobusResult, ZerobusStream,
-};
+use crate::{EncodedBatch, EncodedRecord, OffsetId, ZerobusError, ZerobusResult, ZerobusStream};
 
 /// Number of bits reserved for the stream index.
 /// 6 bits supports up to 64 sub-streams.
@@ -22,7 +20,12 @@ pub struct MessageId(i64);
 /// `to_string()` per record in a hot loop will have a performance penalty.
 impl std::fmt::Display for MessageId {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "MessageId(stream={}, offset={})", self.stream_index(), self.sub_offset())
+        write!(
+            f,
+            "MessageId(stream={}, offset={})",
+            self.stream_index(),
+            self.sub_offset()
+        )
     }
 }
 
@@ -76,6 +79,7 @@ impl MultiplexedStream {
         }
     }
 
+    #[allow(clippy::result_large_err)]
     fn check_closed(&self) -> ZerobusResult<()> {
         if self.is_closed.load(Ordering::Relaxed) {
             return Err(ZerobusError::InvalidStateError(
@@ -107,22 +111,22 @@ impl MultiplexedStream {
         self.round_robin_counter.fetch_add(1, Ordering::Relaxed) % self.streams.len()
     }
 
-    async fn wait_for_capacity(
-        &self,
-        stream: &ZerobusStream,
-        idx: usize,
-    ) -> ZerobusResult<()> {
+    async fn wait_for_capacity(&self, stream: &ZerobusStream, idx: usize) -> ZerobusResult<()> {
         let mut backoff_ms = 1u64;
         let mut total_wait_ms = 0u64;
         let mut logged_backpressure = false;
 
         loop {
             if stream.is_closed() {
-                error!(stream_index = idx, "Sub-stream closed unexpectedly, poisoning MultiplexedStream");
+                error!(
+                    stream_index = idx,
+                    "Sub-stream closed unexpectedly, poisoning MultiplexedStream"
+                );
                 self.shutdown_on_failure().await;
-                return Err(ZerobusError::InvalidStateError(
-                    format!("Sub-stream {} closed unexpectedly", idx),
-                ));
+                return Err(ZerobusError::InvalidStateError(format!(
+                    "Sub-stream {} closed unexpectedly",
+                    idx
+                )));
             }
 
             if stream.has_capacity() {
@@ -136,20 +140,14 @@ impl MultiplexedStream {
             if !logged_backpressure && total_wait_ms >= 1000 {
                 warn!(
                     stream_index = idx,
-                    total_wait_ms,
-                    "Backpressure: sub-stream at capacity, waiting for drain"
+                    total_wait_ms, "Backpressure: sub-stream at capacity, waiting for drain"
                 );
                 logged_backpressure = true;
             }
         }
     }
 
-    async fn handle_ingest_error(
-        &self,
-        e: &ZerobusError,
-        stream: &ZerobusStream,
-        idx: usize,
-    ) {
+    async fn handle_ingest_error(&self, e: &ZerobusError, stream: &ZerobusStream, idx: usize) {
         if stream.is_closed() {
             error!(stream_index = idx, error = %e, "Ingest failed on closed sub-stream, poisoning MultiplexedStream");
             self.shutdown_on_failure().await;
@@ -178,10 +176,7 @@ impl MultiplexedStream {
     }
 
     // TODO: Check if there is a performance advantage in splitting this payload in multiple streams
-    pub async fn ingest_records<I, T>(
-        &self,
-        payload: I,
-    ) -> ZerobusResult<Option<MessageId>>
+    pub async fn ingest_records<I, T>(&self, payload: I) -> ZerobusResult<Option<MessageId>>
     where
         I: IntoIterator<Item = T>,
         T: Into<EncodedRecord>,
@@ -247,7 +242,10 @@ impl MultiplexedStream {
                 idx
             )));
         }
-        match self.streams[idx].wait_for_offset(message_id.sub_offset()).await {
+        match self.streams[idx]
+            .wait_for_offset(message_id.sub_offset())
+            .await
+        {
             Ok(()) => Ok(()),
             Err(e) => {
                 if self.streams[idx].is_closed() {

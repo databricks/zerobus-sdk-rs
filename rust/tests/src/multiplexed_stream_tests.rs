@@ -529,7 +529,8 @@ mod multi_stream_tests {
         let second = mux.ingest_record(b"slow_b".to_vec()).await?;
 
         let mux_for_task = Arc::clone(&mux);
-        let third_task = tokio::spawn(async move { mux_for_task.ingest_record(b"blocked".to_vec()).await });
+        let third_task =
+            tokio::spawn(async move { mux_for_task.ingest_record(b"blocked".to_vec()).await });
 
         tokio::time::sleep(Duration::from_millis(50)).await;
         assert!(
@@ -669,7 +670,10 @@ mod failure_tests {
 
         // The sub-stream closed (non-retryable error), so the mux should be poisoned
         // and further ingest should fail with InvalidStateError.
-        assert!(mux.is_closed(), "Expected mux to be poisoned after sub-stream close");
+        assert!(
+            mux.is_closed(),
+            "Expected mux to be poisoned after sub-stream close"
+        );
         let ingest_after = mux.ingest_record(b"record3".to_vec()).await;
         assert!(
             matches!(ingest_after, Err(ZerobusError::InvalidStateError(_))),
@@ -712,7 +716,10 @@ mod failure_tests {
         // Non-retryable error → sub-stream closes → flush errors → mux poisoned.
         let flush_result = mux.flush().await;
         assert!(flush_result.is_err(), "Expected flush to fail");
-        assert!(mux.is_closed(), "Expected mux poisoned after sub-stream close");
+        assert!(
+            mux.is_closed(),
+            "Expected mux poisoned after sub-stream close"
+        );
 
         let ingest_after = mux.ingest_record(b"data".to_vec()).await;
         assert!(
@@ -773,8 +780,7 @@ mod failure_tests {
     }
 
     #[tokio::test]
-    async fn test_get_unacked_records_auto_closes_mux(
-    ) -> Result<(), Box<dyn std::error::Error>> {
+    async fn test_get_unacked_records_auto_closes_mux() -> Result<(), Box<dyn std::error::Error>> {
         setup_tracing();
         info!("Starting test_get_unacked_records_auto_closes_mux");
 
@@ -805,7 +811,10 @@ mod failure_tests {
 
         let unacked: Vec<_> = mux.get_unacked_records().await?.collect();
         assert!(unacked.is_empty(), "All records were acked");
-        assert!(mux.is_closed(), "get_unacked_records should have closed the mux");
+        assert!(
+            mux.is_closed(),
+            "get_unacked_records should have closed the mux"
+        );
 
         Ok(())
     }
@@ -932,8 +941,8 @@ mod offset_mapping_tests {
     const TABLE: &str = "offset.schema.table";
 
     #[tokio::test]
-    async fn test_wait_for_unknown_message_id_returns_error() -> Result<(), Box<dyn std::error::Error>>
-    {
+    async fn test_wait_for_unknown_message_id_returns_error(
+    ) -> Result<(), Box<dyn std::error::Error>> {
         setup_tracing();
 
         let (mock_server, server_url) = start_mock_server().await?;

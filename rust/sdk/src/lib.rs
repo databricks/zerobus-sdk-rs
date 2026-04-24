@@ -40,9 +40,9 @@ mod default_token_factory;
 mod errors;
 mod headers_provider;
 mod landing_zone;
-mod offset_generator;
 #[cfg(feature = "testing")]
 mod multiplexed_stream;
+mod offset_generator;
 mod proxy;
 mod record_types;
 pub mod schema;
@@ -89,6 +89,8 @@ pub use callbacks::AckCallback;
 pub use default_token_factory::DefaultTokenFactory;
 pub use errors::ZerobusError;
 pub use headers_provider::{HeadersProvider, OAuthHeadersProvider, DEFAULT_X_ZEROBUS_SDK};
+#[cfg(feature = "testing")]
+pub use multiplexed_stream::{MessageId, MultiplexedStream};
 pub use offset_generator::{OffsetId, OffsetIdGenerator};
 pub use proxy::{ConnectorFactory, ProxyConnector};
 pub use record_types::{
@@ -96,8 +98,6 @@ pub use record_types::{
     ProtoBytes, ProtoEncodedRecord, ProtoMessage,
 };
 pub use stream_configuration::StreamConfigurationOptions;
-#[cfg(feature = "testing")]
-pub use multiplexed_stream::{MessageId, MultiplexedStream};
 
 #[cfg(feature = "testing")]
 pub use tls_config::NoTlsConfig;
