@@ -223,6 +223,7 @@ mod single_stream_tests {
 
 mod multi_stream_tests {
     use super::*;
+    use std::time::Duration;
 
     /// Use separate table names per stream so each gRPC connection gets its own response sequence.
     const TABLE_A: &str = "multi.schema.table_a";
@@ -303,6 +304,254 @@ mod multi_stream_tests {
 
         mux.flush().await?;
         assert_eq!(mock_server.get_write_count().await, 6);
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_ingest_waits_on_chosen_stream_when_it_is_full(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        setup_tracing();
+        info!("Starting test_ingest_waits_on_chosen_stream_when_it_is_full");
+
+        let (mock_server, server_url) = start_mock_server().await?;
+        mock_server
+            .inject_responses(
+                TABLE_A,
+                vec![
+                    MockResponse::CreateStream {
+                        stream_id: "slow_a".to_string(),
+                        delay_ms: 0,
+                    },
+                    MockResponse::RecordAck {
+                        ack_up_to_offset: 0,
+                        delay_ms: 250,
+                    },
+                    MockResponse::RecordAck {
+                        ack_up_to_offset: 1,
+                        delay_ms: 0,
+                    },
+                ],
+            )
+            .await;
+        mock_server
+            .inject_responses(
+                TABLE_B,
+                vec![
+                    MockResponse::CreateStream {
+                        stream_id: "fast_b".to_string(),
+                        delay_ms: 0,
+                    },
+                    MockResponse::RecordAck {
+                        ack_up_to_offset: 0,
+                        delay_ms: 0,
+                    },
+                ],
+            )
+            .await;
+
+        let sdk = create_test_sdk(&server_url).await?;
+        let opts = StreamConfigurationOptions {
+            max_inflight_requests: 1,
+            ..default_options()
+        };
+        let s1 = create_test_stream(&sdk, TABLE_A, opts.clone()).await?;
+        let s2 = create_test_stream(&sdk, TABLE_B, opts).await?;
+        let mux = Arc::new(MultiplexedStream::new(vec![s1, s2]));
+
+        let first = mux.ingest_record(b"slow_a".to_vec()).await?;
+        assert_eq!(first.stream_index(), 0);
+
+        let second = mux.ingest_record(b"fast_b".to_vec()).await?;
+        assert_eq!(second.stream_index(), 1);
+        mux.wait_for_message_id(second).await?;
+
+        let mux_for_task = Arc::clone(&mux);
+        let third_task =
+            tokio::spawn(async move { mux_for_task.ingest_record(b"waited".to_vec()).await });
+
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert!(
+            !third_task.is_finished(),
+            "Expected ingest to wait on the chosen stream even when another sibling is free"
+        );
+
+        let third = tokio::time::timeout(Duration::from_millis(500), third_task)
+            .await
+            .expect("ingest should complete once the chosen lane drains")??;
+
+        assert_eq!(third.stream_index(), 0);
+        assert_eq!(third.sub_offset(), 1);
+        mux.wait_for_message_id(first).await?;
+        mux.wait_for_message_id(third).await?;
+        assert_eq!(mock_server.get_write_count().await, 3);
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_batch_ingest_waits_on_chosen_stream_when_it_is_full(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        setup_tracing();
+        info!("Starting test_batch_ingest_waits_on_chosen_stream_when_it_is_full");
+
+        let (mock_server, server_url) = start_mock_server().await?;
+        mock_server
+            .inject_responses(
+                TABLE_A,
+                vec![
+                    MockResponse::CreateStream {
+                        stream_id: "slow_a".to_string(),
+                        delay_ms: 0,
+                    },
+                    MockResponse::RecordAck {
+                        ack_up_to_offset: 0,
+                        delay_ms: 250,
+                    },
+                    MockResponse::RecordAck {
+                        ack_up_to_offset: 1,
+                        delay_ms: 0,
+                    },
+                ],
+            )
+            .await;
+        mock_server
+            .inject_responses(
+                TABLE_B,
+                vec![
+                    MockResponse::CreateStream {
+                        stream_id: "fast_b".to_string(),
+                        delay_ms: 0,
+                    },
+                    MockResponse::RecordAck {
+                        ack_up_to_offset: 0,
+                        delay_ms: 0,
+                    },
+                ],
+            )
+            .await;
+
+        let sdk = create_test_sdk(&server_url).await?;
+        let opts = StreamConfigurationOptions {
+            max_inflight_requests: 1,
+            ..default_options()
+        };
+        let s1 = create_test_stream(&sdk, TABLE_A, opts.clone()).await?;
+        let s2 = create_test_stream(&sdk, TABLE_B, opts).await?;
+        let mux = Arc::new(MultiplexedStream::new(vec![s1, s2]));
+
+        let first = mux.ingest_record(b"slow_a".to_vec()).await?;
+        assert_eq!(first.stream_index(), 0);
+
+        let second = mux.ingest_record(b"fast_b".to_vec()).await?;
+        assert_eq!(second.stream_index(), 1);
+        mux.wait_for_message_id(second).await?;
+
+        let mux_for_task = Arc::clone(&mux);
+        let batch_task = tokio::spawn(async move {
+            mux_for_task
+                .ingest_records(vec![b"r1".to_vec(), b"r2".to_vec(), b"r3".to_vec()])
+                .await
+        });
+
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert!(
+            !batch_task.is_finished(),
+            "Expected batch ingest to wait on the chosen stream even when another sibling is free"
+        );
+
+        let batch_id = tokio::time::timeout(Duration::from_millis(500), batch_task)
+            .await
+            .expect("batch ingest should complete once the chosen lane drains")??
+            .expect("non-empty batch should return a message id");
+
+        assert_eq!(batch_id.stream_index(), 0);
+        assert_eq!(batch_id.sub_offset(), 1);
+        mux.wait_for_message_id(first).await?;
+        mux.wait_for_message_id(batch_id).await?;
+        assert_eq!(mock_server.get_write_count().await, 5);
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_ingest_blocks_on_original_lane_when_all_streams_are_full(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        setup_tracing();
+        info!("Starting test_ingest_blocks_on_original_lane_when_all_streams_are_full");
+
+        let (mock_server, server_url) = start_mock_server().await?;
+        mock_server
+            .inject_responses(
+                TABLE_A,
+                vec![
+                    MockResponse::CreateStream {
+                        stream_id: "slow_a".to_string(),
+                        delay_ms: 0,
+                    },
+                    MockResponse::RecordAck {
+                        ack_up_to_offset: 0,
+                        delay_ms: 200,
+                    },
+                    MockResponse::RecordAck {
+                        ack_up_to_offset: 1,
+                        delay_ms: 0,
+                    },
+                ],
+            )
+            .await;
+        mock_server
+            .inject_responses(
+                TABLE_B,
+                vec![
+                    MockResponse::CreateStream {
+                        stream_id: "slow_b".to_string(),
+                        delay_ms: 0,
+                    },
+                    MockResponse::RecordAck {
+                        ack_up_to_offset: 0,
+                        delay_ms: 200,
+                    },
+                ],
+            )
+            .await;
+
+        let sdk = create_test_sdk(&server_url).await?;
+        let opts = StreamConfigurationOptions {
+            max_inflight_requests: 1,
+            ..default_options()
+        };
+        let s1 = create_test_stream(&sdk, TABLE_A, opts.clone()).await?;
+        let s2 = create_test_stream(&sdk, TABLE_B, opts).await?;
+        let mux = Arc::new(MultiplexedStream::new(vec![s1, s2]));
+
+        let first = mux.ingest_record(b"slow_a".to_vec()).await?;
+        let second = mux.ingest_record(b"slow_b".to_vec()).await?;
+
+        let mux_for_task = Arc::clone(&mux);
+        let third_task = tokio::spawn(async move { mux_for_task.ingest_record(b"blocked".to_vec()).await });
+
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert!(
+            !third_task.is_finished(),
+            "Expected ingest to block while all sub-streams are full"
+        );
+
+        let third = tokio::time::timeout(Duration::from_millis(500), third_task)
+            .await
+            .expect("ingest should complete once the chosen lane drains")??;
+
+        assert_eq!(
+            third.stream_index(),
+            0,
+            "Expected fallback to the original chosen lane when all lanes are full"
+        );
+        assert_eq!(third.sub_offset(), 1);
+
+        mux.wait_for_message_id(first).await?;
+        mux.wait_for_message_id(second).await?;
+        mux.wait_for_message_id(third).await?;
+        assert_eq!(mock_server.get_write_count().await, 3);
 
         Ok(())
     }
