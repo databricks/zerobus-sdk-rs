@@ -1,5 +1,3 @@
-use std::future::Future;
-use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 use futures::future::join_all;
@@ -105,22 +103,15 @@ impl MultiplexedStream {
         }
     }
 
-    async fn ingest_to_substream<F>(
+    fn pick_substream(&self) -> usize {
+        self.round_robin_counter.fetch_add(1, Ordering::Relaxed) % self.streams.len()
+    }
+
+    async fn wait_for_capacity(
         &self,
-        ingest_fn: F,
-    ) -> ZerobusResult<Option<MessageId>>
-    where
-        F: for<'a> FnOnce(
-            &'a ZerobusStream,
-        )
-            -> Pin<Box<dyn Future<Output = ZerobusResult<Option<OffsetId>>> + 'a>>,
-    {
-        self.check_closed()?;
-
-        let idx = self.round_robin_counter.fetch_add(1, Ordering::Relaxed) % self.streams.len();
-        let stream = &self.streams[idx];
-
-        // Wait for capacity with exponential backoff
+        stream: &ZerobusStream,
+        idx: usize,
+    ) -> ZerobusResult<()> {
         let mut backoff_ms = 1u64;
         let mut total_wait_ms = 0u64;
         let mut logged_backpressure = false;
@@ -135,7 +126,7 @@ impl MultiplexedStream {
             }
 
             if stream.has_capacity() {
-                break;
+                return Ok(());
             }
 
             tokio::time::sleep(std::time::Duration::from_millis(backoff_ms)).await;
@@ -151,18 +142,19 @@ impl MultiplexedStream {
                 logged_backpressure = true;
             }
         }
+    }
 
-        match ingest_fn(stream).await {
-            Ok(sub_offset) => Ok(sub_offset.map(|off| MessageId::new(idx, off))),
-            Err(e) => {
-                if stream.is_closed() {
-                    error!(stream_index = idx, error = %e, "Ingest failed on closed sub-stream, poisoning MultiplexedStream");
-                    self.shutdown_on_failure().await;
-                } else {
-                    warn!(stream_index = idx, error = %e, "Ingest errored but sub-stream still alive");
-                }
-                Err(e)
-            }
+    async fn handle_ingest_error(
+        &self,
+        e: &ZerobusError,
+        stream: &ZerobusStream,
+        idx: usize,
+    ) {
+        if stream.is_closed() {
+            error!(stream_index = idx, error = %e, "Ingest failed on closed sub-stream, poisoning MultiplexedStream");
+            self.shutdown_on_failure().await;
+        } else {
+            warn!(stream_index = idx, error = %e, "Ingest errored but sub-stream still alive");
         }
     }
 
@@ -170,12 +162,19 @@ impl MultiplexedStream {
         &self,
         payload: impl Into<EncodedRecord>,
     ) -> ZerobusResult<MessageId> {
+        self.check_closed()?;
         let record = payload.into();
-        self.ingest_to_substream(|stream| {
-            Box::pin(async move { stream.ingest_record_offset(record).await.map(Some) })
-        })
-        .await
-        .map(|opt| opt.unwrap())
+        let idx = self.pick_substream();
+        let stream = &self.streams[idx];
+        self.wait_for_capacity(stream, idx).await?;
+
+        match stream.ingest_record_offset(record).await {
+            Ok(off) => Ok(MessageId::new(idx, off)),
+            Err(e) => {
+                self.handle_ingest_error(&e, stream, idx).await;
+                Err(e)
+            }
+        }
     }
 
     // TODO: Check if there is a performance advantage in splitting this payload in multiple streams
@@ -191,10 +190,18 @@ impl MultiplexedStream {
         if records.is_empty() {
             return Ok(None);
         }
-        self.ingest_to_substream(|stream| {
-            Box::pin(async move { stream.ingest_records_offset(records).await })
-        })
-        .await
+        self.check_closed()?;
+        let idx = self.pick_substream();
+        let stream = &self.streams[idx];
+        self.wait_for_capacity(stream, idx).await?;
+
+        match stream.ingest_records_offset(records).await {
+            Ok(sub_offset) => Ok(sub_offset.map(|off| MessageId::new(idx, off))),
+            Err(e) => {
+                self.handle_ingest_error(&e, stream, idx).await;
+                Err(e)
+            }
+        }
     }
 
     pub async fn flush(&self) -> ZerobusResult<()> {
