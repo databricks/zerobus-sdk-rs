@@ -354,8 +354,8 @@ impl ZerobusSdk {
             zerobus_endpoint,
             use_tls: true,
             unity_catalog_url,
-            shared_channel: tokio::sync::Mutex::new(None),
             workspace_id,
+            shared_channel: tokio::sync::Mutex::new(None),
             tls_config: Arc::new(SecureTlsConfig::new()),
             connector_factory: None,
         })
@@ -376,8 +376,8 @@ impl ZerobusSdk {
             zerobus_endpoint,
             use_tls: true,
             unity_catalog_url,
-            shared_channel: tokio::sync::Mutex::new(None),
             workspace_id,
+            shared_channel: tokio::sync::Mutex::new(None),
             tls_config,
             connector_factory,
         }
