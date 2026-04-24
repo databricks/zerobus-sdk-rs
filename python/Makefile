@@ -38,11 +38,9 @@ dev:
 	$(VENV) -m pip install -r requirements-dev.lock
 	$(VENV) -m maturin develop
 
-lock-dev:
-	@test -d .venv39 || python3.9 -m venv .venv39
+lock-dev: # requires uv
 	@test -f LICENSE || cp ../LICENSE LICENSE
-	.venv39/bin/pip install --quiet --upgrade pip pip-tools
-	.venv39/bin/pip-compile --generate-hashes --strip-extras --no-emit-index-url --allow-unsafe --output-file requirements-dev.lock requirements-dev.in
+	uv pip compile --generate-hashes --no-emit-index-url --exclude-newer '2026-03-19T00:00:00Z' --output-file requirements-dev.lock requirements-dev.in
 
 install:
 	$(VENV) -m pip install -e .
@@ -68,7 +66,7 @@ clean:
 	rm -rf dist *.egg-info .pytest_cache build htmlcov
 
 clean-all: clean clean-rust
-	rm -rf .venv .venv39
+	rm -rf .venv
 
 fmt:
 	$(VENV) -m black zerobus examples tests
