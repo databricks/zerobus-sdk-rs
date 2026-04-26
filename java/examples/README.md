@@ -61,8 +61,12 @@ ZerobusProtoStream stream = sdk.createProtoStream(
 // Method-level generics - flexible typing
 stream.ingestRecordOffset(myProtoMessage);        // Message
 stream.ingestRecordOffset(preEncodedBytes);       // byte[]
+stream.ingestRecordNoWait(myProtoMessage);        // fire-and-forget
+stream.ingestRecordNoWait(preEncodedBytes);       // fire-and-forget bytes
 stream.ingestRecordsOffset(listOfMessages);       // batch
 stream.ingestRecordsOffset(listOfByteArrays);     // batch
+stream.ingestRecordsNoWait(listOfMessages);       // fire-and-forget batch
+stream.ingestRecordsNoWait(listOfByteArrays);     // fire-and-forget bytes batch
 ```
 
 ### ZerobusJsonStream (Recommended for JSON)
@@ -77,8 +81,12 @@ ZerobusJsonStream stream = sdk.createJsonStream(
 // Method-level generics - flexible typing
 stream.ingestRecordOffset(object, gson::toJson);  // Object + serializer
 stream.ingestRecordOffset(jsonString);            // String
+stream.ingestRecordNoWait(object, gson::toJson);  // fire-and-forget object
+stream.ingestRecordNoWait(jsonString);            // fire-and-forget String
 stream.ingestRecordsOffset(objects, gson::toJson);// batch
 stream.ingestRecordsOffset(jsonStrings);          // batch
+stream.ingestRecordsNoWait(objects, gson::toJson);// fire-and-forget batch
+stream.ingestRecordsNoWait(jsonStrings);          // fire-and-forget String batch
 ```
 
 ### ZerobusArrowStream (Experimental - Arrow Flight)

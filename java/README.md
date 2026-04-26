@@ -914,9 +914,19 @@ Stream for Protocol Buffer ingestion with method-level generics. Use `ZerobusSdk
 Ingests a Protocol Buffer message and returns the offset immediately.
 
 ```java
+<T extends Message> void ingestRecordNoWait(T record) throws ZerobusException
+```
+Queues a protobuf message without returning an offset or waiting for acknowledgment.
+
+```java
 long ingestRecordOffset(byte[] encodedBytes) throws ZerobusException
 ```
 Ingests pre-encoded bytes and returns the offset immediately.
+
+```java
+void ingestRecordNoWait(byte[] encodedBytes) throws ZerobusException
+```
+Queues pre-encoded bytes without returning an offset or waiting for acknowledgment.
 
 **Batch Methods:**
 
@@ -926,9 +936,19 @@ Ingests pre-encoded bytes and returns the offset immediately.
 Ingests multiple messages and returns the batch offset.
 
 ```java
+<T extends Message> void ingestRecordsNoWait(Iterable<T> records) throws ZerobusException
+```
+Queues multiple messages without returning an offset or waiting for acknowledgment.
+
+```java
 Optional<Long> ingestRecordsOffset(List<byte[]> encodedRecords) throws ZerobusException
 ```
 Ingests multiple pre-encoded byte arrays and returns the batch offset.
+
+```java
+void ingestRecordsNoWait(List<byte[]> encodedRecords) throws ZerobusException
+```
+Queues multiple pre-encoded byte arrays without returning an offset or waiting for acknowledgment.
 
 **Recovery Methods:**
 
@@ -963,9 +983,19 @@ Stream for JSON ingestion with method-level generics. Use `ZerobusSdk.createJson
 Ingests an object serialized to JSON and returns the offset immediately.
 
 ```java
+<T> void ingestRecordNoWait(T object, JsonSerializer<T> serializer) throws ZerobusException
+```
+Queues an object serialized to JSON without returning an offset or waiting for acknowledgment.
+
+```java
 long ingestRecordOffset(String json) throws ZerobusException
 ```
 Ingests a JSON string and returns the offset immediately.
+
+```java
+void ingestRecordNoWait(String json) throws ZerobusException
+```
+Queues a JSON string without returning an offset or waiting for acknowledgment.
 
 **Batch Methods:**
 
@@ -975,9 +1005,19 @@ Ingests a JSON string and returns the offset immediately.
 Ingests multiple objects as JSON and returns the batch offset.
 
 ```java
+<T> void ingestRecordsNoWait(Iterable<T> objects, JsonSerializer<T> serializer) throws ZerobusException
+```
+Queues multiple objects as JSON without returning an offset or waiting for acknowledgment.
+
+```java
 Optional<Long> ingestRecordsOffset(Iterable<String> jsonStrings) throws ZerobusException
 ```
 Ingests multiple JSON strings and returns the batch offset.
+
+```java
+void ingestRecordsNoWait(Iterable<String> jsonStrings) throws ZerobusException
+```
+Queues multiple JSON strings without returning an offset or waiting for acknowledgment.
 
 **Recovery Methods:**
 
@@ -1010,6 +1050,11 @@ Legacy stream with class-level generics and Future-based API. Use `ZerobusProtoS
 CompletableFuture<Void> ingestRecord(RecordType record) throws ZerobusException
 ```
 Ingests a record and returns a Future that completes on acknowledgment.
+
+```java
+void ingestRecordNoWait(RecordType record) throws ZerobusException
+```
+Queues a record without returning an offset or waiting for acknowledgment.
 
 **Lifecycle Methods:** `waitForOffset()`, `flush()`, `close()`, `isClosed()`
 
@@ -1229,16 +1274,18 @@ Called when an error occurs for records at or after `offsetId`.
 
 1. **Reuse SDK instances**: Create one `ZerobusSdk` instance per application
 2. **Stream lifecycle**: Always close streams in a `finally` block or use try-with-resources
-3. **Use offset-based API for high throughput**: `ingestRecordOffset()` avoids `CompletableFuture` overhead
-4. **Batch records when possible**: Use `ingestRecordsOffset()` for multiple records
-5. **Configure `maxInflightRecords`**: Adjust based on your throughput and memory requirements
-6. **Implement proper error handling**: Distinguish between retriable and non-retriable errors
-7. **Use `AckCallback` for monitoring**: Track acknowledgment progress without blocking
-8. **Proto generation**: Use the built-in `GenerateProto` tool to generate proto files from table schemas
-9. **Choose the right API**:
+3. **Use no-wait ingestion when per-record offsets are unnecessary**: `ingestRecordNoWait()` applies normal native backpressure but does not return an offset; call `flush()` or `close()` before shutdown when durability matters
+4. **Use offset-based API for tracked ingestion**: `ingestRecordOffset()` avoids `CompletableFuture` overhead while still letting you wait on specific offsets
+5. **Batch records when possible**: Use `ingestRecordsOffset()` for multiple records
+6. **Configure `maxInflightRecords`**: Adjust based on your throughput and memory requirements
+7. **Implement proper error handling**: Distinguish between retriable and non-retriable errors
+8. **Use `AckCallback` for monitoring**: Track acknowledgment progress without blocking
+9. **Proto generation**: Use the built-in `GenerateProto` tool to generate proto files from table schemas
+10. **Choose the right API**:
    - `ingestRecord()` → Simple use cases, moderate throughput (deprecated)
+   - `ingestRecordNoWait()` → Fire-and-forget when per-record tracking is unnecessary
    - `ingestRecordOffset()` + `waitForOffset()` → High throughput, fine-grained control (recommended)
-10. **Recovery pattern**: Use `sdk.recreateStream(closedStream)` to automatically re-ingest unacknowledged records, or manually use `getUnackedBatches()` after stream close
+11. **Recovery pattern**: Use `sdk.recreateStream(closedStream)` to automatically re-ingest unacknowledged records, or manually use `getUnackedBatches()` after stream close
 
 ## Community and Contributing
 

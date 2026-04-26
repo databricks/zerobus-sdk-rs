@@ -1130,6 +1130,105 @@ public class IntegrationTest {
   }
 
   // ===================================================================================
+  // Test 17: No-wait ingestion (10 records)
+  // ===================================================================================
+
+  @Test
+  @Order(17)
+  @DisplayName("No-wait ingestion flushes and preserves ordering")
+  void testNoWaitIngestionFlushAndOrdering() throws Exception {
+    ZerobusSdk sdk = new ZerobusSdk(serverEndpoint, workspaceUrl);
+    ZerobusProtoStream protoStream =
+        sdk.createProtoStream(
+                tableName, AirQuality.getDescriptor().toProto(), clientId, clientSecret)
+            .join();
+    ZerobusJsonStream jsonStream = sdk.createJsonStream(tableName, clientId, clientSecret).join();
+
+    int totalRecords = 0;
+
+    try {
+      AirQuality protoNoWait =
+          AirQuality.newBuilder()
+              .setDeviceName("test-nowait-proto-message")
+              .setTemp(20)
+              .setHumidity(50L)
+              .build();
+      protoStream.ingestRecordNoWait(protoNoWait);
+      totalRecords++;
+
+      AirQuality protoBytes =
+          AirQuality.newBuilder()
+              .setDeviceName("test-nowait-proto-bytes")
+              .setTemp(21)
+              .setHumidity(51L)
+              .build();
+      protoStream.ingestRecordNoWait(protoBytes.toByteArray());
+      totalRecords++;
+
+      List<AirQuality> protoBatch = new ArrayList<>();
+      protoBatch.add(
+          AirQuality.newBuilder()
+              .setDeviceName("test-nowait-proto-batch-0")
+              .setTemp(22)
+              .setHumidity(52L)
+              .build());
+      protoBatch.add(
+          AirQuality.newBuilder()
+              .setDeviceName("test-nowait-proto-batch-1")
+              .setTemp(23)
+              .setHumidity(53L)
+              .build());
+      protoStream.ingestRecordsNoWait(protoBatch);
+      totalRecords += protoBatch.size();
+
+      AirQuality protoTracked =
+          AirQuality.newBuilder()
+              .setDeviceName("test-nowait-proto-tracked")
+              .setTemp(24)
+              .setHumidity(54L)
+              .build();
+      long protoOffset = protoStream.ingestRecordOffset(protoTracked);
+      protoStream.waitForOffset(protoOffset);
+      totalRecords++;
+
+      Map<String, Object> jsonNoWait = new HashMap<>();
+      jsonNoWait.put("device_name", "test-nowait-json-object");
+      jsonNoWait.put("temp", 30);
+      jsonNoWait.put("humidity", 60L);
+      jsonStream.ingestRecordNoWait(jsonNoWait, this::toJson);
+      totalRecords++;
+
+      jsonStream.ingestRecordNoWait(
+          "{\"device_name\": \"test-nowait-json-string\", \"temp\": 31, \"humidity\": 61}");
+      totalRecords++;
+
+      List<String> jsonBatch = new ArrayList<>();
+      jsonBatch.add(
+          "{\"device_name\": \"test-nowait-json-batch-0\", \"temp\": 32, \"humidity\": 62}");
+      jsonBatch.add(
+          "{\"device_name\": \"test-nowait-json-batch-1\", \"temp\": 33, \"humidity\": 63}");
+      jsonStream.ingestRecordsNoWait(jsonBatch);
+      totalRecords += jsonBatch.size();
+
+      long jsonOffset =
+          jsonStream.ingestRecordOffset(
+              "{\"device_name\": \"test-nowait-json-tracked\", \"temp\": 34, \"humidity\": 64}");
+      jsonStream.waitForOffset(jsonOffset);
+      totalRecords++;
+
+      protoStream.flush();
+      jsonStream.flush();
+
+      assertEquals(10, totalRecords);
+      System.out.println("No-wait ingestion: " + totalRecords + " records flushed");
+    } finally {
+      protoStream.close();
+      jsonStream.close();
+      sdk.close();
+    }
+  }
+
+  // ===================================================================================
   // Helpers
   // ===================================================================================
 

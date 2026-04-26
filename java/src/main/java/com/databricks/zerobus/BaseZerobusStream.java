@@ -194,6 +194,8 @@ abstract class BaseZerobusStream implements AutoCloseable {
   protected native CompletableFuture<Void> nativeIngestRecord(
       long handle, byte[] payload, boolean isJson);
 
+  protected native void nativeIngestRecordNoWait(long handle, byte[] payload, boolean isJson);
+
   protected native long nativeIngestRecordOffset(long handle, byte[] payload, boolean isJson);
 
   protected native long nativeIngestRecordsOffset(

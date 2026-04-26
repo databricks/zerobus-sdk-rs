@@ -158,6 +158,27 @@ public class ZerobusJsonStream extends BaseZerobusStream {
   }
 
   /**
+   * Ingests an object as JSON without returning an offset or waiting for server acknowledgment.
+   *
+   * <p>This fire-and-forget method serializes the object, queues it through the native runtime's
+   * backpressure path, and returns without exposing the assigned offset or waiting for server
+   * acknowledgment. Call {@link #flush()} or {@link #close()} before shutdown if you need to ensure
+   * all queued records have been acknowledged.
+   *
+   * @param object the object to serialize and ingest
+   * @param serializer a function that converts the object to a JSON string
+   * @param <T> the type of the object
+   * @throws ZerobusException if the stream is already closed, the payload is invalid, or the record
+   *     could not be queued
+   */
+  public <T> void ingestRecordNoWait(T object, JsonSerializer<T> serializer)
+      throws ZerobusException {
+    ensureOpen();
+    String json = serializer.serialize(object);
+    nativeIngestRecordNoWait(nativeHandle, json.getBytes(StandardCharsets.UTF_8), true);
+  }
+
+  /**
    * Ingests a JSON string and returns the offset immediately.
    *
    * <p>Use this method when you already have a JSON string.
@@ -169,6 +190,23 @@ public class ZerobusJsonStream extends BaseZerobusStream {
   public long ingestRecordOffset(String json) throws ZerobusException {
     ensureOpen();
     return nativeIngestRecordOffset(nativeHandle, json.getBytes(StandardCharsets.UTF_8), true);
+  }
+
+  /**
+   * Ingests a JSON string without returning an offset or waiting for server acknowledgment.
+   *
+   * <p>Use this fire-and-forget method when you already have a JSON string and do not need
+   * per-record offset tracking. The method queues the record through native backpressure and
+   * returns without waiting for server acknowledgment. Call {@link #flush()} or {@link #close()}
+   * before shutdown if you need to ensure all queued records have been acknowledged.
+   *
+   * @param json the JSON string to ingest
+   * @throws ZerobusException if the stream is already closed, the payload is invalid, or the record
+   *     could not be queued
+   */
+  public void ingestRecordNoWait(String json) throws ZerobusException {
+    ensureOpen();
+    nativeIngestRecordNoWait(nativeHandle, json.getBytes(StandardCharsets.UTF_8), true);
   }
 
   // ==================== Batch Ingestion ====================
@@ -218,6 +256,59 @@ public class ZerobusJsonStream extends BaseZerobusStream {
     }
     ensureOpen();
     return Optional.of(nativeIngestRecordsOffset(nativeHandle, payloads, true));
+  }
+
+  /**
+   * Ingests multiple objects as JSON without returning an offset or waiting for server
+   * acknowledgment.
+   *
+   * <p>This fire-and-forget method serializes the objects and queues the batch through the native
+   * runtime's backpressure path. Use this when per-batch offset tracking is unnecessary, and call
+   * {@link #flush()} or {@link #close()} before shutdown if you need to ensure all queued records
+   * have been acknowledged.
+   *
+   * @param objects the objects to serialize and ingest
+   * @param serializer a function that converts each object to a JSON string
+   * @param <T> the type of the objects
+   * @throws ZerobusException if the stream is already closed, a payload is invalid, or the batch
+   *     could not be queued
+   */
+  public <T> void ingestRecordsNoWait(Iterable<T> objects, JsonSerializer<T> serializer)
+      throws ZerobusException {
+    List<byte[]> payloads = new ArrayList<>();
+    for (T obj : objects) {
+      String json = serializer.serialize(obj);
+      payloads.add(json.getBytes(StandardCharsets.UTF_8));
+    }
+    if (payloads.isEmpty()) {
+      return;
+    }
+    ensureOpen();
+    nativeIngestRecordsOffset(nativeHandle, payloads, true);
+  }
+
+  /**
+   * Ingests multiple JSON strings without returning an offset or waiting for server acknowledgment.
+   *
+   * <p>Use this fire-and-forget method when you already have JSON strings and do not need per-batch
+   * offset tracking. The method queues the batch through native backpressure. Call {@link #flush()}
+   * or {@link #close()} before shutdown if you need to ensure all queued records have been
+   * acknowledged.
+   *
+   * @param jsonStrings the JSON strings to ingest
+   * @throws ZerobusException if the stream is already closed, a payload is invalid, or the batch
+   *     could not be queued
+   */
+  public void ingestRecordsNoWait(Iterable<String> jsonStrings) throws ZerobusException {
+    List<byte[]> payloads = new ArrayList<>();
+    for (String json : jsonStrings) {
+      payloads.add(json.getBytes(StandardCharsets.UTF_8));
+    }
+    if (payloads.isEmpty()) {
+      return;
+    }
+    ensureOpen();
+    nativeIngestRecordsOffset(nativeHandle, payloads, true);
   }
 
   // ==================== Unacknowledged Records ====================

@@ -137,6 +137,23 @@ public class ZerobusStream<RecordType extends Message> extends BaseZerobusStream
   }
 
   /**
+   * Ingests a protobuf record without returning an offset or waiting for server acknowledgment.
+   *
+   * <p>This fire-and-forget method queues the record through the native runtime's backpressure path
+   * and returns without exposing the assigned offset or waiting for server acknowledgment. Call
+   * {@link #flush()} or {@link #close()} before shutdown if you need to ensure all queued records
+   * have been acknowledged.
+   *
+   * @param record the protobuf record to ingest
+   * @throws ZerobusException if the stream is already closed, the payload is invalid, or the record
+   *     could not be queued
+   */
+  public void ingestRecordNoWait(RecordType record) throws ZerobusException {
+    ensureOpen();
+    nativeIngestRecordNoWait(nativeHandle, record.toByteArray(), false);
+  }
+
+  /**
    * Returns the unacknowledged records after stream failure.
    *
    * <p>Note: Due to type erasure, this method cannot deserialize records without a parser. Consider

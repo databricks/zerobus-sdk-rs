@@ -95,6 +95,24 @@ public class ZerobusProtoStream extends BaseZerobusStream {
   }
 
   /**
+   * Ingests a protobuf message without returning an offset or waiting for server acknowledgment.
+   *
+   * <p>This fire-and-forget method queues the record through the native runtime's backpressure path
+   * and returns without exposing the assigned offset or waiting for server acknowledgment. Call
+   * {@link #flush()} or {@link #close()} before shutdown if you need to ensure all queued records
+   * have been acknowledged.
+   *
+   * @param record the protobuf message to ingest
+   * @param <T> the message type
+   * @throws ZerobusException if the stream is already closed, the payload is invalid, or the record
+   *     could not be queued
+   */
+  public <T extends Message> void ingestRecordNoWait(T record) throws ZerobusException {
+    ensureOpen();
+    nativeIngestRecordNoWait(nativeHandle, record.toByteArray(), false);
+  }
+
+  /**
    * Ingests pre-encoded bytes and returns the offset immediately.
    *
    * <p>Use this method when you have already serialized the record to avoid double-encoding
@@ -107,6 +125,23 @@ public class ZerobusProtoStream extends BaseZerobusStream {
   public long ingestRecordOffset(byte[] encodedBytes) throws ZerobusException {
     ensureOpen();
     return nativeIngestRecordOffset(nativeHandle, encodedBytes, false);
+  }
+
+  /**
+   * Ingests pre-encoded bytes without returning an offset or waiting for server acknowledgment.
+   *
+   * <p>Use this fire-and-forget method when you have already serialized the record and do not need
+   * per-record offset tracking. The method queues the record through native backpressure and
+   * returns without waiting for server acknowledgment. Call {@link #flush()} or {@link #close()}
+   * before shutdown if you need to ensure all queued records have been acknowledged.
+   *
+   * @param encodedBytes the pre-encoded protobuf bytes
+   * @throws ZerobusException if the stream is already closed, the payload is invalid, or the record
+   *     could not be queued
+   */
+  public void ingestRecordNoWait(byte[] encodedBytes) throws ZerobusException {
+    ensureOpen();
+    nativeIngestRecordNoWait(nativeHandle, encodedBytes, false);
   }
 
   // ==================== Batch Ingestion ====================
@@ -150,6 +185,52 @@ public class ZerobusProtoStream extends BaseZerobusStream {
     }
     ensureOpen();
     return Optional.of(nativeIngestRecordsOffset(nativeHandle, encodedRecords, false));
+  }
+
+  /**
+   * Ingests multiple protobuf messages without returning an offset or waiting for server
+   * acknowledgment.
+   *
+   * <p>This fire-and-forget method queues the batch through the native runtime's backpressure path.
+   * Use this when per-batch offset tracking is unnecessary, and call {@link #flush()} or {@link
+   * #close()} before shutdown if you need to ensure all queued records have been acknowledged.
+   *
+   * @param records the protobuf messages to ingest
+   * @param <T> the message type
+   * @throws ZerobusException if the stream is already closed, a payload is invalid, or the batch
+   *     could not be queued
+   */
+  public <T extends Message> void ingestRecordsNoWait(Iterable<T> records) throws ZerobusException {
+    List<byte[]> payloads = new ArrayList<>();
+    for (T record : records) {
+      payloads.add(record.toByteArray());
+    }
+    if (payloads.isEmpty()) {
+      return;
+    }
+    ensureOpen();
+    nativeIngestRecordsOffset(nativeHandle, payloads, false);
+  }
+
+  /**
+   * Ingests multiple pre-encoded byte arrays without returning an offset or waiting for server
+   * acknowledgment.
+   *
+   * <p>Use this fire-and-forget method when you have already serialized the records and do not need
+   * per-batch offset tracking. The method queues the batch through native backpressure. Call {@link
+   * #flush()} or {@link #close()} before shutdown if you need to ensure all queued records have
+   * been acknowledged.
+   *
+   * @param encodedRecords the pre-encoded protobuf byte arrays
+   * @throws ZerobusException if the stream is already closed, a payload is invalid, or the batch
+   *     could not be queued
+   */
+  public void ingestRecordsNoWait(List<byte[]> encodedRecords) throws ZerobusException {
+    if (encodedRecords.isEmpty()) {
+      return;
+    }
+    ensureOpen();
+    nativeIngestRecordsOffset(nativeHandle, encodedRecords, false);
   }
 
   // ==================== Unacknowledged Records ====================

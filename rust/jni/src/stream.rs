@@ -146,6 +146,65 @@ pub extern "system" fn Java_com_databricks_zerobus_BaseZerobusStream_nativeInges
     future
 }
 
+/// Ingest a record without returning an offset or ack future.
+///
+/// # JNI Signature
+/// ```java
+/// private native void nativeIngestRecordNoWait(long handle, byte[] payload, boolean isJson);
+/// ```
+#[no_mangle]
+pub extern "system" fn Java_com_databricks_zerobus_BaseZerobusStream_nativeIngestRecordNoWait<
+    'local,
+>(
+    mut env: JNIEnv<'local>,
+    _obj: JObject<'local>,
+    handle: jlong,
+    payload: JByteArray<'local>,
+    is_json: jboolean,
+) {
+    // Extract payload bytes before returning to Java, so malformed input is reported synchronously.
+    let bytes: Vec<u8> = match env.convert_byte_array(payload) {
+        Ok(b) => b,
+        Err(e) => {
+            throw_zerobus_exception(&mut env, &format!("Invalid payload: {}", e));
+            return;
+        }
+    };
+
+    // Get stream handle
+    let stream_handle = unsafe { NativeStreamHandle::borrow_from_raw(handle) };
+    // Create the encoded record
+    let record = if is_json != JNI_FALSE {
+        let json_str = match String::from_utf8(bytes) {
+            Ok(s) => s,
+            Err(e) => {
+                throw_zerobus_exception(&mut env, &format!("Invalid UTF-8 in JSON payload: {}", e));
+                return;
+            }
+        };
+        EncodedRecord::Json(json_str)
+    } else {
+        EncodedRecord::Proto(bytes)
+    };
+
+    // Queue through the SDK's existing ordered backpressure path and discard the offset.
+    // The Java API is "no wait" for offset/acknowledgment, not "unbounded firehose".
+    let result = block_on(async {
+        let guard = stream_handle.stream.lock().await;
+        let stream = guard.as_ref().ok_or_else(|| {
+            databricks_zerobus_ingest_sdk::ZerobusError::InvalidStateError(
+                "Stream is closed".to_string(),
+            )
+        })?;
+
+        stream.ingest_record_offset(record).await.map(|_| ())
+    });
+
+    if let Err(e) = result {
+        throw_from_zerobus_error(&mut env, &e);
+    }
+}
+
 /// Ingest a record and return the offset immediately (blocking until enqueued).
 ///
 /// # JNI Signature
