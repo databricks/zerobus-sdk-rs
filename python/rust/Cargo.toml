@@ -1,17 +1,20 @@
 [package]
 name = "zerobus-python"
-version = "1.1.0"
+version = "1.2.0"
 edition = "2021"
 
 [lib]
 name = "_zerobus_core"
 crate-type = ["cdylib"]
 
+[patch.crates-io]
+databricks-zerobus-ingest-sdk = { path = "../../rust/sdk" }
+
 [dependencies]
 pyo3 = { version = "0.20", features = ["extension-module", "abi3-py39"] }
 pyo3-asyncio = { version = "0.20", features = ["tokio-runtime"] }
 tokio = { version = "1", features = ["full"] }
-databricks-zerobus-ingest-sdk = { version = "1.0.1", features = ["arrow-flight"] }
+databricks-zerobus-ingest-sdk = { version = "1.2.0", features = ["arrow-flight"] }
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 async-trait = "0.1"
 prost = "0.13"
