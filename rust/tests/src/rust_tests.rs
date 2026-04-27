@@ -5295,3 +5295,164 @@ mod callback_tests {
         Ok(())
     }
 }
+
+mod stream_builder_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn test_builder_json_stream_creation() -> Result<(), Box<dyn std::error::Error>> {
+        setup_tracing();
+
+        let (mock_server, server_url) = start_mock_server().await?;
+
+        mock_server
+            .inject_responses(
+                TABLE_NAME,
+                vec![MockResponse::CreateStream {
+                    stream_id: "builder_json_stream".to_string(),
+                    delay_ms: 0,
+                }],
+            )
+            .await;
+
+        let sdk = ZerobusSdk::builder()
+            .endpoint(server_url)
+            .unity_catalog_url("https://mock-uc.com")
+            .tls_config(Arc::new(NoTlsConfig))
+            .build()?;
+
+        let mut stream = sdk
+            .stream_builder()
+            .table(TABLE_NAME)
+            .headers_provider(Arc::new(TestHeadersProvider::default()))
+            .json()
+            .max_inflight_requests(100)
+            .recovery(false)
+            .build()
+            .await?;
+
+        assert_eq!(stream.stream_type, StreamType::Ephemeral);
+        stream.close().await?;
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_builder_proto_stream_creation() -> Result<(), Box<dyn std::error::Error>> {
+        setup_tracing();
+
+        let (mock_server, server_url) = start_mock_server().await?;
+
+        mock_server
+            .inject_responses(
+                TABLE_NAME,
+                vec![MockResponse::CreateStream {
+                    stream_id: "builder_proto_stream".to_string(),
+                    delay_ms: 0,
+                }],
+            )
+            .await;
+
+        let sdk = ZerobusSdk::builder()
+            .endpoint(server_url)
+            .unity_catalog_url("https://mock-uc.com")
+            .tls_config(Arc::new(NoTlsConfig))
+            .build()?;
+
+        let descriptor = create_test_descriptor_proto().unwrap();
+        let mut stream = sdk
+            .stream_builder()
+            .table(TABLE_NAME)
+            .headers_provider(Arc::new(TestHeadersProvider::default()))
+            .compiled_proto(descriptor)
+            .max_inflight_requests(100)
+            .recovery(false)
+            .build()
+            .await?;
+
+        assert_eq!(stream.stream_type, StreamType::Ephemeral);
+        stream.close().await?;
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_builder_json_ingest_and_ack() -> Result<(), Box<dyn std::error::Error>> {
+        setup_tracing();
+
+        let (mock_server, server_url) = start_mock_server().await?;
+
+        mock_server
+            .inject_responses(
+                TABLE_NAME,
+                vec![
+                    MockResponse::CreateStream {
+                        stream_id: "builder_ingest_stream".to_string(),
+                        delay_ms: 0,
+                    },
+                    MockResponse::RecordAck {
+                        ack_up_to_offset: 0,
+                        delay_ms: 0,
+                    },
+                ],
+            )
+            .await;
+
+        let sdk = ZerobusSdk::builder()
+            .endpoint(server_url)
+            .unity_catalog_url("https://mock-uc.com")
+            .tls_config(Arc::new(NoTlsConfig))
+            .build()?;
+
+        let mut stream = sdk
+            .stream_builder()
+            .table(TABLE_NAME)
+            .headers_provider(Arc::new(TestHeadersProvider::default()))
+            .json()
+            .recovery(false)
+            .build()
+            .await?;
+
+        let offset = stream
+            .ingest_record_offset(r#"{"id": 1, "message": "hello"}"#.to_string())
+            .await?;
+        stream.wait_for_offset(offset).await?;
+        stream.close().await?;
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_builder_validate_catches_missing_fields() {
+        let sdk = ZerobusSdk::builder()
+            .endpoint("http://localhost:1234")
+            .tls_config(Arc::new(NoTlsConfig))
+            .build()
+            .unwrap();
+
+        // Missing everything
+        let result = sdk.stream_builder().validate();
+        assert!(result.is_err());
+
+        // Missing auth and format
+        let result = sdk.stream_builder().table(TABLE_NAME).validate();
+        assert!(result.is_err());
+
+        // Missing format
+        let result = sdk
+            .stream_builder()
+            .table(TABLE_NAME)
+            .headers_provider(Arc::new(TestHeadersProvider::default()))
+            .validate();
+        assert!(result.is_err());
+
+        // All set — should pass
+        let result = sdk
+            .stream_builder()
+            .table(TABLE_NAME)
+            .headers_provider(Arc::new(TestHeadersProvider::default()))
+            .json()
+            .validate();
+        assert!(result.is_ok());
+    }
+}

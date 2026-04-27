@@ -163,6 +163,7 @@ fn record_batch_to_ipc_bytes(batch: &RecordBatch) -> ZerobusResult<Vec<u8>> {
 /// `schema_ipc_bytes` must point to Arrow IPC stream bytes encoding only the schema
 /// (write an empty IPC stream with just the schema message).
 #[no_mangle]
+#[allow(deprecated)]
 pub extern "C" fn zerobus_sdk_create_arrow_stream(
     sdk: *mut CZerobusSdk,
     table_name: *const c_char,
@@ -233,6 +234,7 @@ pub extern "C" fn zerobus_sdk_create_arrow_stream(
 ///
 /// `schema_ipc_bytes` must point to Arrow IPC stream bytes encoding only the schema.
 #[no_mangle]
+#[allow(deprecated)]
 pub extern "C" fn zerobus_sdk_create_arrow_stream_with_headers_provider(
     sdk: *mut CZerobusSdk,
     table_name: *const c_char,
@@ -1025,6 +1027,7 @@ pub extern "C" fn zerobus_sdk_set_use_tls(sdk: *mut CZerobusSdk, _use_tls: bool)
 /// Create a stream with OAuth authentication
 /// descriptor_proto_bytes: protobuf-encoded DescriptorProto (can be NULL for JSON streams)
 #[no_mangle]
+#[allow(deprecated)]
 pub extern "C" fn zerobus_sdk_create_stream(
     sdk: *mut CZerobusSdk,
     table_name: *const c_char,
@@ -1098,6 +1101,7 @@ pub extern "C" fn zerobus_sdk_create_stream(
 /// Create a stream with a custom headers provider callback
 /// This allows you to provide custom authentication headers via a Go callback function
 #[no_mangle]
+#[allow(deprecated)]
 pub extern "C" fn zerobus_sdk_create_stream_with_headers_provider(
     sdk: *mut CZerobusSdk,
     table_name: *const c_char,

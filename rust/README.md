@@ -42,6 +42,7 @@ The Zerobus Rust SDK provides a robust, async-first interface for ingesting larg
 - **High Throughput** - Configurable inflight record limits for optimal performance
 - **Batch Ingestion** - Ingest multiple records at once with all-or-nothing semantics for maximum throughput
 - **Flexible Serialization** - Support for both JSON (simple) and Protocol Buffers (type-safe) data formats
+- **Stream Builder** - Fluent builder API for configuring and creating ingestion streams
 - **Type Safety** - Protocol Buffers ensure schema validation at compile time
 - **Schema Generation** - CLI tool to generate protobuf schemas from Unity Catalog tables
 - **Flexible Configuration** - Fine-tune timeouts, retries, and recovery behavior
@@ -189,7 +190,7 @@ zerobus_rust_sdk/
 +-----------------+
 |    Your App     |
 +-----------------+
-        | 1. create_stream()
+        | 1. stream_builder().build()
         v
 +-----------------+
 |   ZerobusSdk    |
@@ -270,13 +271,14 @@ impl HeadersProvider for MyCustomAuthProvider {
     }
 }
 
-async fn example(sdk: ZerobusSdk, table_properties: TableProperties) -> ZerobusResult<()> {
+async fn example(sdk: ZerobusSdk) -> ZerobusResult<()> {
     let custom_provider = Arc::new(MyCustomAuthProvider {});
-    let stream = sdk.create_stream_with_headers_provider(
-        table_properties,
-        custom_provider,
-        None,
-    ).await?;
+    let stream = sdk
+        .stream_builder().table("catalog.schema.table")
+        .headers_provider(custom_provider)
+        .json()
+        .build()
+        .await?;
     Ok(())
 }
 ```
@@ -397,7 +399,24 @@ See [`examples/README.md`](https://github.com/databricks/zerobus-sdk/blob/main/r
 
 ### 4. Create a Stream
 
-Configure table properties and stream options:
+Use the `stream_builder()` API to create a stream:
+
+#### JSON Stream
+
+```rust
+let mut stream = sdk
+    .stream_builder().table("catalog.schema.orders")
+    .oauth(client_id, client_secret)
+    .json()
+    .max_inflight_requests(10_000)
+    .recovery_timeout_ms(15_000)
+    .recovery_backoff_ms(2_000)
+    .recovery_retries(4)
+    .build()
+    .await?;
+```
+
+#### Protocol Buffers Stream
 
 ```rust
 use std::fs;
@@ -424,27 +443,19 @@ let descriptor_proto = load_descriptor(
     "table_Orders",
 );
 
-let table_properties = TableProperties {
-    table_name: "catalog.schema.orders".to_string(),
-    descriptor_proto,
-};
-
-let options = StreamConfigurationOptions {
-    max_inflight_requests: 10000,
-    recovery: true,
-    recovery_timeout_ms: 15000,
-    recovery_backoff_ms: 2000,
-    recovery_retries: 4,
-    ..Default::default()
-};
-
-let mut stream = sdk.create_stream(
-    table_properties,
-    client_id,
-    client_secret,
-    Some(options),
-).await?;
+let mut stream = sdk
+    .stream_builder().table("catalog.schema.orders")
+    .oauth(client_id, client_secret)
+    .compiled_proto(descriptor_proto)
+    .max_inflight_requests(10_000)
+    .recovery_timeout_ms(15_000)
+    .recovery_backoff_ms(2_000)
+    .recovery_retries(4)
+    .build()
+    .await?;
 ```
+
+Setters can be called in any order. The builder validates at `build()` time that both authentication and format have been configured.
 
 ### 5. Ingest Data
 
@@ -576,22 +587,18 @@ impl AckCallback for MyCallback {
 }
 
 // Configure stream with callback
-let options = StreamConfigurationOptions {
-    max_inflight_requests: 10000,
-    ack_callback: Some(Arc::new(MyCallback)),
-    ..Default::default()
-};
-
-let mut stream = sdk.create_stream(
-    table_properties,
-    client_id,
-    client_secret,
-    Some(options),
-).await?;
+let mut stream = sdk
+    .stream_builder().table("catalog.schema.orders")
+    .oauth(client_id, client_secret)
+    .json()
+    .max_inflight_requests(10_000)
+    .ack_callback(Arc::new(MyCallback))
+    .build()
+    .await?;
 
 for i in 0..1000 {
-    let record = YourMessage { id: Some(i), /* ... */ };
-    stream.ingest_record_offset(record.encode_to_vec()).await?;
+    let record = serde_json::json!({"id": i, "name": format!("order-{}", i)});
+    stream.ingest_record_offset(record.to_string()).await?;
     // Callback fires when this record is acknowledged
 }
 
@@ -753,18 +760,18 @@ let sdk = ZerobusSdk::builder()
     .unity_catalog_url(uc_endpoint)
     .build()?;
 
-let mut stream = sdk.create_stream(
-    table_properties.clone(),
-    client_id.clone(),
-    client_secret.clone(),
-    Some(options),
-).await?;
+let mut stream = sdk
+    .stream_builder().table("catalog.schema.table")
+    .oauth(client_id, client_secret)
+    .json()
+    .build()
+    .await?;
 
 // Ingest data...
 match stream.close().await {
     Err(_) => {
         // Stream failed, recreate with unacked records
-        stream = sdk.recreate_stream(stream).await?;
+        stream = sdk.recreate_stream(&stream).await?;
     }
     Ok(_) => println!("Closed successfully"),
 }
@@ -816,33 +823,19 @@ let sdk = ZerobusSdk::builder()
 ```
 
 **Methods:**
+
 ```rust
-pub async fn create_stream(
-    &self,
-    table_properties: TableProperties,
-    client_id: String,
-    client_secret: String,
-    options: Option<StreamConfigurationOptions>,
-) -> ZerobusResult<ZerobusStream>
+pub fn stream_builder(&self) -> StreamBuilder<'_>
 ```
+Returns a fluent builder for creating ingestion streams. All setters can be called in any order. Call `validate()` to check the configuration without opening a stream, or `build()` / `build_arrow()` to open the stream. See [Create a Stream](#4-create-a-stream) for usage.
 
 ```rust
 pub async fn recreate_stream(
     &self,
-    stream: ZerobusStream
+    stream: &ZerobusStream
 ) -> ZerobusResult<ZerobusStream>
 ```
 Recreates a failed stream, preserving and re-ingesting unacknowledged records.
-
-```rust
-pub async fn create_stream_with_headers_provider(
-    &self,
-    table_properties: TableProperties,
-    headers_provider: Arc<dyn HeadersProvider>,
-    options: Option<StreamConfigurationOptions>,
-) -> ZerobusResult<ZerobusStream>
-```
-Creates a stream with a custom headers provider for advanced authentication.
 
 ### `ZerobusStream`
 

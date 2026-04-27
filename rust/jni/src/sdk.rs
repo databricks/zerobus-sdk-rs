@@ -126,6 +126,7 @@ pub extern "system" fn Java_com_databricks_zerobus_ZerobusSdk_nativeDestroy<'loc
 /// );
 /// ```
 #[no_mangle]
+#[allow(deprecated)]
 pub extern "system" fn Java_com_databricks_zerobus_ZerobusSdk_nativeCreateStream<'local>(
     mut env: JNIEnv<'local>,
     _obj: JObject<'local>,
@@ -346,6 +347,7 @@ pub extern "system" fn Java_com_databricks_zerobus_ZerobusSdk_nativeRecreateStre
 /// );
 /// ```
 #[no_mangle]
+#[allow(deprecated)]
 pub extern "system" fn Java_com_databricks_zerobus_ZerobusSdk_nativeCreateArrowStream<'local>(
     mut env: JNIEnv<'local>,
     _obj: JObject<'local>,
