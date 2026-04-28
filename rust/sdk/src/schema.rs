@@ -614,18 +614,6 @@ fn generate_map_entry(name: &str, key: PrimitiveType, value: MapValue) -> Descri
     }
 }
 
-/// proto2 keywords and primitive type names reserved as field names. A column
-/// named `message` or `int32` produces a technically-valid `DescriptorProto`
-/// for direct wire encoding, but would collide with the proto grammar when
-/// the descriptor is printed back to `.proto` text or fed to protoc for
-/// language-code generation. Rejecting them here keeps the descriptor safe
-/// for both uses.
-const RESERVED_FIELD_NAMES: &[&str] = &[
-    "syntax", "import", "option", "package", "message", "enum", "service", "rpc", "returns",
-    "reserved", "to", "max", "double", "float", "int32", "int64", "uint32", "uint64", "sint32",
-    "sint64", "fixed32", "fixed64", "sfixed32", "sfixed64", "bool", "string", "bytes",
-];
-
 fn validate_field_name(name: &str) -> Result<(), SchemaError> {
     if name.is_empty() {
         return Err(SchemaError::InvalidFieldName {
@@ -643,12 +631,6 @@ fn validate_field_name(name: &str) -> Result<(), SchemaError> {
         return Err(SchemaError::InvalidFieldName {
             name: name.to_string(),
             reason: "only alphanumeric and '_' characters allowed".into(),
-        });
-    }
-    if RESERVED_FIELD_NAMES.contains(&name) {
-        return Err(SchemaError::InvalidFieldName {
-            name: name.to_string(),
-            reason: "reserved proto keyword".into(),
         });
     }
     Ok(())
@@ -906,16 +888,24 @@ mod tests {
     }
 
     #[test]
-    fn rejects_reserved_proto_keyword() {
-        let cols = vec![col("message", "STRING", true, 0)];
-        let err = descriptor_from_uc_columns(&cols, "m").unwrap_err();
-        match err {
-            SchemaError::InvalidFieldName { name, reason } => {
-                assert_eq!(name, "message");
-                assert!(reason.contains("reserved"), "got reason: {}", reason);
-            }
-            other => panic!("expected InvalidFieldName, got {:?}", other),
-        }
+    fn allows_proto_keywords_and_type_names_as_field_names() {
+        // protoc accepts every proto keyword and primitive type name as a
+        // field name (verified against protoc 30.2, proto2/proto3 + cpp codegen).
+        // The descriptor only carries the name as a byte string; ambiguity
+        // exists only when re-rendering to `.proto` text in declaration position.
+        let names = [
+            "message", "enum", "service", "rpc", "option", "import", "package", "oneof", "map",
+            "reserved", "syntax", "double", "float", "int32", "int64", "uint32", "uint64",
+            "sint32", "sint64", "fixed32", "fixed64", "sfixed32", "sfixed64", "bool", "string",
+            "bytes",
+        ];
+        let cols: Vec<UcColumn> = names
+            .iter()
+            .enumerate()
+            .map(|(i, n)| col(n, "STRING", true, i as i32))
+            .collect();
+        let d = descriptor_from_uc_columns(&cols, "m").unwrap();
+        assert_eq!(d.field.len(), names.len());
     }
 
     #[test]
