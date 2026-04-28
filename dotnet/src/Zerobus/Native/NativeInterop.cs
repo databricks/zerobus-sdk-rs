@@ -284,7 +284,9 @@ internal static class NativeInterop
             for (var i = 0; i < records.Length; i++)
             {
                 // Encode with null terminator
-                var utf8 = Encoding.UTF8.GetBytes(records[i] + '\0');
+                var byteCount = Encoding.UTF8.GetByteCount(records[i]);
+                var utf8 = new byte[byteCount + 1];
+                Encoding.UTF8.GetBytes(records[i], utf8);
                 handles[i] = GCHandle.Alloc(utf8, GCHandleType.Pinned);
                 ptrs[i] = handles[i].AddrOfPinnedObject();
             }
