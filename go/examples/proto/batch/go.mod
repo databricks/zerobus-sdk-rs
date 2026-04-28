@@ -4,7 +4,7 @@ go 1.25.3
 
 require (
 	github.com/databricks/zerobus-sdk/go v0.1.0
-	google.golang.org/protobuf v1.36.10
+	google.golang.org/protobuf v1.36.11
 	zerobus-examples v0.0.0
 )
 
