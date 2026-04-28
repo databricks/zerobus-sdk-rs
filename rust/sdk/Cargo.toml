@@ -15,7 +15,7 @@ documentation = "https://docs.rs/databricks-zerobus-ingest-sdk"
 [dependencies]
 async-trait = "0.1"
 prost = "0.13.3"
-prost-types = "0.13.3"
+prost-types = "0.14.3"
 reqwest = { version = "0.12", features = ["json", "rustls-tls-native-roots", "rustls-tls-webpki-roots"], default-features = false }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"

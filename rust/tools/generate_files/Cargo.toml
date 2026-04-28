@@ -8,7 +8,7 @@ publish = false
 anyhow = "1"
 clap = { version = "4", features = ["derive"] }
 databricks-zerobus-ingest-sdk = { path = "../../sdk" }
-prost-types = "0.13"
+prost-types = "0.14"
 reqwest = { version = "0.12", features = ["json", "rustls-tls-native-roots", "rustls-tls-webpki-roots"], default-features = false }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1.0"
