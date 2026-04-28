@@ -13,6 +13,8 @@ namespace Databricks.Zerobus.Native;
 /// </summary>
 internal static class NativeInterop
 {
+    private const int StackAllocThresholdBytes = 4096;
+
     /// <summary>
     /// Converts a <see cref="CResult"/> to a <see cref="ZerobusException"/> (or null on success).
     /// Frees the native error message string.
@@ -210,39 +212,48 @@ internal static class NativeInterop
         var result = new CResult();
         var numRecords = (nuint)records.Length;
 
-        // Pin all record buffers and collect pointers
+        // Pin all record buffers and collect pointers.
+        // Use stackalloc for small batches, heap array for large ones.
         var handles = new GCHandle[records.Length];
-        var ptrs = stackalloc byte*[records.Length];
-        var lens = stackalloc nuint[records.Length];
+        var ptrs = records.Length * sizeof(nint) <= StackAllocThresholdBytes
+            ? stackalloc IntPtr[records.Length]
+            : new IntPtr[records.Length];
+        var lens = records.Length * sizeof(nuint) <= StackAllocThresholdBytes
+            ? stackalloc nuint[records.Length]
+            : new nuint[records.Length];
 
         try
         {
-            for (int i = 0; i < records.Length; i++)
+            for (var i = 0; i < records.Length; i++)
             {
                 handles[i] = GCHandle.Alloc(records[i], GCHandleType.Pinned);
-                ptrs[i] = (byte*)handles[i].AddrOfPinnedObject();
+                ptrs[i] = handles[i].AddrOfPinnedObject();
                 lens[i] = (nuint)records[i].Length;
             }
 
-            var offset = NativeMethods.StreamIngestProtoRecords(
-                streamPtr,
-                ptrs,
-                lens,
-                numRecords,
-                ref result);
-
-            if (offset == -2) return -1; // empty batch
-            if (offset < 0)
+            fixed (IntPtr* pointers = ptrs)
+            fixed (nuint* lengths = lens)
             {
-                ThrowIfFailed(ref result);
-                throw new ZerobusException("Batch ingest failed with unknown error", isRetryable: false);
-            }
+                var offset = NativeMethods.StreamIngestProtoRecords(
+                    streamPtr,
+                    (byte**)pointers,
+                    lengths,
+                    numRecords,
+                    ref result);
 
-            return offset;
+                if (offset == -2) return -1; // empty batch
+                if (offset < 0)
+                {
+                    ThrowIfFailed(ref result);
+                    throw new ZerobusException("Batch ingest failed with unknown error", isRetryable: false);
+                }
+
+                return offset;
+            }
         }
         finally
         {
-            for (int i = 0; i < handles.Length; i++)
+            for (var i = 0; i < handles.Length; i++)
             {
                 if (handles[i].IsAllocated)
                     handles[i].Free();
@@ -261,40 +272,44 @@ internal static class NativeInterop
         var result = new CResult();
         var numRecords = (nuint)records.Length;
 
-        // Encode each string as null-terminated UTF-8 and pin
-        var encoded = new byte[records.Length][];
+        // Encode each string as null-terminated UTF-8 and pin.
+        // Use stackalloc for small batches, heap array for large ones.
         var handles = new GCHandle[records.Length];
-        var ptrs = stackalloc byte*[records.Length];
+        var ptrs = records.Length * sizeof(nint) <= StackAllocThresholdBytes
+            ? stackalloc IntPtr[records.Length]
+            : new IntPtr[records.Length];
 
         try
         {
-            for (int i = 0; i < records.Length; i++)
+            for (var i = 0; i < records.Length; i++)
             {
                 // Encode with null terminator
                 var utf8 = Encoding.UTF8.GetBytes(records[i] + '\0');
-                encoded[i] = utf8;
                 handles[i] = GCHandle.Alloc(utf8, GCHandleType.Pinned);
-                ptrs[i] = (byte*)handles[i].AddrOfPinnedObject();
+                ptrs[i] = handles[i].AddrOfPinnedObject();
             }
 
-            var offset = NativeMethods.StreamIngestJsonRecords(
-                streamPtr,
-                ptrs,
-                numRecords,
-                ref result);
-
-            if (offset == -2) return -1; // empty batch
-            if (offset < 0)
+            fixed (IntPtr* pointers = ptrs)
             {
-                ThrowIfFailed(ref result);
-                throw new ZerobusException("Batch ingest failed with unknown error", isRetryable: false);
-            }
+                var offset = NativeMethods.StreamIngestJsonRecords(
+                    streamPtr,
+                    (byte**)pointers,
+                    numRecords,
+                    ref result);
 
-            return offset;
+                if (offset == -2) return -1; // empty batch
+                if (offset < 0)
+                {
+                    ThrowIfFailed(ref result);
+                    throw new ZerobusException("Batch ingest failed with unknown error", isRetryable: false);
+                }
+
+                return offset;
+            }
         }
         finally
         {
-            for (int i = 0; i < handles.Length; i++)
+            for (var i = 0; i < handles.Length; i++)
             {
                 if (handles[i].IsAllocated)
                     handles[i].Free();
@@ -329,7 +344,7 @@ internal static class NativeInterop
     /// <summary>
     /// Retrieves all unacknowledged records from a closed/failed stream.
     /// </summary>
-    public static unsafe object[] StreamGetUnackedRecords(IntPtr streamPtr)
+    public static object[] StreamGetUnackedRecords(IntPtr streamPtr)
     {
         var result = new CResult();
         var cArray = NativeMethods.StreamGetUnackedRecords(streamPtr, ref result);
@@ -353,7 +368,7 @@ internal static class NativeInterop
         var records = new object[(int)cArray.Len];
         var recordSize = Marshal.SizeOf<CRecord>();
 
-        for (int i = 0; i < (int)cArray.Len; i++)
+        for (var i = 0; i < (int)cArray.Len; i++)
         {
             var cRecord = Marshal.PtrToStructure<CRecord>(cArray.Records + i * recordSize);
             var data = new byte[(int)cRecord.DataLen];
