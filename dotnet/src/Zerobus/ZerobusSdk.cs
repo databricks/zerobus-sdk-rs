@@ -37,7 +37,7 @@ namespace Databricks.Zerobus;
 public sealed class ZerobusSdk : IDisposable
 {
     private IntPtr _ptr;
-    private bool _disposed;
+    private int _disposed;
 
     /// <summary>
     /// Creates a new SDK instance.
@@ -90,7 +90,7 @@ public sealed class ZerobusSdk : IDisposable
         string clientSecret,
         StreamConfigurationOptions? options = null)
     {
-        ObjectDisposedException.ThrowIf(_disposed, this);
+        ObjectDisposedException.ThrowIf(_disposed != 0, this);
         ArgumentNullException.ThrowIfNull(tableProperties);
         ArgumentNullException.ThrowIfNull(clientId);
         ArgumentNullException.ThrowIfNull(clientSecret);
@@ -135,7 +135,7 @@ public sealed class ZerobusSdk : IDisposable
         IHeadersProvider headersProvider,
         StreamConfigurationOptions? options = null)
     {
-        ObjectDisposedException.ThrowIf(_disposed, this);
+        ObjectDisposedException.ThrowIf(_disposed != 0, this);
         ArgumentNullException.ThrowIfNull(tableProperties);
         ArgumentNullException.ThrowIfNull(headersProvider);
 
@@ -179,7 +179,7 @@ public sealed class ZerobusSdk : IDisposable
     /// <exception cref="ObjectDisposedException">Thrown if the SDK has been disposed.</exception>
     public ZerobusStream RecreateStream(ZerobusStream stream)
     {
-        ObjectDisposedException.ThrowIf(_disposed, this);
+        ObjectDisposedException.ThrowIf(_disposed != 0, this);
         ArgumentNullException.ThrowIfNull(stream);
 
         var ptr = NativeInterop.SdkRecreateStream(_ptr, stream.NativePointer);
@@ -198,9 +198,7 @@ public sealed class ZerobusSdk : IDisposable
     /// <inheritdoc />
     public void Dispose()
     {
-        if (_disposed) return;
-        _disposed = true;
-
+        if (Interlocked.CompareExchange(ref _disposed, 1, 0) != 0) return;
         Free();
         GC.SuppressFinalize(this);
     }
