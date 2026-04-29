@@ -1160,16 +1160,14 @@ impl ZerobusArrowStream {
 
                 if now >= deadline {
                     info!("Graceful close timeout reached. Triggering recovery.");
-                    return Err(ZerobusError::StreamClosedError(
-                        tonic::Status::unavailable("Graceful close timeout reached"),
-                    ));
+                    return Err(ZerobusError::StreamClosedError(tonic::Status::unavailable(
+                        "Graceful close timeout reached",
+                    )));
                 } else if all_acked {
                     info!("All in-flight batches acknowledged during graceful close. Triggering recovery.");
-                    return Err(ZerobusError::StreamClosedError(
-                        tonic::Status::unavailable(
-                            "All in-flight batches acked during graceful close",
-                        ),
-                    ));
+                    return Err(ZerobusError::StreamClosedError(tonic::Status::unavailable(
+                        "All in-flight batches acked during graceful close",
+                    )));
                 }
             }
 
@@ -1195,24 +1193,25 @@ impl ZerobusArrowStream {
                                     let server_duration_ms =
                                         ack.close_stream_duration_ms.unwrap_or(0);
 
-                                    let wait_duration_ms =
-                                        match options.stream_paused_max_wait_time_ms {
-                                            None => server_duration_ms,
-                                            Some(0) => {
-                                                info!(
+                                    let wait_duration_ms = match options
+                                        .stream_paused_max_wait_time_ms
+                                    {
+                                        None => server_duration_ms,
+                                        Some(0) => {
+                                            info!(
                                                     "Server will close the stream in {}ms. Triggering stream recovery.",
                                                     server_duration_ms
                                                 );
-                                                return Err(ZerobusError::StreamClosedError(
-                                                    tonic::Status::unavailable(
-                                                        "Immediate recovery on close signal",
-                                                    ),
-                                                ));
-                                            }
-                                            Some(max_wait) => {
-                                                std::cmp::min(max_wait, server_duration_ms)
-                                            }
-                                        };
+                                            return Err(ZerobusError::StreamClosedError(
+                                                tonic::Status::unavailable(
+                                                    "Immediate recovery on close signal",
+                                                ),
+                                            ));
+                                        }
+                                        Some(max_wait) => {
+                                            std::cmp::min(max_wait, server_duration_ms)
+                                        }
+                                    };
 
                                     if wait_duration_ms == 0 {
                                         info!("Server will close the stream. Triggering immediate recovery.");
@@ -1284,10 +1283,13 @@ impl ZerobusArrowStream {
                     // During graceful close, errors are expected (server closes after grace period).
                     // Return retriable error to trigger recovery.
                     if pause_deadline.is_some() {
-                        info!("Stream error during graceful close period, triggering recovery: {}", e);
-                        return Err(ZerobusError::StreamClosedError(
-                            tonic::Status::unavailable("Stream error during graceful close"),
-                        ));
+                        info!(
+                            "Stream error during graceful close period, triggering recovery: {}",
+                            e
+                        );
+                        return Err(ZerobusError::StreamClosedError(tonic::Status::unavailable(
+                            "Stream error during graceful close",
+                        )));
                     }
                     error!("Flight stream error: {}", e);
                     let status: tonic::Status = e.into();
@@ -1300,11 +1302,9 @@ impl ZerobusArrowStream {
                     // Return retriable error to trigger recovery.
                     if pause_deadline.is_some() {
                         info!("Server closed stream during graceful close period, triggering recovery.");
-                        return Err(ZerobusError::StreamClosedError(
-                            tonic::Status::unavailable(
-                                "Server closed stream during graceful close",
-                            ),
-                        ));
+                        return Err(ZerobusError::StreamClosedError(tonic::Status::unavailable(
+                            "Server closed stream during graceful close",
+                        )));
                     }
                     debug!("Server closed the stream");
                     let error = ZerobusError::StreamClosedError(tonic::Status::unknown(

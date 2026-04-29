@@ -413,8 +413,7 @@ impl FlightService for MockFlightServer {
                                 "ack_up_to_records": ack_up_to_records.unwrap_or(0),
                                 "close_stream_duration_ms": duration_ms,
                             });
-                            let close_bytes =
-                                serde_json::to_vec(&close_metadata).unwrap();
+                            let close_bytes = serde_json::to_vec(&close_metadata).unwrap();
                             let put_result = PutResult {
                                 app_metadata: close_bytes.into(),
                             };

@@ -163,8 +163,7 @@ mod tests {
 
     #[test]
     fn test_flight_ack_metadata_with_close_signal() {
-        let json =
-            r#"{"ack_up_to_offset": 5, "ack_up_to_records": 100, "close_stream_duration_ms": 2000}"#;
+        let json = r#"{"ack_up_to_offset": 5, "ack_up_to_records": 100, "close_stream_duration_ms": 2000}"#;
         let parsed = FlightAckMetadata::from_bytes(json.as_bytes()).unwrap();
         assert_eq!(parsed.ack_up_to_offset, 5);
         assert_eq!(parsed.ack_up_to_records, 100);
