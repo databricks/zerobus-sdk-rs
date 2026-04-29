@@ -5,16 +5,23 @@
 //! ## Quick Start
 //!
 //! ```rust,ignore
-//! use databricks_zerobus_ingest_sdk::{ZerobusSdk, TableProperties, ProtoMessage};
+//! use databricks_zerobus_ingest_sdk::{ZerobusSdk, JsonValue};
 //!
 //! let sdk = ZerobusSdk::builder()
 //!     .endpoint(zerobus_endpoint)
 //!     .unity_catalog_url(uc_endpoint)
 //!     .build()?;
-//! let stream = sdk.create_stream(table_properties, client_id, client_secret, None).await?;
+//!
+//! let stream = sdk
+//!     .stream_builder()
+//!     .table("catalog.schema.table")
+//!     .oauth(client_id, client_secret)
+//!     .json()
+//!     .build()
+//!     .await?;
 //!
 //! // Ingest a record and wait for acknowledgment
-//! let offset = stream.ingest_record_offset(ProtoMessage(my_message)).await?;
+//! let offset = stream.ingest_record_offset(JsonValue(my_record)).await?;
 //! stream.wait_for_offset(offset).await?;
 //!
 //! stream.close().await?;
@@ -82,7 +89,7 @@ pub use arrow_configuration::ArrowStreamConfigurationOptions;
 pub use arrow_stream::{
     ArrowSchema, ArrowTableProperties, DataType, Field, RecordBatch, ZerobusArrowStream,
 };
-pub use builder::ZerobusSdkBuilder;
+pub use builder::{StreamBuilder, ZerobusSdkBuilder};
 pub use callbacks::AckCallback;
 pub use default_token_factory::DefaultTokenFactory;
 pub use errors::ZerobusError;
@@ -113,8 +120,8 @@ pub enum StreamType {
 
 /// The properties of the table to ingest to.
 ///
-/// Used when creating streams via `ZerobusSdk::create_stream()` to specify
-/// which table to write to and the schema of records being ingested.
+/// Configure the table via the builder API:
+/// `sdk.stream_builder().table("catalog.schema.table").compiled_proto(descriptor)`.
 ///
 /// # Common errors:
 /// -`InvalidTableName`: table_name contains invalid characters or doesn't exist
@@ -156,8 +163,8 @@ enum CallbackMessage {
 ///
 /// # Lifecycle
 ///
-/// 1. Create a stream via `ZerobusSdk::create_stream()`
-/// 2. Ingest records with `ingest_record()` and await acknowledgments
+/// 1. Create a stream via `ZerobusSdk::stream_builder()`
+/// 2. Ingest records with `ingest_record_offset()` and `wait_for_offset()` for acknowledgments
 /// 3. Optionally call `flush()` to ensure all records are persisted
 /// 4. Close the stream with `close()` to release resources
 ///
@@ -221,43 +228,28 @@ pub struct ZerobusStream {
 
 /// The main interface for interacting with the Zerobus API.
 /// # Examples
-/// ```no_run
-/// # use std::error::Error;
-/// # use std::sync::Arc;
-/// # use databricks_zerobus_ingest_sdk::{ZerobusSdk, StreamConfigurationOptions, TableProperties, ZerobusError, ZerobusResult};
-/// #
-/// # async fn write_single_row(row: impl prost::Message) -> Result<(), ZerobusError> {
-///
+/// ```rust,ignore
 /// // Create SDK using the builder
 /// let sdk = ZerobusSdk::builder()
 ///     .endpoint("https://your-workspace.zerobus.region.cloud.databricks.com")
 ///     .unity_catalog_url("https://your-workspace.cloud.databricks.com")
 ///     .build()?;
 ///
-/// // Define the arguments for the ephemeral stream.
-/// let table_properties = TableProperties {
-///     table_name: "test_table".to_string(),
-///     descriptor_proto: Default::default(),
-/// };
-/// let options = StreamConfigurationOptions {
-///     max_inflight_requests: 100,
-///     ..Default::default()
-/// };
-/// let client_id = "your-client-id".to_string();
-/// let client_secret = "your-client-secret".to_string();
-///
-/// // Create a stream
-/// let stream = sdk.create_stream(table_properties, client_id, client_secret, Some(options)).await?;
+/// // Create a stream via the stream builder
+/// let stream = sdk
+///     .stream_builder()
+///     .table("catalog.schema.table")
+///     .oauth("client-id", "client-secret")
+///     .compiled_proto(descriptor_proto)
+///     .max_inflight_requests(100)
+///     .build()
+///     .await?;
 ///
 /// // Ingest a single record
-/// let offset_id = stream.ingest_record_offset(row.encode_to_vec()).await?;
-/// println!("Record sent with offset Id: {}", offset_id);
+/// let offset_id = stream.ingest_record_offset(ProtoMessage(row)).await?;
 ///
 /// // Wait for acknowledgment
 /// stream.wait_for_offset(offset_id).await?;
-/// println!("Record acknowledged with offset Id: {}", offset_id);
-/// # Ok(())
-/// # }
 /// ```
 pub struct ZerobusSdk {
     pub zerobus_endpoint: String,
@@ -269,8 +261,8 @@ pub struct ZerobusSdk {
     pub use_tls: bool,
     pub unity_catalog_url: String,
     shared_channel: tokio::sync::Mutex<Option<ZerobusClient<Channel>>>,
-    workspace_id: String,
-    tls_config: Arc<dyn TlsConfig>,
+    pub(crate) workspace_id: String,
+    pub(crate) tls_config: Arc<dyn TlsConfig>,
     connector_factory: Option<ConnectorFactory>,
 }
 
@@ -292,6 +284,39 @@ impl ZerobusSdk {
     /// ```
     pub fn builder() -> ZerobusSdkBuilder {
         ZerobusSdkBuilder::new()
+    }
+
+    /// Creates a new stream builder for configuring an ingestion stream.
+    ///
+    /// All setters can be called in any order. The builder validates at
+    /// `build()` time that table name, authentication, and format have
+    /// been configured. Use [`StreamBuilder::validate()`] to check the
+    /// configuration without opening a stream.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// // JSON stream with OAuth
+    /// let stream = sdk
+    ///     .stream_builder()
+    ///     .table("catalog.schema.table")
+    ///     .oauth("client-id", "client-secret")
+    ///     .json()
+    ///     .build()
+    ///     .await?;
+    ///
+    /// // Proto stream with custom headers
+    /// let stream = sdk
+    ///     .stream_builder()
+    ///     .table("catalog.schema.table")
+    ///     .headers_provider(my_provider)
+    ///     .compiled_proto(descriptor)
+    ///     .max_inflight_requests(500_000)
+    ///     .build()
+    ///     .await?;
+    /// ```
+    pub fn stream_builder(&self) -> StreamBuilder<'_> {
+        StreamBuilder::new(self)
     }
 
     /// Creates a new Zerobus SDK instance.
@@ -420,6 +445,11 @@ impl ZerobusSdk {
     /// # Ok(())
     /// # }
     /// ```
+    #[deprecated(
+        since = "1.3.0",
+        note = "Use `sdk.stream_builder().table(table_name).oauth(id, secret).json().build().await` or `.compiled_proto(desc)` instead"
+    )]
+    #[allow(deprecated)]
     #[instrument(level = "debug", skip_all)]
     pub async fn create_stream(
         &self,
@@ -493,6 +523,11 @@ impl ZerobusSdk {
     /// # Ok(())
     /// # }
     /// ```
+    #[deprecated(
+        since = "1.3.0",
+        note = "Use `sdk.stream_builder().table(table_name).headers_provider(p).json().build().await` instead"
+    )]
+    #[allow(deprecated)]
     #[instrument(level = "debug", skip_all)]
     pub async fn create_stream_with_headers_provider(
         &self,
@@ -530,6 +565,7 @@ impl ZerobusSdk {
             options,
         )
         .await;
+
         match stream {
             Ok(stream) => {
                 if let Some(stream_id) = stream.stream_id.as_ref() {
@@ -583,18 +619,35 @@ impl ZerobusSdk {
     #[instrument(level = "debug", skip_all)]
     pub async fn recreate_stream(&self, stream: &ZerobusStream) -> ZerobusResult<ZerobusStream> {
         let batches = stream.get_unacked_batches().await?;
-        let new_stream = self
-            .create_stream_with_headers_provider(
-                stream.table_properties.clone(),
-                Arc::clone(&stream.headers_provider),
-                Some(stream.options.clone()),
-            )
-            .await?;
-        for batch in batches {
-            let ack = new_stream.ingest_internal(batch).await?;
-            tokio::spawn(ack);
+        let channel = self.get_or_create_channel_zerobus_client().await?;
+        let new_stream = ZerobusStream::new_stream(
+            channel,
+            stream.table_properties.clone(),
+            Arc::clone(&stream.headers_provider),
+            stream.options.clone(),
+        )
+        .await;
+
+        match new_stream {
+            Ok(new_stream) => {
+                if let Some(stream_id) = new_stream.stream_id.as_ref() {
+                    info!(stream_id = %stream_id, "Successfully recreated ephemeral stream");
+                } else {
+                    error!("Successfully recreated a stream but stream_id is None");
+                }
+
+                for batch in batches {
+                    let ack = new_stream.ingest_internal(batch).await?;
+                    tokio::spawn(ack);
+                }
+
+                Ok(new_stream)
+            }
+            Err(e) => {
+                error!("Stream recreation failed with error: {}", e);
+                Err(e)
+            }
         }
-        return Ok(new_stream);
     }
 
     /// Creates a new Arrow Flight ingestion stream to a Unity Catalog table.
@@ -648,6 +701,11 @@ impl ZerobusSdk {
     /// # }
     /// ```
     #[cfg(feature = "arrow-flight")]
+    #[deprecated(
+        since = "1.3.0",
+        note = "Use `sdk.stream_builder().table(table_name).oauth(id, secret).arrow(schema).build().await` instead"
+    )]
+    #[allow(deprecated)]
     #[instrument(level = "debug", skip_all)]
     pub async fn create_arrow_stream(
         &self,
@@ -727,6 +785,11 @@ impl ZerobusSdk {
     /// # }
     /// ```
     #[cfg(feature = "arrow-flight")]
+    #[deprecated(
+        since = "1.3.0",
+        note = "Use `sdk.stream_builder().table(table_name).headers_provider(p).arrow(schema).build().await` instead"
+    )]
+    #[allow(deprecated)]
     #[instrument(level = "debug", skip_all)]
     pub async fn create_arrow_stream_with_headers_provider(
         &self,
@@ -814,31 +877,41 @@ impl ZerobusSdk {
     ) -> ZerobusResult<ZerobusArrowStream> {
         let batches = stream.get_unacked_batches().await?;
 
-        let new_stream = self
-            .create_arrow_stream_with_headers_provider(
-                stream.table_properties().clone(),
-                stream.headers_provider(),
-                Some(stream.options().clone()),
-            )
-            .await?;
+        let new_stream = ZerobusArrowStream::new(
+            &self.zerobus_endpoint,
+            Arc::clone(&self.tls_config),
+            stream.table_properties().clone(),
+            stream.headers_provider(),
+            stream.options().clone(),
+        )
+        .await;
 
-        // Replay unacked batches.
-        for batch in batches {
-            let _offset = new_stream.ingest_batch(batch).await?;
+        match new_stream {
+            Ok(new_stream) => {
+                info!(
+                    table_name = %new_stream.table_name(),
+                    "Successfully recreated Arrow Flight stream"
+                );
+
+                for batch in batches {
+                    let _offset = new_stream.ingest_batch(batch).await?;
+                }
+
+                Ok(new_stream)
+            }
+            Err(e) => {
+                error!("Arrow Flight stream recreation failed: {}", e);
+                Err(e)
+            }
         }
-
-        info!(
-            table_name = %new_stream.table_name(),
-            "Successfully recreated Arrow Flight stream"
-        );
-
-        Ok(new_stream)
     }
 
     /// Gets or creates the shared Channel for all streams.
     /// The first call creates the Channel, subsequent calls clone it.
     /// All clones share the same underlying TCP connection via HTTP/2 multiplexing.
-    async fn get_or_create_channel_zerobus_client(&self) -> ZerobusResult<ZerobusClient<Channel>> {
+    pub(crate) async fn get_or_create_channel_zerobus_client(
+        &self,
+    ) -> ZerobusResult<ZerobusClient<Channel>> {
         let mut guard = self.shared_channel.lock().await;
 
         if guard.is_none() {
@@ -880,7 +953,7 @@ impl ZerobusSdk {
 impl ZerobusStream {
     /// Creates a new ephemeral stream for ingesting records.
     #[instrument(level = "debug", skip_all)]
-    async fn new_stream(
+    pub(crate) async fn new_stream(
         channel: ZerobusClient<Channel>,
         table_properties: TableProperties,
         headers_provider: Arc<dyn HeadersProvider>,

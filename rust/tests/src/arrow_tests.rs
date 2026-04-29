@@ -1,3 +1,5 @@
+#![allow(deprecated)]
+
 mod mock_arrow_flight;
 mod utils;
 

@@ -4,10 +4,7 @@ use std::fs;
 use prost::Message;
 use prost_reflect::prost_types;
 
-use databricks_zerobus_ingest_sdk::{
-    ProtoBytes, ProtoMessage, StreamConfigurationOptions, TableProperties, ZerobusSdk,
-    ZerobusStream,
-};
+use databricks_zerobus_ingest_sdk::{ProtoBytes, ProtoMessage, ZerobusSdk, ZerobusStream};
 
 pub mod orders {
     include!("../output/orders.rs");
@@ -33,27 +30,18 @@ const SERVER_ENDPOINT: &str = "https://<your-shard-id>.zerobus.<region>.cloud.da
 async fn main() -> Result<(), Box<dyn Error>> {
     let descriptor_proto =
         load_descriptor_proto("output/orders.descriptor", "orders.proto", "table_Orders");
-    let table_properties = TableProperties {
-        table_name: TABLE_NAME.to_string(),
-        descriptor_proto: Some(descriptor_proto),
-    };
-    let stream_configuration_options = StreamConfigurationOptions {
-        max_inflight_requests: 100,
-        // RecordType::Proto is the default.
-        ..Default::default()
-    };
     let sdk_handle = ZerobusSdk::builder()
         .endpoint(SERVER_ENDPOINT)
         .unity_catalog_url(DATABRICKS_WORKSPACE_URL)
         .build()?;
 
     let mut stream = sdk_handle
-        .create_stream(
-            table_properties.clone(),
-            DATABRICKS_CLIENT_ID.to_string(),
-            DATABRICKS_CLIENT_SECRET.to_string(),
-            Some(stream_configuration_options),
-        )
+        .stream_builder()
+        .table(TABLE_NAME)
+        .oauth(DATABRICKS_CLIENT_ID, DATABRICKS_CLIENT_SECRET)
+        .compiled_proto(descriptor_proto)
+        .max_inflight_requests(100)
+        .build()
         .await?;
 
     ingest_with_offset_api(&mut stream).await?;

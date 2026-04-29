@@ -1,3 +1,5 @@
+#![allow(deprecated)]
+
 mod mock_grpc;
 mod utils;
 

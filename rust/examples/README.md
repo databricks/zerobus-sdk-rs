@@ -95,20 +95,24 @@ All examples follow the same general flow:
 ### 1. Initialize SDK
 
 ```rust
-let sdk = ZerobusSdk::new(
-    SERVER_ENDPOINT.to_string(),
-    DATABRICKS_WORKSPACE_URL.to_string(),
-)?;
+let sdk = ZerobusSdk::builder()
+    .endpoint(SERVER_ENDPOINT)
+    .unity_catalog_url(DATABRICKS_WORKSPACE_URL)
+    .build()?;
 ```
 
-### 2. Configure Table Properties
+### 2. Create Stream
 
 **JSON:**
 ```rust
-let table_properties = TableProperties {
-    table_name: TABLE_NAME.to_string(),
-    descriptor_proto: None,  // Not needed for JSON
-};
+let mut stream = sdk
+    .stream_builder()
+    .table(TABLE_NAME)
+    .oauth(DATABRICKS_CLIENT_ID, DATABRICKS_CLIENT_SECRET)
+    .json()
+    .max_inflight_requests(100)
+    .build()
+    .await?;
 ```
 
 **Protocol Buffers:**
@@ -118,41 +122,25 @@ let descriptor_proto = load_descriptor_proto(
     "orders.proto",
     "table_Orders"
 );
-let table_properties = TableProperties {
-    table_name: TABLE_NAME.to_string(),
-    descriptor_proto: Some(descriptor_proto),
-};
+
+let mut stream = sdk
+    .stream_builder()
+    .table(TABLE_NAME)
+    .oauth(DATABRICKS_CLIENT_ID, DATABRICKS_CLIENT_SECRET)
+    .compiled_proto(descriptor_proto)
+    .max_inflight_requests(100)
+    .build()
+    .await?;
 ```
 
-### 3. Configure Stream Options
-
-```rust
-let options = StreamConfigurationOptions {
-    max_inflight_requests: 100,
-    record_type: RecordType::Json,  // Or RecordType::Proto (default)
-    ..Default::default()
-};
-```
-
-### 4. Create Stream
-
-```rust
-let mut stream = sdk.create_stream(
-    table_properties,
-    DATABRICKS_CLIENT_ID.to_string(),
-    DATABRICKS_CLIENT_SECRET.to_string(),
-    Some(options),
-).await?;
-```
-
-### 5. Ingest and Acknowledge
+### 3. Ingest and Acknowledge
 
 ```rust
 let offset = stream.ingest_record_offset(data).await?;
 stream.wait_for_offset(offset).await?;
 ```
 
-### 6. Close Stream
+### 4. Close Stream
 
 ```rust
 stream.close().await?;
