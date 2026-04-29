@@ -9,18 +9,20 @@ use crate::stream_options::defaults;
 /// These options control the behavior of ingestion streams, including memory limits,
 /// recovery policies, and timeout settings.
 ///
-/// # Examples
+/// **Do not construct this directly.** Configure streams via the builder API:
 ///
-/// ```
-/// use databricks_zerobus_ingest_sdk::StreamConfigurationOptions;
-///
-/// let options = StreamConfigurationOptions {
-///     max_inflight_requests: 1_000_000,
-///     recovery: true,
-///     recovery_timeout_ms: 20_000,
-///     recovery_retries: 5,
-///     ..Default::default()
-/// };
+/// ```rust,ignore
+/// let stream = sdk
+///     .stream_builder()
+///     .table("catalog.schema.table")
+///     .oauth("client-id", "client-secret")
+///     .json()
+///     .max_inflight_requests(1_000_000)
+///     .recovery(true)
+///     .recovery_timeout_ms(20_000)
+///     .recovery_retries(5)
+///     .build()
+///     .await?;
 /// ```
 #[derive(Clone)]
 pub struct StreamConfigurationOptions {
@@ -114,9 +116,9 @@ pub struct StreamConfigurationOptions {
     ///
     /// # Examples
     ///
-    /// ```
+    /// ```rust,ignore
     /// use std::sync::Arc;
-    /// use databricks_zerobus_ingest_sdk::{AckCallback, StreamConfigurationOptions, OffsetId};
+    /// use databricks_zerobus_ingest_sdk::{AckCallback, OffsetId};
     ///
     /// struct MyCallback;
     ///
@@ -130,10 +132,14 @@ pub struct StreamConfigurationOptions {
     ///     }
     /// }
     ///
-    /// let options = StreamConfigurationOptions {
-    ///     ack_callback: Some(Arc::new(MyCallback)),
-    ///     ..Default::default()
-    /// };
+    /// let stream = sdk
+    ///     .stream_builder()
+    ///     .table("catalog.schema.table")
+    ///     .oauth("client-id", "client-secret")
+    ///     .json()
+    ///     .ack_callback(Arc::new(MyCallback))
+    ///     .build()
+    ///     .await?;
     /// ```
     pub ack_callback: Option<Arc<dyn AckCallback>>,
 

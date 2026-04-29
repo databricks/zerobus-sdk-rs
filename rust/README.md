@@ -688,14 +688,18 @@ match stream.close().await {
 **Example:**
 
 ```rust
-let options = StreamConfigurationOptions {
-    max_inflight_requests: 50000,
-    recovery: true,
-    recovery_timeout_ms: 20000,
-    recovery_retries: 5,
-    flush_timeout_ms: 600000,
-    ..Default::default()
-};
+let stream = sdk
+    .stream_builder()
+    .table("catalog.schema.orders")
+    .oauth(client_id, client_secret)
+    .json()
+    .max_inflight_requests(50_000)
+    .recovery(true)
+    .recovery_timeout_ms(20_000)
+    .recovery_retries(5)
+    .flush_timeout_ms(600_000)
+    .build()
+    .await?;
 ```
 
 ## Error Handling
@@ -902,43 +906,9 @@ Returns unacknowledged records grouped by batch, preserving the original batch s
 
 Only call after stream failure.
 
-### `TableProperties`
+### `StreamBuilder`
 
-Configuration for the target table.
-
-**Fields:**
-```rust
-pub struct TableProperties {
-    pub table_name: String,
-    pub descriptor_proto: Option<prost_types::DescriptorProto>,
-}
-```
-
-- `table_name` - Full table name (e.g., "catalog.schema.table")
-- `descriptor_proto` - Optional Protocol buffer descriptor loaded from generated files (required for Proto record type, None for JSON)
-
-### `StreamConfigurationOptions`
-
-Stream behavior configuration.
-
-**Fields:**
-```rust
-pub struct StreamConfigurationOptions {
-    pub max_inflight_requests: usize,
-    pub recovery: bool,
-    pub recovery_timeout_ms: u64,
-    pub recovery_backoff_ms: u64,
-    pub recovery_retries: u32,
-    pub server_lack_of_ack_timeout_ms: u64,
-    pub flush_timeout_ms: u64,
-    pub record_type: RecordType,
-    pub stream_paused_max_wait_time_ms: Option<u64>,
-    pub ack_callback: Option<Arc<dyn AckCallback>>,
-    pub callback_max_wait_time_ms: Option<u64>
-}
-```
-
-See [Configuration Options](#configuration-options) for details.
+Configure stream parameters via fluent setters; all configuration goes through the builder. See [Create a Stream](#4-create-a-stream) for usage and [Configuration Options](#configuration-options) for the full list of available setters and their defaults.
 
 ### `AckCallback`
 

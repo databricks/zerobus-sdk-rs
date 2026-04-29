@@ -11,17 +11,19 @@ use arrow_ipc::CompressionType;
 /// These options control the behavior of Arrow Flight ingestion streams, including
 /// backpressure limits, timeout settings, and recovery policies.
 ///
-/// # Examples
+/// **Do not construct this directly.** Configure Arrow streams via the builder API:
 ///
-/// ```
-/// use databricks_zerobus_ingest_sdk::ArrowStreamConfigurationOptions;
-///
-/// let options = ArrowStreamConfigurationOptions {
-///     max_inflight_batches: 100,
-///     server_lack_of_ack_timeout_ms: 30_000,
-///     recovery: true,
-///     ..Default::default()
-/// };
+/// ```rust,ignore
+/// let stream = sdk
+///     .stream_builder()
+///     .table("catalog.schema.table")
+///     .oauth("client-id", "client-secret")
+///     .arrow(schema)
+///     .max_inflight_batches(100)
+///     .server_lack_of_ack_timeout_ms(30_000)
+///     .recovery(true)
+///     .build_arrow()
+///     .await?;
 /// ```
 #[derive(Clone, Debug)]
 pub struct ArrowStreamConfigurationOptions {

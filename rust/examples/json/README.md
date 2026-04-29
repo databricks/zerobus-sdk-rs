@@ -116,12 +116,15 @@ let ack = stream.ingest_record(json).await?;
 let offset = ack.await?;
 ```
 
-**Key configuration for JSON:**
+**Building a JSON stream:**
 ```rust
-let stream_configuration_options = StreamConfigurationOptions {
-    record_type: RecordType::Json,  // Important!
-    ..Default::default()
-};
+let stream = sdk
+    .stream_builder()
+    .table(TABLE_NAME)
+    .oauth(DATABRICKS_CLIENT_ID, DATABRICKS_CLIENT_SECRET)
+    .json()
+    .build()
+    .await?;
 ```
 
 ## Batch Example

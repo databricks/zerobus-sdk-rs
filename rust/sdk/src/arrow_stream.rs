@@ -64,8 +64,8 @@ impl ArrowPayload {
 
 /// Properties for an Arrow Flight ingestion table.
 ///
-/// Unlike `TableProperties` which requires a protobuf descriptor, Arrow Flight
-/// streams derive the schema from the first RecordBatch sent.
+/// **Do not construct this directly.** Configure Arrow streams via the builder API:
+/// `sdk.stream_builder().table("catalog.schema.table").arrow(schema)`.
 #[derive(Debug, Clone)]
 pub struct ArrowTableProperties {
     /// The fully qualified table name (e.g., "catalog.schema.table").

@@ -118,7 +118,7 @@ let ack = stream.ingest_record(bytes).await?;
 let offset = ack.await?;
 ```
 
-**Key configuration for Protocol Buffers:**
+**Building a Protocol Buffers stream:**
 ```rust
 // Load descriptor from generated files
 let descriptor_proto = load_descriptor_proto(
@@ -127,15 +127,13 @@ let descriptor_proto = load_descriptor_proto(
     "table_Orders"
 );
 
-let table_properties = TableProperties {
-    table_name: TABLE_NAME.to_string(),
-    descriptor_proto: Some(descriptor_proto),  // Required for Proto
-};
-
-let stream_configuration_options = StreamConfigurationOptions {
-    // RecordType::Proto is the default, no need to set explicitly
-    ..Default::default()
-};
+let stream = sdk
+    .stream_builder()
+    .table(TABLE_NAME)
+    .oauth(DATABRICKS_CLIENT_ID, DATABRICKS_CLIENT_SECRET)
+    .compiled_proto(descriptor_proto)
+    .build()
+    .await?;
 ```
 
 ## Batch Example
