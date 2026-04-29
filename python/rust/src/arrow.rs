@@ -136,6 +136,11 @@ pub struct ArrowStreamConfigurationOptions {
     /// IPC compression codec. Default: IPCCompression.NONE
     #[pyo3(get, set)]
     pub ipc_compression: IPCCompression,
+
+    /// Maximum time in milliseconds to wait during graceful stream close.
+    /// None = wait full server duration, 0 = immediate recovery, >0 = wait up to min(this, server_duration).
+    #[pyo3(get, set)]
+    pub stream_paused_max_wait_time_ms: Option<i64>,
 }
 
 impl Default for ArrowStreamConfigurationOptions {
@@ -151,6 +156,9 @@ impl Default for ArrowStreamConfigurationOptions {
             flush_timeout_ms: rust_default.flush_timeout_ms as i64,
             connection_timeout_ms: rust_default.connection_timeout_ms as i64,
             ipc_compression: IPCCompression::Uncompressed,
+            stream_paused_max_wait_time_ms: rust_default
+                .stream_paused_max_wait_time_ms
+                .map(|v| v as i64),
         }
     }
 }
@@ -179,6 +187,9 @@ impl ArrowStreamConfigurationOptions {
                     "ipc_compression" => {
                         options.ipc_compression = value.extract()?;
                     }
+                    "stream_paused_max_wait_time_ms" => {
+                        options.stream_paused_max_wait_time_ms = value.extract()?
+                    }
                     _ => {
                         return Err(pyo3::exceptions::PyValueError::new_err(format!(
                             "Unknown configuration option: {}",
@@ -197,7 +208,8 @@ impl ArrowStreamConfigurationOptions {
             "ArrowStreamConfigurationOptions(max_inflight_batches={}, recovery={}, \
              recovery_timeout_ms={}, recovery_backoff_ms={}, recovery_retries={}, \
              server_lack_of_ack_timeout_ms={}, flush_timeout_ms={}, connection_timeout_ms={}, \
-             ipc_compression={})",
+             ipc_compression={}, \
+             stream_paused_max_wait_time_ms={:?})",
             self.max_inflight_batches,
             self.recovery,
             self.recovery_timeout_ms,
@@ -207,6 +219,7 @@ impl ArrowStreamConfigurationOptions {
             self.flush_timeout_ms,
             self.connection_timeout_ms,
             self.ipc_compression.__repr__(),
+            self.stream_paused_max_wait_time_ms,
         )
     }
 }
@@ -263,6 +276,9 @@ impl ArrowStreamConfigurationOptions {
             flush_timeout_ms: self.flush_timeout_ms as u64,
             connection_timeout_ms: self.connection_timeout_ms as u64,
             ipc_compression,
+            stream_paused_max_wait_time_ms: self
+                .stream_paused_max_wait_time_ms
+                .map(|v| v as u64),
         })
     }
 }

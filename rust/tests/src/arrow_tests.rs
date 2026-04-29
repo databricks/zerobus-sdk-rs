@@ -1822,4 +1822,473 @@ mod arrow_flight_tests {
             Ok(())
         }
     }
+
+    mod graceful_close_tests {
+        use super::*;
+        use std::time::Instant;
+
+        #[tokio::test]
+        async fn test_default_graceful_close_waits_for_full_server_duration(
+        ) -> Result<(), Box<dyn std::error::Error>> {
+            setup_tracing();
+            info!("Starting test_default_graceful_close_waits_for_full_server_duration (arrow)");
+
+            const SERVER_DURATION_MS: u64 = 1000;
+
+            let (mock_server, server_url) = start_mock_flight_server().await?;
+            let schema = create_test_arrow_schema();
+
+            // Ack first 2 batches, then send graceful close, then ack batch 2 on reconnect.
+            mock_server
+                .inject_responses(
+                    TABLE_NAME,
+                    vec![
+                        MockFlightResponse::BatchAck {
+                            ack_up_to_offset: 0,
+                            delay_ms: 0,
+                            ack_up_to_records: 3,
+                        },
+                        MockFlightResponse::BatchAck {
+                            ack_up_to_offset: 1,
+                            delay_ms: 0,
+                            ack_up_to_records: 6,
+                        },
+                        // Send graceful close signal after batch 2 arrives.
+                        MockFlightResponse::GracefulClose {
+                            duration_ms: SERVER_DURATION_MS,
+                            delay_ms: 0,
+                            ack_up_to_offset: None,
+                            ack_up_to_records: None,
+                        },
+                        // After recovery, the client replays batch 2. Ack it.
+                        MockFlightResponse::BatchAck {
+                            ack_up_to_offset: 0,
+                            delay_ms: 0,
+                            ack_up_to_records: 3,
+                        },
+                    ],
+                )
+                .await;
+
+            let sdk = ZerobusSdk::builder()
+                .endpoint(server_url.clone())
+                .unity_catalog_url("https://mock-uc.com")
+                .tls_config(Arc::new(NoTlsConfig))
+                .build()?;
+
+            let table_properties = ArrowTableProperties {
+                table_name: TABLE_NAME.to_string(),
+                schema: schema.clone(),
+            };
+
+            let mut stream = sdk
+                .create_arrow_stream_with_headers_provider(
+                    table_properties,
+                    Arc::new(TestHeadersProvider::default()),
+                    Some(ArrowStreamConfigurationOptions {
+                        recovery: true,
+                        recovery_backoff_ms: 100,
+                        recovery_retries: 3,
+                        // Default: stream_paused_max_wait_time_ms = None (wait full server duration)
+                        ..Default::default()
+                    }),
+                )
+                .await?;
+
+            // Ingest batch 0 and 1 - these will be acked.
+            let batch0 = create_test_record_batch(
+                schema.clone(),
+                vec![1, 2, 3],
+                vec![Some("a"), Some("b"), Some("c")],
+            );
+            let offset0 = stream.ingest_batch(batch0).await?;
+            stream.wait_for_offset(offset0).await?;
+
+            let batch1 = create_test_record_batch(
+                schema.clone(),
+                vec![4, 5, 6],
+                vec![Some("d"), Some("e"), Some("f")],
+            );
+            let offset1 = stream.ingest_batch(batch1).await?;
+            stream.wait_for_offset(offset1).await?;
+
+            // Ingest batch 2 - triggers graceful close signal. The client should wait
+            // for the full server duration before triggering recovery.
+            let batch2 = create_test_record_batch(
+                schema.clone(),
+                vec![7, 8, 9],
+                vec![Some("g"), Some("h"), Some("i")],
+            );
+            let start = Instant::now();
+            let offset2 = stream.ingest_batch(batch2).await?;
+
+            // Wait for batch 2 to be acked (after recovery replays it).
+            stream.wait_for_offset(offset2).await?;
+            let elapsed = start.elapsed();
+
+            // Should have waited roughly the server duration before recovery.
+            assert!(
+                elapsed.as_millis() >= (SERVER_DURATION_MS as u128 - 200),
+                "Expected to wait at least ~{}ms for graceful close, but only waited {}ms",
+                SERVER_DURATION_MS,
+                elapsed.as_millis()
+            );
+
+            stream.close().await?;
+            Ok(())
+        }
+
+        #[tokio::test]
+        async fn test_immediate_recovery_on_close_signal() -> Result<(), Box<dyn std::error::Error>>
+        {
+            setup_tracing();
+            info!("Starting test_immediate_recovery_on_close_signal (arrow)");
+
+            let (mock_server, server_url) = start_mock_flight_server().await?;
+            let schema = create_test_arrow_schema();
+
+            mock_server
+                .inject_responses(
+                    TABLE_NAME,
+                    vec![
+                        MockFlightResponse::BatchAck {
+                            ack_up_to_offset: 0,
+                            delay_ms: 0,
+                            ack_up_to_records: 3,
+                        },
+                        // Send graceful close with long duration after batch 1.
+                        MockFlightResponse::GracefulClose {
+                            duration_ms: 10_000,
+                            delay_ms: 0,
+                            ack_up_to_offset: None,
+                            ack_up_to_records: None,
+                        },
+                        // After immediate recovery, ack batch 1.
+                        MockFlightResponse::BatchAck {
+                            ack_up_to_offset: 0,
+                            delay_ms: 0,
+                            ack_up_to_records: 3,
+                        },
+                    ],
+                )
+                .await;
+
+            let sdk = ZerobusSdk::builder()
+                .endpoint(server_url.clone())
+                .unity_catalog_url("https://mock-uc.com")
+                .tls_config(Arc::new(NoTlsConfig))
+                .build()?;
+
+            let table_properties = ArrowTableProperties {
+                table_name: TABLE_NAME.to_string(),
+                schema: schema.clone(),
+            };
+
+            let mut stream = sdk
+                .create_arrow_stream_with_headers_provider(
+                    table_properties,
+                    Arc::new(TestHeadersProvider::default()),
+                    Some(ArrowStreamConfigurationOptions {
+                        recovery: true,
+                        recovery_backoff_ms: 100,
+                        recovery_retries: 3,
+                        // Immediate recovery: don't wait for grace period.
+                        stream_paused_max_wait_time_ms: Some(0),
+                        ..Default::default()
+                    }),
+                )
+                .await?;
+
+            let batch0 = create_test_record_batch(
+                schema.clone(),
+                vec![1, 2, 3],
+                vec![Some("a"), Some("b"), Some("c")],
+            );
+            let offset0 = stream.ingest_batch(batch0).await?;
+            stream.wait_for_offset(offset0).await?;
+
+            // Batch 1 triggers graceful close. With stream_paused_max_wait_time_ms=0,
+            // recovery should be triggered immediately.
+            let batch1 = create_test_record_batch(
+                schema.clone(),
+                vec![4, 5, 6],
+                vec![Some("d"), Some("e"), Some("f")],
+            );
+            let start = Instant::now();
+            let offset1 = stream.ingest_batch(batch1).await?;
+
+            stream.wait_for_offset(offset1).await?;
+            let elapsed = start.elapsed();
+
+            // Should recover quickly, not wait 10 seconds.
+            assert!(
+                elapsed.as_millis() < 5000,
+                "Expected immediate recovery, but waited {}ms",
+                elapsed.as_millis()
+            );
+
+            stream.close().await?;
+            Ok(())
+        }
+
+        #[tokio::test]
+        async fn test_client_max_less_than_server() -> Result<(), Box<dyn std::error::Error>> {
+            setup_tracing();
+            info!("Starting test_client_max_less_than_server (arrow)");
+
+            const SERVER_DURATION_MS: u64 = 5000;
+            const CLIENT_MAX_WAIT_MS: u64 = 500;
+
+            let (mock_server, server_url) = start_mock_flight_server().await?;
+            let schema = create_test_arrow_schema();
+
+            mock_server
+                .inject_responses(
+                    TABLE_NAME,
+                    vec![
+                        // Send graceful close after batch 0.
+                        MockFlightResponse::GracefulClose {
+                            duration_ms: SERVER_DURATION_MS,
+                            delay_ms: 0,
+                            ack_up_to_offset: None,
+                            ack_up_to_records: None,
+                        },
+                        // After recovery, ack batch 0.
+                        MockFlightResponse::BatchAck {
+                            ack_up_to_offset: 0,
+                            delay_ms: 0,
+                            ack_up_to_records: 3,
+                        },
+                    ],
+                )
+                .await;
+
+            let sdk = ZerobusSdk::builder()
+                .endpoint(server_url.clone())
+                .unity_catalog_url("https://mock-uc.com")
+                .tls_config(Arc::new(NoTlsConfig))
+                .build()?;
+
+            let table_properties = ArrowTableProperties {
+                table_name: TABLE_NAME.to_string(),
+                schema: schema.clone(),
+            };
+
+            let mut stream = sdk
+                .create_arrow_stream_with_headers_provider(
+                    table_properties,
+                    Arc::new(TestHeadersProvider::default()),
+                    Some(ArrowStreamConfigurationOptions {
+                        recovery: true,
+                        recovery_backoff_ms: 100,
+                        recovery_retries: 3,
+                        // Client max wait is less than server duration: should use min().
+                        stream_paused_max_wait_time_ms: Some(CLIENT_MAX_WAIT_MS),
+                        ..Default::default()
+                    }),
+                )
+                .await?;
+
+            let batch0 = create_test_record_batch(
+                schema.clone(),
+                vec![1, 2, 3],
+                vec![Some("a"), Some("b"), Some("c")],
+            );
+            let start = Instant::now();
+            let offset0 = stream.ingest_batch(batch0).await?;
+
+            stream.wait_for_offset(offset0).await?;
+            let elapsed = start.elapsed();
+
+            // Should wait roughly CLIENT_MAX_WAIT_MS (not SERVER_DURATION_MS).
+            assert!(
+                elapsed.as_millis() >= (CLIENT_MAX_WAIT_MS as u128 - 200),
+                "Expected to wait at least ~{}ms, but only waited {}ms",
+                CLIENT_MAX_WAIT_MS,
+                elapsed.as_millis()
+            );
+            assert!(
+                elapsed.as_millis() < (SERVER_DURATION_MS as u128 - 500),
+                "Expected to wait less than server duration {}ms, but waited {}ms",
+                SERVER_DURATION_MS,
+                elapsed.as_millis()
+            );
+
+            stream.close().await?;
+            Ok(())
+        }
+
+        #[tokio::test]
+        async fn test_all_acked_during_graceful_close_exits_early(
+        ) -> Result<(), Box<dyn std::error::Error>> {
+            setup_tracing();
+            info!("Starting test_all_acked_during_graceful_close_exits_early (arrow)");
+
+            let (mock_server, server_url) = start_mock_flight_server().await?;
+            let schema = create_test_arrow_schema();
+
+            mock_server
+                .inject_responses(
+                    TABLE_NAME,
+                    vec![
+                        // Ack batch 0 first.
+                        MockFlightResponse::BatchAck {
+                            ack_up_to_offset: 0,
+                            delay_ms: 0,
+                            ack_up_to_records: 3,
+                        },
+                        // Send graceful close with long duration after batch 1.
+                        // The close signal also carries ack data for batch 1,
+                        // so all in-flight batches are acked at the same time.
+                        MockFlightResponse::GracefulClose {
+                            duration_ms: 10_000,
+                            delay_ms: 0,
+                            ack_up_to_offset: Some(1),
+                            ack_up_to_records: Some(6),
+                        },
+                        // After early recovery, no batches need replay since all were acked.
+                    ],
+                )
+                .await;
+
+            let sdk = ZerobusSdk::builder()
+                .endpoint(server_url.clone())
+                .unity_catalog_url("https://mock-uc.com")
+                .tls_config(Arc::new(NoTlsConfig))
+                .build()?;
+
+            let table_properties = ArrowTableProperties {
+                table_name: TABLE_NAME.to_string(),
+                schema: schema.clone(),
+            };
+
+            let mut stream = sdk
+                .create_arrow_stream_with_headers_provider(
+                    table_properties,
+                    Arc::new(TestHeadersProvider::default()),
+                    Some(ArrowStreamConfigurationOptions {
+                        recovery: true,
+                        recovery_backoff_ms: 100,
+                        recovery_retries: 3,
+                        // Wait full server duration (10s), but should exit early.
+                        stream_paused_max_wait_time_ms: None,
+                        ..Default::default()
+                    }),
+                )
+                .await?;
+
+            let batch0 = create_test_record_batch(
+                schema.clone(),
+                vec![1, 2, 3],
+                vec![Some("a"), Some("b"), Some("c")],
+            );
+            let offset0 = stream.ingest_batch(batch0).await?;
+            stream.wait_for_offset(offset0).await?;
+
+            let batch1 = create_test_record_batch(
+                schema.clone(),
+                vec![4, 5, 6],
+                vec![Some("d"), Some("e"), Some("f")],
+            );
+            let start = Instant::now();
+            let offset1 = stream.ingest_batch(batch1).await?;
+
+            // Batch 1 should be acked during the grace period (after 100ms delay).
+            // The graceful close should exit early since all batches are acked.
+            stream.wait_for_offset(offset1).await?;
+            let elapsed = start.elapsed();
+
+            // Should exit well before the 10s grace period.
+            assert!(
+                elapsed.as_millis() < 3000,
+                "Expected early exit from graceful close, but waited {}ms",
+                elapsed.as_millis()
+            );
+
+            stream.close().await?;
+            Ok(())
+        }
+
+        #[tokio::test]
+        async fn test_ingest_accepted_during_graceful_close(
+        ) -> Result<(), Box<dyn std::error::Error>> {
+            setup_tracing();
+            info!("Starting test_ingest_accepted_during_graceful_close (arrow)");
+
+            let (mock_server, server_url) = start_mock_flight_server().await?;
+            let schema = create_test_arrow_schema();
+
+            mock_server
+                .inject_responses(
+                    TABLE_NAME,
+                    vec![
+                        // Send graceful close after batch 0.
+                        MockFlightResponse::GracefulClose {
+                            duration_ms: 5_000,
+                            delay_ms: 0,
+                            ack_up_to_offset: None,
+                            ack_up_to_records: None,
+                        },
+                        // After recovery, ack both batches (batch 0 + batch 1 = 6 records).
+                        MockFlightResponse::BatchAck {
+                            ack_up_to_offset: 1,
+                            delay_ms: 0,
+                            ack_up_to_records: 6,
+                        },
+                    ],
+                )
+                .await;
+
+            let sdk = ZerobusSdk::builder()
+                .endpoint(server_url.clone())
+                .unity_catalog_url("https://mock-uc.com")
+                .tls_config(Arc::new(NoTlsConfig))
+                .build()?;
+
+            let table_properties = ArrowTableProperties {
+                table_name: TABLE_NAME.to_string(),
+                schema: schema.clone(),
+            };
+
+            let mut stream = sdk
+                .create_arrow_stream_with_headers_provider(
+                    table_properties,
+                    Arc::new(TestHeadersProvider::default()),
+                    Some(ArrowStreamConfigurationOptions {
+                        recovery: true,
+                        recovery_backoff_ms: 100,
+                        recovery_retries: 3,
+                        stream_paused_max_wait_time_ms: None,
+                        ..Default::default()
+                    }),
+                )
+                .await?;
+
+            let batch0 = create_test_record_batch(
+                schema.clone(),
+                vec![1, 2, 3],
+                vec![Some("a"), Some("b"), Some("c")],
+            );
+            let _offset0 = stream.ingest_batch(batch0).await?;
+
+            // Wait a bit for the graceful close signal to be processed.
+            tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+
+            // Ingestion during the grace period should be accepted and buffered.
+            // The batch will be replayed after recovery.
+            let batch1 = create_test_record_batch(
+                schema.clone(),
+                vec![4, 5, 6],
+                vec![Some("d"), Some("e"), Some("f")],
+            );
+            let offset1 = stream.ingest_batch(batch1).await?;
+            assert_eq!(offset1, 1, "Expected offset 1 for second batch");
+
+            // After recovery, both batches should be acked.
+            stream.wait_for_offset(offset1).await?;
+
+            stream.close().await?;
+            Ok(())
+        }
+    }
 }

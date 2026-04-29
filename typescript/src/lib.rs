@@ -1167,6 +1167,10 @@ pub struct ArrowStreamConfigurationOptions {
 
     /// Optional IPC compression type (0 = LZ4Frame, 1 = Zstd, undefined = no compression)
     pub ipc_compression: Option<i32>,
+
+    /// Maximum time in milliseconds to wait during graceful stream close.
+    /// undefined = wait full server duration, 0 = immediate recovery, >0 = wait up to min(this, server_duration).
+    pub stream_paused_max_wait_time_ms: Option<u32>,
 }
 
 #[cfg(feature = "arrow-flight")]
@@ -1190,6 +1194,7 @@ impl From<ArrowStreamConfigurationOptions> for RustArrowStreamOptions {
             flush_timeout_ms: opts.flush_timeout_ms.map(|v| v as u64).unwrap_or(default.flush_timeout_ms),
             connection_timeout_ms: opts.connection_timeout_ms.map(|v| v as u64).unwrap_or(default.connection_timeout_ms),
             ipc_compression,
+            stream_paused_max_wait_time_ms: opts.stream_paused_max_wait_time_ms.map(|v| v as u64),
         }
     }
 }
