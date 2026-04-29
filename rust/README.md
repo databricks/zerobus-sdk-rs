@@ -42,7 +42,6 @@ The Zerobus Rust SDK provides a robust, async-first interface for ingesting larg
 - **High Throughput** - Configurable inflight record limits for optimal performance
 - **Batch Ingestion** - Ingest multiple records at once with all-or-nothing semantics for maximum throughput
 - **Flexible Serialization** - Support for both JSON (simple) and Protocol Buffers (type-safe) data formats
-- **Stream Builder** - Fluent builder API for configuring and creating ingestion streams
 - **Type Safety** - Protocol Buffers ensure schema validation at compile time
 - **Schema Generation** - CLI tool to generate protobuf schemas from Unity Catalog tables
 - **Flexible Configuration** - Fine-tune timeouts, retries, and recovery behavior
@@ -590,15 +589,15 @@ impl AckCallback for MyCallback {
 let mut stream = sdk
     .stream_builder().table("catalog.schema.orders")
     .oauth(client_id, client_secret)
-    .json()
+    .compiled_proto(descriptor_proto)
     .max_inflight_requests(10_000)
     .ack_callback(Arc::new(MyCallback))
     .build()
     .await?;
 
 for i in 0..1000 {
-    let record = serde_json::json!({"id": i, "name": format!("order-{}", i)});
-    stream.ingest_record_offset(record.to_string()).await?;
+    let record = YourMessage { id: Some(i), /* ... */ };
+    stream.ingest_record_offset(ProtoMessage(record)).await?;
     // Callback fires when this record is acknowledged
 }
 
