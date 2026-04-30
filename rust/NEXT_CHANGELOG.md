@@ -6,6 +6,8 @@
 
 ### New Features and Improvements
 
+- **Arrow Flight — graceful stream close**: When the server signals that the stream will close, the SDK enters a paused state: it stops sending new batches, drains in-flight acknowledgments up to a configurable wait, then recovers. Recoveries triggered only by this graceful-close path do **not** count against the `recovery_retries` budget.
+- **`stream_paused_max_wait_time_ms`** on `ArrowStreamConfigurationOptions`: Optional cap (milliseconds) on how long to wait during that paused phase (`None` = use full server duration, `Some(0)` = recover immediately, `Some(x)` = wait up to `min(x, server_duration)`).
 - Added `ZerobusSdkBuilder::connector_factory` for programmatic proxy
   configuration. Callers can install a `ConnectorFactory` (a
   `Fn(&str) -> Option<ProxyConnector>` closure) that fully overrides the
@@ -26,6 +28,7 @@
 
 - **gRPC / HTTP/2 teardown on close and recovery**: Receive and send tasks now shut down with a per-stream `CancellationToken`, bounded waits before `abort`, and a separate `recv_drain_token` on the receiver. This avoids racing **`RST_STREAM` / `CANCEL`** from the client against **`END_STREAM`** from the server—failure modes that could show up as HTTP/2 protocol errors or broken pipe on the server.
 - After the inbound receive loop exits, the response-stream drain is now split by exit reason: the close path (`recv_drain_token`) drains **inline** so the server sees `END_STREAM` before the client process exits and the runtime tears down; the recovery / error paths drain in a **detached** task so `flush()` and stream recovery aren't delayed.
+- **`StreamBuilder::stream_paused_max_wait_time_ms`**: Now updates Arrow stream settings (`arrow_config`) as well as JSON/proto gRPC settings, so `.build_arrow()` respects this option (previously only JSON/proto streams saw the value).
 
 ### Documentation
 

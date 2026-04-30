@@ -240,9 +240,13 @@ impl<'a> StreamBuilder<'a> {
         self
     }
 
-    /// Set the maximum wait time during graceful stream pause (gRPC streams only).
+    /// Set the maximum wait time during graceful stream pause (JSON/proto and Arrow streams).
     pub fn stream_paused_max_wait_time_ms(mut self, ms: Option<u64>) -> Self {
         self.grpc_config.stream_paused_max_wait_time_ms = ms;
+        #[cfg(feature = "arrow-flight")]
+        {
+            self.arrow_config.stream_paused_max_wait_time_ms = ms;
+        }
         self
     }
 
@@ -642,12 +646,17 @@ mod tests {
             .recovery_backoff_ms(500)
             .recovery_retries(2)
             .server_lack_of_ack_timeout_ms(10_000)
-            .flush_timeout_ms(20_000);
+            .flush_timeout_ms(20_000)
+            .stream_paused_max_wait_time_ms(Some(5_000));
         assert!(!builder.arrow_config.recovery);
         assert_eq!(builder.arrow_config.recovery_timeout_ms, 5_000);
         assert_eq!(builder.arrow_config.recovery_backoff_ms, 500);
         assert_eq!(builder.arrow_config.recovery_retries, 2);
         assert_eq!(builder.arrow_config.server_lack_of_ack_timeout_ms, 10_000);
         assert_eq!(builder.arrow_config.flush_timeout_ms, 20_000);
+        assert_eq!(
+            builder.arrow_config.stream_paused_max_wait_time_ms,
+            Some(5_000)
+        );
     }
 }
