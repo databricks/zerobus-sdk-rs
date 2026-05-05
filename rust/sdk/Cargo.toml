@@ -32,7 +32,7 @@ smallvec = "1.15.1"
 bytes = "1"
 
 # Arrow Flight dependencies
-arrow-flight = { version = "56.2.0", default-features = false, optional = true }
+arrow-flight = { version = "58.2.0", default-features = false, optional = true }
 arrow-array = { version = "56.2.0", default-features = false, optional = true }
 arrow-schema = { version = "56.2.0", default-features = false, optional = true }
 arrow-ipc = { version = "56.2.0", default-features = false, optional = true, features = ["lz4","zstd"] }
