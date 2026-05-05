@@ -23,7 +23,7 @@ use tokio::time::{sleep, Duration};
 use tokio_retry::strategy::FixedInterval;
 use tokio_retry::RetryIf;
 use tonic::transport::Channel;
-use tracing::{debug, error, info, instrument, warn};
+use tracing::{debug, error, info, instrument, trace, warn};
 
 // Re-export arrow types for public API
 pub use arrow_array::RecordBatch;
@@ -1456,7 +1456,7 @@ impl ZerobusArrowStream {
                 let current_ack = *offset_rx.borrow_and_update();
                 if let Some(ack_offset) = current_ack {
                     if ack_offset >= offset_to_wait {
-                        info!(
+                        debug!(
                             ack_offset = ack_offset,
                             target_offset = offset_to_wait,
                             "{} completed",
@@ -1464,7 +1464,7 @@ impl ZerobusArrowStream {
                         );
                         return Ok(());
                     }
-                    debug!(
+                    trace!(
                         current_ack = ack_offset,
                         target_offset = offset_to_wait,
                         "Waiting for more acks"

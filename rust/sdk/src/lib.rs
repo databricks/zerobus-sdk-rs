@@ -70,7 +70,7 @@ use tokio_stream::wrappers::ReceiverStream;
 use tokio_util::sync::CancellationToken;
 use tonic::metadata::MetadataValue;
 use tonic::transport::{Channel, Endpoint};
-use tracing::{debug, error, info, instrument, span, warn, Level};
+use tracing::{debug, error, info, instrument, span, trace, warn, Level};
 
 use databricks::zerobus::ephemeral_stream_request::Payload as RequestPayload;
 use databricks::zerobus::ephemeral_stream_response::Payload as ResponsePayload;
@@ -1966,17 +1966,17 @@ impl ZerobusStream {
                 };
                 if let Some(offset) = offset {
                     if offset >= offset_to_wait {
-                        info!(stream_id = %stream_id, "Stream is caught up to the given offset. {} completed.", operation_name);
+                        debug!(stream_id = %stream_id, "Stream is caught up to the given offset. {} completed.", operation_name);
                         return Ok(());
                     } else {
-                        info!(
+                        trace!(
                             stream_id = %stream_id,
                             "Stream is caught up to offset {}. Waiting for offset {}.",
                             offset, offset_to_wait
                         );
                     }
                 } else {
-                    info!(
+                    trace!(
                         stream_id = %stream_id,
                         "Stream is not caught up to any offset yet. Waiting for the first offset."
                     );
