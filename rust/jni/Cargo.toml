@@ -19,7 +19,7 @@ jni = "0.21"
 tokio = { version = "1.42", features = ["rt-multi-thread", "sync"] }
 prost = "0.13"
 prost-types = "0.13"
-thiserror = "1.0"
+thiserror = "2.0"
 tracing = "0.1"
 
 # Arrow dependencies (re-exported from SDK)
