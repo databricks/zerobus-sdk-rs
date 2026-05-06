@@ -28,6 +28,12 @@
 
 ### Internal Changes
 
+- Reduced log verbosity in `wait_for_offset` / `wait_for_acks` polling loops.
+  Per-iteration progress logs are now emitted at `trace` level, and the
+  one-shot "completed" log is now at `debug` level (previously `info`). This
+  removes repeated `info`-level noise observed when callers wait for flushes
+  or graceful close.
+
 ### Breaking Changes
 
 ### Deprecations
