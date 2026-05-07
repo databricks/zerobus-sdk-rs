@@ -268,6 +268,9 @@ pub struct ZerobusSdk {
     pub(crate) workspace_id: String,
     pub(crate) tls_config: Arc<dyn TlsConfig>,
     connector_factory: Option<ConnectorFactory>,
+    /// Final value sent in the `x-zerobus-sdk` gRPC header on every request.
+    /// Either `"zerobus-sdk-rs/<version>"` or `"zerobus-sdk-rs/<version> <application_name>"`.
+    pub(crate) sdk_identifier: Arc<str>,
 }
 
 impl ZerobusSdk {
@@ -382,6 +385,7 @@ impl ZerobusSdk {
             shared_channel: tokio::sync::Mutex::new(None),
             tls_config: Arc::new(SecureTlsConfig::new()),
             connector_factory: None,
+            sdk_identifier: Arc::from(DEFAULT_X_ZEROBUS_SDK),
         })
     }
 
@@ -394,7 +398,14 @@ impl ZerobusSdk {
         workspace_id: String,
         tls_config: Arc<dyn TlsConfig>,
         connector_factory: Option<ConnectorFactory>,
+        application_name: Option<String>,
     ) -> Self {
+        let sdk_identifier: Arc<str> = match application_name {
+            Some(app) if !app.is_empty() => {
+                Arc::from(format!("{} {}", DEFAULT_X_ZEROBUS_SDK, app))
+            }
+            _ => Arc::from(DEFAULT_X_ZEROBUS_SDK),
+        };
         #[allow(deprecated)]
         ZerobusSdk {
             zerobus_endpoint,
@@ -404,6 +415,7 @@ impl ZerobusSdk {
             shared_channel: tokio::sync::Mutex::new(None),
             tls_config,
             connector_factory,
+            sdk_identifier,
         }
     }
 
@@ -567,6 +579,7 @@ impl ZerobusSdk {
             table_properties,
             Arc::clone(&headers_provider),
             options,
+            Arc::clone(&self.sdk_identifier),
         )
         .await;
 
@@ -629,6 +642,7 @@ impl ZerobusSdk {
             stream.table_properties.clone(),
             Arc::clone(&stream.headers_provider),
             stream.options.clone(),
+            Arc::clone(&self.sdk_identifier),
         )
         .await;
 
@@ -809,6 +823,7 @@ impl ZerobusSdk {
             table_properties,
             headers_provider,
             options,
+            Arc::clone(&self.sdk_identifier),
         )
         .await;
 
@@ -887,6 +902,7 @@ impl ZerobusSdk {
             stream.table_properties().clone(),
             stream.headers_provider(),
             stream.options().clone(),
+            Arc::clone(&self.sdk_identifier),
         )
         .await;
 
@@ -962,6 +978,7 @@ impl ZerobusStream {
         table_properties: TableProperties,
         headers_provider: Arc<dyn HeadersProvider>,
         options: StreamConfigurationOptions,
+        sdk_identifier: Arc<str>,
     ) -> ZerobusResult<Self> {
         let (stream_init_result_tx, stream_init_result_rx) =
             tokio::sync::oneshot::channel::<ZerobusResult<String>>();
@@ -1006,6 +1023,7 @@ impl ZerobusStream {
             server_error_tx,
             cancellation_token.clone(),
             callback_tx.clone(),
+            Arc::clone(&sdk_identifier),
         ));
         let stream_id = Some(stream_init_result_rx.await.map_err(|_| {
             ZerobusError::UnexpectedStreamResponseError(
@@ -1054,6 +1072,7 @@ impl ZerobusStream {
         server_error_tx: tokio::sync::watch::Sender<Option<ZerobusError>>,
         cancellation_token: CancellationToken,
         callback_tx: Option<tokio::sync::mpsc::UnboundedSender<CallbackMessage>>,
+        sdk_identifier: Arc<str>,
     ) -> ZerobusResult<()> {
         let mut initial_stream_creation = true;
         let mut stream_init_result_tx = Some(stream_init_result_tx);
@@ -1079,6 +1098,7 @@ impl ZerobusStream {
                 let table_properties = table_properties.clone();
                 let headers_provider = Arc::clone(&headers_provider);
                 let record_type = options.record_type;
+                let sdk_identifier = Arc::clone(&sdk_identifier);
 
                 async move {
                     tokio::time::timeout(
@@ -1088,6 +1108,7 @@ impl ZerobusStream {
                             &table_properties,
                             &headers_provider,
                             record_type,
+                            &sdk_identifier,
                         ),
                     )
                     .await
@@ -1246,6 +1267,7 @@ impl ZerobusStream {
         table_properties: &TableProperties,
         headers_provider: &Arc<dyn HeadersProvider>,
         record_type: RecordType,
+        sdk_identifier: &str,
     ) -> ZerobusResult<(
         tokio::sync::mpsc::Sender<EphemeralStreamRequest>,
         tonic::Streaming<EphemeralStreamResponse>,
@@ -1273,6 +1295,9 @@ impl ZerobusStream {
                     auth_value.set_sensitive(true);
                     stream_metadata.insert("authorization", auth_value);
                 }
+                "x-zerobus-sdk" => {
+                    // Owned by the SDK (set below); ignore provider-supplied values.
+                }
                 other_key => {
                     let header_value = MetadataValue::try_from(value.as_str())
                         .map_err(|_| ZerobusError::InvalidArgument(other_key.to_string()))?;
@@ -1280,6 +1305,14 @@ impl ZerobusStream {
                 }
             }
         }
+
+        let sdk_identifier_value = MetadataValue::try_from(sdk_identifier).map_err(|_| {
+            ZerobusError::InvalidArgument(format!(
+                "invalid x-zerobus-sdk value: {}",
+                sdk_identifier
+            ))
+        })?;
+        stream_metadata.insert("x-zerobus-sdk", sdk_identifier_value);
 
         let mut response_grpc_stream = channel
             .ephemeral_stream(request_stream)

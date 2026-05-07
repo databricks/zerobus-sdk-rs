@@ -374,11 +374,13 @@ impl<'a> StreamBuilder<'a> {
         };
 
         let channel = self.sdk.get_or_create_channel_zerobus_client().await?;
+        let sdk_identifier = Arc::clone(&self.sdk.sdk_identifier);
         ZerobusStream::new_stream(
             channel,
             table_properties,
             headers_provider,
             self.grpc_config,
+            sdk_identifier,
         )
         .await
     }
@@ -417,6 +419,7 @@ impl<'a> StreamBuilder<'a> {
             table_properties,
             headers_provider,
             self.arrow_config,
+            Arc::clone(&self.sdk.sdk_identifier),
         )
         .await
     }
@@ -433,6 +436,7 @@ mod tests {
             "http://localhost:5678".to_string(),
             "test-workspace".to_string(),
             Arc::new(crate::tls_config::SecureTlsConfig::new()),
+            None,
             None,
         )
     }
