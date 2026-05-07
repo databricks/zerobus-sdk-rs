@@ -678,10 +678,7 @@ impl ZerobusArrowStream {
         client
             .add_header(SDK_IDENTIFIER_HEADER, sdk_identifier)
             .map_err(|e| {
-                ZerobusError::InvalidArgument(format!(
-                    "Failed to add x-zerobus-sdk header: {}",
-                    e
-                ))
+                ZerobusError::InvalidArgument(format!("Failed to add x-zerobus-sdk header: {}", e))
             })?;
 
         Ok(client)

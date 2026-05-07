@@ -401,9 +401,7 @@ impl ZerobusSdk {
         application_name: Option<String>,
     ) -> Self {
         let sdk_identifier: Arc<str> = match application_name {
-            Some(app) if !app.is_empty() => {
-                Arc::from(format!("{} {}", DEFAULT_X_ZEROBUS_SDK, app))
-            }
+            Some(app) if !app.is_empty() => Arc::from(format!("{} {}", DEFAULT_X_ZEROBUS_SDK, app)),
             _ => Arc::from(DEFAULT_X_ZEROBUS_SDK),
         };
         #[allow(deprecated)]
