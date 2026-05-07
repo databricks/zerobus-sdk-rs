@@ -23,6 +23,7 @@ pub struct ZerobusSdkBuilder {
     unity_catalog_url: Option<String>,
     tls_config: Option<Arc<dyn TlsConfig>>,
     connector_factory: Option<ConnectorFactory>,
+    application_name: Option<String>,
 }
 
 impl ZerobusSdkBuilder {
@@ -35,6 +36,7 @@ impl ZerobusSdkBuilder {
             unity_catalog_url: None,
             tls_config: None,
             connector_factory: None,
+            application_name: None,
         }
     }
 
@@ -84,6 +86,25 @@ impl ZerobusSdkBuilder {
         self
     }
 
+    /// Sets a custom application identifier appended to the `x-zerobus-sdk`
+    /// gRPC header on every request.
+    ///
+    /// The default header value is `zerobus-sdk-rs/<version>`. When this is
+    /// set, the value sent becomes `zerobus-sdk-rs/<version> <application_name>`,
+    /// preserving the SDK version prefix for server-side telemetry while
+    /// adding caller-supplied identification (e.g. `"my-app/1.0"`).
+    ///
+    /// This value takes precedence over any `x-zerobus-sdk` header returned
+    /// by a custom [`HeadersProvider`](crate::HeadersProvider).
+    ///
+    /// # Arguments
+    ///
+    /// * `name` - Application identifier, conventionally `<product>/<version>`
+    pub fn application_name(mut self, name: impl Into<String>) -> Self {
+        self.application_name = Some(name.into());
+        self
+    }
+
     /// Builds the [`ZerobusSdk`] instance.
     ///
     /// # Errors
@@ -128,6 +149,7 @@ impl ZerobusSdkBuilder {
             workspace_id,
             tls_config,
             self.connector_factory,
+            self.application_name,
         ))
     }
 }
@@ -196,5 +218,38 @@ mod tests {
             .expect("should build successfully without unity_catalog_url");
 
         assert_eq!(sdk.unity_catalog_url, "");
+    }
+
+    #[test]
+    fn test_sdk_identifier_default() {
+        let sdk = ZerobusSdkBuilder::new()
+            .endpoint("https://workspace.zerobus.databricks.com")
+            .build()
+            .expect("should build");
+
+        assert_eq!(&*sdk.sdk_identifier, crate::DEFAULT_X_ZEROBUS_SDK);
+    }
+
+    #[test]
+    fn test_sdk_identifier_with_application_name() {
+        let sdk = ZerobusSdkBuilder::new()
+            .endpoint("https://workspace.zerobus.databricks.com")
+            .application_name("my-app/1.0")
+            .build()
+            .expect("should build");
+
+        let expected = format!("{} my-app/1.0", crate::DEFAULT_X_ZEROBUS_SDK);
+        assert_eq!(&*sdk.sdk_identifier, expected);
+    }
+
+    #[test]
+    fn test_sdk_identifier_empty_application_name_falls_back_to_default() {
+        let sdk = ZerobusSdkBuilder::new()
+            .endpoint("https://workspace.zerobus.databricks.com")
+            .application_name("")
+            .build()
+            .expect("should build");
+
+        assert_eq!(&*sdk.sdk_identifier, crate::DEFAULT_X_ZEROBUS_SDK);
     }
 }

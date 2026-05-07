@@ -449,6 +449,8 @@ pub struct ZerobusArrowStream {
     cumulative_records_sent: Arc<AtomicU64>,
     /// Last acknowledged cumulative record count (for recovery slicing).
     last_acked_records: Arc<AtomicU64>,
+    /// Authoritative `x-zerobus-sdk` header value owned by the SDK.
+    sdk_identifier: Arc<str>,
 }
 
 impl ZerobusArrowStream {
@@ -465,6 +467,7 @@ impl ZerobusArrowStream {
         table_properties: ArrowTableProperties,
         headers_provider: Arc<dyn HeadersProvider>,
         options: ArrowStreamConfigurationOptions,
+        sdk_identifier: Arc<str>,
     ) -> ZerobusResult<Self> {
         let (last_ack_tx, _last_ack_rx) = tokio::sync::watch::channel(None);
         let is_closed = Arc::new(AtomicBool::new(false));
@@ -498,6 +501,7 @@ impl ZerobusArrowStream {
             server_error_rx,
             cumulative_records_sent,
             last_acked_records,
+            sdk_identifier,
         };
 
         // Initialize the connection with retry logic.
@@ -515,6 +519,7 @@ impl ZerobusArrowStream {
             let table_properties = table_properties.clone();
             let options = options.clone();
             let headers_provider = Arc::clone(&headers_provider);
+            let sdk_identifier = Arc::clone(&stream.sdk_identifier);
 
             async move {
                 tokio::time::timeout(
@@ -525,6 +530,7 @@ impl ZerobusArrowStream {
                         &table_properties,
                         &options,
                         &headers_provider,
+                        &sdk_identifier,
                     ),
                 )
                 .await
@@ -569,6 +575,7 @@ impl ZerobusArrowStream {
             Arc::clone(&stream.cumulative_records_sent),
             Arc::clone(&stream.last_acked_records),
             response_stream,
+            Arc::clone(&stream.sdk_identifier),
         );
 
         {
@@ -592,6 +599,7 @@ impl ZerobusArrowStream {
         table_properties: &ArrowTableProperties,
         options: &ArrowStreamConfigurationOptions,
         headers_provider: &Arc<dyn HeadersProvider>,
+        sdk_identifier: &str,
     ) -> ZerobusResult<(
         Pin<Box<dyn Stream<Item = Result<PutResult, FlightError>> + Send>>,
         mpsc::Sender<Result<FlightData, FlightError>>,
@@ -602,6 +610,7 @@ impl ZerobusArrowStream {
             table_properties,
             options,
             headers_provider,
+            sdk_identifier,
         )
         .await?;
 
@@ -615,6 +624,7 @@ impl ZerobusArrowStream {
         table_properties: &ArrowTableProperties,
         options: &ArrowStreamConfigurationOptions,
         headers_provider: &Arc<dyn HeadersProvider>,
+        sdk_identifier: &str,
     ) -> ZerobusResult<FlightClient> {
         let connection_timeout = Duration::from_millis(options.connection_timeout_ms);
 
@@ -628,8 +638,9 @@ impl ZerobusArrowStream {
         let mut client = FlightClient::new(channel);
 
         // Add headers from the provider first, filtering out reserved headers.
-        // The table name header is authoritative and must not be overridden.
+        // The table name and SDK identifier headers are authoritative and must not be overridden.
         const TABLE_NAME_HEADER: &str = "x-databricks-zerobus-table-name";
+        const SDK_IDENTIFIER_HEADER: &str = "x-zerobus-sdk";
         let headers = headers_provider.get_headers().await?;
         for (key, value) in headers {
             if key.eq_ignore_ascii_case(TABLE_NAME_HEADER) {
@@ -637,6 +648,10 @@ impl ZerobusArrowStream {
                     "HeadersProvider attempted to set reserved header '{}', ignoring",
                     TABLE_NAME_HEADER
                 );
+                continue;
+            }
+            if key.eq_ignore_ascii_case(SDK_IDENTIFIER_HEADER) {
+                // Owned by the SDK (set below); silently ignore provider-supplied values.
                 continue;
             }
             client.add_header(key, &value).map_err(|e| {
@@ -649,6 +664,16 @@ impl ZerobusArrowStream {
             .add_header(TABLE_NAME_HEADER, &table_properties.table_name)
             .map_err(|e| {
                 ZerobusError::InvalidArgument(format!("Failed to add table name header: {}", e))
+            })?;
+
+        // Add the SDK identifier header (authoritative).
+        client
+            .add_header(SDK_IDENTIFIER_HEADER, sdk_identifier)
+            .map_err(|e| {
+                ZerobusError::InvalidArgument(format!(
+                    "Failed to add x-zerobus-sdk header: {}",
+                    e
+                ))
             })?;
 
         Ok(client)
@@ -774,6 +799,7 @@ impl ZerobusArrowStream {
         cumulative_records_sent: Arc<AtomicU64>,
         last_acked_records: Arc<AtomicU64>,
         initial_response_stream: Pin<Box<dyn Stream<Item = Result<PutResult, FlightError>> + Send>>,
+        sdk_identifier: Arc<str>,
     ) -> tokio::task::JoinHandle<ZerobusResult<()>> {
         tokio::spawn(async move {
             let ack_timeout = Duration::from_millis(options.server_lack_of_ack_timeout_ms);
@@ -857,6 +883,7 @@ impl ZerobusArrowStream {
                                 &pending_batches,
                                 &cumulative_records_sent,
                                 &last_acked_records,
+                                &sdk_identifier,
                             ),
                         )
                         .await;
@@ -914,6 +941,7 @@ impl ZerobusArrowStream {
         pending_batches: &Arc<Mutex<Vec<PendingBatch>>>,
         cumulative_records_sent: &Arc<AtomicU64>,
         last_acked_records: &Arc<AtomicU64>,
+        sdk_identifier: &str,
     ) -> ZerobusResult<Pin<Box<dyn Stream<Item = Result<PutResult, FlightError>> + Send>>> {
         // Create new client.
         let client = Self::create_flight_client(
@@ -922,6 +950,7 @@ impl ZerobusArrowStream {
             table_properties,
             options,
             headers_provider,
+            sdk_identifier,
         )
         .await?;
 

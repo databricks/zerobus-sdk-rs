@@ -12,6 +12,11 @@ pub const DEFAULT_X_ZEROBUS_SDK: &str = concat!("zerobus-sdk-rs/", env!("CARGO_P
 /// such as fetching tokens from different OAuth providers or using alternative
 /// authentication mechanisms.
 ///
+/// The `x-zerobus-sdk` header is owned by the SDK itself and any value returned
+/// for that key from `get_headers` is ignored. Use
+/// [`ZerobusSdkBuilder::application_name`](crate::ZerobusSdkBuilder::application_name)
+/// to customize it.
+///
 /// # Examples
 ///
 /// ```no_run
@@ -89,7 +94,6 @@ impl HeadersProvider for OAuthHeadersProvider {
         let mut headers = HashMap::new();
         headers.insert("authorization", format!("Bearer {}", token));
         headers.insert("x-databricks-zerobus-table-name", self.table_name.clone());
-        headers.insert("x-zerobus-sdk", DEFAULT_X_ZEROBUS_SDK.to_string());
         Ok(headers)
     }
 }
