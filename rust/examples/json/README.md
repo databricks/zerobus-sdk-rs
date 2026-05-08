@@ -24,8 +24,8 @@ JSON examples are recommended for getting started - they're simpler and don't re
 - Great for quick prototyping
 
 **Available examples:**
-- **`single/`** - Ingest records one at a time using `ingest_record_offset()` / `ingest_record()`
-- **`batch/`** - Ingest multiple records at once using `ingest_records_offset()` / `ingest_records()`
+- **`single.rs`** - Ingest records one at a time using `ingest_record_offset()` / `ingest_record()`
+- **`batch.rs`** - Ingest multiple records at once using `ingest_records_offset()` / `ingest_records()`
 
 ## Three Ways to Pass Data
 
@@ -46,11 +46,11 @@ The SDK supports three approaches for passing JSON data:
 
 ### Running the Example
 
-1. Configure credentials in `single/src/main.rs` (see [Prerequisites](../README.md#prerequisites))
+1. Configure credentials in `single.rs` (see [Prerequisites](../README.md#prerequisites))
 
 2. Run the example:
    ```bash
-   cargo run -p example_json_single
+   cargo run -p rust-examples-json --example json_single
    ```
 
 **Expected output:**
@@ -131,11 +131,11 @@ let stream = sdk
 
 ### Running the Example
 
-1. Configure credentials in `batch/src/main.rs` (see [Prerequisites](../README.md#prerequisites))
+1. Configure credentials in `batch.rs` (see [Prerequisites](../README.md#prerequisites))
 
 2. Run the example:
    ```bash
-   cargo run -p example_json_batch
+   cargo run -p rust-examples-json --example json_batch
    ```
 
 **Expected output:**

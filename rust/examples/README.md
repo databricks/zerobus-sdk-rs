@@ -31,12 +31,12 @@ The SDK supports two serialization formats and two ingestion methods:
 
 **Available Examples:**
 
-| Example | Format | Method | Package |
-|---------|--------|--------|---------|
-| [JSON Single](json/README.md#single-record-example) | JSON | Single-record | `example_json_single` |
-| [JSON Batch](json/README.md#batch-example) | JSON | Batch | `example_json_batch` |
-| [Proto Single](proto/README.md#single-record-example) | Protocol Buffers | Single-record | `example_proto_single` |
-| [Proto Batch](proto/README.md#batch-example) | Protocol Buffers | Batch | `example_proto_batch` |
+| Example | Format | Method | Run with |
+|---------|--------|--------|----------|
+| [JSON Single](json/README.md#single-record-example) | JSON | Single-record | `cargo run -p rust-examples-json --example json_single` |
+| [JSON Batch](json/README.md#batch-example) | JSON | Batch | `cargo run -p rust-examples-json --example json_batch` |
+| [Proto Single](proto/README.md#single-record-example) | Protocol Buffers | Single-record | `cargo run -p rust-examples-proto --example proto_single` |
+| [Proto Batch](proto/README.md#batch-example) | Protocol Buffers | Batch | `cargo run -p rust-examples-proto --example proto_batch` |
 
 ## Prerequisites
 
@@ -71,7 +71,7 @@ Replace `catalog.schema.orders` with your actual catalog, schema, and table name
 
 ### 3. Configure Credentials
 
-Edit the `src/main.rs` file in your chosen example and update these constants:
+Edit the source file (`batch.rs` or `single.rs`) for your chosen example and update these constants:
 
 ```rust
 const DATABRICKS_WORKSPACE_URL: &str = "https://your-workspace.cloud.databricks.com";

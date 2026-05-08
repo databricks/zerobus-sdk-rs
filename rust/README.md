@@ -142,24 +142,17 @@ zerobus_rust_sdk/
 │
 ├── examples/
 │   ├── README.md                       # Examples documentation
-│   ├── json/
-│   │   ├── README.md                   # JSON examples documentation
-│   │   ├── single/                     # JSON single-record example
-│   │   │   ├── src/main.rs
-│   │   │   └── Cargo.toml
-│   │   └── batch/                      # JSON batch ingestion example
-│   │       ├── src/main.rs
-│   │       └── Cargo.toml
-│   └── proto/
-│       ├── README.md                   # Protocol Buffers examples documentation
-│       ├── single/                     # Protocol Buffers single-record example
-│       │   ├── src/main.rs
-│       │   ├── output/                 # Generated schema files
-│       │   └── Cargo.toml
-│       └── batch/                      # Protocol Buffers batch ingestion example
-│           ├── src/main.rs
-│           ├── output/                 # Generated schema files
-│           └── Cargo.toml
+│   ├── json/                           # JSON examples (single Cargo package)
+│   │   ├── README.md
+│   │   ├── Cargo.toml
+│   │   ├── single.rs                   # JSON single-record example
+│   │   └── batch.rs                    # JSON batch ingestion example
+│   └── proto/                          # Protocol Buffers examples (single Cargo package)
+│       ├── README.md
+│       ├── Cargo.toml
+│       ├── single.rs                   # Protocol Buffers single-record example
+│       ├── batch.rs                    # Protocol Buffers batch ingestion example
+│       └── output/                     # Generated schema files (shared)
 │
 ├── tests/                              # Integration tests crate
 │   ├── src/
@@ -745,12 +738,12 @@ match stream.ingest_record(payload).await {
 
 The `examples/` directory contains four working examples covering different serialization formats and ingestion patterns:
 
-| Example | Serialization | Ingestion | Package |
-|---------|--------------|-----------|---------|
-| `json/single/` | JSON | Single-record | `example_json_single` |
-| `json/batch/` | JSON | Batch | `example_json_batch` |
-| `proto/single/` | Protocol Buffers | Single-record | `example_proto_single` |
-| `proto/batch/` | Protocol Buffers | Batch | `example_proto_batch` |
+| Example | Serialization | Ingestion | Run with |
+|---------|--------------|-----------|----------|
+| `json/single.rs` | JSON | Single-record | `cargo run -p rust-examples-json --example json_single` |
+| `json/batch.rs` | JSON | Batch | `cargo run -p rust-examples-json --example json_batch` |
+| `proto/single.rs` | Protocol Buffers | Single-record | `cargo run -p rust-examples-proto --example proto_single` |
+| `proto/batch.rs` | Protocol Buffers | Batch | `cargo run -p rust-examples-proto --example proto_batch` |
 
 
 Check [`examples/README.md`](https://github.com/databricks/zerobus-sdk/blob/main/rust/examples/README.md) for setup instructions and detailed comparisons.
@@ -1026,16 +1019,16 @@ cargo build -p databricks-zerobus-ingest-sdk
 cargo build -p generate_files
 
 # Build and run JSON single-record example
-cargo run -p example_json_single
+cargo run -p rust-examples-json --example json_single
 
 # Build and run JSON batch example
-cargo run -p example_json_batch
+cargo run -p rust-examples-json --example json_batch
 
 # Build and run Protocol Buffers single-record example
-cargo run -p example_proto_single
+cargo run -p rust-examples-proto --example proto_single
 
 # Build and run Protocol Buffers batch example
-cargo run -p example_proto_batch
+cargo run -p rust-examples-proto --example proto_batch
 ```
 
 ## Community and Contributing

@@ -1,0 +1,19 @@
+[package]
+name = "rust-examples-json"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[[example]]
+name = "json_batch"
+path = "batch.rs"
+
+[[example]]
+name = "json_single"
+path = "single.rs"
+
+[dependencies]
+databricks-zerobus-ingest-sdk = { path = "../../sdk" }
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
+chrono.workspace = true
+serde.workspace = true
