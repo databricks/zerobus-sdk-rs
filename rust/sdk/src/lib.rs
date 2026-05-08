@@ -105,7 +105,7 @@ pub use stream_configuration::StreamConfigurationOptions;
 pub use tls_config::NoTlsConfig;
 pub use tls_config::{SecureTlsConfig, TlsConfig};
 
-const SHUTDOWN_TIMEOUT_SECS: u64 = 2;
+const SHUTDOWN_TIMEOUT_SECS: u64 = 1;
 
 /// The type of the stream connection created with the server.
 /// Currently we only support ephemeral streams on the server side, so we support only that in the SDK as well.
@@ -1183,7 +1183,7 @@ impl ZerobusStream {
                     // Draining the recv_task prevents RST_STREAM(CANCEL) from being sent alongside END_STREAM.
                     if matches!(send_result, Ok(Ok(()))) && cancellation_token.is_cancelled() {
                         recv_drain_token.cancel();
-                        let _ = tokio::time::timeout(Duration::from_millis(2000), &mut recv_task).await;
+                        let _ = tokio::time::timeout(Duration::from_millis(100), &mut recv_task).await;
                     }
                     recv_task.abort();
                     match send_result {
@@ -1731,6 +1731,11 @@ impl ZerobusStream {
             let _guard = span.enter();
             let mut last_acked_offset = -1;
             let mut pause_deadline: Option<tokio::time::Instant> = None;
+            // Set when we exit because the supervisor signalled close (`recv_drain_token`).
+            // On that path we drain the response stream inline so the server sees END_STREAM
+            // instead of RST_STREAM. On all other exits (recovery / errors) the runtime is
+            // still up, so a detached drain is used to avoid blocking recovery.
+            let mut close_initiated = false;
 
             'recv_loop: loop {
                 if let Some(deadline) = pause_deadline {
@@ -1749,7 +1754,10 @@ impl ZerobusStream {
                 let message_result = if let Some(deadline) = pause_deadline {
                     tokio::select! {
                         biased;
-                        _ = recv_drain_token.cancelled() => break 'recv_loop,
+                        _ = recv_drain_token.cancelled() => {
+                            close_initiated = true;
+                            break 'recv_loop;
+                        }
                         _ = tokio::time::sleep_until(deadline) => {
                             continue;
                         }
@@ -1761,7 +1769,10 @@ impl ZerobusStream {
                 } else {
                     tokio::select! {
                         biased;
-                        _ = recv_drain_token.cancelled() => break 'recv_loop,
+                        _ = recv_drain_token.cancelled() => {
+                            close_initiated = true;
+                            break 'recv_loop;
+                        }
                         res = tokio::time::timeout(
                             Duration::from_millis(options.server_lack_of_ack_timeout_ms),
                             response_grpc_stream.message(),
@@ -1887,17 +1898,34 @@ impl ZerobusStream {
                 }
             }
 
-            // Drain remaining server messages before dropping the stream. This lets the
-            // server close its response side cleanly (END_STREAM) instead of having the
-            // client reset it (RST_STREAM), which would cause broken pipe errors on the
-            // server's next read from the request body.
-            let _ = tokio::time::timeout(
-                Duration::from_millis(1000),
-                async {
-                    while response_grpc_stream.message().await.ok().flatten().is_some() {}
-                },
-            )
-            .await;
+            // Drain remaining server messages so the server sees END_STREAM instead of
+            // the client RST_STREAM-ing the response. Inline on close (runtime may exit
+            // right after); detached on recovery / errors so recovery isn't delayed.
+            if close_initiated {
+                let _ = tokio::time::timeout(Duration::from_millis(500), async {
+                    while response_grpc_stream
+                        .message()
+                        .await
+                        .ok()
+                        .flatten()
+                        .is_some()
+                    {}
+                })
+                .await;
+            } else {
+                tokio::spawn(async move {
+                    let _ = tokio::time::timeout(Duration::from_millis(500), async move {
+                        while response_grpc_stream
+                            .message()
+                            .await
+                            .ok()
+                            .flatten()
+                            .is_some()
+                        {}
+                    })
+                    .await;
+                });
+            }
             Ok(())
         })
     }

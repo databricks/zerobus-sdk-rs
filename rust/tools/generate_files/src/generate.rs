@@ -131,20 +131,20 @@ fn write_field(
     map_entries: &HashMap<String, MapEntry>,
     indent: &str,
 ) {
-    if f.label() == Label::Repeated
-        && f.r#type() == Type::Message
-        && let Some(type_name) = f.type_name.as_deref()
-        && let Some(entry) = map_entries.get(short_name(type_name))
-    {
-        out.push_str(&format!(
-            "{}map<{}, {}> {} = {};\n",
-            indent,
-            entry.key,
-            entry.value,
-            f.name(),
-            f.number()
-        ));
-        return;
+    if f.label() == Label::Repeated && f.r#type() == Type::Message {
+        if let Some(type_name) = f.type_name.as_deref() {
+            if let Some(entry) = map_entries.get(short_name(type_name)) {
+                out.push_str(&format!(
+                    "{}map<{}, {}> {} = {};\n",
+                    indent,
+                    entry.key,
+                    entry.value,
+                    f.name(),
+                    f.number()
+                ));
+                return;
+            }
+        }
     }
 
     let label = match f.label() {
