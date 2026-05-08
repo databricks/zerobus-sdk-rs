@@ -261,6 +261,13 @@ impl ArrowStreamConfigurationOptions {
                 "connection_timeout_ms must be non-negative",
             ));
         }
+        if let Some(v) = self.stream_paused_max_wait_time_ms {
+            if v < 0 {
+                return Err(pyo3::exceptions::PyValueError::new_err(
+                    "stream_paused_max_wait_time_ms must be non-negative",
+                ));
+            }
+        }
         let ipc_compression = match self.ipc_compression {
             IPCCompression::Uncompressed => None,
             IPCCompression::LZ4Frame => Some(arrow_ipc::CompressionType::LZ4_FRAME),

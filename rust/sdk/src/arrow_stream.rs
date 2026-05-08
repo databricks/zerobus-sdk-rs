@@ -23,7 +23,7 @@ use tokio::time::{sleep, Duration};
 use tokio_retry::strategy::FixedInterval;
 use tokio_retry::RetryIf;
 use tonic::transport::Channel;
-use tracing::{debug, error, info, instrument, trace, warn};
+use tracing::{debug, error, info, instrument, warn};
 
 // Re-export arrow types for public API
 pub use arrow_array::RecordBatch;
@@ -807,10 +807,6 @@ impl ZerobusArrowStream {
                 )
                 .await;
 
-                // Capture whether this was a graceful close recovery before resetting.
-                // Graceful close recoveries should not consume the retry budget.
-                let was_graceful_close = is_paused.load(Ordering::Relaxed);
-
                 // Reset paused state after process_acks returns (before recovery).
                 is_paused.store(false, Ordering::Relaxed);
 
@@ -829,12 +825,7 @@ impl ZerobusArrowStream {
                     }
                     Err(ref error) if error.is_retryable() && options.recovery => {
                         // Retriable error - attempt recovery.
-                        // Graceful close recoveries don't count against the retry budget.
-                        let attempts = if was_graceful_close {
-                            recovery_attempts.load(Ordering::Relaxed)
-                        } else {
-                            recovery_attempts.fetch_add(1, Ordering::Relaxed)
-                        };
+                        let attempts = recovery_attempts.fetch_add(1, Ordering::Relaxed);
                         if attempts >= options.recovery_retries {
                             error!(
                                 attempts = attempts,
@@ -1357,6 +1348,10 @@ impl ZerobusArrowStream {
             });
         }
 
+        if self.is_paused.load(Ordering::Relaxed) {
+            return Ok(offset_id);
+        }
+
         let sender = {
             let guard = self.batch_tx.lock().await;
             guard.clone()
@@ -1577,7 +1572,7 @@ impl ZerobusArrowStream {
                 let current_ack = *offset_rx.borrow_and_update();
                 if let Some(ack_offset) = current_ack {
                     if ack_offset >= offset_to_wait {
-                        debug!(
+                        info!(
                             ack_offset = ack_offset,
                             target_offset = offset_to_wait,
                             "{} completed",
@@ -1585,7 +1580,7 @@ impl ZerobusArrowStream {
                         );
                         return Ok(());
                     }
-                    trace!(
+                    debug!(
                         current_ack = ack_offset,
                         target_offset = offset_to_wait,
                         "Waiting for more acks"

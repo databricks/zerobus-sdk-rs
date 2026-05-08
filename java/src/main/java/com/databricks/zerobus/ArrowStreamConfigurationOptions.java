@@ -151,7 +151,7 @@ public class ArrowStreamConfigurationOptions {
    * Returns the maximum time in milliseconds to wait during graceful stream close.
    *
    * <p>When the server sends a close stream signal, the SDK enters a "paused" state where it stops
-   * accepting new batches but continues processing acknowledgments for in-flight batches.
+   * sending new batches but continues processing acknowledgments for in-flight batches.
    *
    * <p>Values: -1 = wait full server duration (default), 0 = immediate recovery, &gt;0 = wait up to
    * min(this, server_duration) milliseconds.
