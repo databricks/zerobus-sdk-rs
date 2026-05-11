@@ -107,6 +107,10 @@ pub use tls_config::{SecureTlsConfig, TlsConfig};
 
 const SHUTDOWN_TIMEOUT_SECS: u64 = 1;
 
+/// Maximum time to wait for the receiver/sender tasks to finish during stream
+/// teardown.
+const STREAM_TEARDOWN_DRAIN_TIMEOUT_MS: u64 = 500;
+
 /// The type of the stream connection created with the server.
 /// Currently we only support ephemeral streams on the server side, so we support only that in the SDK as well.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1148,7 +1152,6 @@ impl ZerobusStream {
                 Arc::clone(&is_paused),
                 options.clone(),
                 server_error_tx.clone(),
-                per_stream_token.clone(),
                 recv_drain_token.clone(),
                 callback_tx.clone(),
             );
@@ -1164,7 +1167,11 @@ impl ZerobusStream {
             let result = tokio::select! {
                 recv_result = &mut recv_task => {
                     per_stream_token.cancel();
-                    let _ = tokio::time::timeout(Duration::from_millis(500), &mut send_task).await;
+                    let _ = tokio::time::timeout(
+                        Duration::from_millis(STREAM_TEARDOWN_DRAIN_TIMEOUT_MS),
+                        &mut send_task,
+                    )
+                    .await;
                     if !send_task.is_finished() {
                         send_task.abort();
                     }
@@ -1183,7 +1190,11 @@ impl ZerobusStream {
                     // Draining the recv_task prevents RST_STREAM(CANCEL) from being sent alongside END_STREAM.
                     if matches!(send_result, Ok(Ok(()))) && cancellation_token.is_cancelled() {
                         recv_drain_token.cancel();
-                        let _ = tokio::time::timeout(Duration::from_millis(100), &mut recv_task).await;
+                        let _ = tokio::time::timeout(
+                            Duration::from_millis(STREAM_TEARDOWN_DRAIN_TIMEOUT_MS),
+                            &mut recv_task,
+                        )
+                        .await;
                     }
                     recv_task.abort();
                     match send_result {
@@ -1722,7 +1733,6 @@ impl ZerobusStream {
         is_paused: Arc<AtomicBool>,
         options: StreamConfigurationOptions,
         server_error_tx: tokio::sync::watch::Sender<Option<ZerobusError>>,
-        _cancellation_token: CancellationToken,
         recv_drain_token: CancellationToken,
         callback_tx: Option<tokio::sync::mpsc::UnboundedSender<CallbackMessage>>,
     ) -> tokio::task::JoinHandle<ZerobusResult<()>> {
@@ -1902,19 +1912,9 @@ impl ZerobusStream {
             // the client RST_STREAM-ing the response. Inline on close (runtime may exit
             // right after); detached on recovery / errors so recovery isn't delayed.
             if close_initiated {
-                let _ = tokio::time::timeout(Duration::from_millis(500), async {
-                    while response_grpc_stream
-                        .message()
-                        .await
-                        .ok()
-                        .flatten()
-                        .is_some()
-                    {}
-                })
-                .await;
-            } else {
-                tokio::spawn(async move {
-                    let _ = tokio::time::timeout(Duration::from_millis(500), async move {
+                let _ = tokio::time::timeout(
+                    Duration::from_millis(STREAM_TEARDOWN_DRAIN_TIMEOUT_MS),
+                    async {
                         while response_grpc_stream
                             .message()
                             .await
@@ -1922,7 +1922,23 @@ impl ZerobusStream {
                             .flatten()
                             .is_some()
                         {}
-                    })
+                    },
+                )
+                .await;
+            } else {
+                tokio::spawn(async move {
+                    let _ = tokio::time::timeout(
+                        Duration::from_millis(STREAM_TEARDOWN_DRAIN_TIMEOUT_MS),
+                        async move {
+                            while response_grpc_stream
+                                .message()
+                                .await
+                                .ok()
+                                .flatten()
+                                .is_some()
+                            {}
+                        },
+                    )
                     .await;
                 });
             }
