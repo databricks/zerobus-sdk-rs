@@ -39,6 +39,13 @@
   0.1.18, `tokio-util` 0.7.17 → 0.7.18, `once_cell` 1.19 → 1.21,
   `bytes` 1 → 1.11, `tempfile` 3.21 → 3.27, `clap` 4 → 4.6,
   `urlencoding` 2 → 2.1.
+- Migrated the FFI and JNI crates off the deprecated
+  `create_stream` / `create_stream_with_headers_provider` /
+  `create_arrow_stream` / `create_arrow_stream_with_headers_provider`
+  methods. Both wrappers now build streams via `StreamBuilder`. The
+  `zerobus_sdk_set_use_tls` C function is now a true no-op (it previously
+  wrote to the deprecated `ZerobusSdk::use_tls` field). No C ABI or JNI
+  signature changes.
 
 ### Breaking Changes
 
@@ -47,24 +54,6 @@
   consumers that directly handle SDK-exported `prost::Message` or
   `arrow_array::RecordBatch` values must move to the matching major
   versions of those crates.
-
-### Deprecations
-
-### API Changes
-
-## Release v1.3.0
-
-### Major Changes
-
-### New Features and Improvements
-
-### Bug Fixes
-
-### Documentation
-
-### Internal Changes
-
-### Breaking Changes
 
 ### Deprecations
 

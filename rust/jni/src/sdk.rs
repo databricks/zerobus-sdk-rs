@@ -12,7 +12,9 @@ use crate::options::{
 use crate::runtime::block_on;
 use crate::stream::NativeStreamHandle;
 use databricks_zerobus_ingest_sdk::databricks::zerobus::RecordType;
-use databricks_zerobus_ingest_sdk::{ArrowTableProperties, TableProperties, ZerobusSdk};
+use databricks_zerobus_ingest_sdk::{
+    ArrowStreamConfigurationOptions, StreamBuilder, StreamConfigurationOptions, ZerobusSdk,
+};
 use jni::objects::{JByteArray, JClass, JObject, JString};
 use jni::sys::{jboolean, jlong, JNI_FALSE};
 use jni::JNIEnv;
@@ -45,6 +47,42 @@ impl NativeSdkHandle {
     pub unsafe fn borrow_from_raw(ptr: jlong) -> &'static Self {
         &*(ptr as *const Self)
     }
+}
+
+fn apply_stream_options(
+    builder: StreamBuilder<'_>,
+    opts: StreamConfigurationOptions,
+) -> StreamBuilder<'_> {
+    let mut b = builder
+        .max_inflight_requests(opts.max_inflight_requests)
+        .recovery(opts.recovery)
+        .recovery_timeout_ms(opts.recovery_timeout_ms)
+        .recovery_backoff_ms(opts.recovery_backoff_ms)
+        .recovery_retries(opts.recovery_retries)
+        .server_lack_of_ack_timeout_ms(opts.server_lack_of_ack_timeout_ms)
+        .flush_timeout_ms(opts.flush_timeout_ms)
+        .stream_paused_max_wait_time_ms(opts.stream_paused_max_wait_time_ms)
+        .callback_max_wait_time_ms(opts.callback_max_wait_time_ms);
+    if let Some(cb) = opts.ack_callback {
+        b = b.ack_callback(cb);
+    }
+    b
+}
+
+fn apply_arrow_stream_options(
+    builder: StreamBuilder<'_>,
+    opts: ArrowStreamConfigurationOptions,
+) -> StreamBuilder<'_> {
+    builder
+        .max_inflight_batches(opts.max_inflight_batches)
+        .recovery(opts.recovery)
+        .recovery_timeout_ms(opts.recovery_timeout_ms)
+        .recovery_backoff_ms(opts.recovery_backoff_ms)
+        .recovery_retries(opts.recovery_retries)
+        .server_lack_of_ack_timeout_ms(opts.server_lack_of_ack_timeout_ms)
+        .flush_timeout_ms(opts.flush_timeout_ms)
+        .connection_timeout_ms(opts.connection_timeout_ms)
+        .ipc_compression(opts.ipc_compression)
 }
 
 /// Create a new ZerobusSdk instance.
@@ -126,7 +164,6 @@ pub extern "system" fn Java_com_databricks_zerobus_ZerobusSdk_nativeDestroy<'loc
 /// );
 /// ```
 #[no_mangle]
-#[allow(deprecated)]
 pub extern "system" fn Java_com_databricks_zerobus_ZerobusSdk_nativeCreateStream<'local>(
     mut env: JNIEnv<'local>,
     _obj: JObject<'local>,
@@ -237,19 +274,28 @@ pub extern "system" fn Java_com_databricks_zerobus_ZerobusSdk_nativeCreateStream
                 None
             };
 
-            let table_properties = TableProperties {
-                table_name,
-                descriptor_proto,
+            let base = sdk_arc
+                .stream_builder()
+                .table(table_name)
+                .oauth(credentials.0.clone(), credentials.1.clone());
+            let builder = match record_type {
+                RecordType::Proto => {
+                    let desc = descriptor_proto.ok_or_else(|| {
+                        databricks_zerobus_ingest_sdk::ZerobusError::InvalidArgument(
+                            "Proto descriptor is required for Proto record type".to_string(),
+                        )
+                    })?;
+                    base.compiled_proto(desc)
+                }
+                RecordType::Json => base.json(),
+                RecordType::Unspecified => {
+                    return Err(databricks_zerobus_ingest_sdk::ZerobusError::InvalidArgument(
+                        "Record type is not specified".to_string(),
+                    ));
+                }
             };
 
-            let stream = sdk_arc
-                .create_stream(
-                    table_properties,
-                    credentials.0.clone(),
-                    credentials.1.clone(),
-                    Some(stream_options),
-                )
-                .await?;
+            let stream = apply_stream_options(builder, stream_options).build().await?;
 
             Ok(NativeStreamHandle::new(
                 stream,
@@ -347,7 +393,6 @@ pub extern "system" fn Java_com_databricks_zerobus_ZerobusSdk_nativeRecreateStre
 /// );
 /// ```
 #[no_mangle]
-#[allow(deprecated)]
 pub extern "system" fn Java_com_databricks_zerobus_ZerobusSdk_nativeCreateArrowStream<'local>(
     mut env: JNIEnv<'local>,
     _obj: JObject<'local>,
@@ -444,18 +489,14 @@ pub extern "system" fn Java_com_databricks_zerobus_ZerobusSdk_nativeCreateArrowS
 
             let schema = reader.schema();
 
-            let table_properties = ArrowTableProperties {
-                table_name,
-                schema: schema.clone(),
-            };
+            let builder = sdk_arc
+                .stream_builder()
+                .table(table_name)
+                .oauth(credentials.0.clone(), credentials.1.clone())
+                .arrow(schema);
 
-            let stream = sdk_arc
-                .create_arrow_stream(
-                    table_properties,
-                    credentials.0.clone(),
-                    credentials.1.clone(),
-                    Some(stream_options),
-                )
+            let stream = apply_arrow_stream_options(builder, stream_options)
+                .build_arrow()
                 .await?;
 
             Ok(NativeArrowStreamHandle::new(
