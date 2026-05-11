@@ -289,13 +289,17 @@ pub extern "system" fn Java_com_databricks_zerobus_ZerobusSdk_nativeCreateStream
                 }
                 RecordType::Json => base.json(),
                 RecordType::Unspecified => {
-                    return Err(databricks_zerobus_ingest_sdk::ZerobusError::InvalidArgument(
-                        "Record type is not specified".to_string(),
-                    ));
+                    return Err(
+                        databricks_zerobus_ingest_sdk::ZerobusError::InvalidArgument(
+                            "Record type is not specified".to_string(),
+                        ),
+                    );
                 }
             };
 
-            let stream = apply_stream_options(builder, stream_options).build().await?;
+            let stream = apply_stream_options(builder, stream_options)
+                .build()
+                .await?;
 
             Ok(NativeStreamHandle::new(
                 stream,

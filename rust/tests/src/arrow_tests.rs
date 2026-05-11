@@ -1,14 +1,10 @@
-#![allow(deprecated)]
-
 mod mock_arrow_flight;
 mod utils;
 
 mod arrow_flight_tests {
     use std::sync::Arc;
 
-    use databricks_zerobus_ingest_sdk::{
-        ArrowStreamConfigurationOptions, ArrowTableProperties, NoTlsConfig, ZerobusSdk,
-    };
+    use databricks_zerobus_ingest_sdk::{NoTlsConfig, ZerobusSdk};
     use tracing::info;
 
     use crate::mock_arrow_flight::{start_mock_flight_server, MockFlightResponse};
@@ -38,17 +34,12 @@ mod arrow_flight_tests {
                 .tls_config(Arc::new(NoTlsConfig))
                 .build()?;
 
-            let table_properties = ArrowTableProperties {
-                table_name: TABLE_NAME.to_string(),
-                schema,
-            };
-
             let result = sdk
-                .create_arrow_stream_with_headers_provider(
-                    table_properties,
-                    Arc::new(TestHeadersProvider::default()),
-                    None,
-                )
+                .stream_builder()
+                .table(TABLE_NAME)
+                .headers_provider(Arc::new(TestHeadersProvider::default()))
+                .arrow(schema)
+                .build_arrow()
                 .await;
 
             assert!(
@@ -93,17 +84,12 @@ mod arrow_flight_tests {
                 .tls_config(Arc::new(NoTlsConfig))
                 .build()?;
 
-            let table_properties = ArrowTableProperties {
-                table_name: TABLE_NAME.to_string(),
-                schema: schema.clone(),
-            };
-
             let stream = sdk
-                .create_arrow_stream_with_headers_provider(
-                    table_properties,
-                    Arc::new(TestHeadersProvider::default()),
-                    None,
-                )
+                .stream_builder()
+                .table(TABLE_NAME)
+                .headers_provider(Arc::new(TestHeadersProvider::default()))
+                .arrow(schema.clone())
+                .build_arrow()
                 .await?;
 
             let batch = create_test_record_batch(
@@ -159,17 +145,12 @@ mod arrow_flight_tests {
                 .tls_config(Arc::new(NoTlsConfig))
                 .build()?;
 
-            let table_properties = ArrowTableProperties {
-                table_name: TABLE_NAME.to_string(),
-                schema: schema.clone(),
-            };
-
             let stream = sdk
-                .create_arrow_stream_with_headers_provider(
-                    table_properties,
-                    Arc::new(TestHeadersProvider::default()),
-                    None,
-                )
+                .stream_builder()
+                .table(TABLE_NAME)
+                .headers_provider(Arc::new(TestHeadersProvider::default()))
+                .arrow(schema.clone())
+                .build_arrow()
                 .await?;
 
             let mut offsets = Vec::new();
@@ -230,20 +211,13 @@ mod arrow_flight_tests {
                 .tls_config(Arc::new(NoTlsConfig))
                 .build()?;
 
-            let table_properties = ArrowTableProperties {
-                table_name: TABLE_NAME.to_string(),
-                schema: schema.clone(),
-            };
-
             let stream = sdk
-                .create_arrow_stream_with_headers_provider(
-                    table_properties,
-                    Arc::new(TestHeadersProvider::default()),
-                    Some(ArrowStreamConfigurationOptions {
-                        flush_timeout_ms: 5000,
-                        ..Default::default()
-                    }),
-                )
+                .stream_builder()
+                .table(TABLE_NAME)
+                .headers_provider(Arc::new(TestHeadersProvider::default()))
+                .arrow(schema.clone())
+                .flush_timeout_ms(5000)
+                .build_arrow()
                 .await?;
 
             for i in 0..2 {
@@ -284,17 +258,12 @@ mod arrow_flight_tests {
                 .tls_config(Arc::new(NoTlsConfig))
                 .build()?;
 
-            let table_properties = ArrowTableProperties {
-                table_name: TABLE_NAME.to_string(),
-                schema: schema.clone(),
-            };
-
             let mut stream = sdk
-                .create_arrow_stream_with_headers_provider(
-                    table_properties,
-                    Arc::new(TestHeadersProvider::default()),
-                    None,
-                )
+                .stream_builder()
+                .table(TABLE_NAME)
+                .headers_provider(Arc::new(TestHeadersProvider::default()))
+                .arrow(schema.clone())
+                .build_arrow()
                 .await?;
 
             let batch = create_test_record_batch(schema, vec![1], vec![Some("test")]);
@@ -337,20 +306,13 @@ mod arrow_flight_tests {
                 .tls_config(Arc::new(NoTlsConfig))
                 .build()?;
 
-            let table_properties = ArrowTableProperties {
-                table_name: TABLE_NAME.to_string(),
-                schema: schema.clone(),
-            };
-
             let stream = sdk
-                .create_arrow_stream_with_headers_provider(
-                    table_properties,
-                    Arc::new(TestHeadersProvider::default()),
-                    Some(ArrowStreamConfigurationOptions {
-                        server_lack_of_ack_timeout_ms: 1000,
-                        ..Default::default()
-                    }),
-                )
+                .stream_builder()
+                .table(TABLE_NAME)
+                .headers_provider(Arc::new(TestHeadersProvider::default()))
+                .arrow(schema.clone())
+                .server_lack_of_ack_timeout_ms(1000)
+                .build_arrow()
                 .await?;
 
             let batch = create_test_record_batch(schema, vec![1], vec![Some("test")]);
@@ -376,17 +338,12 @@ mod arrow_flight_tests {
                 .tls_config(Arc::new(NoTlsConfig))
                 .build()?;
 
-            let table_properties = ArrowTableProperties {
-                table_name: TABLE_NAME.to_string(),
-                schema: schema.clone(),
-            };
-
             let stream = sdk
-                .create_arrow_stream_with_headers_provider(
-                    table_properties,
-                    Arc::new(TestHeadersProvider::default()),
-                    None,
-                )
+                .stream_builder()
+                .table(TABLE_NAME)
+                .headers_provider(Arc::new(TestHeadersProvider::default()))
+                .arrow(schema.clone())
+                .build_arrow()
                 .await?;
 
             use arrow_array::Int32Array;
@@ -425,17 +382,12 @@ mod arrow_flight_tests {
                 .tls_config(Arc::new(NoTlsConfig))
                 .build()?;
 
-            let table_properties = ArrowTableProperties {
-                table_name: TABLE_NAME.to_string(),
-                schema: schema.clone(),
-            };
-
             let mut stream = sdk
-                .create_arrow_stream_with_headers_provider(
-                    table_properties,
-                    Arc::new(TestHeadersProvider::default()),
-                    None,
-                )
+                .stream_builder()
+                .table(TABLE_NAME)
+                .headers_provider(Arc::new(TestHeadersProvider::default()))
+                .arrow(schema.clone())
+                .build_arrow()
                 .await?;
 
             stream.close().await?;
@@ -472,22 +424,15 @@ mod arrow_flight_tests {
                 .tls_config(Arc::new(NoTlsConfig))
                 .build()?;
 
-            let table_properties = ArrowTableProperties {
-                table_name: TABLE_NAME.to_string(),
-                schema: schema.clone(),
-            };
-
             let stream = sdk
-                .create_arrow_stream_with_headers_provider(
-                    table_properties,
-                    Arc::new(TestHeadersProvider::default()),
-                    Some(ArrowStreamConfigurationOptions {
-                        server_lack_of_ack_timeout_ms: 500,
-                        flush_timeout_ms: 2000,
-                        recovery: false,
-                        ..Default::default()
-                    }),
-                )
+                .stream_builder()
+                .table(TABLE_NAME)
+                .headers_provider(Arc::new(TestHeadersProvider::default()))
+                .arrow(schema.clone())
+                .server_lack_of_ack_timeout_ms(500)
+                .flush_timeout_ms(2000)
+                .recovery(false)
+                .build_arrow()
                 .await?;
 
             let batch = create_test_record_batch(schema, vec![1], vec![Some("test")]);
@@ -524,20 +469,13 @@ mod arrow_flight_tests {
                 .tls_config(Arc::new(NoTlsConfig))
                 .build()?;
 
-            let table_properties = ArrowTableProperties {
-                table_name: TABLE_NAME.to_string(),
-                schema: schema.clone(),
-            };
-
             let stream = sdk
-                .create_arrow_stream_with_headers_provider(
-                    table_properties,
-                    Arc::new(TestHeadersProvider::default()),
-                    Some(ArrowStreamConfigurationOptions {
-                        flush_timeout_ms: 100,
-                        ..Default::default()
-                    }),
-                )
+                .stream_builder()
+                .table(TABLE_NAME)
+                .headers_provider(Arc::new(TestHeadersProvider::default()))
+                .arrow(schema.clone())
+                .flush_timeout_ms(100)
+                .build_arrow()
                 .await?;
 
             let batch = create_test_record_batch(schema, vec![1], vec![Some("test")]);
@@ -569,17 +507,12 @@ mod arrow_flight_tests {
                 .tls_config(Arc::new(NoTlsConfig))
                 .build()?;
 
-            let table_properties = ArrowTableProperties {
-                table_name: TABLE_NAME.to_string(),
-                schema,
-            };
-
             let mut stream = sdk
-                .create_arrow_stream_with_headers_provider(
-                    table_properties,
-                    Arc::new(TestHeadersProvider::default()),
-                    None,
-                )
+                .stream_builder()
+                .table(TABLE_NAME)
+                .headers_provider(Arc::new(TestHeadersProvider::default()))
+                .arrow(schema)
+                .build_arrow()
                 .await?;
 
             stream.close().await?;
@@ -606,17 +539,12 @@ mod arrow_flight_tests {
                 .tls_config(Arc::new(NoTlsConfig))
                 .build()?;
 
-            let table_properties = ArrowTableProperties {
-                table_name: TABLE_NAME.to_string(),
-                schema,
-            };
-
             let stream = sdk
-                .create_arrow_stream_with_headers_provider(
-                    table_properties,
-                    Arc::new(TestHeadersProvider::default()),
-                    None,
-                )
+                .stream_builder()
+                .table(TABLE_NAME)
+                .headers_provider(Arc::new(TestHeadersProvider::default()))
+                .arrow(schema)
+                .build_arrow()
                 .await?;
 
             let start_time = std::time::Instant::now();
@@ -664,20 +592,13 @@ mod arrow_flight_tests {
                 .tls_config(Arc::new(NoTlsConfig))
                 .build()?;
 
-            let table_properties = ArrowTableProperties {
-                table_name: TABLE_NAME.to_string(),
-                schema: schema.clone(),
-            };
-
             let stream = sdk
-                .create_arrow_stream_with_headers_provider(
-                    table_properties,
-                    Arc::new(TestHeadersProvider::default()),
-                    Some(ArrowStreamConfigurationOptions {
-                        max_inflight_batches: TOTAL_BATCHES + 10,
-                        ..Default::default()
-                    }),
-                )
+                .stream_builder()
+                .table(TABLE_NAME)
+                .headers_provider(Arc::new(TestHeadersProvider::default()))
+                .arrow(schema.clone())
+                .max_inflight_batches(TOTAL_BATCHES + 10)
+                .build_arrow()
                 .await?;
             let stream = Arc::new(stream);
 
@@ -759,17 +680,12 @@ mod arrow_flight_tests {
                 .tls_config(Arc::new(NoTlsConfig))
                 .build()?;
 
-            let table_properties = ArrowTableProperties {
-                table_name: TABLE_NAME.to_string(),
-                schema: schema.clone(),
-            };
-
             let mut stream = sdk
-                .create_arrow_stream_with_headers_provider(
-                    table_properties,
-                    Arc::new(TestHeadersProvider::default()),
-                    None,
-                )
+                .stream_builder()
+                .table(TABLE_NAME)
+                .headers_provider(Arc::new(TestHeadersProvider::default()))
+                .arrow(schema.clone())
+                .build_arrow()
                 .await?;
 
             let batch1 = create_test_record_batch(schema.clone(), vec![1], vec![Some("test1")]);
@@ -823,20 +739,13 @@ mod arrow_flight_tests {
                 .tls_config(Arc::new(NoTlsConfig))
                 .build()?;
 
-            let table_properties = ArrowTableProperties {
-                table_name: TABLE_NAME.to_string(),
-                schema: schema.clone(),
-            };
-
             let mut stream = sdk
-                .create_arrow_stream_with_headers_provider(
-                    table_properties,
-                    Arc::new(TestHeadersProvider::default()),
-                    Some(ArrowStreamConfigurationOptions {
-                        recovery: false,
-                        ..Default::default()
-                    }),
-                )
+                .stream_builder()
+                .table(TABLE_NAME)
+                .headers_provider(Arc::new(TestHeadersProvider::default()))
+                .arrow(schema.clone())
+                .recovery(false)
+                .build_arrow()
                 .await?;
 
             let batch1 = create_test_record_batch(schema.clone(), vec![1], vec![Some("acked")]);
@@ -896,23 +805,16 @@ mod arrow_flight_tests {
                 .tls_config(Arc::new(NoTlsConfig))
                 .build()?;
 
-            let table_properties = ArrowTableProperties {
-                table_name: TABLE_NAME.to_string(),
-                schema: schema.clone(),
-            };
-
             let stream = sdk
-                .create_arrow_stream_with_headers_provider(
-                    table_properties,
-                    Arc::new(TestHeadersProvider::default()),
-                    Some(ArrowStreamConfigurationOptions {
-                        recovery: true,
-                        recovery_timeout_ms: 5000,
-                        recovery_backoff_ms: 100,
-                        recovery_retries: 3,
-                        ..Default::default()
-                    }),
-                )
+                .stream_builder()
+                .table(TABLE_NAME)
+                .headers_provider(Arc::new(TestHeadersProvider::default()))
+                .arrow(schema.clone())
+                .recovery(true)
+                .recovery_timeout_ms(5000)
+                .recovery_backoff_ms(100)
+                .recovery_retries(3)
+                .build_arrow()
                 .await?;
 
             let batch1 = create_test_record_batch(schema.clone(), vec![1], vec![Some("first")]);
@@ -965,20 +867,13 @@ mod arrow_flight_tests {
                 .tls_config(Arc::new(NoTlsConfig))
                 .build()?;
 
-            let table_properties = ArrowTableProperties {
-                table_name: TABLE_NAME.to_string(),
-                schema: schema.clone(),
-            };
-
             let mut stream = sdk
-                .create_arrow_stream_with_headers_provider(
-                    table_properties,
-                    Arc::new(TestHeadersProvider::default()),
-                    Some(ArrowStreamConfigurationOptions {
-                        recovery: false,
-                        ..Default::default()
-                    }),
-                )
+                .stream_builder()
+                .table(TABLE_NAME)
+                .headers_provider(Arc::new(TestHeadersProvider::default()))
+                .arrow(schema.clone())
+                .recovery(false)
+                .build_arrow()
                 .await?;
 
             let batch1 = create_test_record_batch(schema.clone(), vec![1], vec![Some("acked")]);
@@ -1038,17 +933,12 @@ mod arrow_flight_tests {
                 .tls_config(Arc::new(NoTlsConfig))
                 .build()?;
 
-            let table_properties = ArrowTableProperties {
-                table_name: TABLE_NAME.to_string(),
-                schema: schema.clone(),
-            };
-
             let mut stream = sdk
-                .create_arrow_stream_with_headers_provider(
-                    table_properties,
-                    Arc::new(TestHeadersProvider::default()),
-                    None,
-                )
+                .stream_builder()
+                .table(TABLE_NAME)
+                .headers_provider(Arc::new(TestHeadersProvider::default()))
+                .arrow(schema.clone())
+                .build_arrow()
                 .await?;
 
             let batch1 = create_test_record_batch(
@@ -1118,23 +1008,16 @@ mod arrow_flight_tests {
                 .tls_config(Arc::new(NoTlsConfig))
                 .build()?;
 
-            let table_properties = ArrowTableProperties {
-                table_name: TABLE_NAME.to_string(),
-                schema: schema.clone(),
-            };
-
             let mut stream = sdk
-                .create_arrow_stream_with_headers_provider(
-                    table_properties,
-                    Arc::new(TestHeadersProvider::default()),
-                    Some(ArrowStreamConfigurationOptions {
-                        recovery: true,
-                        recovery_timeout_ms: 5000,
-                        recovery_backoff_ms: 100,
-                        recovery_retries: 3,
-                        ..Default::default()
-                    }),
-                )
+                .stream_builder()
+                .table(TABLE_NAME)
+                .headers_provider(Arc::new(TestHeadersProvider::default()))
+                .arrow(schema.clone())
+                .recovery(true)
+                .recovery_timeout_ms(5000)
+                .recovery_backoff_ms(100)
+                .recovery_retries(3)
+                .build_arrow()
                 .await?;
 
             let batch1 = create_test_record_batch(
@@ -1205,17 +1088,12 @@ mod arrow_flight_tests {
                 .tls_config(Arc::new(NoTlsConfig))
                 .build()?;
 
-            let table_properties = ArrowTableProperties {
-                table_name: TABLE_NAME.to_string(),
-                schema: schema.clone(),
-            };
-
             let stream = sdk
-                .create_arrow_stream_with_headers_provider(
-                    table_properties,
-                    Arc::new(TestHeadersProvider::default()),
-                    None,
-                )
+                .stream_builder()
+                .table(TABLE_NAME)
+                .headers_provider(Arc::new(TestHeadersProvider::default()))
+                .arrow(schema.clone())
+                .build_arrow()
                 .await?;
 
             let batch = create_test_record_batch(
@@ -1271,17 +1149,12 @@ mod arrow_flight_tests {
                 .tls_config(Arc::new(NoTlsConfig))
                 .build()?;
 
-            let table_properties = ArrowTableProperties {
-                table_name: TABLE_NAME.to_string(),
-                schema: schema.clone(),
-            };
-
             let stream = sdk
-                .create_arrow_stream_with_headers_provider(
-                    table_properties,
-                    Arc::new(TestHeadersProvider::default()),
-                    None,
-                )
+                .stream_builder()
+                .table(TABLE_NAME)
+                .headers_provider(Arc::new(TestHeadersProvider::default()))
+                .arrow(schema.clone())
+                .build_arrow()
                 .await?;
 
             let mut offsets = Vec::new();
@@ -1321,17 +1194,12 @@ mod arrow_flight_tests {
                 .tls_config(Arc::new(NoTlsConfig))
                 .build()?;
 
-            let table_properties = ArrowTableProperties {
-                table_name: TABLE_NAME.to_string(),
-                schema,
-            };
-
             let stream = sdk
-                .create_arrow_stream_with_headers_provider(
-                    table_properties,
-                    Arc::new(TestHeadersProvider::default()),
-                    None,
-                )
+                .stream_builder()
+                .table(TABLE_NAME)
+                .headers_provider(Arc::new(TestHeadersProvider::default()))
+                .arrow(schema)
+                .build_arrow()
                 .await?;
 
             let result = stream
@@ -1361,17 +1229,12 @@ mod arrow_flight_tests {
                 .tls_config(Arc::new(NoTlsConfig))
                 .build()?;
 
-            let table_properties = ArrowTableProperties {
-                table_name: TABLE_NAME.to_string(),
-                schema: schema.clone(),
-            };
-
             let mut stream = sdk
-                .create_arrow_stream_with_headers_provider(
-                    table_properties,
-                    Arc::new(TestHeadersProvider::default()),
-                    None,
-                )
+                .stream_builder()
+                .table(TABLE_NAME)
+                .headers_provider(Arc::new(TestHeadersProvider::default()))
+                .arrow(schema.clone())
+                .build_arrow()
                 .await?;
 
             stream.close().await?;
@@ -1422,23 +1285,16 @@ mod arrow_flight_tests {
                 .tls_config(Arc::new(NoTlsConfig))
                 .build()?;
 
-            let table_properties = ArrowTableProperties {
-                table_name: TABLE_NAME.to_string(),
-                schema: schema.clone(),
-            };
-
             let stream = sdk
-                .create_arrow_stream_with_headers_provider(
-                    table_properties,
-                    Arc::new(TestHeadersProvider::default()),
-                    Some(ArrowStreamConfigurationOptions {
-                        recovery: true,
-                        recovery_timeout_ms: 5000,
-                        recovery_backoff_ms: 100,
-                        recovery_retries: 3,
-                        ..Default::default()
-                    }),
-                )
+                .stream_builder()
+                .table(TABLE_NAME)
+                .headers_provider(Arc::new(TestHeadersProvider::default()))
+                .arrow(schema.clone())
+                .recovery(true)
+                .recovery_timeout_ms(5000)
+                .recovery_backoff_ms(100)
+                .recovery_retries(3)
+                .build_arrow()
                 .await?;
 
             let batch1 = create_test_record_batch(schema.clone(), vec![1], vec![Some("first")]);
@@ -1491,20 +1347,13 @@ mod arrow_flight_tests {
                 .tls_config(Arc::new(NoTlsConfig))
                 .build()?;
 
-            let table_properties = ArrowTableProperties {
-                table_name: TABLE_NAME.to_string(),
-                schema: schema.clone(),
-            };
-
             let mut stream = sdk
-                .create_arrow_stream_with_headers_provider(
-                    table_properties,
-                    Arc::new(TestHeadersProvider::default()),
-                    Some(ArrowStreamConfigurationOptions {
-                        recovery: false,
-                        ..Default::default()
-                    }),
-                )
+                .stream_builder()
+                .table(TABLE_NAME)
+                .headers_provider(Arc::new(TestHeadersProvider::default()))
+                .arrow(schema.clone())
+                .recovery(false)
+                .build_arrow()
                 .await?;
 
             let original_batch =
@@ -1546,17 +1395,12 @@ mod arrow_flight_tests {
                 .tls_config(Arc::new(NoTlsConfig))
                 .build()?;
 
-            let table_properties = ArrowTableProperties {
-                table_name: TABLE_NAME.to_string(),
-                schema,
-            };
-
             let stream = sdk
-                .create_arrow_stream_with_headers_provider(
-                    table_properties,
-                    Arc::new(TestHeadersProvider::default()),
-                    None,
-                )
+                .stream_builder()
+                .table(TABLE_NAME)
+                .headers_provider(Arc::new(TestHeadersProvider::default()))
+                .arrow(schema)
+                .build_arrow()
                 .await?;
 
             // Create IPC bytes with a different schema.
@@ -1599,20 +1443,13 @@ mod arrow_flight_tests {
                 .tls_config(Arc::new(NoTlsConfig))
                 .build()?;
 
-            let table_properties = ArrowTableProperties {
-                table_name: TABLE_NAME.to_string(),
-                schema: schema.clone(),
-            };
-
             let stream = sdk
-                .create_arrow_stream_with_headers_provider(
-                    table_properties,
-                    Arc::new(TestHeadersProvider::default()),
-                    Some(ArrowStreamConfigurationOptions {
-                        ipc_compression: Some(arrow_ipc::CompressionType::ZSTD),
-                        ..Default::default()
-                    }),
-                )
+                .stream_builder()
+                .table(TABLE_NAME)
+                .headers_provider(Arc::new(TestHeadersProvider::default()))
+                .arrow(schema.clone())
+                .ipc_compression(Some(arrow_ipc::CompressionType::ZSTD))
+                .build_arrow()
                 .await?;
 
             let batch = create_test_record_batch(schema, vec![1], vec![Some("test")]);
@@ -1666,17 +1503,12 @@ mod arrow_flight_tests {
                 .tls_config(Arc::new(NoTlsConfig))
                 .build()?;
 
-            let table_properties = ArrowTableProperties {
-                table_name: TABLE_NAME.to_string(),
-                schema: schema.clone(),
-            };
-
             let stream = sdk
-                .create_arrow_stream_with_headers_provider(
-                    table_properties,
-                    Arc::new(TestHeadersProvider::default()),
-                    None,
-                )
+                .stream_builder()
+                .table(TABLE_NAME)
+                .headers_provider(Arc::new(TestHeadersProvider::default()))
+                .arrow(schema.clone())
+                .build_arrow()
                 .await?;
 
             // Interleave RecordBatch and IPC ingestion.
@@ -1740,17 +1572,12 @@ mod arrow_flight_tests {
                 .tls_config(Arc::new(NoTlsConfig))
                 .build()?;
 
-            let table_properties = ArrowTableProperties {
-                table_name: TABLE_NAME.to_string(),
-                schema: schema.clone(),
-            };
-
             let stream = sdk
-                .create_arrow_stream_with_headers_provider(
-                    table_properties,
-                    Arc::new(TestHeadersProvider::default()),
-                    None,
-                )
+                .stream_builder()
+                .table(TABLE_NAME)
+                .headers_provider(Arc::new(TestHeadersProvider::default()))
+                .arrow(schema.clone())
+                .build_arrow()
                 .await?;
 
             let batch = create_test_dict_record_batch(
@@ -1794,17 +1621,12 @@ mod arrow_flight_tests {
                 .tls_config(Arc::new(NoTlsConfig))
                 .build()?;
 
-            let table_properties = ArrowTableProperties {
-                table_name: TABLE_NAME.to_string(),
-                schema: schema.clone(),
-            };
-
             let stream = sdk
-                .create_arrow_stream_with_headers_provider(
-                    table_properties,
-                    Arc::new(TestHeadersProvider::default()),
-                    None,
-                )
+                .stream_builder()
+                .table(TABLE_NAME)
+                .headers_provider(Arc::new(TestHeadersProvider::default()))
+                .arrow(schema.clone())
+                .build_arrow()
                 .await?;
 
             let batch = create_test_dict_record_batch(

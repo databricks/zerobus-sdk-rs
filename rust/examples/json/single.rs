@@ -48,7 +48,6 @@ async fn main() -> Result<(), Box<dyn Error>> {
         .await?;
 
     ingest_with_offset_api(&mut stream).await?;
-    ingest_with_future_api(&mut stream).await?;
 
     stream.close().await?;
     println!("Stream closed successfully");
@@ -129,79 +128,6 @@ async fn ingest_with_offset_api(stream: &mut ZerobusStream) -> Result<(), Box<dy
         offset_id
     );
     stream.wait_for_offset(offset_id).await?;
-    println!(
-        "[Backward-compatible] Record acknowledged with offset ID: {}",
-        offset_id
-    );
-
-    Ok(())
-}
-
-/// Deprecated API: returns future that resolves to offset.
-#[allow(deprecated)]
-async fn ingest_with_future_api(stream: &mut ZerobusStream) -> Result<(), Box<dyn Error>> {
-    println!("=== Future-based API (Deprecated) ===");
-
-    let now = chrono::Utc::now().timestamp();
-
-    // 1. Auto-serializing: JsonValue - pass struct, SDK handles JSON conversion.
-    let order = Order {
-        id: 4,
-        customer_name: "David Green".to_string(),
-        product_name: "Monitor Stand".to_string(),
-        quantity: 1,
-        price: 79.99,
-        status: "pending".to_string(),
-        created_at: now,
-        updated_at: now,
-    };
-
-    let ack_future = stream.ingest_record(JsonValue(order)).await?;
-    let offset_id = ack_future.await?;
-    println!(
-        "[Auto-serializing] Record acknowledged with offset ID: {}",
-        offset_id
-    );
-
-    // 2. Pre-serialized: JsonString - pass JSON string with explicit wrapper.
-    let json_string = format!(
-        r#"{{
-            "id": 5,
-            "customer_name": "Emma White",
-            "product_name": "Webcam",
-            "quantity": 2,
-            "price": 59.99,
-            "status": "shipped",
-            "created_at": {},
-            "updated_at": {}
-        }}"#,
-        now, now
-    );
-
-    let ack_future = stream.ingest_record(JsonString(json_string)).await?;
-    let offset_id = ack_future.await?;
-    println!(
-        "[Pre-serialized] Record acknowledged with offset ID: {}",
-        offset_id
-    );
-
-    // 3. Backward-compatible: raw String - no wrapper needed, works the same as JsonString.
-    let raw_json = format!(
-        r#"{{
-            "id": 6,
-            "customer_name": "Frank Brown",
-            "product_name": "Mouse Pad",
-            "quantity": 5,
-            "price": 15.99,
-            "status": "delivered",
-            "created_at": {},
-            "updated_at": {}
-        }}"#,
-        now, now
-    );
-
-    let ack_future = stream.ingest_record(raw_json).await?;
-    let offset_id = ack_future.await?;
     println!(
         "[Backward-compatible] Record acknowledged with offset ID: {}",
         offset_id

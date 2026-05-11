@@ -46,6 +46,14 @@
   `zerobus_sdk_set_use_tls` C function is now a true no-op (it previously
   wrote to the deprecated `ZerobusSdk::use_tls` field). No C ABI or JNI
   signature changes.
+- Migrated all in-tree consumers off the deprecated stream-creation and
+  `ingest_record(s)` APIs: `rust/sdk` doc examples in `record_types.rs`,
+  all four `rust/examples/` programs (the deprecated demo functions were
+  removed; only the recommended offset-based API is shown), and all three
+  test files in `rust/tests/`. The `test_proto_stream_creation_without_descriptor_fails`
+  test was removed because the typestate builder makes that scenario
+  impossible at compile time. No behavior changes; the deprecated APIs
+  themselves remain available until removed in the next major release.
 
 ### Breaking Changes
 
