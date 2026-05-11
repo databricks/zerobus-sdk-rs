@@ -807,9 +807,6 @@ impl ZerobusArrowStream {
                 )
                 .await;
 
-                // Reset paused state after process_acks returns (before recovery).
-                is_paused.store(false, Ordering::Relaxed);
-
                 // Check if stream was closed during processing.
                 if is_closed.load(Ordering::Relaxed) {
                     debug!("Supervisor: Stream closed after process_acks, exiting");
@@ -878,6 +875,8 @@ impl ZerobusArrowStream {
                             Ok(Ok(new_response_stream)) => {
                                 info!("Supervisor: Recovery successful, resuming");
                                 recovery_attempts.store(0, Ordering::Relaxed);
+                                // Now that a fresh sender is installed, lift the pause gate.
+                                is_paused.store(false, Ordering::Relaxed);
                                 response_stream = new_response_stream;
                                 // Loop continues with new stream.
                             }
@@ -1572,7 +1571,7 @@ impl ZerobusArrowStream {
                 let current_ack = *offset_rx.borrow_and_update();
                 if let Some(ack_offset) = current_ack {
                     if ack_offset >= offset_to_wait {
-                        info!(
+                        debug!(
                             ack_offset = ack_offset,
                             target_offset = offset_to_wait,
                             "{} completed",

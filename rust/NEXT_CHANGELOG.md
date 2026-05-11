@@ -6,7 +6,7 @@
 
 ### New Features and Improvements
 
-- **Arrow Flight — graceful stream close**: When the server signals that the stream will close, the SDK enters a paused state: it stops sending new batches, drains in-flight acknowledgments up to a configurable wait, then recovers. Recoveries triggered only by this graceful-close path do **not** count against the `recovery_retries` budget.
+- **Arrow Flight — graceful stream close**: When the server signals that the stream will close, the SDK enters a paused state: it stops sending new batches, drains in-flight acknowledgments up to a configurable wait, then recovers.
 - **`stream_paused_max_wait_time_ms`** on `ArrowStreamConfigurationOptions`: Optional cap (milliseconds) on how long to wait during that paused phase (`None` = use full server duration, `Some(0)` = recover immediately, `Some(x)` = wait up to `min(x, server_duration)`).
 - Added `ZerobusSdkBuilder::connector_factory` for programmatic proxy
   configuration. Callers can install a `ConnectorFactory` (a

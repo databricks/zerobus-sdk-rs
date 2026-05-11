@@ -6,7 +6,7 @@
 
 ### New Features and Improvements
 
-- **Arrow Flight — graceful stream close**: On server signaled close, the client pauses sending, drains in-flight acks within a bounded wait, then recovers; those recoveries do not consume the `recovery_retries` budget.
+- **Arrow Flight — graceful stream close**: On server signaled close, the client pauses sending, drains in-flight acks within a bounded wait, then recovers.
 - **`stream_paused_max_wait_time_ms`** on `ArrowStreamConfigurationOptions`: Optional milliseconds cap for the paused wait (`None` = full server duration, `0` = immediate recovery).
 
 ### Bug Fixes
