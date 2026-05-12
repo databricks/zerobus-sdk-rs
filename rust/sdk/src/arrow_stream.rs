@@ -1,7 +1,7 @@
 //! Arrow Flight stream implementation for high-performance Arrow data ingestion.
 //!
-//! **Experimental/Unsupported**: This module is experimental and not yet supported
-//! for production use. The API may change in future releases.
+//! **Beta**: This module is in Beta. The API is stabilising but may still change
+//! before reaching GA.
 //!
 //! This module provides `ZerobusArrowStream`, a client for ingesting Arrow `RecordBatch`
 //! data into Databricks Delta tables using the Arrow Flight protocol.

@@ -48,6 +48,6 @@ protoc-bin-vendored.workspace = true
 
 [features]
 default = []
-# Arrow Flight is experimental/unsupported
+# Arrow Flight is in Beta
 arrow-flight = ["dep:arrow-flight", "dep:arrow-array", "dep:arrow-schema", "dep:arrow-ipc", "dep:futures"]
 testing = []

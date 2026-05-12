@@ -93,18 +93,22 @@ GRANT SELECT, MODIFY ON TABLE <catalog_name>.default.<table_name> TO `<service-p
 
 The service principal's **Application ID** is your OAuth **Client ID**, and the generated secret is your **Client Secret**.
 
-## Serialization Formats
+## Ingestion APIs
 
-All SDKs support two serialization formats:
+Pick the API that matches your data.
+
+### Standard gRPC ingestion
+
+Supported by all SDKs. Records are sent over a gRPC stream in one of two serialization formats:
 
 - **JSON** - Simple, schema-free ingestion. Pass a JSON string or native object (dict, map, etc.) and the SDK serializes it. No compilation step required. Good for getting started or dynamic schemas.
 - **Protocol Buffers** - Strongly-typed, schema-validated ingestion. More efficient over the wire. Recommended for production workloads.
 
-### Protocol Buffers
+#### Protocol Buffers
 
 Use `proto2` syntax with `optional` fields to correctly represent nullable Delta table columns.
 
-#### Delta → Protobuf Type Mappings
+##### Delta → Protobuf Type Mappings
 
 | Delta Type | Proto2 Type |
 |-----------|-------------|
@@ -122,9 +126,13 @@ Use `proto2` syntax with `optional` fields to correctly represent nullable Delta
 | STRUCT\<fields\> | nested message |
 | VARIANT | string (JSON string) |
 
-### Schema Generation
+#### Schema Generation
 
 Instead of writing `.proto` files by hand, each SDK ships a tool to generate protobuf schemas directly from an existing Unity Catalog table. See the individual SDK READMEs for language-specific usage.
+
+### Arrow Flight ingestion (Beta)
+
+Supported by all SDKs starting from version 2.0.0. Currently in Beta — the API is stabilising but may still change before reaching GA. Ingests Apache Arrow `RecordBatch` data over the Arrow Flight protocol — useful when your data already lives in Arrow form (e.g., from DataFusion, Polars, pyarrow, or a Parquet reader) and you want to skip a JSON/proto serialization step. See each SDK's `examples/arrow/` directory for usage.
 
 ## HTTP Proxy Support
 
