@@ -6,7 +6,7 @@ publish = false
 
 [dependencies]
 databricks-zerobus-ingest-sdk = { path = "../../../sdk" }
-tonic-build = "0.13.1"
+tonic-build = "0.14.6"
 prost = "0.13.3"
 prost-build = "0.12"
 prost-reflect = "0.14.2"
