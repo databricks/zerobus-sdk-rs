@@ -13,7 +13,7 @@ reqwest.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
-tonic-build.workspace = true
+tonic-prost-build.workspace = true
 urlencoding.workspace = true
 
 [build-dependencies]

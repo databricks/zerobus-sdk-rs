@@ -12,11 +12,12 @@ resolver = "2"
 
 [workspace.dependencies]
 # Protobuf / gRPC
-prost = "0.13.3"
-prost-types = "0.13.3"
-prost-reflect = "0.14"
-tonic = "0.13"
-tonic-build = "0.13"
+prost = "0.14"
+prost-types = "0.14"
+prost-reflect = "0.16"
+tonic = "0.14"
+tonic-prost = "0.14"
+tonic-prost-build = "0.14"
 protoc-bin-vendored = "3.0.0"
 
 # Async runtime
@@ -43,10 +44,10 @@ tracing = "0.1.41"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
 # Arrow
-arrow-flight = { version = "56.2.0", default-features = false }
-arrow-array = { version = "56.2.0", default-features = false }
-arrow-schema = { version = "56.2.0", default-features = false }
-arrow-ipc = { version = "56.2.0", default-features = false }
+arrow-flight = { version = "58", default-features = false }
+arrow-array = { version = "58", default-features = false }
+arrow-schema = { version = "58", default-features = false }
+arrow-ipc = { version = "58", default-features = false }
 
 # Misc
 futures = "0.3"

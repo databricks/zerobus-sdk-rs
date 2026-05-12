@@ -15,7 +15,7 @@ use std::sync::Arc;
 
 use arrow_flight::error::FlightError;
 use arrow_flight::{FlightClient, FlightData, PutResult, SchemaAsIpc};
-use arrow_ipc::writer::{DictionaryTracker, IpcDataGenerator, IpcWriteOptions};
+use arrow_ipc::writer::{CompressionContext, DictionaryTracker, IpcDataGenerator, IpcWriteOptions};
 use bytes::Bytes;
 use futures::{Stream, StreamExt};
 use tokio::sync::{mpsc, watch, Mutex};
@@ -364,8 +364,9 @@ fn record_batch_to_flight_data(
         &mut dict_tracker,
         opts,
     );
+    let mut compression_context = CompressionContext::default();
     let (dict_batches, encoded) = data_gen
-        .encoded_batch(batch, &mut dict_tracker, opts)
+        .encode(batch, &mut dict_tracker, opts, &mut compression_context)
         .map_err(|e| ZerobusError::InvalidArgument(format!("Failed to encode RecordBatch: {e}")))?;
     let mut flight_data: Vec<FlightData> = dict_batches.into_iter().map(Into::into).collect();
     flight_data.push(encoded.into());
