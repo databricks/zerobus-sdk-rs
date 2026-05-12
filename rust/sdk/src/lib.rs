@@ -105,7 +105,11 @@ pub use stream_configuration::StreamConfigurationOptions;
 pub use tls_config::NoTlsConfig;
 pub use tls_config::{SecureTlsConfig, TlsConfig};
 
-const SHUTDOWN_TIMEOUT_SECS: u64 = 2;
+const SHUTDOWN_TIMEOUT_SECS: u64 = 1;
+
+/// Maximum time to wait for the receiver/sender tasks to finish during stream
+/// teardown.
+const STREAM_TEARDOWN_DRAIN_TIMEOUT_MS: u64 = 500;
 
 /// The type of the stream connection created with the server.
 /// Currently we only support ephemeral streams on the server side, so we support only that in the SDK as well.
@@ -1134,6 +1138,12 @@ impl ZerobusStream {
 
             // 3. Spawn receiver and sender task.
             let is_paused = Arc::new(AtomicBool::new(false));
+
+            // Per-stream child token
+            let per_stream_token = cancellation_token.child_token();
+            // Separate token for recv_task's close path
+            let recv_drain_token = CancellationToken::new();
+
             let mut recv_task = Self::spawn_receiver_task(
                 response_grpc_stream,
                 logical_last_received_offset_id_tx.clone(),
@@ -1142,7 +1152,7 @@ impl ZerobusStream {
                 Arc::clone(&is_paused),
                 options.clone(),
                 server_error_tx.clone(),
-                cancellation_token.clone(),
+                recv_drain_token.clone(),
                 callback_tx.clone(),
             );
             let mut send_task = Self::spawn_sender_task(
@@ -1150,13 +1160,21 @@ impl ZerobusStream {
                 landing_zone_sender,
                 Arc::clone(&is_paused),
                 server_error_tx.clone(),
-                cancellation_token.clone(),
+                per_stream_token.clone(),
             );
 
             // 4. Wait for any of the two tasks to end.
             let result = tokio::select! {
                 recv_result = &mut recv_task => {
-                    send_task.abort();
+                    per_stream_token.cancel();
+                    let _ = tokio::time::timeout(
+                        Duration::from_millis(STREAM_TEARDOWN_DRAIN_TIMEOUT_MS),
+                        &mut send_task,
+                    )
+                    .await;
+                    if !send_task.is_finished() {
+                        send_task.abort();
+                    }
                     match recv_result {
                         Ok(Err(e)) => Err(e),
                         Err(e) => Err(ZerobusError::UnexpectedStreamResponseError(
@@ -1169,6 +1187,15 @@ impl ZerobusStream {
                     }
                 }
                 send_result = &mut send_task => {
+                    // Draining the recv_task prevents RST_STREAM(CANCEL) from being sent alongside END_STREAM.
+                    if matches!(send_result, Ok(Ok(()))) && cancellation_token.is_cancelled() {
+                        recv_drain_token.cancel();
+                        let _ = tokio::time::timeout(
+                            Duration::from_millis(STREAM_TEARDOWN_DRAIN_TIMEOUT_MS),
+                            &mut recv_task,
+                        )
+                        .await;
+                    }
                     recv_task.abort();
                     match send_result {
                         Ok(Err(e)) => Err(e),
@@ -1706,7 +1733,7 @@ impl ZerobusStream {
         is_paused: Arc<AtomicBool>,
         options: StreamConfigurationOptions,
         server_error_tx: tokio::sync::watch::Sender<Option<ZerobusError>>,
-        cancellation_token: CancellationToken,
+        recv_drain_token: CancellationToken,
         callback_tx: Option<tokio::sync::mpsc::UnboundedSender<CallbackMessage>>,
     ) -> tokio::task::JoinHandle<ZerobusResult<()>> {
         tokio::spawn(async move {
@@ -1714,25 +1741,33 @@ impl ZerobusStream {
             let _guard = span.enter();
             let mut last_acked_offset = -1;
             let mut pause_deadline: Option<tokio::time::Instant> = None;
+            // Set when we exit because the supervisor signalled close (`recv_drain_token`).
+            // On that path we drain the response stream inline so the server sees END_STREAM
+            // instead of RST_STREAM. On all other exits (recovery / errors) the runtime is
+            // still up, so a detached drain is used to avoid blocking recovery.
+            let mut close_initiated = false;
 
-            loop {
+            'recv_loop: loop {
                 if let Some(deadline) = pause_deadline {
                     let now = tokio::time::Instant::now();
                     let all_acked = landing_zone.is_observed_empty();
 
                     if now >= deadline {
                         info!("Graceful close timeout reached. Triggering recovery.");
-                        return Ok(());
+                        break 'recv_loop;
                     } else if all_acked {
                         info!("All in-flight records acknowledged during graceful close. Triggering recovery.");
-                        return Ok(());
+                        break 'recv_loop;
                     }
                 }
 
                 let message_result = if let Some(deadline) = pause_deadline {
                     tokio::select! {
                         biased;
-                        _ = cancellation_token.cancelled() => return Ok(()),
+                        _ = recv_drain_token.cancelled() => {
+                            close_initiated = true;
+                            break 'recv_loop;
+                        }
                         _ = tokio::time::sleep_until(deadline) => {
                             continue;
                         }
@@ -1744,7 +1779,10 @@ impl ZerobusStream {
                 } else {
                     tokio::select! {
                         biased;
-                        _ = cancellation_token.cancelled() => return Ok(()),
+                        _ = recv_drain_token.cancelled() => {
+                            close_initiated = true;
+                            break 'recv_loop;
+                        }
                         res = tokio::time::timeout(
                             Duration::from_millis(options.server_lack_of_ack_timeout_ms),
                             response_grpc_stream.message(),
@@ -1809,14 +1847,14 @@ impl ZerobusStream {
                                     Some(0) => {
                                         // Immediate recovery
                                         info!("Server will close the stream in {}ms. Triggering stream recovery.", server_duration_ms);
-                                        return Ok(());
+                                        break 'recv_loop;
                                     }
                                     Some(max_wait) => std::cmp::min(max_wait, server_duration_ms),
                                 };
 
                                 if wait_duration_ms == 0 {
                                     info!("Server will close the stream. Triggering immediate recovery.");
-                                    return Ok(());
+                                    break 'recv_loop;
                                 }
 
                                 is_paused.store(true, Ordering::Relaxed);
@@ -1869,6 +1907,42 @@ impl ZerobusStream {
                     }
                 }
             }
+
+            // Drain remaining server messages so the server sees END_STREAM instead of
+            // the client RST_STREAM-ing the response. Inline on close (runtime may exit
+            // right after); detached on recovery / errors so recovery isn't delayed.
+            if close_initiated {
+                let _ = tokio::time::timeout(
+                    Duration::from_millis(STREAM_TEARDOWN_DRAIN_TIMEOUT_MS),
+                    async {
+                        while response_grpc_stream
+                            .message()
+                            .await
+                            .ok()
+                            .flatten()
+                            .is_some()
+                        {}
+                    },
+                )
+                .await;
+            } else {
+                tokio::spawn(async move {
+                    let _ = tokio::time::timeout(
+                        Duration::from_millis(STREAM_TEARDOWN_DRAIN_TIMEOUT_MS),
+                        async move {
+                            while response_grpc_stream
+                                .message()
+                                .await
+                                .ok()
+                                .flatten()
+                                .is_some()
+                            {}
+                        },
+                    )
+                    .await;
+                });
+            }
+            Ok(())
         })
     }
 

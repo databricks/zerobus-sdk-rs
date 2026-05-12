@@ -24,6 +24,9 @@
 
 ### Bug Fixes
 
+- **gRPC / HTTP/2 teardown on close and recovery**: Receive and send tasks now shut down with a per-stream `CancellationToken`, bounded waits before `abort`, and a separate `recv_drain_token` on the receiver. This avoids racing **`RST_STREAM` / `CANCEL`** from the client against **`END_STREAM`** from the server—failure modes that could show up as HTTP/2 protocol errors or broken pipe on the server.
+- After the inbound receive loop exits, the response-stream drain is now split by exit reason: the close path (`recv_drain_token`) drains **inline** so the server sees `END_STREAM` before the client process exits and the runtime tears down; the recovery / error paths drain in a **detached** task so `flush()` and stream recovery aren't delayed.
+
 ### Documentation
 
 ### Internal Changes
