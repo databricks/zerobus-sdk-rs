@@ -7,7 +7,7 @@ use prost_reflect::prost_types;
 use databricks_zerobus_ingest_sdk::{ProtoBytes, ProtoMessage, ZerobusSdk, ZerobusStream};
 
 pub mod orders {
-    include!("../output/orders.rs");
+    include!("output/orders.rs");
 }
 use crate::orders::TableOrders;
 

@@ -26,8 +26,8 @@ Protocol Buffers examples provide type safety and better performance. **No schem
 - Better for production use cases
 
 **Available examples:**
-- **`single/`** - Ingest records one at a time using `ingest_record_offset()` / `ingest_record()`
-- **`batch/`** - Ingest multiple records at once using `ingest_records_offset()` / `ingest_records()`
+- **`single.rs`** - Ingest records one at a time using `ingest_record_offset()` / `ingest_record()`
+- **`batch.rs`** - Ingest multiple records at once using `ingest_records_offset()` / `ingest_records()`
 
 ## Three Ways to Pass Data
 
@@ -48,11 +48,11 @@ The SDK supports three approaches for passing Protocol Buffers data:
 
 ### Running the Example
 
-1. Configure credentials in `single/src/main.rs` (see [Prerequisites](../README.md#prerequisites))
+1. Configure credentials in `single.rs` (see [Prerequisites](../README.md#prerequisites))
 
 2. Run the example:
    ```bash
-   cargo run -p example_proto_single
+   cargo run -p rust-examples-proto --example proto_single
    ```
 
 **Expected output:**
@@ -140,11 +140,11 @@ let stream = sdk
 
 ### Running the Example
 
-1. Configure credentials in `batch/src/main.rs` (see [Prerequisites](../README.md#prerequisites))
+1. Configure credentials in `batch.rs` (see [Prerequisites](../README.md#prerequisites))
 
 2. Run the example:
    ```bash
-   cargo run -p example_proto_batch
+   cargo run -p rust-examples-proto --example proto_batch
    ```
 
 **Expected output:**
@@ -232,10 +232,10 @@ cargo run -- \
   --client-id "<your-client-id>" \
   --client-secret "<your-client-secret>" \
   --table "<catalog.schema.your_table>" \
-  --output-dir "../../examples/proto/single/output"
+  --output-dir "../../examples/proto/output"
 ```
 
-For the batch example, use `--output-dir "../../examples/proto/batch/output"` instead.
+Both `single.rs` and `batch.rs` share the same `output/` directory, so the generated schema files only need to be produced once.
 
 This generates:
 - `output/<your_table>.proto` - Protocol Buffer schema definition
@@ -251,13 +251,13 @@ Change `orders` to match your generated file name:
 ```rust
 // Before:
 pub mod orders {
-    include!("../output/orders.rs");
+    include!("output/orders.rs");
 }
 use crate::orders::TableOrders;
 
 // After (for a table named `inventory`):
 pub mod inventory {
-    include!("../output/inventory.rs");
+    include!("output/inventory.rs");
 }
 use crate::inventory::TableInventory;
 ```
