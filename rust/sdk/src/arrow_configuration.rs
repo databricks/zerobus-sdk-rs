@@ -95,6 +95,23 @@ pub struct ArrowStreamConfigurationOptions {
     ///
     /// Default: `None`
     pub ipc_compression: Option<CompressionType>,
+
+    /// Maximum time in milliseconds to wait during graceful stream close.
+    ///
+    /// When the server sends a close stream signal indicating it will close the stream,
+    /// the SDK enters a "paused" state where it:
+    /// - Continues accepting and buffering new `ingest_batch()` calls
+    /// - Stops sending buffered batches to the server
+    /// - Continues processing acknowledgments for in-flight batches
+    /// - Waits for either all in-flight batches to be acknowledged or the timeout to expire
+    ///
+    /// Configuration values:
+    /// - `None`: Wait for the full server-specified duration (most graceful)
+    /// - `Some(0)`: Immediate recovery, close stream right away
+    /// - `Some(x)`: Wait up to min(x, server_duration) milliseconds
+    ///
+    /// Default: `None` (wait for full server duration)
+    pub stream_paused_max_wait_time_ms: Option<u64>,
 }
 
 impl Default for ArrowStreamConfigurationOptions {
@@ -109,6 +126,7 @@ impl Default for ArrowStreamConfigurationOptions {
             flush_timeout_ms: defaults::FLUSH_TIMEOUT_MS,
             connection_timeout_ms: defaults::CONNECTION_TIMEOUT_MS,
             ipc_compression: None,
+            stream_paused_max_wait_time_ms: None,
         }
     }
 }

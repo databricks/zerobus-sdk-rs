@@ -177,6 +177,16 @@ pub fn extract_arrow_stream_options(
         _ => None, // "NONE" or any unknown value
     };
 
+    // Extract stream paused max wait time (-1 means None/wait full server duration)
+    let stream_paused_max_wait_time_raw = env
+        .call_method(options, "streamPausedMaxWaitTimeMs", "()J", &[])?
+        .j()?;
+    let stream_paused_max_wait_time_ms = if stream_paused_max_wait_time_raw < 0 {
+        None
+    } else {
+        Some(stream_paused_max_wait_time_raw as u64)
+    };
+
     Ok(ArrowStreamConfigurationOptions {
         max_inflight_batches,
         recovery,
@@ -187,6 +197,7 @@ pub fn extract_arrow_stream_options(
         flush_timeout_ms,
         connection_timeout_ms,
         ipc_compression,
+        stream_paused_max_wait_time_ms,
     })
 }
 

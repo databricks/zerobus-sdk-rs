@@ -23,7 +23,7 @@ use tokio::time::{sleep, Duration};
 use tokio_retry::strategy::FixedInterval;
 use tokio_retry::RetryIf;
 use tonic::transport::Channel;
-use tracing::{debug, error, info, instrument, trace, warn};
+use tracing::{debug, error, info, instrument, warn};
 
 // Re-export arrow types for public API
 pub use arrow_array::RecordBatch;
@@ -449,6 +449,10 @@ pub struct ZerobusArrowStream {
     cumulative_records_sent: Arc<AtomicU64>,
     /// Last acknowledged cumulative record count (for recovery slicing).
     last_acked_records: Arc<AtomicU64>,
+    /// Flag indicating the stream is paused due to a server close signal.
+    /// When true, new `ingest_batch()` calls are still accepted and buffered,
+    /// but the receiver continues draining in-flight acks before triggering recovery.
+    is_paused: Arc<AtomicBool>,
 }
 
 impl ZerobusArrowStream {
@@ -475,6 +479,7 @@ impl ZerobusArrowStream {
         let receiver_task = Arc::new(Mutex::new(None));
         let cumulative_records_sent = Arc::new(AtomicU64::new(0));
         let last_acked_records = Arc::new(AtomicU64::new(0));
+        let is_paused = Arc::new(AtomicBool::new(false));
 
         let (server_error_tx, server_error_rx) = watch::channel(None);
 
@@ -498,6 +503,7 @@ impl ZerobusArrowStream {
             server_error_rx,
             cumulative_records_sent,
             last_acked_records,
+            is_paused,
         };
 
         // Initialize the connection with retry logic.
@@ -568,6 +574,7 @@ impl ZerobusArrowStream {
             stream.server_error_tx.clone(),
             Arc::clone(&stream.cumulative_records_sent),
             Arc::clone(&stream.last_acked_records),
+            Arc::clone(&stream.is_paused),
             response_stream,
         );
 
@@ -773,6 +780,7 @@ impl ZerobusArrowStream {
         server_error_tx: watch::Sender<Option<ZerobusError>>,
         cumulative_records_sent: Arc<AtomicU64>,
         last_acked_records: Arc<AtomicU64>,
+        is_paused: Arc<AtomicBool>,
         initial_response_stream: Pin<Box<dyn Stream<Item = Result<PutResult, FlightError>> + Send>>,
     ) -> tokio::task::JoinHandle<ZerobusResult<()>> {
         tokio::spawn(async move {
@@ -794,6 +802,8 @@ impl ZerobusArrowStream {
                     ack_timeout,
                     server_error_tx.clone(),
                     Arc::clone(&last_acked_records),
+                    Arc::clone(&is_paused),
+                    &options,
                 )
                 .await;
 
@@ -865,6 +875,8 @@ impl ZerobusArrowStream {
                             Ok(Ok(new_response_stream)) => {
                                 info!("Supervisor: Recovery successful, resuming");
                                 recovery_attempts.store(0, Ordering::Relaxed);
+                                // Now that a fresh sender is installed, lift the pause gate.
+                                is_paused.store(false, Ordering::Relaxed);
                                 response_stream = new_response_stream;
                                 // Loop continues with new stream.
                             }
@@ -1119,19 +1131,105 @@ impl ZerobusArrowStream {
         ack_timeout: Duration,
         server_error_tx: watch::Sender<Option<ZerobusError>>,
         last_acked_records: Arc<AtomicU64>,
+        is_paused: Arc<AtomicBool>,
+        options: &ArrowStreamConfigurationOptions,
     ) -> ZerobusResult<()> {
+        let mut pause_deadline: Option<tokio::time::Instant> = None;
+
         loop {
             if is_closed.load(Ordering::Relaxed) {
                 debug!("Stream closed, stopping ack processor");
                 return Ok(());
             }
 
-            let result = tokio::time::timeout(ack_timeout, response_stream.next()).await;
+            // Check pause state: exit when deadline reached or all batches acked.
+            // Returns a retriable error to trigger recovery in the supervisor.
+            if let Some(deadline) = pause_deadline {
+                let now = tokio::time::Instant::now();
+                let all_acked = pending_batches.lock().await.is_empty();
+
+                if now >= deadline {
+                    info!("Graceful close timeout reached. Triggering recovery.");
+                    return Err(ZerobusError::StreamClosedError(tonic::Status::unavailable(
+                        "Graceful close timeout reached",
+                    )));
+                } else if all_acked {
+                    info!("All in-flight batches acknowledged during graceful close. Triggering recovery.");
+                    return Err(ZerobusError::StreamClosedError(tonic::Status::unavailable(
+                        "All in-flight batches acked during graceful close",
+                    )));
+                }
+            }
+
+            let result = if let Some(deadline) = pause_deadline {
+                tokio::select! {
+                    biased;
+                    _ = tokio::time::sleep_until(deadline) => {
+                        continue;
+                    }
+                    res = tokio::time::timeout(ack_timeout, response_stream.next()) => res,
+                }
+            } else {
+                tokio::time::timeout(ack_timeout, response_stream.next()).await
+            };
 
             match result {
                 Ok(Some(Ok(put_result))) => {
                     match FlightAckMetadata::from_bytes(&put_result.app_metadata) {
                         Ok(ack) => {
+                            // Handle close stream signal.
+                            if ack.is_close_signal() {
+                                if options.recovery {
+                                    let server_duration_ms =
+                                        ack.close_stream_duration_ms.unwrap_or(0);
+
+                                    let wait_duration_ms = match options
+                                        .stream_paused_max_wait_time_ms
+                                    {
+                                        None => server_duration_ms,
+                                        Some(0) => {
+                                            info!(
+                                                    "Server will close the stream in {}ms. Triggering stream recovery.",
+                                                    server_duration_ms
+                                                );
+                                            return Err(ZerobusError::StreamClosedError(
+                                                tonic::Status::unavailable(
+                                                    "Immediate recovery on close signal",
+                                                ),
+                                            ));
+                                        }
+                                        Some(max_wait) => {
+                                            std::cmp::min(max_wait, server_duration_ms)
+                                        }
+                                    };
+
+                                    if wait_duration_ms == 0 {
+                                        info!("Server will close the stream. Triggering immediate recovery.");
+                                        return Err(ZerobusError::StreamClosedError(
+                                            tonic::Status::unavailable(
+                                                "Immediate recovery on close signal",
+                                            ),
+                                        ));
+                                    }
+
+                                    is_paused.store(true, Ordering::Relaxed);
+                                    pause_deadline = Some(
+                                        tokio::time::Instant::now()
+                                            + Duration::from_millis(wait_duration_ms),
+                                    );
+                                    info!(
+                                        "Server will close the stream in {}ms. Entering graceful close period (waiting up to {}ms for in-flight acks).",
+                                        server_duration_ms, wait_duration_ms
+                                    );
+                                }
+                                // Process any ack data that came with the close signal.
+                                // Fall through to ack processing below only if there's
+                                // meaningful ack data (non-zero records count).
+                                if ack.ack_up_to_records == 0 {
+                                    continue;
+                                }
+                            }
+
                             let acked_records = ack.ack_up_to_records;
                             debug!(
                                 ack_up_to_offset = ack.ack_up_to_offset,
@@ -1172,29 +1270,43 @@ impl ZerobusArrowStream {
                     }
                 }
                 Ok(Some(Err(e))) => {
+                    // During graceful close, errors are expected (server closes after grace period).
+                    // Return retriable error to trigger recovery.
+                    if pause_deadline.is_some() {
+                        info!(
+                            "Stream error during graceful close period, triggering recovery: {}",
+                            e
+                        );
+                        return Err(ZerobusError::StreamClosedError(tonic::Status::unavailable(
+                            "Stream error during graceful close",
+                        )));
+                    }
                     error!("Flight stream error: {}", e);
-                    // Convert FlightError to tonic::Status - this properly extracts
-                    // the underlying status if it's a Tonic error, preserving the
-                    // original error code and message from the server.
                     let status: tonic::Status = e.into();
                     let error = ZerobusError::StreamClosedError(status);
-                    // Store the error in watch channel for immediate, race-free access
-                    // by ingest_batch when channel send fails.
                     let _ = server_error_tx.send(Some(error.clone()));
-                    // Don't fail pending acks here - let the supervisor handle it.
-                    // If retriable, supervisor will recover and replay batches.
-                    // If non-retriable, supervisor will fail the acks.
                     return Err(error);
                 }
                 Ok(None) => {
+                    // During graceful close, stream end is expected.
+                    // Return retriable error to trigger recovery.
+                    if pause_deadline.is_some() {
+                        info!("Server closed stream during graceful close period, triggering recovery.");
+                        return Err(ZerobusError::StreamClosedError(tonic::Status::unavailable(
+                            "Server closed stream during graceful close",
+                        )));
+                    }
                     debug!("Server closed the stream");
                     let error = ZerobusError::StreamClosedError(tonic::Status::unknown(
                         "Server closed the stream",
                     ));
-                    // Don't fail pending acks here - let the supervisor handle it.
                     return Err(error);
                 }
                 Err(_timeout) => {
+                    // During graceful close, ack timeout is not an error.
+                    if pause_deadline.is_some() {
+                        continue;
+                    }
                     // Check if there are pending acks that should have been received.
                     let pending = pending_batches.lock().await;
                     if !pending.is_empty() {
@@ -1205,7 +1317,6 @@ impl ZerobusArrowStream {
                         let error = ZerobusError::StreamClosedError(
                             tonic::Status::deadline_exceeded("Server ack timeout"),
                         );
-                        // Don't fail pending acks here - let the supervisor handle it.
                         return Err(error);
                     }
                 }
@@ -1234,6 +1345,10 @@ impl ZerobusArrowStream {
                 start_record,
                 end_record,
             });
+        }
+
+        if self.is_paused.load(Ordering::Relaxed) {
+            return Ok(offset_id);
         }
 
         let sender = {
@@ -1464,7 +1579,7 @@ impl ZerobusArrowStream {
                         );
                         return Ok(());
                     }
-                    trace!(
+                    debug!(
                         current_ack = ack_offset,
                         target_offset = offset_to_wait,
                         "Waiting for more acks"

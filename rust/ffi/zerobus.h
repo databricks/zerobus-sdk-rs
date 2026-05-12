@@ -47,6 +47,11 @@ typedef struct CArrowStreamConfigurationOptions {
    * -1 = None, 0 = LZ4_FRAME, 1 = ZSTD
    */
   int32_t ipc_compression;
+  /**
+   * Maximum time in milliseconds to wait during graceful stream close.
+   * -1 = None (wait full server duration), 0 = immediate recovery, >0 = wait up to min(this, server_duration).
+   */
+  int64_t stream_paused_max_wait_time_ms;
 } CArrowStreamConfigurationOptions;
 
 typedef struct CResult {

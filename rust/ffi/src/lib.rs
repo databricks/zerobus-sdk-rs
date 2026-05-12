@@ -56,6 +56,9 @@ pub struct CArrowStreamConfigurationOptions {
     pub connection_timeout_ms: u64,
     /// -1 = None, 0 = LZ4_FRAME, 1 = ZSTD
     pub ipc_compression: i32,
+    /// Maximum time in milliseconds to wait during graceful stream close.
+    /// -1 = None (wait full server duration), 0 = immediate recovery, >0 = wait up to min(this, server_duration).
+    pub stream_paused_max_wait_time_ms: i64,
 }
 
 impl From<CArrowStreamConfigurationOptions> for ArrowStreamConfigurationOptions {
@@ -64,6 +67,10 @@ impl From<CArrowStreamConfigurationOptions> for ArrowStreamConfigurationOptions 
             0 => Some(CompressionType::LZ4_FRAME),
             1 => Some(CompressionType::ZSTD),
             _ => None,
+        };
+        let stream_paused_max_wait_time_ms = match c_opts.stream_paused_max_wait_time_ms {
+            n if n < 0 => None,
+            n => Some(n as u64),
         };
         ArrowStreamConfigurationOptions {
             max_inflight_batches: c_opts.max_inflight_batches,
@@ -75,6 +82,7 @@ impl From<CArrowStreamConfigurationOptions> for ArrowStreamConfigurationOptions 
             flush_timeout_ms: c_opts.flush_timeout_ms,
             connection_timeout_ms: c_opts.connection_timeout_ms,
             ipc_compression,
+            stream_paused_max_wait_time_ms,
         }
     }
 }
@@ -588,6 +596,10 @@ pub extern "C" fn zerobus_arrow_get_default_config() -> CArrowStreamConfiguratio
         Some(ct) if ct == CompressionType::ZSTD => 1,
         _ => -1,
     };
+    let stream_paused_max_wait_time_ms = match d.stream_paused_max_wait_time_ms {
+        None => -1,
+        Some(n) => n as i64,
+    };
     CArrowStreamConfigurationOptions {
         max_inflight_batches: d.max_inflight_batches,
         recovery: d.recovery,
@@ -598,6 +610,7 @@ pub extern "C" fn zerobus_arrow_get_default_config() -> CArrowStreamConfiguratio
         flush_timeout_ms: d.flush_timeout_ms,
         connection_timeout_ms: d.connection_timeout_ms,
         ipc_compression,
+        stream_paused_max_wait_time_ms,
     }
 }
 

@@ -13,22 +13,19 @@
 #![deny(clippy::all)]
 
 use napi::bindgen_prelude::*;
-use napi::threadsafe_function::{ThreadsafeFunction, ErrorStrategy};
-use napi::{Env, JsObject, JsFunction, JsUnknown, JsString, JsGlobal, ValueType};
+use napi::threadsafe_function::{ErrorStrategy, ThreadsafeFunction};
+use napi::{Env, JsFunction, JsGlobal, JsObject, JsString, JsUnknown, ValueType};
 use napi_derive::napi;
 
-use databricks_zerobus_ingest_sdk::{
-    EncodedRecord as RustRecordPayload,
-    StreamConfigurationOptions as RustStreamOptions,
-    TableProperties as RustTableProperties, ZerobusSdk as RustZerobusSdk,
-    ZerobusStream as RustZerobusStream,
-    HeadersProvider as RustHeadersProvider,
-    ZerobusResult as RustZerobusResult,
-    ZerobusError as RustZerobusError,
-    DefaultTokenFactory,
-};
-use databricks_zerobus_ingest_sdk::databricks::zerobus::RecordType as RustRecordType;
 use async_trait::async_trait;
+use databricks_zerobus_ingest_sdk::databricks::zerobus::RecordType as RustRecordType;
+use databricks_zerobus_ingest_sdk::{
+    DefaultTokenFactory, EncodedRecord as RustRecordPayload,
+    HeadersProvider as RustHeadersProvider, StreamConfigurationOptions as RustStreamOptions,
+    TableProperties as RustTableProperties, ZerobusError as RustZerobusError,
+    ZerobusResult as RustZerobusResult, ZerobusSdk as RustZerobusSdk,
+    ZerobusStream as RustZerobusStream,
+};
 use prost_types;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -107,13 +104,28 @@ impl From<StreamConfigurationOptions> for RustStreamOptions {
         };
 
         RustStreamOptions {
-            max_inflight_requests: opts.max_inflight_requests.unwrap_or(default.max_inflight_requests as u32) as usize,
+            max_inflight_requests: opts
+                .max_inflight_requests
+                .unwrap_or(default.max_inflight_requests as u32)
+                as usize,
             recovery: opts.recovery.unwrap_or(default.recovery),
-            recovery_timeout_ms: opts.recovery_timeout_ms.map(|v| v as u64).unwrap_or(default.recovery_timeout_ms),
-            recovery_backoff_ms: opts.recovery_backoff_ms.map(|v| v as u64).unwrap_or(default.recovery_backoff_ms),
+            recovery_timeout_ms: opts
+                .recovery_timeout_ms
+                .map(|v| v as u64)
+                .unwrap_or(default.recovery_timeout_ms),
+            recovery_backoff_ms: opts
+                .recovery_backoff_ms
+                .map(|v| v as u64)
+                .unwrap_or(default.recovery_backoff_ms),
             recovery_retries: opts.recovery_retries.unwrap_or(default.recovery_retries),
-            flush_timeout_ms: opts.flush_timeout_ms.map(|v| v as u64).unwrap_or(default.flush_timeout_ms),
-            server_lack_of_ack_timeout_ms: opts.server_lack_of_ack_timeout_ms.map(|v| v as u64).unwrap_or(default.server_lack_of_ack_timeout_ms),
+            flush_timeout_ms: opts
+                .flush_timeout_ms
+                .map(|v| v as u64)
+                .unwrap_or(default.flush_timeout_ms),
+            server_lack_of_ack_timeout_ms: opts
+                .server_lack_of_ack_timeout_ms
+                .map(|v| v as u64)
+                .unwrap_or(default.server_lack_of_ack_timeout_ms),
             record_type,
             callback_max_wait_time_ms: None, // Callbacks not supported in TS SDK
             stream_paused_max_wait_time_ms: opts.stream_paused_max_wait_time_ms.map(|v| v as u64),
@@ -139,12 +151,16 @@ pub struct TableProperties {
 
 impl TableProperties {
     fn to_rust(&self) -> Result<RustTableProperties> {
-        let descriptor: Option<prost_types::DescriptorProto> = if let Some(ref desc_str) = self.descriptor_proto {
+        let descriptor: Option<prost_types::DescriptorProto> = if let Some(ref desc_str) =
+            self.descriptor_proto
+        {
             let bytes = base64_decode(desc_str)
                 .map_err(|e| Error::from_reason(format!("Failed to decode descriptor: {}", e)))?;
 
             let descriptor_proto: prost_types::DescriptorProto = prost::Message::decode(&bytes[..])
-                .map_err(|e| Error::from_reason(format!("Failed to parse descriptor proto: {}", e)))?;
+                .map_err(|e| {
+                    Error::from_reason(format!("Failed to parse descriptor proto: {}", e))
+                })?;
 
             Some(descriptor_proto)
         } else {
@@ -209,17 +225,19 @@ fn convert_js_to_record_payload(env: &Env, payload: Unknown) -> Result<RustRecor
             if constructor_obj.has_named_property("encode")? {
                 let encode_fn: JsFunction = constructor_obj.get_named_property("encode")?;
                 let obj_as_unknown = obj.into_unknown();
-                let encode_result: JsUnknown = encode_fn.call::<JsUnknown>(Some(&constructor_obj), &[obj_as_unknown])?;
+                let encode_result: JsUnknown =
+                    encode_fn.call::<JsUnknown>(Some(&constructor_obj), &[obj_as_unknown])?;
                 let encode_obj = JsObject::from_unknown(encode_result)?;
 
                 if encode_obj.has_named_property("finish")? {
                     let finish_fn: JsFunction = encode_obj.get_named_property("finish")?;
-                    let buffer_result: JsUnknown = finish_fn.call::<JsUnknown>(Some(&encode_obj), &[])?;
+                    let buffer_result: JsUnknown =
+                        finish_fn.call::<JsUnknown>(Some(&encode_obj), &[])?;
                     let buffer: Buffer = Buffer::from_unknown(buffer_result)?;
                     Ok(RustRecordPayload::Proto(buffer.to_vec()))
                 } else {
                     Err(Error::from_reason(
-                        "Protobuf message .encode() must return an object with .finish() method"
+                        "Protobuf message .encode() must return an object with .finish() method",
                     ))
                 }
             } else {
@@ -227,7 +245,8 @@ fn convert_js_to_record_payload(env: &Env, payload: Unknown) -> Result<RustRecor
                 let json_obj: JsObject = global.get_named_property("JSON")?;
                 let stringify: JsFunction = json_obj.get_named_property("stringify")?;
                 let obj_as_unknown = obj.into_unknown();
-                let str_result: JsUnknown = stringify.call::<JsUnknown>(Some(&json_obj), &[obj_as_unknown])?;
+                let str_result: JsUnknown =
+                    stringify.call::<JsUnknown>(Some(&json_obj), &[obj_as_unknown])?;
                 let js_string = JsString::from_unknown(str_result)?;
                 let json_string = js_string.into_utf8()?.as_str()?.to_string();
 
@@ -240,11 +259,9 @@ fn convert_js_to_record_payload(env: &Env, payload: Unknown) -> Result<RustRecor
             let json_string = js_string.into_utf8()?.as_str()?.to_string();
             Ok(RustRecordPayload::Json(json_string))
         }
-        _ => {
-            Err(Error::from_reason(
-                "Payload must be a Buffer, string, protobuf message object, or plain JavaScript object"
-            ))
-        }
+        _ => Err(Error::from_reason(
+            "Payload must be a Buffer, string, protobuf message object, or plain JavaScript object",
+        )),
     }
 }
 
@@ -408,9 +425,10 @@ impl ZerobusStream {
                 match ack_future_option.await {
                     Ok(Some(offset_id)) => Ok(Some(offset_id)),
                     Ok(None) => Ok(None),
-                    Err(e) => Err(napi::Error::from_reason(
-                        format!("Batch acknowledgment failed: {}", e)
-                    )),
+                    Err(e) => Err(napi::Error::from_reason(format!(
+                        "Batch acknowledgment failed: {}",
+                        e
+                    ))),
                 }
             },
             |env, result| match result {
@@ -421,7 +439,7 @@ impl ZerobusStream {
                     let js_str = env.create_string(&offset_str)?;
                     let bigint = bigint_ctor.call(None, &[js_str.into_unknown()])?;
                     Ok(bigint.into_unknown())
-                },
+                }
                 None => env.get_null().map(|v| v.into_unknown()),
             },
         )
@@ -470,7 +488,9 @@ impl ZerobusStream {
                 stream_ref
                     .ingest_record_offset(record_payload)
                     .await
-                    .map_err(|e| napi::Error::from_reason(format!("Failed to ingest record: {}", e)))
+                    .map_err(|e| {
+                        napi::Error::from_reason(format!("Failed to ingest record: {}", e))
+                    })
             },
             |env, offset_id| {
                 let offset_str = offset_id.to_string();
@@ -537,7 +557,7 @@ impl ZerobusStream {
                     let js_str = env.create_string(&offset_str)?;
                     let bigint = bigint_ctor.call(None, &[js_str.into_unknown()])?;
                     Ok(bigint.into_unknown())
-                },
+                }
                 None => env.get_null().map(|v| v.into_unknown()),
             },
         )
@@ -584,10 +604,9 @@ impl ZerobusStream {
                     .as_ref()
                     .ok_or_else(|| napi::Error::from_reason("Stream has been closed"))?;
 
-                stream_ref
-                    .wait_for_offset(offset)
-                    .await
-                    .map_err(|e| napi::Error::from_reason(format!("Failed to wait for offset: {}", e)))
+                stream_ref.wait_for_offset(offset).await.map_err(|e| {
+                    napi::Error::from_reason(format!("Failed to wait for offset: {}", e))
+                })
             },
             |_env, _| Ok(()),
         )
@@ -750,12 +769,12 @@ impl StaticHeadersProvider {
 
         if !map.contains_key("authorization") {
             return Err(RustZerobusError::InvalidArgument(
-                "HeadersProvider must include 'authorization' header with Bearer token".to_string()
+                "HeadersProvider must include 'authorization' header with Bearer token".to_string(),
             ));
         }
         if !map.contains_key("x-databricks-zerobus-table-name") {
             return Err(RustZerobusError::InvalidArgument(
-                "HeadersProvider must include 'x-databricks-zerobus-table-name' header".to_string()
+                "HeadersProvider must include 'x-databricks-zerobus-table-name' header".to_string(),
             ));
         }
 
@@ -776,13 +795,18 @@ impl RustHeadersProvider for StaticHeadersProvider {
 }
 
 /// Helper to create a threadsafe function from JavaScript callback
-fn create_headers_tsfn(js_func: JsFunction) -> Result<ThreadsafeFunction<(), ErrorStrategy::Fatal>> {
+fn create_headers_tsfn(
+    js_func: JsFunction,
+) -> Result<ThreadsafeFunction<(), ErrorStrategy::Fatal>> {
     js_func.create_threadsafe_function(0, |ctx| Ok(vec![ctx.value]))
 }
 
 /// Helper to call headers callback and get result
-async fn call_headers_tsfn(tsfn: ThreadsafeFunction<(), ErrorStrategy::Fatal>) -> Result<Vec<(String, String)>> {
-    let raw_headers: Vec<Vec<String>> = tsfn.call_async(())
+async fn call_headers_tsfn(
+    tsfn: ThreadsafeFunction<(), ErrorStrategy::Fatal>,
+) -> Result<Vec<(String, String)>> {
+    let raw_headers: Vec<Vec<String>> = tsfn
+        .call_async(())
         .await
         .map_err(|e| Error::from_reason(format!("Failed to call headers callback: {}", e)))?;
 
@@ -898,7 +922,9 @@ impl ZerobusSdk {
             .and_then(|s| s.split('.').next())
             .map(|s| s.to_string())
             .ok_or_else(|| {
-                Error::from_reason("Failed to extract workspace_id from zerobus_endpoint".to_string())
+                Error::from_reason(
+                    "Failed to extract workspace_id from zerobus_endpoint".to_string(),
+                )
             })?;
 
         let inner = RustZerobusSdk::builder()
@@ -979,9 +1005,9 @@ impl ZerobusSdk {
         let rust_options: RustStreamOptions = options.map(|o| o.into()).unwrap_or_default();
 
         let headers_tsfn = match headers_provider {
-            Some(JsHeadersProvider { get_headers_callback }) => {
-                Some(create_headers_tsfn(get_headers_callback)?)
-            }
+            Some(JsHeadersProvider {
+                get_headers_callback,
+            }) => Some(create_headers_tsfn(get_headers_callback)?),
             None => None,
         };
 
@@ -992,10 +1018,13 @@ impl ZerobusSdk {
 
         env.execute_tokio_future(
             async move {
-                let headers_provider_arc: Arc<dyn RustHeadersProvider> = if let Some(tsfn) = headers_tsfn {
+                let headers_provider_arc: Arc<dyn RustHeadersProvider> = if let Some(tsfn) =
+                    headers_tsfn
+                {
                     // Custom headers provider from JavaScript callback
-                    let headers = call_headers_tsfn(tsfn).await
-                        .map_err(|e| napi::Error::from_reason(format!("Headers callback failed: {}", e)))?;
+                    let headers = call_headers_tsfn(tsfn).await.map_err(|e| {
+                        napi::Error::from_reason(format!("Headers callback failed: {}", e))
+                    })?;
 
                     let static_provider = StaticHeadersProvider::new(headers)
                         .map_err(|e| napi::Error::from_reason(format!("Invalid headers: {}", e)))?;
@@ -1019,7 +1048,9 @@ impl ZerobusSdk {
                         Some(rust_options),
                     )
                     .await
-                    .map_err(|e| napi::Error::from_reason(format!("Failed to create stream: {}", e)))?;
+                    .map_err(|e| {
+                        napi::Error::from_reason(format!("Failed to create stream: {}", e))
+                    })?;
 
                 Ok(ZerobusStream {
                     inner: Arc::new(Mutex::new(Some(stream))),
@@ -1096,19 +1127,15 @@ fn base64_decode(input: &str) -> std::result::Result<Vec<u8>, String> {
 // =============================================================================
 
 #[cfg(feature = "arrow-flight")]
-use databricks_zerobus_ingest_sdk::{
-    ArrowStreamConfigurationOptions as RustArrowStreamOptions,
-    ArrowTableProperties as RustArrowTableProperties,
-    ZerobusArrowStream as RustZerobusArrowStream,
-    ArrowSchema as RustArrowSchema,
-    RecordBatch as RustRecordBatch,
-    Field as RustField,
-    DataType as RustDataType,
-};
-#[cfg(feature = "arrow-flight")]
 use arrow_ipc::reader::StreamReader;
 #[cfg(feature = "arrow-flight")]
 use arrow_ipc::writer::StreamWriter;
+#[cfg(feature = "arrow-flight")]
+use databricks_zerobus_ingest_sdk::{
+    ArrowSchema as RustArrowSchema, ArrowStreamConfigurationOptions as RustArrowStreamOptions,
+    ArrowTableProperties as RustArrowTableProperties, DataType as RustDataType, Field as RustField,
+    RecordBatch as RustRecordBatch, ZerobusArrowStream as RustZerobusArrowStream,
+};
 #[cfg(feature = "arrow-flight")]
 use std::io::Cursor;
 
@@ -1181,14 +1208,32 @@ impl From<ArrowStreamConfigurationOptions> for RustArrowStreamOptions {
         };
 
         RustArrowStreamOptions {
-            max_inflight_batches: opts.max_inflight_batches.unwrap_or(default.max_inflight_batches as u32) as usize,
+            max_inflight_batches: opts
+                .max_inflight_batches
+                .unwrap_or(default.max_inflight_batches as u32)
+                as usize,
             recovery: opts.recovery.unwrap_or(default.recovery),
-            recovery_timeout_ms: opts.recovery_timeout_ms.map(|v| v as u64).unwrap_or(default.recovery_timeout_ms),
-            recovery_backoff_ms: opts.recovery_backoff_ms.map(|v| v as u64).unwrap_or(default.recovery_backoff_ms),
+            recovery_timeout_ms: opts
+                .recovery_timeout_ms
+                .map(|v| v as u64)
+                .unwrap_or(default.recovery_timeout_ms),
+            recovery_backoff_ms: opts
+                .recovery_backoff_ms
+                .map(|v| v as u64)
+                .unwrap_or(default.recovery_backoff_ms),
             recovery_retries: opts.recovery_retries.unwrap_or(default.recovery_retries),
-            server_lack_of_ack_timeout_ms: opts.server_lack_of_ack_timeout_ms.map(|v| v as u64).unwrap_or(default.server_lack_of_ack_timeout_ms),
-            flush_timeout_ms: opts.flush_timeout_ms.map(|v| v as u64).unwrap_or(default.flush_timeout_ms),
-            connection_timeout_ms: opts.connection_timeout_ms.map(|v| v as u64).unwrap_or(default.connection_timeout_ms),
+            server_lack_of_ack_timeout_ms: opts
+                .server_lack_of_ack_timeout_ms
+                .map(|v| v as u64)
+                .unwrap_or(default.server_lack_of_ack_timeout_ms),
+            flush_timeout_ms: opts
+                .flush_timeout_ms
+                .map(|v| v as u64)
+                .unwrap_or(default.flush_timeout_ms),
+            connection_timeout_ms: opts
+                .connection_timeout_ms
+                .map(|v| v as u64)
+                .unwrap_or(default.connection_timeout_ms),
             ipc_compression,
         }
     }
@@ -1301,13 +1346,17 @@ pub struct ArrowTableProperties {
 #[cfg(feature = "arrow-flight")]
 impl ArrowTableProperties {
     fn to_rust(&self) -> Result<RustArrowTableProperties> {
-        let fields: Vec<RustField> = self.schema_fields.iter().map(|f| {
-            RustField::new(
-                &f.name,
-                convert_arrow_data_type(f.data_type),
-                f.nullable.unwrap_or(true),
-            )
-        }).collect();
+        let fields: Vec<RustField> = self
+            .schema_fields
+            .iter()
+            .map(|f| {
+                RustField::new(
+                    &f.name,
+                    convert_arrow_data_type(f.data_type),
+                    f.nullable.unwrap_or(true),
+                )
+            })
+            .collect();
 
         let schema = Arc::new(RustArrowSchema::new(fields));
 
@@ -1360,18 +1409,21 @@ pub struct ZerobusArrowStream {
 
 /// Helper to parse Arrow IPC buffer to RecordBatch
 #[cfg(feature = "arrow-flight")]
-fn parse_arrow_ipc_to_batch(ipc_buffer: &[u8], _expected_schema: &RustArrowSchema) -> Result<RustRecordBatch> {
+fn parse_arrow_ipc_to_batch(
+    ipc_buffer: &[u8],
+    _expected_schema: &RustArrowSchema,
+) -> Result<RustRecordBatch> {
     let cursor = Cursor::new(ipc_buffer);
     let reader = StreamReader::try_new(cursor, None)
         .map_err(|e| Error::from_reason(format!("Failed to parse Arrow IPC: {}", e)))?;
 
     // Collect all batches (typically just one)
-    let batches: Vec<RustRecordBatch> = reader
-        .filter_map(|r| r.ok())
-        .collect();
+    let batches: Vec<RustRecordBatch> = reader.filter_map(|r| r.ok()).collect();
 
     if batches.is_empty() {
-        return Err(Error::from_reason("Arrow IPC buffer contains no record batches"));
+        return Err(Error::from_reason(
+            "Arrow IPC buffer contains no record batches",
+        ));
     }
 
     // Return the first batch (or could concatenate if multiple)
@@ -1385,9 +1437,11 @@ fn serialize_batch_to_ipc(batch: &RustRecordBatch) -> Result<Vec<u8>> {
     {
         let mut writer = StreamWriter::try_new(&mut buffer, batch.schema().as_ref())
             .map_err(|e| Error::from_reason(format!("Failed to create Arrow IPC writer: {}", e)))?;
-        writer.write(batch)
+        writer
+            .write(batch)
             .map_err(|e| Error::from_reason(format!("Failed to write batch to IPC: {}", e)))?;
-        writer.finish()
+        writer
+            .finish()
             .map_err(|e| Error::from_reason(format!("Failed to finish IPC stream: {}", e)))?;
     }
     Ok(buffer)
@@ -1474,10 +1528,9 @@ impl ZerobusArrowStream {
                     .as_ref()
                     .ok_or_else(|| napi::Error::from_reason("Arrow stream has been closed"))?;
 
-                stream_ref
-                    .wait_for_offset(offset)
-                    .await
-                    .map_err(|e| napi::Error::from_reason(format!("Failed to wait for offset: {}", e)))
+                stream_ref.wait_for_offset(offset).await.map_err(|e| {
+                    napi::Error::from_reason(format!("Failed to wait for offset: {}", e))
+                })
             },
             |_env, _| Ok(()),
         )
@@ -1523,7 +1576,9 @@ impl ZerobusArrowStream {
     /// Returns the table name for this stream.
     #[napi(getter)]
     pub fn table_name(&self) -> Result<String> {
-        let guard = self.inner.try_lock()
+        let guard = self
+            .inner
+            .try_lock()
             .map_err(|_| Error::from_reason("Stream is busy"))?;
         let stream = guard
             .as_ref()
@@ -1624,7 +1679,9 @@ impl ZerobusSdk {
                 let stream = sdk
                     .create_arrow_stream(rust_table_props, client_id, client_secret, rust_options)
                     .await
-                    .map_err(|e| napi::Error::from_reason(format!("Failed to create arrow stream: {}", e)))?;
+                    .map_err(|e| {
+                        napi::Error::from_reason(format!("Failed to create arrow stream: {}", e))
+                    })?;
 
                 Ok(ZerobusArrowStream {
                     inner: Arc::new(Mutex::new(Some(stream))),
@@ -1647,7 +1704,10 @@ impl ZerobusSdk {
     ///
     /// A Promise that resolves to a new ZerobusArrowStream with all unacknowledged batches re-ingested.
     #[napi]
-    pub async fn recreate_arrow_stream(&self, stream: &ZerobusArrowStream) -> Result<ZerobusArrowStream> {
+    pub async fn recreate_arrow_stream(
+        &self,
+        stream: &ZerobusArrowStream,
+    ) -> Result<ZerobusArrowStream> {
         let inner_guard = stream.inner.lock().await;
         let rust_stream = inner_guard
             .as_ref()
