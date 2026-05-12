@@ -1579,7 +1579,7 @@ impl ZerobusArrowStream {
                         );
                         return Ok(());
                     }
-                    trace!(
+                    debug!(
                         current_ack = ack_offset,
                         target_offset = offset_to_wait,
                         "Waiting for more acks"
