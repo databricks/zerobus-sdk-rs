@@ -6,7 +6,7 @@ A tool for generating Protocol Buffer schemas and Rust code from Unity Catalog t
 
 This tool fetches table schema information from Unity Catalog and generates:
 - Protocol Buffer (`.proto`) files that match the table schema
-- Rust structs and serialization code via `tonic-build`
+- Rust structs and serialization code via `tonic-prost-build`
 - Binary descriptor files for runtime schema validation
 
 ## Supported Data Types

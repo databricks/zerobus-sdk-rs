@@ -25,6 +25,7 @@ tokio-retry.workspace = true
 tokio-stream.workspace = true
 tokio-util = { workspace = true, features = ["rt"] }
 tonic = { workspace = true, features = ["tls-native-roots", "transport"] }
+tonic-prost.workspace = true
 tracing.workspace = true
 hyper-http-proxy.workspace = true
 hyper-util.workspace = true
@@ -42,7 +43,7 @@ futures = { workspace = true, optional = true }
 tracing-subscriber.workspace = true
 
 [build-dependencies]
-tonic-build.workspace = true
+tonic-prost-build.workspace = true
 protoc-bin-vendored.workspace = true
 
 [features]

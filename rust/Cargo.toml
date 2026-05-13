@@ -12,19 +12,20 @@ resolver = "2"
 
 [workspace.dependencies]
 # Protobuf / gRPC
-prost = "0.13.3"
-prost-types = "0.13.3"
-prost-reflect = "0.14"
-tonic = "0.13"
-tonic-build = "0.13"
+prost = "0.14"
+prost-types = "0.14"
+prost-reflect = "0.16"
+tonic = "0.14"
+tonic-prost = "0.14"
+tonic-prost-build = "0.14"
 protoc-bin-vendored = "3.0.0"
 
 # Async runtime
 async-trait = "0.1"
-tokio = "1.42.0"
-tokio-stream = "0.1.16"
+tokio = "1.52"
+tokio-stream = "0.1.18"
 tokio-retry = "0.3"
-tokio-util = "0.7.17"
+tokio-util = "0.7.18"
 
 # Serialization
 serde = { version = "1.0", features = ["derive"] }
@@ -43,23 +44,23 @@ tracing = "0.1.41"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
 # Arrow
-arrow-flight = { version = "56.2.0", default-features = false }
-arrow-array = { version = "56.2.0", default-features = false }
-arrow-schema = { version = "56.2.0", default-features = false }
-arrow-ipc = { version = "56.2.0", default-features = false }
+arrow-flight = { version = "58.2", default-features = false }
+arrow-array = { version = "58.2", default-features = false }
+arrow-schema = { version = "58.2", default-features = false }
+arrow-ipc = { version = "58.2", default-features = false }
 
 # Misc
 futures = "0.3"
 chrono = "0.4"
-once_cell = "1.19"
-bytes = "1"
+once_cell = "1.21"
+bytes = "1.11"
 smallvec = "1.15.1"
 libc = "0.2"
 cbindgen = "0.27"
 
 # Tools
 anyhow = "1"
-clap = { version = "4", features = ["derive"] }
-urlencoding = "2"
-tempfile = "3.21.0"
+clap = { version = "4.6", features = ["derive"] }
+urlencoding = "2.1"
+tempfile = "3.27"
 jni = "0.21"
