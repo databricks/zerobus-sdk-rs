@@ -55,25 +55,18 @@ The SDK supports three approaches for passing JSON data:
 
 **Expected output:**
 ```
-=== Offset-based API (Recommended) ===
 [Auto-serializing] Record sent with offset ID: 0
 [Auto-serializing] Record acknowledged with offset ID: 0
 [Pre-serialized] Record sent with offset ID: 1
 [Pre-serialized] Record acknowledged with offset ID: 1
 [Backward-compatible] Record sent with offset ID: 2
 [Backward-compatible] Record acknowledged with offset ID: 2
-=== Future-based API (Deprecated) ===
-[Auto-serializing] Record acknowledged with offset ID: 3
-[Pre-serialized] Record acknowledged with offset ID: 4
-[Backward-compatible] Record acknowledged with offset ID: 5
 Stream closed successfully
 ```
 
 ### Code Highlights
 
-The example demonstrates all three data-passing approaches with both API styles:
-
-**Offset-based API (Recommended):**
+The example demonstrates all three data-passing approaches:
 
 ```rust
 use databricks_zerobus_ingest_sdk::{JsonValue, JsonString};
@@ -100,22 +93,6 @@ let offset = stream.ingest_record_offset(json).await?;
 stream.wait_for_offset(offset).await?;
 ```
 
-**Future-based API (Deprecated):**
-
-```rust
-// 1. Auto-serializing
-let ack = stream.ingest_record(JsonValue(order)).await?;
-let offset = ack.await?;
-
-// 2. Pre-serialized
-let ack = stream.ingest_record(JsonString(json)).await?;
-let offset = ack.await?;
-
-// 3. Backward-compatible
-let ack = stream.ingest_record(json).await?;
-let offset = ack.await?;
-```
-
 **Building a JSON stream:**
 ```rust
 let stream = sdk
@@ -140,23 +117,16 @@ let stream = sdk
 
 **Expected output:**
 ```
-=== Offset-based API (Recommended) ===
 [Auto-serializing] Batch of 3 records sent with offset ID: 0
 [Auto-serializing] Batch acknowledged with offset ID: 0
 [Pre-serialized] Batch of 3 records sent with offset ID: 1
 [Pre-serialized] Batch acknowledged with offset ID: 1
 [Backward-compatible] Batch of 3 records sent with offset ID: 2
 [Backward-compatible] Batch acknowledged with offset ID: 2
-=== Future-based API (Deprecated) ===
-[Auto-serializing] Batch acknowledged with offset ID: 3
-[Pre-serialized] Batch acknowledged with offset ID: 4
-[Backward-compatible] Batch acknowledged with offset ID: 5
 Stream closed successfully
 ```
 
 ### Code Highlights
-
-**Offset-based API (Recommended):**
 
 ```rust
 use databricks_zerobus_ingest_sdk::{JsonValue, JsonString};
@@ -201,15 +171,6 @@ let batch: Vec<String> = vec![
 ];
 if let Some(offset) = stream.ingest_records_offset(batch).await? {
     stream.wait_for_offset(offset).await?;
-}
-```
-
-**Future-based API (Deprecated):**
-
-```rust
-// Works the same way, returns Option<Future> instead of Option<OffsetId>
-if let Some(ack) = stream.ingest_records(batch).await? {
-    let offset = ack.await?;
 }
 ```
 

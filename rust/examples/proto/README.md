@@ -57,25 +57,18 @@ The SDK supports three approaches for passing Protocol Buffers data:
 
 **Expected output:**
 ```
-=== Offset-based API (Recommended) ===
 [Auto-encoding] Record sent with offset ID: 0
 [Auto-encoding] Record acknowledged with offset ID: 0
 [Pre-encoded] Record sent with offset ID: 1
 [Pre-encoded] Record acknowledged with offset ID: 1
 [Backward-compatible] Record sent with offset ID: 2
 [Backward-compatible] Record acknowledged with offset ID: 2
-=== Future-based API (Deprecated) ===
-[Auto-encoding] Record acknowledged with offset ID: 3
-[Pre-encoded] Record acknowledged with offset ID: 4
-[Backward-compatible] Record acknowledged with offset ID: 5
 Stream closed successfully
 ```
 
 ### Code Highlights
 
-The example demonstrates all three data-passing approaches with both API styles:
-
-**Offset-based API (Recommended):**
+The example demonstrates all three data-passing approaches:
 
 ```rust
 use databricks_zerobus_ingest_sdk::{ProtoMessage, ProtoBytes};
@@ -100,22 +93,6 @@ stream.wait_for_offset(offset).await?;
 let bytes = order.encode_to_vec();
 let offset = stream.ingest_record_offset(bytes).await?;
 stream.wait_for_offset(offset).await?;
-```
-
-**Future-based API (Deprecated):**
-
-```rust
-// 1. Auto-encoding
-let ack = stream.ingest_record(ProtoMessage(order)).await?;
-let offset = ack.await?;
-
-// 2. Pre-encoded
-let ack = stream.ingest_record(ProtoBytes(bytes)).await?;
-let offset = ack.await?;
-
-// 3. Backward-compatible
-let ack = stream.ingest_record(bytes).await?;
-let offset = ack.await?;
 ```
 
 **Building a Protocol Buffers stream:**
@@ -149,23 +126,16 @@ let stream = sdk
 
 **Expected output:**
 ```
-=== Offset-based API (Recommended) ===
 [Auto-encoding] Batch of 3 records sent with offset ID: 0
 [Auto-encoding] Batch acknowledged with offset ID: 0
 [Pre-encoded] Batch of 3 records sent with offset ID: 1
 [Pre-encoded] Batch acknowledged with offset ID: 1
 [Backward-compatible] Batch of 3 records sent with offset ID: 2
 [Backward-compatible] Batch acknowledged with offset ID: 2
-=== Future-based API (Deprecated) ===
-[Auto-encoding] Batch acknowledged with offset ID: 3
-[Pre-encoded] Batch acknowledged with offset ID: 4
-[Backward-compatible] Batch acknowledged with offset ID: 5
 Stream closed successfully
 ```
 
 ### Code Highlights
-
-**Offset-based API (Recommended):**
 
 ```rust
 use databricks_zerobus_ingest_sdk::{ProtoMessage, ProtoBytes};
@@ -199,15 +169,6 @@ let batch: Vec<Vec<u8>> = vec![
 ];
 if let Some(offset) = stream.ingest_records_offset(batch).await? {
     stream.wait_for_offset(offset).await?;
-}
-```
-
-**Future-based API (Deprecated):**
-
-```rust
-// Works the same way, returns Option<Future> instead of Option<OffsetId>
-if let Some(ack) = stream.ingest_records(batch).await? {
-    let offset = ack.await?;
 }
 ```
 

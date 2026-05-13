@@ -146,29 +146,15 @@ stream.wait_for_offset(offset).await?;
 stream.close().await?;
 ```
 
-## API Styles
+## Ingestion API
 
-The SDK provides two API styles for ingestion:
-
-| Style | Method | Returns | When to wait |
-|-------|--------|---------|--------------|
-| **Offset-based** (Recommended) | `ingest_record_offset()` | `OffsetId` directly | Call `wait_for_offset()` when needed |
-| **Future-based** (Deprecated) | `ingest_record()` | `Future<OffsetId>` | Await the future |
-
-**Offset-based (Recommended):**
 ```rust
 let offset = stream.ingest_record_offset(data).await?;
 // Do other work, then wait when needed.
 stream.wait_for_offset(offset).await?;
 ```
 
-**Future-based (Deprecated):**
-```rust
-let ack = stream.ingest_record(data).await?;
-
-// Must await to get offset.
-let offset = ack.await?;
-```
+`ingest_record_offset` returns the assigned `OffsetId` immediately after the record is queued. Call `wait_for_offset(offset)` to block until the record is durably acknowledged by the server.
 
 ## Single-Record vs Batch Ingestion
 
