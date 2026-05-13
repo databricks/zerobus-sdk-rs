@@ -803,9 +803,7 @@ fn complex_type_to_arrow_field(
         ComplexType::Map { key, value } => {
             let key_primitive = validate_map_key(key, name)?;
             let value_field = match value.as_ref() {
-                ComplexType::Primitive(p) => {
-                    Field::new("values", map_primitive_to_arrow(*p), true)
-                }
+                ComplexType::Primitive(p) => Field::new("values", map_primitive_to_arrow(*p), true),
                 ComplexType::Struct(_) => complex_type_to_arrow_field("values", value, true)?,
                 ComplexType::Array(_) | ComplexType::Map { .. } => {
                     return Err(shape_unsupported("maps with complex value types", name));
