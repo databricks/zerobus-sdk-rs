@@ -31,9 +31,14 @@
   `tonic-prost` crate for the prost codec. `sdk/build.rs`, `tests/build.rs`,
   and `tools/generate_files/src/generate.rs` were updated accordingly.
 - Bumped Arrow crates (`arrow-flight`, `arrow-array`, `arrow-schema`,
-  `arrow-ipc`) from 56.2.0 to 58. Switched `IpcDataGenerator::encoded_batch`
+  `arrow-ipc`) from 56.2.0 to 58.2. Switched `IpcDataGenerator::encoded_batch`
   to the non-deprecated `encode` API which takes an explicit
   `CompressionContext`.
+- Raised minimum-version floors on several non-breaking dependencies to
+  current latest minor: `tokio` 1.42 → 1.52, `tokio-stream` 0.1.16 →
+  0.1.18, `tokio-util` 0.7.17 → 0.7.18, `once_cell` 1.19 → 1.21,
+  `bytes` 1 → 1.11, `tempfile` 3.21 → 3.27, `clap` 4 → 4.6,
+  `urlencoding` 2 → 2.1.
 
 ### Breaking Changes
 
