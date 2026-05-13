@@ -454,7 +454,8 @@ pub struct ZerobusArrowStream {
     /// When true, new `ingest_batch()` calls are still accepted and buffered,
     /// but the receiver continues draining in-flight acks before triggering recovery.
     is_paused: Arc<AtomicBool>,
-    /// Authoritative `x-zerobus-sdk` header value owned by the SDK.
+    /// HTTP `user-agent` value owned by the SDK, re-applied to each fresh
+    /// Channel built during recovery.
     sdk_identifier: Arc<str>,
 }
 

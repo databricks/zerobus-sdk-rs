@@ -93,7 +93,7 @@ pub use builder::{StreamBuilder, ZerobusSdkBuilder};
 pub use callbacks::AckCallback;
 pub use default_token_factory::DefaultTokenFactory;
 pub use errors::ZerobusError;
-pub use headers_provider::{HeadersProvider, OAuthHeadersProvider, DEFAULT_X_ZEROBUS_SDK};
+pub use headers_provider::{HeadersProvider, OAuthHeadersProvider, DEFAULT_SDK_IDENTIFIER};
 pub use offset_generator::{OffsetId, OffsetIdGenerator};
 pub use proxy::{ConnectorFactory, ProxyConnector};
 pub use record_types::{
@@ -268,7 +268,7 @@ pub struct ZerobusSdk {
     pub(crate) workspace_id: String,
     pub(crate) tls_config: Arc<dyn TlsConfig>,
     connector_factory: Option<ConnectorFactory>,
-    /// Final value sent in the `x-zerobus-sdk` gRPC header on every request.
+    /// Final value sent as the HTTP `user-agent` header on every request.
     /// Either `"zerobus-sdk-rs/<version>"` or `"zerobus-sdk-rs/<version> <application_name>"`.
     pub(crate) sdk_identifier: Arc<str>,
 }
@@ -385,7 +385,7 @@ impl ZerobusSdk {
             shared_channel: tokio::sync::Mutex::new(None),
             tls_config: Arc::new(SecureTlsConfig::new()),
             connector_factory: None,
-            sdk_identifier: Arc::from(DEFAULT_X_ZEROBUS_SDK),
+            sdk_identifier: Arc::from(DEFAULT_SDK_IDENTIFIER),
         })
     }
 
@@ -401,8 +401,8 @@ impl ZerobusSdk {
         application_name: Option<String>,
     ) -> Self {
         let sdk_identifier: Arc<str> = match application_name {
-            Some(app) if !app.is_empty() => Arc::from(format!("{} {}", DEFAULT_X_ZEROBUS_SDK, app)),
-            _ => Arc::from(DEFAULT_X_ZEROBUS_SDK),
+            Some(app) if !app.is_empty() => Arc::from(format!("{} {}", DEFAULT_SDK_IDENTIFIER, app)),
+            _ => Arc::from(DEFAULT_SDK_IDENTIFIER),
         };
         #[allow(deprecated)]
         ZerobusSdk {

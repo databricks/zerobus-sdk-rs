@@ -3,8 +3,10 @@ use crate::ZerobusResult;
 use async_trait::async_trait;
 use std::collections::HashMap;
 
-/// Default x-zerobus-sdk header value for Rust SDK requests.
-pub const DEFAULT_X_ZEROBUS_SDK: &str = concat!("zerobus-sdk-rs/", env!("CARGO_PKG_VERSION"));
+/// Default identifier the SDK sends as the HTTP `user-agent` header on every
+/// request. Use [`ZerobusSdkBuilder::application_name`](crate::ZerobusSdkBuilder::application_name)
+/// to append an application suffix.
+pub const DEFAULT_SDK_IDENTIFIER: &str = concat!("zerobus-sdk-rs/", env!("CARGO_PKG_VERSION"));
 
 /// A trait for providing custom headers for gRPC requests.
 ///
@@ -12,9 +14,9 @@ pub const DEFAULT_X_ZEROBUS_SDK: &str = concat!("zerobus-sdk-rs/", env!("CARGO_P
 /// such as fetching tokens from different OAuth providers or using alternative
 /// authentication mechanisms.
 ///
-/// The `x-zerobus-sdk` header is owned by the SDK itself and any value returned
-/// for that key from `get_headers` is ignored. Use
-/// [`ZerobusSdkBuilder::application_name`](crate::ZerobusSdkBuilder::application_name)
+/// The HTTP `user-agent` header is set by the SDK on the underlying tonic
+/// `Endpoint` and cannot be overridden by values returned from `get_headers`.
+/// Use [`ZerobusSdkBuilder::application_name`](crate::ZerobusSdkBuilder::application_name)
 /// to customize it.
 ///
 /// # Examples

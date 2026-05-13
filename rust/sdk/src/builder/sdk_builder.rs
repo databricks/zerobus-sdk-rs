@@ -86,16 +86,17 @@ impl ZerobusSdkBuilder {
         self
     }
 
-    /// Sets a custom application identifier appended to the `x-zerobus-sdk`
-    /// gRPC header on every request.
+    /// Sets a custom application identifier appended to the HTTP `user-agent`
+    /// header sent on every request.
     ///
-    /// The default header value is `zerobus-sdk-rs/<version>`. When this is
+    /// The default user-agent value is `zerobus-sdk-rs/<version>`. When this is
     /// set, the value sent becomes `zerobus-sdk-rs/<version> <application_name>`,
     /// preserving the SDK version prefix for server-side telemetry while
     /// adding caller-supplied identification (e.g. `"my-app/1.0"`).
     ///
-    /// This value takes precedence over any `x-zerobus-sdk` header returned
-    /// by a custom [`HeadersProvider`](crate::HeadersProvider).
+    /// The SDK owns the `user-agent` header at the tonic `Endpoint` level;
+    /// values returned by a [`HeadersProvider`](crate::HeadersProvider) cannot
+    /// override it.
     ///
     /// # Arguments
     ///
@@ -227,7 +228,7 @@ mod tests {
             .build()
             .expect("should build");
 
-        assert_eq!(&*sdk.sdk_identifier, crate::DEFAULT_X_ZEROBUS_SDK);
+        assert_eq!(&*sdk.sdk_identifier, crate::DEFAULT_SDK_IDENTIFIER);
     }
 
     #[test]
@@ -238,7 +239,7 @@ mod tests {
             .build()
             .expect("should build");
 
-        let expected = format!("{} my-app/1.0", crate::DEFAULT_X_ZEROBUS_SDK);
+        let expected = format!("{} my-app/1.0", crate::DEFAULT_SDK_IDENTIFIER);
         assert_eq!(&*sdk.sdk_identifier, expected);
     }
 
@@ -250,6 +251,6 @@ mod tests {
             .build()
             .expect("should build");
 
-        assert_eq!(&*sdk.sdk_identifier, crate::DEFAULT_X_ZEROBUS_SDK);
+        assert_eq!(&*sdk.sdk_identifier, crate::DEFAULT_SDK_IDENTIFIER);
     }
 }
