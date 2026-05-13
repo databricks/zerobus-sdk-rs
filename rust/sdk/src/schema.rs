@@ -681,7 +681,9 @@ fn sanitize_message_name(name: &str) -> String {
 /// `STRING` / `VARIANT` / `DECIMAL` → `LargeUtf8`, `BINARY` → `LargeBinary`,
 /// `DATE` → `Date32`, `TIMESTAMP` → `Timestamp(Microsecond, Some("UTC"))`,
 /// `TIMESTAMP_NTZ` → `Timestamp(Microsecond, None)`, `ARRAY<T>` → `List` with
-/// item field `"item"`, `MAP<K,V>` → `Map` with entries field `"key_value"`.
+/// item field `"item"`, `MAP<K,V>` → `Map` with entries field `"entries"`
+/// containing `"keys"` and `"values"` (the canonical schema the Databricks
+/// Arrow Flight server builds from Delta).
 #[cfg(feature = "arrow-flight")]
 pub fn arrow_schema_from_uc_columns(
     columns: &[UcColumn],
@@ -738,7 +740,8 @@ fn map_primitive_to_arrow(p: PrimitiveType) -> arrow_schema::DataType {
         PrimitiveType::String => DataType::LargeUtf8,
         PrimitiveType::Long => DataType::Int64,
         PrimitiveType::Integer => DataType::Int32,
-        PrimitiveType::Short | PrimitiveType::Byte => DataType::Int32,
+        PrimitiveType::Short => DataType::Int16,
+        PrimitiveType::Byte => DataType::Int8,
         PrimitiveType::Double => DataType::Float64,
         PrimitiveType::Float => DataType::Float32,
         PrimitiveType::Boolean => DataType::Boolean,
@@ -746,6 +749,10 @@ fn map_primitive_to_arrow(p: PrimitiveType) -> arrow_schema::DataType {
         PrimitiveType::Timestamp => DataType::Timestamp(TimeUnit::Microsecond, Some("UTC".into())),
         PrimitiveType::TimestampNtz => DataType::Timestamp(TimeUnit::Microsecond, None),
         PrimitiveType::Date => DataType::Date32,
+        // TODO: emit Decimal128(precision, scale) once the Databricks Arrow
+        // Flight server accepts native Decimal128. UC carries (p, s) in
+        // `type_text` ("decimal(10,2)") and the `type_json` primitive string,
+        // but `PrimitiveType::Decimal` discards them today.
         PrimitiveType::Decimal => DataType::LargeUtf8,
     }
 }
@@ -796,21 +803,26 @@ fn complex_type_to_arrow_field(
         ComplexType::Map { key, value } => {
             let key_primitive = validate_map_key(key, name)?;
             let value_field = match value.as_ref() {
-                ComplexType::Primitive(p) => Field::new("value", map_primitive_to_arrow(*p), true),
-                ComplexType::Struct(_) => complex_type_to_arrow_field("value", value, true)?,
+                ComplexType::Primitive(p) => {
+                    Field::new("values", map_primitive_to_arrow(*p), true)
+                }
+                ComplexType::Struct(_) => complex_type_to_arrow_field("values", value, true)?,
                 ComplexType::Array(_) | ComplexType::Map { .. } => {
                     return Err(shape_unsupported("maps with complex value types", name));
                 }
             };
             let entries = DataType::Struct(Fields::from(vec![
-                Field::new("key", map_primitive_to_arrow(key_primitive), false),
+                Field::new("keys", map_primitive_to_arrow(key_primitive), false),
                 value_field,
             ]));
-            // "key_value" matches the Spark/Delta/UC Arrow IPC convention; the
-            // Databricks Arrow Flight server rejects other entry-field names.
+            // "entries" / "keys" / "values" matches the canonical Arrow schema
+            // the Databricks Arrow Flight server builds from Delta on its side.
+            // The server also accepts the Arrow-default "key_value"/"key"/"value"
+            // names and normalizes via `arrow::compute::cast`, but emitting the
+            // canonical names directly avoids that per-batch cast.
             Ok(Field::new(
                 name,
-                DataType::Map(Arc::new(Field::new("key_value", entries, false)), false),
+                DataType::Map(Arc::new(Field::new("entries", entries, false)), false),
                 nullable,
             ))
         }
@@ -1285,7 +1297,7 @@ mod tests {
         }
 
         #[test]
-        fn map_uses_key_value_entries_with_spark_convention() {
+        fn map_uses_entries_keys_values_canonical_names() {
             let type_json = r#"{"type":"map","keyType":"string","valueType":"integer","valueContainsNull":true}"#;
             let cols = vec![complex_col("props", "MAP", type_json, 0)];
             let s = arrow_schema_from_uc_columns(&cols).unwrap();
@@ -1293,14 +1305,14 @@ mod tests {
             match f.data_type() {
                 DataType::Map(entries, sorted) => {
                     assert!(!sorted);
-                    assert_eq!(entries.name(), "key_value");
+                    assert_eq!(entries.name(), "entries");
                     assert!(!entries.is_nullable());
                     match entries.data_type() {
                         DataType::Struct(kv) => {
-                            assert_eq!(kv[0].name(), "key");
+                            assert_eq!(kv[0].name(), "keys");
                             assert_eq!(kv[0].data_type(), &DataType::LargeUtf8);
                             assert!(!kv[0].is_nullable(), "map keys must not be nullable");
-                            assert_eq!(kv[1].name(), "value");
+                            assert_eq!(kv[1].name(), "values");
                             assert_eq!(kv[1].data_type(), &DataType::Int32);
                             assert!(kv[1].is_nullable());
                         }
