@@ -3,11 +3,6 @@ use crate::ZerobusResult;
 use async_trait::async_trait;
 use std::collections::HashMap;
 
-/// Default identifier the SDK sends as the HTTP `user-agent` header on every
-/// request. Use [`ZerobusSdkBuilder::application_name`](crate::ZerobusSdkBuilder::application_name)
-/// to append an application suffix.
-pub const DEFAULT_SDK_IDENTIFIER: &str = concat!("zerobus-sdk-rs/", env!("CARGO_PKG_VERSION"));
-
 /// A trait for providing custom headers for gRPC requests.
 ///
 /// This trait allows you to implement custom logic for generating authentication headers,

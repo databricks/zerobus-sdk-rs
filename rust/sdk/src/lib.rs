@@ -93,7 +93,7 @@ pub use builder::{StreamBuilder, ZerobusSdkBuilder};
 pub use callbacks::AckCallback;
 pub use default_token_factory::DefaultTokenFactory;
 pub use errors::ZerobusError;
-pub use headers_provider::{HeadersProvider, OAuthHeadersProvider, DEFAULT_SDK_IDENTIFIER};
+pub use headers_provider::{HeadersProvider, OAuthHeadersProvider};
 pub use offset_generator::{OffsetId, OffsetIdGenerator};
 pub use proxy::{ConnectorFactory, ProxyConnector};
 pub use record_types::{
@@ -229,6 +229,11 @@ pub struct ZerobusStream {
     /// Callback handler task that executes callbacks in a separate thread.
     callback_handler_task: Option<tokio::task::JoinHandle<()>>,
 }
+
+/// Default identifier the SDK sends as the HTTP `user-agent` header on every
+/// request. Use [`ZerobusSdkBuilder::application_name`] to append an
+/// application suffix.
+pub const DEFAULT_SDK_IDENTIFIER: &str = concat!("zerobus-sdk-rs/", env!("CARGO_PKG_VERSION"));
 
 /// The main interface for interacting with the Zerobus API.
 /// # Examples
