@@ -577,7 +577,6 @@ impl ZerobusSdk {
             table_properties,
             Arc::clone(&headers_provider),
             options,
-            Arc::clone(&self.sdk_identifier),
         )
         .await;
 
@@ -640,7 +639,6 @@ impl ZerobusSdk {
             stream.table_properties.clone(),
             Arc::clone(&stream.headers_provider),
             stream.options.clone(),
-            Arc::clone(&self.sdk_identifier),
         )
         .await;
 
@@ -935,6 +933,8 @@ impl ZerobusSdk {
         if guard.is_none() {
             // Create the channel for the first time.
             let endpoint = Endpoint::from_shared(self.zerobus_endpoint.clone())
+                .map_err(|err| ZerobusError::ChannelCreationError(err.to_string()))?
+                .user_agent(self.sdk_identifier.as_ref())
                 .map_err(|err| ZerobusError::ChannelCreationError(err.to_string()))?;
 
             let endpoint = self.tls_config.configure_endpoint(endpoint)?;
@@ -976,7 +976,6 @@ impl ZerobusStream {
         table_properties: TableProperties,
         headers_provider: Arc<dyn HeadersProvider>,
         options: StreamConfigurationOptions,
-        sdk_identifier: Arc<str>,
     ) -> ZerobusResult<Self> {
         let (stream_init_result_tx, stream_init_result_rx) =
             tokio::sync::oneshot::channel::<ZerobusResult<String>>();
@@ -1021,7 +1020,6 @@ impl ZerobusStream {
             server_error_tx,
             cancellation_token.clone(),
             callback_tx.clone(),
-            Arc::clone(&sdk_identifier),
         ));
         let stream_id = Some(stream_init_result_rx.await.map_err(|_| {
             ZerobusError::UnexpectedStreamResponseError(
@@ -1070,7 +1068,6 @@ impl ZerobusStream {
         server_error_tx: tokio::sync::watch::Sender<Option<ZerobusError>>,
         cancellation_token: CancellationToken,
         callback_tx: Option<tokio::sync::mpsc::UnboundedSender<CallbackMessage>>,
-        sdk_identifier: Arc<str>,
     ) -> ZerobusResult<()> {
         let mut initial_stream_creation = true;
         let mut stream_init_result_tx = Some(stream_init_result_tx);
@@ -1096,7 +1093,6 @@ impl ZerobusStream {
                 let table_properties = table_properties.clone();
                 let headers_provider = Arc::clone(&headers_provider);
                 let record_type = options.record_type;
-                let sdk_identifier = Arc::clone(&sdk_identifier);
 
                 async move {
                     tokio::time::timeout(
@@ -1106,7 +1102,6 @@ impl ZerobusStream {
                             &table_properties,
                             &headers_provider,
                             record_type,
-                            &sdk_identifier,
                         ),
                     )
                     .await
@@ -1265,7 +1260,6 @@ impl ZerobusStream {
         table_properties: &TableProperties,
         headers_provider: &Arc<dyn HeadersProvider>,
         record_type: RecordType,
-        sdk_identifier: &str,
     ) -> ZerobusResult<(
         tokio::sync::mpsc::Sender<EphemeralStreamRequest>,
         tonic::Streaming<EphemeralStreamResponse>,
@@ -1293,9 +1287,6 @@ impl ZerobusStream {
                     auth_value.set_sensitive(true);
                     stream_metadata.insert("authorization", auth_value);
                 }
-                "x-zerobus-sdk" => {
-                    // Owned by the SDK (set below); ignore provider-supplied values.
-                }
                 other_key => {
                     let header_value = MetadataValue::try_from(value.as_str())
                         .map_err(|_| ZerobusError::InvalidArgument(other_key.to_string()))?;
@@ -1303,14 +1294,6 @@ impl ZerobusStream {
                 }
             }
         }
-
-        let sdk_identifier_value = MetadataValue::try_from(sdk_identifier).map_err(|_| {
-            ZerobusError::InvalidArgument(format!(
-                "invalid x-zerobus-sdk value: {}",
-                sdk_identifier
-            ))
-        })?;
-        stream_metadata.insert("x-zerobus-sdk", sdk_identifier_value);
 
         let mut response_grpc_stream = channel
             .ephemeral_stream(request_stream)

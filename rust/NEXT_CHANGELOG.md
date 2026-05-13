@@ -14,11 +14,12 @@
   `Map("entries", Struct{keys,values})`) matching the canonical Arrow schema
   the Databricks Arrow Flight server builds from Delta.
 - **`ZerobusSdkBuilder::application_name`**: Set a custom application identifier
-  appended to the `x-zerobus-sdk` gRPC metadata header on every request. The
-  default `zerobus-sdk-rs/<version>` prefix is preserved for server-side
-  telemetry, so the wire value becomes `zerobus-sdk-rs/<version> <application_name>`.
-  The SDK now owns this header at the gRPC layer: any `x-zerobus-sdk` value
-  returned by a `HeadersProvider` is ignored.
+  appended to the HTTP `user-agent` header (sent on the underlying tonic
+  `Endpoint`) on every request. The default `zerobus-sdk-rs/<version>` prefix
+  is preserved for server-side telemetry, so the wire value becomes
+  `zerobus-sdk-rs/<version> <application_name>`. The previous `x-zerobus-sdk`
+  gRPC metadata header is no longer emitted; downstream consumers that parsed
+  it should switch to reading `user-agent`.
 
 ### Bug Fixes
 

@@ -638,6 +638,8 @@ impl ZerobusArrowStream {
 
         let base_endpoint = Channel::from_shared(endpoint.to_string())
             .map_err(|e| ZerobusError::ChannelCreationError(e.to_string()))?
+            .user_agent(sdk_identifier)
+            .map_err(|e| ZerobusError::ChannelCreationError(e.to_string()))?
             .connect_timeout(connection_timeout)
             .timeout(connection_timeout);
 
@@ -646,9 +648,8 @@ impl ZerobusArrowStream {
         let mut client = FlightClient::new(channel);
 
         // Add headers from the provider first, filtering out reserved headers.
-        // The table name and SDK identifier headers are authoritative and must not be overridden.
+        // The table name header is authoritative and must not be overridden.
         const TABLE_NAME_HEADER: &str = "x-databricks-zerobus-table-name";
-        const SDK_IDENTIFIER_HEADER: &str = "x-zerobus-sdk";
         let headers = headers_provider.get_headers().await?;
         for (key, value) in headers {
             if key.eq_ignore_ascii_case(TABLE_NAME_HEADER) {
@@ -656,10 +657,6 @@ impl ZerobusArrowStream {
                     "HeadersProvider attempted to set reserved header '{}', ignoring",
                     TABLE_NAME_HEADER
                 );
-                continue;
-            }
-            if key.eq_ignore_ascii_case(SDK_IDENTIFIER_HEADER) {
-                // Owned by the SDK (set below); silently ignore provider-supplied values.
                 continue;
             }
             client.add_header(key, &value).map_err(|e| {
@@ -672,13 +669,6 @@ impl ZerobusArrowStream {
             .add_header(TABLE_NAME_HEADER, &table_properties.table_name)
             .map_err(|e| {
                 ZerobusError::InvalidArgument(format!("Failed to add table name header: {}", e))
-            })?;
-
-        // Add the SDK identifier header (authoritative).
-        client
-            .add_header(SDK_IDENTIFIER_HEADER, sdk_identifier)
-            .map_err(|e| {
-                ZerobusError::InvalidArgument(format!("Failed to add x-zerobus-sdk header: {}", e))
             })?;
 
         Ok(client)
