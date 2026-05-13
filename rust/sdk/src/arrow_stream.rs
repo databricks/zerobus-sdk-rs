@@ -67,13 +67,13 @@ impl ArrowPayload {
 /// **Do not construct this directly.** Configure Arrow streams via the builder API:
 /// `sdk.stream_builder().table("catalog.schema.table").arrow(schema)`.
 #[derive(Debug, Clone)]
-pub struct ArrowTableProperties {
+pub(crate) struct ArrowTableProperties {
     /// The fully qualified table name (e.g., "catalog.schema.table").
-    pub table_name: String,
+    pub(crate) table_name: String,
     /// The Arrow schema for the data being ingested.
     /// This is used to validate RecordBatches before sending and is sent
     /// as the first message in the Flight stream.
-    pub schema: Arc<ArrowSchema>,
+    pub(crate) schema: Arc<ArrowSchema>,
 }
 
 /// A pending batch waiting for acknowledgment.
@@ -411,6 +411,7 @@ fn record_batch_to_flight_data(
 /// # Ok(())
 /// # }
 /// ```
+#[non_exhaustive]
 pub struct ZerobusArrowStream {
     /// Table properties including name and schema.
     pub(crate) table_properties: ArrowTableProperties,
@@ -1873,11 +1874,6 @@ impl ZerobusArrowStream {
     /// Returns the Arrow schema for this stream.
     pub fn schema(&self) -> &Arc<ArrowSchema> {
         &self.table_properties.schema
-    }
-
-    /// Returns the table properties for this stream.
-    pub fn table_properties(&self) -> &ArrowTableProperties {
-        &self.table_properties
     }
 
     /// Returns the configuration options for this stream.

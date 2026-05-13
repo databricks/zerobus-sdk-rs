@@ -17,12 +17,10 @@ use arrow_ipc::{reader::StreamReader, writer::StreamWriter, CompressionType};
 use async_trait::async_trait;
 use databricks_zerobus_ingest_sdk::databricks::zerobus::RecordType;
 use databricks_zerobus_ingest_sdk::{
-    ArrowStreamConfigurationOptions, RecordBatch, StreamBuilder, ZerobusArrowStream,
+    EncodedRecord, HeadersProvider, NoTlsConfig, ZerobusError, ZerobusResult, ZerobusSdk,
+    ZerobusStream,
 };
-use databricks_zerobus_ingest_sdk::{
-    EncodedRecord, HeadersProvider, NoTlsConfig, StreamConfigurationOptions, ZerobusError,
-    ZerobusResult, ZerobusSdk, ZerobusStream,
-};
+use databricks_zerobus_ingest_sdk::{RecordBatch, StreamBuilder, ZerobusArrowStream};
 use prost::Message;
 use std::sync::Arc;
 
@@ -61,29 +59,19 @@ pub struct CArrowStreamConfigurationOptions {
     pub stream_paused_max_wait_time_ms: i64,
 }
 
-impl From<CArrowStreamConfigurationOptions> for ArrowStreamConfigurationOptions {
-    fn from(c_opts: CArrowStreamConfigurationOptions) -> Self {
-        let ipc_compression = match c_opts.ipc_compression {
-            0 => Some(CompressionType::LZ4_FRAME),
-            1 => Some(CompressionType::ZSTD),
-            _ => None,
-        };
-        let stream_paused_max_wait_time_ms = match c_opts.stream_paused_max_wait_time_ms {
-            n if n < 0 => None,
-            n => Some(n as u64),
-        };
-        ArrowStreamConfigurationOptions {
-            max_inflight_batches: c_opts.max_inflight_batches,
-            recovery: c_opts.recovery,
-            recovery_timeout_ms: c_opts.recovery_timeout_ms,
-            recovery_backoff_ms: c_opts.recovery_backoff_ms,
-            recovery_retries: c_opts.recovery_retries,
-            server_lack_of_ack_timeout_ms: c_opts.server_lack_of_ack_timeout_ms,
-            flush_timeout_ms: c_opts.flush_timeout_ms,
-            connection_timeout_ms: c_opts.connection_timeout_ms,
-            ipc_compression,
-            stream_paused_max_wait_time_ms,
-        }
+fn c_to_compression(value: i32) -> Option<CompressionType> {
+    match value {
+        0 => Some(CompressionType::LZ4_FRAME),
+        1 => Some(CompressionType::ZSTD),
+        _ => None,
+    }
+}
+
+fn c_to_stream_paused_ms(value: i64) -> Option<u64> {
+    if value < 0 {
+        None
+    } else {
+        Some(value as u64)
     }
 }
 
@@ -166,40 +154,53 @@ fn record_batch_to_ipc_bytes(batch: &RecordBatch) -> ZerobusResult<Vec<u8>> {
 
 // Builder option application helpers
 
-fn apply_stream_options(
-    builder: StreamBuilder<'_>,
-    opts: StreamConfigurationOptions,
-) -> StreamBuilder<'_> {
-    let mut b = builder
-        .max_inflight_requests(opts.max_inflight_requests)
-        .recovery(opts.recovery)
-        .recovery_timeout_ms(opts.recovery_timeout_ms)
-        .recovery_backoff_ms(opts.recovery_backoff_ms)
-        .recovery_retries(opts.recovery_retries)
-        .server_lack_of_ack_timeout_ms(opts.server_lack_of_ack_timeout_ms)
-        .flush_timeout_ms(opts.flush_timeout_ms)
-        .stream_paused_max_wait_time_ms(opts.stream_paused_max_wait_time_ms)
-        .callback_max_wait_time_ms(opts.callback_max_wait_time_ms);
-    if let Some(cb) = opts.ack_callback {
-        b = b.ack_callback(cb);
-    }
-    b
+fn apply_c_stream_options<'a>(
+    builder: StreamBuilder<'a>,
+    c: &CStreamConfigurationOptions,
+) -> StreamBuilder<'a> {
+    builder
+        .max_inflight_requests(c.max_inflight_requests)
+        .recovery(c.recovery)
+        .recovery_timeout_ms(c.recovery_timeout_ms)
+        .recovery_backoff_ms(c.recovery_backoff_ms)
+        .recovery_retries(c.recovery_retries)
+        .server_lack_of_ack_timeout_ms(c.server_lack_of_ack_timeout_ms)
+        .flush_timeout_ms(c.flush_timeout_ms)
+        .stream_paused_max_wait_time_ms(if c.has_stream_paused_max_wait_time_ms {
+            Some(c.stream_paused_max_wait_time_ms)
+        } else {
+            None
+        })
+        .callback_max_wait_time_ms(if c.has_callback_max_wait_time_ms {
+            Some(c.callback_max_wait_time_ms)
+        } else {
+            None
+        })
 }
 
-fn apply_arrow_stream_options(
-    builder: StreamBuilder<'_>,
-    opts: ArrowStreamConfigurationOptions,
-) -> StreamBuilder<'_> {
+fn c_record_type(value: i32) -> RecordType {
+    match value {
+        1 => RecordType::Proto,
+        2 => RecordType::Json,
+        _ => RecordType::Unspecified,
+    }
+}
+
+fn apply_c_arrow_stream_options<'a>(
+    builder: StreamBuilder<'a>,
+    c: &CArrowStreamConfigurationOptions,
+) -> StreamBuilder<'a> {
     builder
-        .max_inflight_batches(opts.max_inflight_batches)
-        .recovery(opts.recovery)
-        .recovery_timeout_ms(opts.recovery_timeout_ms)
-        .recovery_backoff_ms(opts.recovery_backoff_ms)
-        .recovery_retries(opts.recovery_retries)
-        .server_lack_of_ack_timeout_ms(opts.server_lack_of_ack_timeout_ms)
-        .flush_timeout_ms(opts.flush_timeout_ms)
-        .connection_timeout_ms(opts.connection_timeout_ms)
-        .ipc_compression(opts.ipc_compression)
+        .max_inflight_batches(c.max_inflight_batches)
+        .recovery(c.recovery)
+        .recovery_timeout_ms(c.recovery_timeout_ms)
+        .recovery_backoff_ms(c.recovery_backoff_ms)
+        .recovery_retries(c.recovery_retries)
+        .server_lack_of_ack_timeout_ms(c.server_lack_of_ack_timeout_ms)
+        .flush_timeout_ms(c.flush_timeout_ms)
+        .connection_timeout_ms(c.connection_timeout_ms)
+        .ipc_compression(c_to_compression(c.ipc_compression))
+        .stream_paused_max_wait_time_ms(c_to_stream_paused_ms(c.stream_paused_max_wait_time_ms))
 }
 
 // ---- Arrow FFI functions ----
@@ -245,7 +246,7 @@ pub extern "C" fn zerobus_sdk_create_arrow_stream(
             .oauth(client_id_str, client_secret_str)
             .arrow(schema);
         if !options.is_null() {
-            builder = apply_arrow_stream_options(builder, unsafe { (*options).into() });
+            builder = apply_c_arrow_stream_options(builder, unsafe { &*options });
         }
 
         let stream = builder.build_arrow().await.map_err(|e| e.to_string())?;
@@ -306,7 +307,7 @@ pub extern "C" fn zerobus_sdk_create_arrow_stream_with_headers_provider(
             .headers_provider(headers_provider)
             .arrow(schema);
         if !options.is_null() {
-            builder = apply_arrow_stream_options(builder, unsafe { (*options).into() });
+            builder = apply_c_arrow_stream_options(builder, unsafe { &*options });
         }
 
         let stream = builder.build_arrow().await.map_err(|e| e.to_string())?;
@@ -610,27 +611,18 @@ pub extern "C" fn zerobus_arrow_stream_is_closed(stream: *mut CArrowStream) -> b
 /// Returns the default Arrow stream configuration options.
 #[no_mangle]
 pub extern "C" fn zerobus_arrow_get_default_config() -> CArrowStreamConfigurationOptions {
-    let d = ArrowStreamConfigurationOptions::default();
-    let ipc_compression = match d.ipc_compression {
-        Some(ct) if ct == CompressionType::LZ4_FRAME => 0,
-        Some(ct) if ct == CompressionType::ZSTD => 1,
-        _ => -1,
-    };
-    let stream_paused_max_wait_time_ms = match d.stream_paused_max_wait_time_ms {
-        None => -1,
-        Some(n) => n as i64,
-    };
+    use databricks_zerobus_ingest_sdk::stream_options::defaults;
     CArrowStreamConfigurationOptions {
-        max_inflight_batches: d.max_inflight_batches,
-        recovery: d.recovery,
-        recovery_timeout_ms: d.recovery_timeout_ms,
-        recovery_backoff_ms: d.recovery_backoff_ms,
-        recovery_retries: d.recovery_retries,
-        server_lack_of_ack_timeout_ms: d.server_lack_of_ack_timeout_ms,
-        flush_timeout_ms: d.flush_timeout_ms,
-        connection_timeout_ms: d.connection_timeout_ms,
-        ipc_compression,
-        stream_paused_max_wait_time_ms,
+        max_inflight_batches: 1_000,
+        recovery: defaults::RECOVERY,
+        recovery_timeout_ms: defaults::RECOVERY_TIMEOUT_MS,
+        recovery_backoff_ms: defaults::RECOVERY_BACKOFF_MS,
+        recovery_retries: defaults::RECOVERY_RETRIES,
+        server_lack_of_ack_timeout_ms: defaults::SERVER_LACK_OF_ACK_TIMEOUT_MS,
+        flush_timeout_ms: defaults::FLUSH_TIMEOUT_MS,
+        connection_timeout_ms: defaults::CONNECTION_TIMEOUT_MS,
+        ipc_compression: -1,
+        stream_paused_max_wait_time_ms: -1,
     }
 }
 
@@ -753,36 +745,6 @@ pub struct CStreamConfigurationOptions {
     pub has_stream_paused_max_wait_time_ms: bool,
     pub callback_max_wait_time_ms: u64,
     pub has_callback_max_wait_time_ms: bool,
-}
-
-impl From<CStreamConfigurationOptions> for StreamConfigurationOptions {
-    fn from(c_opts: CStreamConfigurationOptions) -> Self {
-        StreamConfigurationOptions {
-            max_inflight_requests: c_opts.max_inflight_requests,
-            recovery: c_opts.recovery,
-            recovery_timeout_ms: c_opts.recovery_timeout_ms,
-            recovery_backoff_ms: c_opts.recovery_backoff_ms,
-            recovery_retries: c_opts.recovery_retries,
-            server_lack_of_ack_timeout_ms: c_opts.server_lack_of_ack_timeout_ms,
-            flush_timeout_ms: c_opts.flush_timeout_ms,
-            record_type: match c_opts.record_type {
-                1 => RecordType::Proto,
-                2 => RecordType::Json,
-                _ => RecordType::Unspecified,
-            },
-            stream_paused_max_wait_time_ms: if c_opts.has_stream_paused_max_wait_time_ms {
-                Some(c_opts.stream_paused_max_wait_time_ms)
-            } else {
-                None
-            },
-            callback_max_wait_time_ms: if c_opts.has_callback_max_wait_time_ms {
-                Some(c_opts.callback_max_wait_time_ms)
-            } else {
-                None
-            },
-            ack_callback: None,
-        }
-    }
 }
 
 // Helper to convert C string to Rust String
@@ -1077,15 +1039,13 @@ pub extern "C" fn zerobus_sdk_create_stream(
             None
         };
 
-        let stream_options: Option<StreamConfigurationOptions> = if !options.is_null() {
-            Some(unsafe { (*options).into() })
+        let c_opts = if !options.is_null() {
+            Some(unsafe { &*options })
         } else {
             None
         };
-
-        let record_type = stream_options
-            .as_ref()
-            .map(|o| o.record_type)
+        let record_type = c_opts
+            .map(|c| c_record_type(c.record_type))
             .unwrap_or(RecordType::Proto);
 
         let base = sdk_ref
@@ -1102,8 +1062,8 @@ pub extern "C" fn zerobus_sdk_create_stream(
             RecordType::Json => base.json(),
             RecordType::Unspecified => return Err("Record type is not specified".to_string()),
         };
-        if let Some(opts) = stream_options {
-            builder = apply_stream_options(builder, opts);
+        if let Some(c) = c_opts {
+            builder = apply_c_stream_options(builder, c);
         }
 
         let stream = builder.build().await.map_err(|e| e.to_string())?;
@@ -1156,15 +1116,13 @@ pub extern "C" fn zerobus_sdk_create_stream_with_headers_provider(
             None
         };
 
-        let stream_options: Option<StreamConfigurationOptions> = if !options.is_null() {
-            Some(unsafe { (*options).into() })
+        let c_opts = if !options.is_null() {
+            Some(unsafe { &*options })
         } else {
             None
         };
-
-        let record_type = stream_options
-            .as_ref()
-            .map(|o| o.record_type)
+        let record_type = c_opts
+            .map(|c| c_record_type(c.record_type))
             .unwrap_or(RecordType::Proto);
 
         let headers_provider: Arc<dyn HeadersProvider> =
@@ -1184,8 +1142,8 @@ pub extern "C" fn zerobus_sdk_create_stream_with_headers_provider(
             RecordType::Json => base.json(),
             RecordType::Unspecified => return Err("Record type is not specified".to_string()),
         };
-        if let Some(opts) = stream_options {
-            builder = apply_stream_options(builder, opts);
+        if let Some(c) = c_opts {
+            builder = apply_c_stream_options(builder, c);
         }
 
         let stream = builder.build().await.map_err(|e| e.to_string())?;
@@ -1646,19 +1604,19 @@ pub extern "C" fn zerobus_free_error_message(message: *mut c_char) {
 /// Get default stream configuration options
 #[no_mangle]
 pub extern "C" fn zerobus_get_default_config() -> CStreamConfigurationOptions {
-    let default_opts = StreamConfigurationOptions::default();
+    use databricks_zerobus_ingest_sdk::stream_options::defaults;
     CStreamConfigurationOptions {
-        max_inflight_requests: default_opts.max_inflight_requests,
-        recovery: default_opts.recovery,
-        recovery_timeout_ms: default_opts.recovery_timeout_ms,
-        recovery_backoff_ms: default_opts.recovery_backoff_ms,
-        recovery_retries: default_opts.recovery_retries,
-        server_lack_of_ack_timeout_ms: default_opts.server_lack_of_ack_timeout_ms,
-        flush_timeout_ms: default_opts.flush_timeout_ms,
-        record_type: 1,                            // RecordType::Proto
-        stream_paused_max_wait_time_ms: 0,         // Not used when has_ is false
-        has_stream_paused_max_wait_time_ms: false, // Default is None
-        callback_max_wait_time_ms: 0,              // Not used when has_ is false
-        has_callback_max_wait_time_ms: false,      // Default is None
+        max_inflight_requests: 1_000_000,
+        recovery: defaults::RECOVERY,
+        recovery_timeout_ms: defaults::RECOVERY_TIMEOUT_MS,
+        recovery_backoff_ms: defaults::RECOVERY_BACKOFF_MS,
+        recovery_retries: defaults::RECOVERY_RETRIES,
+        server_lack_of_ack_timeout_ms: defaults::SERVER_LACK_OF_ACK_TIMEOUT_MS,
+        flush_timeout_ms: defaults::FLUSH_TIMEOUT_MS,
+        record_type: 1, // RecordType::Proto
+        stream_paused_max_wait_time_ms: 0,
+        has_stream_paused_max_wait_time_ms: false,
+        callback_max_wait_time_ms: defaults::CALLBACK_MAX_WAIT_TIME_MS,
+        has_callback_max_wait_time_ms: true,
     }
 }

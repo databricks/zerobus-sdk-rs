@@ -1,10 +1,10 @@
 #[cfg(test)]
 mod tests {
     use crate::{
-        intern_header_key, validate_sdk_ptr, validate_stream_ptr, write_error_result,
-        write_success_result, zerobus_free_error_message, zerobus_get_default_config, CHeaders,
-        CResult, CStreamConfigurationOptions, CallbackHeadersProvider, RecordType,
-        StreamConfigurationOptions, ZerobusError,
+        c_record_type, intern_header_key, validate_sdk_ptr, validate_stream_ptr,
+        write_error_result, write_success_result, zerobus_free_error_message,
+        zerobus_get_default_config, CHeaders, CResult, CallbackHeadersProvider, RecordType,
+        ZerobusError,
     };
     use databricks_zerobus_ingest_sdk::HeadersProvider;
     use std::ffi::{CStr, CString};
@@ -167,71 +167,11 @@ mod tests {
     // ========================================================================
 
     #[test]
-    fn test_stream_config_conversion() {
-        let c_config = CStreamConfigurationOptions {
-            max_inflight_requests: 100,
-            recovery: true,
-            recovery_timeout_ms: 5000,
-            recovery_backoff_ms: 1000,
-            recovery_retries: 3,
-            server_lack_of_ack_timeout_ms: 10000,
-            flush_timeout_ms: 2000,
-            record_type: 1, // Proto
-            stream_paused_max_wait_time_ms: 0,
-            has_stream_paused_max_wait_time_ms: false,
-            callback_max_wait_time_ms: 0,
-            has_callback_max_wait_time_ms: false,
-        };
-
-        let rust_config: StreamConfigurationOptions = c_config.into();
-
-        assert_eq!(rust_config.max_inflight_requests, 100);
-        assert_eq!(rust_config.recovery, true);
-        assert_eq!(rust_config.recovery_timeout_ms, 5000);
-        assert_eq!(rust_config.recovery_retries, 3);
-        assert_eq!(rust_config.record_type, RecordType::Proto);
-    }
-
-    #[test]
-    fn test_stream_config_record_type_json() {
-        let c_config = CStreamConfigurationOptions {
-            max_inflight_requests: 50,
-            recovery: false,
-            recovery_timeout_ms: 0,
-            recovery_backoff_ms: 0,
-            recovery_retries: 0,
-            server_lack_of_ack_timeout_ms: 0,
-            flush_timeout_ms: 0,
-            record_type: 2, // Json
-            stream_paused_max_wait_time_ms: 0,
-            has_stream_paused_max_wait_time_ms: false,
-            callback_max_wait_time_ms: 0,
-            has_callback_max_wait_time_ms: false,
-        };
-
-        let rust_config: StreamConfigurationOptions = c_config.into();
-        assert_eq!(rust_config.record_type, RecordType::Json);
-    }
-
-    #[test]
-    fn test_stream_config_record_type_unspecified() {
-        let c_config = CStreamConfigurationOptions {
-            max_inflight_requests: 50,
-            recovery: false,
-            recovery_timeout_ms: 0,
-            recovery_backoff_ms: 0,
-            recovery_retries: 0,
-            server_lack_of_ack_timeout_ms: 0,
-            flush_timeout_ms: 0,
-            record_type: 999, // Invalid
-            stream_paused_max_wait_time_ms: 0,
-            has_stream_paused_max_wait_time_ms: false,
-            callback_max_wait_time_ms: 0,
-            has_callback_max_wait_time_ms: false,
-        };
-
-        let rust_config: StreamConfigurationOptions = c_config.into();
-        assert_eq!(rust_config.record_type, RecordType::Unspecified);
+    fn test_c_record_type_mapping() {
+        assert_eq!(c_record_type(1), RecordType::Proto);
+        assert_eq!(c_record_type(2), RecordType::Json);
+        assert_eq!(c_record_type(999), RecordType::Unspecified);
+        assert_eq!(c_record_type(0), RecordType::Unspecified);
     }
 
     #[test]

@@ -26,6 +26,7 @@ use arrow_ipc::CompressionType;
 ///     .await?;
 /// ```
 #[derive(Clone, Debug)]
+#[non_exhaustive]
 pub struct ArrowStreamConfigurationOptions {
     /// Maximum number of batches that can be in-flight (sent but not acknowledged).
     ///

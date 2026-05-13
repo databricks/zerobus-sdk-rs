@@ -52,7 +52,7 @@ mod proxy;
 mod record_types;
 pub mod schema;
 mod stream_configuration;
-mod stream_options;
+pub mod stream_options;
 mod tls_config;
 
 use std::collections::HashMap;
@@ -86,9 +86,7 @@ use landing_zone::LandingZone;
 #[cfg(feature = "arrow-flight")]
 pub use arrow_configuration::ArrowStreamConfigurationOptions;
 #[cfg(feature = "arrow-flight")]
-pub use arrow_stream::{
-    ArrowSchema, ArrowTableProperties, DataType, Field, RecordBatch, ZerobusArrowStream,
-};
+pub use arrow_stream::{ArrowSchema, DataType, Field, RecordBatch, ZerobusArrowStream};
 pub use builder::{StreamBuilder, ZerobusSdkBuilder};
 pub use callbacks::AckCallback;
 pub use default_token_factory::DefaultTokenFactory;
@@ -114,6 +112,7 @@ const STREAM_TEARDOWN_DRAIN_TIMEOUT_MS: u64 = 500;
 /// The type of the stream connection created with the server.
 /// Currently we only support ephemeral streams on the server side, so we support only that in the SDK as well.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum StreamType {
     /// Ephemeral streams exist only for the duration of the connection.
     /// They are not persisted and are not recoverable.
@@ -132,9 +131,9 @@ pub enum StreamType {
 /// -`PermissionDenied`: insufficient permissions to write to the specified table
 /// -`InvalidArgument`: invalid or missing descriptor_proto or auth token
 #[derive(Debug, Clone)]
-pub struct TableProperties {
-    pub table_name: String,
-    pub descriptor_proto: Option<prost_types::DescriptorProto>,
+pub(crate) struct TableProperties {
+    pub(crate) table_name: String,
+    pub(crate) descriptor_proto: Option<prost_types::DescriptorProto>,
 }
 
 pub type ZerobusResult<T> = Result<T, ZerobusError>;
@@ -190,6 +189,7 @@ enum CallbackMessage {
 /// # Ok(())
 /// # }
 /// ```
+#[non_exhaustive]
 pub struct ZerobusStream {
     /// This is a 128-bit UUID that is unique across all streams in the system,
     /// not just within a single table. The server returns this ID in the CreateStreamResponse
@@ -202,7 +202,7 @@ pub struct ZerobusStream {
     /// The stream configuration options related to recovery, fetching OAuth tokens, etc.
     pub options: StreamConfigurationOptions,
     /// The table properties - table name and descriptor of the table.
-    pub table_properties: TableProperties,
+    pub(crate) table_properties: TableProperties,
     /// Logical landing zone that is used to store records that have been sent by user but not yet sent over the network.
     landing_zone: RecordLandingZone,
     /// Map of logical offset to oneshot sender.
@@ -255,6 +255,7 @@ pub struct ZerobusStream {
 /// // Wait for acknowledgment
 /// stream.wait_for_offset(offset_id).await?;
 /// ```
+#[non_exhaustive]
 pub struct ZerobusSdk {
     pub zerobus_endpoint: String,
     pub unity_catalog_url: String,
@@ -462,7 +463,7 @@ impl ZerobusSdk {
         let new_stream = ZerobusArrowStream::new(
             &self.zerobus_endpoint,
             Arc::clone(&self.tls_config),
-            stream.table_properties().clone(),
+            stream.table_properties.clone(),
             stream.headers_provider(),
             stream.options().clone(),
         )

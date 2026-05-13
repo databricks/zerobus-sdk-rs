@@ -1698,23 +1698,15 @@ mod arrow_flight_tests {
                 .tls_config(Arc::new(NoTlsConfig))
                 .build()?;
 
-            let table_properties = ArrowTableProperties {
-                table_name: TABLE_NAME.to_string(),
-                schema: schema.clone(),
-            };
-
             let mut stream = sdk
-                .create_arrow_stream_with_headers_provider(
-                    table_properties,
-                    Arc::new(TestHeadersProvider::default()),
-                    Some(ArrowStreamConfigurationOptions {
-                        recovery: true,
-                        recovery_backoff_ms: 100,
-                        recovery_retries: 3,
-                        // Default: stream_paused_max_wait_time_ms = None (wait full server duration)
-                        ..Default::default()
-                    }),
-                )
+                .stream_builder()
+                .table(TABLE_NAME)
+                .headers_provider(Arc::new(TestHeadersProvider::default()))
+                .arrow(schema.clone())
+                .recovery(true)
+                .recovery_backoff_ms(100)
+                .recovery_retries(3)
+                .build_arrow()
                 .await?;
 
             // Ingest batch 0 and 1 - these will be acked.
@@ -1801,24 +1793,16 @@ mod arrow_flight_tests {
                 .tls_config(Arc::new(NoTlsConfig))
                 .build()?;
 
-            let table_properties = ArrowTableProperties {
-                table_name: TABLE_NAME.to_string(),
-                schema: schema.clone(),
-            };
-
             let mut stream = sdk
-                .create_arrow_stream_with_headers_provider(
-                    table_properties,
-                    Arc::new(TestHeadersProvider::default()),
-                    Some(ArrowStreamConfigurationOptions {
-                        recovery: true,
-                        recovery_backoff_ms: 100,
-                        recovery_retries: 3,
-                        // Immediate recovery: don't wait for grace period.
-                        stream_paused_max_wait_time_ms: Some(0),
-                        ..Default::default()
-                    }),
-                )
+                .stream_builder()
+                .table(TABLE_NAME)
+                .headers_provider(Arc::new(TestHeadersProvider::default()))
+                .arrow(schema.clone())
+                .recovery(true)
+                .recovery_backoff_ms(100)
+                .recovery_retries(3)
+                .stream_paused_max_wait_time_ms(Some(0))
+                .build_arrow()
                 .await?;
 
             let batch0 = create_test_record_batch(
@@ -1891,24 +1875,16 @@ mod arrow_flight_tests {
                 .tls_config(Arc::new(NoTlsConfig))
                 .build()?;
 
-            let table_properties = ArrowTableProperties {
-                table_name: TABLE_NAME.to_string(),
-                schema: schema.clone(),
-            };
-
             let mut stream = sdk
-                .create_arrow_stream_with_headers_provider(
-                    table_properties,
-                    Arc::new(TestHeadersProvider::default()),
-                    Some(ArrowStreamConfigurationOptions {
-                        recovery: true,
-                        recovery_backoff_ms: 100,
-                        recovery_retries: 3,
-                        // Client max wait is less than server duration: should use min().
-                        stream_paused_max_wait_time_ms: Some(CLIENT_MAX_WAIT_MS),
-                        ..Default::default()
-                    }),
-                )
+                .stream_builder()
+                .table(TABLE_NAME)
+                .headers_provider(Arc::new(TestHeadersProvider::default()))
+                .arrow(schema.clone())
+                .recovery(true)
+                .recovery_backoff_ms(100)
+                .recovery_retries(3)
+                .stream_paused_max_wait_time_ms(Some(CLIENT_MAX_WAIT_MS))
+                .build_arrow()
                 .await?;
 
             let batch0 = create_test_record_batch(
@@ -1979,24 +1955,16 @@ mod arrow_flight_tests {
                 .tls_config(Arc::new(NoTlsConfig))
                 .build()?;
 
-            let table_properties = ArrowTableProperties {
-                table_name: TABLE_NAME.to_string(),
-                schema: schema.clone(),
-            };
-
             let mut stream = sdk
-                .create_arrow_stream_with_headers_provider(
-                    table_properties,
-                    Arc::new(TestHeadersProvider::default()),
-                    Some(ArrowStreamConfigurationOptions {
-                        recovery: true,
-                        recovery_backoff_ms: 100,
-                        recovery_retries: 3,
-                        // Wait full server duration (10s), but should exit early.
-                        stream_paused_max_wait_time_ms: None,
-                        ..Default::default()
-                    }),
-                )
+                .stream_builder()
+                .table(TABLE_NAME)
+                .headers_provider(Arc::new(TestHeadersProvider::default()))
+                .arrow(schema.clone())
+                .recovery(true)
+                .recovery_backoff_ms(100)
+                .recovery_retries(3)
+                .stream_paused_max_wait_time_ms(None)
+                .build_arrow()
                 .await?;
 
             let batch0 = create_test_record_batch(
@@ -2067,23 +2035,16 @@ mod arrow_flight_tests {
                 .tls_config(Arc::new(NoTlsConfig))
                 .build()?;
 
-            let table_properties = ArrowTableProperties {
-                table_name: TABLE_NAME.to_string(),
-                schema: schema.clone(),
-            };
-
             let mut stream = sdk
-                .create_arrow_stream_with_headers_provider(
-                    table_properties,
-                    Arc::new(TestHeadersProvider::default()),
-                    Some(ArrowStreamConfigurationOptions {
-                        recovery: true,
-                        recovery_backoff_ms: 100,
-                        recovery_retries: 3,
-                        stream_paused_max_wait_time_ms: None,
-                        ..Default::default()
-                    }),
-                )
+                .stream_builder()
+                .table(TABLE_NAME)
+                .headers_provider(Arc::new(TestHeadersProvider::default()))
+                .arrow(schema.clone())
+                .recovery(true)
+                .recovery_backoff_ms(100)
+                .recovery_retries(3)
+                .stream_paused_max_wait_time_ms(None)
+                .build_arrow()
                 .await?;
 
             let batch0 = create_test_record_batch(

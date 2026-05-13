@@ -6,15 +6,13 @@ use crate::arrow_stream::NativeArrowStreamHandle;
 use crate::async_bridge::{create_completable_future, spawn_and_complete};
 use crate::errors::{throw_from_zerobus_error, throw_zerobus_exception};
 use crate::options::{
-    default_arrow_stream_options, default_stream_options, extract_arrow_stream_options,
+    apply_arrow_stream_options, apply_stream_options, extract_arrow_stream_options,
     extract_stream_options,
 };
 use crate::runtime::block_on;
 use crate::stream::NativeStreamHandle;
 use databricks_zerobus_ingest_sdk::databricks::zerobus::RecordType;
-use databricks_zerobus_ingest_sdk::{
-    ArrowStreamConfigurationOptions, StreamBuilder, StreamConfigurationOptions, ZerobusSdk,
-};
+use databricks_zerobus_ingest_sdk::ZerobusSdk;
 use jni::objects::{JByteArray, JClass, JObject, JString};
 use jni::sys::{jboolean, jlong, JNI_FALSE};
 use jni::JNIEnv;
@@ -47,42 +45,6 @@ impl NativeSdkHandle {
     pub unsafe fn borrow_from_raw(ptr: jlong) -> &'static Self {
         &*(ptr as *const Self)
     }
-}
-
-fn apply_stream_options(
-    builder: StreamBuilder<'_>,
-    opts: StreamConfigurationOptions,
-) -> StreamBuilder<'_> {
-    let mut b = builder
-        .max_inflight_requests(opts.max_inflight_requests)
-        .recovery(opts.recovery)
-        .recovery_timeout_ms(opts.recovery_timeout_ms)
-        .recovery_backoff_ms(opts.recovery_backoff_ms)
-        .recovery_retries(opts.recovery_retries)
-        .server_lack_of_ack_timeout_ms(opts.server_lack_of_ack_timeout_ms)
-        .flush_timeout_ms(opts.flush_timeout_ms)
-        .stream_paused_max_wait_time_ms(opts.stream_paused_max_wait_time_ms)
-        .callback_max_wait_time_ms(opts.callback_max_wait_time_ms);
-    if let Some(cb) = opts.ack_callback {
-        b = b.ack_callback(cb);
-    }
-    b
-}
-
-fn apply_arrow_stream_options(
-    builder: StreamBuilder<'_>,
-    opts: ArrowStreamConfigurationOptions,
-) -> StreamBuilder<'_> {
-    builder
-        .max_inflight_batches(opts.max_inflight_batches)
-        .recovery(opts.recovery)
-        .recovery_timeout_ms(opts.recovery_timeout_ms)
-        .recovery_backoff_ms(opts.recovery_backoff_ms)
-        .recovery_retries(opts.recovery_retries)
-        .server_lack_of_ack_timeout_ms(opts.server_lack_of_ack_timeout_ms)
-        .flush_timeout_ms(opts.flush_timeout_ms)
-        .connection_timeout_ms(opts.connection_timeout_ms)
-        .ipc_compression(opts.ipc_compression)
 }
 
 /// Create a new ZerobusSdk instance.
@@ -238,12 +200,11 @@ pub extern "system" fn Java_com_databricks_zerobus_ZerobusSdk_nativeCreateStream
         RecordType::Proto
     };
 
-    // Extract options (may be null for defaults)
-    let stream_options = if options.is_null() {
-        default_stream_options(record_type)
+    let extracted_options = if options.is_null() {
+        None
     } else {
-        match extract_stream_options(&mut env, &options, record_type) {
-            Ok(opts) => opts,
+        match extract_stream_options(&mut env, &options) {
+            Ok(opts) => Some(opts),
             Err(e) => {
                 throw_zerobus_exception(&mut env, &format!("Invalid options: {}", e));
                 return JObject::null();
@@ -278,7 +239,7 @@ pub extern "system" fn Java_com_databricks_zerobus_ZerobusSdk_nativeCreateStream
                 .stream_builder()
                 .table(table_name)
                 .oauth(credentials.0.clone(), credentials.1.clone());
-            let builder = match record_type {
+            let mut builder = match record_type {
                 RecordType::Proto => {
                     let desc = descriptor_proto.ok_or_else(|| {
                         databricks_zerobus_ingest_sdk::ZerobusError::InvalidArgument(
@@ -296,10 +257,11 @@ pub extern "system" fn Java_com_databricks_zerobus_ZerobusSdk_nativeCreateStream
                     );
                 }
             };
+            if let Some(opts) = extracted_options {
+                builder = apply_stream_options(builder, opts);
+            }
 
-            let stream = apply_stream_options(builder, stream_options)
-                .build()
-                .await?;
+            let stream = builder.build().await?;
 
             Ok(NativeStreamHandle::new(
                 stream,
@@ -459,12 +421,11 @@ pub extern "system" fn Java_com_databricks_zerobus_ZerobusSdk_nativeCreateArrowS
         }
     };
 
-    // Extract options
-    let stream_options = if options.is_null() {
-        default_arrow_stream_options()
+    let extracted_options = if options.is_null() {
+        None
     } else {
         match extract_arrow_stream_options(&mut env, &options) {
-            Ok(opts) => opts,
+            Ok(opts) => Some(opts),
             Err(e) => {
                 throw_zerobus_exception(&mut env, &format!("Invalid options: {}", e));
                 return JObject::null();
@@ -493,15 +454,16 @@ pub extern "system" fn Java_com_databricks_zerobus_ZerobusSdk_nativeCreateArrowS
 
             let schema = reader.schema();
 
-            let builder = sdk_arc
+            let mut builder = sdk_arc
                 .stream_builder()
                 .table(table_name)
                 .oauth(credentials.0.clone(), credentials.1.clone())
                 .arrow(schema);
+            if let Some(opts) = extracted_options {
+                builder = apply_arrow_stream_options(builder, opts);
+            }
 
-            let stream = apply_arrow_stream_options(builder, stream_options)
-                .build_arrow()
-                .await?;
+            let stream = builder.build_arrow().await?;
 
             Ok(NativeArrowStreamHandle::new(
                 stream,
