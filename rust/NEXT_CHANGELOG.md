@@ -6,6 +6,14 @@
 
 ### New Features and Improvements
 
+- **Arrow schema from UC schema** (feature `arrow-flight`):
+  `schema::arrow_schema_from_uc_columns` and `schema::arrow_schema_from_uc_schema`
+  build an `arrow_schema::Schema` directly from Unity Catalog metadata, parallel
+  to the existing `descriptor_from_uc_*` functions. Emits native Arrow types
+  (`Date32`, `Timestamp(Microsecond, ..)`, `LargeUtf8`, `LargeBinary`,
+  `Map("entries", Struct{keys,values})`) matching the canonical Arrow schema
+  the Databricks Arrow Flight server builds from Delta.
+
 ### Bug Fixes
 
 ### Documentation

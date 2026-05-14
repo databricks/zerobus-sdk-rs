@@ -178,7 +178,8 @@ pub fn descriptor_from_uc_columns(
                 map_complex_type_to_protobuf(&complex, &column.name, &mut collector)?;
             (ty, type_name, is_repeated)
         } else {
-            (map_simple_databricks_type(&column.type_name)?, None, false)
+            let p = parse_uc_top_level_type(&column.type_name)?;
+            (map_primitive_to_protobuf(p), None, false)
         };
 
         fields.push(field_descriptor(
@@ -239,20 +240,25 @@ fn field_descriptor(
     }
 }
 
-fn map_simple_databricks_type(type_name: &str) -> Result<ProtoType, SchemaError> {
+/// Parse a top-level UC `type_name` (e.g. `"BIGINT"`, `"TIMESTAMP_NTZ"`) into our
+/// internal [`PrimitiveType`]. Single source of truth for the accepted set of
+/// non-complex UC types; each backend (proto, Arrow) projects from `PrimitiveType`
+/// onto its own target representation.
+fn parse_uc_top_level_type(type_name: &str) -> Result<PrimitiveType, SchemaError> {
     Ok(match type_name {
-        "STRING" => ProtoType::String,
-        "INT" | "INTEGER" => ProtoType::Int32,
-        "LONG" | "BIGINT" => ProtoType::Int64,
-        "SHORT" | "SMALLINT" | "BYTE" | "TINYINT" => ProtoType::Int32,
-        "BOOLEAN" | "BOOL" => ProtoType::Bool,
-        "DOUBLE" => ProtoType::Double,
-        "FLOAT" => ProtoType::Float,
-        "TIMESTAMP" | "TIMESTAMP_NTZ" => ProtoType::Int64,
-        "DATE" => ProtoType::Int32,
-        "BINARY" => ProtoType::Bytes,
-        "DECIMAL" => ProtoType::String,
-        "VARIANT" => ProtoType::String,
+        "STRING" | "VARIANT" => PrimitiveType::String,
+        "INT" | "INTEGER" => PrimitiveType::Integer,
+        "LONG" | "BIGINT" => PrimitiveType::Long,
+        "SHORT" | "SMALLINT" => PrimitiveType::Short,
+        "BYTE" | "TINYINT" => PrimitiveType::Byte,
+        "BOOLEAN" | "BOOL" => PrimitiveType::Boolean,
+        "DOUBLE" => PrimitiveType::Double,
+        "FLOAT" => PrimitiveType::Float,
+        "TIMESTAMP" => PrimitiveType::Timestamp,
+        "TIMESTAMP_NTZ" => PrimitiveType::TimestampNtz,
+        "DATE" => PrimitiveType::Date,
+        "BINARY" => PrimitiveType::Binary,
+        "DECIMAL" => PrimitiveType::Decimal,
         other => return Err(SchemaError::UnsupportedType(other.to_string())),
     })
 }
@@ -280,6 +286,7 @@ enum PrimitiveType {
     Boolean,
     Binary,
     Timestamp,
+    TimestampNtz,
     Date,
     Decimal,
 }
@@ -398,7 +405,8 @@ fn parse_primitive_type(s: &str) -> Result<PrimitiveType, String> {
         "float" => PrimitiveType::Float,
         "boolean" => PrimitiveType::Boolean,
         "binary" => PrimitiveType::Binary,
-        "timestamp" | "timestamp_ntz" => PrimitiveType::Timestamp,
+        "timestamp" => PrimitiveType::Timestamp,
+        "timestamp_ntz" => PrimitiveType::TimestampNtz,
         "date" => PrimitiveType::Date,
         s if s.starts_with("decimal") => PrimitiveType::Decimal,
         other => return Err(format!("unknown primitive type '{}'", other)),
@@ -415,7 +423,7 @@ const fn map_primitive_to_protobuf(p: PrimitiveType) -> ProtoType {
         PrimitiveType::Float => ProtoType::Float,
         PrimitiveType::Boolean => ProtoType::Bool,
         PrimitiveType::Binary => ProtoType::Bytes,
-        PrimitiveType::Timestamp => ProtoType::Int64,
+        PrimitiveType::Timestamp | PrimitiveType::TimestampNtz => ProtoType::Int64,
         PrimitiveType::Date => ProtoType::Int32,
         PrimitiveType::Decimal => ProtoType::String,
     }
@@ -426,6 +434,25 @@ const fn is_valid_map_key(p: PrimitiveType) -> bool {
         p,
         PrimitiveType::Double | PrimitiveType::Float | PrimitiveType::Binary
     )
+}
+
+fn validate_map_key(key: &ComplexType, path: &str) -> Result<PrimitiveType, SchemaError> {
+    match key {
+        ComplexType::Primitive(p) if is_valid_map_key(*p) => Ok(*p),
+        ComplexType::Primitive(p) => Err(SchemaError::Invalid(format!(
+            "unsupported map key type {:?} for field '{}' \
+             (map keys must be integral, bool, or string)",
+            p, path
+        ))),
+        _ => Err(SchemaError::Invalid(format!(
+            "map keys must be primitive types (field '{}')",
+            path
+        ))),
+    }
+}
+
+fn shape_unsupported(kind: &str, path: &str) -> SchemaError {
+    SchemaError::Invalid(format!("{} not supported for field '{}'", kind, path))
 }
 
 /// Accumulates nested message definitions during conversion and dedupes their names.
@@ -492,32 +519,11 @@ fn map_complex_type_to_protobuf(
                 let element_path = format!("{}_element", sanitize_message_name(path));
                 map_complex_type_to_protobuf(element, &element_path, collector)
             }
-            ComplexType::Array(_) => Err(SchemaError::Invalid(format!(
-                "nested arrays not supported for field '{}'",
-                path
-            ))),
-            ComplexType::Map { .. } => Err(SchemaError::Invalid(format!(
-                "arrays of maps not supported for field '{}'",
-                path
-            ))),
+            ComplexType::Array(_) => Err(shape_unsupported("nested arrays", path)),
+            ComplexType::Map { .. } => Err(shape_unsupported("arrays of maps", path)),
         },
         ComplexType::Map { key, value } => {
-            let key_primitive = match key.as_ref() {
-                ComplexType::Primitive(p) if is_valid_map_key(*p) => *p,
-                ComplexType::Primitive(p) => {
-                    return Err(SchemaError::Invalid(format!(
-                        "unsupported map key type {:?} for field '{}' \
-                         (protobuf map keys must be integral, bool, or string)",
-                        p, path
-                    )));
-                }
-                _ => {
-                    return Err(SchemaError::Invalid(format!(
-                        "map keys must be primitive types (field '{}')",
-                        path
-                    )));
-                }
-            };
+            let key_primitive = validate_map_key(key, path)?;
             let base = sanitize_message_name(path);
             let map_value = match value.as_ref() {
                 ComplexType::Primitive(v) => MapValue::Primitive(*v),
@@ -528,10 +534,7 @@ fn map_complex_type_to_protobuf(
                     MapValue::Message(value_name)
                 }
                 ComplexType::Array(_) | ComplexType::Map { .. } => {
-                    return Err(SchemaError::Invalid(format!(
-                        "maps with complex value types not supported for field '{}'",
-                        path
-                    )));
+                    return Err(shape_unsupported("maps with complex value types", path));
                 }
             };
             let entry_name = collector.unique_name(format!("{}Entry", base));
@@ -661,6 +664,167 @@ fn sanitize_message_name(name: &str) -> String {
         out.insert(0, 'M');
     }
     out
+}
+
+// ---------------------------------------------------------------------------
+// Arrow schema conversion (feature = "arrow-flight")
+// ---------------------------------------------------------------------------
+
+/// Build an [`arrow_schema::Schema`] from a Unity Catalog table's columns.
+///
+/// Parallels [`descriptor_from_uc_columns`] but targets Arrow Flight callers.
+/// Accepts the same set of UC types and applies the same structural rules
+/// (nested arrays, arrays-of-maps, and maps with complex values are rejected;
+/// map keys must be integral, bool, or string).
+///
+/// Notable Arrow choices, all dictated by the Databricks Arrow Flight server:
+/// `STRING` / `VARIANT` / `DECIMAL` → `LargeUtf8`, `BINARY` → `LargeBinary`,
+/// `DATE` → `Date32`, `TIMESTAMP` → `Timestamp(Microsecond, Some("UTC"))`,
+/// `TIMESTAMP_NTZ` → `Timestamp(Microsecond, None)`, `ARRAY<T>` → `List` with
+/// item field `"item"`, `MAP<K,V>` → `Map` with entries field `"entries"`
+/// containing `"keys"` and `"values"` (the canonical schema the Databricks
+/// Arrow Flight server builds from Delta).
+#[cfg(feature = "arrow-flight")]
+pub fn arrow_schema_from_uc_columns(
+    columns: &[UcColumn],
+) -> Result<arrow_schema::Schema, SchemaError> {
+    let mut sorted: Vec<&UcColumn> = columns.iter().filter(|c| c.position >= 0).collect();
+    sorted.sort_by_key(|c| c.position);
+
+    let mut fields = Vec::with_capacity(sorted.len());
+    for column in sorted.iter() {
+        validate_field_name(&column.name)?;
+        fields.push(uc_column_to_arrow_field(column)?);
+    }
+    Ok(arrow_schema::Schema::new(fields))
+}
+
+/// Build an [`arrow_schema::Schema`] from a full [`UcTableSchema`].
+///
+/// See [`arrow_schema_from_uc_columns`] for the type mapping. The schema name
+/// is not preserved in the returned Arrow schema (Arrow schemas do not carry a
+/// top-level name); only fields are emitted.
+#[cfg(feature = "arrow-flight")]
+pub fn arrow_schema_from_uc_schema(
+    schema: &UcTableSchema,
+) -> Result<arrow_schema::Schema, SchemaError> {
+    arrow_schema_from_uc_columns(&schema.columns)
+}
+
+#[cfg(feature = "arrow-flight")]
+fn uc_column_to_arrow_field(column: &UcColumn) -> Result<arrow_schema::Field, SchemaError> {
+    if is_complex(&column.type_name) {
+        if column.type_json.is_empty() {
+            return Err(SchemaError::MissingTypeJson(column.name.clone()));
+        }
+        let complex =
+            parse_type_json(&column.type_json).map_err(|reason| SchemaError::InvalidTypeJson {
+                column: column.name.clone(),
+                reason,
+            })?;
+        complex_type_to_arrow_field(&column.name, &complex, column.nullable)
+    } else {
+        let p = parse_uc_top_level_type(&column.type_name)?;
+        Ok(arrow_schema::Field::new(
+            &column.name,
+            map_primitive_to_arrow(p),
+            column.nullable,
+        ))
+    }
+}
+
+#[cfg(feature = "arrow-flight")]
+fn map_primitive_to_arrow(p: PrimitiveType) -> arrow_schema::DataType {
+    use arrow_schema::{DataType, TimeUnit};
+    match p {
+        PrimitiveType::String => DataType::LargeUtf8,
+        PrimitiveType::Long => DataType::Int64,
+        PrimitiveType::Integer => DataType::Int32,
+        PrimitiveType::Short => DataType::Int16,
+        PrimitiveType::Byte => DataType::Int8,
+        PrimitiveType::Double => DataType::Float64,
+        PrimitiveType::Float => DataType::Float32,
+        PrimitiveType::Boolean => DataType::Boolean,
+        PrimitiveType::Binary => DataType::LargeBinary,
+        PrimitiveType::Timestamp => DataType::Timestamp(TimeUnit::Microsecond, Some("UTC".into())),
+        PrimitiveType::TimestampNtz => DataType::Timestamp(TimeUnit::Microsecond, None),
+        PrimitiveType::Date => DataType::Date32,
+        // TODO: emit Decimal128(precision, scale) once the Databricks Arrow
+        // Flight server accepts native Decimal128. UC carries (p, s) in
+        // `type_text` ("decimal(10,2)") and the `type_json` primitive string,
+        // but `PrimitiveType::Decimal` discards them today.
+        PrimitiveType::Decimal => DataType::LargeUtf8,
+    }
+}
+
+#[cfg(feature = "arrow-flight")]
+fn complex_type_to_arrow_field(
+    name: &str,
+    ct: &ComplexType,
+    nullable: bool,
+) -> Result<arrow_schema::Field, SchemaError> {
+    use arrow_schema::{DataType, Field, Fields};
+    use std::sync::Arc;
+
+    match ct {
+        ComplexType::Primitive(p) => Ok(Field::new(name, map_primitive_to_arrow(*p), nullable)),
+        ComplexType::Struct(st) => {
+            let mut child_fields = Vec::with_capacity(st.fields.len());
+            for f in &st.fields {
+                validate_field_name(&f.name)?;
+                child_fields.push(complex_type_to_arrow_field(
+                    &f.name,
+                    &f.field_type,
+                    f.nullable,
+                )?);
+            }
+            Ok(Field::new(
+                name,
+                DataType::Struct(Fields::from(child_fields)),
+                nullable,
+            ))
+        }
+        ComplexType::Array(element) => {
+            // UC's `containsNull` is not surfaced in our AST; default to
+            // nullable elements (Spark/Delta semantics for an unspecified
+            // value).
+            let item_field = match element.as_ref() {
+                ComplexType::Primitive(p) => Field::new("item", map_primitive_to_arrow(*p), true),
+                ComplexType::Struct(_) => complex_type_to_arrow_field("item", element, true)?,
+                ComplexType::Array(_) => return Err(shape_unsupported("nested arrays", name)),
+                ComplexType::Map { .. } => return Err(shape_unsupported("arrays of maps", name)),
+            };
+            Ok(Field::new(
+                name,
+                DataType::List(Arc::new(item_field)),
+                nullable,
+            ))
+        }
+        ComplexType::Map { key, value } => {
+            let key_primitive = validate_map_key(key, name)?;
+            let value_field = match value.as_ref() {
+                ComplexType::Primitive(p) => Field::new("values", map_primitive_to_arrow(*p), true),
+                ComplexType::Struct(_) => complex_type_to_arrow_field("values", value, true)?,
+                ComplexType::Array(_) | ComplexType::Map { .. } => {
+                    return Err(shape_unsupported("maps with complex value types", name));
+                }
+            };
+            let entries = DataType::Struct(Fields::from(vec![
+                Field::new("keys", map_primitive_to_arrow(key_primitive), false),
+                value_field,
+            ]));
+            // "entries" / "keys" / "values" matches the canonical Arrow schema
+            // the Databricks Arrow Flight server builds from Delta on its side.
+            // The server also accepts the Arrow-default "key_value"/"key"/"value"
+            // names and normalizes via `arrow::compute::cast`, but emitting the
+            // canonical names directly avoids that per-batch cast.
+            Ok(Field::new(
+                name,
+                DataType::Map(Arc::new(Field::new("entries", entries, false)), false),
+                nullable,
+            ))
+        }
+    }
 }
 
 #[cfg(test)]
@@ -1000,5 +1164,284 @@ mod tests {
         assert_eq!(col.name, "id");
         assert_eq!(col.type_name, "INT");
         assert!(!col.nullable);
+    }
+
+    #[cfg(feature = "arrow-flight")]
+    mod arrow {
+        use super::*;
+        use arrow_schema::{DataType, TimeUnit};
+
+        fn arrow_field<'a>(
+            schema: &'a arrow_schema::Schema,
+            name: &str,
+        ) -> &'a arrow_schema::Field {
+            schema
+                .field_with_name(name)
+                .unwrap_or_else(|_| panic!("field '{}' not found", name))
+        }
+
+        #[test]
+        fn scalars_use_proper_arrow_types() {
+            let cols = vec![
+                col("id", "BIGINT", false, 0),
+                col("name", "STRING", true, 1),
+                col("score", "DOUBLE", true, 2),
+                col("created_at", "TIMESTAMP", true, 3),
+                col("seen_at", "TIMESTAMP_NTZ", true, 4),
+                col("d", "DATE", false, 5),
+                col("data", "BINARY", false, 6),
+                col("flag", "BOOLEAN", true, 7),
+                col("price", "DECIMAL", true, 8),
+            ];
+            let s = arrow_schema_from_uc_columns(&cols).unwrap();
+            assert_eq!(arrow_field(&s, "id").data_type(), &DataType::Int64);
+            assert!(!arrow_field(&s, "id").is_nullable());
+            assert_eq!(arrow_field(&s, "name").data_type(), &DataType::LargeUtf8);
+            assert!(arrow_field(&s, "name").is_nullable());
+            assert_eq!(arrow_field(&s, "score").data_type(), &DataType::Float64);
+            assert_eq!(
+                arrow_field(&s, "created_at").data_type(),
+                &DataType::Timestamp(TimeUnit::Microsecond, Some("UTC".into()))
+            );
+            assert_eq!(
+                arrow_field(&s, "seen_at").data_type(),
+                &DataType::Timestamp(TimeUnit::Microsecond, None)
+            );
+            assert_eq!(arrow_field(&s, "d").data_type(), &DataType::Date32);
+            assert_eq!(arrow_field(&s, "data").data_type(), &DataType::LargeBinary);
+            assert_eq!(arrow_field(&s, "flag").data_type(), &DataType::Boolean);
+            // DECIMAL renders as LargeUtf8 (text encoding contract preserved).
+            assert_eq!(arrow_field(&s, "price").data_type(), &DataType::LargeUtf8);
+        }
+
+        #[test]
+        fn columns_sorted_by_position() {
+            let cols = vec![
+                col("b", "STRING", true, 1),
+                col("a", "STRING", true, 0),
+                col("c", "STRING", true, 2),
+            ];
+            let s = arrow_schema_from_uc_columns(&cols).unwrap();
+            assert_eq!(s.field(0).name(), "a");
+            assert_eq!(s.field(1).name(), "b");
+            assert_eq!(s.field(2).name(), "c");
+        }
+
+        #[test]
+        fn struct_becomes_arrow_struct() {
+            let type_json = r#"{
+                "type":"struct",
+                "fields":[
+                    {"name":"street","type":"string","nullable":true,"metadata":{}},
+                    {"name":"zip","type":"integer","nullable":false,"metadata":{}}
+                ]
+            }"#;
+            let cols = vec![complex_col("address", "STRUCT", type_json, 0)];
+            let s = arrow_schema_from_uc_columns(&cols).unwrap();
+            let f = arrow_field(&s, "address");
+            match f.data_type() {
+                DataType::Struct(fs) => {
+                    assert_eq!(fs.len(), 2);
+                    assert_eq!(fs[0].name(), "street");
+                    assert_eq!(fs[0].data_type(), &DataType::LargeUtf8);
+                    assert!(fs[0].is_nullable());
+                    assert_eq!(fs[1].name(), "zip");
+                    assert_eq!(fs[1].data_type(), &DataType::Int32);
+                    assert!(!fs[1].is_nullable());
+                }
+                other => panic!("expected Struct, got {:?}", other),
+            }
+        }
+
+        #[test]
+        fn array_of_primitive_is_list() {
+            let type_json = r#"{"type":"array","elementType":"long","containsNull":true}"#;
+            let cols = vec![complex_col("tags", "ARRAY", type_json, 0)];
+            let s = arrow_schema_from_uc_columns(&cols).unwrap();
+            let f = arrow_field(&s, "tags");
+            match f.data_type() {
+                DataType::List(item) => {
+                    assert_eq!(item.name(), "item");
+                    assert_eq!(item.data_type(), &DataType::Int64);
+                    assert!(item.is_nullable());
+                }
+                other => panic!("expected List, got {:?}", other),
+            }
+        }
+
+        #[test]
+        fn array_of_struct_is_list_of_struct() {
+            let type_json = r#"{
+                "type":"array",
+                "elementType":{
+                    "type":"struct",
+                    "fields":[{"name":"k","type":"string","nullable":true,"metadata":{}}]
+                },
+                "containsNull":true
+            }"#;
+            let cols = vec![complex_col("items", "ARRAY", type_json, 0)];
+            let s = arrow_schema_from_uc_columns(&cols).unwrap();
+            let f = arrow_field(&s, "items");
+            match f.data_type() {
+                DataType::List(item) => match item.data_type() {
+                    DataType::Struct(fs) => {
+                        assert_eq!(fs.len(), 1);
+                        assert_eq!(fs[0].name(), "k");
+                    }
+                    other => panic!("expected Struct inside List, got {:?}", other),
+                },
+                other => panic!("expected List, got {:?}", other),
+            }
+        }
+
+        #[test]
+        fn map_uses_entries_keys_values_canonical_names() {
+            let type_json = r#"{"type":"map","keyType":"string","valueType":"integer","valueContainsNull":true}"#;
+            let cols = vec![complex_col("props", "MAP", type_json, 0)];
+            let s = arrow_schema_from_uc_columns(&cols).unwrap();
+            let f = arrow_field(&s, "props");
+            match f.data_type() {
+                DataType::Map(entries, sorted) => {
+                    assert!(!sorted);
+                    assert_eq!(entries.name(), "entries");
+                    assert!(!entries.is_nullable());
+                    match entries.data_type() {
+                        DataType::Struct(kv) => {
+                            assert_eq!(kv[0].name(), "keys");
+                            assert_eq!(kv[0].data_type(), &DataType::LargeUtf8);
+                            assert!(!kv[0].is_nullable(), "map keys must not be nullable");
+                            assert_eq!(kv[1].name(), "values");
+                            assert_eq!(kv[1].data_type(), &DataType::Int32);
+                            assert!(kv[1].is_nullable());
+                        }
+                        other => panic!("expected Struct inside Map, got {:?}", other),
+                    }
+                }
+                other => panic!("expected Map, got {:?}", other),
+            }
+        }
+
+        #[test]
+        fn map_with_struct_value() {
+            let type_json = r#"{
+                "type":"map",
+                "keyType":"long",
+                "valueType":{
+                    "type":"struct",
+                    "fields":[{"name":"v","type":"long","nullable":true,"metadata":{}}]
+                },
+                "valueContainsNull":true
+            }"#;
+            let cols = vec![complex_col("lookup", "MAP", type_json, 0)];
+            let s = arrow_schema_from_uc_columns(&cols).unwrap();
+            let f = arrow_field(&s, "lookup");
+            match f.data_type() {
+                DataType::Map(entries, _) => match entries.data_type() {
+                    DataType::Struct(kv) => {
+                        assert_eq!(kv[0].data_type(), &DataType::Int64);
+                        match kv[1].data_type() {
+                            DataType::Struct(inner) => {
+                                assert_eq!(inner[0].name(), "v");
+                                assert_eq!(inner[0].data_type(), &DataType::Int64);
+                            }
+                            other => panic!("expected Struct value, got {:?}", other),
+                        }
+                    }
+                    other => panic!("expected Struct, got {:?}", other),
+                },
+                other => panic!("expected Map, got {:?}", other),
+            }
+        }
+
+        #[test]
+        fn rejects_unsupported_map_key() {
+            let type_json = r#"{"type":"map","keyType":"double","valueType":"integer","valueContainsNull":true}"#;
+            let cols = vec![complex_col("bad", "MAP", type_json, 0)];
+            let err = arrow_schema_from_uc_columns(&cols).unwrap_err();
+            assert!(matches!(err, SchemaError::Invalid(_)), "got {:?}", err);
+        }
+
+        #[test]
+        fn rejects_nested_arrays() {
+            let type_json = r#"{"type":"array","elementType":{"type":"array","elementType":"integer","containsNull":true},"containsNull":true}"#;
+            let cols = vec![complex_col("nested", "ARRAY", type_json, 0)];
+            let err = arrow_schema_from_uc_columns(&cols).unwrap_err();
+            assert!(matches!(err, SchemaError::Invalid(_)), "got {:?}", err);
+        }
+
+        #[test]
+        fn rejects_invalid_field_name() {
+            let cols = vec![col("1bad", "STRING", true, 0)];
+            let err = arrow_schema_from_uc_columns(&cols).unwrap_err();
+            assert!(matches!(err, SchemaError::InvalidFieldName { .. }));
+        }
+
+        #[test]
+        fn complex_column_requires_type_json() {
+            let cols = vec![col("x", "STRUCT", true, 0)];
+            let err = arrow_schema_from_uc_columns(&cols).unwrap_err();
+            assert!(matches!(err, SchemaError::MissingTypeJson(_)));
+        }
+
+        #[test]
+        fn nested_timestamp_ntz_preserves_no_timezone() {
+            // Inside type_json, "timestamp" carries UTC and "timestamp_ntz" carries no tz;
+            // the AST must distinguish the two so the Arrow types are correct in nested
+            // positions, not just at the top level.
+            let type_json = r#"{
+                "type":"struct",
+                "fields":[
+                    {"name":"utc","type":"timestamp","nullable":true,"metadata":{}},
+                    {"name":"local","type":"timestamp_ntz","nullable":true,"metadata":{}}
+                ]
+            }"#;
+            let cols = vec![complex_col("ts", "STRUCT", type_json, 0)];
+            let s = arrow_schema_from_uc_columns(&cols).unwrap();
+            match arrow_field(&s, "ts").data_type() {
+                DataType::Struct(fs) => {
+                    assert_eq!(
+                        fs[0].data_type(),
+                        &DataType::Timestamp(TimeUnit::Microsecond, Some("UTC".into()))
+                    );
+                    assert_eq!(
+                        fs[1].data_type(),
+                        &DataType::Timestamp(TimeUnit::Microsecond, None)
+                    );
+                }
+                other => panic!("expected Struct, got {:?}", other),
+            }
+        }
+
+        #[test]
+        fn rejects_excessively_deep_nesting() {
+            let mut type_json = String::from("\"integer\"");
+            for _ in 0..MAX_NESTING_DEPTH + 2 {
+                type_json = format!(
+                    r#"{{"type":"array","elementType":{},"containsNull":true}}"#,
+                    type_json
+                );
+            }
+            let cols = vec![complex_col("deep", "ARRAY", &type_json, 0)];
+            let err = arrow_schema_from_uc_columns(&cols).unwrap_err();
+            match err {
+                SchemaError::InvalidTypeJson { reason, .. } => {
+                    assert!(reason.contains("maximum depth"), "unexpected: {}", reason);
+                }
+                other => panic!("expected InvalidTypeJson, got {:?}", other),
+            }
+        }
+
+        #[test]
+        fn arrow_schema_from_uc_schema_delegates_to_columns() {
+            let schema = UcTableSchema {
+                name: "events".into(),
+                catalog_name: "main".into(),
+                schema_name: "analytics".into(),
+                columns: vec![col("id", "BIGINT", false, 0)],
+            };
+            let s = arrow_schema_from_uc_schema(&schema).unwrap();
+            assert_eq!(s.fields().len(), 1);
+            assert_eq!(arrow_field(&s, "id").data_type(), &DataType::Int64);
+        }
     }
 }
