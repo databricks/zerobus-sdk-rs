@@ -2,6 +2,7 @@ use std::error::Error;
 use std::sync::Arc;
 
 use arrow_array::{Float64Array, Int32Array, Int64Array, RecordBatch, StringArray};
+use arrow_ipc::CompressionType;
 use databricks_zerobus_ingest_sdk::{ArrowSchema, DataType, Field, ZerobusSdk};
 
 /// One row of the `orders` table.
@@ -82,11 +83,15 @@ async fn main() -> Result<(), Box<dyn Error>> {
         .unity_catalog_url(DATABRICKS_WORKSPACE_URL)
         .build()?;
 
+    // Optional IPC compression. Trades client CPU for fewer bytes on the wire —
+    // enable only when network bandwidth limits throughput. `LZ4_FRAME` is fast
+    // with a modest ratio; `ZSTD` compresses more at higher CPU cost.
     let mut stream = sdk_handle
         .stream_builder()
         .table(TABLE_NAME)
         .oauth(DATABRICKS_CLIENT_ID, DATABRICKS_CLIENT_SECRET)
         .arrow(schema.clone())
+        .ipc_compression(Some(CompressionType::ZSTD))
         .max_inflight_batches(100)
         .build_arrow()
         .await?;

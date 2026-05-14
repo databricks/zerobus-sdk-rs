@@ -9,3 +9,4 @@ databricks-zerobus-ingest-sdk = { path = "../../sdk", features = ["arrow-flight"
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
 chrono.workspace = true
 arrow-array.workspace = true
+arrow-ipc.workspace = true

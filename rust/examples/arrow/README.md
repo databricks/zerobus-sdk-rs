@@ -9,11 +9,12 @@ This directory contains an example demonstrating Arrow Flight-based data ingesti
 - [Overview](#overview)
 - [Running the Example](#running-the-example)
 - [Code Highlights](#code-highlights)
+- [IPC compression](#ipc-compression)
 - [Adapting for Your Custom Table](#adapting-for-your-custom-table)
 
 ## Overview
 
-Arrow Flight provides a columnar, high-throughput path for ingesting Apache Arrow `RecordBatch` data. Compared to JSON or Protocol Buffers, Arrow keeps data in its native columnar layout end-to-end, which is efficient when your data already lives in Arrow form (e.g., from DataFusion, Polars, or a Parquet reader).
+Arrow Flight is a third record format option alongside JSON and Protocol Buffers: it sends Apache Arrow `RecordBatch` data directly to Zerobus over the Arrow Flight protocol, on the same gRPC connection. It is the best fit when your workload is naturally columnar or batched — analytics pipelines, gateways aggregating short windows of rows, wide/numeric schemas where row-by-row serialization adds noticeable CPU overhead — or when your application already produces Arrow data via pyarrow, the [arrow-rs](https://github.com/apache/arrow-rs) crates, DataFusion, Polars, or similar libraries.
 
 **Features:**
 - Columnar Arrow data sent over the Arrow Flight protocol
@@ -21,7 +22,7 @@ Arrow Flight provides a columnar, high-throughput path for ingesting Apache Arro
 
 > **Feature flag.** The Arrow Flight API is behind the `arrow-flight` Cargo feature. The example's `Cargo.toml` enables it for you.
 
-Arrow Flight is inherently batch-oriented — a `RecordBatch` carries one or more rows. To ingest one row at a time, just pass a single-row `RecordBatch`. `ingest_batch` returns an `OffsetId` directly; there is no future-based variant for the Arrow Flight API.
+Send multiple rows per `RecordBatch`. Start with natural application-sized batches; sending one row per call works but negates most of the performance advantage of using Arrow. For sparse, one-row-at-a-time traffic, the JSON or Protocol Buffers examples in `examples/json/` and `examples/proto/` are usually a better fit. `ingest_batch` returns an `OffsetId` directly; there is no future-based variant for the Arrow Flight API.
 
 ## Running the Example
 
@@ -99,6 +100,30 @@ stream.close().await?;
 - **All-or-nothing per `RecordBatch`**: A batch is acknowledged as a unit
 - **Single acknowledgment**: One offset ID for the whole `RecordBatch`
 - **Schema validation**: The `RecordBatch` schema must exactly match the schema configured on the stream
+
+## IPC compression
+
+Arrow IPC payloads can be compressed on the wire. Enable compression only when network bandwidth limits throughput — it reduces bytes on the wire at the cost of CPU on the client.
+
+The `CompressionType` enum lives in the `arrow-ipc` crate, which is already added as a dependency for this example. The example's `main.rs` enables `ZSTD` compression on the stream builder:
+
+```rust
+use arrow_ipc::CompressionType;
+
+let stream = sdk
+    .stream_builder()
+    .table(TABLE_NAME)
+    .oauth(DATABRICKS_CLIENT_ID, DATABRICKS_CLIENT_SECRET)
+    .arrow(schema)
+    .ipc_compression(Some(CompressionType::ZSTD))  // or LZ4_FRAME
+    .build_arrow()
+    .await?;
+```
+
+- `LZ4_FRAME` — fast, low CPU overhead, modest compression ratio.
+- `ZSTD` — higher compression ratio, more CPU per batch.
+
+To disable compression, drop the `.ipc_compression(...)` call (default is `None`).
 
 ## Adapting for Your Custom Table
 
