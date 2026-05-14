@@ -1,7 +1,7 @@
 //! Configuration options for Arrow Flight streams.
 //!
-//! **Experimental/Unsupported**: Arrow Flight ingestion is experimental and not yet
-//! supported for production use. The API may change in future releases.
+//! **Beta**: Arrow Flight ingestion is in Beta. The API is stabilising but may
+//! still change before reaching GA.
 
 use crate::stream_options::defaults;
 use arrow_ipc::CompressionType;

@@ -5,6 +5,10 @@
 ### Major Changes
 
 ### New Features and Improvements
+- **Arrow Flight ingestion promoted to Beta**: The `arrow-flight` feature
+  (`ZerobusArrowStream`, `ArrowStreamConfigurationOptions`, and related types)
+  is no longer labelled experimental/unsupported. The API is stabilising but
+  may still change before reaching GA.
 
 - **Arrow schema from UC schema** (feature `arrow-flight`):
   `schema::arrow_schema_from_uc_columns` and `schema::arrow_schema_from_uc_schema`
@@ -41,6 +45,9 @@
   remove all references to the deleted future-based APIs. The
   "Future-based API (Deprecated)" example sections and the deprecated
   method entries in the API Reference were removed.
+- Added an Arrow Flight example under `examples/arrow/` (`example_arrow`)
+  demonstrating both `ingest_batch` (RecordBatch) and `ingest_ipc_batch`
+  (Arrow IPC bytes).
 
 ### Internal Changes
 

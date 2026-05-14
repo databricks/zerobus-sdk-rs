@@ -7,6 +7,7 @@ This directory contains examples demonstrating how to use the Zerobus Rust SDK t
 - [Overview](#overview)
 - [JSON Examples](json/README.md)
 - [Protocol Buffers Examples](proto/README.md)
+- [Arrow Flight Examples](arrow/README.md) (Beta)
 - [Prerequisites](#prerequisites)
   - [Create a Databricks Table](#1-create-a-databricks-table)
   - [Set Up OAuth Service Principal](#2-set-up-oauth-service-principal)
@@ -24,10 +25,12 @@ The SDK supports two serialization formats and two ingestion methods:
 **Serialization Formats:**
 - **[JSON](json/README.md)** - Simpler, no schema generation required. Great for getting started.
 - **[Protocol Buffers](proto/README.md)** - Type-safe with compile-time validation. Better for production.
+- **[Arrow Flight](arrow/README.md)** (Beta) - Columnar Arrow `RecordBatch` ingestion over Arrow Flight. Behind the `arrow-flight` feature flag.
 
 **Ingestion Methods:**
-- **Single-record** (`ingest_record_offset`) - Ingest records one at a time
-- **Batch** (`ingest_records_offset`) - Ingest multiple records at once with all-or-nothing semantics
+- **Single-record** (`ingest_record_offset`) - Ingest records one at a time (JSON / Protocol Buffers)
+- **Batch** (`ingest_records_offset`) - Ingest multiple records at once with all-or-nothing semantics (JSON / Protocol Buffers)
+- **Arrow batch** (`ingest_batch` / `ingest_ipc_batch`) - Ingest an Arrow `RecordBatch` (one or many rows) over Arrow Flight
 
 **Available Examples:**
 
@@ -37,6 +40,7 @@ The SDK supports two serialization formats and two ingestion methods:
 | [JSON Batch](json/README.md#batch-example) | JSON | Batch | `cargo run -p rust-examples-json --example json_batch` |
 | [Proto Single](proto/README.md#single-record-example) | Protocol Buffers | Single-record | `cargo run -p rust-examples-proto --example proto_single` |
 | [Proto Batch](proto/README.md#batch-example) | Protocol Buffers | Batch | `cargo run -p rust-examples-proto --example proto_batch` |
+| [Arrow](arrow/README.md) | Arrow Flight (Beta) | `RecordBatch` | `cargo run -p example_arrow` |
 
 ## Prerequisites
 
@@ -130,6 +134,26 @@ let mut stream = sdk
     .compiled_proto(descriptor_proto)
     .max_inflight_requests(100)
     .build()
+    .await?;
+```
+
+**Arrow Flight (Beta):**
+```rust
+use std::sync::Arc;
+use databricks_zerobus_ingest_sdk::{ArrowSchema, DataType, Field};
+
+let schema = Arc::new(ArrowSchema::new(vec![
+    Field::new("id", DataType::Int32, false),
+    // ... other fields matching your table
+]));
+
+let mut stream = sdk
+    .stream_builder()
+    .table(TABLE_NAME)
+    .oauth(DATABRICKS_CLIENT_ID, DATABRICKS_CLIENT_SECRET)
+    .arrow(schema)
+    .max_inflight_batches(100)
+    .build_arrow()
     .await?;
 ```
 

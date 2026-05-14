@@ -5,6 +5,7 @@ members = [
     "jni",
     "examples/json",
     "examples/proto",
+    "examples/arrow",
     "tools/*",
     "tests",
 ]

@@ -23,7 +23,7 @@ This is a Cargo workspace. The workspace root is `rust/Cargo.toml`.
 - `headers_provider.rs` — `HeadersProvider` trait + OAuth implementation
 - `landing_zone.rs` — Batches records before sending over gRPC
 - `record_types.rs` — `EncodedRecord`, `ProtoMessage`, `JsonString`
-- `arrow_stream.rs` — Experimental Arrow Flight ingestion (behind `arrow-flight` feature flag)
+- `arrow_stream.rs` — Arrow Flight ingestion (Beta; behind `arrow-flight` feature flag)
 
 ## Build commands
 
@@ -54,7 +54,7 @@ Any change to the Rust SDK's public API surface has cascading effects:
 
 ## Feature flags
 
-- `arrow-flight` — Experimental Arrow Flight support. Not production-ready; API may change.
+- `arrow-flight` — Arrow Flight support (Beta). API is stabilising but may still change before GA.
 - `testing` — Test utilities.
 
 ## Error handling
