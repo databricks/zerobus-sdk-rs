@@ -14,7 +14,7 @@ crate-type = ["cdylib"]
 name = "zerobus_jni"
 
 [dependencies]
-databricks-zerobus-ingest-sdk = { path = "../sdk", version = "1.3.0", features = ["arrow-flight"] }
+databricks-zerobus-ingest-sdk = { path = "../sdk", version = "2.0.0", features = ["arrow-flight"] }
 jni.workspace = true
 tokio = { workspace = true, features = ["rt-multi-thread", "sync"] }
 prost.workspace = true
