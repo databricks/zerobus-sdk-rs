@@ -8,7 +8,19 @@
 
 ### Bug Fixes
 
+- Corrected the values returned by the C FFI `zerobus_get_default_config()`
+  for `callback_max_wait_time_ms` / `has_callback_max_wait_time_ms`. The
+  function previously reported `0 / false` (i.e., "no callback timeout"),
+  while the actual Rust SDK default is `Some(5000ms)`. The C-side defaults
+  now correctly mirror the Rust defaults (`5000 / true`).
+
 ### Documentation
+
+- Updated `rust/README.md`, `rust/examples/README.md`,
+  `rust/examples/json/README.md`, and `rust/examples/proto/README.md` to
+  remove all references to the deleted future-based APIs. The
+  "Future-based API (Deprecated)" example sections and the deprecated
+  method entries in the API Reference were removed.
 
 ### Internal Changes
 
@@ -39,24 +51,73 @@
   0.1.18, `tokio-util` 0.7.17 → 0.7.18, `once_cell` 1.19 → 1.21,
   `bytes` 1 → 1.11, `tempfile` 3.21 → 3.27, `clap` 4 → 4.6,
   `urlencoding` 2 → 2.1.
-- Migrated the FFI and JNI crates off the deprecated
-  `create_stream` / `create_stream_with_headers_provider` /
-  `create_arrow_stream` / `create_arrow_stream_with_headers_provider`
-  methods. Both wrappers now build streams via `StreamBuilder`. The
-  `zerobus_sdk_set_use_tls` C function is now a true no-op (it previously
-  wrote to the deprecated `ZerobusSdk::use_tls` field). No C ABI or JNI
-  signature changes.
-- Migrated all in-tree consumers off the deprecated stream-creation and
-  `ingest_record(s)` APIs: `rust/sdk` doc examples in `record_types.rs`,
-  all four `rust/examples/` programs (the deprecated demo functions were
-  removed; only the recommended offset-based API is shown), and all three
-  test files in `rust/tests/`. The `test_proto_stream_creation_without_descriptor_fails`
-  test was removed because the typestate builder makes that scenario
-  impossible at compile time. No behavior changes; the deprecated APIs
-  themselves remain available until removed in the next major release.
+- Migrated the FFI and JNI crates off the deleted stream-creation methods.
+  Both wrappers now build streams via `StreamBuilder`. Default config in
+  `zerobus_get_default_config()` / `zerobus_arrow_get_default_config()`
+  now reads `stream_options::defaults::*` constants directly instead of
+  constructing `*ConfigurationOptions` (no longer needed at the FFI layer).
+  No C ABI or JNI signature changes.
+- FFI and JNI no longer construct `StreamConfigurationOptions` /
+  `ArrowStreamConfigurationOptions`. They read C/Java struct fields
+  directly and apply each via builder setters.
 
 ### Breaking Changes
 
+- Removed `ZerobusSdk::create_stream()` (in deprecation since v1.3.0).
+  Use `sdk.stream_builder().table(name).oauth(id, secret).json()` /
+  `.compiled_proto(desc).build().await` instead. Removed from all
+  examples, documentation, and tests.
+- Removed `ZerobusSdk::create_stream_with_headers_provider()` (in
+  deprecation since v1.3.0). Use
+  `sdk.stream_builder().table(name).headers_provider(p).json()` /
+  `.compiled_proto(desc).build().await` instead. Removed from all
+  examples, documentation, and tests.
+- Removed `ZerobusSdk::create_arrow_stream()` *(feature `arrow-flight`)*
+  (in deprecation since v1.3.0). Use
+  `sdk.stream_builder().table(name).oauth(id, secret).arrow(schema).build_arrow().await`
+  instead. Removed from all examples, documentation, and tests.
+- Removed `ZerobusSdk::create_arrow_stream_with_headers_provider()`
+  *(feature `arrow-flight`)* (in deprecation since v1.3.0). Use
+  `sdk.stream_builder().table(name).headers_provider(p).arrow(schema).build_arrow().await`
+  instead. Removed from all examples, documentation, and tests.
+- Removed `ZerobusStream::ingest_record()` (in deprecation since v0.4.0).
+  Use `stream.ingest_record_offset(payload).await?` followed by
+  `stream.wait_for_offset(offset).await?` to wait for acknowledgment.
+  Removed from all examples, documentation, and tests.
+- Removed `ZerobusStream::ingest_records()` (in deprecation since v0.4.0).
+  Use `stream.ingest_records_offset(payloads).await?` followed by
+  `stream.wait_for_offset(offset).await?`. Removed from all examples,
+  documentation, and tests.
+- Removed `ZerobusSdk::new()` (in deprecation since v0.5.0). Use
+  `ZerobusSdk::builder().endpoint(...).unity_catalog_url(...).build()?`
+  instead.
+- Removed the `ZerobusSdk::use_tls` field (in deprecation since v0.5.0).
+  TLS is controlled via `ZerobusSdkBuilder::tls_config(...)`. The C FFI
+  `zerobus_sdk_set_use_tls()` function is retained as a no-op for ABI
+  compatibility.
+- Removed the `test_proto_stream_creation_without_descriptor_fails` test
+  — the typestate `StreamBuilder` makes that scenario impossible at
+  compile time.
+- Added `#[non_exhaustive]` to `StreamConfigurationOptions`. External
+  crates can no longer construct the struct via struct-literal syntax;
+  all configuration must go through `StreamBuilder` setters. Field reads
+  via `stream.options.*` are unaffected. Adding new config fields in
+  future releases is now non-breaking.
+- Added `#[non_exhaustive]` to `ArrowStreamConfigurationOptions`. Same
+  semantics as above; reads via `stream.options().*` are unaffected.
+- Added `#[non_exhaustive]` to `ZerobusError`, `StreamType`, and
+  `SchemaError` enums. External `match` expressions on these types now
+  require a `_ =>` wildcard arm. Adding new variants is non-breaking.
+- Added `#[non_exhaustive]` to `ZerobusSdk`, `ZerobusStream`, and
+  `ZerobusArrowStream` structs. Adding new fields to these top-level
+  handle types is non-breaking.
+- `TableProperties` and `ArrowTableProperties` are now `pub(crate)` and
+  no longer part of the public API. They are only used internally by
+  `StreamBuilder`; after the deletion of the deprecated
+  `create_*_stream()` methods there are no external constructors.
+- Removed `ZerobusArrowStream::table_properties()` getter (returned the
+  now-private `ArrowTableProperties`). Use the existing `table_name()`
+  and `schema()` getters instead.
 - Major-version bumps of `prost` (0.13 → 0.14), `tonic` (0.13 → 0.14),
   `prost-reflect` (0.14 → 0.16), and the Arrow crates (56 → 58). Downstream
   consumers that directly handle SDK-exported `prost::Message` or
