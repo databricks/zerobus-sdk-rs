@@ -80,8 +80,12 @@ pub(crate) struct ArrowTableProperties {
 #[derive(Clone)]
 struct PendingBatch {
     payload: ArrowPayload,
-    /// Logical offset ID assigned by the client for this batch.
-    offset_id: OffsetId,
+    /// Logical (user-visible) offset ID assigned by the client for this batch.
+    /// Monotonic across the lifetime of the stream — never resets on recovery.
+    /// This is the value handed back from `ingest_batch` / `ingest_ipc_batch`
+    /// and broadcast on `last_ack_tx` so that `wait_for_offset` callers see a
+    /// monotonically non-decreasing acked offset.
+    logical_offset_id: OffsetId,
     /// Cumulative record count before this batch.
     start_record: u64,
     /// Cumulative record count after this batch.
@@ -115,7 +119,7 @@ fn slice_batch_for_recovery(
         Ok(Some(pb.payload.clone()))
     } else {
         debug!(
-            offset_id = pb.offset_id,
+            offset_id = pb.logical_offset_id,
             total_rows = total_rows,
             records_already_acked = records_already_acked,
             remaining_rows = remaining_rows,
@@ -132,7 +136,7 @@ fn slice_batch_for_recovery(
                 let b = materialize_ipc(bytes).map_err(|e| {
                     ZerobusError::InvalidArgument(format!(
                         "IPC batch could not be deserialised for partial recovery (offset_id={}): {e}",
-                        pb.offset_id
+                        pb.logical_offset_id
                     ))
                 })?;
                 Ok(Some(ArrowPayload::Batch(b.slice(
@@ -419,8 +423,20 @@ pub struct ZerobusArrowStream {
     pub(crate) options: ArrowStreamConfigurationOptions,
     /// Channel to send FlightData to the encoder task.
     batch_tx: BatchSender,
-    /// Generator for logical offset IDs.
-    offset_generator: OffsetIdGenerator,
+    /// Generator for logical (user-visible) offset IDs.
+    ///
+    /// Monotonic across the lifetime of the stream — never reset on recovery.
+    /// The values returned by `ingest_batch` / `ingest_ipc_batch` come from
+    /// here, so that `wait_for_offset` semantics hold even if the underlying
+    /// Flight stream reconnects.
+    logical_offset_generator: Arc<OffsetIdGenerator>,
+    /// Generator for physical (wire) offset IDs sent in `FlightBatchMetadata`.
+    ///
+    /// The server enforces sequential offsets starting at 0 per Flight stream,
+    /// so this is reset to `0` on each successful reconnect (specifically,
+    /// repositioned to `replay_offset` so fresh ingests continue from where
+    /// the replay's wire offsets left off).
+    physical_offset_generator: Arc<OffsetIdGenerator>,
     /// Watch channel for tracking the last acknowledged offset.
     last_ack_tx: tokio::sync::watch::Sender<Option<OffsetId>>,
     /// Receiver for the watch channel (kept alive to prevent sender errors).
@@ -494,7 +510,8 @@ impl ZerobusArrowStream {
             table_properties,
             options,
             batch_tx,
-            offset_generator: OffsetIdGenerator::default(),
+            logical_offset_generator: Arc::new(OffsetIdGenerator::default()),
+            physical_offset_generator: Arc::new(OffsetIdGenerator::default()),
             last_ack_tx,
             _last_ack_rx,
             is_closed,
@@ -585,6 +602,8 @@ impl ZerobusArrowStream {
             Arc::clone(&stream.cumulative_records_sent),
             Arc::clone(&stream.last_acked_records),
             Arc::clone(&stream.is_paused),
+            Arc::clone(&stream.physical_offset_generator),
+            Arc::clone(&stream.ingest_mutex),
             response_stream,
             Arc::clone(&stream.sdk_identifier),
         );
@@ -797,6 +816,8 @@ impl ZerobusArrowStream {
         cumulative_records_sent: Arc<AtomicU64>,
         last_acked_records: Arc<AtomicU64>,
         is_paused: Arc<AtomicBool>,
+        physical_offset_generator: Arc<OffsetIdGenerator>,
+        ingest_mutex: Arc<Mutex<()>>,
         initial_response_stream: Pin<Box<dyn Stream<Item = Result<PutResult, FlightError>> + Send>>,
         sdk_identifier: Arc<str>,
     ) -> tokio::task::JoinHandle<ZerobusResult<()>> {
@@ -885,6 +906,8 @@ impl ZerobusArrowStream {
                                 &cumulative_records_sent,
                                 &last_acked_records,
                                 &sdk_identifier,
+                                &physical_offset_generator,
+                                &ingest_mutex,
                             ),
                         )
                         .await;
@@ -945,6 +968,8 @@ impl ZerobusArrowStream {
         cumulative_records_sent: &Arc<AtomicU64>,
         last_acked_records: &Arc<AtomicU64>,
         sdk_identifier: &str,
+        physical_offset_generator: &Arc<OffsetIdGenerator>,
+        ingest_mutex: &Arc<Mutex<()>>,
     ) -> ZerobusResult<Pin<Box<dyn Stream<Item = Result<PutResult, FlightError>> + Send>>> {
         // Create new client.
         let client = Self::create_flight_client(
@@ -1045,6 +1070,14 @@ impl ZerobusArrowStream {
 
         // Replay pending batches, slicing partially-acked ones if present.
         // We rebuild the pending list to drop fully-acked batches.
+        //
+        // The `ingest_mutex` is held for the entire replay so that concurrent
+        // `ingest_batch` callers cannot read a stale value from
+        // `physical_offset_generator` between the replay (which renumbers wire
+        // offsets from 0) and the generator reset at the end. Lock order
+        // matches `ingest_batch`: `ingest_mutex` -> `pending_batches`.
+        let _ingest_guard = ingest_mutex.lock().await;
+        let mut replay_offset: i64 = 0;
         {
             let mut pending = pending_batches.lock().await;
             if !pending.is_empty() {
@@ -1056,12 +1089,14 @@ impl ZerobusArrowStream {
 
                 let mut new_pending = Vec::with_capacity(pending.len());
                 let mut new_cumulative: u64 = 0;
-                let mut replay_offset: i64 = 0;
 
                 for pb in pending.drain(..) {
                     let payload = match slice_batch_for_recovery(&pb, acked_before_disconnect)? {
                         None => {
-                            debug!(offset_id = pb.offset_id, "Skipping fully-acked batch");
+                            debug!(
+                                offset_id = pb.logical_offset_id,
+                                "Skipping fully-acked batch"
+                            );
                             continue;
                         }
                         Some(p) => p,
@@ -1107,7 +1142,7 @@ impl ZerobusArrowStream {
 
                     new_pending.push(PendingBatch {
                         payload,
-                        offset_id: pb.offset_id,
+                        logical_offset_id: pb.logical_offset_id,
                         start_record,
                         end_record,
                     });
@@ -1117,6 +1152,10 @@ impl ZerobusArrowStream {
                 cumulative_records_sent.store(new_cumulative, Ordering::Relaxed);
             }
         }
+
+        // Reposition the physical (wire) offset generator so the next fresh
+        // `ingest_batch` continues from where the replay left off.
+        physical_offset_generator.set_next(replay_offset);
 
         Ok(response_stream)
     }
@@ -1269,8 +1308,9 @@ impl ZerobusArrowStream {
                                     if acked_records >= pb.end_record {
                                         // Batch is fully acknowledged
                                         max_acked_offset = Some(
-                                            max_acked_offset
-                                                .map_or(pb.offset_id, |o| o.max(pb.offset_id)),
+                                            max_acked_offset.map_or(pb.logical_offset_id, |o| {
+                                                o.max(pb.logical_offset_id)
+                                            }),
                                         );
                                         false // Remove from pending
                                     } else {
@@ -1353,7 +1393,8 @@ impl ZerobusArrowStream {
         &self,
         payload: ArrowPayload,
         flight_data_messages: Vec<FlightData>,
-        offset_id: OffsetId,
+        logical_offset_id: OffsetId,
+        physical_offset_id: OffsetId,
         start_record: u64,
         end_record: u64,
     ) -> ZerobusResult<OffsetId> {
@@ -1361,14 +1402,14 @@ impl ZerobusArrowStream {
             let mut pending = self.pending_batches.lock().await;
             pending.push(PendingBatch {
                 payload,
-                offset_id,
+                logical_offset_id,
                 start_record,
                 end_record,
             });
         }
 
         if self.is_paused.load(Ordering::Relaxed) {
-            return Ok(offset_id);
+            return Ok(logical_offset_id);
         }
 
         let sender = {
@@ -1393,7 +1434,7 @@ impl ZerobusArrowStream {
         let msg_count = flight_data_messages.len();
         for (i, mut flight_data) in flight_data_messages.into_iter().enumerate() {
             if i == msg_count - 1 {
-                let metadata = FlightBatchMetadata::new(offset_id);
+                let metadata = FlightBatchMetadata::new(physical_offset_id);
                 if let Ok(bytes) = metadata.to_bytes() {
                     flight_data.app_metadata = bytes.into();
                 }
@@ -1402,14 +1443,15 @@ impl ZerobusArrowStream {
                 warn!("Send failed: {}", e);
                 if self.options.recovery {
                     debug!(
-                        offset_id = offset_id,
+                        logical_offset_id = logical_offset_id,
+                        physical_offset_id = physical_offset_id,
                         "Send failed but recovery enabled - supervisor will handle recovery"
                     );
-                    return Ok(offset_id);
+                    return Ok(logical_offset_id);
                 } else {
                     {
                         let mut pending = self.pending_batches.lock().await;
-                        pending.retain(|pb| pb.offset_id != offset_id);
+                        pending.retain(|pb| pb.logical_offset_id != logical_offset_id);
                     }
                     let _ = tokio::time::timeout(
                         Duration::from_millis(100),
@@ -1426,7 +1468,7 @@ impl ZerobusArrowStream {
             }
         }
 
-        Ok(offset_id)
+        Ok(logical_offset_id)
     }
 
     /// Ingests a single Arrow RecordBatch into the stream.
@@ -1483,7 +1525,8 @@ impl ZerobusArrowStream {
         let _guard = self.ingest_mutex.lock().await;
 
         let record_count = batch.num_rows() as u64;
-        let offset_id = self.offset_generator.next();
+        let logical_offset_id = self.logical_offset_generator.next();
+        let physical_offset_id = self.physical_offset_generator.next();
         let start_record = self
             .cumulative_records_sent
             .fetch_add(record_count, Ordering::Relaxed);
@@ -1494,11 +1537,16 @@ impl ZerobusArrowStream {
             &make_ipc_write_options(self.options.ipc_compression)?,
         )?;
 
-        debug!(offset_id = offset_id, "Batch queued for ingestion");
+        debug!(
+            logical_offset_id = logical_offset_id,
+            physical_offset_id = physical_offset_id,
+            "Batch queued for ingestion"
+        );
         self.send_flight_data_internal(
             ArrowPayload::Batch(batch),
             flight_data_messages,
-            offset_id,
+            logical_offset_id,
+            physical_offset_id,
             start_record,
             end_record,
         )
@@ -1552,17 +1600,23 @@ impl ZerobusArrowStream {
 
         let _guard = self.ingest_mutex.lock().await;
 
-        let offset_id = self.offset_generator.next();
+        let logical_offset_id = self.logical_offset_generator.next();
+        let physical_offset_id = self.physical_offset_generator.next();
         let start_record = self
             .cumulative_records_sent
             .fetch_add(parsed.num_rows, Ordering::Relaxed);
         let end_record = start_record + parsed.num_rows;
 
-        debug!(offset_id = offset_id, "IPC batch queued for ingestion");
+        debug!(
+            logical_offset_id = logical_offset_id,
+            physical_offset_id = physical_offset_id,
+            "IPC batch queued for ingestion"
+        );
         self.send_flight_data_internal(
             ArrowPayload::Ipc(ipc_bytes),
             parsed.flight_data,
-            offset_id,
+            logical_offset_id,
+            physical_offset_id,
             start_record,
             end_record,
         )
@@ -1684,7 +1738,7 @@ impl ZerobusArrowStream {
             )));
         }
 
-        let target_offset = match self.offset_generator.last() {
+        let target_offset = match self.logical_offset_generator.last() {
             Some(offset) => offset,
             None => {
                 debug!("No batches to flush");
@@ -1859,7 +1913,7 @@ impl ZerobusArrowStream {
                 result.push(pb.payload.materialize().map_err(|e| {
                     ZerobusError::InvalidArgument(format!(
                         "unacked batch at offset_id {} could not be materialised: {e}",
-                        pb.offset_id
+                        pb.logical_offset_id
                     ))
                 })?);
             }
