@@ -25,6 +25,7 @@ use crate::stream_options::defaults;
 ///     .await?;
 /// ```
 #[derive(Clone)]
+#[non_exhaustive]
 pub struct StreamConfigurationOptions {
     /// Maximum number of requests that can be sending or pending acknowledgement at any given time.
     ///

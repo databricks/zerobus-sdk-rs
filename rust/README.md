@@ -95,8 +95,6 @@ The SDK supports two serialization formats and two ingestion methods:
 - **Single-record** (`ingest_record_offset`): Ingest records one at a time with per-record acknowledgment
 - **Batch** (`ingest_records_offset`): Ingest multiple records at once with all-or-nothing semantics for higher throughput
 
-> **Note:** The older `ingest_record()` and `ingest_records()` methods are deprecated as of v0.4.0. Use the `_offset` variants instead.
-
 See [`examples/README.md`](https://github.com/databricks/zerobus-sdk/blob/main/rust/examples/README.md) for detailed setup instructions and examples for all combinations.
 
 ## Repository Structure
@@ -220,10 +218,10 @@ zerobus_rust_sdk/
 
 ### Data Flow
 
-1. **Ingestion** - Your app calls `stream.ingest_record(data)` or `stream.ingest_records(batch)`
+1. **Ingestion** - Your app calls `stream.ingest_record_offset(data)` or `stream.ingest_records_offset(batch)`
 2. **Buffering** - Records are placed in the landing zone with logical offsets
 3. **Sending** - Sender task sends records over gRPC with physical offsets
-4. **Acknowledgment** - Receiver task gets server ack and resolves the future
+4. **Acknowledgment** - Receiver task gets server ack; callers wait via `stream.wait_for_offset(offset)`
 5. **Recovery** - If connection fails, supervisor reconnects and resends unacked records
 
 ### Authentication Flow
@@ -282,7 +280,7 @@ The SDK supports two approaches for data serialization:
 1. **JSON** - Simpler approach that uses JSON strings. No schema generation required, making it ideal for quick prototyping. See [`examples/README.md`](https://github.com/databricks/zerobus-sdk/blob/main/rust/examples/README.md) for a complete example.
 2. **Protocol Buffers** - Type-safe approach with schema validation at compile time. Recommended for production use cases. This guide focuses on the Protocol Buffers approach.
 
-For JSON-based ingestion, you can skip the schema generation step and directly pass JSON strings to `ingest_record()`.
+For JSON-based ingestion, you can skip the schema generation step and directly pass JSON strings to `ingest_record_offset()`.
 
 ### 1. Generate Protocol Buffer Schema (Protocol Buffers approach only)
 
@@ -718,9 +716,9 @@ Require manual intervention:
 **Check if an error is retryable:**
 
 ```rust
-match stream.ingest_record(payload).await {
-    Ok(ack) => {
-        let offset = ack.await?;
+match stream.ingest_record_offset(payload).await {
+    Ok(offset) => {
+        stream.wait_for_offset(offset).await?;
     }
     Err(e) if e.is_retryable() => {
         eprintln!("Retryable error, SDK will auto-recover: {}", e);
@@ -794,7 +792,6 @@ cargo test -p tests -- --nocapture
    - Use `ingest_records_offset()` for high throughput batch ingestion
    - Use `ingest_record_offset()` when processing records individually
    - Both return offsets directly; use `wait_for_offset()` to explicitly wait for acknowledgments
-   - The older `ingest_record()` and `ingest_records()` methods are deprecated
 4. **Tune Inflight Limits** - Adjust `max_inflight_requests` based on memory and throughput needs
 5. **Enable Recovery** - Always set `recovery: true` in production environments
 6. **Handle Ack Futures** - Use `tokio::spawn` for fire-and-forget or batch-wait for verification
@@ -855,22 +852,6 @@ pub async fn ingest_records_offset(
 Ingests multiple encoded records as a batch with all-or-nothing semantics. The entire batch either succeeds or fails as a unit. The await queues the batch for sending and returns the logical offset ID directly (or `None` for empty batches). Use `wait_for_offset()` to explicitly wait for server acknowledgment.
 
 ```rust
-pub async fn ingest_record(
-    &self,
-    payload: Vec<u8>
-) -> ZerobusResult<impl Future<Output = ZerobusResult<OffsetId>>>>
-```
-**Deprecated:** Use `ingest_record_offset()` instead. Returns a future that resolves to the offset ID.
-
-```rust
-pub async fn ingest_records(
-    &self,
-    payloads: Vec<Vec<u8>>
-) -> ZerobusResult<impl Future<Output = ZerobusResult<Option<OffsetId>>>>
-```
-**Deprecated:** Use `ingest_records_offset()` instead. Returns a future that resolves to `Some(offset_id)` for non-empty batches, or `None` if the batch is empty.
-
-```rust
 pub async fn wait_for_offset(&self, offset_id: OffsetId) -> ZerobusResult<()>
 ```
 Waits for acknowledgment of a specific logical offset. Use this method with offsets returned from `ingest_record_offset()` or `ingest_records_offset()` to explicitly wait for server acknowledgment.
@@ -894,8 +875,8 @@ Returns an iterator over all unacknowledged records as individual `EncodedRecord
 pub async fn get_unacked_batches(&self) -> ZerobusResult<Vec<EncodedBatch>>
 ```
 Returns unacknowledged records grouped by batch, preserving the original batch structure. Records ingested together remain grouped:
-- Each `ingest_record()` call creates a batch containing one record
-- Each `ingest_records()` call creates a batch containing multiple records
+- Each `ingest_record_offset()` call creates a batch containing one record
+- Each `ingest_records_offset()` call creates a batch containing multiple records
 
 Only call after stream failure.
 

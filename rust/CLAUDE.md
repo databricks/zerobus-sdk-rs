@@ -46,7 +46,9 @@ Any change to the Rust SDK's public API surface has cascading effects:
 3. **JNI exports** (`rust/jni/`) — changing native method signatures breaks Java. Must stay in sync with `native` declarations in Java source.
 4. **PyO3 bindings** (`python/rust/src/lib.rs`) and **NAPI-RS bindings** (`typescript/src/lib.rs`) wrap the Rust SDK directly, so internal refactors can break them if module paths or type signatures change.
 
-**Safe changes**: adding new public items, adding optional parameters with defaults, adding new enum variants (if non-exhaustive), adding feature-gated modules.
+**Safe changes**: adding new public items, adding optional parameters with defaults, adding new enum variants (if non-exhaustive), adding fields to `#[non_exhaustive]` structs, adding feature-gated modules.
+
+**Adding methods to public traits** (`HeadersProvider`, `AckCallback`, `TlsConfig`): always provide a default implementation. Users implement these traits externally; adding a method without a default breaks every external impl.
 
 **Deprecation path**: mark with `#[deprecated(since = "x.y.z", note = "Use X instead")]`, keep for at least one minor release, remove in next major.
 

@@ -1,14 +1,9 @@
-#![allow(deprecated)]
-
 mod mock_grpc;
 mod utils;
 
 use std::sync::Arc;
 
-use databricks_zerobus_ingest_sdk::databricks::zerobus::RecordType;
-use databricks_zerobus_ingest_sdk::{
-    NoTlsConfig, StreamConfigurationOptions, StreamType, TableProperties, ZerobusError, ZerobusSdk,
-};
+use databricks_zerobus_ingest_sdk::{NoTlsConfig, StreamType, ZerobusError, ZerobusSdk};
 use mock_grpc::{start_mock_server, MockResponse};
 use tracing::info;
 use utils::{create_test_descriptor_proto, setup_tracing, TestCallback, TestHeadersProvider};
@@ -41,23 +36,14 @@ mod stream_initialization_and_basic_lifecycle_tests {
             .tls_config(Arc::new(NoTlsConfig))
             .build()?;
 
-        let table_properties = TableProperties {
-            table_name: TABLE_NAME.to_string(),
-            descriptor_proto: create_test_descriptor_proto(),
-        };
-
-        let options = StreamConfigurationOptions {
-            max_inflight_requests: 100,
-            recovery: false,
-            ..Default::default()
-        };
-
         let result = sdk
-            .create_stream_with_headers_provider(
-                table_properties,
-                Arc::new(TestHeadersProvider::default()),
-                Some(options),
-            )
+            .stream_builder()
+            .table(TABLE_NAME)
+            .headers_provider(Arc::new(TestHeadersProvider::default()))
+            .compiled_proto(create_test_descriptor_proto().unwrap_or_default())
+            .max_inflight_requests(100)
+            .recovery(false)
+            .build()
             .await;
         assert!(
             result.is_ok(),
@@ -94,24 +80,15 @@ mod stream_initialization_and_basic_lifecycle_tests {
             .tls_config(Arc::new(NoTlsConfig))
             .build()?;
 
-        let table_properties = TableProperties {
-            table_name: TABLE_NAME.to_string(),
-            descriptor_proto: create_test_descriptor_proto(),
-        };
-
-        let options = StreamConfigurationOptions {
-            max_inflight_requests: 100,
-            recovery_timeout_ms: 100,
-            recovery: false,
-            ..Default::default()
-        };
-
         let result = sdk
-            .create_stream_with_headers_provider(
-                table_properties,
-                Arc::new(TestHeadersProvider::default()),
-                Some(options),
-            )
+            .stream_builder()
+            .table(TABLE_NAME)
+            .headers_provider(Arc::new(TestHeadersProvider::default()))
+            .compiled_proto(create_test_descriptor_proto().unwrap_or_default())
+            .max_inflight_requests(100)
+            .recovery_timeout_ms(100)
+            .recovery(false)
+            .build()
             .await;
         assert!(
             result.is_err(),
@@ -146,23 +123,14 @@ mod stream_initialization_and_basic_lifecycle_tests {
             .tls_config(Arc::new(NoTlsConfig))
             .build()?;
 
-        let table_properties = TableProperties {
-            table_name: TABLE_NAME.to_string(),
-            descriptor_proto: create_test_descriptor_proto(),
-        };
-
-        let options = StreamConfigurationOptions {
-            max_inflight_requests: 100,
-            recovery: true,
-            ..Default::default()
-        };
-
         let result = sdk
-            .create_stream_with_headers_provider(
-                table_properties,
-                Arc::new(TestHeadersProvider::default()),
-                Some(options),
-            )
+            .stream_builder()
+            .table(TABLE_NAME)
+            .headers_provider(Arc::new(TestHeadersProvider::default()))
+            .compiled_proto(create_test_descriptor_proto().unwrap_or_default())
+            .max_inflight_requests(100)
+            .recovery(true)
+            .build()
             .await;
 
         assert!(result.is_err());
@@ -199,26 +167,18 @@ mod stream_initialization_and_basic_lifecycle_tests {
             .tls_config(Arc::new(NoTlsConfig))
             .build()?;
 
-        let table_properties = TableProperties {
-            table_name: TABLE_NAME.to_string(),
-            descriptor_proto: create_test_descriptor_proto(),
-        };
-
-        let options = StreamConfigurationOptions {
-            max_inflight_requests: 100,
-            recovery: false,
-            recovery_timeout_ms: 200,
-            recovery_backoff_ms: 200,
-            ..Default::default()
-        };
         let start_time = std::time::Instant::now();
 
         let result = sdk
-            .create_stream_with_headers_provider(
-                table_properties,
-                Arc::new(TestHeadersProvider::default()),
-                Some(options),
-            )
+            .stream_builder()
+            .table(TABLE_NAME)
+            .headers_provider(Arc::new(TestHeadersProvider::default()))
+            .compiled_proto(create_test_descriptor_proto().unwrap_or_default())
+            .max_inflight_requests(100)
+            .recovery(false)
+            .recovery_timeout_ms(200)
+            .recovery_backoff_ms(200)
+            .build()
             .await;
         let duration = start_time.elapsed();
         assert!(result.is_err());
@@ -255,29 +215,20 @@ mod stream_initialization_and_basic_lifecycle_tests {
             .tls_config(Arc::new(NoTlsConfig))
             .build()?;
 
-        let table_properties = TableProperties {
-            table_name: TABLE_NAME.to_string(),
-            descriptor_proto: create_test_descriptor_proto(),
-        };
-
-        let options = StreamConfigurationOptions {
-            max_inflight_requests: 100,
-            recovery: false,
-            ..Default::default()
-        };
-
         let mut stream = sdk
-            .create_stream_with_headers_provider(
-                table_properties,
-                Arc::new(TestHeadersProvider::default()),
-                Some(options),
-            )
+            .stream_builder()
+            .table(TABLE_NAME)
+            .headers_provider(Arc::new(TestHeadersProvider::default()))
+            .compiled_proto(create_test_descriptor_proto().unwrap_or_default())
+            .max_inflight_requests(100)
+            .recovery(false)
+            .build()
             .await?;
 
         let test_record = b"test record data".to_vec();
 
-        let ack_future = stream.ingest_record(test_record).await?;
-        let _offset_id = ack_future.await?;
+        let ack_future = stream.ingest_record_offset(test_record).await?;
+        stream.wait_for_offset(ack_future).await?;
 
         stream.close().await?;
 
@@ -313,23 +264,14 @@ mod stream_initialization_and_basic_lifecycle_tests {
             .tls_config(Arc::new(NoTlsConfig))
             .build()?;
 
-        let table_properties = TableProperties {
-            table_name: TABLE_NAME.to_string(),
-            descriptor_proto: create_test_descriptor_proto(),
-        };
-
-        let options = StreamConfigurationOptions {
-            max_inflight_requests: 100,
-            recovery: false,
-            ..Default::default()
-        };
-
         let mut stream = sdk
-            .create_stream_with_headers_provider(
-                table_properties,
-                Arc::new(TestHeadersProvider::default()),
-                Some(options),
-            )
+            .stream_builder()
+            .table(TABLE_NAME)
+            .headers_provider(Arc::new(TestHeadersProvider::default()))
+            .compiled_proto(create_test_descriptor_proto().unwrap_or_default())
+            .max_inflight_requests(100)
+            .recovery(false)
+            .build()
             .await?;
 
         stream.close().await?;
@@ -371,29 +313,20 @@ mod stream_initialization_and_basic_lifecycle_tests {
             .tls_config(Arc::new(NoTlsConfig))
             .build()?;
 
-        let table_properties = TableProperties {
-            table_name: TABLE_NAME.to_string(),
-            descriptor_proto: create_test_descriptor_proto(),
-        };
-
-        let options = StreamConfigurationOptions {
-            max_inflight_requests: 100,
-            recovery: false,
-            ..Default::default()
-        };
-
         let mut stream = sdk
-            .create_stream_with_headers_provider(
-                table_properties,
-                Arc::new(TestHeadersProvider::default()),
-                Some(options),
-            )
+            .stream_builder()
+            .table(TABLE_NAME)
+            .headers_provider(Arc::new(TestHeadersProvider::default()))
+            .compiled_proto(create_test_descriptor_proto().unwrap_or_default())
+            .max_inflight_requests(100)
+            .recovery(false)
+            .build()
             .await?;
 
         let test_record = b"test record data".to_vec();
-        let _offset = stream.ingest_record(test_record).await?;
+        let _offset = stream.ingest_record_offset(test_record).await?;
         let test_record = b"test record data 2".to_vec();
-        let _offset = stream.ingest_record(test_record).await?;
+        let _offset = stream.ingest_record_offset(test_record).await?;
         let _result = stream.close().await;
         let flush_result = stream.flush().await;
 
@@ -430,28 +363,21 @@ mod stream_initialization_and_basic_lifecycle_tests {
             .tls_config(Arc::new(NoTlsConfig))
             .build()?;
 
-        let table_properties = TableProperties {
-            table_name: TABLE_NAME.to_string(),
-            descriptor_proto: create_test_descriptor_proto(),
-        };
-
-        let options = StreamConfigurationOptions {
-            max_inflight_requests: 100,
-            recovery: false,
-            ..Default::default()
-        };
-
         let mut stream = sdk
-            .create_stream_with_headers_provider(
-                table_properties,
-                Arc::new(TestHeadersProvider::default()),
-                Some(options),
-            )
+            .stream_builder()
+            .table(TABLE_NAME)
+            .headers_provider(Arc::new(TestHeadersProvider::default()))
+            .compiled_proto(create_test_descriptor_proto().unwrap_or_default())
+            .max_inflight_requests(100)
+            .recovery(false)
+            .build()
             .await?;
 
         stream.close().await?;
 
-        let ingest_result = stream.ingest_record(b"test record data".to_vec()).await;
+        let ingest_result = stream
+            .ingest_record_offset(b"test record data".to_vec())
+            .await;
         assert!(matches!(
             ingest_result,
             Err(ZerobusError::StreamClosedError(_))
@@ -483,29 +409,20 @@ mod stream_initialization_and_basic_lifecycle_tests {
             .tls_config(Arc::new(NoTlsConfig))
             .build()?;
 
-        let table_properties = TableProperties {
-            table_name: TABLE_NAME.to_string(),
-            descriptor_proto: create_test_descriptor_proto(),
-        };
-
-        let options = StreamConfigurationOptions {
-            max_inflight_requests: 100,
-            recovery: false,
-            ..Default::default()
-        };
-
         let mut stream = sdk
-            .create_stream_with_headers_provider(
-                table_properties,
-                Arc::new(TestHeadersProvider::default()),
-                Some(options),
-            )
+            .stream_builder()
+            .table(TABLE_NAME)
+            .headers_provider(Arc::new(TestHeadersProvider::default()))
+            .compiled_proto(create_test_descriptor_proto().unwrap_or_default())
+            .max_inflight_requests(100)
+            .recovery(false)
+            .build()
             .await?;
 
         stream.close().await?;
 
         let batch = vec![b"record 1".to_vec(), b"record 2".to_vec()];
-        let ingest_result = stream.ingest_records(batch).await;
+        let ingest_result = stream.ingest_records_offset(batch).await;
 
         assert!(matches!(
             ingest_result,
@@ -545,27 +462,18 @@ mod stream_initialization_and_basic_lifecycle_tests {
             .tls_config(Arc::new(NoTlsConfig))
             .build()?;
 
-        let table_properties = TableProperties {
-            table_name: TABLE_NAME.to_string(),
-            descriptor_proto: create_test_descriptor_proto(),
-        };
-
-        let options = StreamConfigurationOptions {
-            max_inflight_requests: 100,
-            recovery: false,
-            ..Default::default()
-        };
-
         let mut stream = sdk
-            .create_stream_with_headers_provider(
-                table_properties,
-                Arc::new(TestHeadersProvider::default()),
-                Some(options),
-            )
+            .stream_builder()
+            .table(TABLE_NAME)
+            .headers_provider(Arc::new(TestHeadersProvider::default()))
+            .compiled_proto(create_test_descriptor_proto().unwrap_or_default())
+            .max_inflight_requests(100)
+            .recovery(false)
+            .build()
             .await?;
 
         // Ingest a record to ensure supervisor is running.
-        let _ack = stream.ingest_record(b"test".to_vec()).await?;
+        let _ack = stream.ingest_record_offset(b"test".to_vec()).await?;
 
         let start = std::time::Instant::now();
         stream.close().await?;
@@ -604,17 +512,12 @@ mod stream_initialization_and_basic_lifecycle_tests {
             .tls_config(Arc::new(NoTlsConfig))
             .build()?;
 
-        let table_properties = TableProperties {
-            table_name: TABLE_NAME.to_string(),
-            descriptor_proto: create_test_descriptor_proto(),
-        };
-
         let stream = sdk
-            .create_stream_with_headers_provider(
-                table_properties,
-                Arc::new(TestHeadersProvider::default()),
-                None,
-            )
+            .stream_builder()
+            .table(TABLE_NAME)
+            .headers_provider(Arc::new(TestHeadersProvider::default()))
+            .compiled_proto(create_test_descriptor_proto().unwrap_or_default())
+            .build()
             .await?;
 
         let start = std::time::Instant::now();
@@ -660,26 +563,17 @@ mod stream_initialization_and_basic_lifecycle_tests {
             .tls_config(Arc::new(NoTlsConfig))
             .build()?;
 
-        let table_properties = TableProperties {
-            table_name: TABLE_NAME.to_string(),
-            descriptor_proto: create_test_descriptor_proto(),
-        };
-
-        let options = StreamConfigurationOptions {
-            recovery: false,
-            ..Default::default()
-        };
-
         let mut stream = sdk
-            .create_stream_with_headers_provider(
-                table_properties,
-                Arc::new(TestHeadersProvider::default()),
-                Some(options),
-            )
+            .stream_builder()
+            .table(TABLE_NAME)
+            .headers_provider(Arc::new(TestHeadersProvider::default()))
+            .compiled_proto(create_test_descriptor_proto().unwrap_or_default())
+            .recovery(false)
+            .build()
             .await?;
 
         // Ingest record that will fail.
-        let _ack = stream.ingest_record(b"will fail".to_vec()).await?;
+        let _ack = stream.ingest_record_offset(b"will fail".to_vec()).await?;
 
         // Wait for error to propagate.
         tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
@@ -728,28 +622,19 @@ mod stream_initialization_and_basic_lifecycle_tests {
             .tls_config(Arc::new(NoTlsConfig))
             .build()?;
 
-        let table_properties = TableProperties {
-            table_name: TABLE_NAME.to_string(),
-            descriptor_proto: create_test_descriptor_proto(),
-        };
-
-        let options = StreamConfigurationOptions {
-            max_inflight_requests: 100,
-            recovery: false,
-            ..Default::default()
-        };
-
         let mut stream = sdk
-            .create_stream_with_headers_provider(
-                table_properties,
-                Arc::new(TestHeadersProvider::default()),
-                Some(options),
-            )
+            .stream_builder()
+            .table(TABLE_NAME)
+            .headers_provider(Arc::new(TestHeadersProvider::default()))
+            .compiled_proto(create_test_descriptor_proto().unwrap_or_default())
+            .max_inflight_requests(100)
+            .recovery(false)
+            .build()
             .await?;
 
         // Ingest several records to keep supervisor busy.
         for _ in 0..10 {
-            let _ack = stream.ingest_record(b"test data".to_vec()).await?;
+            let _ack = stream.ingest_record_offset(b"test data".to_vec()).await?;
         }
 
         // Close while records are in flight.
@@ -791,17 +676,12 @@ mod stream_initialization_and_basic_lifecycle_tests {
             .tls_config(Arc::new(NoTlsConfig))
             .build()?;
 
-        let table_properties = TableProperties {
-            table_name: TABLE_NAME.to_string(),
-            descriptor_proto: create_test_descriptor_proto(),
-        };
-
         let stream = sdk
-            .create_stream_with_headers_provider(
-                table_properties,
-                Arc::new(TestHeadersProvider::default()),
-                None,
-            )
+            .stream_builder()
+            .table(TABLE_NAME)
+            .headers_provider(Arc::new(TestHeadersProvider::default()))
+            .compiled_proto(create_test_descriptor_proto().unwrap_or_default())
+            .build()
             .await?;
 
         // Wrap stream in Arc<Mutex<>> to enable concurrent access from multiple tasks.
@@ -859,17 +739,12 @@ mod stream_initialization_and_basic_lifecycle_tests {
             .tls_config(Arc::new(NoTlsConfig))
             .build()?;
 
-        let table_properties = TableProperties {
-            table_name: TABLE_NAME.to_string(),
-            descriptor_proto: create_test_descriptor_proto(),
-        };
-
         let stream = sdk
-            .create_stream_with_headers_provider(
-                table_properties,
-                Arc::new(TestHeadersProvider::default()),
-                None,
-            )
+            .stream_builder()
+            .table(TABLE_NAME)
+            .headers_provider(Arc::new(TestHeadersProvider::default()))
+            .compiled_proto(create_test_descriptor_proto().unwrap_or_default())
+            .build()
             .await?;
 
         {
@@ -914,29 +789,20 @@ mod schema_tests {
             .tls_config(Arc::new(NoTlsConfig))
             .build()?;
 
-        let table_properties = TableProperties {
-            table_name: TABLE_NAME.to_string(),
-            descriptor_proto: None,
-        };
-
-        let options = StreamConfigurationOptions {
-            max_inflight_requests: 100,
-            recovery: false,
-            record_type: RecordType::Json,
-            ..Default::default()
-        };
-
         let stream = sdk
-            .create_stream_with_headers_provider(
-                table_properties,
-                Arc::new(TestHeadersProvider::default()),
-                Some(options),
-            )
+            .stream_builder()
+            .table(TABLE_NAME)
+            .headers_provider(Arc::new(TestHeadersProvider::default()))
+            .json()
+            .max_inflight_requests(100)
+            .recovery(false)
+            .build()
             .await?;
 
         let json_record = r#"{"id": 1, "name": "test"}"#.to_string();
-        let ingest_future = stream.ingest_record(json_record.clone()).await?;
-        let ingest_result = ingest_future.await?;
+        let ingest_future = stream.ingest_record_offset(json_record.clone()).await?;
+        stream.wait_for_offset(ingest_future).await?;
+        let ingest_result = ingest_future;
 
         assert_eq!(ingest_result, 0);
         assert_eq!(mock_server.get_write_count().await, 1);
@@ -973,24 +839,14 @@ mod schema_tests {
             .tls_config(Arc::new(NoTlsConfig))
             .build()?;
 
-        let table_properties = TableProperties {
-            table_name: TABLE_NAME.to_string(),
-            descriptor_proto: None,
-        };
-
-        let options = StreamConfigurationOptions {
-            max_inflight_requests: 100,
-            recovery: false,
-            record_type: RecordType::Json,
-            ..Default::default()
-        };
-
         let stream = sdk
-            .create_stream_with_headers_provider(
-                table_properties,
-                Arc::new(TestHeadersProvider::default()),
-                Some(options),
-            )
+            .stream_builder()
+            .table(TABLE_NAME)
+            .headers_provider(Arc::new(TestHeadersProvider::default()))
+            .json()
+            .max_inflight_requests(100)
+            .recovery(false)
+            .build()
             .await?;
 
         let json_batch = vec![
@@ -999,8 +855,11 @@ mod schema_tests {
             r#"{"id": 3, "name": "test3"}"#.to_string(),
         ];
 
-        let ack_future = stream.ingest_records(json_batch).await?;
-        let offset = ack_future.await?;
+        let ack_future = stream.ingest_records_offset(json_batch).await?;
+        if let Some(off) = ack_future {
+            stream.wait_for_offset(off).await?;
+        }
+        let offset = ack_future;
 
         assert_eq!(offset, Some(0));
         assert_eq!(mock_server.get_write_count().await, 3);
@@ -1020,26 +879,16 @@ mod schema_tests {
             .tls_config(Arc::new(NoTlsConfig))
             .build()?;
 
-        let table_properties = TableProperties {
-            table_name: TABLE_NAME.to_string(),
-            descriptor_proto: Some(Default::default()),
-        };
-
-        let options = StreamConfigurationOptions {
-            record_type: RecordType::Proto,
-            ..Default::default()
-        };
-
         let stream = sdk
-            .create_stream_with_headers_provider(
-                table_properties,
-                Arc::new(TestHeadersProvider::default()),
-                Some(options),
-            )
+            .stream_builder()
+            .table(TABLE_NAME)
+            .headers_provider(Arc::new(TestHeadersProvider::default()))
+            .compiled_proto(Default::default())
+            .build()
             .await?;
 
         let json_record = r#"{"id": 1, "name": "test"}"#.to_string();
-        let result = stream.ingest_record(json_record).await;
+        let result = stream.ingest_record_offset(json_record).await;
 
         assert!(matches!(result, Err(ZerobusError::InvalidArgument(_))));
 
@@ -1059,29 +908,19 @@ mod schema_tests {
             .tls_config(Arc::new(NoTlsConfig))
             .build()?;
 
-        let table_properties = TableProperties {
-            table_name: TABLE_NAME.to_string(),
-            descriptor_proto: Some(Default::default()),
-        };
-
-        let options = StreamConfigurationOptions {
-            record_type: RecordType::Proto,
-            ..Default::default()
-        };
-
         let stream = sdk
-            .create_stream_with_headers_provider(
-                table_properties,
-                Arc::new(TestHeadersProvider::default()),
-                Some(options),
-            )
+            .stream_builder()
+            .table(TABLE_NAME)
+            .headers_provider(Arc::new(TestHeadersProvider::default()))
+            .compiled_proto(Default::default())
+            .build()
             .await?;
 
         let json_batch = vec![
             r#"{"id": 1, "name": "test1"}"#.to_string(),
             r#"{"id": 2, "name": "test2"}"#.to_string(),
         ];
-        let result = stream.ingest_records(json_batch).await;
+        let result = stream.ingest_records_offset(json_batch).await;
 
         assert!(matches!(result, Err(ZerobusError::InvalidArgument(_))));
 
@@ -1100,26 +939,16 @@ mod schema_tests {
             .tls_config(Arc::new(NoTlsConfig))
             .build()?;
 
-        let table_properties = TableProperties {
-            table_name: TABLE_NAME.to_string(),
-            descriptor_proto: None,
-        };
-
-        let options = StreamConfigurationOptions {
-            record_type: RecordType::Json,
-            ..Default::default()
-        };
-
         let stream = sdk
-            .create_stream_with_headers_provider(
-                table_properties,
-                Arc::new(TestHeadersProvider::default()),
-                Some(options),
-            )
+            .stream_builder()
+            .table(TABLE_NAME)
+            .headers_provider(Arc::new(TestHeadersProvider::default()))
+            .json()
+            .build()
             .await?;
 
         let proto_record = vec![1, 2, 3];
-        let result = stream.ingest_record(proto_record).await;
+        let result = stream.ingest_record_offset(proto_record).await;
 
         assert!(matches!(result, Err(ZerobusError::InvalidArgument(_))));
 
@@ -1139,67 +968,18 @@ mod schema_tests {
             .tls_config(Arc::new(NoTlsConfig))
             .build()?;
 
-        let table_properties = TableProperties {
-            table_name: TABLE_NAME.to_string(),
-            descriptor_proto: None,
-        };
-
-        let options = StreamConfigurationOptions {
-            record_type: RecordType::Json,
-            ..Default::default()
-        };
-
         let stream = sdk
-            .create_stream_with_headers_provider(
-                table_properties,
-                Arc::new(TestHeadersProvider::default()),
-                Some(options),
-            )
+            .stream_builder()
+            .table(TABLE_NAME)
+            .headers_provider(Arc::new(TestHeadersProvider::default()))
+            .json()
+            .build()
             .await?;
 
         let proto_batch = vec![vec![1, 2, 3], vec![4, 5, 6]];
-        let result = stream.ingest_records(proto_batch).await;
+        let result = stream.ingest_records_offset(proto_batch).await;
 
         assert!(matches!(result, Err(ZerobusError::InvalidArgument(_))));
-
-        Ok(())
-    }
-
-    #[tokio::test]
-    async fn test_proto_stream_creation_without_descriptor_fails(
-    ) -> Result<(), Box<dyn std::error::Error>> {
-        setup_tracing();
-        info!("Starting test_proto_stream_creation_without_descriptor_fails");
-
-        let (_mock_server, server_url) = start_mock_server().await?;
-        let sdk = ZerobusSdk::builder()
-            .endpoint(server_url.clone())
-            .unity_catalog_url("https://mock-uc.com")
-            .tls_config(Arc::new(NoTlsConfig))
-            .build()?;
-
-        let table_properties = TableProperties {
-            table_name: TABLE_NAME.to_string(),
-            descriptor_proto: None, // No descriptor provided
-        };
-
-        let options = StreamConfigurationOptions {
-            record_type: RecordType::Proto, // But Proto type required
-            ..Default::default()
-        };
-
-        let result = sdk
-            .create_stream_with_headers_provider(
-                table_properties,
-                Arc::new(TestHeadersProvider::default()),
-                Some(options),
-            )
-            .await;
-
-        assert!(matches!(result, Err(ZerobusError::InvalidArgument(_))));
-        if let Err(ZerobusError::InvalidArgument(msg)) = result {
-            assert!(msg.contains("Proto descriptor is required"));
-        }
 
         Ok(())
     }
@@ -1228,23 +1008,13 @@ mod schema_tests {
             .tls_config(Arc::new(NoTlsConfig))
             .build()?;
 
-        let table_properties = TableProperties {
-            table_name: TABLE_NAME.to_string(),
-            descriptor_proto: create_test_descriptor_proto(), // Descriptor provided
-        };
-
-        let options = StreamConfigurationOptions {
-            record_type: RecordType::Json, // But JSON type specified
-            ..Default::default()
-        };
-
         // Should succeed but log a warning (descriptor will be ignored)
         let result = sdk
-            .create_stream_with_headers_provider(
-                table_properties,
-                Arc::new(TestHeadersProvider::default()),
-                Some(options),
-            )
+            .stream_builder()
+            .table(TABLE_NAME)
+            .headers_provider(Arc::new(TestHeadersProvider::default()))
+            .json()
+            .build()
             .await;
 
         assert!(
@@ -1288,27 +1058,21 @@ mod standard_operation_and_state_management_tests {
             .tls_config(Arc::new(NoTlsConfig))
             .build()?;
 
-        let table_properties = TableProperties {
-            table_name: TABLE_NAME.to_string(),
-            descriptor_proto: create_test_descriptor_proto(),
-        };
-
-        let options = StreamConfigurationOptions {
-            max_inflight_requests: 100,
-            recovery: false,
-            ..Default::default()
-        };
-
         let stream = sdk
-            .create_stream_with_headers_provider(
-                table_properties,
-                Arc::new(TestHeadersProvider::default()),
-                Some(options),
-            )
+            .stream_builder()
+            .table(TABLE_NAME)
+            .headers_provider(Arc::new(TestHeadersProvider::default()))
+            .compiled_proto(create_test_descriptor_proto().unwrap_or_default())
+            .max_inflight_requests(100)
+            .recovery(false)
+            .build()
             .await?;
 
-        let ingest_future = stream.ingest_record(b"test record data".to_vec()).await?;
-        let ingest_result = ingest_future.await?;
+        let ingest_future = stream
+            .ingest_record_offset(b"test record data".to_vec())
+            .await?;
+        stream.wait_for_offset(ingest_future).await?;
+        let ingest_result = ingest_future;
 
         assert_eq!(ingest_result, 0);
         assert_eq!(mock_server.get_write_count().await, 1);
@@ -1346,33 +1110,27 @@ mod standard_operation_and_state_management_tests {
             .tls_config(Arc::new(NoTlsConfig))
             .build()?;
 
-        let table_properties = TableProperties {
-            table_name: TABLE_NAME.to_string(),
-            descriptor_proto: create_test_descriptor_proto(),
-        };
-
-        let options = StreamConfigurationOptions {
-            max_inflight_requests: 100,
-            recovery: false,
-            ..Default::default()
-        };
-
         let stream = sdk
-            .create_stream_with_headers_provider(
-                table_properties,
-                Arc::new(TestHeadersProvider::default()),
-                Some(options),
-            )
+            .stream_builder()
+            .table(TABLE_NAME)
+            .headers_provider(Arc::new(TestHeadersProvider::default()))
+            .compiled_proto(create_test_descriptor_proto().unwrap_or_default())
+            .max_inflight_requests(100)
+            .recovery(false)
+            .build()
             .await?;
 
         let mut ingest_futures = Vec::new();
         for _i in 0..100 {
-            let ingest_future = stream.ingest_record(b"test record data".to_vec()).await?;
+            let ingest_future = stream
+                .ingest_record_offset(b"test record data".to_vec())
+                .await?;
             ingest_futures.push(ingest_future);
         }
 
         for (i, ingest_future) in ingest_futures.into_iter().enumerate() {
-            let ingest_result = ingest_future.await?;
+            stream.wait_for_offset(ingest_future).await?;
+            let ingest_result = ingest_future;
             assert_eq!(ingest_result, i as i64);
         }
 
@@ -1411,23 +1169,14 @@ mod standard_operation_and_state_management_tests {
             .tls_config(Arc::new(NoTlsConfig))
             .build()?;
 
-        let table_properties = TableProperties {
-            table_name: TABLE_NAME.to_string(),
-            descriptor_proto: create_test_descriptor_proto(),
-        };
-
-        let options = StreamConfigurationOptions {
-            max_inflight_requests: 100,
-            recovery: false,
-            ..Default::default()
-        };
-
         let stream = sdk
-            .create_stream_with_headers_provider(
-                table_properties,
-                Arc::new(TestHeadersProvider::default()),
-                Some(options),
-            )
+            .stream_builder()
+            .table(TABLE_NAME)
+            .headers_provider(Arc::new(TestHeadersProvider::default()))
+            .compiled_proto(create_test_descriptor_proto().unwrap_or_default())
+            .max_inflight_requests(100)
+            .recovery(false)
+            .build()
             .await?;
 
         let batch = vec![
@@ -1436,8 +1185,11 @@ mod standard_operation_and_state_management_tests {
             b"record 3".to_vec(),
         ];
 
-        let ack_future = stream.ingest_records(batch).await?;
-        let offset = ack_future.await?;
+        let ack_future = stream.ingest_records_offset(batch).await?;
+        if let Some(off) = ack_future {
+            stream.wait_for_offset(off).await?;
+        }
+        let offset = ack_future;
 
         assert_eq!(offset, Some(0));
         assert_eq!(mock_server.get_write_count().await, 3);
@@ -1469,28 +1221,21 @@ mod standard_operation_and_state_management_tests {
             .tls_config(Arc::new(NoTlsConfig))
             .build()?;
 
-        let table_properties = TableProperties {
-            table_name: TABLE_NAME.to_string(),
-            descriptor_proto: create_test_descriptor_proto(),
-        };
-
-        let options = StreamConfigurationOptions {
-            record_type: RecordType::Proto,
-            ..Default::default()
-        };
-
         let stream = sdk
-            .create_stream_with_headers_provider(
-                table_properties,
-                Arc::new(TestHeadersProvider::default()),
-                Some(options),
-            )
+            .stream_builder()
+            .table(TABLE_NAME)
+            .headers_provider(Arc::new(TestHeadersProvider::default()))
+            .compiled_proto(create_test_descriptor_proto().unwrap_or_default())
+            .build()
             .await?;
 
         // Ingest empty batch when no batches have been acknowledged yet
         let empty_batch: Vec<Vec<u8>> = vec![];
-        let ack_future = stream.ingest_records(empty_batch).await?;
-        let offset_id = ack_future.await?;
+        let ack_future = stream.ingest_records_offset(empty_batch).await?;
+        if let Some(off) = ack_future {
+            stream.wait_for_offset(off).await?;
+        }
+        let offset_id = ack_future;
 
         // Should return None since the batch is empty
         assert_eq!(offset_id, None);
@@ -1532,39 +1277,34 @@ mod standard_operation_and_state_management_tests {
             .tls_config(Arc::new(NoTlsConfig))
             .build()?;
 
-        let table_properties = TableProperties {
-            table_name: TABLE_NAME.to_string(),
-            descriptor_proto: create_test_descriptor_proto(),
-        };
-
-        let options = StreamConfigurationOptions {
-            record_type: RecordType::Proto,
-            ..Default::default()
-        };
-
         let stream = sdk
-            .create_stream_with_headers_provider(
-                table_properties,
-                Arc::new(TestHeadersProvider::default()),
-                Some(options),
-            )
+            .stream_builder()
+            .table(TABLE_NAME)
+            .headers_provider(Arc::new(TestHeadersProvider::default()))
+            .compiled_proto(create_test_descriptor_proto().unwrap_or_default())
+            .build()
             .await?;
 
         // Ingest some real records first
         let test_record1 = b"test record 1".to_vec();
-        let ack_future1 = stream.ingest_record(test_record1).await?;
-        let offset_id1 = ack_future1.await?;
+        let ack_future1 = stream.ingest_record_offset(test_record1).await?;
+        stream.wait_for_offset(ack_future1).await?;
+        let offset_id1 = ack_future1;
         assert_eq!(offset_id1, 0);
 
         let test_record2 = b"test record 2".to_vec();
-        let ack_future2 = stream.ingest_record(test_record2).await?;
-        let offset_id2 = ack_future2.await?;
+        let ack_future2 = stream.ingest_record_offset(test_record2).await?;
+        stream.wait_for_offset(ack_future2).await?;
+        let offset_id2 = ack_future2;
         assert_eq!(offset_id2, 1);
 
         // Now ingest an empty batch
         let empty_batch: Vec<Vec<u8>> = vec![];
-        let ack_future = stream.ingest_records(empty_batch).await?;
-        let offset_id = ack_future.await?;
+        let ack_future = stream.ingest_records_offset(empty_batch).await?;
+        if let Some(off) = ack_future {
+            stream.wait_for_offset(off).await?;
+        }
+        let offset_id = ack_future;
 
         // Should return None since the batch is empty
         assert_eq!(offset_id, None);
@@ -1603,33 +1343,27 @@ mod standard_operation_and_state_management_tests {
             .tls_config(Arc::new(NoTlsConfig))
             .build()?;
 
-        let table_properties = TableProperties {
-            table_name: TABLE_NAME.to_string(),
-            descriptor_proto: create_test_descriptor_proto(),
-        };
-
-        let options = StreamConfigurationOptions {
-            max_inflight_requests: 100,
-            recovery: false,
-            ..Default::default()
-        };
-
         let stream = sdk
-            .create_stream_with_headers_provider(
-                table_properties,
-                Arc::new(TestHeadersProvider::default()),
-                Some(options),
-            )
+            .stream_builder()
+            .table(TABLE_NAME)
+            .headers_provider(Arc::new(TestHeadersProvider::default()))
+            .compiled_proto(create_test_descriptor_proto().unwrap_or_default())
+            .max_inflight_requests(100)
+            .recovery(false)
+            .build()
             .await?;
 
         // Create a batch and send it - server will reject it as too large
         let batch: Vec<Vec<u8>> = (0..100)
             .map(|i| format!("record_{}", i).into_bytes())
             .collect();
-        let ack_future = stream.ingest_records(batch).await?;
+        let ack_future = stream.ingest_records_offset(batch).await?;
 
         // The ack future should fail with the server's error
-        let result = ack_future.await;
+        let result = match ack_future {
+            Some(off) => stream.wait_for_offset(off).await,
+            None => Ok(()),
+        };
         assert!(result.is_err());
         if let Err(ZerobusError::InvalidArgument(msg)) = result {
             assert!(
@@ -1673,31 +1407,25 @@ mod standard_operation_and_state_management_tests {
             .tls_config(Arc::new(NoTlsConfig))
             .build()?;
 
-        let table_properties = TableProperties {
-            table_name: TABLE_NAME.to_string(),
-            descriptor_proto: create_test_descriptor_proto(),
-        };
-
-        let options = StreamConfigurationOptions {
-            max_inflight_requests: 200,
-            recovery: false,
-            ..Default::default()
-        };
-
         let stream = sdk
-            .create_stream_with_headers_provider(
-                table_properties,
-                Arc::new(TestHeadersProvider::default()),
-                Some(options),
-            )
+            .stream_builder()
+            .table(TABLE_NAME)
+            .headers_provider(Arc::new(TestHeadersProvider::default()))
+            .compiled_proto(create_test_descriptor_proto().unwrap_or_default())
+            .max_inflight_requests(200)
+            .recovery(false)
+            .build()
             .await?;
 
         let batch: Vec<Vec<u8>> = (0..100)
             .map(|i| format!("record {}", i).into_bytes())
             .collect();
 
-        let ack_future = stream.ingest_records(batch).await?;
-        let offset = ack_future.await?;
+        let ack_future = stream.ingest_records_offset(batch).await?;
+        if let Some(off) = ack_future {
+            stream.wait_for_offset(off).await?;
+        }
+        let offset = ack_future;
 
         assert_eq!(offset, Some(0));
         assert_eq!(mock_server.get_write_count().await, 100);
@@ -1743,40 +1471,38 @@ mod standard_operation_and_state_management_tests {
             .tls_config(Arc::new(NoTlsConfig))
             .build()?;
 
-        let table_properties = TableProperties {
-            table_name: TABLE_NAME.to_string(),
-            descriptor_proto: create_test_descriptor_proto(),
-        };
-
-        let options = StreamConfigurationOptions {
-            max_inflight_requests: 100,
-            recovery: false,
-            ..Default::default()
-        };
-
         let stream = sdk
-            .create_stream_with_headers_provider(
-                table_properties,
-                Arc::new(TestHeadersProvider::default()),
-                Some(options),
-            )
+            .stream_builder()
+            .table(TABLE_NAME)
+            .headers_provider(Arc::new(TestHeadersProvider::default()))
+            .compiled_proto(create_test_descriptor_proto().unwrap_or_default())
+            .max_inflight_requests(100)
+            .recovery(false)
+            .build()
             .await?;
 
         // Single record
-        let ack1_future = stream.ingest_record(b"single record".to_vec()).await?;
+        let ack1_future = stream
+            .ingest_record_offset(b"single record".to_vec())
+            .await?;
 
         // Batch
         let batch = vec![b"batch record 1".to_vec(), b"batch record 2".to_vec()];
-        let ack2_future = stream.ingest_records(batch).await?;
+        let ack2_future = stream.ingest_records_offset(batch).await?;
 
         // Another single record
         let ack3_future = stream
-            .ingest_record(b"another single record".to_vec())
+            .ingest_record_offset(b"another single record".to_vec())
             .await?;
 
-        assert_eq!(ack1_future.await?, 0);
-        assert_eq!(ack2_future.await?, Some(1));
-        assert_eq!(ack3_future.await?, 2);
+        stream.wait_for_offset(ack1_future).await?;
+        assert_eq!(ack1_future, 0);
+        if let Some(off) = ack2_future {
+            stream.wait_for_offset(off).await?;
+        }
+        assert_eq!(ack2_future, Some(1));
+        stream.wait_for_offset(ack3_future).await?;
+        assert_eq!(ack3_future, 2);
 
         assert_eq!(mock_server.get_write_count().await, 4);
         assert_eq!(mock_server.get_max_offset_sent().await, 2);
@@ -1813,27 +1539,20 @@ mod standard_operation_and_state_management_tests {
             .tls_config(Arc::new(NoTlsConfig))
             .build()?;
 
-        let table_properties = TableProperties {
-            table_name: TABLE_NAME.to_string(),
-            descriptor_proto: create_test_descriptor_proto(),
-        };
-
-        let options = StreamConfigurationOptions {
-            max_inflight_requests: 100,
-            recovery: false,
-            ..Default::default()
-        };
-
         let stream = sdk
-            .create_stream_with_headers_provider(
-                table_properties,
-                Arc::new(TestHeadersProvider::default()),
-                Some(options),
-            )
+            .stream_builder()
+            .table(TABLE_NAME)
+            .headers_provider(Arc::new(TestHeadersProvider::default()))
+            .compiled_proto(create_test_descriptor_proto().unwrap_or_default())
+            .max_inflight_requests(100)
+            .recovery(false)
+            .build()
             .await?;
 
         for _i in 0..5 {
-            let _ingest_future = stream.ingest_record(b"test record data".to_vec()).await?;
+            let _ingest_future = stream
+                .ingest_record_offset(b"test record data".to_vec())
+                .await?;
         }
 
         stream.flush().await?;
@@ -1873,29 +1592,22 @@ mod standard_operation_and_state_management_tests {
             .tls_config(Arc::new(NoTlsConfig))
             .build()?;
 
-        let table_properties = TableProperties {
-            table_name: TABLE_NAME.to_string(),
-            descriptor_proto: create_test_descriptor_proto(),
-        };
-
-        let options = StreamConfigurationOptions {
-            max_inflight_requests: 100,
-            recovery: false,
-            flush_timeout_ms: 100,
-            ..Default::default()
-        };
-
         let stream = sdk
-            .create_stream_with_headers_provider(
-                table_properties,
-                Arc::new(TestHeadersProvider::default()),
-                Some(options),
-            )
+            .stream_builder()
+            .table(TABLE_NAME)
+            .headers_provider(Arc::new(TestHeadersProvider::default()))
+            .compiled_proto(create_test_descriptor_proto().unwrap_or_default())
+            .max_inflight_requests(100)
+            .recovery(false)
+            .flush_timeout_ms(100)
+            .build()
             .await?;
 
         let mut ingest_futures = Vec::new();
         for _i in 0..5 {
-            let ingest_future = stream.ingest_record(b"test record data".to_vec()).await?;
+            let ingest_future = stream
+                .ingest_record_offset(b"test record data".to_vec())
+                .await?;
             ingest_futures.push(ingest_future);
         }
 
@@ -1937,23 +1649,14 @@ mod standard_operation_and_state_management_tests {
             .tls_config(Arc::new(NoTlsConfig))
             .build()?;
 
-        let table_properties = TableProperties {
-            table_name: TABLE_NAME.to_string(),
-            descriptor_proto: create_test_descriptor_proto(),
-        };
-
-        let options = StreamConfigurationOptions {
-            max_inflight_requests: 100,
-            recovery: false,
-            ..Default::default()
-        };
-
         let stream = sdk
-            .create_stream_with_headers_provider(
-                table_properties,
-                Arc::new(TestHeadersProvider::default()),
-                Some(options),
-            )
+            .stream_builder()
+            .table(TABLE_NAME)
+            .headers_provider(Arc::new(TestHeadersProvider::default()))
+            .compiled_proto(create_test_descriptor_proto().unwrap_or_default())
+            .max_inflight_requests(100)
+            .recovery(false)
+            .build()
             .await?;
 
         let start_time = std::time::Instant::now();
@@ -1999,23 +1702,14 @@ mod concurrency_and_race_condition_tests {
             .tls_config(Arc::new(NoTlsConfig))
             .build()?;
 
-        let table_properties = TableProperties {
-            table_name: TABLE_NAME.to_string(),
-            descriptor_proto: create_test_descriptor_proto(),
-        };
-
-        let options = StreamConfigurationOptions {
-            max_inflight_requests: NUM_RECORDS,
-            recovery: false,
-            ..Default::default()
-        };
-
         let stream = sdk
-            .create_stream_with_headers_provider(
-                table_properties,
-                Arc::new(TestHeadersProvider::default()),
-                Some(options),
-            )
+            .stream_builder()
+            .table(TABLE_NAME)
+            .headers_provider(Arc::new(TestHeadersProvider::default()))
+            .compiled_proto(create_test_descriptor_proto().unwrap_or_default())
+            .max_inflight_requests(NUM_RECORDS)
+            .recovery(false)
+            .build()
             .await?;
         let stream = Arc::new(stream);
 
@@ -2027,7 +1721,7 @@ mod concurrency_and_race_condition_tests {
                 let mut ack_futures = Vec::new();
                 for _ in 0..RECORDS_PER_TASK {
                     match stream_clone
-                        .ingest_record(b"concurrent test data".to_vec())
+                        .ingest_record_offset(b"concurrent test data".to_vec())
                         .await
                     {
                         Ok(ack_future) => ack_futures.push(ack_future),
@@ -2049,7 +1743,8 @@ mod concurrency_and_race_condition_tests {
 
         let mut offsets = Vec::new();
         for ack_future in all_ack_futures {
-            offsets.push(ack_future.await?);
+            stream.wait_for_offset(ack_future).await?;
+            offsets.push(ack_future);
         }
 
         offsets.sort();
@@ -2105,36 +1800,29 @@ mod concurrency_and_race_condition_tests {
             .tls_config(Arc::new(NoTlsConfig))
             .build()?;
 
-        let table_properties = TableProperties {
-            table_name: TABLE_NAME.to_string(),
-            descriptor_proto: create_test_descriptor_proto(),
-        };
-
-        let options = StreamConfigurationOptions {
-            max_inflight_requests: MAX_INFLIGHT_REQUESTS,
-            recovery: false,
-            ..Default::default()
-        };
-
         let stream = sdk
-            .create_stream_with_headers_provider(
-                table_properties,
-                Arc::new(TestHeadersProvider::default()),
-                Some(options),
-            )
+            .stream_builder()
+            .table(TABLE_NAME)
+            .headers_provider(Arc::new(TestHeadersProvider::default()))
+            .compiled_proto(create_test_descriptor_proto().unwrap_or_default())
+            .max_inflight_requests(MAX_INFLIGHT_REQUESTS)
+            .recovery(false)
+            .build()
             .await?;
 
         let mut ack_futures = Vec::new();
 
         // Send MAX_INFLIGHT_REQUESTS requests (each ingest_record = 1 request)
         for _ in 0..MAX_INFLIGHT_REQUESTS {
-            let ack_future = stream.ingest_record(b"test data".to_vec()).await?;
+            let ack_future = stream.ingest_record_offset(b"test data".to_vec()).await?;
             ack_futures.push(ack_future);
         }
 
         // The next request should block because we're at the inflight limit
         let start_time = std::time::Instant::now();
-        let blocking_ack_future = stream.ingest_record(b"blocking data".to_vec()).await?;
+        let blocking_ack_future = stream
+            .ingest_record_offset(b"blocking data".to_vec())
+            .await?;
         let duration = start_time.elapsed();
 
         ack_futures.push(blocking_ack_future);
@@ -2149,13 +1837,15 @@ mod concurrency_and_race_condition_tests {
 
         // Send remaining requests
         for _ in (MAX_INFLIGHT_REQUESTS + 1)..TOTAL_REQUESTS {
-            let ack_future = stream.ingest_record(b"more test data".to_vec()).await?;
+            let ack_future = stream
+                .ingest_record_offset(b"more test data".to_vec())
+                .await?;
             ack_futures.push(ack_future);
         }
 
         for (i, ack) in ack_futures.into_iter().enumerate() {
-            let offset = ack.await?;
-            assert_eq!(offset, i as i64);
+            stream.wait_for_offset(ack).await?;
+            assert_eq!(ack, i as i64);
         }
 
         assert_eq!(mock_server.get_write_count().await, TOTAL_REQUESTS as u64);
@@ -2206,23 +1896,14 @@ mod concurrency_and_race_condition_tests {
             .tls_config(Arc::new(NoTlsConfig))
             .build()?;
 
-        let table_properties = TableProperties {
-            table_name: TABLE_NAME.to_string(),
-            descriptor_proto: create_test_descriptor_proto(),
-        };
-
-        let options = StreamConfigurationOptions {
-            max_inflight_requests: MAX_INFLIGHT_REQUESTS,
-            recovery: false,
-            ..Default::default()
-        };
-
         let stream = sdk
-            .create_stream_with_headers_provider(
-                table_properties,
-                Arc::new(TestHeadersProvider::default()),
-                Some(options),
-            )
+            .stream_builder()
+            .table(TABLE_NAME)
+            .headers_provider(Arc::new(TestHeadersProvider::default()))
+            .compiled_proto(create_test_descriptor_proto().unwrap_or_default())
+            .max_inflight_requests(MAX_INFLIGHT_REQUESTS)
+            .recovery(false)
+            .build()
             .await?;
 
         let mut ack_futures = Vec::new();
@@ -2232,7 +1913,7 @@ mod concurrency_and_race_condition_tests {
             let batch: Vec<Vec<u8>> = (0..RECORDS_PER_BATCH)
                 .map(|_| b"test data".to_vec())
                 .collect();
-            let ack_future = stream.ingest_records(batch).await?;
+            let ack_future = stream.ingest_records_offset(batch).await?;
             ack_futures.push(ack_future);
         }
 
@@ -2241,7 +1922,7 @@ mod concurrency_and_race_condition_tests {
         let batch: Vec<Vec<u8>> = (0..RECORDS_PER_BATCH)
             .map(|_| b"blocking batch data".to_vec())
             .collect();
-        let blocking_ack_future = stream.ingest_records(batch).await?;
+        let blocking_ack_future = stream.ingest_records_offset(batch).await?;
         let duration = start_time.elapsed();
 
         ack_futures.push(blocking_ack_future);
@@ -2256,8 +1937,10 @@ mod concurrency_and_race_condition_tests {
 
         // Wait for all acknowledgments
         for (i, ack) in ack_futures.into_iter().enumerate() {
-            let offset = ack.await?;
-            assert_eq!(offset, Some(i as i64));
+            if let Some(off) = ack {
+                stream.wait_for_offset(off).await?;
+            }
+            assert_eq!(ack, Some(i as i64));
         }
 
         // Total writes = TOTAL_BATCHES * RECORDS_PER_BATCH
@@ -2311,17 +1994,12 @@ mod concurrency_and_race_condition_tests {
             .tls_config(Arc::new(NoTlsConfig))
             .build()?;
         let stream = sdk
-            .create_stream_with_headers_provider(
-                TableProperties {
-                    table_name: TABLE_NAME.to_string(),
-                    descriptor_proto: create_test_descriptor_proto(),
-                },
-                Arc::new(TestHeadersProvider::default()),
-                Some(StreamConfigurationOptions {
-                    max_inflight_requests: TOTAL_RECORDS + 5,
-                    ..Default::default()
-                }),
-            )
+            .stream_builder()
+            .table(TABLE_NAME)
+            .headers_provider(Arc::new(TestHeadersProvider::default()))
+            .compiled_proto(create_test_descriptor_proto().unwrap_or_default())
+            .max_inflight_requests(TOTAL_RECORDS + 5)
+            .build()
             .await?;
         let stream = Arc::new(stream);
 
@@ -2334,7 +2012,7 @@ mod concurrency_and_race_condition_tests {
             ingester_barrier.wait().await;
             for _ in 0..RECORDS_DURING_FLUSH {
                 if let Ok(future) = ingester_stream
-                    .ingest_record(b"ingester data".to_vec())
+                    .ingest_record_offset(b"ingester data".to_vec())
                     .await
                 {
                     futures.push(future);
@@ -2345,7 +2023,11 @@ mod concurrency_and_race_condition_tests {
 
         let mut flusher_futures = Vec::new();
         for _ in 0..RECORDS_BEFORE_FLUSH {
-            flusher_futures.push(stream.ingest_record(b"flusher data".to_vec()).await?);
+            flusher_futures.push(
+                stream
+                    .ingest_record_offset(b"flusher data".to_vec())
+                    .await?,
+            );
         }
 
         barrier.wait().await;
@@ -2367,7 +2049,8 @@ mod concurrency_and_race_condition_tests {
         all_futures.extend(ingester_task.await?);
 
         for (i, future) in all_futures.into_iter().enumerate() {
-            assert_eq!(future.await?, i as i64);
+            stream.wait_for_offset(future).await?;
+            assert_eq!(future, i as i64);
         }
 
         assert_eq!(mock_server.get_write_count().await, TOTAL_RECORDS as u64);
@@ -2411,23 +2094,14 @@ mod concurrency_and_race_condition_tests {
             .tls_config(Arc::new(NoTlsConfig))
             .build()?;
 
-        let table_properties = TableProperties {
-            table_name: TABLE_NAME.to_string(),
-            descriptor_proto: create_test_descriptor_proto(),
-        };
-
-        let options = StreamConfigurationOptions {
-            max_inflight_requests: NUM_TASKS * RECORDS_PER_BATCH + 10,
-            recovery: false,
-            ..Default::default()
-        };
-
         let stream = sdk
-            .create_stream_with_headers_provider(
-                table_properties,
-                Arc::new(TestHeadersProvider::default()),
-                Some(options),
-            )
+            .stream_builder()
+            .table(TABLE_NAME)
+            .headers_provider(Arc::new(TestHeadersProvider::default()))
+            .compiled_proto(create_test_descriptor_proto().unwrap_or_default())
+            .max_inflight_requests(NUM_TASKS * RECORDS_PER_BATCH + 10)
+            .recovery(false)
+            .build()
             .await?;
         let stream = Arc::new(stream);
 
@@ -2440,7 +2114,7 @@ mod concurrency_and_race_condition_tests {
                     .map(|i| format!("task {} record {}", task_id, i).into_bytes())
                     .collect();
 
-                match stream_clone.ingest_records(batch).await {
+                match stream_clone.ingest_records_offset(batch).await {
                     Ok(ack_future) => Ok(ack_future),
                     Err(e) => Err(e),
                 }
@@ -2458,7 +2132,10 @@ mod concurrency_and_race_condition_tests {
 
         let mut offsets = Vec::new();
         for ack_future in all_ack_futures {
-            offsets.push(ack_future.await?);
+            if let Some(off) = ack_future {
+                stream.wait_for_offset(off).await?;
+            }
+            offsets.push(ack_future);
         }
 
         offsets.sort();
@@ -2508,31 +2185,27 @@ mod failure_scenarios_tests {
                 .tls_config(Arc::new(NoTlsConfig))
                 .build()?;
             let stream = sdk
-                .create_stream_with_headers_provider(
-                    TableProperties {
-                        table_name: TABLE_NAME.to_string(),
-                        descriptor_proto: create_test_descriptor_proto(),
-                    },
-                    Arc::new(TestHeadersProvider::default()),
-                    Some(StreamConfigurationOptions {
-                        recovery: false,
-                        ..Default::default()
-                    }),
-                )
+                .stream_builder()
+                .table(TABLE_NAME)
+                .headers_provider(Arc::new(TestHeadersProvider::default()))
+                .compiled_proto(create_test_descriptor_proto().unwrap_or_default())
+                .recovery(false)
+                .build()
                 .await?;
 
-            let ack_future_1 = stream.ingest_record(b"good data".to_vec()).await?;
-            let ack_future_2 = stream.ingest_record(b"bad data".to_vec()).await?;
+            let ack_future_1 = stream.ingest_record_offset(b"good data".to_vec()).await?;
+            let ack_future_2 = stream.ingest_record_offset(b"bad data".to_vec()).await?;
 
-            assert_eq!(ack_future_1.await?, 0);
+            stream.wait_for_offset(ack_future_1).await?;
+            assert_eq!(ack_future_1, 0);
 
-            let result_2 = ack_future_2.await;
+            let result_2 = stream.wait_for_offset(ack_future_2).await;
             assert!(result_2.is_err());
             if let Err(e) = result_2 {
                 assert!(e.to_string().contains("Receiver error"));
             }
 
-            let ingest_3 = stream.ingest_record(b"more data".to_vec()).await;
+            let ingest_3 = stream.ingest_record_offset(b"more data".to_vec()).await;
             assert!(matches!(ingest_3, Err(ZerobusError::StreamClosedError(_))));
 
             Ok(())
@@ -2564,23 +2237,18 @@ mod failure_scenarios_tests {
                 .tls_config(Arc::new(NoTlsConfig))
                 .build()?;
             let stream = sdk
-                .create_stream_with_headers_provider(
-                    TableProperties {
-                        table_name: TABLE_NAME.to_string(),
-                        descriptor_proto: create_test_descriptor_proto(),
-                    },
-                    Arc::new(TestHeadersProvider::default()),
-                    Some(StreamConfigurationOptions {
-                        recovery: false,
-                        server_lack_of_ack_timeout_ms: ACK_TIMEOUT_MS,
-                        ..Default::default()
-                    }),
-                )
+                .stream_builder()
+                .table(TABLE_NAME)
+                .headers_provider(Arc::new(TestHeadersProvider::default()))
+                .compiled_proto(create_test_descriptor_proto().unwrap_or_default())
+                .recovery(false)
+                .server_lack_of_ack_timeout_ms(ACK_TIMEOUT_MS)
+                .build()
                 .await?;
 
-            let ack_future = stream.ingest_record(b"some data".to_vec()).await?;
+            let ack_future = stream.ingest_record_offset(b"some data".to_vec()).await?;
 
-            let result = ack_future.await;
+            let result = stream.wait_for_offset(ack_future).await;
             assert!(result.is_err());
             if let Err(e) = result {
                 assert!(e.to_string().contains("Server ack timeout"));
@@ -2627,28 +2295,23 @@ mod failure_scenarios_tests {
                 .tls_config(Arc::new(NoTlsConfig))
                 .build()?;
             let stream = sdk
-                .create_stream_with_headers_provider(
-                    TableProperties {
-                        table_name: TABLE_NAME.to_string(),
-                        descriptor_proto: create_test_descriptor_proto(),
-                    },
-                    Arc::new(TestHeadersProvider::default()),
-                    Some(StreamConfigurationOptions {
-                        recovery: false,
-                        ..Default::default()
-                    }),
-                )
+                .stream_builder()
+                .table(TABLE_NAME)
+                .headers_provider(Arc::new(TestHeadersProvider::default()))
+                .compiled_proto(create_test_descriptor_proto().unwrap_or_default())
+                .recovery(false)
+                .build()
                 .await?;
 
             let mut futures = Vec::new();
 
             for i in 0..TOTAL_RECORDS {
                 let payload = format!("record-{}", i).into_bytes();
-                futures.push(stream.ingest_record(payload).await?);
+                futures.push(stream.ingest_record_offset(payload).await?);
             }
 
             for (i, future) in futures.into_iter().enumerate() {
-                let result = future.await;
+                let result = stream.wait_for_offset(future).await;
                 if i < ACKED_RECORDS {
                     assert!(result.is_ok(), "First batch of records should be acked");
                 } else {
@@ -2712,35 +2375,30 @@ mod failure_scenarios_tests {
                 .tls_config(Arc::new(NoTlsConfig))
                 .build()?;
             let stream = sdk
-                .create_stream_with_headers_provider(
-                    TableProperties {
-                        table_name: TABLE_NAME.to_string(),
-                        descriptor_proto: create_test_descriptor_proto(),
-                    },
-                    Arc::new(TestHeadersProvider::default()),
-                    Some(StreamConfigurationOptions {
-                        recovery: false,
-                        ..Default::default()
-                    }),
-                )
+                .stream_builder()
+                .table(TABLE_NAME)
+                .headers_provider(Arc::new(TestHeadersProvider::default()))
+                .compiled_proto(create_test_descriptor_proto().unwrap_or_default())
+                .recovery(false)
+                .build()
                 .await?;
 
             // Ingest individual records
             let mut single_futures = Vec::new();
             for i in 0..SINGLE_RECORDS {
                 let payload = format!("single-{}", i).into_bytes();
-                single_futures.push(stream.ingest_record(payload).await?);
+                single_futures.push(stream.ingest_record_offset(payload).await?);
             }
 
             // Ingest a batch
             let batch: Vec<Vec<u8>> = (0..BATCH_SIZE)
                 .map(|i| format!("batch-{}", i).into_bytes())
                 .collect();
-            let batch_future = stream.ingest_records(batch).await?;
+            let batch_future = stream.ingest_records_offset(batch).await?;
 
             // Wait for some to be acked and some to fail
             for (i, future) in single_futures.into_iter().enumerate() {
-                let result = future.await;
+                let result = stream.wait_for_offset(future).await;
                 if i < 2 {
                     assert!(result.is_ok(), "First records should be acked");
                 } else {
@@ -2748,7 +2406,10 @@ mod failure_scenarios_tests {
                 }
             }
 
-            let batch_result = batch_future.await;
+            let batch_result = match batch_future {
+                Some(off) => stream.wait_for_offset(off).await,
+                None => Ok(()),
+            };
             assert!(batch_result.is_err(), "Batch should fail");
 
             let retrieved_unacked = stream.get_unacked_records().await?.collect::<Vec<_>>();
@@ -2816,27 +2477,22 @@ mod failure_scenarios_tests {
                 .tls_config(Arc::new(NoTlsConfig))
                 .build()?;
             let stream = sdk
-                .create_stream_with_headers_provider(
-                    TableProperties {
-                        table_name: TABLE_NAME.to_string(),
-                        descriptor_proto: create_test_descriptor_proto(),
-                    },
-                    Arc::new(TestHeadersProvider::default()),
-                    Some(StreamConfigurationOptions {
-                        recovery: false,
-                        ..Default::default()
-                    }),
-                )
+                .stream_builder()
+                .table(TABLE_NAME)
+                .headers_provider(Arc::new(TestHeadersProvider::default()))
+                .compiled_proto(create_test_descriptor_proto().unwrap_or_default())
+                .recovery(false)
+                .build()
                 .await?;
 
             let mut futures = Vec::new();
             for i in 0..NUM_PENDING_RECORDS {
                 let payload = format!("record-{}", i).into_bytes();
-                futures.push(stream.ingest_record(payload).await?);
+                futures.push(stream.ingest_record_offset(payload).await?);
             }
 
             for future in futures {
-                let result = future.await;
+                let result = stream.wait_for_offset(future).await;
                 assert!(result.is_err());
                 match result {
                     Err(ZerobusError::StreamClosedError(status)) => {
@@ -2887,26 +2543,17 @@ mod failure_scenarios_tests {
                 .tls_config(Arc::new(NoTlsConfig))
                 .build()?;
 
-            let table_properties = TableProperties {
-                table_name: TABLE_NAME.to_string(),
-                descriptor_proto: create_test_descriptor_proto(),
-            };
-
-            let options = StreamConfigurationOptions {
-                max_inflight_requests: 100,
-                recovery: true,
-                recovery_timeout_ms: 5000,
-                recovery_backoff_ms: 100,
-                ..Default::default()
-            };
-
             let start_time = std::time::Instant::now();
             let result = sdk
-                .create_stream_with_headers_provider(
-                    table_properties,
-                    Arc::new(TestHeadersProvider::default()),
-                    Some(options),
-                )
+                .stream_builder()
+                .table(TABLE_NAME)
+                .headers_provider(Arc::new(TestHeadersProvider::default()))
+                .compiled_proto(create_test_descriptor_proto().unwrap_or_default())
+                .max_inflight_requests(100)
+                .recovery(true)
+                .recovery_timeout_ms(5000)
+                .recovery_backoff_ms(100)
+                .build()
                 .await;
             let duration = start_time.elapsed();
 
@@ -2927,7 +2574,7 @@ mod failure_scenarios_tests {
 
             for i in 0..3 {
                 let payload = format!("test-record-{}", i).into_bytes();
-                let _ack_future = stream.ingest_record(payload).await?;
+                let _ack_future = stream.ingest_record_offset(payload).await?;
             }
 
             stream.flush().await?;
@@ -2980,25 +2627,16 @@ mod failure_scenarios_tests {
                 .tls_config(Arc::new(NoTlsConfig))
                 .build()?;
 
-            let table_properties = TableProperties {
-                table_name: TABLE_NAME.to_string(),
-                descriptor_proto: create_test_descriptor_proto(),
-            };
-
-            let options = StreamConfigurationOptions {
-                max_inflight_requests: 100,
-                recovery: true,
-                recovery_backoff_ms: 100,
-                ..Default::default()
-            };
-
             let start_time = std::time::Instant::now();
             let result = sdk
-                .create_stream_with_headers_provider(
-                    table_properties,
-                    Arc::new(TestHeadersProvider::default()),
-                    Some(options),
-                )
+                .stream_builder()
+                .table(TABLE_NAME)
+                .headers_provider(Arc::new(TestHeadersProvider::default()))
+                .compiled_proto(create_test_descriptor_proto().unwrap_or_default())
+                .max_inflight_requests(100)
+                .recovery(true)
+                .recovery_backoff_ms(100)
+                .build()
                 .await;
             let duration = start_time.elapsed();
 
@@ -3061,38 +2699,29 @@ mod failure_scenarios_tests {
                 .tls_config(Arc::new(NoTlsConfig))
                 .build()?;
 
-            let table_properties = TableProperties {
-                table_name: TABLE_NAME.to_string(),
-                descriptor_proto: create_test_descriptor_proto(),
-            };
-
-            let options = StreamConfigurationOptions {
-                max_inflight_requests: 100,
-                recovery: true,
-                recovery_timeout_ms: 5000,
-                recovery_backoff_ms: 100,
-                ..Default::default()
-            };
-
             let stream = sdk
-                .create_stream_with_headers_provider(
-                    table_properties,
-                    Arc::new(TestHeadersProvider::default()),
-                    Some(options),
-                )
+                .stream_builder()
+                .table(TABLE_NAME)
+                .headers_provider(Arc::new(TestHeadersProvider::default()))
+                .compiled_proto(create_test_descriptor_proto().unwrap_or_default())
+                .max_inflight_requests(100)
+                .recovery(true)
+                .recovery_timeout_ms(5000)
+                .recovery_backoff_ms(100)
+                .build()
                 .await?;
             assert_eq!(stream.stream_type, StreamType::Ephemeral);
 
             let mut futures = Vec::new();
             for i in 0..5 {
                 let payload = format!("test-record-{}", i).into_bytes();
-                let ack_future = stream.ingest_record(payload).await?;
+                let ack_future = stream.ingest_record_offset(payload).await?;
                 futures.push(ack_future);
             }
 
             for (i, future) in futures.into_iter().enumerate() {
-                let offset = future.await?;
-                assert_eq!(offset, i as i64, "Record {} should have offset {}", i, i);
+                stream.wait_for_offset(future).await?;
+                assert_eq!(future, i as i64, "Record {} should have offset {}", i, i);
             }
 
             let write_count = mock_server.get_write_count().await;
@@ -3148,32 +2777,23 @@ mod failure_scenarios_tests {
                 .tls_config(Arc::new(NoTlsConfig))
                 .build()?;
 
-            let table_properties = TableProperties {
-                table_name: TABLE_NAME.to_string(),
-                descriptor_proto: create_test_descriptor_proto(),
-            };
-
-            let options = StreamConfigurationOptions {
-                max_inflight_requests: 100,
-                recovery: true,
-                server_lack_of_ack_timeout_ms: ACK_TIMEOUT_MS,
-                recovery_timeout_ms: 5000,
-                recovery_backoff_ms: 100,
-                ..Default::default()
-            };
-
             let stream = sdk
-                .create_stream_with_headers_provider(
-                    table_properties,
-                    Arc::new(TestHeadersProvider::default()),
-                    Some(options),
-                )
+                .stream_builder()
+                .table(TABLE_NAME)
+                .headers_provider(Arc::new(TestHeadersProvider::default()))
+                .compiled_proto(create_test_descriptor_proto().unwrap_or_default())
+                .max_inflight_requests(100)
+                .recovery(true)
+                .server_lack_of_ack_timeout_ms(ACK_TIMEOUT_MS)
+                .recovery_timeout_ms(5000)
+                .recovery_backoff_ms(100)
+                .build()
                 .await?;
             assert_eq!(stream.stream_type, StreamType::Ephemeral);
 
             for i in 0..5 {
                 let payload = format!("test-record-{}", i).into_bytes();
-                let _ack_future = stream.ingest_record(payload).await?;
+                let _ack_future = stream.ingest_record_offset(payload).await?;
             }
             stream.flush().await?;
             let write_count = mock_server.get_write_count().await;
@@ -3219,29 +2839,20 @@ mod failure_scenarios_tests {
                 .tls_config(Arc::new(NoTlsConfig))
                 .build()?;
 
-            let table_properties = TableProperties {
-                table_name: TABLE_NAME.to_string(),
-                descriptor_proto: create_test_descriptor_proto(),
-            };
-
-            let options = StreamConfigurationOptions {
-                max_inflight_requests: 100,
-                flush_timeout_ms: 200,
-                ..Default::default()
-            };
-
             let mut stream = sdk
-                .create_stream_with_headers_provider(
-                    table_properties,
-                    Arc::new(TestHeadersProvider::default()),
-                    Some(options),
-                )
+                .stream_builder()
+                .table(TABLE_NAME)
+                .headers_provider(Arc::new(TestHeadersProvider::default()))
+                .compiled_proto(create_test_descriptor_proto().unwrap_or_default())
+                .max_inflight_requests(100)
+                .flush_timeout_ms(200)
+                .build()
                 .await?;
             assert_eq!(stream.stream_type, StreamType::Ephemeral);
 
             for i in 0..5 {
                 let payload = format!("test-record-{}", i).into_bytes();
-                let _ack_future = stream.ingest_record(payload).await?;
+                let _ack_future = stream.ingest_record_offset(payload).await?;
             }
 
             let close_result = stream.close().await;
@@ -3255,7 +2866,8 @@ mod failure_scenarios_tests {
                 );
             }
 
-            let ingest_after_failed_close = stream.ingest_record(b"more data".to_vec()).await;
+            let ingest_after_failed_close =
+                stream.ingest_record_offset(b"more data".to_vec()).await;
             assert!(
                 matches!(
                     ingest_after_failed_close,
@@ -3308,37 +2920,28 @@ mod failure_scenarios_tests {
                 .tls_config(Arc::new(NoTlsConfig))
                 .build()?;
 
-            let table_properties = TableProperties {
-                table_name: TABLE_NAME.to_string(),
-                descriptor_proto: create_test_descriptor_proto(),
-            };
-
-            let options = StreamConfigurationOptions {
-                max_inflight_requests: 100,
-                recovery: true,
-                recovery_timeout_ms: 5000,
-                recovery_backoff_ms: 100,
-                ..Default::default()
-            };
-
             let stream = sdk
-                .create_stream_with_headers_provider(
-                    table_properties,
-                    Arc::new(TestHeadersProvider::default()),
-                    Some(options),
-                )
+                .stream_builder()
+                .table(TABLE_NAME)
+                .headers_provider(Arc::new(TestHeadersProvider::default()))
+                .compiled_proto(create_test_descriptor_proto().unwrap_or_default())
+                .max_inflight_requests(100)
+                .recovery(true)
+                .recovery_timeout_ms(5000)
+                .recovery_backoff_ms(100)
+                .build()
                 .await?;
             assert_eq!(stream.stream_type, StreamType::Ephemeral);
 
             for i in 0..2 {
                 let payload = format!("test-record-{}", i).into_bytes();
-                let _ack_future = stream.ingest_record(payload).await?;
+                let _ack_future = stream.ingest_record_offset(payload).await?;
             }
             tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
 
             for i in 2..3 {
                 let payload = format!("test-record-{}", i).into_bytes();
-                let _ack_future = stream.ingest_record(payload).await?;
+                let _ack_future = stream.ingest_record_offset(payload).await?;
             }
 
             stream.flush().await?;
@@ -3403,30 +3006,23 @@ mod failure_scenarios_tests {
                 .tls_config(Arc::new(NoTlsConfig))
                 .build()?;
 
-            let table_properties = TableProperties {
-                table_name: TABLE_NAME.to_string(),
-                descriptor_proto: create_test_descriptor_proto(),
-            };
-
-            let options = StreamConfigurationOptions {
-                max_inflight_requests: 100,
-                recovery: true,
-                recovery_timeout_ms: 5000,
-                recovery_backoff_ms: 100,
-                server_lack_of_ack_timeout_ms: 5000,
-                ..Default::default()
-            };
-
             let stream = sdk
-                .create_stream_with_headers_provider(
-                    table_properties,
-                    Arc::new(TestHeadersProvider::default()),
-                    Some(options),
-                )
+                .stream_builder()
+                .table(TABLE_NAME)
+                .headers_provider(Arc::new(TestHeadersProvider::default()))
+                .compiled_proto(create_test_descriptor_proto().unwrap_or_default())
+                .max_inflight_requests(100)
+                .recovery(true)
+                .recovery_timeout_ms(5000)
+                .recovery_backoff_ms(100)
+                .server_lack_of_ack_timeout_ms(5000)
+                .build()
                 .await?;
 
             // Ingest a single record first
-            let ack1 = stream.ingest_record(b"single record".to_vec()).await?;
+            let ack1 = stream
+                .ingest_record_offset(b"single record".to_vec())
+                .await?;
 
             // Ingest a batch
             let batch = vec![
@@ -3434,11 +3030,15 @@ mod failure_scenarios_tests {
                 b"batch record 2".to_vec(),
                 b"batch record 3".to_vec(),
             ];
-            let ack2 = stream.ingest_records(batch).await?;
+            let ack2 = stream.ingest_records_offset(batch).await?;
 
             // Both should eventually succeed after recovery
-            assert_eq!(ack1.await?, 0);
-            assert_eq!(ack2.await?, Some(1)); // SDK returns the highest acknowledged offset in the batch
+            stream.wait_for_offset(ack1).await?;
+            assert_eq!(ack1, 0);
+            if let Some(off) = ack2 {
+                stream.wait_for_offset(off).await?;
+            }
+            assert_eq!(ack2, Some(1)); // SDK returns the highest acknowledged offset in the batch
 
             let write_count = mock_server.get_write_count().await;
             // First stream: 1 single + 3 batch records
@@ -3504,40 +3104,35 @@ mod failure_scenarios_tests {
                 .build()?;
 
             let stream = sdk
-                .create_stream_with_headers_provider(
-                    TableProperties {
-                        table_name: TABLE_NAME.to_string(),
-                        descriptor_proto: create_test_descriptor_proto(),
-                    },
-                    Arc::new(TestHeadersProvider::default()),
-                    Some(StreamConfigurationOptions {
-                        recovery: false,
-                        flush_timeout_ms: 10000,
-                        ..Default::default()
-                    }),
-                )
+                .stream_builder()
+                .table(TABLE_NAME)
+                .headers_provider(Arc::new(TestHeadersProvider::default()))
+                .compiled_proto(create_test_descriptor_proto().unwrap_or_default())
+                .recovery(false)
+                .flush_timeout_ms(10000)
+                .build()
                 .await?;
 
             // Ingest: 2 single records (will be acked), then 1 single + 1 batch (will fail)
             let mut single_futures = Vec::new();
             for i in 0..ACKED_RECORDS {
                 let payload = format!("acked-{}", i).into_bytes();
-                single_futures.push(stream.ingest_record(payload).await?);
+                single_futures.push(stream.ingest_record_offset(payload).await?);
             }
 
             // Single record that will not be acked
             let unacked_single = b"unacked-single".to_vec();
-            single_futures.push(stream.ingest_record(unacked_single).await?);
+            single_futures.push(stream.ingest_record_offset(unacked_single).await?);
 
             // Batch that will not be acked
             let unacked_batch: Vec<Vec<u8>> = (0..UNACKED_BATCH_SIZE)
                 .map(|i| format!("unacked-batch-{}", i).into_bytes())
                 .collect();
-            let batch_future = stream.ingest_records(unacked_batch).await?;
+            let batch_future = stream.ingest_records_offset(unacked_batch).await?;
 
             // Wait for acks - some succeed, some fail
             for (i, future) in single_futures.into_iter().enumerate() {
-                let result = future.await;
+                let result = stream.wait_for_offset(future).await;
                 if i < ACKED_RECORDS {
                     assert!(result.is_ok());
                 } else {
@@ -3545,7 +3140,10 @@ mod failure_scenarios_tests {
                 }
             }
 
-            let batch_result = batch_future.await;
+            let batch_result = match batch_future {
+                Some(off) => stream.wait_for_offset(off).await,
+                None => Ok(()),
+            };
             assert!(batch_result.is_err());
 
             // Recreate stream - should automatically re-ingest unacked records (1 single + 1 batch)
@@ -3600,30 +3198,25 @@ mod failure_scenarios_tests {
                 .tls_config(Arc::new(NoTlsConfig))
                 .build()?;
             let mut stream = sdk
-                .create_stream_with_headers_provider(
-                    TableProperties {
-                        table_name: TABLE_NAME.to_string(),
-                        descriptor_proto: create_test_descriptor_proto(),
-                    },
-                    Arc::new(TestHeadersProvider::default()),
-                    Some(StreamConfigurationOptions {
-                        recovery: false,
-                        ..Default::default()
-                    }),
-                )
+                .stream_builder()
+                .table(TABLE_NAME)
+                .headers_provider(Arc::new(TestHeadersProvider::default()))
+                .compiled_proto(create_test_descriptor_proto().unwrap_or_default())
+                .recovery(false)
+                .build()
                 .await?;
 
             // Ingest some records
             let mut ack_futures = Vec::new();
             for i in 0..5 {
                 let payload = format!("record-{}", i).into_bytes();
-                let ack = stream.ingest_record(payload).await?;
+                let ack = stream.ingest_record_offset(payload).await?;
                 ack_futures.push(ack);
             }
 
             // Wait for all acks
             for ack in ack_futures {
-                ack.await?;
+                stream.wait_for_offset(ack).await?;
             }
 
             // Close successfully
@@ -3685,26 +3278,19 @@ mod graceful_close_tests {
             .tls_config(Arc::new(NoTlsConfig))
             .build()?;
 
-        let options = StreamConfigurationOptions {
-            max_inflight_requests: 100,
-            recovery: true,
-            ..Default::default()
-        };
-
         let stream = sdk
-            .create_stream_with_headers_provider(
-                TableProperties {
-                    table_name: TABLE_NAME.to_string(),
-                    descriptor_proto: create_test_descriptor_proto(),
-                },
-                Arc::new(TestHeadersProvider::default()),
-                Some(options),
-            )
+            .stream_builder()
+            .table(TABLE_NAME)
+            .headers_provider(Arc::new(TestHeadersProvider::default()))
+            .compiled_proto(create_test_descriptor_proto().unwrap_or_default())
+            .max_inflight_requests(100)
+            .recovery(true)
+            .build()
             .await?;
 
         for i in 0..3 {
             let payload = format!("record-{}", i).into_bytes();
-            let _ack = stream.ingest_record(payload).await?;
+            let _ack = stream.ingest_record_offset(payload).await?;
         }
 
         // Give time for records to be sent and CloseStreamSignal to be received.
@@ -3771,34 +3357,27 @@ mod graceful_close_tests {
             .tls_config(Arc::new(NoTlsConfig))
             .build()?;
 
-        let options = StreamConfigurationOptions {
-            max_inflight_requests: 100,
-            recovery: true,
-            stream_paused_max_wait_time_ms: Some(0),
-            ..Default::default()
-        };
-
         let stream = sdk
-            .create_stream_with_headers_provider(
-                TableProperties {
-                    table_name: TABLE_NAME.to_string(),
-                    descriptor_proto: create_test_descriptor_proto(),
-                },
-                Arc::new(TestHeadersProvider::default()),
-                Some(options),
-            )
+            .stream_builder()
+            .table(TABLE_NAME)
+            .headers_provider(Arc::new(TestHeadersProvider::default()))
+            .compiled_proto(create_test_descriptor_proto().unwrap_or_default())
+            .max_inflight_requests(100)
+            .recovery(true)
+            .stream_paused_max_wait_time_ms(Some(0))
+            .build()
             .await?;
 
         for i in 0..3 {
             let payload = format!("record-{}", i).into_bytes();
-            let _ack = stream.ingest_record(payload).await?;
+            let _ack = stream.ingest_record_offset(payload).await?;
         }
 
         tokio::time::sleep(tokio::time::Duration::from_millis(200)).await;
 
         let start_time = std::time::Instant::now();
         let payload = "record-4".to_string().into_bytes();
-        let _ack = stream.ingest_record(payload).await?;
+        let _ack = stream.ingest_record_offset(payload).await?;
 
         stream.flush().await?;
         let elapsed = start_time.elapsed();
@@ -3858,35 +3437,28 @@ mod graceful_close_tests {
             .tls_config(Arc::new(NoTlsConfig))
             .build()?;
 
-        let options = StreamConfigurationOptions {
-            max_inflight_requests: 100,
-            recovery: true,
-            server_lack_of_ack_timeout_ms: 5000,
-            stream_paused_max_wait_time_ms: Some(CLIENT_MAX_WAIT_MS),
-            ..Default::default()
-        };
-
         let stream = sdk
-            .create_stream_with_headers_provider(
-                TableProperties {
-                    table_name: TABLE_NAME.to_string(),
-                    descriptor_proto: create_test_descriptor_proto(),
-                },
-                Arc::new(TestHeadersProvider::default()),
-                Some(options),
-            )
+            .stream_builder()
+            .table(TABLE_NAME)
+            .headers_provider(Arc::new(TestHeadersProvider::default()))
+            .compiled_proto(create_test_descriptor_proto().unwrap_or_default())
+            .max_inflight_requests(100)
+            .recovery(true)
+            .server_lack_of_ack_timeout_ms(5000)
+            .stream_paused_max_wait_time_ms(Some(CLIENT_MAX_WAIT_MS))
+            .build()
             .await?;
 
         for i in 0..4 {
             let payload = format!("record-{}", i).into_bytes();
-            let _ack = stream.ingest_record(payload).await?;
+            let _ack = stream.ingest_record_offset(payload).await?;
         }
 
         tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
 
         let start_time = std::time::Instant::now();
         let payload = b"post-signal-record".to_vec();
-        let _ack = stream.ingest_record(payload).await?;
+        let _ack = stream.ingest_record_offset(payload).await?;
 
         stream.flush().await?;
         let elapsed = start_time.elapsed();
@@ -3954,27 +3526,20 @@ mod graceful_close_tests {
             .tls_config(Arc::new(NoTlsConfig))
             .build()?;
 
-        let options = StreamConfigurationOptions {
-            max_inflight_requests: 100,
-            recovery: true,
-            stream_paused_max_wait_time_ms: Some(CLIENT_MAX_WAIT_MS),
-            ..Default::default()
-        };
-
         let stream = sdk
-            .create_stream_with_headers_provider(
-                TableProperties {
-                    table_name: TABLE_NAME.to_string(),
-                    descriptor_proto: create_test_descriptor_proto(),
-                },
-                Arc::new(TestHeadersProvider::default()),
-                Some(options),
-            )
+            .stream_builder()
+            .table(TABLE_NAME)
+            .headers_provider(Arc::new(TestHeadersProvider::default()))
+            .compiled_proto(create_test_descriptor_proto().unwrap_or_default())
+            .max_inflight_requests(100)
+            .recovery(true)
+            .stream_paused_max_wait_time_ms(Some(CLIENT_MAX_WAIT_MS))
+            .build()
             .await?;
 
         for i in 0..3 {
             let payload = format!("record-{}", i).into_bytes();
-            let _ack = stream.ingest_record(payload).await?;
+            let _ack = stream.ingest_record_offset(payload).await?;
         }
 
         tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
@@ -4037,27 +3602,20 @@ mod graceful_close_tests {
             .tls_config(Arc::new(NoTlsConfig))
             .build()?;
 
-        let options = StreamConfigurationOptions {
-            max_inflight_requests: 100,
-            recovery: true,
-            stream_paused_max_wait_time_ms: Some(2000),
-            ..Default::default()
-        };
-
         let stream = sdk
-            .create_stream_with_headers_provider(
-                TableProperties {
-                    table_name: TABLE_NAME.to_string(),
-                    descriptor_proto: create_test_descriptor_proto(),
-                },
-                Arc::new(TestHeadersProvider::default()),
-                Some(options),
-            )
+            .stream_builder()
+            .table(TABLE_NAME)
+            .headers_provider(Arc::new(TestHeadersProvider::default()))
+            .compiled_proto(create_test_descriptor_proto().unwrap_or_default())
+            .max_inflight_requests(100)
+            .recovery(true)
+            .stream_paused_max_wait_time_ms(Some(2000))
+            .build()
             .await?;
 
         for i in 0..3 {
             let payload = format!("record-{}", i).into_bytes();
-            let _ack = stream.ingest_record(payload).await?;
+            let _ack = stream.ingest_record_offset(payload).await?;
         }
 
         let start_time = std::time::Instant::now();
@@ -4116,34 +3674,27 @@ mod graceful_close_tests {
             .tls_config(Arc::new(NoTlsConfig))
             .build()?;
 
-        let options = StreamConfigurationOptions {
-            max_inflight_requests: 100,
-            recovery: true,
-            stream_paused_max_wait_time_ms: Some(1000),
-            ..Default::default()
-        };
-
         let stream = sdk
-            .create_stream_with_headers_provider(
-                TableProperties {
-                    table_name: TABLE_NAME.to_string(),
-                    descriptor_proto: create_test_descriptor_proto(),
-                },
-                Arc::new(TestHeadersProvider::default()),
-                Some(options),
-            )
+            .stream_builder()
+            .table(TABLE_NAME)
+            .headers_provider(Arc::new(TestHeadersProvider::default()))
+            .compiled_proto(create_test_descriptor_proto().unwrap_or_default())
+            .max_inflight_requests(100)
+            .recovery(true)
+            .stream_paused_max_wait_time_ms(Some(1000))
+            .build()
             .await?;
 
         for i in 0..2 {
             let payload = format!("pre-pause-{}", i).into_bytes();
-            let _ack = stream.ingest_record(payload).await?;
+            let _ack = stream.ingest_record_offset(payload).await?;
         }
 
         tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
 
         for i in 0..2 {
             let payload = format!("during-pause-{}", i).into_bytes();
-            let _ack = stream.ingest_record(payload).await?;
+            let _ack = stream.ingest_record_offset(payload).await?;
         }
 
         stream.flush().await?;
@@ -4204,28 +3755,21 @@ mod graceful_close_tests {
             .tls_config(Arc::new(NoTlsConfig))
             .build()?;
 
-        let options = StreamConfigurationOptions {
-            max_inflight_requests: 100,
-            recovery: true,
-            stream_paused_max_wait_time_ms: Some(2000),
-            ..Default::default()
-        };
-
         let stream = sdk
-            .create_stream_with_headers_provider(
-                TableProperties {
-                    table_name: TABLE_NAME.to_string(),
-                    descriptor_proto: create_test_descriptor_proto(),
-                },
-                Arc::new(TestHeadersProvider::default()),
-                Some(options),
-            )
+            .stream_builder()
+            .table(TABLE_NAME)
+            .headers_provider(Arc::new(TestHeadersProvider::default()))
+            .compiled_proto(create_test_descriptor_proto().unwrap_or_default())
+            .max_inflight_requests(100)
+            .recovery(true)
+            .stream_paused_max_wait_time_ms(Some(2000))
+            .build()
             .await?;
 
         let mut futures = Vec::new();
         for i in 0..3 {
             let payload = format!("record-{}", i).into_bytes();
-            let ack = stream.ingest_record(payload).await?;
+            let ack = stream.ingest_record_offset(payload).await?;
             futures.push(ack);
         }
 
@@ -4274,23 +3818,14 @@ mod api_offset_tests {
             .tls_config(Arc::new(NoTlsConfig))
             .build()?;
 
-        let table_properties = TableProperties {
-            table_name: TABLE_NAME.to_string(),
-            descriptor_proto: create_test_descriptor_proto(),
-        };
-
-        let options = StreamConfigurationOptions {
-            max_inflight_requests: 100,
-            recovery: false,
-            ..Default::default()
-        };
-
         let stream = sdk
-            .create_stream_with_headers_provider(
-                table_properties,
-                Arc::new(TestHeadersProvider::default()),
-                Some(options),
-            )
+            .stream_builder()
+            .table(TABLE_NAME)
+            .headers_provider(Arc::new(TestHeadersProvider::default()))
+            .compiled_proto(create_test_descriptor_proto().unwrap_or_default())
+            .max_inflight_requests(100)
+            .recovery(false)
+            .build()
             .await?;
 
         // ingest_record_offset returns the offset directly without nested future
@@ -4339,23 +3874,14 @@ mod api_offset_tests {
             .tls_config(Arc::new(NoTlsConfig))
             .build()?;
 
-        let table_properties = TableProperties {
-            table_name: TABLE_NAME.to_string(),
-            descriptor_proto: create_test_descriptor_proto(),
-        };
-
-        let options = StreamConfigurationOptions {
-            max_inflight_requests: 100,
-            recovery: false,
-            ..Default::default()
-        };
-
         let stream = sdk
-            .create_stream_with_headers_provider(
-                table_properties,
-                Arc::new(TestHeadersProvider::default()),
-                Some(options),
-            )
+            .stream_builder()
+            .table(TABLE_NAME)
+            .headers_provider(Arc::new(TestHeadersProvider::default()))
+            .compiled_proto(create_test_descriptor_proto().unwrap_or_default())
+            .max_inflight_requests(100)
+            .recovery(false)
+            .build()
             .await?;
 
         let mut offsets = Vec::new();
@@ -4408,23 +3934,14 @@ mod api_offset_tests {
             .tls_config(Arc::new(NoTlsConfig))
             .build()?;
 
-        let table_properties = TableProperties {
-            table_name: TABLE_NAME.to_string(),
-            descriptor_proto: create_test_descriptor_proto(),
-        };
-
-        let options = StreamConfigurationOptions {
-            max_inflight_requests: 100,
-            recovery: false,
-            ..Default::default()
-        };
-
         let stream = sdk
-            .create_stream_with_headers_provider(
-                table_properties,
-                Arc::new(TestHeadersProvider::default()),
-                Some(options),
-            )
+            .stream_builder()
+            .table(TABLE_NAME)
+            .headers_provider(Arc::new(TestHeadersProvider::default()))
+            .compiled_proto(create_test_descriptor_proto().unwrap_or_default())
+            .max_inflight_requests(100)
+            .recovery(false)
+            .build()
             .await?;
 
         let batch = vec![
@@ -4478,23 +3995,14 @@ mod api_offset_tests {
             .tls_config(Arc::new(NoTlsConfig))
             .build()?;
 
-        let table_properties = TableProperties {
-            table_name: TABLE_NAME.to_string(),
-            descriptor_proto: create_test_descriptor_proto(),
-        };
-
-        let options = StreamConfigurationOptions {
-            max_inflight_requests: 100,
-            recovery: false,
-            ..Default::default()
-        };
-
         let stream = sdk
-            .create_stream_with_headers_provider(
-                table_properties,
-                Arc::new(TestHeadersProvider::default()),
-                Some(options),
-            )
+            .stream_builder()
+            .table(TABLE_NAME)
+            .headers_provider(Arc::new(TestHeadersProvider::default()))
+            .compiled_proto(create_test_descriptor_proto().unwrap_or_default())
+            .max_inflight_requests(100)
+            .recovery(false)
+            .build()
             .await?;
 
         let offset = stream.ingest_record_offset(b"test record".to_vec()).await?;
@@ -4556,22 +4064,12 @@ mod api_offset_tests {
             .tls_config(Arc::new(NoTlsConfig))
             .build()?;
 
-        let table_properties = TableProperties {
-            table_name: TABLE_NAME.to_string(),
-            descriptor_proto: create_test_descriptor_proto(),
-        };
-
-        let options = StreamConfigurationOptions {
-            record_type: RecordType::Proto,
-            ..Default::default()
-        };
-
         let stream = sdk
-            .create_stream_with_headers_provider(
-                table_properties,
-                Arc::new(TestHeadersProvider::default()),
-                Some(options),
-            )
+            .stream_builder()
+            .table(TABLE_NAME)
+            .headers_provider(Arc::new(TestHeadersProvider::default()))
+            .compiled_proto(create_test_descriptor_proto().unwrap_or_default())
+            .build()
             .await?;
 
         // Ingest empty batch
@@ -4614,30 +4112,21 @@ mod api_offset_tests {
             .tls_config(Arc::new(NoTlsConfig))
             .build()?;
 
-        let table_properties = TableProperties {
-            table_name: TABLE_NAME.to_string(),
-            descriptor_proto: create_test_descriptor_proto(),
-        };
-
-        let options = StreamConfigurationOptions {
-            max_inflight_requests: 100,
-            recovery: false,
-            ..Default::default()
-        };
-
         let stream = sdk
-            .create_stream_with_headers_provider(
-                table_properties,
-                Arc::new(TestHeadersProvider::default()),
-                Some(options),
-            )
+            .stream_builder()
+            .table(TABLE_NAME)
+            .headers_provider(Arc::new(TestHeadersProvider::default()))
+            .compiled_proto(create_test_descriptor_proto().unwrap_or_default())
+            .max_inflight_requests(100)
+            .recovery(false)
+            .build()
             .await?;
 
         // Mix ingest_record_offset and ingest_record
         let offset1 = stream.ingest_record_offset(b"record 1".to_vec()).await?;
         assert_eq!(offset1, 0);
 
-        let future = stream.ingest_record(b"record".to_vec()).await?;
+        let future = stream.ingest_record_offset(b"record".to_vec()).await?;
 
         let offset2 = stream.ingest_record_offset(b"record 2".to_vec()).await?;
         assert_eq!(offset2, 2);
@@ -4646,7 +4135,8 @@ mod api_offset_tests {
         assert_eq!(offset3, 3);
 
         // Wait for future
-        let offset = future.await?;
+        stream.wait_for_offset(future).await?;
+        let offset = future;
         assert_eq!(offset, 1);
 
         stream.flush().await?;
@@ -4686,24 +4176,14 @@ mod api_offset_tests {
             .tls_config(Arc::new(NoTlsConfig))
             .build()?;
 
-        let table_properties = TableProperties {
-            table_name: TABLE_NAME.to_string(),
-            descriptor_proto: None,
-        };
-
-        let options = StreamConfigurationOptions {
-            max_inflight_requests: 100,
-            recovery: false,
-            record_type: RecordType::Json,
-            ..Default::default()
-        };
-
         let stream = sdk
-            .create_stream_with_headers_provider(
-                table_properties,
-                Arc::new(TestHeadersProvider::default()),
-                Some(options),
-            )
+            .stream_builder()
+            .table(TABLE_NAME)
+            .headers_provider(Arc::new(TestHeadersProvider::default()))
+            .json()
+            .max_inflight_requests(100)
+            .recovery(false)
+            .build()
             .await?;
 
         let json_record = r#"{"id": 1, "name": "test"}"#.to_string();
@@ -4746,24 +4226,14 @@ mod api_offset_tests {
             .tls_config(Arc::new(NoTlsConfig))
             .build()?;
 
-        let table_properties = TableProperties {
-            table_name: TABLE_NAME.to_string(),
-            descriptor_proto: None,
-        };
-
-        let options = StreamConfigurationOptions {
-            max_inflight_requests: 100,
-            recovery: false,
-            record_type: RecordType::Json,
-            ..Default::default()
-        };
-
         let stream = sdk
-            .create_stream_with_headers_provider(
-                table_properties,
-                Arc::new(TestHeadersProvider::default()),
-                Some(options),
-            )
+            .stream_builder()
+            .table(TABLE_NAME)
+            .headers_provider(Arc::new(TestHeadersProvider::default()))
+            .json()
+            .max_inflight_requests(100)
+            .recovery(false)
+            .build()
             .await?;
 
         let json_batch = vec![
@@ -4807,23 +4277,14 @@ mod api_offset_tests {
             .tls_config(Arc::new(NoTlsConfig))
             .build()?;
 
-        let table_properties = TableProperties {
-            table_name: TABLE_NAME.to_string(),
-            descriptor_proto: create_test_descriptor_proto(),
-        };
-
-        let options = StreamConfigurationOptions {
-            max_inflight_requests: 100,
-            recovery: false,
-            ..Default::default()
-        };
-
         let mut stream = sdk
-            .create_stream_with_headers_provider(
-                table_properties,
-                Arc::new(TestHeadersProvider::default()),
-                Some(options),
-            )
+            .stream_builder()
+            .table(TABLE_NAME)
+            .headers_provider(Arc::new(TestHeadersProvider::default()))
+            .compiled_proto(create_test_descriptor_proto().unwrap_or_default())
+            .max_inflight_requests(100)
+            .recovery(false)
+            .build()
             .await?;
 
         stream.close().await?;
@@ -4863,23 +4324,14 @@ mod api_offset_tests {
             .tls_config(Arc::new(NoTlsConfig))
             .build()?;
 
-        let table_properties = TableProperties {
-            table_name: TABLE_NAME.to_string(),
-            descriptor_proto: create_test_descriptor_proto(),
-        };
-
-        let options = StreamConfigurationOptions {
-            max_inflight_requests: 100,
-            recovery: false,
-            ..Default::default()
-        };
-
         let mut stream = sdk
-            .create_stream_with_headers_provider(
-                table_properties,
-                Arc::new(TestHeadersProvider::default()),
-                Some(options),
-            )
+            .stream_builder()
+            .table(TABLE_NAME)
+            .headers_provider(Arc::new(TestHeadersProvider::default()))
+            .compiled_proto(create_test_descriptor_proto().unwrap_or_default())
+            .max_inflight_requests(100)
+            .recovery(false)
+            .build()
             .await?;
 
         stream.close().await?;
@@ -4933,23 +4385,14 @@ mod api_offset_tests {
             .tls_config(Arc::new(NoTlsConfig))
             .build()?;
 
-        let table_properties = TableProperties {
-            table_name: TABLE_NAME.to_string(),
-            descriptor_proto: create_test_descriptor_proto(),
-        };
-
-        let options = StreamConfigurationOptions {
-            max_inflight_requests: MAX_INFLIGHT_REQUESTS,
-            recovery: false,
-            ..Default::default()
-        };
-
         let stream = sdk
-            .create_stream_with_headers_provider(
-                table_properties,
-                Arc::new(TestHeadersProvider::default()),
-                Some(options),
-            )
+            .stream_builder()
+            .table(TABLE_NAME)
+            .headers_provider(Arc::new(TestHeadersProvider::default()))
+            .compiled_proto(create_test_descriptor_proto().unwrap_or_default())
+            .max_inflight_requests(MAX_INFLIGHT_REQUESTS)
+            .recovery(false)
+            .build()
             .await?;
 
         let mut offsets = Vec::new();
@@ -5042,26 +4485,17 @@ mod callback_tests {
             .tls_config(Arc::new(NoTlsConfig))
             .build()?;
 
-        let table_properties = TableProperties {
-            table_name: TABLE_NAME.to_string(),
-            descriptor_proto: create_test_descriptor_proto(),
-        };
-
         let callback = Arc::new(TestCallback::new());
 
-        let options = StreamConfigurationOptions {
-            max_inflight_requests: 100,
-            recovery: false,
-            ack_callback: Some(callback.clone()),
-            ..Default::default()
-        };
-
         let stream = sdk
-            .create_stream_with_headers_provider(
-                table_properties,
-                Arc::new(TestHeadersProvider::default()),
-                Some(options),
-            )
+            .stream_builder()
+            .table(TABLE_NAME)
+            .headers_provider(Arc::new(TestHeadersProvider::default()))
+            .compiled_proto(create_test_descriptor_proto().unwrap_or_default())
+            .max_inflight_requests(100)
+            .recovery(false)
+            .ack_callback(callback.clone())
+            .build()
             .await?;
 
         let offset1 = stream.ingest_record_offset(vec![1, 2, 3]).await?;
@@ -5115,26 +4549,17 @@ mod callback_tests {
             .tls_config(Arc::new(NoTlsConfig))
             .build()?;
 
-        let table_properties = TableProperties {
-            table_name: TABLE_NAME.to_string(),
-            descriptor_proto: create_test_descriptor_proto(),
-        };
-
         let callback = Arc::new(TestCallback::new());
 
-        let options = StreamConfigurationOptions {
-            max_inflight_requests: 100,
-            recovery: false,
-            ack_callback: Some(callback.clone()),
-            ..Default::default()
-        };
-
         let stream = sdk
-            .create_stream_with_headers_provider(
-                table_properties,
-                Arc::new(TestHeadersProvider::default()),
-                Some(options),
-            )
+            .stream_builder()
+            .table(TABLE_NAME)
+            .headers_provider(Arc::new(TestHeadersProvider::default()))
+            .compiled_proto(create_test_descriptor_proto().unwrap_or_default())
+            .max_inflight_requests(100)
+            .recovery(false)
+            .ack_callback(callback.clone())
+            .build()
             .await?;
 
         let offset1 = stream.ingest_record_offset(vec![1, 2, 3]).await?;
@@ -5194,27 +4619,17 @@ mod callback_tests {
             .tls_config(Arc::new(NoTlsConfig))
             .build()?;
 
-        let table_properties = TableProperties {
-            table_name: TABLE_NAME.to_string(),
-            descriptor_proto: create_test_descriptor_proto(),
-        };
-
         let callback = Arc::new(TestCallback::new());
 
-        let options = StreamConfigurationOptions {
-            max_inflight_requests: 100,
-            recovery: false,
-            record_type: RecordType::Proto,
-            ack_callback: Some(callback.clone()),
-            ..Default::default()
-        };
-
         let stream = sdk
-            .create_stream_with_headers_provider(
-                table_properties,
-                Arc::new(TestHeadersProvider::default()),
-                Some(options),
-            )
+            .stream_builder()
+            .table(TABLE_NAME)
+            .headers_provider(Arc::new(TestHeadersProvider::default()))
+            .compiled_proto(create_test_descriptor_proto().unwrap_or_default())
+            .max_inflight_requests(100)
+            .recovery(false)
+            .ack_callback(callback.clone())
+            .build()
             .await?;
 
         // Ingest batch of records
@@ -5259,26 +4674,17 @@ mod callback_tests {
             .tls_config(Arc::new(NoTlsConfig))
             .build()?;
 
-        let table_properties = TableProperties {
-            table_name: TABLE_NAME.to_string(),
-            descriptor_proto: create_test_descriptor_proto(),
-        };
-
         let callback = Arc::new(TestCallback::new());
 
-        let options = StreamConfigurationOptions {
-            max_inflight_requests: 100,
-            recovery: false,
-            ack_callback: Some(callback.clone()),
-            ..Default::default()
-        };
-
         let stream = sdk
-            .create_stream_with_headers_provider(
-                table_properties,
-                Arc::new(TestHeadersProvider::default()),
-                Some(options),
-            )
+            .stream_builder()
+            .table(TABLE_NAME)
+            .headers_provider(Arc::new(TestHeadersProvider::default()))
+            .compiled_proto(create_test_descriptor_proto().unwrap_or_default())
+            .max_inflight_requests(100)
+            .recovery(false)
+            .ack_callback(callback.clone())
+            .build()
             .await?;
 
         // Ingest 5 records

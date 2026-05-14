@@ -2,6 +2,7 @@ use thiserror::Error;
 
 /// Represents all possible errors that can occur when using Zerobus.
 #[derive(Error, Debug, Clone)]
+#[non_exhaustive]
 pub enum ZerobusError {
     /// Returned when the client failed to open a gRPC channel to the Zerobus endpoint.
     #[error("Failed to open a channel: {0}.")]

@@ -6,13 +6,13 @@ use crate::arrow_stream::NativeArrowStreamHandle;
 use crate::async_bridge::{create_completable_future, spawn_and_complete};
 use crate::errors::{throw_from_zerobus_error, throw_zerobus_exception};
 use crate::options::{
-    default_arrow_stream_options, default_stream_options, extract_arrow_stream_options,
+    apply_arrow_stream_options, apply_stream_options, extract_arrow_stream_options,
     extract_stream_options,
 };
 use crate::runtime::block_on;
 use crate::stream::NativeStreamHandle;
 use databricks_zerobus_ingest_sdk::databricks::zerobus::RecordType;
-use databricks_zerobus_ingest_sdk::{ArrowTableProperties, TableProperties, ZerobusSdk};
+use databricks_zerobus_ingest_sdk::ZerobusSdk;
 use jni::objects::{JByteArray, JClass, JObject, JString};
 use jni::sys::{jboolean, jlong, JNI_FALSE};
 use jni::JNIEnv;
@@ -126,7 +126,6 @@ pub extern "system" fn Java_com_databricks_zerobus_ZerobusSdk_nativeDestroy<'loc
 /// );
 /// ```
 #[no_mangle]
-#[allow(deprecated)]
 pub extern "system" fn Java_com_databricks_zerobus_ZerobusSdk_nativeCreateStream<'local>(
     mut env: JNIEnv<'local>,
     _obj: JObject<'local>,
@@ -201,12 +200,11 @@ pub extern "system" fn Java_com_databricks_zerobus_ZerobusSdk_nativeCreateStream
         RecordType::Proto
     };
 
-    // Extract options (may be null for defaults)
-    let stream_options = if options.is_null() {
-        default_stream_options(record_type)
+    let extracted_options = if options.is_null() {
+        None
     } else {
-        match extract_stream_options(&mut env, &options, record_type) {
-            Ok(opts) => opts,
+        match extract_stream_options(&mut env, &options) {
+            Ok(opts) => Some(opts),
             Err(e) => {
                 throw_zerobus_exception(&mut env, &format!("Invalid options: {}", e));
                 return JObject::null();
@@ -237,19 +235,33 @@ pub extern "system" fn Java_com_databricks_zerobus_ZerobusSdk_nativeCreateStream
                 None
             };
 
-            let table_properties = TableProperties {
-                table_name,
-                descriptor_proto,
+            let base = sdk_arc
+                .stream_builder()
+                .table(table_name)
+                .oauth(credentials.0.clone(), credentials.1.clone());
+            let mut builder = match record_type {
+                RecordType::Proto => {
+                    let desc = descriptor_proto.ok_or_else(|| {
+                        databricks_zerobus_ingest_sdk::ZerobusError::InvalidArgument(
+                            "Proto descriptor is required for Proto record type".to_string(),
+                        )
+                    })?;
+                    base.compiled_proto(desc)
+                }
+                RecordType::Json => base.json(),
+                RecordType::Unspecified => {
+                    return Err(
+                        databricks_zerobus_ingest_sdk::ZerobusError::InvalidArgument(
+                            "Record type is not specified".to_string(),
+                        ),
+                    );
+                }
             };
+            if let Some(opts) = extracted_options {
+                builder = apply_stream_options(builder, opts);
+            }
 
-            let stream = sdk_arc
-                .create_stream(
-                    table_properties,
-                    credentials.0.clone(),
-                    credentials.1.clone(),
-                    Some(stream_options),
-                )
-                .await?;
+            let stream = builder.build().await?;
 
             Ok(NativeStreamHandle::new(
                 stream,
@@ -347,7 +359,6 @@ pub extern "system" fn Java_com_databricks_zerobus_ZerobusSdk_nativeRecreateStre
 /// );
 /// ```
 #[no_mangle]
-#[allow(deprecated)]
 pub extern "system" fn Java_com_databricks_zerobus_ZerobusSdk_nativeCreateArrowStream<'local>(
     mut env: JNIEnv<'local>,
     _obj: JObject<'local>,
@@ -410,12 +421,11 @@ pub extern "system" fn Java_com_databricks_zerobus_ZerobusSdk_nativeCreateArrowS
         }
     };
 
-    // Extract options
-    let stream_options = if options.is_null() {
-        default_arrow_stream_options()
+    let extracted_options = if options.is_null() {
+        None
     } else {
         match extract_arrow_stream_options(&mut env, &options) {
-            Ok(opts) => opts,
+            Ok(opts) => Some(opts),
             Err(e) => {
                 throw_zerobus_exception(&mut env, &format!("Invalid options: {}", e));
                 return JObject::null();
@@ -444,19 +454,16 @@ pub extern "system" fn Java_com_databricks_zerobus_ZerobusSdk_nativeCreateArrowS
 
             let schema = reader.schema();
 
-            let table_properties = ArrowTableProperties {
-                table_name,
-                schema: schema.clone(),
-            };
+            let mut builder = sdk_arc
+                .stream_builder()
+                .table(table_name)
+                .oauth(credentials.0.clone(), credentials.1.clone())
+                .arrow(schema);
+            if let Some(opts) = extracted_options {
+                builder = apply_arrow_stream_options(builder, opts);
+            }
 
-            let stream = sdk_arc
-                .create_arrow_stream(
-                    table_properties,
-                    credentials.0.clone(),
-                    credentials.1.clone(),
-                    Some(stream_options),
-                )
-                .await?;
+            let stream = builder.build_arrow().await?;
 
             Ok(NativeArrowStreamHandle::new(
                 stream,

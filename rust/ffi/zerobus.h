@@ -253,7 +253,7 @@ void zerobus_sdk_free(struct CZerobusSdk *sdk);
  * Deprecated: This function is a no-op. TLS is now controlled via the `TlsConfig`
  * trait passed to the SDK builder. This function is retained for ABI compatibility.
  */
-void zerobus_sdk_set_use_tls(struct CZerobusSdk *sdk, bool _use_tls);
+void zerobus_sdk_set_use_tls(struct CZerobusSdk *_sdk, bool _use_tls);
 
 /**
  * Create a stream with OAuth authentication

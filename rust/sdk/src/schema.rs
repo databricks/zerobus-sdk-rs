@@ -128,6 +128,7 @@ pub struct UcTableSchema {
 
 /// Errors produced while converting a UC schema to a protobuf descriptor.
 #[derive(Debug, Error)]
+#[non_exhaustive]
 pub enum SchemaError {
     #[error("invalid field name '{name}': {reason}")]
     InvalidFieldName { name: String, reason: String },
