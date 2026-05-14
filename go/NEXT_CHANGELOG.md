@@ -14,6 +14,7 @@
 ### Bug Fixes
 
 - **Reduced GC pressure in batch ingest FFI paths** ([#271](https://github.com/databricks/zerobus-sdk/issues/271)): `streamIngestJSONRecords` was allocating one heap-allocated closure per record per call (defer-in-loop). These closures are not pooled by the Go runtime, causing measurable allocation growth at high ingestion rates. Fixed by replacing N defers with a single closure. `streamIngestProtoRecords` was also allocating the pointer/length arrays on the Go heap and unnecessarily pinning them; both are now allocated in C memory via `C.malloc`.
+- **Vendoring support**: `go mod vendor` now preserves the prebuilt FFI archives under `lib/<GOOS>_<GOARCH>/` when downstream consumers vendor this module. Previously, cgo `#cgo LDFLAGS` paths were invisible to the vendor tool's dependency analysis, so vendored builds failed to link.
 
 ### Documentation
 

@@ -16,11 +16,11 @@ go/
 ├── build.go         # Build tags and cgo link directives
 ├── build_rust.sh    # Script to build the Rust FFI library
 ├── lib/             # Pre-built static libraries per platform
-│   ├── linux_x86_64/libzerobus_ffi.a
+│   ├── linux_amd64/libzerobus_ffi.a
 │   ├── linux_arm64/libzerobus_ffi.a
-│   ├── darwin_x86_64/libzerobus_ffi.a
+│   ├── darwin_amd64/libzerobus_ffi.a
 │   ├── darwin_arm64/libzerobus_ffi.a
-│   └── windows_x86_64/libzerobus_ffi.a
+│   └── windows_amd64/libzerobus_ffi.a
 ├── tests/           # Integration tests
 └── examples/        # Usage examples
 ```
