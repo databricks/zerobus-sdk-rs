@@ -20,6 +20,11 @@
   `zerobus-sdk-rs/<version> <application_name>`. The previous `x-zerobus-sdk`
   gRPC metadata header is no longer emitted; downstream consumers that parsed
   it should switch to reading `user-agent`.
+- **`ZerobusSdkBuilder::sdk_identifier`**: Override the SDK prefix of the
+  HTTP `user-agent` header, replacing the default `zerobus-sdk-rs/<version>`.
+  Intended for wrapper SDKs that need to replace the SDK identification; most
+  callers should prefer `application_name`, which preserves the SDK version
+  prefix. When both are set, `application_name` is still appended, so the wire value becomes `<sdk_identifier> <application_name>`.
 
 ### Bug Fixes
 

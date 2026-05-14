@@ -396,19 +396,18 @@ impl ZerobusSdk {
 
     /// Creates a new SDK instance with explicit configuration.
     ///
-    /// This is used internally by the builder pattern.
+    /// This is used internally by the builder pattern. `sdk_identifier` is the
+    /// fully-resolved value sent as the HTTP `user-agent` header; the builder
+    /// is responsible for composing it from the default prefix and any
+    /// caller-supplied `application_name` or override.
     pub(crate) fn new_with_config(
         zerobus_endpoint: String,
         unity_catalog_url: String,
         workspace_id: String,
         tls_config: Arc<dyn TlsConfig>,
         connector_factory: Option<ConnectorFactory>,
-        application_name: Option<String>,
+        sdk_identifier: Arc<str>,
     ) -> Self {
-        let sdk_identifier: Arc<str> = match application_name {
-            Some(app) if !app.is_empty() => Arc::from(format!("{} {}", DEFAULT_SDK_IDENTIFIER, app)),
-            _ => Arc::from(DEFAULT_SDK_IDENTIFIER),
-        };
         #[allow(deprecated)]
         ZerobusSdk {
             zerobus_endpoint,
