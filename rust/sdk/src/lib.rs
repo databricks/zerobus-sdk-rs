@@ -93,7 +93,7 @@ pub use builder::{StreamBuilder, ZerobusSdkBuilder};
 pub use callbacks::AckCallback;
 pub use default_token_factory::DefaultTokenFactory;
 pub use errors::ZerobusError;
-pub use headers_provider::{HeadersProvider, OAuthHeadersProvider, DEFAULT_X_ZEROBUS_SDK};
+pub use headers_provider::{HeadersProvider, OAuthHeadersProvider};
 pub use offset_generator::{OffsetId, OffsetIdGenerator};
 pub use proxy::{ConnectorFactory, ProxyConnector};
 pub use record_types::{
@@ -230,6 +230,11 @@ pub struct ZerobusStream {
     callback_handler_task: Option<tokio::task::JoinHandle<()>>,
 }
 
+/// Default identifier the SDK sends as the HTTP `user-agent` header on every
+/// request. Use [`ZerobusSdkBuilder::application_name`] to append an
+/// application suffix.
+pub const DEFAULT_SDK_IDENTIFIER: &str = concat!("zerobus-sdk-rs/", env!("CARGO_PKG_VERSION"));
+
 /// The main interface for interacting with the Zerobus API.
 /// # Examples
 /// ```rust,ignore
@@ -268,6 +273,9 @@ pub struct ZerobusSdk {
     pub(crate) workspace_id: String,
     pub(crate) tls_config: Arc<dyn TlsConfig>,
     connector_factory: Option<ConnectorFactory>,
+    /// Final value sent as the HTTP `user-agent` header on every request.
+    /// Either `"zerobus-sdk-rs/<version>"` or `"zerobus-sdk-rs/<version> <application_name>"`.
+    pub(crate) sdk_identifier: Arc<str>,
 }
 
 impl ZerobusSdk {
@@ -382,18 +390,23 @@ impl ZerobusSdk {
             shared_channel: tokio::sync::Mutex::new(None),
             tls_config: Arc::new(SecureTlsConfig::new()),
             connector_factory: None,
+            sdk_identifier: Arc::from(DEFAULT_SDK_IDENTIFIER),
         })
     }
 
     /// Creates a new SDK instance with explicit configuration.
     ///
-    /// This is used internally by the builder pattern.
+    /// This is used internally by the builder pattern. `sdk_identifier` is the
+    /// fully-resolved value sent as the HTTP `user-agent` header; the builder
+    /// is responsible for composing it from the default prefix and any
+    /// caller-supplied `application_name` or override.
     pub(crate) fn new_with_config(
         zerobus_endpoint: String,
         unity_catalog_url: String,
         workspace_id: String,
         tls_config: Arc<dyn TlsConfig>,
         connector_factory: Option<ConnectorFactory>,
+        sdk_identifier: Arc<str>,
     ) -> Self {
         #[allow(deprecated)]
         ZerobusSdk {
@@ -404,6 +417,7 @@ impl ZerobusSdk {
             shared_channel: tokio::sync::Mutex::new(None),
             tls_config,
             connector_factory,
+            sdk_identifier,
         }
     }
 
@@ -809,6 +823,7 @@ impl ZerobusSdk {
             table_properties,
             headers_provider,
             options,
+            Arc::clone(&self.sdk_identifier),
         )
         .await;
 
@@ -887,6 +902,7 @@ impl ZerobusSdk {
             stream.table_properties().clone(),
             stream.headers_provider(),
             stream.options().clone(),
+            Arc::clone(&self.sdk_identifier),
         )
         .await;
 
@@ -921,6 +937,8 @@ impl ZerobusSdk {
         if guard.is_none() {
             // Create the channel for the first time.
             let endpoint = Endpoint::from_shared(self.zerobus_endpoint.clone())
+                .map_err(|err| ZerobusError::ChannelCreationError(err.to_string()))?
+                .user_agent(self.sdk_identifier.as_ref())
                 .map_err(|err| ZerobusError::ChannelCreationError(err.to_string()))?;
 
             let endpoint = self.tls_config.configure_endpoint(endpoint)?;
