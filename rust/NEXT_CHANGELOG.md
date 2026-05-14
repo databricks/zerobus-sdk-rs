@@ -6,6 +6,26 @@
 
 ### New Features and Improvements
 
+- **Arrow schema from UC schema** (feature `arrow-flight`):
+  `schema::arrow_schema_from_uc_columns` and `schema::arrow_schema_from_uc_schema`
+  build an `arrow_schema::Schema` directly from Unity Catalog metadata, parallel
+  to the existing `descriptor_from_uc_*` functions. Emits native Arrow types
+  (`Date32`, `Timestamp(Microsecond, ..)`, `LargeUtf8`, `LargeBinary`,
+  `Map("entries", Struct{keys,values})`) matching the canonical Arrow schema
+  the Databricks Arrow Flight server builds from Delta.
+- **`ZerobusSdkBuilder::application_name`**: Set a custom application identifier
+  appended to the HTTP `user-agent` header (sent on the underlying tonic
+  `Endpoint`) on every request. The default `zerobus-sdk-rs/<version>` prefix
+  is preserved for server-side telemetry, so the wire value becomes
+  `zerobus-sdk-rs/<version> <application_name>`. The previous `x-zerobus-sdk`
+  gRPC metadata header is no longer emitted; downstream consumers that parsed
+  it should switch to reading `user-agent`.
+- **`ZerobusSdkBuilder::sdk_identifier`**: Override the SDK prefix of the
+  HTTP `user-agent` header, replacing the default `zerobus-sdk-rs/<version>`.
+  Intended for wrapper SDKs that need to replace the SDK identification; most
+  callers should prefer `application_name`, which preserves the SDK version
+  prefix. When both are set, `application_name` is still appended, so the wire value becomes `<sdk_identifier> <application_name>`.
+
 ### Bug Fixes
 
 - Corrected the values returned by the C FFI `zerobus_get_default_config()`

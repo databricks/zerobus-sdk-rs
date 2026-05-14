@@ -455,6 +455,10 @@ pub struct ZerobusArrowStream {
     /// When true, new `ingest_batch()` calls are still accepted and buffered,
     /// but the receiver continues draining in-flight acks before triggering recovery.
     is_paused: Arc<AtomicBool>,
+    /// Final value sent as the HTTP `user-agent` header on every request.
+    /// Either `"zerobus-sdk-rs/<version>"` or `"zerobus-sdk-rs/<version> <application_name>"`.
+    /// Re-applied to each fresh Channel built during recovery.
+    sdk_identifier: Arc<str>,
 }
 
 impl ZerobusArrowStream {
@@ -471,6 +475,7 @@ impl ZerobusArrowStream {
         table_properties: ArrowTableProperties,
         headers_provider: Arc<dyn HeadersProvider>,
         options: ArrowStreamConfigurationOptions,
+        sdk_identifier: Arc<str>,
     ) -> ZerobusResult<Self> {
         let (last_ack_tx, _last_ack_rx) = tokio::sync::watch::channel(None);
         let is_closed = Arc::new(AtomicBool::new(false));
@@ -506,6 +511,7 @@ impl ZerobusArrowStream {
             cumulative_records_sent,
             last_acked_records,
             is_paused,
+            sdk_identifier,
         };
 
         // Initialize the connection with retry logic.
@@ -523,6 +529,7 @@ impl ZerobusArrowStream {
             let table_properties = table_properties.clone();
             let options = options.clone();
             let headers_provider = Arc::clone(&headers_provider);
+            let sdk_identifier = Arc::clone(&stream.sdk_identifier);
 
             async move {
                 tokio::time::timeout(
@@ -533,6 +540,7 @@ impl ZerobusArrowStream {
                         &table_properties,
                         &options,
                         &headers_provider,
+                        &sdk_identifier,
                     ),
                 )
                 .await
@@ -578,6 +586,7 @@ impl ZerobusArrowStream {
             Arc::clone(&stream.last_acked_records),
             Arc::clone(&stream.is_paused),
             response_stream,
+            Arc::clone(&stream.sdk_identifier),
         );
 
         {
@@ -601,6 +610,7 @@ impl ZerobusArrowStream {
         table_properties: &ArrowTableProperties,
         options: &ArrowStreamConfigurationOptions,
         headers_provider: &Arc<dyn HeadersProvider>,
+        sdk_identifier: &str,
     ) -> ZerobusResult<(
         Pin<Box<dyn Stream<Item = Result<PutResult, FlightError>> + Send>>,
         mpsc::Sender<Result<FlightData, FlightError>>,
@@ -611,6 +621,7 @@ impl ZerobusArrowStream {
             table_properties,
             options,
             headers_provider,
+            sdk_identifier,
         )
         .await?;
 
@@ -624,10 +635,13 @@ impl ZerobusArrowStream {
         table_properties: &ArrowTableProperties,
         options: &ArrowStreamConfigurationOptions,
         headers_provider: &Arc<dyn HeadersProvider>,
+        sdk_identifier: &str,
     ) -> ZerobusResult<FlightClient> {
         let connection_timeout = Duration::from_millis(options.connection_timeout_ms);
 
         let base_endpoint = Channel::from_shared(endpoint.to_string())
+            .map_err(|e| ZerobusError::ChannelCreationError(e.to_string()))?
+            .user_agent(sdk_identifier)
             .map_err(|e| ZerobusError::ChannelCreationError(e.to_string()))?
             .connect_timeout(connection_timeout)
             .timeout(connection_timeout);
@@ -784,6 +798,7 @@ impl ZerobusArrowStream {
         last_acked_records: Arc<AtomicU64>,
         is_paused: Arc<AtomicBool>,
         initial_response_stream: Pin<Box<dyn Stream<Item = Result<PutResult, FlightError>> + Send>>,
+        sdk_identifier: Arc<str>,
     ) -> tokio::task::JoinHandle<ZerobusResult<()>> {
         tokio::spawn(async move {
             let ack_timeout = Duration::from_millis(options.server_lack_of_ack_timeout_ms);
@@ -869,6 +884,7 @@ impl ZerobusArrowStream {
                                 &pending_batches,
                                 &cumulative_records_sent,
                                 &last_acked_records,
+                                &sdk_identifier,
                             ),
                         )
                         .await;
@@ -928,6 +944,7 @@ impl ZerobusArrowStream {
         pending_batches: &Arc<Mutex<Vec<PendingBatch>>>,
         cumulative_records_sent: &Arc<AtomicU64>,
         last_acked_records: &Arc<AtomicU64>,
+        sdk_identifier: &str,
     ) -> ZerobusResult<Pin<Box<dyn Stream<Item = Result<PutResult, FlightError>> + Send>>> {
         // Create new client.
         let client = Self::create_flight_client(
@@ -936,6 +953,7 @@ impl ZerobusArrowStream {
             table_properties,
             options,
             headers_provider,
+            sdk_identifier,
         )
         .await?;
 

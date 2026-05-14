@@ -417,6 +417,7 @@ impl<'a> StreamBuilder<'a> {
             table_properties,
             headers_provider,
             self.arrow_config,
+            Arc::clone(&self.sdk.sdk_identifier),
         )
         .await
     }
@@ -434,6 +435,7 @@ mod tests {
             "test-workspace".to_string(),
             Arc::new(crate::tls_config::SecureTlsConfig::new()),
             None,
+            Arc::from(crate::DEFAULT_SDK_IDENTIFIER),
         )
     }
 
