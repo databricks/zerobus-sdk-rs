@@ -1856,6 +1856,16 @@ impl ZerobusStream {
     pub(crate) fn has_capacity(&self) -> bool {
         self.landing_zone.len() < self.options.max_inflight_requests
     }
+
+    // Signal the stream to stop accepting work and tear down its background
+    // tasks. Unlike `close`, this only needs `&self` — it relies on the
+    // cancellation token and `is_closed` flag, both of which are already
+    // interior-mutable. The `JoinHandle`s aren't reaped here; that happens in
+    // `close` or `Drop`.
+    pub(crate) fn signal_shutdown(&self) {
+        self.is_closed.store(true, Ordering::Relaxed);
+        self.cancellation_token.cancel();
+    }
 }
 
 impl Drop for ZerobusStream {

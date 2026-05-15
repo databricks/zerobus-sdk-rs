@@ -1,3 +1,23 @@
+//! Fan-out wrapper that distributes ingestion across multiple [`ZerobusStream`]s.
+//!
+//! A single `ZerobusStream` is throughput-limited by its in-flight window;
+//! `MultiplexedStream` routes records round-robin across a fixed set of
+//! sub-streams to raise aggregate throughput. When the chosen sub-stream is at
+//! capacity the call awaits drain rather than rerouting, so per-sub-stream
+//! ordering is preserved.
+//!
+//! Each ingest returns an opaque [`MessageId`] that packs the sub-stream index
+//! and its offset into a single `i64` (6 bits of stream index → up to 64
+//! sub-streams). Callers later pass it to
+//! [`wait_for_message_id`](MultiplexedStream::wait_for_message_id) without
+//! needing to know which sub-stream handled the record.
+//!
+//! The mux is poisoned on the first unrecoverable sub-stream error: remaining
+//! sub-streams are flushed and further ingest calls fail. Any records still
+//! buffered can be recovered via
+//! [`get_unacked_records`](MultiplexedStream::get_unacked_records) or
+//! [`get_unacked_batches`](MultiplexedStream::get_unacked_batches).
+
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 use futures::future::join_all;
@@ -89,12 +109,14 @@ impl MultiplexedStream {
         Ok(())
     }
 
-    async fn shutdown_on_failure(&self) {
+    async fn shutdown_on_failure(&self, trigger_index: usize, cause: &ZerobusError) {
         if self.is_closed.swap(true, Ordering::Relaxed) {
             return;
         }
 
-        warn!(
+        error!(
+            trigger_stream_index = trigger_index,
+            cause = %cause,
             num_streams = self.streams.len(),
             "MultiplexedStream poisoned due to sub-stream failure"
         );
@@ -105,8 +127,17 @@ impl MultiplexedStream {
                 warn!(stream_index = i, error = %e, "Failed to flush sub-stream during shutdown");
             }
         }
+
+        // Signal each sub-stream to tear down its background tasks (gRPC
+        // connection, supervisor, callback handler). Full join/abort of the
+        // task handles happens later in `close` or `Drop`.
+        for s in &self.streams {
+            s.signal_shutdown();
+        }
     }
 
+    // TODO: if the picked sub-stream is at capacity, try the next one before
+    // falling back to waiting.
     fn pick_substream(&self) -> usize {
         self.round_robin_counter.fetch_add(1, Ordering::Relaxed) % self.streams.len()
     }
@@ -117,16 +148,15 @@ impl MultiplexedStream {
         let mut logged_backpressure = false;
 
         loop {
+            self.check_closed()?;
+
             if stream.is_closed() {
-                error!(
-                    stream_index = idx,
-                    "Sub-stream closed unexpectedly, poisoning MultiplexedStream"
-                );
-                self.shutdown_on_failure().await;
-                return Err(ZerobusError::InvalidStateError(format!(
+                let err = ZerobusError::InvalidStateError(format!(
                     "Sub-stream {} closed unexpectedly",
                     idx
-                )));
+                ));
+                self.shutdown_on_failure(idx, &err).await;
+                return Err(err);
             }
 
             if stream.has_capacity() {
@@ -147,13 +177,24 @@ impl MultiplexedStream {
         }
     }
 
-    async fn handle_ingest_error(&self, e: &ZerobusError, stream: &ZerobusStream, idx: usize) {
+    // Only poison the mux when the sub-stream itself has reached a terminal
+    // state (`is_closed`): recovery is exhausted or a non-retryable server
+    // error fired, so its offsets/pending records are unrecoverable. Other
+    // ingest errors (e.g. `InvalidArgument` on a record-type mismatch) leave
+    // the sub-stream healthy and would be wrong to escalate — one bad payload
+    // shouldn't kill the other sub-streams.
+    async fn handle_ingest_error(
+        &self,
+        e: ZerobusError,
+        stream: &ZerobusStream,
+        idx: usize,
+    ) -> ZerobusError {
         if stream.is_closed() {
-            error!(stream_index = idx, error = %e, "Ingest failed on closed sub-stream, poisoning MultiplexedStream");
-            self.shutdown_on_failure().await;
+            self.shutdown_on_failure(idx, &e).await;
         } else {
             warn!(stream_index = idx, error = %e, "Ingest errored but sub-stream still alive");
         }
+        e
     }
 
     pub async fn ingest_record(
@@ -165,13 +206,11 @@ impl MultiplexedStream {
         let idx = self.pick_substream();
         let stream = &self.streams[idx];
         self.wait_for_capacity(stream, idx).await?;
+        self.check_closed()?;
 
         match stream.ingest_record_offset(record).await {
             Ok(off) => Ok(MessageId::new(idx, off)),
-            Err(e) => {
-                self.handle_ingest_error(&e, stream, idx).await;
-                Err(e)
-            }
+            Err(e) => Err(self.handle_ingest_error(e, stream, idx).await),
         }
     }
 
@@ -181,36 +220,34 @@ impl MultiplexedStream {
         I: IntoIterator<Item = T>,
         T: Into<EncodedRecord>,
     {
+        self.check_closed()?;
         let records: Vec<EncodedRecord> = payload.into_iter().map(Into::into).collect();
         if records.is_empty() {
             return Ok(None);
         }
-        self.check_closed()?;
         let idx = self.pick_substream();
         let stream = &self.streams[idx];
         self.wait_for_capacity(stream, idx).await?;
+        self.check_closed()?;
 
         match stream.ingest_records_offset(records).await {
             Ok(sub_offset) => Ok(sub_offset.map(|off| MessageId::new(idx, off))),
-            Err(e) => {
-                self.handle_ingest_error(&e, stream, idx).await;
-                Err(e)
-            }
+            Err(e) => Err(self.handle_ingest_error(e, stream, idx).await),
         }
     }
 
     pub async fn flush(&self) -> ZerobusResult<()> {
         self.check_closed()?;
         let results = join_all(self.streams.iter().map(|s| s.flush())).await;
-        let mut first_error = None;
-        let mut any_closed = false;
+        let mut first_error: Option<(usize, ZerobusError)> = None;
+        let mut first_closed: Option<usize> = None;
         for (i, result) in results.into_iter().enumerate() {
             if let Err(e) = result {
-                if self.streams[i].is_closed() {
-                    any_closed = true;
+                if self.streams[i].is_closed() && first_closed.is_none() {
+                    first_closed = Some(i);
                 }
                 if first_error.is_none() {
-                    first_error = Some(e);
+                    first_error = Some((i, e));
                 } else {
                     warn!(
                         stream_index = i,
@@ -221,12 +258,11 @@ impl MultiplexedStream {
             }
         }
         match first_error {
-            Some(e) => {
-                if any_closed {
-                    error!(error = %e, "flush failed on closed sub-stream, poisoning MultiplexedStream");
-                    self.shutdown_on_failure().await;
+            Some((i, e)) => {
+                if let Some(closed_idx) = first_closed {
+                    self.shutdown_on_failure(closed_idx, &e).await;
                 } else {
-                    warn!(error = %e, "flush errored but sub-streams still alive");
+                    warn!(stream_index = i, error = %e, "flush errored but sub-streams still alive");
                 }
                 Err(e)
             }
@@ -249,12 +285,7 @@ impl MultiplexedStream {
             Ok(()) => Ok(()),
             Err(e) => {
                 if self.streams[idx].is_closed() {
-                    error!(
-                        stream_index = idx,
-                        error = %e,
-                        "wait_for_offset failed on closed sub-stream, poisoning MultiplexedStream"
-                    );
-                    self.shutdown_on_failure().await;
+                    self.shutdown_on_failure(idx, &e).await;
                 } else {
                     warn!(
                         stream_index = idx,
@@ -340,6 +371,19 @@ impl MultiplexedStream {
             all_batches.extend(stream.get_unacked_batches().await?);
         }
         Ok(all_batches)
+    }
+}
+
+impl Drop for MultiplexedStream {
+    fn drop(&mut self) {
+        self.is_closed.store(true, Ordering::Relaxed);
+        // Fire cancellation on every sub-stream in parallel so their
+        // background tasks can start unwinding concurrently. The Vec drop
+        // below then runs each `ZerobusStream::Drop`, which aborts any
+        // JoinHandles that haven't already exited.
+        for stream in &self.streams {
+            stream.signal_shutdown();
+        }
     }
 }
 
