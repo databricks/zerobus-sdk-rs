@@ -7,6 +7,7 @@ This directory contains examples demonstrating how to use the Zerobus Rust SDK t
 - [Overview](#overview)
 - [JSON Examples](json/README.md)
 - [Protocol Buffers Examples](proto/README.md)
+- [Arrow Flight Examples](arrow/README.md) (Beta)
 - [Prerequisites](#prerequisites)
   - [Create a Databricks Table](#1-create-a-databricks-table)
   - [Set Up OAuth Service Principal](#2-set-up-oauth-service-principal)
@@ -24,19 +25,22 @@ The SDK supports two serialization formats and two ingestion methods:
 **Serialization Formats:**
 - **[JSON](json/README.md)** - Simpler, no schema generation required. Great for getting started.
 - **[Protocol Buffers](proto/README.md)** - Type-safe with compile-time validation. Better for production.
+- **[Arrow Flight](arrow/README.md)** (Beta) - Columnar Arrow `RecordBatch` ingestion over Arrow Flight. Behind the `arrow-flight` feature flag.
 
 **Ingestion Methods:**
-- **Single-record** (`ingest_record_offset`) - Ingest records one at a time
-- **Batch** (`ingest_records_offset`) - Ingest multiple records at once with all-or-nothing semantics
+- **Single-record** (`ingest_record_offset`) - Ingest records one at a time (JSON / Protocol Buffers)
+- **Batch** (`ingest_records_offset`) - Ingest multiple records at once with all-or-nothing semantics (JSON / Protocol Buffers)
+- **Arrow batch** (`ingest_batch` / `ingest_ipc_batch`) - Ingest an Arrow `RecordBatch` (one or many rows) over Arrow Flight
 
 **Available Examples:**
 
-| Example | Format | Method | Package |
-|---------|--------|--------|---------|
-| [JSON Single](json/README.md#single-record-example) | JSON | Single-record | `example_json_single` |
-| [JSON Batch](json/README.md#batch-example) | JSON | Batch | `example_json_batch` |
-| [Proto Single](proto/README.md#single-record-example) | Protocol Buffers | Single-record | `example_proto_single` |
-| [Proto Batch](proto/README.md#batch-example) | Protocol Buffers | Batch | `example_proto_batch` |
+| Example | Format | Method | Run with |
+|---------|--------|--------|----------|
+| [JSON Single](json/README.md#single-record-example) | JSON | Single-record | `cargo run -p rust-examples-json --example json_single` |
+| [JSON Batch](json/README.md#batch-example) | JSON | Batch | `cargo run -p rust-examples-json --example json_batch` |
+| [Proto Single](proto/README.md#single-record-example) | Protocol Buffers | Single-record | `cargo run -p rust-examples-proto --example proto_single` |
+| [Proto Batch](proto/README.md#batch-example) | Protocol Buffers | Batch | `cargo run -p rust-examples-proto --example proto_batch` |
+| [Arrow](arrow/README.md) | Arrow Flight (Beta) | `RecordBatch` | `cargo run -p example_arrow` |
 
 ## Prerequisites
 
@@ -71,7 +75,7 @@ Replace `catalog.schema.orders` with your actual catalog, schema, and table name
 
 ### 3. Configure Credentials
 
-Edit the `src/main.rs` file in your chosen example and update these constants:
+Edit the source file (`batch.rs` or `single.rs`) for your chosen example and update these constants:
 
 ```rust
 const DATABRICKS_WORKSPACE_URL: &str = "https://your-workspace.cloud.databricks.com";
@@ -95,20 +99,24 @@ All examples follow the same general flow:
 ### 1. Initialize SDK
 
 ```rust
-let sdk = ZerobusSdk::new(
-    SERVER_ENDPOINT.to_string(),
-    DATABRICKS_WORKSPACE_URL.to_string(),
-)?;
+let sdk = ZerobusSdk::builder()
+    .endpoint(SERVER_ENDPOINT)
+    .unity_catalog_url(DATABRICKS_WORKSPACE_URL)
+    .build()?;
 ```
 
-### 2. Configure Table Properties
+### 2. Create Stream
 
 **JSON:**
 ```rust
-let table_properties = TableProperties {
-    table_name: TABLE_NAME.to_string(),
-    descriptor_proto: None,  // Not needed for JSON
-};
+let mut stream = sdk
+    .stream_builder()
+    .table(TABLE_NAME)
+    .oauth(DATABRICKS_CLIENT_ID, DATABRICKS_CLIENT_SECRET)
+    .json()
+    .max_inflight_requests(100)
+    .build()
+    .await?;
 ```
 
 **Protocol Buffers:**
@@ -118,69 +126,59 @@ let descriptor_proto = load_descriptor_proto(
     "orders.proto",
     "table_Orders"
 );
-let table_properties = TableProperties {
-    table_name: TABLE_NAME.to_string(),
-    descriptor_proto: Some(descriptor_proto),
-};
+
+let mut stream = sdk
+    .stream_builder()
+    .table(TABLE_NAME)
+    .oauth(DATABRICKS_CLIENT_ID, DATABRICKS_CLIENT_SECRET)
+    .compiled_proto(descriptor_proto)
+    .max_inflight_requests(100)
+    .build()
+    .await?;
 ```
 
-### 3. Configure Stream Options
-
+**Arrow Flight (Beta):**
 ```rust
-let options = StreamConfigurationOptions {
-    max_inflight_requests: 100,
-    record_type: RecordType::Json,  // Or RecordType::Proto (default)
-    ..Default::default()
-};
+use std::sync::Arc;
+use databricks_zerobus_ingest_sdk::{ArrowSchema, DataType, Field};
+
+let schema = Arc::new(ArrowSchema::new(vec![
+    Field::new("id", DataType::Int32, false),
+    // ... other fields matching your table
+]));
+
+let mut stream = sdk
+    .stream_builder()
+    .table(TABLE_NAME)
+    .oauth(DATABRICKS_CLIENT_ID, DATABRICKS_CLIENT_SECRET)
+    .arrow(schema)
+    .max_inflight_batches(100)
+    .build_arrow()
+    .await?;
 ```
 
-### 4. Create Stream
-
-```rust
-let mut stream = sdk.create_stream(
-    table_properties,
-    DATABRICKS_CLIENT_ID.to_string(),
-    DATABRICKS_CLIENT_SECRET.to_string(),
-    Some(options),
-).await?;
-```
-
-### 5. Ingest and Acknowledge
+### 3. Ingest and Acknowledge
 
 ```rust
 let offset = stream.ingest_record_offset(data).await?;
 stream.wait_for_offset(offset).await?;
 ```
 
-### 6. Close Stream
+### 4. Close Stream
 
 ```rust
 stream.close().await?;
 ```
 
-## API Styles
+## Ingestion API
 
-The SDK provides two API styles for ingestion:
-
-| Style | Method | Returns | When to wait |
-|-------|--------|---------|--------------|
-| **Offset-based** (Recommended) | `ingest_record_offset()` | `OffsetId` directly | Call `wait_for_offset()` when needed |
-| **Future-based** (Deprecated) | `ingest_record()` | `Future<OffsetId>` | Await the future |
-
-**Offset-based (Recommended):**
 ```rust
 let offset = stream.ingest_record_offset(data).await?;
 // Do other work, then wait when needed.
 stream.wait_for_offset(offset).await?;
 ```
 
-**Future-based (Deprecated):**
-```rust
-let ack = stream.ingest_record(data).await?;
-
-// Must await to get offset.
-let offset = ack.await?;
-```
+`ingest_record_offset` returns the assigned `OffsetId` immediately after the record is queued. Call `wait_for_offset(offset)` to block until the record is durably acknowledged by the server.
 
 ## Single-Record vs Batch Ingestion
 

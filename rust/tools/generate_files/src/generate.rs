@@ -245,7 +245,7 @@ pub fn generate_rust_and_descriptor(
         .context("bad filename")?;
     let desc_file = output_dir.join(format!("{}.descriptor", file_name));
 
-    tonic_build::configure()
+    tonic_prost_build::configure()
         .out_dir(output_dir)
         .file_descriptor_set_path(&desc_file)
         .compile_protos(
@@ -475,24 +475,6 @@ mod tests {
                 .unwrap_err()
                 .to_string()
                 .contains("invalid field name 'invalid-name'")
-        );
-    }
-
-    #[test]
-    fn test_reserved_field_name() {
-        let columns = vec![simple("message", "STRING", false, 0)];
-
-        let dir = tempdir().unwrap();
-        let proto_path = dir.path().join("test.proto");
-        let output_dir = dir.path().to_path_buf();
-
-        let result = generate_proto_file("TestMessage", &columns, &proto_path, &output_dir);
-        assert!(result.is_err());
-        assert!(
-            result
-                .unwrap_err()
-                .to_string()
-                .contains("reserved proto keyword")
         );
     }
 

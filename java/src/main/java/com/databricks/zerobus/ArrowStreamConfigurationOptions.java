@@ -30,6 +30,7 @@ public class ArrowStreamConfigurationOptions {
   private long flushTimeoutMs = 300000;
   private long connectionTimeoutMs = 30000;
   private IPCCompressionType ipcCompression = IPCCompressionType.NONE;
+  private long streamPausedMaxWaitTimeMs = -1;
 
   private ArrowStreamConfigurationOptions() {}
 
@@ -42,7 +43,8 @@ public class ArrowStreamConfigurationOptions {
       long serverLackOfAckTimeoutMs,
       long flushTimeoutMs,
       long connectionTimeoutMs,
-      IPCCompressionType ipcCompression) {
+      IPCCompressionType ipcCompression,
+      long streamPausedMaxWaitTimeMs) {
     this.maxInflightBatches = maxInflightBatches;
     this.recovery = recovery;
     this.recoveryTimeoutMs = recoveryTimeoutMs;
@@ -52,6 +54,7 @@ public class ArrowStreamConfigurationOptions {
     this.flushTimeoutMs = flushTimeoutMs;
     this.connectionTimeoutMs = connectionTimeoutMs;
     this.ipcCompression = ipcCompression;
+    this.streamPausedMaxWaitTimeMs = streamPausedMaxWaitTimeMs;
   }
 
   /**
@@ -145,6 +148,21 @@ public class ArrowStreamConfigurationOptions {
   }
 
   /**
+   * Returns the maximum time in milliseconds to wait during graceful stream close.
+   *
+   * <p>When the server sends a close stream signal, the SDK enters a "paused" state where it stops
+   * sending new batches but continues processing acknowledgments for in-flight batches.
+   *
+   * <p>Values: -1 = wait full server duration (default), 0 = immediate recovery, &gt;0 = wait up to
+   * min(this, server_duration) milliseconds.
+   *
+   * @return the stream paused max wait time in milliseconds, or -1 for full server duration
+   */
+  public long streamPausedMaxWaitTimeMs() {
+    return this.streamPausedMaxWaitTimeMs;
+  }
+
+  /**
    * Returns the default Arrow stream configuration options.
    *
    * <p>Default values:
@@ -159,6 +177,7 @@ public class ArrowStreamConfigurationOptions {
    *   <li>flushTimeoutMs: 300000
    *   <li>connectionTimeoutMs: 30000
    *   <li>ipcCompression: {@link IPCCompressionType#NONE}
+   *   <li>streamPausedMaxWaitTimeMs: -1 (wait full server duration)
    * </ul>
    *
    * @return the default Arrow stream configuration options
@@ -194,6 +213,7 @@ public class ArrowStreamConfigurationOptions {
     private long flushTimeoutMs = defaults.flushTimeoutMs;
     private long connectionTimeoutMs = defaults.connectionTimeoutMs;
     private IPCCompressionType ipcCompression = defaults.ipcCompression;
+    private long streamPausedMaxWaitTimeMs = defaults.streamPausedMaxWaitTimeMs;
 
     private ArrowStreamConfigurationOptionsBuilder() {}
 
@@ -307,6 +327,21 @@ public class ArrowStreamConfigurationOptions {
     }
 
     /**
+     * Sets the maximum time in milliseconds to wait during graceful stream close.
+     *
+     * <p>Values: -1 = wait full server duration (default), 0 = immediate recovery, &gt;0 = wait up
+     * to min(this, server_duration) milliseconds.
+     *
+     * @param streamPausedMaxWaitTimeMs the max wait time, or -1 for full server duration
+     * @return this builder for method chaining
+     */
+    public ArrowStreamConfigurationOptionsBuilder setStreamPausedMaxWaitTimeMs(
+        long streamPausedMaxWaitTimeMs) {
+      this.streamPausedMaxWaitTimeMs = streamPausedMaxWaitTimeMs;
+      return this;
+    }
+
+    /**
      * Builds a new ArrowStreamConfigurationOptions instance.
      *
      * @return a new ArrowStreamConfigurationOptions with the configured settings
@@ -321,7 +356,8 @@ public class ArrowStreamConfigurationOptions {
           this.serverLackOfAckTimeoutMs,
           this.flushTimeoutMs,
           this.connectionTimeoutMs,
-          this.ipcCompression);
+          this.ipcCompression,
+          this.streamPausedMaxWaitTimeMs);
     }
   }
 }

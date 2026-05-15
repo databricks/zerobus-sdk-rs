@@ -1,9 +1,6 @@
 use std::error::Error;
 
-use databricks_zerobus_ingest_sdk::{
-    databricks::zerobus::RecordType, JsonString, JsonValue, StreamConfigurationOptions,
-    TableProperties, ZerobusSdk, ZerobusStream,
-};
+use databricks_zerobus_ingest_sdk::{JsonString, JsonValue, ZerobusSdk, ZerobusStream};
 use serde::Serialize;
 
 /// Order struct that can be automatically serialized to JSON using JsonValue wrapper.
@@ -36,32 +33,21 @@ const SERVER_ENDPOINT: &str = "https://<your-shard-id>.zerobus.<region>.cloud.da
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error>> {
-    let table_properties = TableProperties {
-        table_name: TABLE_NAME.to_string(),
-        // Not needed for JSON.
-        descriptor_proto: None,
-    };
-    let stream_configuration_options = StreamConfigurationOptions {
-        max_inflight_requests: 100,
-        record_type: RecordType::Json,
-        ..Default::default()
-    };
     let sdk_handle = ZerobusSdk::builder()
         .endpoint(SERVER_ENDPOINT)
         .unity_catalog_url(DATABRICKS_WORKSPACE_URL)
         .build()?;
 
     let mut stream = sdk_handle
-        .create_stream(
-            table_properties.clone(),
-            DATABRICKS_CLIENT_ID.to_string(),
-            DATABRICKS_CLIENT_SECRET.to_string(),
-            Some(stream_configuration_options),
-        )
+        .stream_builder()
+        .table(TABLE_NAME)
+        .oauth(DATABRICKS_CLIENT_ID, DATABRICKS_CLIENT_SECRET)
+        .json()
+        .max_inflight_requests(100)
+        .build()
         .await?;
 
     ingest_with_offset_api(&mut stream).await?;
-    ingest_with_future_api(&mut stream).await?;
 
     stream.close().await?;
     println!("Stream closed successfully");
@@ -225,160 +211,6 @@ async fn ingest_with_offset_api(stream: &mut ZerobusStream) -> Result<(), Box<dy
             offset_id
         );
         stream.wait_for_offset(offset_id).await?;
-        println!(
-            "[Backward-compatible] Batch acknowledged with offset ID: {}",
-            offset_id
-        );
-    }
-
-    Ok(())
-}
-
-/// Deprecated API: returns future that resolves to offset.
-#[allow(deprecated)]
-async fn ingest_with_future_api(stream: &mut ZerobusStream) -> Result<(), Box<dyn Error>> {
-    println!("=== Future-based API (Deprecated) ===");
-
-    let now = chrono::Utc::now().timestamp();
-
-    // 1. Auto-serializing: JsonValue - pass structs, SDK handles JSON conversion.
-    let batch: Vec<JsonValue<Order>> = vec![
-        JsonValue(Order {
-            id: 10,
-            customer_name: "Jack Taylor".to_string(),
-            product_name: "Laptop Stand".to_string(),
-            quantity: 1,
-            price: 89.99,
-            status: "pending".to_string(),
-            created_at: now,
-            updated_at: now,
-        }),
-        JsonValue(Order {
-            id: 11,
-            customer_name: "Kate Martinez".to_string(),
-            product_name: "Screen Protector".to_string(),
-            quantity: 3,
-            price: 19.99,
-            status: "shipped".to_string(),
-            created_at: now,
-            updated_at: now,
-        }),
-        JsonValue(Order {
-            id: 12,
-            customer_name: "Leo Anderson".to_string(),
-            product_name: "Phone Charger".to_string(),
-            quantity: 2,
-            price: 24.99,
-            status: "delivered".to_string(),
-            created_at: now,
-            updated_at: now,
-        }),
-    ];
-
-    let ack_future = stream.ingest_records(batch).await?;
-    if let Some(offset_id) = ack_future.await? {
-        println!(
-            "[Auto-serializing] Batch acknowledged with offset ID: {}",
-            offset_id
-        );
-    }
-
-    // 2. Pre-serialized: JsonString - pass JSON strings with explicit wrapper.
-    let batch: Vec<JsonString> = vec![
-        JsonString(format!(
-            r#"{{
-                "id": 13,
-                "customer_name": "Mia Thompson",
-                "product_name": "USB Drive",
-                "quantity": 5,
-                "price": 9.99,
-                "status": "pending",
-                "created_at": {},
-                "updated_at": {}
-            }}"#,
-            now, now
-        )),
-        JsonString(format!(
-            r#"{{
-                "id": 14,
-                "customer_name": "Noah Garcia",
-                "product_name": "HDMI Cable",
-                "quantity": 2,
-                "price": 14.99,
-                "status": "shipped",
-                "created_at": {},
-                "updated_at": {}
-            }}"#,
-            now, now
-        )),
-        JsonString(format!(
-            r#"{{
-                "id": 15,
-                "customer_name": "Olivia Davis",
-                "product_name": "Webcam Cover",
-                "quantity": 10,
-                "price": 4.99,
-                "status": "delivered",
-                "created_at": {},
-                "updated_at": {}
-            }}"#,
-            now, now
-        )),
-    ];
-
-    let ack_future = stream.ingest_records(batch).await?;
-    if let Some(offset_id) = ack_future.await? {
-        println!(
-            "[Pre-serialized] Batch acknowledged with offset ID: {}",
-            offset_id
-        );
-    }
-
-    // 3. Backward-compatible: raw String - no wrapper needed, works the same as JsonString.
-    let batch: Vec<String> = vec![
-        format!(
-            r#"{{
-                "id": 16,
-                "customer_name": "Peter Robinson",
-                "product_name": "Keyboard Wrist Rest",
-                "quantity": 1,
-                "price": 22.99,
-                "status": "pending",
-                "created_at": {},
-                "updated_at": {}
-            }}"#,
-            now, now
-        ),
-        format!(
-            r#"{{
-                "id": 17,
-                "customer_name": "Quinn Harris",
-                "product_name": "Monitor Arm",
-                "quantity": 1,
-                "price": 79.99,
-                "status": "shipped",
-                "created_at": {},
-                "updated_at": {}
-            }}"#,
-            now, now
-        ),
-        format!(
-            r#"{{
-                "id": 18,
-                "customer_name": "Rachel Clark",
-                "product_name": "Desk Mat",
-                "quantity": 1,
-                "price": 29.99,
-                "status": "delivered",
-                "created_at": {},
-                "updated_at": {}
-            }}"#,
-            now, now
-        ),
-    ];
-
-    let ack_future = stream.ingest_records(batch).await?;
-    if let Some(offset_id) = ack_future.await? {
         println!(
             "[Backward-compatible] Batch acknowledged with offset ID: {}",
             offset_id

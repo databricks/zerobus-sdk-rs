@@ -4,13 +4,10 @@ use std::fs;
 use prost::Message;
 use prost_reflect::prost_types;
 
-use databricks_zerobus_ingest_sdk::{
-    ProtoBytes, ProtoMessage, StreamConfigurationOptions, TableProperties, ZerobusSdk,
-    ZerobusStream,
-};
+use databricks_zerobus_ingest_sdk::{ProtoBytes, ProtoMessage, ZerobusSdk, ZerobusStream};
 
 pub mod orders {
-    include!("../output/orders.rs");
+    include!("output/orders.rs");
 }
 use crate::orders::TableOrders;
 
@@ -33,31 +30,21 @@ const SERVER_ENDPOINT: &str = "https://<your-shard-id>.zerobus.<region>.cloud.da
 async fn main() -> Result<(), Box<dyn Error>> {
     let descriptor_proto =
         load_descriptor_proto("output/orders.descriptor", "orders.proto", "table_Orders");
-    let table_properties = TableProperties {
-        table_name: TABLE_NAME.to_string(),
-        descriptor_proto: Some(descriptor_proto),
-    };
-    let stream_configuration_options = StreamConfigurationOptions {
-        max_inflight_requests: 100,
-        // RecordType::Proto is the default.
-        ..Default::default()
-    };
     let sdk_handle = ZerobusSdk::builder()
         .endpoint(SERVER_ENDPOINT)
         .unity_catalog_url(DATABRICKS_WORKSPACE_URL)
         .build()?;
 
     let mut stream = sdk_handle
-        .create_stream(
-            table_properties.clone(),
-            DATABRICKS_CLIENT_ID.to_string(),
-            DATABRICKS_CLIENT_SECRET.to_string(),
-            Some(stream_configuration_options),
-        )
+        .stream_builder()
+        .table(TABLE_NAME)
+        .oauth(DATABRICKS_CLIENT_ID, DATABRICKS_CLIENT_SECRET)
+        .compiled_proto(descriptor_proto)
+        .max_inflight_requests(100)
+        .build()
         .await?;
 
     ingest_with_offset_api(&mut stream).await?;
-    ingest_with_future_api(&mut stream).await?;
 
     stream.close().await?;
     println!("Stream closed successfully");
@@ -131,75 +118,6 @@ async fn ingest_with_offset_api(stream: &mut ZerobusStream) -> Result<(), Box<dy
         offset_id
     );
     stream.wait_for_offset(offset_id).await?;
-    println!(
-        "[Backward-compatible] Record acknowledged with offset ID: {}",
-        offset_id
-    );
-
-    Ok(())
-}
-
-/// Deprecated API: returns future that resolves to offset.
-#[allow(deprecated)]
-async fn ingest_with_future_api(stream: &mut ZerobusStream) -> Result<(), Box<dyn Error>> {
-    println!("=== Future-based API (Deprecated) ===");
-
-    let now = chrono::Utc::now().timestamp();
-
-    // 1. Auto-encoding: ProtoMessage - pass message directly, SDK handles encoding.
-    let order = TableOrders {
-        id: Some(4),
-        customer_name: Some("David Green".to_string()),
-        product_name: Some("Monitor Stand".to_string()),
-        quantity: Some(1),
-        price: Some(79.99),
-        status: Some("pending".to_string()),
-        created_at: Some(now),
-        updated_at: Some(now),
-    };
-
-    let ack_future = stream.ingest_record(ProtoMessage(order)).await?;
-    let offset_id = ack_future.await?;
-    println!(
-        "[Auto-encoding] Record acknowledged with offset ID: {}",
-        offset_id
-    );
-
-    // 2. Pre-encoded: ProtoBytes - pass bytes with explicit wrapper.
-    let order = TableOrders {
-        id: Some(5),
-        customer_name: Some("Emma White".to_string()),
-        product_name: Some("Webcam".to_string()),
-        quantity: Some(2),
-        price: Some(59.99),
-        status: Some("shipped".to_string()),
-        created_at: Some(now),
-        updated_at: Some(now),
-    };
-    let bytes = order.encode_to_vec();
-
-    let ack_future = stream.ingest_record(ProtoBytes(bytes)).await?;
-    let offset_id = ack_future.await?;
-    println!(
-        "[Pre-encoded] Record acknowledged with offset ID: {}",
-        offset_id
-    );
-
-    // 3. Backward-compatible: raw Vec<u8> - no wrapper needed, works the same as ProtoBytes.
-    let order = TableOrders {
-        id: Some(6),
-        customer_name: Some("Frank Brown".to_string()),
-        product_name: Some("Mouse Pad".to_string()),
-        quantity: Some(5),
-        price: Some(15.99),
-        status: Some("delivered".to_string()),
-        created_at: Some(now),
-        updated_at: Some(now),
-    };
-    let raw_bytes = order.encode_to_vec();
-
-    let ack_future = stream.ingest_record(raw_bytes).await?;
-    let offset_id = ack_future.await?;
     println!(
         "[Backward-compatible] Record acknowledged with offset ID: {}",
         offset_id

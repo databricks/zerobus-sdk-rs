@@ -62,6 +62,17 @@ impl OffsetIdGenerator {
             Some(last_offset)
         }
     }
+
+    /// Repositions the generator so the next call to `next()` returns `next_value`.
+    ///
+    /// Used by the Arrow Flight stream recovery path: when the SDK reconnects and
+    /// replays N pending batches with wire offsets `0..N-1`, the in-memory generator
+    /// must be set so that subsequent fresh batches pick up at `N` rather than the
+    /// pre-recovery monotonic counter — otherwise the server rejects the next batch
+    /// with a non-sequential-offset error.
+    pub fn set_next(&self, next_value: OffsetId) {
+        self.last_offset_id.store(next_value - 1, Ordering::SeqCst);
+    }
 }
 
 #[cfg(test)]
@@ -94,6 +105,33 @@ mod tests {
         assert_eq!(generator.next(), 3);
         //blblb
         assert_eq!(generator.last(), Some(3));
+    }
+
+    #[test]
+    fn test_set_next_repositions_generator() {
+        let generator = OffsetIdGenerator::default();
+
+        for _ in 0..100 {
+            generator.next();
+        }
+        assert_eq!(generator.last(), Some(99));
+
+        generator.set_next(5);
+        assert_eq!(generator.next(), 5);
+        assert_eq!(generator.next(), 6);
+        assert_eq!(generator.last(), Some(6));
+    }
+
+    #[test]
+    fn test_set_next_to_zero_after_empty_replay() {
+        let generator = OffsetIdGenerator::default();
+        for _ in 0..42 {
+            generator.next();
+        }
+
+        generator.set_next(0);
+        assert_eq!(generator.next(), 0);
+        assert_eq!(generator.next(), 1);
     }
 
     #[test]

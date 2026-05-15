@@ -5,16 +5,23 @@
 //! ## Quick Start
 //!
 //! ```rust,ignore
-//! use databricks_zerobus_ingest_sdk::{ZerobusSdk, TableProperties, ProtoMessage};
+//! use databricks_zerobus_ingest_sdk::{ZerobusSdk, JsonValue};
 //!
 //! let sdk = ZerobusSdk::builder()
 //!     .endpoint(zerobus_endpoint)
 //!     .unity_catalog_url(uc_endpoint)
 //!     .build()?;
-//! let stream = sdk.create_stream(table_properties, client_id, client_secret, None).await?;
+//!
+//! let stream = sdk
+//!     .stream_builder()
+//!     .table("catalog.schema.table")
+//!     .oauth(client_id, client_secret)
+//!     .json()
+//!     .build()
+//!     .await?;
 //!
 //! // Ingest a record and wait for acknowledgment
-//! let offset = stream.ingest_record_offset(ProtoMessage(my_message)).await?;
+//! let offset = stream.ingest_record_offset(JsonValue(my_record)).await?;
 //! stream.wait_for_offset(offset).await?;
 //!
 //! stream.close().await?;
@@ -47,7 +54,7 @@ mod proxy;
 mod record_types;
 pub mod schema;
 mod stream_configuration;
-mod stream_options;
+pub mod stream_options;
 mod tls_config;
 
 use std::collections::HashMap;
@@ -65,7 +72,7 @@ use tokio_stream::wrappers::ReceiverStream;
 use tokio_util::sync::CancellationToken;
 use tonic::metadata::MetadataValue;
 use tonic::transport::{Channel, Endpoint};
-use tracing::{debug, error, info, instrument, span, warn, Level};
+use tracing::{debug, error, info, instrument, span, trace, warn, Level};
 
 use databricks::zerobus::ephemeral_stream_request::Payload as RequestPayload;
 use databricks::zerobus::ephemeral_stream_response::Payload as ResponsePayload;
@@ -76,19 +83,17 @@ use databricks::zerobus::{
 };
 use landing_zone::LandingZone;
 
-/// **Experimental/Unsupported**: Arrow Flight ingestion is experimental and not yet
-/// supported for production use. The API may change in future releases.
+/// **Beta**: Arrow Flight ingestion is in Beta. The API is stabilising but may
+/// still change before reaching GA.
 #[cfg(feature = "arrow-flight")]
 pub use arrow_configuration::ArrowStreamConfigurationOptions;
 #[cfg(feature = "arrow-flight")]
-pub use arrow_stream::{
-    ArrowSchema, ArrowTableProperties, DataType, Field, RecordBatch, ZerobusArrowStream,
-};
-pub use builder::ZerobusSdkBuilder;
+pub use arrow_stream::{ArrowSchema, DataType, Field, RecordBatch, ZerobusArrowStream};
+pub use builder::{StreamBuilder, ZerobusSdkBuilder};
 pub use callbacks::AckCallback;
 pub use default_token_factory::DefaultTokenFactory;
 pub use errors::ZerobusError;
-pub use headers_provider::{HeadersProvider, OAuthHeadersProvider, DEFAULT_X_ZEROBUS_SDK};
+pub use headers_provider::{HeadersProvider, OAuthHeadersProvider};
 #[cfg(feature = "testing")]
 pub use multiplexed_stream::{MessageId, MultiplexedStream};
 pub use offset_generator::{OffsetId, OffsetIdGenerator};
@@ -103,11 +108,16 @@ pub use stream_configuration::StreamConfigurationOptions;
 pub use tls_config::NoTlsConfig;
 pub use tls_config::{SecureTlsConfig, TlsConfig};
 
-const SHUTDOWN_TIMEOUT_SECS: u64 = 2;
+const SHUTDOWN_TIMEOUT_SECS: u64 = 1;
+
+/// Maximum time to wait for the receiver/sender tasks to finish during stream
+/// teardown.
+const STREAM_TEARDOWN_DRAIN_TIMEOUT_MS: u64 = 500;
 
 /// The type of the stream connection created with the server.
 /// Currently we only support ephemeral streams on the server side, so we support only that in the SDK as well.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum StreamType {
     /// Ephemeral streams exist only for the duration of the connection.
     /// They are not persisted and are not recoverable.
@@ -118,17 +128,17 @@ pub enum StreamType {
 
 /// The properties of the table to ingest to.
 ///
-/// Used when creating streams via `ZerobusSdk::create_stream()` to specify
-/// which table to write to and the schema of records being ingested.
+/// Configure the table via the builder API:
+/// `sdk.stream_builder().table("catalog.schema.table").compiled_proto(descriptor)`.
 ///
 /// # Common errors:
 /// -`InvalidTableName`: table_name contains invalid characters or doesn't exist
 /// -`PermissionDenied`: insufficient permissions to write to the specified table
 /// -`InvalidArgument`: invalid or missing descriptor_proto or auth token
 #[derive(Debug, Clone)]
-pub struct TableProperties {
-    pub table_name: String,
-    pub descriptor_proto: Option<prost_types::DescriptorProto>,
+pub(crate) struct TableProperties {
+    pub(crate) table_name: String,
+    pub(crate) descriptor_proto: Option<prost_types::DescriptorProto>,
 }
 
 pub type ZerobusResult<T> = Result<T, ZerobusError>;
@@ -161,8 +171,8 @@ enum CallbackMessage {
 ///
 /// # Lifecycle
 ///
-/// 1. Create a stream via `ZerobusSdk::create_stream()`
-/// 2. Ingest records with `ingest_record()` and await acknowledgments
+/// 1. Create a stream via `ZerobusSdk::stream_builder()`
+/// 2. Ingest records with `ingest_record_offset()` and `wait_for_offset()` for acknowledgments
 /// 3. Optionally call `flush()` to ensure all records are persisted
 /// 4. Close the stream with `close()` to release resources
 ///
@@ -184,6 +194,7 @@ enum CallbackMessage {
 /// # Ok(())
 /// # }
 /// ```
+#[non_exhaustive]
 pub struct ZerobusStream {
     /// This is a 128-bit UUID that is unique across all streams in the system,
     /// not just within a single table. The server returns this ID in the CreateStreamResponse
@@ -196,7 +207,7 @@ pub struct ZerobusStream {
     /// The stream configuration options related to recovery, fetching OAuth tokens, etc.
     pub options: StreamConfigurationOptions,
     /// The table properties - table name and descriptor of the table.
-    pub table_properties: TableProperties,
+    pub(crate) table_properties: TableProperties,
     /// Logical landing zone that is used to store records that have been sent by user but not yet sent over the network.
     landing_zone: RecordLandingZone,
     /// Map of logical offset to oneshot sender.
@@ -224,59 +235,47 @@ pub struct ZerobusStream {
     callback_handler_task: Option<tokio::task::JoinHandle<()>>,
 }
 
+/// Default identifier the SDK sends as the HTTP `user-agent` header on every
+/// request. Use [`ZerobusSdkBuilder::application_name`] to append an
+/// application suffix.
+pub const DEFAULT_SDK_IDENTIFIER: &str = concat!("zerobus-sdk-rs/", env!("CARGO_PKG_VERSION"));
+
 /// The main interface for interacting with the Zerobus API.
 /// # Examples
-/// ```no_run
-/// # use std::error::Error;
-/// # use std::sync::Arc;
-/// # use databricks_zerobus_ingest_sdk::{ZerobusSdk, StreamConfigurationOptions, TableProperties, ZerobusError, ZerobusResult};
-/// #
-/// # async fn write_single_row(row: impl prost::Message) -> Result<(), ZerobusError> {
-///
+/// ```rust,ignore
 /// // Create SDK using the builder
 /// let sdk = ZerobusSdk::builder()
 ///     .endpoint("https://your-workspace.zerobus.region.cloud.databricks.com")
 ///     .unity_catalog_url("https://your-workspace.cloud.databricks.com")
 ///     .build()?;
 ///
-/// // Define the arguments for the ephemeral stream.
-/// let table_properties = TableProperties {
-///     table_name: "test_table".to_string(),
-///     descriptor_proto: Default::default(),
-/// };
-/// let options = StreamConfigurationOptions {
-///     max_inflight_requests: 100,
-///     ..Default::default()
-/// };
-/// let client_id = "your-client-id".to_string();
-/// let client_secret = "your-client-secret".to_string();
-///
-/// // Create a stream
-/// let stream = sdk.create_stream(table_properties, client_id, client_secret, Some(options)).await?;
+/// // Create a stream via the stream builder
+/// let stream = sdk
+///     .stream_builder()
+///     .table("catalog.schema.table")
+///     .oauth("client-id", "client-secret")
+///     .compiled_proto(descriptor_proto)
+///     .max_inflight_requests(100)
+///     .build()
+///     .await?;
 ///
 /// // Ingest a single record
-/// let offset_id = stream.ingest_record_offset(row.encode_to_vec()).await?;
-/// println!("Record sent with offset Id: {}", offset_id);
+/// let offset_id = stream.ingest_record_offset(ProtoMessage(row)).await?;
 ///
 /// // Wait for acknowledgment
 /// stream.wait_for_offset(offset_id).await?;
-/// println!("Record acknowledged with offset Id: {}", offset_id);
-/// # Ok(())
-/// # }
 /// ```
+#[non_exhaustive]
 pub struct ZerobusSdk {
     pub zerobus_endpoint: String,
-    /// Deprecated: This field is no longer used. TLS is now controlled via `tls_config`.
-    #[deprecated(
-        since = "0.5.0",
-        note = "This field is no longer used. TLS is controlled via tls_config."
-    )]
-    pub use_tls: bool,
     pub unity_catalog_url: String,
     shared_channel: tokio::sync::Mutex<Option<ZerobusClient<Channel>>>,
-    workspace_id: String,
-    tls_config: Arc<dyn TlsConfig>,
+    pub(crate) workspace_id: String,
+    pub(crate) tls_config: Arc<dyn TlsConfig>,
     connector_factory: Option<ConnectorFactory>,
+    /// Final value sent as the HTTP `user-agent` header on every request.
+    /// Either `"zerobus-sdk-rs/<version>"` or `"zerobus-sdk-rs/<version> <application_name>"`.
+    pub(crate) sdk_identifier: Arc<str>,
 }
 
 impl ZerobusSdk {
@@ -299,255 +298,61 @@ impl ZerobusSdk {
         ZerobusSdkBuilder::new()
     }
 
-    /// Creates a new Zerobus SDK instance.
+    /// Creates a new stream builder for configuring an ingestion stream.
     ///
-    /// # Deprecated
+    /// All setters can be called in any order. The builder validates at
+    /// `build()` time that table name, authentication, and format have
+    /// been configured. Use [`StreamBuilder::validate()`] to check the
+    /// configuration without opening a stream.
     ///
-    /// Use [`ZerobusSdk::builder()`] instead for more flexible configuration:
+    /// # Examples
     ///
-    /// ```no_run
-    /// use databricks_zerobus_ingest_sdk::ZerobusSdk;
+    /// ```rust,ignore
+    /// // JSON stream with OAuth
+    /// let stream = sdk
+    ///     .stream_builder()
+    ///     .table("catalog.schema.table")
+    ///     .oauth("client-id", "client-secret")
+    ///     .json()
+    ///     .build()
+    ///     .await?;
     ///
-    /// let sdk = ZerobusSdk::builder()
-    ///     .endpoint("https://workspace.zerobus.databricks.com")
-    ///     .unity_catalog_url("https://workspace.cloud.databricks.com")
-    ///     .build()?;
-    /// # Ok::<(), databricks_zerobus_ingest_sdk::ZerobusError>(())
+    /// // Proto stream with custom headers
+    /// let stream = sdk
+    ///     .stream_builder()
+    ///     .table("catalog.schema.table")
+    ///     .headers_provider(my_provider)
+    ///     .compiled_proto(descriptor)
+    ///     .max_inflight_requests(500_000)
+    ///     .build()
+    ///     .await?;
     /// ```
-    ///
-    /// # Arguments
-    ///
-    /// * `zerobus_endpoint` - The Zerobus API endpoint URL (e.g., "https://workspace-id.cloud.databricks.com")
-    /// * `unity_catalog_url` - The Unity Catalog endpoint URL (e.g., "https://workspace.cloud.databricks.com")
-    ///
-    /// # Returns
-    ///
-    /// A new `ZerobusSdk` instance configured to use TLS.
-    ///
-    /// # Errors
-    ///
-    /// * `ChannelCreationError` - If the workspace ID cannot be extracted from the Zerobus endpoint
-    #[deprecated(since = "0.5.0", note = "Use ZerobusSdk::builder() instead")]
-    #[allow(clippy::result_large_err)]
-    pub fn new(zerobus_endpoint: String, unity_catalog_url: String) -> ZerobusResult<Self> {
-        let zerobus_endpoint = if !zerobus_endpoint.starts_with("https://")
-            && !zerobus_endpoint.starts_with("http://")
-        {
-            format!("https://{}", zerobus_endpoint)
-        } else {
-            zerobus_endpoint
-        };
-
-        let workspace_id = zerobus_endpoint
-            .strip_prefix("https://")
-            .or_else(|| zerobus_endpoint.strip_prefix("http://"))
-            .and_then(|s| s.split('.').next())
-            .map(|s| s.to_string())
-            .ok_or_else(|| {
-                ZerobusError::InvalidArgument(
-                    "Failed to extract workspace ID from zerobus_endpoint".to_string(),
-                )
-            })?;
-
-        #[allow(deprecated)]
-        Ok(ZerobusSdk {
-            zerobus_endpoint,
-            use_tls: true,
-            unity_catalog_url,
-            workspace_id,
-            shared_channel: tokio::sync::Mutex::new(None),
-            tls_config: Arc::new(SecureTlsConfig::new()),
-            connector_factory: None,
-        })
+    pub fn stream_builder(&self) -> StreamBuilder<'_> {
+        StreamBuilder::new(self)
     }
 
     /// Creates a new SDK instance with explicit configuration.
     ///
-    /// This is used internally by the builder pattern.
+    /// This is used internally by the builder pattern. `sdk_identifier` is the
+    /// fully-resolved value sent as the HTTP `user-agent` header; the builder
+    /// is responsible for composing it from the default prefix and any
+    /// caller-supplied `application_name` or override.
     pub(crate) fn new_with_config(
         zerobus_endpoint: String,
         unity_catalog_url: String,
         workspace_id: String,
         tls_config: Arc<dyn TlsConfig>,
         connector_factory: Option<ConnectorFactory>,
+        sdk_identifier: Arc<str>,
     ) -> Self {
-        #[allow(deprecated)]
         ZerobusSdk {
             zerobus_endpoint,
-            use_tls: true,
             unity_catalog_url,
             workspace_id,
             shared_channel: tokio::sync::Mutex::new(None),
             tls_config,
             connector_factory,
-        }
-    }
-
-    /// Creates a new ingestion stream to a Unity Catalog table.
-    ///
-    /// This establishes a bidirectional gRPC stream for ingesting records. Authentication
-    /// is handled automatically using the provided OAuth credentials.
-    ///
-    /// # Arguments
-    ///
-    /// * `table_properties` - Table name and protobuf descriptor
-    /// * `client_id` - OAuth client ID for authentication
-    /// * `client_secret` - OAuth client secret for authentication
-    /// * `options` - Optional stream configuration (uses defaults if `None`)
-    ///
-    /// # Returns
-    ///
-    /// A `ZerobusStream` ready for ingesting records.
-    ///
-    /// # Errors
-    ///
-    /// * `CreateStreamError` - If stream creation fails
-    /// * `InvalidTableName` - If the table name is invalid or table doesn't exist
-    /// * `InvalidUCTokenError` - If OAuth authentication fails
-    /// * `PermissionDenied` - If credentials lack required permissions
-    ///
-    /// # Examples
-    ///
-    /// ```no_run
-    /// # use databricks_zerobus_ingest_sdk::*;
-    /// # async fn example(sdk: ZerobusSdk) -> Result<(), ZerobusError> {
-    /// let table_props = TableProperties {
-    ///     table_name: "catalog.schema.table".to_string(),
-    ///     descriptor_proto: Default::default(), // Load from generated files
-    /// };
-    ///
-    /// let stream = sdk.create_stream(
-    ///     table_props,
-    ///     "client-id".to_string(),
-    ///     "client-secret".to_string(),
-    ///     None,
-    /// ).await?;
-    /// # Ok(())
-    /// # }
-    /// ```
-    #[instrument(level = "debug", skip_all)]
-    pub async fn create_stream(
-        &self,
-        table_properties: TableProperties,
-        client_id: String,
-        client_secret: String,
-        options: Option<StreamConfigurationOptions>,
-    ) -> ZerobusResult<ZerobusStream> {
-        let headers_provider = OAuthHeadersProvider::new(
-            client_id,
-            client_secret,
-            table_properties.table_name.clone(),
-            self.workspace_id.clone(),
-            self.unity_catalog_url.clone(),
-        );
-        self.create_stream_with_headers_provider(
-            table_properties,
-            Arc::new(headers_provider),
-            options,
-        )
-        .await
-    }
-
-    /// Creates a new ingestion stream with a custom headers provider.
-    ///
-    /// This is an advanced method that allows you to implement your own authentication
-    /// logic by providing a custom implementation of the `HeadersProvider` trait.
-    ///
-    /// # Arguments
-    ///
-    /// * `table_properties` - Table name and protobuf descriptor
-    /// * `headers_provider` - An `Arc` holding your custom `HeadersProvider` implementation
-    /// * `options` - Optional stream configuration (uses defaults if `None`)
-    ///
-    /// # Returns
-    ///
-    /// A `ZerobusStream` ready for ingesting records.
-    ///
-    /// # Examples
-    ///
-    /// ```no_run
-    /// # use databricks_zerobus_ingest_sdk::*;
-    /// # use std::collections::HashMap;
-    /// # use std::sync::Arc;
-    /// # use async_trait::async_trait;
-    /// #
-    /// # struct MyHeadersProvider;
-    /// #
-    /// # #[async_trait]
-    /// # impl HeadersProvider for MyHeadersProvider {
-    /// #     async fn get_headers(&self) -> ZerobusResult<HashMap<&'static str, String>> {
-    /// #         let mut headers = HashMap::new();
-    /// #         headers.insert("some_key", "some_value".to_string());
-    /// #         Ok(headers)
-    /// #     }
-    /// # }
-    /// #
-    /// # async fn example(sdk: ZerobusSdk) -> Result<(), ZerobusError> {
-    /// let table_props = TableProperties {
-    ///     table_name: "catalog.schema.table".to_string(),
-    ///     descriptor_proto: Default::default(),
-    /// };
-    ///
-    /// let headers_provider = Arc::new(MyHeadersProvider);
-    ///
-    /// let stream = sdk.create_stream_with_headers_provider(
-    ///     table_props,
-    ///     headers_provider,
-    ///     None,
-    /// ).await?;
-    /// # Ok(())
-    /// # }
-    /// ```
-    #[instrument(level = "debug", skip_all)]
-    pub async fn create_stream_with_headers_provider(
-        &self,
-        table_properties: TableProperties,
-        headers_provider: Arc<dyn HeadersProvider>,
-        options: Option<StreamConfigurationOptions>,
-    ) -> ZerobusResult<ZerobusStream> {
-        let options = options.unwrap_or_default();
-
-        match options.record_type {
-            RecordType::Proto => {
-                if table_properties.descriptor_proto.is_none() {
-                    return Err(ZerobusError::InvalidArgument(
-                        "Proto descriptor is required for Proto record type".to_string(),
-                    ));
-                }
-            }
-            RecordType::Json => {
-                if table_properties.descriptor_proto.is_some() {
-                    warn!("JSON descriptor is not supported for Proto record type");
-                }
-            }
-            RecordType::Unspecified => {
-                return Err(ZerobusError::InvalidArgument(
-                    "Record type is not specified".to_string(),
-                ));
-            }
-        }
-
-        let channel = self.get_or_create_channel_zerobus_client().await?;
-        let stream = ZerobusStream::new_stream(
-            channel,
-            table_properties,
-            Arc::clone(&headers_provider),
-            options,
-        )
-        .await;
-        match stream {
-            Ok(stream) => {
-                if let Some(stream_id) = stream.stream_id.as_ref() {
-                    info!(stream_id = %stream_id, "Successfully created new ephemeral stream");
-                } else {
-                    error!("Successfully created a stream but stream_id is None");
-                }
-                return Ok(stream);
-            }
-            Err(e) => {
-                error!("Stream initialization failed with error: {}", e);
-                return Err(e);
-            }
+            sdk_identifier,
         }
     }
 
@@ -588,178 +393,32 @@ impl ZerobusSdk {
     #[instrument(level = "debug", skip_all)]
     pub async fn recreate_stream(&self, stream: &ZerobusStream) -> ZerobusResult<ZerobusStream> {
         let batches = stream.get_unacked_batches().await?;
-        let new_stream = self
-            .create_stream_with_headers_provider(
-                stream.table_properties.clone(),
-                Arc::clone(&stream.headers_provider),
-                Some(stream.options.clone()),
-            )
-            .await?;
-        for batch in batches {
-            let ack = new_stream.ingest_internal(batch).await?;
-            tokio::spawn(ack);
-        }
-        return Ok(new_stream);
-    }
-
-    /// Creates a new Arrow Flight ingestion stream to a Unity Catalog table.
-    ///
-    /// This establishes an Arrow Flight stream for high-performance ingestion of
-    /// Arrow RecordBatches. Authentication is handled automatically using the
-    /// provided OAuth credentials.
-    ///
-    /// # Arguments
-    ///
-    /// * `table_properties` - Table name and Arrow schema
-    /// * `client_id` - OAuth client ID for authentication
-    /// * `client_secret` - OAuth client secret for authentication
-    /// * `options` - Optional Arrow stream configuration (uses defaults if `None`)
-    ///
-    /// # Returns
-    ///
-    /// A `ZerobusArrowStream` ready for ingesting Arrow RecordBatches.
-    ///
-    /// # Errors
-    ///
-    /// * `CreateStreamError` - If stream creation fails
-    /// * `InvalidTableName` - If the table name is invalid or table doesn't exist
-    /// * `InvalidUCTokenError` - If OAuth authentication fails
-    /// * `PermissionDenied` - If credentials lack required permissions
-    ///
-    /// # Examples
-    ///
-    /// ```no_run
-    /// # use databricks_zerobus_ingest_sdk::*;
-    /// # use std::sync::Arc;
-    /// # use arrow_schema::{Schema as ArrowSchema, Field, DataType};
-    /// # async fn example(sdk: ZerobusSdk) -> Result<(), ZerobusError> {
-    /// let schema = Arc::new(ArrowSchema::new(vec![
-    ///     Field::new("id", DataType::Int32, false),
-    ///     Field::new("name", DataType::Utf8, true),
-    /// ]));
-    ///
-    /// let table_props = ArrowTableProperties {
-    ///     table_name: "catalog.schema.table".to_string(),
-    ///     schema,
-    /// };
-    ///
-    /// let stream = sdk.create_arrow_stream(
-    ///     table_props,
-    ///     "client-id".to_string(),
-    ///     "client-secret".to_string(),
-    ///     None,
-    /// ).await?;
-    /// # Ok(())
-    /// # }
-    /// ```
-    #[cfg(feature = "arrow-flight")]
-    #[instrument(level = "debug", skip_all)]
-    pub async fn create_arrow_stream(
-        &self,
-        table_properties: ArrowTableProperties,
-        client_id: String,
-        client_secret: String,
-        options: Option<ArrowStreamConfigurationOptions>,
-    ) -> ZerobusResult<ZerobusArrowStream> {
-        let headers_provider = OAuthHeadersProvider::new(
-            client_id,
-            client_secret,
-            table_properties.table_name.clone(),
-            self.workspace_id.clone(),
-            self.unity_catalog_url.clone(),
-        );
-        self.create_arrow_stream_with_headers_provider(
-            table_properties,
-            Arc::new(headers_provider),
-            options,
-        )
-        .await
-    }
-
-    /// Creates a new Arrow Flight stream with a custom headers provider.
-    ///
-    /// This is an advanced method that allows you to implement your own authentication
-    /// logic by providing a custom implementation of the `HeadersProvider` trait.
-    ///
-    /// # Arguments
-    ///
-    /// * `table_properties` - Table name and Arrow schema
-    /// * `headers_provider` - An `Arc` holding your custom `HeadersProvider` implementation
-    /// * `options` - Optional Arrow stream configuration (uses defaults if `None`)
-    ///
-    /// # Returns
-    ///
-    /// A `ZerobusArrowStream` ready for ingesting Arrow RecordBatches.
-    ///
-    /// # Examples
-    ///
-    /// ```no_run
-    /// # use databricks_zerobus_ingest_sdk::*;
-    /// # use std::collections::HashMap;
-    /// # use std::sync::Arc;
-    /// # use async_trait::async_trait;
-    /// # use arrow_schema::{Schema as ArrowSchema, Field, DataType};
-    /// #
-    /// # struct MyHeadersProvider;
-    /// #
-    /// # #[async_trait]
-    /// # impl HeadersProvider for MyHeadersProvider {
-    /// #     async fn get_headers(&self) -> ZerobusResult<HashMap<&'static str, String>> {
-    /// #         let mut headers = HashMap::new();
-    /// #         headers.insert("authorization", "Bearer my-token".to_string());
-    /// #         Ok(headers)
-    /// #     }
-    /// # }
-    /// #
-    /// # async fn example(sdk: ZerobusSdk) -> Result<(), ZerobusError> {
-    /// let schema = Arc::new(ArrowSchema::new(vec![
-    ///     Field::new("id", DataType::Int32, false),
-    /// ]));
-    ///
-    /// let table_props = ArrowTableProperties {
-    ///     table_name: "catalog.schema.table".to_string(),
-    ///     schema,
-    /// };
-    ///
-    /// let headers_provider = Arc::new(MyHeadersProvider);
-    ///
-    /// let stream = sdk.create_arrow_stream_with_headers_provider(
-    ///     table_props,
-    ///     headers_provider,
-    ///     None,
-    /// ).await?;
-    /// # Ok(())
-    /// # }
-    /// ```
-    #[cfg(feature = "arrow-flight")]
-    #[instrument(level = "debug", skip_all)]
-    pub async fn create_arrow_stream_with_headers_provider(
-        &self,
-        table_properties: ArrowTableProperties,
-        headers_provider: Arc<dyn HeadersProvider>,
-        options: Option<ArrowStreamConfigurationOptions>,
-    ) -> ZerobusResult<ZerobusArrowStream> {
-        let options = options.unwrap_or_default();
-
-        let stream = ZerobusArrowStream::new(
-            &self.zerobus_endpoint,
-            Arc::clone(&self.tls_config),
-            table_properties,
-            headers_provider,
-            options,
+        let channel = self.get_or_create_channel_zerobus_client().await?;
+        let new_stream = ZerobusStream::new_stream(
+            channel,
+            stream.table_properties.clone(),
+            Arc::clone(&stream.headers_provider),
+            stream.options.clone(),
         )
         .await;
 
-        match stream {
-            Ok(stream) => {
-                info!(
-                    table_name = %stream.table_name(),
-                    "Successfully created new Arrow Flight stream"
-                );
-                Ok(stream)
+        match new_stream {
+            Ok(new_stream) => {
+                if let Some(stream_id) = new_stream.stream_id.as_ref() {
+                    info!(stream_id = %stream_id, "Successfully recreated ephemeral stream");
+                } else {
+                    error!("Successfully recreated a stream but stream_id is None");
+                }
+
+                for batch in batches {
+                    let ack = new_stream.ingest_internal(batch).await?;
+                    tokio::spawn(ack);
+                }
+
+                Ok(new_stream)
             }
             Err(e) => {
-                error!("Arrow Flight stream initialization failed: {}", e);
+                error!("Stream recreation failed with error: {}", e);
                 Err(e)
             }
         }
@@ -819,35 +478,48 @@ impl ZerobusSdk {
     ) -> ZerobusResult<ZerobusArrowStream> {
         let batches = stream.get_unacked_batches().await?;
 
-        let new_stream = self
-            .create_arrow_stream_with_headers_provider(
-                stream.table_properties().clone(),
-                stream.headers_provider(),
-                Some(stream.options().clone()),
-            )
-            .await?;
+        let new_stream = ZerobusArrowStream::new(
+            &self.zerobus_endpoint,
+            Arc::clone(&self.tls_config),
+            stream.table_properties.clone(),
+            stream.headers_provider(),
+            stream.options().clone(),
+            Arc::clone(&self.sdk_identifier),
+        )
+        .await;
 
-        // Replay unacked batches.
-        for batch in batches {
-            let _offset = new_stream.ingest_batch(batch).await?;
+        match new_stream {
+            Ok(new_stream) => {
+                info!(
+                    table_name = %new_stream.table_name(),
+                    "Successfully recreated Arrow Flight stream"
+                );
+
+                for batch in batches {
+                    let _offset = new_stream.ingest_batch(batch).await?;
+                }
+
+                Ok(new_stream)
+            }
+            Err(e) => {
+                error!("Arrow Flight stream recreation failed: {}", e);
+                Err(e)
+            }
         }
-
-        info!(
-            table_name = %new_stream.table_name(),
-            "Successfully recreated Arrow Flight stream"
-        );
-
-        Ok(new_stream)
     }
 
     /// Gets or creates the shared Channel for all streams.
     /// The first call creates the Channel, subsequent calls clone it.
     /// All clones share the same underlying TCP connection via HTTP/2 multiplexing.
-    async fn get_or_create_channel_zerobus_client(&self) -> ZerobusResult<ZerobusClient<Channel>> {
+    pub(crate) async fn get_or_create_channel_zerobus_client(
+        &self,
+    ) -> ZerobusResult<ZerobusClient<Channel>> {
         let mut guard = self.shared_channel.lock().await;
 
         if guard.is_none() {
             let endpoint = Endpoint::from_shared(self.zerobus_endpoint.clone())
+                .map_err(|err| ZerobusError::ChannelCreationError(err.to_string()))?
+                .user_agent(self.sdk_identifier.as_ref())
                 .map_err(|err| ZerobusError::ChannelCreationError(err.to_string()))?;
 
             let endpoint = self.tls_config.configure_endpoint(endpoint)?;
@@ -884,7 +556,7 @@ impl ZerobusSdk {
 impl ZerobusStream {
     /// Creates a new ephemeral stream for ingesting records.
     #[instrument(level = "debug", skip_all)]
-    async fn new_stream(
+    pub(crate) async fn new_stream(
         channel: ZerobusClient<Channel>,
         table_properties: TableProperties,
         headers_provider: Arc<dyn HeadersProvider>,
@@ -1065,6 +737,12 @@ impl ZerobusStream {
 
             // 3. Spawn receiver and sender task.
             let is_paused = Arc::new(AtomicBool::new(false));
+
+            // Per-stream child token
+            let per_stream_token = cancellation_token.child_token();
+            // Separate token for recv_task's close path
+            let recv_drain_token = CancellationToken::new();
+
             let mut recv_task = Self::spawn_receiver_task(
                 response_grpc_stream,
                 logical_last_received_offset_id_tx.clone(),
@@ -1073,7 +751,7 @@ impl ZerobusStream {
                 Arc::clone(&is_paused),
                 options.clone(),
                 server_error_tx.clone(),
-                cancellation_token.clone(),
+                recv_drain_token.clone(),
                 callback_tx.clone(),
             );
             let mut send_task = Self::spawn_sender_task(
@@ -1081,13 +759,21 @@ impl ZerobusStream {
                 landing_zone_sender,
                 Arc::clone(&is_paused),
                 server_error_tx.clone(),
-                cancellation_token.clone(),
+                per_stream_token.clone(),
             );
 
             // 4. Wait for any of the two tasks to end.
             let result = tokio::select! {
                 recv_result = &mut recv_task => {
-                    send_task.abort();
+                    per_stream_token.cancel();
+                    let _ = tokio::time::timeout(
+                        Duration::from_millis(STREAM_TEARDOWN_DRAIN_TIMEOUT_MS),
+                        &mut send_task,
+                    )
+                    .await;
+                    if !send_task.is_finished() {
+                        send_task.abort();
+                    }
                     match recv_result {
                         Ok(Err(e)) => Err(e),
                         Err(e) => Err(ZerobusError::UnexpectedStreamResponseError(
@@ -1100,6 +786,15 @@ impl ZerobusStream {
                     }
                 }
                 send_result = &mut send_task => {
+                    // Draining the recv_task prevents RST_STREAM(CANCEL) from being sent alongside END_STREAM.
+                    if matches!(send_result, Ok(Ok(()))) && cancellation_token.is_cancelled() {
+                        recv_drain_token.cancel();
+                        let _ = tokio::time::timeout(
+                            Duration::from_millis(STREAM_TEARDOWN_DRAIN_TIMEOUT_MS),
+                            &mut recv_task,
+                        )
+                        .await;
+                    }
                     recv_task.abort();
                     match send_result {
                         Ok(Err(e)) => Err(e),
@@ -1260,64 +955,6 @@ impl ZerobusStream {
         }
     }
 
-    /// Ingests a single record into the stream.
-    ///
-    /// This method is non-blocking and returns immediately with a future. The record is
-    /// queued for transmission and the returned future resolves when the server acknowledges
-    /// the record has been durably written.
-    ///
-    /// # Arguments
-    ///
-    /// * `payload` - A record that can be converted to `EncodedRecord` (either JSON string or protobuf bytes)
-    ///
-    /// # Returns
-    ///
-    /// A future that resolves to the logical offset ID of the acknowledged record.
-    ///
-    /// # Errors
-    ///
-    /// * `InvalidArgument` - If the record type doesn't match stream configuration
-    /// * `StreamClosedError` - If the stream has been closed
-    /// * Other errors may be returned via the acknowledgment future
-    ///
-    /// # Examples
-    ///
-    /// ```no_run
-    /// # use databricks_zerobus_ingest_sdk::*;
-    /// # use prost::Message;
-    /// # async fn example(stream: ZerobusStream) -> Result<(), ZerobusError> {
-    /// # let my_record = vec![1, 2, 3]; // Example protobuf-encoded data
-    /// // Ingest and immediately await acknowledgment
-    /// let ack = stream.ingest_record(my_record).await?;
-    /// let offset = ack.await?;
-    /// println!("Record written at offset: {}", offset);
-    /// # Ok(())
-    /// # }
-    /// ```
-    ///
-    /// # Deprecation Note
-    ///
-    /// This method is deprecated. Use [`ingest_record_offset()`](Self::ingest_record_offset) instead,
-    /// which returns the offset directly (after queuing) without Future wrapping. You can then use
-    /// [`wait_for_offset()`](Self::wait_for_offset) to explicitly wait for acknowledgment when needed.
-    #[deprecated(
-        since = "0.4.0",
-        note = "Use `ingest_record_offset()` instead which returns the offset directly after queuing"
-    )]
-    pub async fn ingest_record(
-        &self,
-        payload: impl Into<EncodedRecord>,
-    ) -> ZerobusResult<impl Future<Output = ZerobusResult<OffsetId>>> {
-        let encoded_batch = EncodedBatch::try_from_record(payload, self.options.record_type)
-            .ok_or_else(|| {
-                ZerobusError::InvalidArgument(
-                    "Record type does not match stream configuration".to_string(),
-                )
-            })?;
-
-        self.ingest_internal(encoded_batch).await
-    }
-
     /// Ingests a single record and returns its logical offset directly.
     ///
     /// This is an alternative to `ingest_record()` that returns the logical offset directly
@@ -1365,84 +1002,6 @@ impl ZerobusStream {
             })?;
 
         self.ingest_internal_v2(encoded_batch).await
-    }
-
-    /// Ingests a batch of records into the stream.
-    ///
-    /// This method is non-blocking and returns immediately with a future. The records are
-    /// queued for transmission and the returned future resolves when the server acknowledges
-    /// the entire batch has been durably written.
-    ///
-    /// # Arguments
-    ///
-    /// * `payload` - An iterator of protobuf-encoded records (each item should be convertible to `EncodedRecord`)
-    ///
-    /// # Returns
-    ///
-    /// A future that resolves to the logical offset ID of the last acknowledged batch.
-    /// If the batch is empty, the future resoles to None.
-    ///
-    /// # Errors
-    ///
-    /// * `InvalidArgument` - If record types don't match stream configuration
-    /// * `StreamClosedError` - If the stream has been closed
-    /// * Other errors may be returned via the acknowledgment future
-    ///
-    /// # Examples
-    ///
-    /// ```no_run
-    /// # use databricks_zerobus_ingest_sdk::*;
-    /// # use prost::Message;
-    /// # async fn example(stream: ZerobusStream) -> Result<(), ZerobusError> {
-    /// let records = vec![vec![1, 2, 3], vec![4, 5, 6]]; // Example protobuf-encoded data
-    /// // Ingest batch and await acknowledgment
-    /// let ack = stream.ingest_records(records).await?;
-    /// let offset = ack.await?;
-    /// match offset {
-    ///     Some(offset) => println!("Batch written at offset: {}", offset),
-    ///     None => println!("Empty batch - no records written"),
-    /// }
-    /// # Ok(())
-    /// # }
-    /// ```
-    ///
-    /// # Deprecation Note
-    ///
-    /// This method is deprecated. Use [`ingest_records_offset()`](Self::ingest_records_offset) instead,
-    /// which returns the offset directly (after queuing) without Future wrapping. You can then use
-    /// [`wait_for_offset()`](Self::wait_for_offset) to explicitly wait for acknowledgment when needed.
-    #[deprecated(
-        since = "0.4.0",
-        note = "Use `ingest_records_offset()` instead which returns the offset directly after queuing"
-    )]
-    pub async fn ingest_records<I, T>(
-        &self,
-        payload: I,
-    ) -> ZerobusResult<impl Future<Output = ZerobusResult<Option<OffsetId>>>>
-    where
-        I: IntoIterator<Item = T>,
-        T: Into<EncodedRecord>,
-    {
-        let encoded_batch = EncodedBatch::try_from_batch(payload, self.options.record_type)
-            .ok_or_else(|| {
-                ZerobusError::InvalidArgument(
-                    "Record type does not match stream configuration".to_string(),
-                )
-            })?;
-
-        // For non-empty batches, get the future from ingest_internal
-        let ingest_future = if encoded_batch.is_empty() {
-            None
-        } else {
-            Some(self.ingest_internal(encoded_batch).await?)
-        };
-
-        Ok(async move {
-            match ingest_future {
-                Some(fut) => fut.await.map(Option::Some),
-                None => Ok(None),
-            }
-        })
     }
 
     /// Ingests a batch of records and returns the logical offset directly.
@@ -1637,7 +1196,7 @@ impl ZerobusStream {
         is_paused: Arc<AtomicBool>,
         options: StreamConfigurationOptions,
         server_error_tx: tokio::sync::watch::Sender<Option<ZerobusError>>,
-        cancellation_token: CancellationToken,
+        recv_drain_token: CancellationToken,
         callback_tx: Option<tokio::sync::mpsc::UnboundedSender<CallbackMessage>>,
     ) -> tokio::task::JoinHandle<ZerobusResult<()>> {
         tokio::spawn(async move {
@@ -1645,25 +1204,33 @@ impl ZerobusStream {
             let _guard = span.enter();
             let mut last_acked_offset = -1;
             let mut pause_deadline: Option<tokio::time::Instant> = None;
+            // Set when we exit because the supervisor signalled close (`recv_drain_token`).
+            // On that path we drain the response stream inline so the server sees END_STREAM
+            // instead of RST_STREAM. On all other exits (recovery / errors) the runtime is
+            // still up, so a detached drain is used to avoid blocking recovery.
+            let mut close_initiated = false;
 
-            loop {
+            'recv_loop: loop {
                 if let Some(deadline) = pause_deadline {
                     let now = tokio::time::Instant::now();
                     let all_acked = landing_zone.is_observed_empty();
 
                     if now >= deadline {
                         info!("Graceful close timeout reached. Triggering recovery.");
-                        return Ok(());
+                        break 'recv_loop;
                     } else if all_acked {
                         info!("All in-flight records acknowledged during graceful close. Triggering recovery.");
-                        return Ok(());
+                        break 'recv_loop;
                     }
                 }
 
                 let message_result = if let Some(deadline) = pause_deadline {
                     tokio::select! {
                         biased;
-                        _ = cancellation_token.cancelled() => return Ok(()),
+                        _ = recv_drain_token.cancelled() => {
+                            close_initiated = true;
+                            break 'recv_loop;
+                        }
                         _ = tokio::time::sleep_until(deadline) => {
                             continue;
                         }
@@ -1675,7 +1242,10 @@ impl ZerobusStream {
                 } else {
                     tokio::select! {
                         biased;
-                        _ = cancellation_token.cancelled() => return Ok(()),
+                        _ = recv_drain_token.cancelled() => {
+                            close_initiated = true;
+                            break 'recv_loop;
+                        }
                         res = tokio::time::timeout(
                             Duration::from_millis(options.server_lack_of_ack_timeout_ms),
                             response_grpc_stream.message(),
@@ -1740,14 +1310,14 @@ impl ZerobusStream {
                                     Some(0) => {
                                         // Immediate recovery
                                         info!("Server will close the stream in {}ms. Triggering stream recovery.", server_duration_ms);
-                                        return Ok(());
+                                        break 'recv_loop;
                                     }
                                     Some(max_wait) => std::cmp::min(max_wait, server_duration_ms),
                                 };
 
                                 if wait_duration_ms == 0 {
                                     info!("Server will close the stream. Triggering immediate recovery.");
-                                    return Ok(());
+                                    break 'recv_loop;
                                 }
 
                                 is_paused.store(true, Ordering::Relaxed);
@@ -1800,6 +1370,42 @@ impl ZerobusStream {
                     }
                 }
             }
+
+            // Drain remaining server messages so the server sees END_STREAM instead of
+            // the client RST_STREAM-ing the response. Inline on close (runtime may exit
+            // right after); detached on recovery / errors so recovery isn't delayed.
+            if close_initiated {
+                let _ = tokio::time::timeout(
+                    Duration::from_millis(STREAM_TEARDOWN_DRAIN_TIMEOUT_MS),
+                    async {
+                        while response_grpc_stream
+                            .message()
+                            .await
+                            .ok()
+                            .flatten()
+                            .is_some()
+                        {}
+                    },
+                )
+                .await;
+            } else {
+                tokio::spawn(async move {
+                    let _ = tokio::time::timeout(
+                        Duration::from_millis(STREAM_TEARDOWN_DRAIN_TIMEOUT_MS),
+                        async move {
+                            while response_grpc_stream
+                                .message()
+                                .await
+                                .ok()
+                                .flatten()
+                                .is_some()
+                            {}
+                        },
+                    )
+                    .await;
+                });
+            }
+            Ok(())
         })
     }
 
@@ -1897,17 +1503,17 @@ impl ZerobusStream {
                 };
                 if let Some(offset) = offset {
                     if offset >= offset_to_wait {
-                        info!(stream_id = %stream_id, "Stream is caught up to the given offset. {} completed.", operation_name);
+                        debug!(stream_id = %stream_id, "Stream is caught up to the given offset. {} completed.", operation_name);
                         return Ok(());
                     } else {
-                        info!(
+                        trace!(
                             stream_id = %stream_id,
                             "Stream is caught up to offset {}. Waiting for offset {}.",
                             offset, offset_to_wait
                         );
                     }
                 } else {
-                    info!(
+                    trace!(
                         stream_id = %stream_id,
                         "Stream is not caught up to any offset yet. Waiting for the first offset."
                     );

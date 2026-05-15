@@ -35,7 +35,6 @@ We are keen to hear feedback from you on this SDK. Please [file issues](https://
 - [Examples](#examples)
 - [Arrow Flight Ingestion (Experimental)](#arrow-flight-ingestion-experimental)
 - [Tests](#tests)
-- [Performance Benchmarks](#performance-benchmarks)
 - [Best Practices](#best-practices)
 - [Migration Guide](#migration-guide)
 - [API Reference](#api-reference)
@@ -894,34 +893,6 @@ The test suite includes:
 - **Unit tests** - Test individual functions and components
 - **FFI tests** - Test the CGO bindings to Rust
 - **Integration tests** - Test end-to-end functionality
-
-## Performance Benchmarks
-
-The following results were obtained running against a local server with a local table. These numbers should not be expected in production environments as they don't account for network latency. All benchmarks used a single stream without parallelism.
-
-### Go SDK
-
-```
-Record Size | Throughput
-------------|------------
-     20 B   |     9.59 MB/s
-    220 B   |    98.39 MB/s
-    750 B   |   265.54 MB/s
-  10000 B   |   463.98 MB/s
-```
-
-### Rust SDK (for comparison)
-
-```
-Record Size | Throughput
-------------|------------
-     20 B   |     9.29 MB/s
-    220 B   |   103.11 MB/s
-    750 B   |   282.10 MB/s
-  10000 B   |   465.47 MB/s
-```
-
-**Note:** These benchmarks demonstrate comparable performance between the Go and Rust SDKs, which is expected since both use the same Rust core via FFI. The variations are within expected margins for local testing. Production throughput will vary significantly based on network conditions, server load, and system configuration.
 
 ## Best Practices
 

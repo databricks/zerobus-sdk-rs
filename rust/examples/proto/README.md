@@ -26,8 +26,8 @@ Protocol Buffers examples provide type safety and better performance. **No schem
 - Better for production use cases
 
 **Available examples:**
-- **`single/`** - Ingest records one at a time using `ingest_record_offset()` / `ingest_record()`
-- **`batch/`** - Ingest multiple records at once using `ingest_records_offset()` / `ingest_records()`
+- **`single.rs`** - Ingest records one at a time using `ingest_record_offset()` / `ingest_record()`
+- **`batch.rs`** - Ingest multiple records at once using `ingest_records_offset()` / `ingest_records()`
 
 ## Three Ways to Pass Data
 
@@ -48,34 +48,27 @@ The SDK supports three approaches for passing Protocol Buffers data:
 
 ### Running the Example
 
-1. Configure credentials in `single/src/main.rs` (see [Prerequisites](../README.md#prerequisites))
+1. Configure credentials in `single.rs` (see [Prerequisites](../README.md#prerequisites))
 
 2. Run the example:
    ```bash
-   cargo run -p example_proto_single
+   cargo run -p rust-examples-proto --example proto_single
    ```
 
 **Expected output:**
 ```
-=== Offset-based API (Recommended) ===
 [Auto-encoding] Record sent with offset ID: 0
 [Auto-encoding] Record acknowledged with offset ID: 0
 [Pre-encoded] Record sent with offset ID: 1
 [Pre-encoded] Record acknowledged with offset ID: 1
 [Backward-compatible] Record sent with offset ID: 2
 [Backward-compatible] Record acknowledged with offset ID: 2
-=== Future-based API (Deprecated) ===
-[Auto-encoding] Record acknowledged with offset ID: 3
-[Pre-encoded] Record acknowledged with offset ID: 4
-[Backward-compatible] Record acknowledged with offset ID: 5
 Stream closed successfully
 ```
 
 ### Code Highlights
 
-The example demonstrates all three data-passing approaches with both API styles:
-
-**Offset-based API (Recommended):**
+The example demonstrates all three data-passing approaches:
 
 ```rust
 use databricks_zerobus_ingest_sdk::{ProtoMessage, ProtoBytes};
@@ -102,23 +95,7 @@ let offset = stream.ingest_record_offset(bytes).await?;
 stream.wait_for_offset(offset).await?;
 ```
 
-**Future-based API (Deprecated):**
-
-```rust
-// 1. Auto-encoding
-let ack = stream.ingest_record(ProtoMessage(order)).await?;
-let offset = ack.await?;
-
-// 2. Pre-encoded
-let ack = stream.ingest_record(ProtoBytes(bytes)).await?;
-let offset = ack.await?;
-
-// 3. Backward-compatible
-let ack = stream.ingest_record(bytes).await?;
-let offset = ack.await?;
-```
-
-**Key configuration for Protocol Buffers:**
+**Building a Protocol Buffers stream:**
 ```rust
 // Load descriptor from generated files
 let descriptor_proto = load_descriptor_proto(
@@ -127,47 +104,38 @@ let descriptor_proto = load_descriptor_proto(
     "table_Orders"
 );
 
-let table_properties = TableProperties {
-    table_name: TABLE_NAME.to_string(),
-    descriptor_proto: Some(descriptor_proto),  // Required for Proto
-};
-
-let stream_configuration_options = StreamConfigurationOptions {
-    // RecordType::Proto is the default, no need to set explicitly
-    ..Default::default()
-};
+let stream = sdk
+    .stream_builder()
+    .table(TABLE_NAME)
+    .oauth(DATABRICKS_CLIENT_ID, DATABRICKS_CLIENT_SECRET)
+    .compiled_proto(descriptor_proto)
+    .build()
+    .await?;
 ```
 
 ## Batch Example
 
 ### Running the Example
 
-1. Configure credentials in `batch/src/main.rs` (see [Prerequisites](../README.md#prerequisites))
+1. Configure credentials in `batch.rs` (see [Prerequisites](../README.md#prerequisites))
 
 2. Run the example:
    ```bash
-   cargo run -p example_proto_batch
+   cargo run -p rust-examples-proto --example proto_batch
    ```
 
 **Expected output:**
 ```
-=== Offset-based API (Recommended) ===
 [Auto-encoding] Batch of 3 records sent with offset ID: 0
 [Auto-encoding] Batch acknowledged with offset ID: 0
 [Pre-encoded] Batch of 3 records sent with offset ID: 1
 [Pre-encoded] Batch acknowledged with offset ID: 1
 [Backward-compatible] Batch of 3 records sent with offset ID: 2
 [Backward-compatible] Batch acknowledged with offset ID: 2
-=== Future-based API (Deprecated) ===
-[Auto-encoding] Batch acknowledged with offset ID: 3
-[Pre-encoded] Batch acknowledged with offset ID: 4
-[Backward-compatible] Batch acknowledged with offset ID: 5
 Stream closed successfully
 ```
 
 ### Code Highlights
-
-**Offset-based API (Recommended):**
 
 ```rust
 use databricks_zerobus_ingest_sdk::{ProtoMessage, ProtoBytes};
@@ -204,15 +172,6 @@ if let Some(offset) = stream.ingest_records_offset(batch).await? {
 }
 ```
 
-**Future-based API (Deprecated):**
-
-```rust
-// Works the same way, returns Option<Future> instead of Option<OffsetId>
-if let Some(ack) = stream.ingest_records(batch).await? {
-    let offset = ack.await?;
-}
-```
-
 **Batch semantics:**
 - **All-or-nothing**: The entire batch succeeds or fails as a unit
 - **Single acknowledgment**: One offset ID for the whole batch
@@ -234,10 +193,10 @@ cargo run -- \
   --client-id "<your-client-id>" \
   --client-secret "<your-client-secret>" \
   --table "<catalog.schema.your_table>" \
-  --output-dir "../../examples/proto/single/output"
+  --output-dir "../../examples/proto/output"
 ```
 
-For the batch example, use `--output-dir "../../examples/proto/batch/output"` instead.
+Both `single.rs` and `batch.rs` share the same `output/` directory, so the generated schema files only need to be produced once.
 
 This generates:
 - `output/<your_table>.proto` - Protocol Buffer schema definition
@@ -253,13 +212,13 @@ Change `orders` to match your generated file name:
 ```rust
 // Before:
 pub mod orders {
-    include!("../output/orders.rs");
+    include!("output/orders.rs");
 }
 use crate::orders::TableOrders;
 
 // After (for a table named `inventory`):
 pub mod inventory {
-    include!("../output/inventory.rs");
+    include!("output/inventory.rs");
 }
 use crate::inventory::TableInventory;
 ```

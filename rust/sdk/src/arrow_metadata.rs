@@ -68,6 +68,16 @@ pub struct FlightAckMetadata {
     pub ack_up_to_offset: OffsetId,
     /// Cumulative count of records durably stored up to this acknowledgment.
     pub ack_up_to_records: u64,
+    /// Optional close stream signal with grace period duration in milliseconds.
+    ///
+    /// When present, the server is signaling that it will close the stream after
+    /// this duration. The client should enter a "paused" state: stop sending new
+    /// batches but continue processing acknowledgments for in-flight batches.
+    /// After the grace period (or when all in-flight batches are acked), the client
+    /// triggers stream recovery.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
+    pub close_stream_duration_ms: Option<u64>,
 }
 
 impl FlightAckMetadata {
@@ -77,6 +87,7 @@ impl FlightAckMetadata {
         Self {
             ack_up_to_offset,
             ack_up_to_records,
+            close_stream_duration_ms: None,
         }
     }
 
@@ -87,7 +98,13 @@ impl FlightAckMetadata {
         Self {
             ack_up_to_offset: STREAM_READY_OFFSET,
             ack_up_to_records: 0,
+            close_stream_duration_ms: None,
         }
+    }
+
+    /// Returns true if this message contains a close stream signal.
+    pub fn is_close_signal(&self) -> bool {
+        self.close_stream_duration_ms.is_some()
     }
 
     /// Returns true if this is a stream ready signal (setup complete, no batches acked).
@@ -140,6 +157,28 @@ mod tests {
         let parsed = FlightAckMetadata::from_bytes(json.as_bytes()).unwrap();
         assert_eq!(parsed.ack_up_to_offset, 99);
         assert_eq!(parsed.ack_up_to_records, 5000);
+        assert!(parsed.close_stream_duration_ms.is_none());
+        assert!(!parsed.is_close_signal());
+    }
+
+    #[test]
+    fn test_flight_ack_metadata_with_close_signal() {
+        let json = r#"{"ack_up_to_offset": 5, "ack_up_to_records": 100, "close_stream_duration_ms": 2000}"#;
+        let parsed = FlightAckMetadata::from_bytes(json.as_bytes()).unwrap();
+        assert_eq!(parsed.ack_up_to_offset, 5);
+        assert_eq!(parsed.ack_up_to_records, 100);
+        assert_eq!(parsed.close_stream_duration_ms, Some(2000));
+        assert!(parsed.is_close_signal());
+    }
+
+    #[test]
+    fn test_flight_ack_metadata_close_signal_only() {
+        let json =
+            r#"{"ack_up_to_offset": -1, "ack_up_to_records": 0, "close_stream_duration_ms": 5000}"#;
+        let parsed = FlightAckMetadata::from_bytes(json.as_bytes()).unwrap();
+        assert!(parsed.is_close_signal());
+        assert!(parsed.is_stream_ready());
+        assert_eq!(parsed.close_stream_duration_ms, Some(5000));
     }
 
     #[test]

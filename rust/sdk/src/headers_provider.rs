@@ -3,14 +3,16 @@ use crate::ZerobusResult;
 use async_trait::async_trait;
 use std::collections::HashMap;
 
-/// Default x-zerobus-sdk header value for Rust SDK requests.
-pub const DEFAULT_X_ZEROBUS_SDK: &str = concat!("zerobus-sdk-rs/", env!("CARGO_PKG_VERSION"));
-
 /// A trait for providing custom headers for gRPC requests.
 ///
 /// This trait allows you to implement custom logic for generating authentication headers,
 /// such as fetching tokens from different OAuth providers or using alternative
 /// authentication mechanisms.
+///
+/// The HTTP `user-agent` header is set by the SDK on the underlying tonic
+/// `Endpoint` and cannot be overridden by values returned from `get_headers`.
+/// Use [`ZerobusSdkBuilder::application_name`](crate::ZerobusSdkBuilder::application_name)
+/// to customize it.
 ///
 /// # Examples
 ///
@@ -89,7 +91,6 @@ impl HeadersProvider for OAuthHeadersProvider {
         let mut headers = HashMap::new();
         headers.insert("authorization", format!("Bearer {}", token));
         headers.insert("x-databricks-zerobus-table-name", self.table_name.clone());
-        headers.insert("x-zerobus-sdk", DEFAULT_X_ZEROBUS_SDK.to_string());
         Ok(headers)
     }
 }
