@@ -4,12 +4,24 @@ mod utils;
 use std::sync::Arc;
 
 use databricks_zerobus_ingest_sdk::{
-    MessageId, MultiplexedStream, NoTlsConfig, StreamConfigurationOptions, TableProperties,
-    ZerobusError, ZerobusSdk,
+    MessageId, MultiplexedStream, NoTlsConfig, ZerobusError, ZerobusSdk, ZerobusStream,
 };
 use mock_grpc::{start_mock_server, MockResponse};
 use tracing::info;
 use utils::{create_test_descriptor_proto, setup_tracing, TestHeadersProvider};
+
+#[derive(Clone)]
+struct TestOpts {
+    max_inflight_requests: usize,
+    flush_timeout_ms: Option<u64>,
+}
+
+fn default_options() -> TestOpts {
+    TestOpts {
+        max_inflight_requests: 100,
+        flush_timeout_ms: None,
+    }
+}
 
 /// Helper: create an SDK pointed at a mock server.
 async fn create_test_sdk(server_url: &str) -> Result<ZerobusSdk, Box<dyn std::error::Error>> {
@@ -24,26 +36,19 @@ async fn create_test_sdk(server_url: &str) -> Result<ZerobusSdk, Box<dyn std::er
 async fn create_test_stream(
     sdk: &ZerobusSdk,
     table_name: &str,
-    options: StreamConfigurationOptions,
-) -> Result<databricks_zerobus_ingest_sdk::ZerobusStream, ZerobusError> {
-    let table_properties = TableProperties {
-        table_name: table_name.to_string(),
-        descriptor_proto: create_test_descriptor_proto(),
-    };
-    sdk.create_stream_with_headers_provider(
-        table_properties,
-        Arc::new(TestHeadersProvider::default()),
-        Some(options),
-    )
-    .await
-}
-
-fn default_options() -> StreamConfigurationOptions {
-    StreamConfigurationOptions {
-        max_inflight_requests: 100,
-        recovery: false,
-        ..Default::default()
+    opts: TestOpts,
+) -> Result<ZerobusStream, ZerobusError> {
+    let mut builder = sdk
+        .stream_builder()
+        .table(table_name)
+        .headers_provider(Arc::new(TestHeadersProvider::default()))
+        .compiled_proto(create_test_descriptor_proto().unwrap())
+        .max_inflight_requests(opts.max_inflight_requests)
+        .recovery(false);
+    if let Some(ms) = opts.flush_timeout_ms {
+        builder = builder.flush_timeout_ms(ms);
     }
+    builder.build().await
 }
 
 mod construction_tests {
@@ -351,7 +356,7 @@ mod multi_stream_tests {
             .await;
 
         let sdk = create_test_sdk(&server_url).await?;
-        let opts = StreamConfigurationOptions {
+        let opts = TestOpts {
             max_inflight_requests: 1,
             ..default_options()
         };
@@ -432,7 +437,7 @@ mod multi_stream_tests {
             .await;
 
         let sdk = create_test_sdk(&server_url).await?;
-        let opts = StreamConfigurationOptions {
+        let opts = TestOpts {
             max_inflight_requests: 1,
             ..default_options()
         };
@@ -517,7 +522,7 @@ mod multi_stream_tests {
             .await;
 
         let sdk = create_test_sdk(&server_url).await?;
-        let opts = StreamConfigurationOptions {
+        let opts = TestOpts {
             max_inflight_requests: 1,
             ..default_options()
         };
@@ -759,8 +764,8 @@ mod failure_tests {
             .await;
 
         let sdk = create_test_sdk(&server_url).await?;
-        let opts = StreamConfigurationOptions {
-            flush_timeout_ms: 100,
+        let opts = TestOpts {
+            flush_timeout_ms: Some(100),
             ..default_options()
         };
         let s = create_test_stream(&sdk, TABLE_OK, opts).await?;
