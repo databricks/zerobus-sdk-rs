@@ -1,80 +1,86 @@
 """
 Databricks Zerobus Ingest SDK for Python.
 
-High-performance SDK for ingesting records into Databricks tables via the Zerobus service.
-This version is backed by a Rust core for optimal performance while maintaining a Pythonic API.
+High-performance SDK for ingesting records into Databricks tables via the
+Zerobus service. Backed by a Rust core for performance with a Pythonic API.
 
-Example (Sync):
-    >>> from zerobus import ZerobusSdk, TableProperties, AckCallback
-    >>>
-    >>> # Define a custom callback
-    >>> class MyCallback(AckCallback):
-    ...     def on_ack(self, offset):
-    ...         print(f"Record acknowledged at offset {offset}")
-    >>>
-    >>> sdk = ZerobusSdk(
-    ...     host="https://your-shard-id.zerobus.region.cloud.databricks.com",
-    ...     unity_catalog_url="https://your-workspace.cloud.databricks.com"
-    ... )
-    >>>
-    >>> props = TableProperties("catalog.schema.table")
-    >>> stream = sdk.create_stream(
-    ...     table_properties=props,
-    ...     client_id="your-client-id",
-    ...     client_secret="your-client-secret"
-    ... )
-    >>>
-    >>> # New optimized API
-    >>> offset = stream.ingest_record_offset(b"data")
-    >>> stream.flush()
-    >>> stream.close()
+Quick start (sync):
+    from zerobus import ZerobusSdk, OAuth, Format
 
-Example (Async):
-    >>> import asyncio
-    >>> from zerobus.sdk.aio import ZerobusSdk, TableProperties
-    >>>
-    >>> async def main():
-    ...     sdk = ZerobusSdk(host, unity_catalog_url)
-    ...     stream = await sdk.create_stream(props, client_id, client_secret)
-    ...     offset = await stream.ingest_record_offset(b"data")
-    ...     await stream.flush()
-    ...     await stream.close()
-    >>>
-    >>> asyncio.run(main())
+    sdk = ZerobusSdk(
+        host="https://<shard>.zerobus.<region>.cloud.databricks.com",
+        unity_catalog_url="https://<workspace>.cloud.databricks.com",
+    )
+    stream = sdk.create_stream(
+        table="catalog.schema.table",
+        auth=OAuth("client-id", "client-secret"),
+        record_format=Format.JSON,
+    )
+    offset = stream.ingest_record_offset({"k": "v"})  # dict (or JSON str)
+    stream.flush()
+    stream.close()
+
+Quick start (async):
+    import asyncio
+    from zerobus.aio import ZerobusSdk
+    from zerobus import OAuth, Format
+
+    async def main():
+        sdk = ZerobusSdk(host=..., unity_catalog_url=...)
+        stream = await sdk.create_stream(
+            table="catalog.schema.table",
+            auth=OAuth("id", "secret"),
+            record_format=Format.JSON,
+        )
+        offset = await stream.ingest_record_offset({"k": "v"})
+        await stream.flush()
+        await stream.close()
+
+    asyncio.run(main())
+
+For Arrow Flight (Beta), use `create_arrow_stream(...)` and install the
+`[arrow]` extra. See README.
 """
 
-# Import from Rust core
 import zerobus._zerobus_core as _core
 from zerobus.sdk.shared.arrow import ArrowStreamConfigurationOptions, IPCCompression
+from zerobus.sdk.shared.auth import Auth, Headers, OAuth
+from zerobus.sdk.shared.format import Format
 from zerobus.sdk.sync import ZerobusArrowStream, ZerobusSdk, ZerobusStream
 
-__version__ = "1.1.0"
+__version__ = "2.0.0"
 
 # Re-export common types
-TableProperties = _core.TableProperties
 StreamConfigurationOptions = _core.StreamConfigurationOptions
 RecordType = _core.RecordType
 AckCallback = _core.AckCallback
 ZerobusException = _core.ZerobusException
 NonRetriableException = _core.NonRetriableException
 HeadersProvider = _core.HeadersProvider
-RecordAcknowledgment = _core.sync.RecordAcknowledgment
+
+# Note: `zerobus.aio` is a top-level shim module (`python/zerobus/aio.py`)
+# loaded on `from zerobus.aio import ZerobusSdk`. It is intentionally NOT
+# imported here so the attribute `zerobus.aio` resolves to a single module
+# object — the shim — and not to the `zerobus.sdk.aio` sub-package.
 
 __all__ = [
     # Sync SDK (default)
     "ZerobusSdk",
     "ZerobusStream",
-    # Arrow (experimental)
+    # Arrow (Beta)
     "ZerobusArrowStream",
     "ArrowStreamConfigurationOptions",
     "IPCCompression",
-    "RecordAcknowledgment",
-    # Common types
-    "TableProperties",
+    # New API selectors
+    "OAuth",
+    "Headers",
+    "Format",
+    "Auth",
+    # Configuration
     "StreamConfigurationOptions",
     "RecordType",
     "AckCallback",
-    # Authentication
+    # Authentication base class
     "HeadersProvider",
     # Exceptions
     "ZerobusException",

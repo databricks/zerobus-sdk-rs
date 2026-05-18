@@ -248,6 +248,17 @@ class TestArrowStreamConfigurationOptions(unittest.TestCase):
         with self.assertRaises(TypeError):
             ArrowStreamConfigurationOptions(ipc_compression="lz4_frame")
 
+    def test_stream_paused_max_wait_time_ms_default(self):
+        """v2.0.0: stream_paused_max_wait_time_ms is exposed on Arrow options."""
+        options = ArrowStreamConfigurationOptions()
+        self.assertIsNone(options.stream_paused_max_wait_time_ms)
+
+    def test_stream_paused_max_wait_time_ms_kwarg(self):
+        options = ArrowStreamConfigurationOptions(stream_paused_max_wait_time_ms=12_345)
+        self.assertEqual(options.stream_paused_max_wait_time_ms, 12_345)
+        options.stream_paused_max_wait_time_ms = 0  # 0 = immediate recovery
+        self.assertEqual(options.stream_paused_max_wait_time_ms, 0)
+
     def test_repr(self):
         options = ArrowStreamConfigurationOptions()
         repr_str = repr(options)
@@ -319,17 +330,23 @@ class TestAsyncArrowStreamAPISurface(unittest.TestCase):
         from zerobus.sdk.aio import ZerobusSdk
 
         self.assertTrue(hasattr(ZerobusSdk, "create_arrow_stream"))
-        self.assertTrue(hasattr(ZerobusSdk, "create_arrow_stream_with_headers_provider"))
         self.assertTrue(hasattr(ZerobusSdk, "recreate_arrow_stream"))
-        # Both creation methods should be coroutine functions
         self.assertTrue(
             inspect.iscoroutinefunction(ZerobusSdk.create_arrow_stream),
             "create_arrow_stream should be async",
         )
         self.assertTrue(
-            inspect.iscoroutinefunction(ZerobusSdk.create_arrow_stream_with_headers_provider),
-            "create_arrow_stream_with_headers_provider should be async",
+            inspect.iscoroutinefunction(ZerobusSdk.recreate_arrow_stream),
+            "recreate_arrow_stream should be async",
         )
+
+    def test_old_with_headers_provider_methods_removed(self):
+        """v2.0.0 removed the per-auth-strategy *_with_headers_provider methods."""
+        from zerobus.sdk.aio import ZerobusSdk as AioSdk
+        from zerobus.sdk.sync import ZerobusSdk as SyncSdk
+
+        for cls in (SyncSdk, AioSdk):
+            self.assertFalse(hasattr(cls, "create_arrow_stream_with_headers_provider"))
 
 
 class TestArrowImports(unittest.TestCase):
@@ -368,14 +385,12 @@ class TestArrowSDKAPISurface(unittest.TestCase):
         from zerobus.sdk.sync import ZerobusSdk
 
         self.assertTrue(hasattr(ZerobusSdk, "create_arrow_stream"))
-        self.assertTrue(hasattr(ZerobusSdk, "create_arrow_stream_with_headers_provider"))
         self.assertTrue(hasattr(ZerobusSdk, "recreate_arrow_stream"))
 
     def test_async_sdk_has_arrow_methods(self):
         from zerobus.sdk.aio import ZerobusSdk
 
         self.assertTrue(hasattr(ZerobusSdk, "create_arrow_stream"))
-        self.assertTrue(hasattr(ZerobusSdk, "create_arrow_stream_with_headers_provider"))
         self.assertTrue(hasattr(ZerobusSdk, "recreate_arrow_stream"))
 
     def test_sync_arrow_stream_has_methods(self):

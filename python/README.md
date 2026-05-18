@@ -14,6 +14,7 @@ A high-performance Python client for streaming data ingestion into Databricks De
 - [Quick Start](#quick-start)
   - [JSON (Simplest)](#option-1-json-simplest)
   - [Protocol Buffers](#option-2-protocol-buffers)
+  - [Arrow Flight (Beta)](#option-3-arrow-flight-beta)
 - [Configuration](#configuration)
 - [Error Handling](#error-handling)
 - [Handling Stream Failures](#handling-stream-failures)
@@ -21,6 +22,7 @@ A high-performance Python client for streaming data ingestion into Databricks De
 - [API Reference](#api-reference)
 - [Debugging](#debugging)
 - [Building from Source](#building-from-source)
+- [Migrating from v1.x](#migrating-from-v1x)
 - [Community and Contributing](#community-and-contributing)
 - [License](#license)
 
@@ -86,6 +88,7 @@ Requires **Python 3.9 or higher**.
 
 - `protobuf` >= 4.25.0, < 7.0 (for Protocol Buffer schema handling)
 - `requests` >= 2.28.1, < 3 (only for the `generate_proto` utility tool)
+- `pyarrow` >= 14.0.0, < 22.0 (optional, via the `[arrow]` extra; required for Arrow Flight)
 
 All core ingestion functionality (gRPC, OAuth, stream management) is handled by the native Rust implementation.
 
@@ -101,16 +104,17 @@ All core ingestion functionality (gRPC, OAuth, stream management) is handled by 
 **Synchronous:**
 
 ```python
-from zerobus.sdk.sync import ZerobusSdk
-from zerobus.sdk.shared import RecordType, StreamConfigurationOptions, TableProperties
+from zerobus import Format, OAuth, ZerobusSdk
 
 server_endpoint = "https://1234567890123456.zerobus.us-west-2.cloud.databricks.com"
 workspace_url = "https://dbc-a1b2c3d4-e5f6.cloud.databricks.com"
 
-sdk = ZerobusSdk(server_endpoint, workspace_url)
-table_properties = TableProperties("main.default.air_quality")
-options = StreamConfigurationOptions(record_type=RecordType.JSON)
-stream = sdk.create_stream(client_id, client_secret, table_properties, options)
+sdk = ZerobusSdk(host=server_endpoint, unity_catalog_url=workspace_url)
+stream = sdk.create_stream(
+    table="main.default.air_quality",
+    auth=OAuth(client_id, client_secret),
+    record_format=Format.JSON,
+)
 
 try:
     for i in range(100):
@@ -128,17 +132,16 @@ finally:
 
 ```python
 import asyncio
-from zerobus.sdk.aio import ZerobusSdk
-from zerobus.sdk.shared import RecordType, StreamConfigurationOptions, TableProperties
+from zerobus import Format, OAuth
+from zerobus.aio import ZerobusSdk
 
 async def main():
-    server_endpoint = "https://1234567890123456.zerobus.us-west-2.cloud.databricks.com"
-    workspace_url = "https://dbc-a1b2c3d4-e5f6.cloud.databricks.com"
-
-    sdk = ZerobusSdk(server_endpoint, workspace_url)
-    table_properties = TableProperties("main.default.air_quality")
-    options = StreamConfigurationOptions(record_type=RecordType.JSON)
-    stream = await sdk.create_stream(client_id, client_secret, table_properties, options)
+    sdk = ZerobusSdk(host=server_endpoint, unity_catalog_url=workspace_url)
+    stream = await sdk.create_stream(
+        table="main.default.air_quality",
+        auth=OAuth(client_id, client_secret),
+        record_format=Format.JSON,
+    )
 
     try:
         for i in range(100):
@@ -178,13 +181,13 @@ python -m grpc_tools.protoc --python_out=. --proto_path=. record.proto
 # Generates record_pb2.py
 ```
 
-**Load the descriptor** from the generated module and pass it to `TableProperties`:
+**Load the descriptor** from the generated module and pass it to `Format.proto(...)`:
 
 ```python
 import record_pb2
+from zerobus import Format
 
-# The DESCRIPTOR is the compiled schema — pass it so the SDK can validate records
-table_properties = TableProperties("main.default.air_quality", record_pb2.AirQuality.DESCRIPTOR)
+format_spec = Format.proto(record_pb2.AirQuality.DESCRIPTOR)
 ```
 
 Alternatively, generate the schema automatically from an existing Unity Catalog table:
@@ -205,13 +208,15 @@ python -m grpc_tools.protoc --python_out=. --proto_path=. record.proto
 **Synchronous:**
 
 ```python
-from zerobus.sdk.sync import ZerobusSdk
-from zerobus.sdk.shared import TableProperties
 import record_pb2
+from zerobus import Format, OAuth, ZerobusSdk
 
-sdk = ZerobusSdk(server_endpoint, workspace_url)
-table_properties = TableProperties("main.default.air_quality", record_pb2.AirQuality.DESCRIPTOR)
-stream = sdk.create_stream(client_id, client_secret, table_properties)
+sdk = ZerobusSdk(host=server_endpoint, unity_catalog_url=workspace_url)
+stream = sdk.create_stream(
+    table="main.default.air_quality",
+    auth=OAuth(client_id, client_secret),
+    record_format=Format.proto(record_pb2.AirQuality.DESCRIPTOR),
+)
 
 try:
     for i in range(100):
@@ -230,14 +235,17 @@ finally:
 
 ```python
 import asyncio
-from zerobus.sdk.aio import ZerobusSdk
-from zerobus.sdk.shared import TableProperties
 import record_pb2
+from zerobus import Format, OAuth
+from zerobus.aio import ZerobusSdk
 
 async def main():
-    sdk = ZerobusSdk(server_endpoint, workspace_url)
-    table_properties = TableProperties("main.default.air_quality", record_pb2.AirQuality.DESCRIPTOR)
-    stream = await sdk.create_stream(client_id, client_secret, table_properties)
+    sdk = ZerobusSdk(host=server_endpoint, unity_catalog_url=workspace_url)
+    stream = await sdk.create_stream(
+        table="main.default.air_quality",
+        auth=OAuth(client_id, client_secret),
+        record_format=Format.proto(record_pb2.AirQuality.DESCRIPTOR),
+    )
 
     try:
         for i in range(100):
@@ -254,37 +262,85 @@ async def main():
 asyncio.run(main())
 ```
 
+### Option 3: Arrow Flight (Beta)
+
+> **Beta**: Arrow Flight ingestion is in **Beta** in v2.0.0. The API is
+> stabilising but may still change before reaching GA.
+
+Arrow ingestion is gated behind the `arrow` extra:
+
+```bash
+pip install "databricks-zerobus-ingest-sdk[arrow]"
+```
+
+```python
+import pyarrow as pa
+from zerobus import IPCCompression, OAuth, ZerobusSdk
+from zerobus import ArrowStreamConfigurationOptions
+
+schema = pa.schema([
+    ("device_name", pa.large_utf8()),
+    ("temp", pa.int32()),
+    ("humidity", pa.int32()),
+])
+
+sdk = ZerobusSdk(host=server_endpoint, unity_catalog_url=workspace_url)
+stream = sdk.create_arrow_stream(
+    table="main.default.air_quality",
+    schema=schema,
+    auth=OAuth(client_id, client_secret),
+    # Leave compression at NONE to take the zero-copy ingest path.
+    options=ArrowStreamConfigurationOptions(ipc_compression=IPCCompression.NONE),
+)
+
+batch = pa.record_batch({
+    "device_name": ["s1", "s2"],
+    "temp": [22, 23],
+    "humidity": [60, 61],
+}, schema=schema)
+offset = stream.ingest_batch(batch)
+stream.flush()
+stream.close()
+```
+
+When `ipc_compression=IPCCompression.NONE` (the default), the SDK forwards the
+Arrow IPC bytes straight to Arrow Flight without parsing and re-serialising —
+this is the recommended path. Enabling LZ4 / ZSTD compression disables the
+zero-copy path.
+
 See the [`examples/`](examples/) directory for complete runnable examples.
 
 ## Configuration
 
-Configure stream behavior by passing a `StreamConfigurationOptions` object to `create_stream()`:
+Configure stream behavior by passing `StreamConfigurationOptions` to
+`create_stream()`. The `record_type` field is set automatically from the
+`format` argument and does not need to be specified.
 
 ```python
-from zerobus.sdk.shared import StreamConfigurationOptions, RecordType, AckCallback
+from zerobus import AckCallback, OAuth, StreamConfigurationOptions, Format, ZerobusSdk
 
 class MyCallback(AckCallback):
     def on_ack(self, offset: int):
         print(f"Acknowledged offset: {offset}")
 
-    def on_error(self, offset: int, error_message: str):
-        print(f"Error at offset {offset}: {error_message}")
-
 options = StreamConfigurationOptions(
-    record_type=RecordType.JSON,
     max_inflight_records=10000,
     recovery=True,
-    ack_callback=MyCallback()
+    ack_callback=MyCallback(),
 )
 
-stream = sdk.create_stream(client_id, client_secret, table_properties, options)
+stream = sdk.create_stream(
+    table="main.default.air_quality",
+    auth=OAuth(client_id, client_secret),
+    record_format=Format.JSON,
+    options=options,
+)
 ```
 
 ### Available Options
 
 | Option | Type | Default | Description |
 |--------|------|---------|-------------|
-| `record_type` | `RecordType` | `RecordType.PROTO` | Serialization format: `PROTO` or `JSON` |
 | `max_inflight_records` | `int` | `50000` | Maximum number of unacknowledged records |
 | `recovery` | `bool` | `True` | Enable automatic stream recovery |
 | `recovery_timeout_ms` | `int` | `15000` | Timeout for recovery operations (ms) |
@@ -304,7 +360,7 @@ The SDK raises two types of exceptions:
 - `NonRetriableException` - Non-retriable errors (invalid credentials, missing table)
 
 ```python
-from zerobus.sdk.shared import ZerobusException, NonRetriableException
+from zerobus import ZerobusException, NonRetriableException
 
 try:
     stream.ingest_record_offset(record)
@@ -320,20 +376,24 @@ except ZerobusException as e:
 The SDK automatically handles retries for transient errors. Use `get_unacked_records()` only when a stream has **permanently failed** (non-retriable error or max retries exceeded):
 
 ```python
-from zerobus.sdk.shared import NonRetriableException
+from zerobus import Format, NonRetriableException, OAuth
 
 try:
     for i in range(10000):
         stream.ingest_record_offset(record)
     stream.flush()
 except NonRetriableException as e:
-    unacked = stream.get_unacked_records()  # Returns List[bytes]
+    unacked = list(stream.get_unacked_records())  # Iterator[bytes]
     print(f"Stream failed: {e}. {len(unacked)} records unacknowledged.")
 
     # Retry with a new stream
-    new_stream = sdk.create_stream(client_id, client_secret, table_properties, options)
+    new_stream = sdk.create_stream(
+        table="main.default.air_quality",
+        auth=OAuth(client_id, client_secret),
+        record_format=Format.JSON,
+    )
     for record_bytes in unacked:
-        new_stream.ingest_record_offset(record_bytes)  # Pass bytes directly
+        new_stream.ingest_record_offset(record_bytes)
     new_stream.flush()
     new_stream.close()
 ```
@@ -356,24 +416,53 @@ for batch in unacked_batches:
 |--------|------------|----------|
 | `ingest_record_nowait()` | **Highest** | Fire-and-forget: no offset returned; maximum throughput when you do not need per-record ack tracking in the hot path |
 | `ingest_record_offset()` | Medium | Recommended for most apps: returns an offset after queueing; call `wait_for_offset()` when you need durability confirmation |
-| `ingest_record()` | Low | **Deprecated** — prefer offset-based APIs |
+
+For Arrow Flight ingestion, the SDK uses a **zero-copy** ingest path when
+`ipc_compression` is left at `IPCCompression.NONE` — Arrow IPC bytes are
+forwarded straight to Arrow Flight without parse/re-encode. Enabling compression
+disables the zero-copy path.
 
 ## API Reference
 
 ### `ZerobusSdk`
 
-Main entry point. Sync: `from zerobus.sdk.sync import ZerobusSdk` / Async: `from zerobus.sdk.aio import ZerobusSdk`
+Main entry point. Sync: `from zerobus import ZerobusSdk` / Async: `from zerobus.aio import ZerobusSdk`
 
 ```python
-sdk = ZerobusSdk(server_endpoint: str, unity_catalog_endpoint: str)
+sdk = ZerobusSdk(
+    host: str,
+    unity_catalog_url: str,
+    *,
+    application_name: Optional[str] = None,
+)
 ```
+
+`application_name` is appended to the HTTP `user-agent` for server-side
+telemetry; the SDK prefix (`zerobus-sdk-py/<version>`) is always emitted.
 
 ```python
 # Sync
-stream = sdk.create_stream(client_id, client_secret, table_properties, options=None, headers_provider=None)
-# Async
-stream = await sdk.create_stream(client_id, client_secret, table_properties, options=None, headers_provider=None)
+stream = sdk.create_stream(
+    table=...,
+    auth=OAuth(client_id, client_secret),     # or Headers(my_provider)
+    record_format=Format.JSON,                       # or Format.proto(descriptor)
+    options=StreamConfigurationOptions(...),  # optional
+)
+# Async — same kwargs, awaited
+stream = await sdk.create_stream(...)
+
+# Arrow (Beta)
+arrow_stream = sdk.create_arrow_stream(
+    table=...,
+    schema=pyarrow_schema,
+    auth=OAuth(client_id, client_secret),
+    options=ArrowStreamConfigurationOptions(...),  # optional
+)
 ```
+
+The `auth` and `format` arguments are tagged-union types
+(`OAuth`/`Headers`, `Format.JSON`/`Format.proto(...)`). New auth strategies and
+formats can be added in future releases without breaking existing call sites.
 
 ### `ZerobusStream`
 
@@ -383,14 +472,13 @@ stream = await sdk.create_stream(client_id, client_secret, table_properties, opt
 |--------|------|-------|-------|
 | `ingest_record_nowait(record)` | `→ None` | `→ None` (not async) | Fire-and-forget, highest throughput |
 | `ingest_record_offset(record)` | `→ int` | `await → int` | Returns offset after queueing |
-| `ingest_record(record)` | `→ RecordAcknowledgment` | `await → Awaitable` | **Deprecated** since v0.3.0 |
 
 **Batch ingestion:**
 
 | Method | Sync | Async | Notes |
 |--------|------|-------|-------|
 | `ingest_records_nowait(records)` | `→ None` | `→ None` (not async) | Fire-and-forget |
-| `ingest_records_offset(records)` | `→ int` | `await → int` | Returns final offset |
+| `ingest_records_offset(records)` | `→ Optional[int]` | `await → Optional[int]` | Returns final offset |
 
 **Accepted record types:**
 - **JSON mode**: `dict` (SDK serializes) or `str` (pre-serialized JSON)
@@ -434,48 +522,52 @@ records = await stream.get_unacked_records()
 batches = await stream.get_unacked_batches()
 ```
 
-### `TableProperties`
+### `OAuth` / `Headers`
+
+Auth selectors. Pass one of these as the `auth` argument to `create_stream` /
+`create_arrow_stream`:
 
 ```python
-TableProperties(table_name: str, descriptor: Descriptor = None)
+from zerobus import OAuth, Headers
 
-# JSON mode
-TableProperties("catalog.schema.table")
-
-# Protobuf mode
-TableProperties("catalog.schema.table", MyMessage.DESCRIPTOR)
+OAuth(client_id="...", client_secret="...")  # OAuth client credentials
+Headers(provider=MyHeadersProvider(...))     # Custom HeadersProvider subclass
 ```
+
+### `Format`
+
+Format selectors. Pass one of these as the `format` argument to `create_stream`:
+
+```python
+from zerobus import Format
+
+Format.JSON                       # JSON records
+Format.proto(MyMessage.DESCRIPTOR)  # Compiled-proto records
+```
+
+Arrow Flight uses a dedicated `create_arrow_stream(table=..., schema=...)` entry
+point and does not go through `Format`.
 
 ### `StreamConfigurationOptions`
 
-See [Configuration](#configuration) for full parameter list.
+See [Configuration](#configuration) for the full parameter list.
 
 ### `AckCallback`
 
 ```python
-from zerobus.sdk.shared import AckCallback
+from zerobus import AckCallback
 
 class MyCallback(AckCallback):
     def on_ack(self, offset: int) -> None:
-        # Called when a record is acknowledged by the server
-        pass
-
-    def on_error(self, offset: int, error_message: str) -> None:
-        # Called when a record encounters an error
         pass
 ```
 
 ### `HeadersProvider`
 
-For custom authentication (e.g. custom token providers), implement `HeadersProvider` and pass it to `create_stream()`. Must include both `authorization` and `x-databricks-zerobus-table-name` headers. See [`examples/`](examples/) for implementation details.
-
-### `RecordAcknowledgment` (Sync only, deprecated)
-
-```python
-ack.wait_for_ack(timeout_sec=None)  # Block until acknowledged
-ack.is_done() -> bool
-ack.add_done_callback(callback)
-```
+For custom authentication, subclass `HeadersProvider` and pass it through
+`Headers(provider=...)`. The provider must return a list of
+`(header_name, header_value)` tuples including any authentication header
+required by the server. See [`examples/sync_example_proto.py`](examples/sync_example_proto.py).
 
 ### Exceptions
 
@@ -506,6 +598,67 @@ make build  # Build release wheel
 ```
 
 For development workflows and detailed instructions, see [CONTRIBUTING.md](CONTRIBUTING.md).
+
+## Migrating from v1.x
+
+v2.0.0 reorganises the stream-creation API around tagged-union selectors and
+removes the long-deprecated `ingest_record()` / `*_with_headers_provider`
+methods. The following changes are required:
+
+**Imports:**
+
+```python
+# Before
+from zerobus.sdk.sync import ZerobusSdk
+from zerobus.sdk.shared import RecordType, StreamConfigurationOptions, TableProperties
+
+# After
+from zerobus import Format, OAuth, StreamConfigurationOptions, ZerobusSdk
+```
+
+**Stream creation:**
+
+```python
+# Before (v1.x)
+props = TableProperties("catalog.schema.table", record_pb2.MyMessage.DESCRIPTOR)
+stream = sdk.create_stream(client_id, client_secret, props, options)
+
+# After (v2.0.0)
+stream = sdk.create_stream(
+    table="catalog.schema.table",
+    auth=OAuth(client_id, client_secret),
+    record_format=Format.proto(record_pb2.MyMessage.DESCRIPTOR),
+    options=options,  # `record_type` is implied by `format`; do not set it
+)
+```
+
+**Custom HeadersProvider:**
+
+```python
+# Before (v1.x)
+stream = sdk.create_stream(client_id, client_secret, props, options, headers_provider=my_provider)
+# or:
+stream = sdk.create_stream_with_headers_provider(props, my_provider, options)  # removed
+
+# After (v2.0.0)
+from zerobus import Headers
+stream = sdk.create_stream(
+    table=..., auth=Headers(my_provider), record_format=..., options=options
+)
+```
+
+**Removed methods:**
+
+- `stream.ingest_record(...)` → `stream.ingest_record_offset(...)` (deprecated since v0.3.0)
+- `sdk.create_stream_with_headers_provider(...)` → `auth=Headers(provider)`
+- `sdk.create_arrow_stream_with_headers_provider(...)` → `auth=Headers(provider)`
+- `TableProperties` class → no longer needed; pass `table=...` directly
+
+**SDK identifier:** The Python SDK now identifies itself as
+`zerobus-sdk-py/2.0.0` on the HTTP `user-agent` header (previously it
+inherited the Rust SDK identifier `zerobus-sdk-rs/...`). Use the new
+`application_name=` constructor argument to append a caller-supplied
+identifier for server-side telemetry.
 
 ## Community and Contributing
 

@@ -43,10 +43,12 @@ export ZEROBUS_TABLE_NAME="catalog.schema.table"
 # Synchronous examples (blocking I/O)
 python examples/sync_example_proto.py     # Protobuf
 python examples/sync_example_json.py      # JSON
+python examples/sync_example_arrow.py     # Arrow Flight (Beta)
 
 # Asynchronous examples (non-blocking I/O)
 python examples/async_example_proto.py    # Protobuf
 python examples/async_example_json.py     # JSON
+python examples/async_example_arrow.py    # Arrow Flight (Beta)
 ```
 
 ## Examples Overview
@@ -72,18 +74,23 @@ More efficient over the wire. You can pass either:
 - **Pre-serialized bytes** (client controls serialization)
 
 ```python
-# Create protobuf record
-record = record_pb2.AirQuality(device_name="sensor-1", temp=25, humidity=60)
-table_properties = TableProperties(TABLE_NAME, record_pb2.AirQuality.DESCRIPTOR)
-options = StreamConfigurationOptions(record_type=RecordType.PROTO)
+from zerobus import Format, OAuth, ZerobusSdk
+import record_pb2
 
-# Recommended: Use ingest_record_offset() for better performance
+sdk = ZerobusSdk(host=..., unity_catalog_url=...)
+stream = sdk.create_stream(
+    table=TABLE_NAME,
+    auth=OAuth(client_id, client_secret),
+    record_format=Format.proto(record_pb2.AirQuality.DESCRIPTOR),
+)
+
+record = record_pb2.AirQuality(device_name="sensor-1", temp=25, humidity=60)
 offset = stream.ingest_record_offset(record)
 
 # Or fire-and-forget for maximum throughput
 stream.ingest_record_nowait(record)
 
-# Option 2: Pass pre-serialized bytes (client controls serialization)
+# Or pass pre-serialized bytes (client controls serialization):
 # offset = stream.ingest_record_offset(record.SerializeToString())
 ```
 
@@ -95,18 +102,22 @@ Good for getting started. No protobuf schema required. You can pass either:
 - **Pre-serialized JSON string** (client controls serialization)
 
 ```python
-# Create JSON record
-record_dict = {"device_name": "sensor-1", "temp": 25, "humidity": 60}
-table_properties = TableProperties(TABLE_NAME)
-options = StreamConfigurationOptions(record_type=RecordType.JSON)
+from zerobus import Format, OAuth, ZerobusSdk
 
-# Recommended: Use ingest_record_offset() for better performance
+sdk = ZerobusSdk(host=..., unity_catalog_url=...)
+stream = sdk.create_stream(
+    table=TABLE_NAME,
+    auth=OAuth(client_id, client_secret),
+    record_format=Format.JSON,
+)
+
+record_dict = {"device_name": "sensor-1", "temp": 25, "humidity": 60}
 offset = stream.ingest_record_offset(record_dict)
 
 # Or fire-and-forget for maximum throughput
 stream.ingest_record_nowait(record_dict)
 
-# Option 2: Pass pre-serialized JSON string (client controls serialization)
+# Or pass a pre-serialized JSON string:
 # offset = stream.ingest_record_offset(json.dumps(record_dict))
 ```
 
@@ -145,7 +156,7 @@ Both APIs provide the same functionality and performance. The key differences ar
 
 | Aspect | Synchronous (`sync`) | Asynchronous (`aio`) |
 |--------|---------------------|----------------------|
-| Import | `from zerobus.sdk.sync import ZerobusSdk` | `from zerobus.sdk.aio import ZerobusSdk` |
+| Import | `from zerobus import ZerobusSdk` | `from zerobus.aio import ZerobusSdk` |
 | Stream creation | `stream = sdk.create_stream(...)` | `stream = await sdk.create_stream(...)` |
 | Record ingestion (with offset) | `offset = stream.ingest_record_offset(record)` | `offset = await stream.ingest_record_offset(record)` |
 | Record ingestion (fire-and-forget) | `stream.ingest_record_nowait(record)` | `stream.ingest_record_nowait(record)` |
@@ -166,15 +177,13 @@ Both APIs provide the same functionality and performance. The key differences ar
 - `ingest_records_offset()` - Batch multiple records, returns final offset
 - `ingest_records_nowait()` - Fire-and-forget batch ingestion, most efficient for bulk data
 
-**Deprecated:**
-- `ingest_record()` - Use `ingest_record_offset()` instead (2-40x slower)
-
 ### Serialization Format Comparison
 
-| Format | Record Input | Configuration |
-|--------|-------------|---------------|
-| **Protobuf** (Default) | `Message` object or `bytes` | `TableProperties(table_name, descriptor)` |
-| **JSON** | `dict` or `str` (JSON string) | `TableProperties(table_name)` + `StreamConfigurationOptions(record_type=RecordType.JSON)` |
+| Format | Record Input | `create_stream` argument |
+|--------|-------------|--------------------------|
+| **Protobuf** | `Message` object or `bytes` | `record_format=Format.proto(MyMessage.DESCRIPTOR)` |
+| **JSON** | `dict` or `str` (JSON string) | `record_format=Format.JSON` |
+| **Arrow Flight** (Beta) | `pyarrow.RecordBatch` or `pyarrow.Table` | use `create_arrow_stream(table=..., schema=..., auth=...)` |
 
 ## Authentication
 
@@ -203,10 +212,23 @@ To use your own JSON structure:
    ```python
    json_record = json.dumps({"field1": "value1", "field2": 123})
    ```
-2. Configure `StreamConfigurationOptions` with `record_type=RecordType.JSON`
+2. Pass `record_format=Format.JSON` to `sdk.create_stream(...)`
 3. Ensure your JSON structure matches the schema of your Databricks table
 
 Note: The SDK sends JSON strings directly without client-side schema validation.
+
+### Arrow Flight (Beta)
+
+**Files:** `sync_example_arrow.py`, `async_example_arrow.py`
+
+> Arrow Flight ingestion is in **Beta** in v2.0.0. The API is stabilising but
+> may still change before reaching GA. Use
+> `pip install "databricks-zerobus-ingest-sdk[arrow]"` to install the
+> `pyarrow` dependency.
+
+The SDK uses a **zero-copy** path (forwarding Arrow IPC bytes straight to
+Arrow Flight) when `ipc_compression=IPCCompression.NONE` (the default).
+Enabling `IPCCompression.LZ4_FRAME` or `IPCCompression.ZSTD` disables zero-copy.
 
 ## Additional Resources
 

@@ -28,7 +28,6 @@ fn _zerobus_core(py: Python, m: &PyModule) -> PyResult<()> {
     // Add common types
     m.add_class::<common::RecordType>()?;
     m.add_class::<common::StreamConfigurationOptions>()?;
-    m.add_class::<common::TableProperties>()?;
     m.add_class::<common::AckCallback>()?;
 
     // Add exception types
@@ -59,7 +58,6 @@ fn _zerobus_core(py: Python, m: &PyModule) -> PyResult<()> {
     let sync_module = PyModule::new(py, "sync")?;
     sync_module.add_class::<sync_wrapper::ZerobusSdk>()?;
     sync_module.add_class::<sync_wrapper::ZerobusStream>()?;
-    sync_module.add_class::<sync_wrapper::RecordAcknowledgment>()?;
     m.add_submodule(sync_module)?;
     sys_modules.set_item("zerobus._zerobus_core.sync", sync_module)?;
 
@@ -67,7 +65,6 @@ fn _zerobus_core(py: Python, m: &PyModule) -> PyResult<()> {
     let aio_module = PyModule::new(py, "aio")?;
     aio_module.add_class::<async_wrapper::ZerobusSdk>()?;
     aio_module.add_class::<async_wrapper::ZerobusStream>()?;
-    aio_module.add_class::<async_wrapper::PyAckFuture>()?;
     m.add_submodule(aio_module)?;
     sys_modules.set_item("zerobus._zerobus_core.aio", aio_module)?;
 

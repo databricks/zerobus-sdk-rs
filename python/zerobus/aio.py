@@ -1,11 +1,18 @@
 """
-Asynchronous Python SDK for the Zerobus service (Rust-backed).
+Top-level shortcut to the async SDK.
+
+Equivalent to `from zerobus.sdk.aio import *`.
 """
 
-from zerobus.sdk.aio.zerobus_sdk import (
+from zerobus.sdk.aio import (
     AckCallback,
+    ArrowStreamConfigurationOptions,
+    Format,
+    Headers,
     HeadersProvider,
+    IPCCompression,
     NonRetriableException,
+    OAuth,
     RecordType,
     StreamConfigurationOptions,
     ZerobusArrowStream,
@@ -13,9 +20,6 @@ from zerobus.sdk.aio.zerobus_sdk import (
     ZerobusSdk,
     ZerobusStream,
 )
-from zerobus.sdk.shared.arrow import ArrowStreamConfigurationOptions, IPCCompression
-from zerobus.sdk.shared.auth import Headers, OAuth
-from zerobus.sdk.shared.format import Format
 
 __all__ = [
     "ZerobusSdk",

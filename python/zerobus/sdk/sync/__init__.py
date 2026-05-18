@@ -1,16 +1,16 @@
 """
 Sync Python SDK for the Zerobus service (Rust-backed).
-
-This module provides high-performance synchronous ingestion backed by a Rust core.
 """
 
+from zerobus.sdk.shared.arrow import ArrowStreamConfigurationOptions, IPCCompression
+from zerobus.sdk.shared.auth import Headers, OAuth
+from zerobus.sdk.shared.format import Format
 from zerobus.sdk.sync.zerobus_sdk import (
+    AckCallback,
     HeadersProvider,
     NonRetriableException,
-    RecordAcknowledgment,
     RecordType,
     StreamConfigurationOptions,
-    TableProperties,
     ZerobusArrowStream,
     ZerobusException,
     ZerobusSdk,
@@ -21,11 +21,15 @@ __all__ = [
     "ZerobusSdk",
     "ZerobusStream",
     "ZerobusArrowStream",
-    "RecordAcknowledgment",
-    "TableProperties",
+    "ArrowStreamConfigurationOptions",
+    "IPCCompression",
     "StreamConfigurationOptions",
     "RecordType",
+    "AckCallback",
     "HeadersProvider",
     "ZerobusException",
     "NonRetriableException",
+    "OAuth",
+    "Headers",
+    "Format",
 ]
