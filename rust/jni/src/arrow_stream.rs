@@ -6,6 +6,7 @@
 use crate::class_cache::{as_jclass, get_class_cache};
 use crate::errors::{throw_from_zerobus_error, throw_zerobus_exception};
 use crate::runtime::block_on;
+use bytes::Bytes;
 use databricks_zerobus_ingest_sdk::ZerobusArrowStream;
 use jni::objects::{JByteArray, JClass, JObject, JValue};
 use jni::sys::{jboolean, jlong, JNI_FALSE, JNI_TRUE};
@@ -134,6 +135,55 @@ pub extern "system" fn Java_com_databricks_zerobus_ZerobusArrowStream_nativeInge
 
         // Ingest the first batch
         stream.ingest_batch(batches.remove(0)).await
+    });
+
+    match result {
+        Ok(offset) => offset,
+        Err(e) => {
+            throw_from_zerobus_error(&mut env, &e);
+            -1
+        }
+    }
+}
+
+/// Ingest a pre-serialized Arrow IPC batch using the zero-copy path.
+///
+/// Forwards IPC bytes directly into Flight wire format without materializing a
+/// `RecordBatch`, skipping the deserialize → re-serialize round-trip performed by
+/// `nativeIngestBatch`. Returns `-1` and throws `ZerobusException` on error (e.g.
+/// when the stream is configured with `ipc_compression`).
+///
+/// # JNI Signature
+/// ```java
+/// private native long nativeIngestIpcBatch(long handle, byte[] ipcBytes);
+/// ```
+#[no_mangle]
+pub extern "system" fn Java_com_databricks_zerobus_ZerobusArrowStream_nativeIngestIpcBatch<
+    'local,
+>(
+    mut env: JNIEnv<'local>,
+    _obj: JObject<'local>,
+    handle: jlong,
+    ipc_bytes: JByteArray<'local>,
+) -> jlong {
+    let bytes: Vec<u8> = match env.convert_byte_array(ipc_bytes) {
+        Ok(b) => b,
+        Err(e) => {
+            throw_zerobus_exception(&mut env, &format!("Invalid IPC bytes: {}", e));
+            return -1;
+        }
+    };
+
+    let stream_handle = unsafe { NativeArrowStreamHandle::borrow_from_raw(handle) };
+
+    let result = block_on(async {
+        let mut guard = stream_handle.stream.lock().await;
+        let stream = guard.as_mut().ok_or_else(|| {
+            databricks_zerobus_ingest_sdk::ZerobusError::InvalidStateError(
+                "Arrow stream is closed".to_string(),
+            )
+        })?;
+        stream.ingest_ipc_batch(Bytes::from(bytes)).await
     });
 
     match result {

@@ -126,6 +126,33 @@ public class ZerobusArrowStream implements AutoCloseable {
     return Optional.of(nativeIngestBatch(nativeHandle, ipcBytes));
   }
 
+  /**
+   * Ingests a pre-serialized Arrow IPC batch (zero-copy path).
+   *
+   * <p>Use this when you already hold Arrow IPC stream bytes (e.g. produced by {@code
+   * ArrowStreamWriter}) and want to skip the deserialize → re-serialize round-trip performed by
+   * {@link #ingestBatch(VectorSchemaRoot)}. The bytes must form a valid Arrow IPC stream containing
+   * exactly one record batch whose schema matches the stream schema. Dictionary messages between
+   * the schema and the record batch are supported.
+   *
+   * <p>Cannot be used when the stream is configured with {@code ipcCompression} — the raw IPC bytes
+   * would not match the compression codec. Use {@link #ingestBatch(VectorSchemaRoot)} instead for
+   * compressed streams.
+   *
+   * @param ipcBytes Arrow IPC stream bytes containing exactly one record batch, or null/empty for a
+   *     no-op
+   * @return the offset ID assigned to this batch, or empty if {@code ipcBytes} is null or empty
+   * @throws ZerobusException if the stream is closed, the schema doesn't match, compression is
+   *     enabled, or another error occurs
+   */
+  public Optional<Long> ingestIpcBatch(byte[] ipcBytes) throws ZerobusException {
+    if (ipcBytes == null || ipcBytes.length == 0) {
+      return Optional.empty();
+    }
+    ensureOpen();
+    return Optional.of(nativeIngestIpcBatch(nativeHandle, ipcBytes));
+  }
+
   // ==================== Acknowledgment ====================
 
   /**
@@ -313,6 +340,8 @@ public class ZerobusArrowStream implements AutoCloseable {
   private static native void nativeDestroy(long handle);
 
   private native long nativeIngestBatch(long handle, byte[] batchData);
+
+  private native long nativeIngestIpcBatch(long handle, byte[] ipcBytes);
 
   private native void nativeWaitForOffset(long handle, long offset);
 

@@ -17,6 +17,7 @@ name = "zerobus_jni"
 databricks-zerobus-ingest-sdk = { path = "../sdk", version = "2.0.0", features = ["arrow-flight"] }
 jni.workspace = true
 tokio = { workspace = true, features = ["rt-multi-thread", "sync"] }
+bytes.workspace = true
 prost.workspace = true
 prost-types.workspace = true
 thiserror.workspace = true

@@ -3,6 +3,8 @@ package com.databricks.zerobus;
 import static org.junit.jupiter.api.Assertions.*;
 import static org.junit.jupiter.api.Assumptions.assumeTrue;
 
+import java.io.ByteArrayOutputStream;
+import java.nio.channels.Channels;
 import java.util.Arrays;
 import java.util.List;
 import org.apache.arrow.memory.BufferAllocator;
@@ -11,6 +13,7 @@ import org.apache.arrow.vector.BigIntVector;
 import org.apache.arrow.vector.IntVector;
 import org.apache.arrow.vector.LargeVarCharVector;
 import org.apache.arrow.vector.VectorSchemaRoot;
+import org.apache.arrow.vector.ipc.ArrowStreamWriter;
 import org.apache.arrow.vector.types.pojo.ArrowType;
 import org.apache.arrow.vector.types.pojo.Field;
 import org.apache.arrow.vector.types.pojo.Schema;
@@ -686,8 +689,109 @@ public class ArrowIntegrationTest {
   }
 
   // ===================================================================================
+  // Test 16: Arrow stream - zero-copy ingestIpcBatch happy path
+  // ===================================================================================
+
+  @Test
+  @Order(16)
+  @DisplayName("Arrow stream - ingestIpcBatch (zero-copy) happy path")
+  void testArrowIngestIpcBatch() throws Exception {
+    try (ZerobusSdk sdk = new ZerobusSdk(serverEndpoint, workspaceUrl);
+        BufferAllocator allocator = new RootAllocator()) {
+      ZerobusArrowStream stream =
+          sdk.createArrowStream(tableName, SCHEMA, clientId, clientSecret).join();
+
+      try {
+        byte[] ipcBytes;
+        try (VectorSchemaRoot batch = VectorSchemaRoot.create(SCHEMA, allocator)) {
+          fillBatch(batch, "test-arrow-ipc", 5);
+          ipcBytes = serializeBatchToIpc(batch);
+        }
+
+        long offset = stream.ingestIpcBatch(ipcBytes).get();
+        stream.waitForOffset(offset);
+
+        System.out.println("Arrow ingestIpcBatch: 5 rows ingested (offset: " + offset + ")");
+      } finally {
+        stream.close();
+      }
+    }
+  }
+
+  // ===================================================================================
+  // Test 17: Arrow stream - ingestIpcBatch rejects with compression enabled
+  // ===================================================================================
+
+  @Test
+  @Order(17)
+  @DisplayName("Arrow stream - ingestIpcBatch rejects with ipcCompression set")
+  void testArrowIngestIpcBatchRejectsCompression() throws Exception {
+    ArrowStreamConfigurationOptions options =
+        ArrowStreamConfigurationOptions.builder()
+            .setIpcCompression(IPCCompressionType.ZSTD)
+            .build();
+
+    try (ZerobusSdk sdk = new ZerobusSdk(serverEndpoint, workspaceUrl);
+        BufferAllocator allocator = new RootAllocator()) {
+      ZerobusArrowStream stream =
+          sdk.createArrowStream(tableName, SCHEMA, clientId, clientSecret, options).join();
+
+      try {
+        byte[] ipcBytes;
+        try (VectorSchemaRoot batch = VectorSchemaRoot.create(SCHEMA, allocator)) {
+          fillBatch(batch, "test-arrow-ipc-compressed", 3);
+          ipcBytes = serializeBatchToIpc(batch);
+        }
+
+        ZerobusException ex =
+            assertThrows(ZerobusException.class, () -> stream.ingestIpcBatch(ipcBytes));
+        assertTrue(
+            ex.getMessage().toLowerCase().contains("compression"),
+            "Expected compression-rejection message, got: " + ex.getMessage());
+
+        System.out.println("Arrow ingestIpcBatch compression-rejection: correctly throws");
+      } finally {
+        stream.close();
+      }
+    }
+  }
+
+  // ===================================================================================
+  // Test 18: Arrow stream - ingestIpcBatch null/empty bytes returns empty Optional
+  // ===================================================================================
+
+  @Test
+  @Order(18)
+  @DisplayName("Arrow stream - ingestIpcBatch null/empty returns empty Optional")
+  void testArrowIngestIpcBatchNullEmpty() throws Exception {
+    try (ZerobusSdk sdk = new ZerobusSdk(serverEndpoint, workspaceUrl)) {
+      ZerobusArrowStream stream =
+          sdk.createArrowStream(tableName, SCHEMA, clientId, clientSecret).join();
+
+      try {
+        assertFalse(stream.ingestIpcBatch(null).isPresent(), "null bytes should return empty");
+        assertFalse(
+            stream.ingestIpcBatch(new byte[0]).isPresent(), "empty bytes should return empty");
+        System.out.println("Arrow ingestIpcBatch null/empty: returns empty Optional");
+      } finally {
+        stream.close();
+      }
+    }
+  }
+
+  // ===================================================================================
   // Helper
   // ===================================================================================
+
+  private static byte[] serializeBatchToIpc(VectorSchemaRoot batch) throws Exception {
+    ByteArrayOutputStream out = new ByteArrayOutputStream();
+    try (ArrowStreamWriter writer = new ArrowStreamWriter(batch, null, Channels.newChannel(out))) {
+      writer.start();
+      writer.writeBatch();
+      writer.end();
+    }
+    return out.toByteArray();
+  }
 
   private static void fillBatch(VectorSchemaRoot batch, String prefix, int rowCount) {
     LargeVarCharVector nameVector = (LargeVarCharVector) batch.getVector("device_name");
