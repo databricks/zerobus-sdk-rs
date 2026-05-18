@@ -2,6 +2,12 @@
 
 The Databricks Zerobus Ingest SDK for TypeScript provides a high-performance client for ingesting data directly into Databricks Delta tables using the Zerobus streaming protocol. This SDK wraps the high-performance [Rust SDK](https://github.com/databricks/zerobus-sdk/tree/main/rust) using native bindings for optimal performance.
 
+> **v2.0 introduces a new options-bag API.** `new ZerobusSdk({endpoint, ...})` and
+> `sdk.createStream({table, auth, format, ...})` replace the v1.x positional
+> constructor and `createStream` shape. See [v2.0 Migration](#v20-migration) below.
+> Arrow Flight ingestion is now **Beta** — production-eligible but the API may
+> still change before GA.
+
 ## Table of Contents
 
 - [Features](#features)
@@ -10,7 +16,7 @@ The Databricks Zerobus Ingest SDK for TypeScript provides a high-performance cli
   - [Installation](#installation)
   - [Choose Your Serialization Format](#choose-your-serialization-format)
   - [Option 1: Using JSON (Quick Start)](#option-1-using-json-quick-start)
-  - [Option 2: Using Protocol Buffers (Default, Recommended)](#option-2-using-protocol-buffers-default-recommended)
+  - [Option 2: Using Protocol Buffers (Recommended)](#option-2-using-protocol-buffers-recommended)
 - [Usage Examples](#usage-examples)
 - [Authentication](#authentication)
 - [Configuration](#configuration)
@@ -25,21 +31,21 @@ The Databricks Zerobus Ingest SDK for TypeScript provides a high-performance cli
 
 ## Features
 
-- **High-throughput ingestion**: Optimized for high-volume data ingestion with native Rust implementation
-- **Automatic recovery**: Built-in retry and recovery mechanisms for transient failures
-- **Flexible configuration**: Customizable stream behavior and timeouts
-- **Multiple serialization formats**: Support for JSON and Protocol Buffers
-- **Type widening**: Accept high-level types (plain objects, protobuf messages) or low-level types (strings, buffers) - automatically handles serialization
-- **Batch ingestion**: Ingest multiple records with a single acknowledgment for higher throughput
-- **OAuth 2.0 authentication**: Secure authentication with client credentials
-- **TypeScript support**: Full type definitions for excellent IDE support
-- **Cross-platform**: Supports Linux, macOS, and Windows
+- **High-throughput ingestion**: Native Rust implementation under a thin TypeScript facade
+- **Three serialization formats**: JSON, Protocol Buffers, and **Arrow Flight (Beta)** with optional LZ4 / ZSTD compression
+- **Zero-copy Arrow path**: Arrow IPC bytes are forwarded straight to Flight (no parse/re-encode round trip) when compression is disabled
+- **Type widening**: Accept high-level types (plain objects, protobuf messages) or low-level types (strings, buffers) — serialization is automatic
+- **Automatic recovery**: Built-in retry and recovery for transient failures
+- **Flexible auth**: OAuth 2.0 client credentials, a custom `getHeaders` callback, or `noAuth` for local / sidecar-proxy deployments
+- **Pluggable TLS**: `secure` (system CA, default) or `none` (for local plaintext servers)
+- **TypeScript first**: Options-bag API with discriminated unions for `auth` and `format`
+- **Cross-platform**: Linux, macOS, Windows
 
 ## Requirements
 
 ### Runtime Requirements
 
-- **Node.js**: >= 16
+- **Node.js**: >= 20 (Node 18 went EOL April 2025; v2.0 dropped support)
 - **Databricks workspace** with Zerobus access enabled
 
 ### Build Requirements
@@ -70,7 +76,7 @@ Before using the SDK, you need a Databricks workspace URL, a Delta table, and a 
 
 Before installing the SDK, ensure you have the required tools:
 
-**1. Node.js >= 16**
+**1. Node.js >= 20**
 
 Check if Node.js is installed:
 ```bash
@@ -137,12 +143,12 @@ source $HOME/.cargo/env
 
 #### Installation Steps
 
-**Note for macOS users**: Pre-built binaries are not available. The package will automatically build from source during `npm install`. Ensure you have Rust toolchain and Xcode Command Line Tools installed (see prerequisites above).
+**macOS users**: prebuilt binaries are published for both Intel and Apple Silicon — `npm install` picks the right one automatically. No Rust toolchain or Xcode Command Line Tools are needed unless you're modifying the SDK from source.
 
 1. Clone the repository:
    ```bash
    git clone https://github.com/databricks/zerobus-sdk.git
-   cd zerobus-sdk/ts
+   cd zerobus-sdk/typescript
    ```
 
 2. Install dependencies:
@@ -177,69 +183,51 @@ source $HOME/.cargo/env
 
 ### Choose Your Serialization Format
 
-The SDK supports two serialization formats. **Protocol Buffers is the default** and recommended for production use:
+The SDK supports two gRPC serialization formats — both are explicit choices in v2 (there is no implicit default; you must pass `format` on `createStream`):
 
-- **Protocol Buffers (Default)** - Strongly-typed schemas, efficient binary encoding, better performance. This is the default format.
-- **JSON** - Simple, no schema compilation needed. Good for getting started quickly or when schema flexibility is needed.
+- **Protocol Buffers** — recommended for production. Strongly-typed schemas, efficient binary encoding, best performance.
+- **JSON** — simpler getting-started; no schema compilation needed. Good for quick prototyping or when schema flexibility matters more than wire efficiency.
 
-> **Note:** If you don't specify `recordType`, the SDK will use Protocol Buffers by default. To use JSON, explicitly set `recordType: RecordType.Json`.
+> **Note:** Pick the format via `format: { type: 'json' }` or `format: { type: 'proto', descriptor }` on `createStream(...)`. Use `createArrowStream(...)` for Arrow Flight (Beta).
 
 ### Option 1: Using JSON (Quick Start)
 
-JSON mode is the simplest way to get started. You don't need to define or compile protobuf schemas, but you must explicitly specify `RecordType.Json`.
+JSON mode is the simplest way to get started — no schema compilation needed.
 
 ```typescript
-import { ZerobusSdk, RecordType } from '@databricks/zerobus-ingest-sdk';
+import { ZerobusSdk } from '@databricks/zerobus-ingest-sdk';
 
-// Configuration
-// For AWS:
-const zerobusEndpoint = 'https://<workspace-id>.zerobus.<region>.cloud.databricks.com';
-const workspaceUrl = 'https://<workspace-name>.cloud.databricks.com';
-// For Azure:
-// const zerobusEndpoint = '<workspace-id>.zerobus.<region>.azuredatabricks.net';
-// const workspaceUrl = 'https://<workspace-name>.azuredatabricks.net';
+const sdk = new ZerobusSdk({
+    // For AWS:
+    endpoint: 'https://<workspace-id>.zerobus.<region>.cloud.databricks.com',
+    unityCatalogUrl: 'https://<workspace-name>.cloud.databricks.com',
+    // For Azure:
+    // endpoint: 'https://<workspace-id>.zerobus.<region>.azuredatabricks.net',
+    // unityCatalogUrl: 'https://<workspace-name>.azuredatabricks.net',
+    applicationName: 'my-service/1.0', // optional, appended to user-agent
+});
 
-const tableName = 'main.default.air_quality';
-const clientId = process.env.DATABRICKS_CLIENT_ID!;
-const clientSecret = process.env.DATABRICKS_CLIENT_SECRET!;
-
-// Initialize SDK
-const sdk = new ZerobusSdk(zerobusEndpoint, workspaceUrl);
-
-// Configure table properties (no descriptor needed for JSON)
-const tableProperties = { tableName };
-
-// Configure stream with JSON record type
-const options = {
-    recordType: RecordType.Json,  // JSON encoding
+const stream = await sdk.createStream({
+    table: 'main.default.air_quality',
+    auth: {
+        type: 'oauth',
+        clientId: process.env.DATABRICKS_CLIENT_ID!,
+        clientSecret: process.env.DATABRICKS_CLIENT_SECRET!,
+    },
+    format: { type: 'json' },
     maxInflightRequests: 1000,
-    recovery: true
-};
-
-// Create stream
-const stream = await sdk.createStream(
-    tableProperties,
-    clientId,
-    clientSecret,
-    options
-);
+    recovery: true,
+});
 
 try {
-    let lastOffset: bigint;
-
-    // Send all records
+    let lastOffset: bigint = 0n;
     for (let i = 0; i < 100; i++) {
-        const record = {
+        lastOffset = await stream.ingestRecord({
             device_name: `sensor-${i % 10}`,
             temp: 20 + (i % 15),
-            humidity: 50 + (i % 40)
-        };
-
-        // ingestRecordOffset returns immediately after queuing
-        lastOffset = await stream.ingestRecordOffset(record);
+            humidity: 50 + (i % 40),
+        });
     }
-
-    // Wait for all records to be acknowledged
     await stream.waitForOffset(lastOffset);
     console.log('Successfully ingested 100 records!');
 } finally {
@@ -247,9 +235,9 @@ try {
 }
 ```
 
-### Option 2: Using Protocol Buffers (Default, Recommended)
+### Option 2: Using Protocol Buffers (Recommended)
 
-Protocol Buffers is the default serialization format and provides efficient binary encoding with schema validation. This is recommended for production use. This section covers the complete setup process.
+Protocol Buffers provides efficient binary encoding with schema validation, and is the recommended format for production use. This section covers the complete setup process.
 
 #### Prerequisites
 
@@ -351,60 +339,45 @@ That's it! The SDK will automatically extract the message descriptor from this f
 #### Step 5: Use in Your Code
 
 ```typescript
-import { ZerobusSdk, RecordType } from '@databricks/zerobus-ingest-sdk';
-import * as airQuality from './examples/generated/air_quality';
+import { ZerobusSdk } from '@databricks/zerobus-ingest-sdk';
 import { loadDescriptorProto } from '@databricks/zerobus-ingest-sdk/utils/descriptor';
+import * as airQuality from './examples/generated/air_quality';
 
-// Configuration
-const zerobusEndpoint = 'https://<workspace-id>.zerobus.<region>.cloud.databricks.com';
-const workspaceUrl = 'https://<workspace-name>.cloud.databricks.com';
-const tableName = 'main.default.air_quality';
-const clientId = process.env.DATABRICKS_CLIENT_ID!;
-const clientSecret = process.env.DATABRICKS_CLIENT_SECRET!;
-
-// Load and extract the descriptor for your specific message
-const descriptorBase64 = loadDescriptorProto({
-    descriptorPath: 'schemas/air_quality_descriptor.pb',
-    protoFileName: 'air_quality.proto',
-    messageName: 'AirQuality'
+const sdk = new ZerobusSdk({
+    endpoint: 'https://<workspace-id>.zerobus.<region>.cloud.databricks.com',
+    unityCatalogUrl: 'https://<workspace-name>.cloud.databricks.com',
 });
 
-// Initialize SDK
-const sdk = new ZerobusSdk(zerobusEndpoint, workspaceUrl);
+// Extract the AirQuality message's DescriptorProto from the .pb FileDescriptorSet.
+const descriptor = loadDescriptorProto({
+    descriptorPath: 'schemas/air_quality_descriptor.pb',
+    protoFileName: 'air_quality.proto',
+    messageName: 'AirQuality',
+});
 
-// Configure table properties with protobuf descriptor
-const tableProperties = {
-    tableName,
-    descriptorProto: descriptorBase64  // Required for Protocol Buffers
-};
-
-// Configure stream with Protocol Buffers record type
-const options = {
-    recordType: RecordType.Proto,  // Protocol Buffers encoding
+const stream = await sdk.createStream({
+    table: 'main.default.air_quality',
+    auth: {
+        type: 'oauth',
+        clientId: process.env.DATABRICKS_CLIENT_ID!,
+        clientSecret: process.env.DATABRICKS_CLIENT_SECRET!,
+    },
+    format: { type: 'proto', descriptor },
     maxInflightRequests: 1000,
-    recovery: true
-};
-
-// Create stream
-const stream = await sdk.createStream(tableProperties, clientId, clientSecret, options);
+    recovery: true,
+});
 
 try {
     const AirQuality = airQuality.examples.AirQuality;
-    let lastOffset: bigint;
-
-    // Send all records
+    let lastOffset: bigint = 0n;
     for (let i = 0; i < 100; i++) {
         const record = AirQuality.create({
-            device_name: `sensor-${i}`,
+            deviceName: `sensor-${i}`,
             temp: 20 + i,
-            humidity: 50 + i
+            humidity: 50 + i,
         });
-
-        // ingestRecordOffset returns immediately after queuing
-        lastOffset = await stream.ingestRecordOffset(record);
+        lastOffset = await stream.ingestRecord(record); // queue, returns offset
     }
-
-    // Wait for all records to be acknowledged
     await stream.waitForOffset(lastOffset);
     console.log('Successfully ingested 100 records!');
 } finally {
@@ -551,166 +524,199 @@ See the `examples/` directory for complete, runnable examples. See [examples/REA
 
 ```bash
 # Set environment variables
-export ZEROBUS_SERVER_ENDPOINT="https://<workspace-id>.zerobus.<region>.cloud.databricks.com"
+export ZEROBUS_ENDPOINT="https://<workspace-id>.zerobus.<region>.cloud.databricks.com"
 export DATABRICKS_WORKSPACE_URL="https://<workspace-name>.cloud.databricks.com"
 export DATABRICKS_CLIENT_ID="your-client-id"
 export DATABRICKS_CLIENT_SECRET="your-client-secret"
 export ZEROBUS_TABLE_NAME="main.default.air_quality"
 
-# Run JSON examples
+# JSON
 npm run example:json:single
 npm run example:json:batch
 
-# For Protocol Buffers, generate TypeScript code and descriptor
+# Protocol Buffers (compile the schema once)
 npm run build:proto
-protoc --descriptor_set_out=schemas/air_quality_descriptor.pb --include_imports schemas/air_quality.proto
-
-# Run Protocol Buffers examples
 npm run example:proto:single
 npm run example:proto:batch
+
+# Arrow Flight (Beta) — included in the default npm build
+npm run example:arrow:single
+npm run example:arrow:batch
 ```
+
+Run against a local plaintext test server by adding `ZEROBUS_TLS=none
+ZEROBUS_NO_AUTH=1` — see `examples/_config.ts` and
+[`examples/README.md`](examples/README.md).
 
 ### Batch Ingestion
 
-For higher throughput, use batch ingestion to send multiple records with a single acknowledgment:
-
-#### Protocol Buffers
+`ingestRecords(array)` queues many records atomically and resolves to the
+batch's offset ID. Use it for higher throughput than per-record calls.
 
 ```typescript
-const records = Array.from({ length: 1000 }, (_, i) =>
-  AirQuality.create({ device_name: `sensor-${i}`, temp: 20 + i, humidity: 50 + i })
-);
+// JSON: plain objects (auto-stringify'd) or pre-serialized strings
+const offset = await stream.ingestRecords([
+    { device_name: 'sensor-0', temp: 20, humidity: 50 },
+    { device_name: 'sensor-1', temp: 21, humidity: 51 },
+]);
 
-// Protobuf Type 1: Message objects (high-level) - SDK auto-serializes
-const offsetId = await stream.ingestRecordsOffset(records);
+// Protobuf: protobufjs message instances or Buffers of pre-encoded bytes
+const offset = await stream.ingestRecords([
+    AirQuality.create({ deviceName: 'sensor-0', temp: 20, humidity: 50n }),
+    AirQuality.create({ deviceName: 'sensor-1', temp: 21, humidity: 51n }),
+]);
 
-// Protobuf Type 2: Buffers (low-level) - pre-serialized bytes
-// const buffers = records.map(r => Buffer.from(AirQuality.encode(r).finish()));
-// const offsetId = await stream.ingestRecordsOffset(buffers);
-
-if (offsetId !== null) {
-  await stream.waitForOffset(offsetId);
-  console.log(`Batch acknowledged at offset ${offsetId}`);
+if (offset !== null) {
+    await stream.waitForOffset(offset);
 }
 ```
 
-#### JSON
+- Mixed types (objects + strings, or messages + Buffers) are supported in the same batch.
+- Empty batches resolve to `null` — no error, no offset.
+- Use `sdk.recreateStream(stream)` for recovery — unacked records are replayed automatically.
+
+## Arrow Flight (Beta)
+
+> **Beta**: API is stabilising but may still change before reaching GA.
+
+Arrow Flight is included in the default `npm install` — no rebuild needed.
+Each batch is supplied as an Arrow IPC stream (`tableToIPC(table, 'stream')`
+from `apache-arrow`).
+
+When `compression: 'none'` (the default) the SDK forwards the IPC bytes
+directly to the Rust SDK's zero-copy path — no parse / re-encode round trip.
+Setting `'lz4_frame'` or `'zstd'` trades CPU for fewer bytes on the wire and
+forces the SDK onto the parsed-RecordBatch path so it can apply the codec.
 
 ```typescript
-const records = Array.from({ length: 1000 }, (_, i) => ({
-  device_name: `sensor-${i}`,
-  temp: 20 + i,
-  humidity: 50 + i
-}));
+import { ZerobusSdk, ArrowDataType } from '@databricks/zerobus-ingest-sdk';
+import { Field, Int32, Int64, RecordBatch, Schema, Struct, Table, Utf8,
+         makeData, makeVector, tableToIPC, vectorFromArray } from 'apache-arrow';
 
-// JSON Type 1: objects (high-level) - SDK auto-stringifies
-const offsetId = await stream.ingestRecordsOffset(records);
+const sdk = new ZerobusSdk({ endpoint, unityCatalogUrl });
 
-// JSON Type 2: strings (low-level) - pre-serialized JSON
-// const jsonRecords = records.map(r => JSON.stringify(r));
-// const offsetId = await stream.ingestRecordsOffset(jsonRecords);
+const stream = await sdk.createArrowStream({
+    table: 'catalog.schema.air_quality',
+    auth: { type: 'oauth', clientId, clientSecret },
+    schema: [
+        { name: 'device_name', dataType: ArrowDataType.Utf8 },
+        { name: 'temp',        dataType: ArrowDataType.Int32 },
+        { name: 'humidity',    dataType: ArrowDataType.Int64 },
+    ],
+    compression: 'zstd', // or 'lz4_frame' / 'none'
+    maxInflightBatches: 100,
+});
 
-if (offsetId !== null) {
-  await stream.waitForOffset(offsetId);
-}
+// Build an Arrow RecordBatch with an explicit schema so nullability matches.
+const arrowSchema = new Schema([
+    new Field('device_name', new Utf8(), true),
+    new Field('temp',        new Int32(), true),
+    new Field('humidity',    new Int64(), true),
+]);
+const dev = vectorFromArray(['s1', 's2'], new Utf8());
+const t   = makeVector(Int32Array.from([21, 19]));
+const h   = makeVector(BigInt64Array.from([55n, 60n]));
+const data = makeData({ type: new Struct(arrowSchema.fields), length: 2,
+                        children: [dev.data[0], t.data[0], h.data[0]] });
+const ipc = Buffer.from(tableToIPC(new Table(new RecordBatch(arrowSchema, data)), 'stream'));
+
+const offset = await stream.ingestBatch(ipc);
+await stream.waitForOffset(offset);
+await stream.close();
 ```
 
-**Type Widening Support:**
-- JSON mode: Accept `object[]` (auto-stringify) or `string[]` (pre-stringified)
-- Proto mode: Accept protobuf messages with `.encode()` method (auto-serialize) or `Buffer[]` (pre-serialized)
-- Mixed types are supported in the same batch
-
-**Best Practices**:
-- Batch size: 100-1,000 records for optimal throughput/latency balance
-- Empty batches return `null` (no error, no offset)
-- Use `recreateStream()` for recovery - it automatically handles unacknowledged batches
-
-**Examples:**
-See `examples/json/batch.ts` and `examples/proto/batch.ts` for batch ingestion examples.
+See `examples/arrow/single.ts` and `examples/arrow/batch.ts` for full runnable
+examples.
 
 ## Authentication
 
-The SDK uses OAuth 2.0 Client Credentials for authentication:
+The `auth` field on `createStream` / `createArrowStream` is a discriminated
+union with three arms:
+
+### OAuth 2.0 Client Credentials (recommended)
 
 ```typescript
-import { ZerobusSdk } from '@databricks/zerobus-ingest-sdk';
-
-const sdk = new ZerobusSdk(zerobusEndpoint, workspaceUrl);
-
-// Create stream with OAuth authentication
-const stream = await sdk.createStream(
-    tableProperties,
-    clientId,
-    clientSecret,
-    options
-);
+auth: { type: 'oauth', clientId, clientSecret }
 ```
 
-The SDK automatically fetches access tokens and includes these headers:
-- `"authorization": "Bearer <oauth_token>"` - Obtained via OAuth 2.0 Client Credentials flow
-- `"x-databricks-zerobus-table-name": "<table_name>"` - The fully qualified table name
+The SDK fetches access tokens from Unity Catalog and attaches the
+`authorization` and `x-databricks-zerobus-table-name` headers automatically.
+The SDK identifies itself via the `user-agent` HTTP header
+(`zerobus-sdk-ts/<version>`); pass `applicationName` to the `ZerobusSdk`
+constructor to append your app's identifier.
 
-### Custom Authentication
+### Custom headers provider
 
-Beyond OAuth, you can use custom headers for Personal Access Tokens (PAT) or other auth methods:
+For PATs, M2M tokens, or other auth methods, pass a callback that produces
+headers on demand:
 
 ```typescript
-const stream = await sdk.createStream(
-  tableProperties,
-  '', // client_id (ignored when headers_provider is provided)
-  '', // client_secret (ignored when headers_provider is provided)
-  options,
-  {
-    getHeadersCallback: async () => [
-      ["authorization", `Bearer ${myToken}`],
-      ["x-databricks-zerobus-table-name", tableName]
-    ]
-  }
-);
+import { bearerTokenProvider } from '@databricks/zerobus-ingest-sdk';
+
+auth: {
+    type: 'headersProvider',
+    // The callback must return a Promise. It is invoked once per stream
+    // (the result is cached); call `sdk.createStream(...)` again for a fresh token.
+    getHeaders: bearerTokenProvider('catalog.schema.table', () => fetchMyToken()),
+}
+
+// Or the raw form:
+auth: {
+    type: 'headersProvider',
+    getHeaders: async () => [
+        ['authorization', `Bearer ${myToken}`],
+        ['x-databricks-zerobus-table-name', 'catalog.schema.table'],
+    ],
+}
 ```
 
-**Required headers:**
-- `authorization` - Bearer token or other auth header
-- `x-databricks-zerobus-table-name` - The fully qualified table name
+The callback **must** return at minimum the `authorization` and
+`x-databricks-zerobus-table-name` headers.
 
-**Note:** The SDK automatically adds the `user-agent` header if not provided.
+### `noAuth`
+
+```typescript
+auth: { type: 'noAuth' }
+```
+
+For local development against a server that doesn't enforce auth, or
+sidecar-proxy deployments where authentication is injected upstream. The SDK
+still attaches placeholder canonical headers because the wire protocol
+requires them.
 
 ## Configuration
 
 ### Stream Configuration Options
 
-| Option | Default | Description |
-|--------|---------|-------------|
-| `recordType` | `RecordType.Proto` | Serialization format: `RecordType.Json` or `RecordType.Proto` |
-| `maxInflightRequests` | 10,000 | Maximum number of unacknowledged requests |
-| `recovery` | true | Enable automatic stream recovery |
-| `recoveryTimeoutMs` | 15,000 | Timeout for recovery operations (ms) |
-| `recoveryBackoffMs` | 2,000 | Delay between recovery attempts (ms) |
-| `recoveryRetries` | 4 | Maximum number of recovery attempts |
-| `flushTimeoutMs` | 300,000 | Timeout for flush operations (ms) |
-| `serverLackOfAckTimeoutMs` | 60,000 | Server acknowledgment timeout (ms) |
-| `streamPausedMaxWaitTimeMs` | undefined | Max wait time during graceful stream close (ms) |
+These optional fields go on the same options object you pass to
+`createStream` / `createArrowStream`:
 
-### Example Configuration
+| Option | Default | Applies to | Description |
+|--------|---------|------------|-------------|
+| `recovery` | `true` | both | Auto-retry transient failures |
+| `recoveryTimeoutMs` | `15000` | both | Per-attempt recovery timeout |
+| `recoveryBackoffMs` | `2000` | both | Delay between retries |
+| `recoveryRetries` | `4` | both | Max retry attempts |
+| `flushTimeoutMs` | `300000` | both | `flush()` timeout |
+| `serverLackOfAckTimeoutMs` | `60000` | both | Server ack timeout |
+| `streamPausedMaxWaitTimeMs` | `undefined` | both | Graceful pause wait cap |
+| `maxInflightRequests` | `10000` | gRPC | Unacked records in-flight |
+| `maxInflightBatches` | `1000` | Arrow | Unacked batches in-flight |
+| `connectionTimeoutMs` | `30000` | Arrow | Initial connection timeout |
+| `compression` | `'none'` | Arrow | `'none'` (zero-copy) \| `'lz4_frame'` \| `'zstd'` |
+
+### Example
 
 ```typescript
-import { StreamConfigurationOptions, RecordType } from '@databricks/zerobus-ingest-sdk';
-
-const options: StreamConfigurationOptions = {
-    recordType: RecordType.Json,  // JSON encoding
-    maxInflightRequests: 10000,
+const stream = await sdk.createStream({
+    table: 'main.default.air_quality',
+    auth: { type: 'oauth', clientId, clientSecret },
+    format: { type: 'json' },
+    maxInflightRequests: 10_000,
     recovery: true,
-    recoveryTimeoutMs: 20000,
-    recoveryBackoffMs: 2000,
-    recoveryRetries: 4
-};
-
-const stream = await sdk.createStream(
-    tableProperties,
-    clientId,
-    clientSecret,
-    options
-);
+    recoveryTimeoutMs: 20_000,
+    recoveryRetries: 4,
+});
 ```
 
 ## Descriptor Utilities
@@ -755,368 +761,190 @@ const descriptorBase64 = loadDescriptorProto({
 
 ## Error Handling
 
-The SDK includes automatic recovery for transient failures (enabled by default with `recovery: true`). For permanent failures, use `recreateStream()` to automatically recover all unacknowledged batches. Always use try/finally blocks to ensure streams are properly closed:
+`recovery: true` (the default) auto-retries transient failures inside the
+stream. For terminal failures, call `sdk.recreateStream(...)` (or
+`sdk.recreateArrowStream(...)`) on the failed stream **before closing it** —
+the SDK reads the unacked records from the old handle, opens a fresh stream
+with the same configuration, and replays them. Close the old stream
+afterwards.
 
 ```typescript
 try {
-    const offset = await stream.ingestRecordOffset(record);
+    const offset = await stream.ingestRecord(record);
     await stream.waitForOffset(offset);
-    console.log(`Success: offset ${offset}`);
-} catch (error) {
-    console.error('Ingestion failed:', error);
-
-    // When stream fails, close it first
-    await stream.close();
-    console.log('Stream closed after error');
-
-    // Optional: Inspect what needs recovery (must be called on closed stream)
-    const unackedBatches = await stream.getUnackedBatches();
-    console.log(`Batches to recover: ${unackedBatches.length}`);
-
-    // Recommended recovery approach: Use recreateStream()
-    // This method:
-    // 1. Gets all unacknowledged batches from the failed stream
-    // 2. Creates a new stream with the same configuration
-    // 3. Re-ingests all unacknowledged batches automatically
-    // 4. Returns the new stream ready for continued use
-    const newStream = await sdk.recreateStream(stream);
-    console.log(`Stream recreated with ${unackedBatches.length} batches re-ingested`);
-
-    // Continue using newStream for further ingestion
-    try {
-        // Continue ingesting...
-    } finally {
-        await newStream.close();
-    }
+} catch (err) {
+    const fresh = await sdk.recreateStream(stream); // unacked records replayed
+    await stream.close();                            // release the old handle
+    stream = fresh;
 }
 ```
 
-**Best Practices:**
-- **Rely on automatic recovery** (default): The SDK will automatically retry transient failures
-- **Use `recreateStream()` for permanent failures**: Automatically recovers all unacknowledged batches
-- **Use `getUnackedRecords()` for inspection only**: Primarily for debugging or understanding failed records
-- Always close streams in a `finally` block to ensure proper cleanup
+Inspect unacked work yourself with `getUnackedRecords()` / `getUnackedBatches()`
+on the failed (but **not yet closed**) stream — useful for diagnostics, not
+required for recovery. Once `close()` returns, the Rust handle is gone and
+these methods error.
 
 ## API Reference
 
-### ZerobusSdk
-
-Main entry point for the SDK.
-
-**Constructor:**
+### `ZerobusSdk`
 
 ```typescript
-new ZerobusSdk(zerobusEndpoint: string, unityCatalogUrl: string)
+new ZerobusSdk(options: SdkOptions): ZerobusSdk
+
+interface SdkOptions {
+    endpoint: string;                    // Zerobus endpoint URL
+    unityCatalogUrl?: string;            // Required for OAuth, optional for custom headers
+    tls?: 'secure' | 'none';             // Default 'secure' (system CAs); 'none' for plaintext local servers
+    applicationName?: string;            // Appended to user-agent: '<sdk>/<ver> <applicationName>'
+    sdkIdentifier?: string;              // Overrides the default 'zerobus-sdk-ts/<ver>' prefix
+}
+
+// Open a JSON or protobuf stream.
+sdk.createStream(options: CreateStreamOptions): Promise<ZerobusStream>
+
+// Open an Arrow Flight stream (Beta).
+sdk.createArrowStream(options: CreateArrowStreamOptions): Promise<ZerobusArrowStream>
+
+// Replay unacked work on a fresh stream with the same config.
+sdk.recreateStream(stream: ZerobusStream): Promise<ZerobusStream>
+sdk.recreateArrowStream(stream: ZerobusArrowStream): Promise<ZerobusArrowStream>
 ```
 
-**Parameters:**
-- `zerobusEndpoint` (string) - The Zerobus gRPC endpoint (e.g., `https://<workspace-id>.zerobus.<region>.cloud.databricks.com` for AWS, or `https://<workspace-id>.zerobus.<region>.azuredatabricks.net` for Azure)
-- `unityCatalogUrl` (string) - The Unity Catalog endpoint (your workspace URL)
-
-**Methods:**
+### `CreateStreamOptions`
 
 ```typescript
-async createStream(
-    tableProperties: TableProperties,
-    clientId: string,
-    clientSecret: string,
-    options?: StreamConfigurationOptions
-): Promise<ZerobusStream>
+interface CreateStreamOptions {
+    table: string;            // Fully-qualified Unity Catalog table name
+    auth: Auth;               // See Authentication
+    format: GrpcFormat;       // { type: 'json' } | { type: 'proto', descriptor: string }
+    recovery?: boolean;                  // Default true
+    recoveryTimeoutMs?: number;          // Default 15000
+    recoveryBackoffMs?: number;          // Default 2000
+    recoveryRetries?: number;            // Default 4
+    serverLackOfAckTimeoutMs?: number;   // Default 60000
+    flushTimeoutMs?: number;             // Default 300000
+    maxInflightRequests?: number;        // Default 10000
+    streamPausedMaxWaitTimeMs?: number;
+}
+
+type GrpcFormat =
+    | { type: 'json' }
+    | { type: 'proto'; descriptor: string };  // base64-encoded DescriptorProto
 ```
 
-Creates a new ingestion stream using OAuth 2.0 Client Credentials authentication.
-
-Automatically includes these headers:
-- `"authorization": "Bearer <oauth_token>"` (fetched via OAuth 2.0 Client Credentials flow)
-- `"x-databricks-zerobus-table-name": "<table_name>"`
-
-Returns a `ZerobusStream` instance.
-
----
+### `CreateArrowStreamOptions`
 
 ```typescript
-async recreateStream(stream: ZerobusStream): Promise<ZerobusStream>
-```
+interface CreateArrowStreamOptions {
+    table: string;
+    auth: Auth;
+    schema: ArrowField[];                // Arrow schema; nullable defaults to true
+    compression?: 'none' | 'lz4_frame' | 'zstd';   // Default 'none' (zero-copy path)
+    recovery?: boolean;
+    recoveryTimeoutMs?: number;
+    recoveryBackoffMs?: number;
+    recoveryRetries?: number;
+    serverLackOfAckTimeoutMs?: number;
+    flushTimeoutMs?: number;
+    maxInflightBatches?: number;         // Default 1000
+    connectionTimeoutMs?: number;        // Default 30000
+    streamPausedMaxWaitTimeMs?: number;
+}
 
-Recreates a stream with the same configuration and automatically re-ingests all unacknowledged batches.
-
-This method is the **recommended approach** for recovering from stream failures. It:
-1. Retrieves all unacknowledged batches from the failed stream
-2. Creates a new stream with identical configuration (same table, auth, options)
-3. Re-ingests all unacknowledged batches in their original order
-4. Returns the new stream ready for continued ingestion
-
-**Parameters:**
-- `stream` - The failed or closed stream to recreate
-
-**Returns:** Promise resolving to a new `ZerobusStream` with all unacknowledged batches re-ingested
-
-**Example:**
-```typescript
-try {
-  await stream.ingestRecords(batch);
-} catch (error) {
-  await stream.close();
-  // Automatically recreate stream and recover all unacked batches
-  const newStream = await sdk.recreateStream(stream);
-  // Continue ingesting with newStream
+interface ArrowField {
+    name: string;
+    dataType: ArrowDataType;             // Boolean | Int8…64 | UInt8…64 | Float32/64 | Utf8 | LargeUtf8 | Binary | LargeBinary | Date32/64 | TimestampMicros/Nanos
+    nullable?: boolean;                  // Default true
 }
 ```
 
-**Note:** This method preserves batch structure and re-ingests batches atomically. For debugging, you can inspect what was recovered using `getUnackedBatches()` after closing the stream.
+### `Auth`
 
----
-
-### ZerobusStream
-
-Represents an active ingestion stream.
-
-**Methods:**
+Discriminated union with three arms:
 
 ```typescript
-async ingestRecordOffset(payload: Buffer | string | object): Promise<bigint>
+type Auth =
+    | { type: 'oauth';            clientId: string; clientSecret: string }
+    | { type: 'headersProvider';  getHeaders: () => Promise<Array<[string, string]>> }
+    | { type: 'noAuth' };
 ```
 
-**(Recommended)** Ingests a single record. The Promise resolves immediately after the record is queued (before server acknowledgment). Use `waitForOffset()` to wait for acknowledgment when needed.
+`'oauth'` runs the OAuth 2.0 Client Credentials flow against
+`unityCatalogUrl`. `'headersProvider'` calls your callback once at stream
+open — it must return at least `authorization` and
+`x-databricks-zerobus-table-name`. `'noAuth'` is for local-only servers /
+sidecar-proxy deployments.
+
+### `ZerobusStream`
 
 ```typescript
-// High-throughput pattern: send many, wait once
-const offset1 = await stream.ingestRecordOffset(record1);  // Resolves immediately
-const offset2 = await stream.ingestRecordOffset(record2);  // Resolves immediately
-await stream.waitForOffset(offset2);  // Waits for server to acknowledge all records up to offset2
-```
+class ZerobusStream {
+    ingestRecord(record: unknown): Promise<bigint>;
+    // record may be a Buffer (proto bytes), string (JSON), protobufjs message
+    // (auto-encoded), or plain object (auto-stringify'd).
 
----
+    ingestRecords(records: unknown[]): Promise<bigint | null>;
+    // Atomic batch. `null` for an empty array.
 
-```typescript
-async ingestRecordsOffset(payloads: Array<Buffer | string | object>): Promise<bigint | null>
-```
+    waitForOffset(offset: bigint): Promise<void>;
+    flush(): Promise<void>;
+    close(): Promise<void>;
 
-**(Recommended)** Ingests multiple records as a batch. The Promise resolves immediately after the batch is queued (before server acknowledgment). Returns `null` for empty batches.
-
----
-
-```typescript
-async waitForOffset(offsetId: bigint): Promise<void>
-```
-
-Waits for the server to acknowledge all records up to and including the specified offset ID.
-
----
-
-```typescript
-async ingestRecord(payload: Buffer | string | object): Promise<bigint>
-```
-
-**@deprecated** Use `ingestRecordOffset()` instead.
-
-Ingests a single record. Unlike `ingestRecordOffset()`, the Promise only resolves **after the server acknowledges** the record. This is slower for high-throughput scenarios.
-
-**Parameters:**
-- `payload` - Record data. The SDK supports 4 input types for flexibility:
-  - **JSON Mode** (`RecordType.Json`):
-    - **Type 1 - object** (high-level): Plain JavaScript object - SDK auto-stringifies with `JSON.stringify()`
-    - **Type 2 - string** (low-level): Pre-serialized JSON string
-  - **Protocol Buffers Mode** (`RecordType.Proto`):
-    - **Type 3 - Message** (high-level): Protobuf message object - SDK calls `.encode().finish()` automatically
-    - **Type 4 - Buffer** (low-level): Pre-serialized protobuf bytes
-
-**All 4 Type Examples:**
-```typescript
-// JSON Type 1: object (high-level) - SDK auto-stringifies
-await stream.ingestRecord({ device: 'sensor-1', temp: 25 });
-
-// JSON Type 2: string (low-level) - pre-serialized
-await stream.ingestRecord(JSON.stringify({ device: 'sensor-1', temp: 25 }));
-
-// Protobuf Type 3: Message object (high-level) - SDK auto-serializes
-const message = MyMessage.create({ device: 'sensor-1', temp: 25 });
-await stream.ingestRecord(message);
-
-// Protobuf Type 4: Buffer (low-level) - pre-serialized bytes
-const buffer = Buffer.from(MyMessage.encode(message).finish());
-await stream.ingestRecord(buffer);
-```
-
-**Note:** The SDK automatically detects protobufjs message objects by checking if the constructor has a static `.encode()` method. This works seamlessly with messages created via `MyMessage.create()` or `new MyMessage()`.
-
-**Returns:** Promise resolving to the offset ID when the server acknowledges the record
-
----
-
-```typescript
-async ingestRecords(payloads: Array<Buffer | string | object>): Promise<bigint | null>
-```
-
-**@deprecated** Use `ingestRecordsOffset()` instead.
-
-Ingests multiple records as a batch. Unlike `ingestRecordsOffset()`, the Promise only resolves **after the server acknowledges** the batch. This is slower for high-throughput scenarios.
-
-**Parameters:**
-- `payloads` - Array of record data. Supports the same 4 types as `ingestRecord()`:
-  - **JSON Mode**: Array of **objects** (Type 1) or **strings** (Type 2)
-  - **Proto Mode**: Array of **Message objects** (Type 3) or **Buffers** (Type 4)
-  - Mixed types within the same array are supported
-
-**All 4 Type Examples:**
-```typescript
-// JSON Type 1: objects (high-level) - SDK auto-stringifies
-await stream.ingestRecords([
-  { device: 'sensor-1', temp: 25 },
-  { device: 'sensor-2', temp: 26 }
-]);
-
-// JSON Type 2: strings (low-level) - pre-serialized
-await stream.ingestRecords([
-  JSON.stringify({ device: 'sensor-1', temp: 25 }),
-  JSON.stringify({ device: 'sensor-2', temp: 26 })
-]);
-
-// Protobuf Type 3: Message objects (high-level) - SDK auto-serializes
-await stream.ingestRecords([
-  MyMessage.create({ device: 'sensor-1', temp: 25 }),
-  MyMessage.create({ device: 'sensor-2', temp: 26 })
-]);
-
-// Protobuf Type 4: Buffers (low-level) - pre-serialized bytes
-const buffers = [
-  Buffer.from(MyMessage.encode(msg1).finish()),
-  Buffer.from(MyMessage.encode(msg2).finish())
-];
-await stream.ingestRecords(buffers);
-```
-
-**Returns:** Promise resolving to:
-- `bigint` - Offset ID when the server acknowledges the entire batch
-- `null` - If the batch was empty (no records sent)
-
-**Best Practices:**
-- Batch size: 100-1,000 records for optimal throughput/latency balance
-- Empty batches are allowed and return `null`
-
----
-
-```typescript
-async flush(): Promise<void>
-```
-
-Flushes all pending records and waits for acknowledgments.
-
-```typescript
-async close(): Promise<void>
-```
-
-Closes the stream gracefully, flushing all pending data. **Always call this in a finally block!**
-
-```typescript
-async getUnackedRecords(): Promise<Buffer[]>
-```
-
-Returns unacknowledged record payloads as a flat array for inspection purposes.
-
-**Important:** Can only be called on **closed streams**. Call `stream.close()` first, or this will throw an error.
-
-**Returns:** Array of Buffer containing the raw record payloads
-
-**Use case:** For inspecting unacknowledged individual records when using `ingestRecord()`. **Note:** This method is primarily for debugging and inspection. For recovery, use `recreateStream()` (recommended) or automatic recovery (default).
-
----
-
-```typescript
-async getUnackedBatches(): Promise<Buffer[][]>
-```
-
-Returns unacknowledged records grouped by their original batches for inspection purposes.
-
-**Important:** Can only be called on **closed streams**. Call `stream.close()` first, or this will throw an error.
-
-**Returns:** Array of arrays, where each inner array represents a batch of records as Buffers
-
-**Use case:** For inspecting unacknowledged batches when using `ingestRecords()`. Preserves the original batch structure. **Note:** This method is primarily for debugging and inspection. For recovery, use `recreateStream()` (recommended) or automatic recovery (default).
-
-**Example:**
-```typescript
-try {
-  await stream.ingestRecords(batch1);
-  await stream.ingestRecords(batch2);
-  // ... error occurs
-} catch (error) {
-  await stream.close();
-  const unackedBatches = await stream.getUnackedBatches();
-  // unackedBatches[0] contains records from batch1 (if not acked)
-  // unackedBatches[1] contains records from batch2 (if not acked)
-
-  // Re-ingest with new stream
-  for (const batch of unackedBatches) {
-    await newStream.ingestRecords(batch);
-  }
+    // Inspect unacked work on a failed-but-not-yet-closed stream. Prefer
+    // `sdk.recreateStream(...)` for actual recovery; this is for diagnostics.
+    // Errors after `close()` because the underlying handle is gone.
+    getUnackedRecords(): Promise<Buffer[]>;
+    getUnackedBatches(): Promise<Buffer[][]>;
 }
 ```
 
----
+Both `ingestRecord` and `ingestRecords` resolve **at queue time** (before
+server ack). Use `waitForOffset(offset)` to wait for acknowledgment.
 
-### TableProperties
-
-Configuration for the target table.
-
-**Interface:**
+### `ZerobusArrowStream` (Beta)
 
 ```typescript
-interface TableProperties {
-    tableName: string;              // Fully qualified table name (e.g., "catalog.schema.table")
-    descriptorProto?: string;       // Base64-encoded protobuf descriptor (required for Protocol Buffers)
+class ZerobusArrowStream {
+    ingestBatch(ipcBuffer: Buffer): Promise<bigint>;
+    // `ipcBuffer` is the output of `tableToIPC(table, 'stream')` from
+    // apache-arrow. When `compression: 'none'` the buffer is forwarded
+    // zero-copy; otherwise the SDK parses + re-encodes with the codec.
+
+    waitForOffset(offset: bigint): Promise<void>;
+    flush(): Promise<void>;
+    close(): Promise<void>;
+
+    get isClosed(): boolean;
+    get tableName(): string;
+
+    getUnackedBatches(): Promise<Buffer[]>;  // IPC-encoded
 }
 ```
 
-**Examples:**
+### Helpers
 
 ```typescript
-// JSON mode
-const tableProperties = { tableName: 'main.default.air_quality' };
+// Build a headers-provider callback from a (refreshable) bearer token.
+function bearerTokenProvider(
+    table: string,
+    getToken: () => string | Promise<string>,
+): () => Promise<Array<[string, string]>>;
 
-// Protocol Buffers mode
-const tableProperties = {
-    tableName: 'main.default.air_quality',
-    descriptorProto: descriptorBase64  // Required for protobuf
-};
-```
-
----
-
-### StreamConfigurationOptions
-
-Configuration options for stream behavior.
-
-**Interface:**
-
-```typescript
-interface StreamConfigurationOptions {
-    recordType?: RecordType;              // RecordType.Json or RecordType.Proto. Default: RecordType.Proto
-    maxInflightRequests?: number;         // Default: 10,000
-    recovery?: boolean;                   // Default: true
-    recoveryTimeoutMs?: number;           // Default: 15,000
-    recoveryBackoffMs?: number;           // Default: 2,000
-    recoveryRetries?: number;             // Default: 4
-    flushTimeoutMs?: number;              // Default: 300,000
-    serverLackOfAckTimeoutMs?: number;    // Default: 60,000
-    streamPausedMaxWaitTimeMs?: number;   // Default: undefined (wait for full server duration)
-}
-
-enum RecordType {
-    Json = 0,   // JSON encoding
-    Proto = 1   // Protocol Buffers encoding
-}
+// Plain `as const` object (not an `enum`) — usable as a value from JS.
+const ArrowDataType: { Boolean, Int8, …, TimestampNanos };
+// Record type for gRPC streams is selected via `format` (`{ type: 'json' }` or
+// `{ type: 'proto', descriptor }`) on `createStream`; no separate enum to import.
 ```
 
 ## Best Practices
 
-1. **Reuse SDK instances**: Create one `ZerobusSdk` instance per application
-2. **Stream lifecycle**: Always close streams in a `finally` block to ensure all records are flushed
-3. **Batch size**: Adjust `maxInflightRequests` based on your throughput requirements (default: 10,000)
-4. **Error handling**: The stream handles errors internally with automatic retry. Only use `recreateStream()` for persistent failures after internal retries are exhausted.
-5. **Use Protocol Buffers for production**: Protocol Buffers (the default) provides better performance and schema validation. Use JSON only when you need schema flexibility or for quick prototyping.
-6. **Store credentials securely**: Use environment variables, never hardcode credentials
-7. **Use batch ingestion**: For high-throughput scenarios, use `ingestRecordsOffset()` instead of individual `ingestRecordOffset()` calls
+1. **Reuse SDK instances**: one `ZerobusSdk` per process.
+2. **Close in `finally`**: always close streams to flush pending records.
+3. **Batch for throughput**: `ingestRecords` amortises the JS↔Rust crossing; aim for 100–1000 records per batch.
+4. **Wait once, not per record**: capture the last offset and call `waitForOffset` once at the end.
+5. **Don't catch transient errors**: the SDK retries them internally when `recovery: true` (default). Reserve catch / `recreateStream` for terminal failures.
+6. **Pick Arrow for columnar pipelines**: when you already have Arrow data, `createArrowStream` skips per-record encoding entirely.
+7. **Use `tls: 'none'` only for local / sidecar-proxy setups** — production traffic should always go through `'secure'`.
 
 ## Platform Support
 
@@ -1124,19 +952,31 @@ The SDK supports all platforms where Node.js and Rust are available.
 
 ### Pre-built Binaries
 
-Pre-built native binaries are available for:
+Pre-built native binaries are published for:
 
-- **Linux**: x64, ARM64
-- **Windows**: x64
+- **Linux**: x64 (`x86_64-unknown-linux-gnu`), ARM64 (`aarch64-unknown-linux-gnu`)
+- **macOS**: x64 / Intel (`x86_64-apple-darwin`), ARM64 / Apple Silicon (`aarch64-apple-darwin`)
+- **Windows**: x64 (`x86_64-pc-windows-msvc`)
+
+`npm install` resolves the correct platform package automatically via npm's
+`optionalDependencies` mechanism — only the binary matching your OS+arch is
+downloaded.
 
 ### Build from Source
 
-**macOS users**: Pre-built binaries are not available for macOS. The package will automatically build from source during `npm install`, which requires:
+You only need this if you're modifying the SDK or running on an unsupported
+platform. Requires:
 
-- **Rust toolchain** (1.70+): Install via `curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh`
-- **Xcode Command Line Tools**: Install via `xcode-select --install`
+- **Rust toolchain** (1.70+): `curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh`
+- **A C/C++ toolchain**: Xcode Command Line Tools on macOS (`xcode-select --install`); `build-essential` on Linux; MSVC on Windows.
 
-The build process happens automatically during installation and typically takes 2-3 minutes.
+Then from `typescript/`:
+
+```bash
+npm install
+npm run build              # release
+npm run build:debug        # debug (faster iteration)
+```
 
 ## Architecture
 
@@ -1164,6 +1004,67 @@ This SDK wraps the high-performance [Rust Zerobus SDK](https://github.com/databr
 - **Native async/await support** - Rust futures become JavaScript Promises
 - **Automatic memory management** - No manual cleanup required
 - **Type safety** - Compile-time checks on both sides
+
+## v2.0 Migration
+
+v2.0 is a breaking release. The biggest shifts:
+
+### `ZerobusSdk` constructor — options bag
+
+```typescript
+// v1.x
+const sdk = new ZerobusSdk(endpoint, unityCatalogUrl);
+
+// v2.0
+const sdk = new ZerobusSdk({
+    endpoint,
+    unityCatalogUrl,                    // optional with custom headers provider
+    tls: 'secure' | 'none',             // 'secure' is the default
+    applicationName: 'my-service/1.0',  // optional
+});
+```
+
+### `createStream` — options bag with discriminated unions
+
+```typescript
+// v1.x
+const stream = await sdk.createStream(
+    { tableName, descriptorProto },
+    clientId, clientSecret,
+    { recordType: RecordType.Json, ... },
+    headersProvider,
+);
+
+// v2.0
+const stream = await sdk.createStream({
+    table: 'catalog.schema.table',
+    auth:   { type: 'oauth', clientId, clientSecret },        // | 'headersProvider' | 'noAuth'
+    format: { type: 'json' },                                  // | 'proto' (+ descriptor)
+    recovery: true,
+    maxInflightRequests: 1000,
+});
+```
+
+### Arrow Flight has its own factory
+
+```typescript
+const arrow = await sdk.createArrowStream({
+    table, auth,
+    schema: [{ name: 'id', dataType: ArrowDataType.Int64 }, ...],
+    compression: 'zstd', // 'none' (default) keeps the SDK on the zero-copy path
+});
+```
+
+### Other changes
+
+- **`ingestRecord` / `ingestRecords` now resolve at queue time** (not server ack). v1.x had a deprecated blocking variant; it was removed. Use `waitForOffset` to wait for acknowledgment.
+- **`recordType` is inferred from `format`** — no longer specified separately.
+- **SDK identity** is now sent in the `user-agent` HTTP header
+  (`zerobus-sdk-ts/<version>`). The `x-zerobus-sdk` gRPC metadata header
+  (used by v1.x via the Rust SDK's default headers provider) is no longer
+  emitted. Override via `sdkIdentifier`; append via `applicationName`.
+- **Compression is a string** (`'none' | 'lz4_frame' | 'zstd'`) on Arrow streams instead of the v1.x numeric `IpcCompressionType` enum.
+- `RecordType` and `ArrowDataType` are now plain `as const` objects (not `const enum`) so they survive `--isolatedModules`.
 
 ## Community and Contributing
 

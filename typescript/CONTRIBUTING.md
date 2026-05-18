@@ -9,7 +9,7 @@ This document covers TypeScript-specific development setup and workflow.
 ### Prerequisites
 
 - Git
-- Node.js >= 16 - [Download Node.js](https://nodejs.org/)
+- Node.js >= 20 - [Download Node.js](https://nodejs.org/)
 - Rust toolchain (1.70+) - [Install Rust](https://rustup.rs/)
 
 ### Setting Up Your Development Environment
@@ -17,7 +17,7 @@ This document covers TypeScript-specific development setup and workflow.
 1. **Clone the repository:**
    ```bash
    git clone https://github.com/databricks/zerobus-sdk.git
-   cd zerobus-sdk/ts
+   cd zerobus-sdk/typescript
    ```
 
 2. **Install dependencies:**
@@ -102,4 +102,4 @@ Follow standard TypeScript conventions:
 All pull requests must pass CI checks:
 
 - **build**: Cross-platform builds for Linux (x86_64, aarch64) and Windows (x64)
-- **test**: Unit tests on Node.js 16, 18, and 20 across Linux and Windows runners
+- **test**: Unit tests on Node.js 20 and 22 (Linux) and Node.js 20 (Windows)

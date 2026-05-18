@@ -80,11 +80,19 @@ jobs:
         run: Add-Content -Path Cargo.toml -Value "`n[patch.crates-io]`ndatabricks-zerobus-ingest-sdk = { path = `"../rust/sdk`" }`n"
         shell: powershell
 
+      # `npm install` (not `ci`) tolerates the fact that v2.0 references
+      # 5 platform-sub-package optionalDependencies at a version that
+      # doesn't exist on the registry until publish (standard napi-rs
+      # chicken-and-egg). `npm ci`'s strict lockfile validation rejects
+      # the gap; `npm install` skips the missing optionals silently. CI
+      # builds its own `.node`, so it doesn't need the prebuilts.
       - name: Install dependencies
-        run: npm ci
+        run: npm install --no-audit --no-fund
 
-      - name: Build
-        run: npm run build -- --target ${{ matrix.target }}
+      # Build only the napi `.node` here so `--target` reaches napi-cli.
+      # The TS facade is platform-agnostic and is built once in the test job.
+      - name: Build native binding
+        run: npm run build:napi -- --target ${{ matrix.target }}
         env:
           CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: aarch64-linux-gnu-gcc
 
@@ -98,19 +106,17 @@ jobs:
   test:
     name: Test Node.js ${{ matrix.node }} - ${{ matrix.os }}
     runs-on: ${{ matrix.runner }}
+    # `engines.node` is >= 20 since v2.0 (Node 18 went EOL April 2025).
     strategy:
       fail-fast: false
       matrix:
         include:
           - os: linux-ubuntu-latest
             runner: { group: databricks-protected-runner-group, labels: linux-ubuntu-latest }
-            node: '16'
-          - os: linux-ubuntu-latest
-            runner: { group: databricks-protected-runner-group, labels: linux-ubuntu-latest }
-            node: '18'
-          - os: linux-ubuntu-latest
-            runner: { group: databricks-protected-runner-group, labels: linux-ubuntu-latest }
             node: '20'
+          - os: linux-ubuntu-latest
+            runner: { group: databricks-protected-runner-group, labels: linux-ubuntu-latest }
+            node: '22'
           - os: windows-server-latest
             runner: { group: databricks-protected-runner-group, labels: windows-server-latest }
             node: '20'
@@ -151,7 +157,8 @@ jobs:
         shell: powershell
 
       - name: Install dependencies
-        run: npm ci
+        # See the Build job for the `npm install` rationale.
+        run: npm install --no-audit --no-fund
 
       - name: Build
         run: npm run build:debug

@@ -1,9 +1,9 @@
 {
   "name": "@databricks/zerobus-ingest-sdk",
-  "version": "1.0.2",
+  "version": "2.0.0",
   "description": "TypeScript/Node.js SDK for streaming data ingestion into Databricks Delta tables using Zerobus",
-  "main": "index.js",
-  "types": "index.d.ts",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
   "keywords": [
     "databricks",
     "delta",
@@ -19,17 +19,14 @@
   },
   "license": "Apache-2.0",
   "files": [
+    "dist/",
     "index.js",
     "index.d.ts",
     "README.md",
     "LICENSE",
     "NOTICE",
-    "src/",
     "utils/",
-    "schemas/",
-    "Cargo.toml",
-    "Cargo.lock",
-    "build.rs"
+    "schemas/"
   ],
   "napi": {
     "name": "zerobus-ingest-sdk",
@@ -45,14 +42,15 @@
     }
   },
   "engines": {
-    "node": ">= 16"
+    "node": ">= 20"
   },
   "scripts": {
     "artifacts": "napi artifacts",
-    "build": "napi build --platform --release",
-    "build:arrow": "napi build --platform --release --features arrow-flight",
-    "build:debug": "napi build --platform",
-    "build:debug:arrow": "napi build --platform --features arrow-flight",
+    "build:napi": "napi build --platform --release --features arrow-flight",
+    "build:napi:debug": "napi build --platform --features arrow-flight",
+    "build:ts": "tsc -p tsconfig.build.json",
+    "build": "npm run build:napi && npm run build:ts",
+    "build:debug": "npm run build:napi:debug && npm run build:ts",
     "build:proto": "mkdir -p examples/generated && pbjs -t static-module -w commonjs -o examples/generated/air_quality.js schemas/air_quality.proto && pbts -o examples/generated/air_quality.d.ts examples/generated/air_quality.js && protoc --descriptor_set_out=schemas/air_quality_descriptor.pb --include_imports schemas/air_quality.proto",
     "test": "tsx --test test/unit.test.ts test/integration.test.ts",
     "test:unit": "tsx --test test/unit.test.ts",
@@ -67,13 +65,15 @@
     "example:arrow:batch": "tsx examples/arrow/batch.ts"
   },
   "optionalDependencies": {
-    "@databricks/zerobus-ingest-sdk-linux-x64-gnu": "1.0.2",
-    "@databricks/zerobus-ingest-sdk-linux-arm64-gnu": "1.0.2",
-    "@databricks/zerobus-ingest-sdk-win32-x64-msvc": "1.0.2"
+    "@databricks/zerobus-ingest-sdk-linux-x64-gnu": "2.0.0",
+    "@databricks/zerobus-ingest-sdk-linux-arm64-gnu": "2.0.0",
+    "@databricks/zerobus-ingest-sdk-win32-x64-msvc": "2.0.0",
+    "@databricks/zerobus-ingest-sdk-darwin-x64": "2.0.0",
+    "@databricks/zerobus-ingest-sdk-darwin-arm64": "2.0.0"
   },
   "peerDependencies": {
-    "protobufjs": "^7.0.0",
-    "apache-arrow": "^56.0.0"
+    "protobufjs": "^7.0.0 || ^8.0.0",
+    "apache-arrow": "^21.0.0"
   },
   "peerDependenciesMeta": {
     "protobufjs": {
@@ -84,16 +84,18 @@
     }
   },
   "devDependencies": {
-    "@napi-rs/cli": "^2.18.0",
-    "@types/node": "^20.0.0",
-    "apache-arrow": "^18.1.0",
-    "dotenv": "^17.2.3",
-    "protobufjs": "^7.5.4",
-    "protobufjs-cli": "^2.0.0",
+    "@napi-rs/cli": "^2.18.4",
+    "@types/node": "^22.0.0",
+    "apache-arrow": "^21.0.0",
+    "dotenv": "^17.4.2",
+    "protobufjs": "^8.0.3",
+    "protobufjs-cli": "^2.0.3",
     "tsx": "^4.21.0",
-    "typescript": "^5.3.0"
+    "typescript": "^5.6.0"
   },
   "overrides": {
-    "glob": "^10.0.0"
+    "glob": "^10.0.0",
+    "minimatch": "^9.0.7",
+    "lodash": "^4.18.0"
   }
 }

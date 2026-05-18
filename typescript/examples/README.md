@@ -1,202 +1,106 @@
 # Zerobus TypeScript SDK Examples
 
-This directory contains examples demonstrating how to use the Zerobus TypeScript SDK to ingest data into Databricks Delta tables.
+Runnable examples for the **v2.0** API. They cover all three serialization
+formats and exercise the production-shaped happy path: open a stream, queue
+records, wait for server acknowledgment, close.
 
-## Table of Contents
+| Path | What it demonstrates |
+|------|----------------------|
+| `json/single.ts`  | Queue records one at a time with `ingestRecord`. |
+| `json/batch.ts`   | Queue many records atomically with `ingestRecords`. |
+| `proto/single.ts` | Protobuf-encoded ingestion using a `protobufjs` message. |
+| `proto/batch.ts`  | Protobuf batch ingestion. |
+| `arrow/single.ts` | Arrow Flight (Beta) — zero-copy IPC ingest. |
+| `arrow/batch.ts`  | Arrow Flight with `zstd` compression. |
 
-- [Overview](#overview)
-- [JSON Examples](json/README.md)
-- [Protocol Buffers Examples](proto/README.md)
-- [Arrow Flight Examples](arrow/README.md) (Experimental)
-- [Prerequisites](#prerequisites)
-- [Common Code Patterns](#common-code-patterns)
-- [API Styles](#api-styles)
-- [Single-Record vs Batch Ingestion](#single-record-vs-batch-ingestion)
-- [Choosing a Format](#choosing-a-format)
+All examples share `_config.ts`, which reads environment variables and
+builds the `SdkOptions` and `auth` object. The same example can target a
+real Databricks workspace or a local test server depending on the env.
 
-## Overview
-
-The SDK supports three serialization formats and two ingestion methods:
-
-**Serialization Formats:**
-- **[JSON](json/README.md)** - Simpler, no schema generation required. Great for getting started.
-- **[Protocol Buffers](proto/README.md)** - Type-safe with compile-time validation. Better for production.
-- **[Arrow Flight](arrow/README.md)** - High-performance columnar format for analytics. **(Experimental/Unsupported)**
-
-**Ingestion Methods:**
-- **Single-record** (`ingestRecordOffset`) - Ingest records one at a time
-- **Batch** (`ingestRecordsOffset`) - Ingest multiple records at once with all-or-nothing semantics
-
-**Available Examples:**
-
-| Example | Format | Method | Script |
-|---------|--------|--------|--------|
-| [JSON Single](json/README.md#single-record-example) | JSON | Single-record | `npm run example:json:single` |
-| [JSON Batch](json/README.md#batch-example) | JSON | Batch | `npm run example:json:batch` |
-| [Proto Single](proto/README.md#single-record-example) | Protocol Buffers | Single-record | `npm run example:proto:single` |
-| [Proto Batch](proto/README.md#batch-example) | Protocol Buffers | Batch | `npm run example:proto:batch` |
-| [Arrow Single](arrow/README.md#single-record-example) | Arrow Flight | Single-batch | `npm run example:arrow:single` |
-| [Arrow Batch](arrow/README.md#batch-example) | Arrow Flight | Multi-row batch | `npm run example:arrow:batch` |
-
-## Prerequisites
-
-### 1. Create a Databricks Table
-
-Create a table in your Databricks workspace:
-
-```sql
-CREATE TABLE catalog.schema.air_quality (
-  device_name STRING,
-  temp INT,
-  humidity BIGINT
-);
-```
-
-### 2. Set Up OAuth Service Principal
-
-1. In your Databricks workspace, go to **Settings** > **Identity and Access**
-2. Create a service principal or use an existing one
-3. Generate OAuth credentials (client ID and secret)
-4. Grant the service principal these permissions on your table:
-   - `SELECT` - Read table schema
-   - `MODIFY` - Write data to the table
-   - `USE CATALOG` and `USE SCHEMA` - Access catalog and schema
-
-### 3. Configure Environment Variables
-
-Set the following environment variables:
+## Running against a Databricks workspace
 
 ```bash
-export ZEROBUS_SERVER_ENDPOINT="https://workspace-id.zerobus.region.cloud.databricks.com"
-export DATABRICKS_WORKSPACE_URL="https://your-workspace.cloud.databricks.com"
-export ZEROBUS_TABLE_NAME="catalog.schema.air_quality"
-export DATABRICKS_CLIENT_ID="your-client-id"
-export DATABRICKS_CLIENT_SECRET="your-client-secret"
+export ZEROBUS_ENDPOINT='https://<workspace>.zerobus.<region>.cloud.databricks.com'
+export DATABRICKS_WORKSPACE_URL='https://<workspace>.cloud.databricks.com'
+export DATABRICKS_CLIENT_ID='<client id>'
+export DATABRICKS_CLIENT_SECRET='<client secret>'
+export ZEROBUS_TABLE_NAME='catalog.schema.air_quality'
+
+npm install
+npm run build:debug          # builds napi + facade (Arrow Flight included)
+npm run build:proto          # only needed for the proto examples
+
+npm run example:json:single
+npm run example:json:batch
+npm run example:proto:single
+npm run example:proto:batch
+npm run example:arrow:single
+npm run example:arrow:batch
 ```
 
-## Common Code Patterns
+## Running against a local test server
 
-All examples follow the same general flow:
+```bash
+export ZEROBUS_ENDPOINT='http://[::1]:50051'
+export ZEROBUS_TLS=none
+export ZEROBUS_NO_AUTH=1
+export ZEROBUS_TABLE_NAME='test_data/test_table'
 
-### 1. Initialize SDK
-
-```typescript
-const sdk = new ZerobusSdk(SERVER_ENDPOINT, DATABRICKS_WORKSPACE_URL);
+npm run example:json:single
+# ... etc
 ```
 
-### 2. Configure Table Properties
+The `_config.ts` helper supplies the canonical headers the wire protocol
+requires (with a placeholder token) when `ZEROBUS_NO_AUTH=1`.
 
-**JSON:**
-```typescript
-const tableProperties: TableProperties = {
-    tableName: TABLE_NAME
-    // No descriptor needed for JSON
-};
-```
+## Schema
 
-**Protocol Buffers:**
-```typescript
-const descriptorBase64 = loadDescriptorProto({ ... });
-const tableProperties: TableProperties = {
-    tableName: TABLE_NAME,
-    descriptorProto: descriptorBase64
-};
-```
+All examples target the `air_quality` schema:
 
-### 3. Configure Stream Options
-
-```typescript
-const options: StreamConfigurationOptions = {
-    recordType: RecordType.Json,  // or RecordType.Proto
-    maxInflightRequests: 100,
-    recovery: true
-};
-```
-
-### 4. Create Stream
-
-```typescript
-const stream = await sdk.createStream(
-    tableProperties,
-    CLIENT_ID,
-    CLIENT_SECRET,
-    options
-);
-```
-
-### 5. Ingest and Acknowledge
-
-```typescript
-const offset = await stream.ingestRecordOffset(data);
-await stream.waitForOffset(offset);
-```
-
-### 6. Close Stream
-
-```typescript
-await stream.close();
-```
-
-## API Styles
-
-The SDK provides two API styles for ingestion:
-
-| Style | Method | Returns | Promise resolves |
-|-------|--------|---------|------------------|
-| **Offset-based** (Recommended) | `ingestRecordOffset()` | `Promise<bigint>` | Immediately after queuing (before server ack) |
-| **Future-based** (Deprecated) | `ingestRecord()` | `Promise<bigint>` | After server acknowledgment |
-
-Both methods return `Promise<bigint>`, but the key difference is **when** the promise resolves:
-
-**Offset-based (Recommended):**
-```typescript
-// Promise resolves immediately with offset (doesn't wait for server ack)
-const offset = await stream.ingestRecordOffset(data);
-// Do other work, then wait for acknowledgment when needed
-await stream.waitForOffset(offset);
-```
-
-**Future-based (Deprecated):**
-```typescript
-// Promise blocks until server acknowledges - slower for high-throughput
-const offset = await stream.ingestRecord(data);
-```
-
-## Single-Record vs Batch Ingestion
-
-| Aspect | Single-Record | Batch |
-|--------|---------------|-------|
-| **Method** | `ingestRecordOffset()` | `ingestRecordsOffset()` |
-| **Use case** | Records arrive one at a time | Multiple records ready at once |
-| **Semantics** | Each record independent | All-or-nothing (atomic) |
-| **Acknowledgment** | Per record | Per batch |
-| **Throughput** | Lower | Higher |
-
-**Single-record:**
-```typescript
-for (const record of records) {
-    const offset = await stream.ingestRecordOffset(record);
-}
-await stream.flush();
-```
-
-**Batch:**
-```typescript
-const offset = await stream.ingestRecordsOffset(records);
-if (offset !== null) {
-    await stream.waitForOffset(offset);
+```protobuf
+message AirQuality {
+    optional string device_name = 1;
+    optional int32  temp        = 2;
+    optional int64  humidity    = 3;
 }
 ```
 
-## Choosing a Format
+For Arrow examples the equivalent schema is declared with explicit nullable
+fields so the IPC payload validates against the Delta target.
 
-| Feature | JSON | Protocol Buffers | Arrow Flight |
-|---------|------|------------------|--------------|
-| **Setup** | Simple - no schema files | Schema files required | Schema in code |
-| **Type Safety** | Runtime validation | Compile-time validation | Runtime validation |
-| **Performance** | Text-based | Efficient binary encoding | High-performance columnar |
-| **Flexibility** | Easy to modify | Schema changes require regeneration | Dynamic schema |
-| **Best For** | Prototyping, simple use cases | Production, high-throughput | Analytics, data science |
-| **Status** | Stable | Stable | Experimental/Unsupported |
+## Ingestion patterns
 
-**Recommendation:** Start with JSON for quick prototyping, then migrate to Protocol Buffers for production row-oriented workloads. Use Arrow Flight (when stable) for analytics and columnar workloads.
+The v2.0 API exposes one queue-time API per cardinality:
+
+| Method | Returns | Resolves at |
+|--------|---------|-------------|
+| `stream.ingestRecord(record)`     | `Promise<bigint>`        | Record is in the SDK's landing zone. |
+| `stream.ingestRecords(records)`   | `Promise<bigint \| null>`| Batch is in the landing zone; `null` for an empty batch. |
+| `stream.waitForOffset(offset)`    | `Promise<void>`          | Server has acked through that offset. |
+| `stream.flush()`                  | `Promise<void>`          | All currently-queued records have been acked. |
+| `stream.close()`                  | `Promise<void>`          | Graceful shutdown. |
+
+The v1.x deprecated blocking-on-ack variants of `ingestRecord` /
+`ingestRecords` are gone. Use `waitForOffset` to wait for acknowledgment.
+
+## Authentication
+
+`createStream` and `createArrowStream` take an `auth` field — a discriminated
+union with three arms:
+
+```typescript
+auth: { type: 'oauth', clientId, clientSecret }
+
+auth: {
+    type: 'headersProvider',
+    getHeaders: async () => [
+        ['authorization', `Bearer ${myToken}`],
+        ['x-databricks-zerobus-table-name', 'catalog.schema.table'],
+    ],
+}
+
+auth: { type: 'noAuth' }   // local-only / sidecar-proxy
+```
+
+The helper `bearerTokenProvider(table, getToken)` produces a
+`headersProvider`-shaped callback for the common bearer-token case.
