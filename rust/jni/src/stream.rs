@@ -12,69 +12,14 @@ use databricks_zerobus_ingest_sdk::{EncodedBatch, EncodedRecord};
 use jni::objects::{JByteArray, JClass, JList, JObject, JValue};
 use jni::sys::{jboolean, jlong, JNI_FALSE, JNI_TRUE};
 use jni::JNIEnv;
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
-use tokio::sync::{Mutex, Notify};
-
-/// Tracks the number of in-flight `*NoWait` ingestion tasks for a stream.
-///
-/// Increments happen synchronously on the JNI thread *before* the task is spawned; the
-/// decrement runs when the task completes. This lets `flush`/`close`/`waitForOffset` and
-/// the offset-returning ingest paths await `wait_drained()` so they observe records that
-/// were submitted via earlier no-wait calls.
-pub struct PendingTracker {
-    count: AtomicUsize,
-    notify: Notify,
-}
-
-impl PendingTracker {
-    fn new() -> Self {
-        Self {
-            count: AtomicUsize::new(0),
-            notify: Notify::new(),
-        }
-    }
-
-    fn begin(self: &Arc<Self>) -> PendingGuard {
-        self.count.fetch_add(1, Ordering::SeqCst);
-        PendingGuard(self.clone())
-    }
-
-    /// Wait until all currently-pending no-wait tasks have finished.
-    ///
-    /// Tasks that begin after this call started are not awaited — callers hold the
-    /// JNI thread, so no new no-wait calls can race in from the same Java thread.
-    pub async fn wait_drained(&self) {
-        loop {
-            // Register interest BEFORE checking the count to avoid missing a wake.
-            let wait = self.notify.notified();
-            tokio::pin!(wait);
-            wait.as_mut().enable();
-            if self.count.load(Ordering::SeqCst) == 0 {
-                return;
-            }
-            wait.await;
-        }
-    }
-}
-
-/// RAII guard that decrements the pending counter when dropped.
-pub struct PendingGuard(Arc<PendingTracker>);
-
-impl Drop for PendingGuard {
-    fn drop(&mut self) {
-        if self.0.count.fetch_sub(1, Ordering::SeqCst) == 1 {
-            self.0.notify.notify_waiters();
-        }
-    }
-}
+use tokio::sync::Mutex;
 
 /// Native stream handle stored in Java.
 pub struct NativeStreamHandle {
     pub stream: Arc<Mutex<Option<ZerobusStream>>>,
     pub client_id: String,
     pub client_secret: String,
-    pub pending_no_wait: Arc<PendingTracker>,
 }
 
 impl NativeStreamHandle {
@@ -83,7 +28,6 @@ impl NativeStreamHandle {
             stream: Arc::new(Mutex::new(Some(stream))),
             client_id,
             client_secret,
-            pending_no_wait: Arc::new(PendingTracker::new()),
         }
     }
 
@@ -170,7 +114,6 @@ pub extern "system" fn Java_com_databricks_zerobus_BaseZerobusStream_nativeInges
     // Get stream handle
     let stream_handle = unsafe { NativeStreamHandle::borrow_from_raw(handle) };
     let stream_arc = stream_handle.stream.clone();
-    let pending = stream_handle.pending_no_wait.clone();
 
     // Create the encoded record
     let record = if is_json != JNI_FALSE {
@@ -188,7 +131,6 @@ pub extern "system" fn Java_com_databricks_zerobus_BaseZerobusStream_nativeInges
 
     // Spawn async operation
     spawn_and_complete_void(future_ref, async move {
-        pending.wait_drained().await;
         let guard = stream_arc.lock().await;
         let stream = guard.as_ref().ok_or_else(|| {
             databricks_zerobus_ingest_sdk::ZerobusError::InvalidStateError(
@@ -208,9 +150,6 @@ pub extern "system" fn Java_com_databricks_zerobus_BaseZerobusStream_nativeInges
 ///
 /// This call returns to Java as soon as the task is queued on the tokio runtime;
 /// enqueueing into the SDK and backpressure happen on the runtime thread pool.
-/// Subsequent `flush` / `close` / `waitForOffset` / offset-returning ingest calls
-/// await the no-wait task's completion via [`PendingTracker::wait_drained`], so a
-/// no-wait record is always observable to those operations.
 ///
 /// # JNI Signature
 /// ```java
@@ -250,17 +189,13 @@ pub extern "system" fn Java_com_databricks_zerobus_BaseZerobusStream_nativeInges
         EncodedRecord::Proto(bytes)
     };
 
-    // Increment SYNCHRONOUSLY so any subsequent flush/close/offset call from this Java
-    // thread observes the pending task. The guard decrements when the task drops it.
-    let guard = stream_handle.pending_no_wait.begin();
     let stream_arc = stream_handle.stream.clone();
 
     spawn(async move {
-        let _guard = guard; // decrement on task completion (including panic)
         let stream_guard = stream_arc.lock().await;
         if let Some(stream) = stream_guard.as_ref() {
-            // Errors after enqueue (e.g., stream failed during ack) are unobservable
-            // by design — the caller asked for no-wait semantics.
+            // Background ingestion errors are unobservable by design; the caller
+            // asked for no-wait semantics.
             let _ = stream.ingest_record_offset(record).await;
         }
     });
@@ -343,11 +278,9 @@ pub extern "system" fn Java_com_databricks_zerobus_BaseZerobusStream_nativeInges
     }
 
     let stream_handle = unsafe { NativeStreamHandle::borrow_from_raw(handle) };
-    let guard = stream_handle.pending_no_wait.begin();
     let stream_arc = stream_handle.stream.clone();
 
     spawn(async move {
-        let _guard = guard;
         let stream_guard = stream_arc.lock().await;
         if let Some(stream) = stream_guard.as_ref() {
             let _ = stream.ingest_records_offset(records).await;
@@ -397,10 +330,8 @@ pub extern "system" fn Java_com_databricks_zerobus_BaseZerobusStream_nativeInges
         EncodedRecord::Proto(bytes)
     };
 
-    // Block on the async operation. Drain any in-flight no-wait tasks first so the
-    // offset returned here is strictly after any previously-submitted no-wait records.
+    // Block on the async operation
     let result = block_on(async {
-        stream_handle.pending_no_wait.wait_drained().await;
         let guard = stream_handle.stream.lock().await;
         let stream = guard.as_ref().ok_or_else(|| {
             databricks_zerobus_ingest_sdk::ZerobusError::InvalidStateError(
@@ -498,9 +429,8 @@ pub extern "system" fn Java_com_databricks_zerobus_BaseZerobusStream_nativeInges
     // Get stream handle
     let stream_handle = unsafe { NativeStreamHandle::borrow_from_raw(handle) };
 
-    // Block on the async operation. Drain in-flight no-wait tasks first.
+    // Block on the async operation
     let result = block_on(async {
-        stream_handle.pending_no_wait.wait_drained().await;
         let guard = stream_handle.stream.lock().await;
         let stream = guard.as_ref().ok_or_else(|| {
             databricks_zerobus_ingest_sdk::ZerobusError::InvalidStateError(
@@ -537,10 +467,8 @@ pub extern "system" fn Java_com_databricks_zerobus_BaseZerobusStream_nativeWaitF
     // Get stream handle
     let stream_handle = unsafe { NativeStreamHandle::borrow_from_raw(handle) };
 
-    // Block on the async operation. Drain in-flight no-wait tasks first so the
-    // target offset includes (or post-dates) any previously-submitted no-wait records.
+    // Block on the async operation
     let result = block_on(async {
-        stream_handle.pending_no_wait.wait_drained().await;
         let guard = stream_handle.stream.lock().await;
         let stream = guard.as_ref().ok_or_else(|| {
             databricks_zerobus_ingest_sdk::ZerobusError::InvalidStateError(
@@ -571,10 +499,8 @@ pub extern "system" fn Java_com_databricks_zerobus_BaseZerobusStream_nativeFlush
     // Get stream handle
     let stream_handle = unsafe { NativeStreamHandle::borrow_from_raw(handle) };
 
-    // Block on the async operation. Drain in-flight no-wait tasks first so flush
-    // observes every record submitted via no-wait calls before this one.
+    // Block on the async operation
     let result = block_on(async {
-        stream_handle.pending_no_wait.wait_drained().await;
         let guard = stream_handle.stream.lock().await;
         let stream = guard.as_ref().ok_or_else(|| {
             databricks_zerobus_ingest_sdk::ZerobusError::InvalidStateError(
@@ -605,10 +531,8 @@ pub extern "system" fn Java_com_databricks_zerobus_BaseZerobusStream_nativeClose
     // Get stream handle
     let stream_handle = unsafe { NativeStreamHandle::borrow_from_raw(handle) };
 
-    // Block on the async operation. Drain in-flight no-wait tasks first so close
-    // observes every record that was submitted via no-wait calls before this one.
+    // Block on the async operation
     let result = block_on(async {
-        stream_handle.pending_no_wait.wait_drained().await;
         let mut guard = stream_handle.stream.lock().await;
         if let Some(mut stream) = guard.take() {
             stream.close().await?;

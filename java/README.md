@@ -916,7 +916,7 @@ Ingests a Protocol Buffer message and returns the offset immediately.
 ```java
 <T extends Message> void ingestRecordNoWait(T record) throws ZerobusException
 ```
-Queues a protobuf message without returning an offset or waiting for acknowledgment.
+Hands a protobuf message to the native runtime without returning an offset or waiting for acknowledgment.
 
 ```java
 long ingestRecordOffset(byte[] encodedBytes) throws ZerobusException
@@ -926,7 +926,7 @@ Ingests pre-encoded bytes and returns the offset immediately.
 ```java
 void ingestRecordNoWait(byte[] encodedBytes) throws ZerobusException
 ```
-Queues pre-encoded bytes without returning an offset or waiting for acknowledgment.
+Hands pre-encoded bytes to the native runtime without returning an offset or waiting for acknowledgment.
 
 **Batch Methods:**
 
@@ -938,7 +938,7 @@ Ingests multiple messages and returns the batch offset.
 ```java
 <T extends Message> void ingestRecordsNoWait(Iterable<T> records) throws ZerobusException
 ```
-Queues multiple messages without returning an offset or waiting for acknowledgment.
+Hands multiple messages to the native runtime without returning an offset or waiting for acknowledgment.
 
 ```java
 Optional<Long> ingestRecordsOffset(List<byte[]> encodedRecords) throws ZerobusException
@@ -948,7 +948,7 @@ Ingests multiple pre-encoded byte arrays and returns the batch offset.
 ```java
 void ingestRecordsNoWait(List<byte[]> encodedRecords) throws ZerobusException
 ```
-Queues multiple pre-encoded byte arrays without returning an offset or waiting for acknowledgment.
+Hands multiple pre-encoded byte arrays to the native runtime without returning an offset or waiting for acknowledgment.
 
 **Recovery Methods:**
 
@@ -985,7 +985,7 @@ Ingests an object serialized to JSON and returns the offset immediately.
 ```java
 <T> void ingestRecordNoWait(T object, JsonSerializer<T> serializer) throws ZerobusException
 ```
-Queues an object serialized to JSON without returning an offset or waiting for acknowledgment.
+Hands an object serialized to JSON to the native runtime without returning an offset or waiting for acknowledgment.
 
 ```java
 long ingestRecordOffset(String json) throws ZerobusException
@@ -995,7 +995,7 @@ Ingests a JSON string and returns the offset immediately.
 ```java
 void ingestRecordNoWait(String json) throws ZerobusException
 ```
-Queues a JSON string without returning an offset or waiting for acknowledgment.
+Hands a JSON string to the native runtime without returning an offset or waiting for acknowledgment.
 
 **Batch Methods:**
 
@@ -1007,7 +1007,7 @@ Ingests multiple objects as JSON and returns the batch offset.
 ```java
 <T> void ingestRecordsNoWait(Iterable<T> objects, JsonSerializer<T> serializer) throws ZerobusException
 ```
-Queues multiple objects as JSON without returning an offset or waiting for acknowledgment.
+Hands multiple objects as JSON to the native runtime without returning an offset or waiting for acknowledgment.
 
 ```java
 Optional<Long> ingestRecordsOffset(Iterable<String> jsonStrings) throws ZerobusException
@@ -1017,7 +1017,14 @@ Ingests multiple JSON strings and returns the batch offset.
 ```java
 void ingestRecordsNoWait(Iterable<String> jsonStrings) throws ZerobusException
 ```
-Queues multiple JSON strings without returning an offset or waiting for acknowledgment.
+Hands multiple JSON strings to the native runtime without returning an offset or waiting for acknowledgment.
+
+**No-wait semantics:** no-wait methods return after synchronous validation and hand-off to a
+native background task. They do not wait for local enqueue, native backpressure, offset assignment,
+or server acknowledgment. Background ingestion errors are intentionally not surfaced to the caller,
+and no ordering is guaranteed relative to later offset-returning, `flush()`, `close()`, or
+`waitForOffset()` calls. Use `ingestRecordOffset()` / `ingestRecordsOffset()` when the caller needs
+an offset or deterministic inclusion in a later wait.
 
 **Recovery Methods:**
 
@@ -1269,7 +1276,7 @@ Called when an error occurs for records at or after `offsetId`.
 
 1. **Reuse SDK instances**: Create one `ZerobusSdk` instance per application
 2. **Stream lifecycle**: Always close streams in a `finally` block or use try-with-resources
-3. **Use no-wait ingestion when per-record offsets are unnecessary**: `ingestRecordNoWait()` applies normal native backpressure but does not return an offset; call `flush()` or `close()` before shutdown when durability matters
+3. **Use no-wait ingestion when per-record offsets are unnecessary**: `ingestRecordNoWait()` returns after handing the payload to a native background task; it does not wait for local enqueue, offset assignment, or acknowledgment, and background ingestion errors are not surfaced to the caller
 4. **Use offset-based API for tracked ingestion**: `ingestRecordOffset()` avoids `CompletableFuture` overhead while still letting you wait on specific offsets
 5. **Batch records when possible**: Use `ingestRecordsOffset()` for multiple records
 6. **Configure `maxInflightRecords`**: Adjust based on your throughput and memory requirements

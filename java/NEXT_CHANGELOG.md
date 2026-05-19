@@ -21,4 +21,4 @@
 
 ### API Changes
 
-- Added `ingestRecordNoWait(...)` fire-and-forget ingestion APIs for Java proto and JSON streams, plus `ingestRecordsNoWait(...)` batch APIs.
+- Added `ingestRecordNoWait(...)` fire-and-forget ingestion APIs for Java proto and JSON streams, plus `ingestRecordsNoWait(...)` batch APIs. These methods return after handing payloads to the native background runtime and do not return offsets or surface background ingestion errors.

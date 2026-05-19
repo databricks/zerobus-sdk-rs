@@ -98,14 +98,10 @@ public class ZerobusProtoStream extends BaseZerobusStream {
    * Ingests a protobuf message asynchronously without exposing the offset or ack future.
    *
    * <p>This fire-and-forget method returns as soon as the record is handed off to the native
-   * runtime; enqueueing into the stream and applying backpressure happen on the runtime's thread
-   * pool. Errors raised after this hand-off (e.g., the stream fails before the record is
-   * acknowledged) are not surfaced to the caller — call {@link #flush()} or {@link #close()}
-   * before shutdown when durability matters.
-   *
-   * <p>Subsequent calls to {@link #flush()}, {@link #close()}, {@link #waitForOffset(long)}, or
-   * any offset-returning ingest method on this stream wait for previously-submitted no-wait tasks
-   * to complete, so a record submitted here is always observable to those operations.
+   * runtime. Enqueueing into the stream, native backpressure, and offset assignment happen later on
+   * the runtime's thread pool. Errors raised after this hand-off are intentionally not surfaced to
+   * the caller, and there is no ordering guarantee relative to subsequent offset-returning,
+   * {@link #flush()}, {@link #close()}, or {@link #waitForOffset(long)} calls.
    *
    * @param record the protobuf message to ingest
    * @param <T> the message type
@@ -134,8 +130,7 @@ public class ZerobusProtoStream extends BaseZerobusStream {
   /**
    * Ingests pre-encoded bytes asynchronously without exposing the offset or ack future.
    *
-   * <p>See {@link #ingestRecordNoWait(Message)} for the fire-and-forget contract and the ordering
-   * guarantee with respect to subsequent {@link #flush()} / {@link #close()} / offset calls.
+   * <p>See {@link #ingestRecordNoWait(Message)} for the fire-and-forget contract.
    *
    * @param encodedBytes the pre-encoded protobuf bytes
    * @throws ZerobusException if the stream is already closed
@@ -191,8 +186,7 @@ public class ZerobusProtoStream extends BaseZerobusStream {
   /**
    * Ingests multiple protobuf messages asynchronously without exposing the batch offset.
    *
-   * <p>See {@link #ingestRecordNoWait(Message)} for the fire-and-forget contract and the ordering
-   * guarantee with respect to subsequent {@link #flush()} / {@link #close()} / offset calls.
+   * <p>See {@link #ingestRecordNoWait(Message)} for the fire-and-forget contract.
    *
    * @param records the protobuf messages to ingest
    * @param <T> the message type
@@ -213,8 +207,7 @@ public class ZerobusProtoStream extends BaseZerobusStream {
   /**
    * Ingests multiple pre-encoded byte arrays asynchronously without exposing the batch offset.
    *
-   * <p>See {@link #ingestRecordNoWait(Message)} for the fire-and-forget contract and the ordering
-   * guarantee with respect to subsequent {@link #flush()} / {@link #close()} / offset calls.
+   * <p>See {@link #ingestRecordNoWait(Message)} for the fire-and-forget contract.
    *
    * @param encodedRecords the pre-encoded protobuf byte arrays
    * @throws ZerobusException if the stream is already closed

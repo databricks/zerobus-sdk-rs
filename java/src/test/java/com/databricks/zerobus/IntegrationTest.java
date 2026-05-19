@@ -1135,8 +1135,8 @@ public class IntegrationTest {
 
   @Test
   @Order(17)
-  @DisplayName("No-wait ingestion flushes and preserves ordering")
-  void testNoWaitIngestionFlushAndOrdering() throws Exception {
+  @DisplayName("No-wait ingestion submits without offsets")
+  void testNoWaitIngestionSubmitsWithoutOffsets() throws Exception {
     ZerobusSdk sdk = new ZerobusSdk(serverEndpoint, workspaceUrl);
     ZerobusProtoStream protoStream =
         sdk.createProtoStream(
@@ -1220,7 +1220,7 @@ public class IntegrationTest {
       jsonStream.flush();
 
       assertEquals(10, totalRecords);
-      System.out.println("No-wait ingestion: " + totalRecords + " records flushed");
+      System.out.println("No-wait ingestion: " + totalRecords + " records submitted");
     } finally {
       protoStream.close();
       jsonStream.close();

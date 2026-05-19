@@ -161,14 +161,11 @@ public class ZerobusJsonStream extends BaseZerobusStream {
    * Ingests an object as JSON asynchronously without exposing the offset or ack future.
    *
    * <p>This fire-and-forget method serializes the object on the calling thread, then hands the
-   * encoded payload off to the native runtime; enqueueing into the stream and applying
-   * backpressure happen on the runtime's thread pool. Errors raised after this hand-off (e.g.,
-   * the stream fails before the record is acknowledged) are not surfaced to the caller — call
-   * {@link #flush()} or {@link #close()} before shutdown when durability matters.
-   *
-   * <p>Subsequent calls to {@link #flush()}, {@link #close()}, {@link #waitForOffset(long)}, or
-   * any offset-returning ingest method on this stream wait for previously-submitted no-wait tasks
-   * to complete, so a record submitted here is always observable to those operations.
+   * encoded payload off to the native runtime. Enqueueing into the stream, native backpressure, and
+   * offset assignment happen later on the runtime's thread pool. Errors raised after this hand-off
+   * are intentionally not surfaced to the caller, and there is no ordering guarantee relative to
+   * subsequent offset-returning, {@link #flush()}, {@link #close()}, or {@link #waitForOffset(long)}
+   * calls.
    *
    * @param object the object to serialize and ingest
    * @param serializer a function that converts the object to a JSON string
@@ -199,9 +196,7 @@ public class ZerobusJsonStream extends BaseZerobusStream {
   /**
    * Ingests a JSON string asynchronously without exposing the offset or ack future.
    *
-   * <p>See {@link #ingestRecordNoWait(Object, JsonSerializer)} for the fire-and-forget contract
-   * and the ordering guarantee with respect to subsequent {@link #flush()} / {@link #close()} /
-   * offset calls.
+   * <p>See {@link #ingestRecordNoWait(Object, JsonSerializer)} for the fire-and-forget contract.
    *
    * @param json the JSON string to ingest
    * @throws ZerobusException if the stream is already closed
@@ -263,9 +258,7 @@ public class ZerobusJsonStream extends BaseZerobusStream {
   /**
    * Ingests multiple objects as JSON asynchronously without exposing the batch offset.
    *
-   * <p>See {@link #ingestRecordNoWait(Object, JsonSerializer)} for the fire-and-forget contract
-   * and the ordering guarantee with respect to subsequent {@link #flush()} / {@link #close()} /
-   * offset calls.
+   * <p>See {@link #ingestRecordNoWait(Object, JsonSerializer)} for the fire-and-forget contract.
    *
    * @param objects the objects to serialize and ingest
    * @param serializer a function that converts each object to a JSON string
@@ -289,9 +282,7 @@ public class ZerobusJsonStream extends BaseZerobusStream {
   /**
    * Ingests multiple JSON strings asynchronously without exposing the batch offset.
    *
-   * <p>See {@link #ingestRecordNoWait(Object, JsonSerializer)} for the fire-and-forget contract
-   * and the ordering guarantee with respect to subsequent {@link #flush()} / {@link #close()} /
-   * offset calls.
+   * <p>See {@link #ingestRecordNoWait(Object, JsonSerializer)} for the fire-and-forget contract.
    *
    * @param jsonStrings the JSON strings to ingest
    * @throws ZerobusException if the stream is already closed
