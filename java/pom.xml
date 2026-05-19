@@ -44,7 +44,7 @@
     <dependency>
       <groupId>org.slf4j</groupId>
       <artifactId>slf4j-api</artifactId>
-      <version>2.0.17</version>
+      <version>2.0.18</version>
     </dependency>
     <!-- Apache Arrow (provided - users must supply arrow-vector >= 15.0.0 and a memory
          allocator such as arrow-memory-netty). Only needed for Arrow Flight ingestion. -->
