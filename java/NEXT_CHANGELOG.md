@@ -12,6 +12,8 @@
 
 ### Documentation
 
+- Clarified that Arrow Flight ingestion requires Arrow dependencies even when using the fat JAR.
+
 ### Internal Changes
 
 ### Breaking Changes

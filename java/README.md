@@ -82,7 +82,8 @@ This SDK includes native libraries for the following platforms:
 ### Dependencies
 
 **When using the fat JAR** (recommended for most users):
-- No additional dependencies required - all dependencies are bundled
+- No additional dependencies required for Proto/JSON ingestion - all dependencies are bundled
+- Arrow Flight ingestion is optional and still requires you to provide Arrow dependencies such as `arrow-vector` and `arrow-memory-netty`
 
 **When using the regular JAR**:
 - [`protobuf-java` 4.33.0](https://mvnrepository.com/artifact/com.google.protobuf/protobuf-java/4.33.0)

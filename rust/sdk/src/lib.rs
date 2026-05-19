@@ -1870,7 +1870,9 @@ impl ZerobusStream {
                 ));
             }
         }
-        *failed_records.write().await = failed_payloads;
+        if !failed_payloads.is_empty() {
+            failed_records.write().await.extend(failed_payloads);
+        }
     }
 
     /// Internal method to wait for a specific offset to be acknowledged.
