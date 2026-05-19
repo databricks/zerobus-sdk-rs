@@ -158,18 +158,22 @@ public class ZerobusJsonStream extends BaseZerobusStream {
   }
 
   /**
-   * Ingests an object as JSON without returning an offset or waiting for server acknowledgment.
+   * Ingests an object as JSON asynchronously without exposing the offset or ack future.
    *
-   * <p>This fire-and-forget method serializes the object, queues it through the native runtime's
-   * backpressure path, and returns without exposing the assigned offset or waiting for server
-   * acknowledgment. Call {@link #flush()} or {@link #close()} before shutdown if you need to ensure
-   * all queued records have been acknowledged.
+   * <p>This fire-and-forget method serializes the object on the calling thread, then hands the
+   * encoded payload off to the native runtime; enqueueing into the stream and applying
+   * backpressure happen on the runtime's thread pool. Errors raised after this hand-off (e.g.,
+   * the stream fails before the record is acknowledged) are not surfaced to the caller — call
+   * {@link #flush()} or {@link #close()} before shutdown when durability matters.
+   *
+   * <p>Subsequent calls to {@link #flush()}, {@link #close()}, {@link #waitForOffset(long)}, or
+   * any offset-returning ingest method on this stream wait for previously-submitted no-wait tasks
+   * to complete, so a record submitted here is always observable to those operations.
    *
    * @param object the object to serialize and ingest
    * @param serializer a function that converts the object to a JSON string
    * @param <T> the type of the object
-   * @throws ZerobusException if the stream is already closed, the payload is invalid, or the record
-   *     could not be queued
+   * @throws ZerobusException if the stream is already closed or serialization fails
    */
   public <T> void ingestRecordNoWait(T object, JsonSerializer<T> serializer)
       throws ZerobusException {
@@ -193,16 +197,14 @@ public class ZerobusJsonStream extends BaseZerobusStream {
   }
 
   /**
-   * Ingests a JSON string without returning an offset or waiting for server acknowledgment.
+   * Ingests a JSON string asynchronously without exposing the offset or ack future.
    *
-   * <p>Use this fire-and-forget method when you already have a JSON string and do not need
-   * per-record offset tracking. The method queues the record through native backpressure and
-   * returns without waiting for server acknowledgment. Call {@link #flush()} or {@link #close()}
-   * before shutdown if you need to ensure all queued records have been acknowledged.
+   * <p>See {@link #ingestRecordNoWait(Object, JsonSerializer)} for the fire-and-forget contract
+   * and the ordering guarantee with respect to subsequent {@link #flush()} / {@link #close()} /
+   * offset calls.
    *
    * @param json the JSON string to ingest
-   * @throws ZerobusException if the stream is already closed, the payload is invalid, or the record
-   *     could not be queued
+   * @throws ZerobusException if the stream is already closed
    */
   public void ingestRecordNoWait(String json) throws ZerobusException {
     ensureOpen();
@@ -259,19 +261,16 @@ public class ZerobusJsonStream extends BaseZerobusStream {
   }
 
   /**
-   * Ingests multiple objects as JSON without returning an offset or waiting for server
-   * acknowledgment.
+   * Ingests multiple objects as JSON asynchronously without exposing the batch offset.
    *
-   * <p>This fire-and-forget method serializes the objects and queues the batch through the native
-   * runtime's backpressure path. Use this when per-batch offset tracking is unnecessary, and call
-   * {@link #flush()} or {@link #close()} before shutdown if you need to ensure all queued records
-   * have been acknowledged.
+   * <p>See {@link #ingestRecordNoWait(Object, JsonSerializer)} for the fire-and-forget contract
+   * and the ordering guarantee with respect to subsequent {@link #flush()} / {@link #close()} /
+   * offset calls.
    *
    * @param objects the objects to serialize and ingest
    * @param serializer a function that converts each object to a JSON string
    * @param <T> the type of the objects
-   * @throws ZerobusException if the stream is already closed, a payload is invalid, or the batch
-   *     could not be queued
+   * @throws ZerobusException if the stream is already closed or serialization fails
    */
   public <T> void ingestRecordsNoWait(Iterable<T> objects, JsonSerializer<T> serializer)
       throws ZerobusException {
@@ -284,20 +283,18 @@ public class ZerobusJsonStream extends BaseZerobusStream {
       return;
     }
     ensureOpen();
-    nativeIngestRecordsOffset(nativeHandle, payloads, true);
+    nativeIngestRecordsNoWait(nativeHandle, payloads, true);
   }
 
   /**
-   * Ingests multiple JSON strings without returning an offset or waiting for server acknowledgment.
+   * Ingests multiple JSON strings asynchronously without exposing the batch offset.
    *
-   * <p>Use this fire-and-forget method when you already have JSON strings and do not need per-batch
-   * offset tracking. The method queues the batch through native backpressure. Call {@link #flush()}
-   * or {@link #close()} before shutdown if you need to ensure all queued records have been
-   * acknowledged.
+   * <p>See {@link #ingestRecordNoWait(Object, JsonSerializer)} for the fire-and-forget contract
+   * and the ordering guarantee with respect to subsequent {@link #flush()} / {@link #close()} /
+   * offset calls.
    *
    * @param jsonStrings the JSON strings to ingest
-   * @throws ZerobusException if the stream is already closed, a payload is invalid, or the batch
-   *     could not be queued
+   * @throws ZerobusException if the stream is already closed
    */
   public void ingestRecordsNoWait(Iterable<String> jsonStrings) throws ZerobusException {
     List<byte[]> payloads = new ArrayList<>();
@@ -308,7 +305,7 @@ public class ZerobusJsonStream extends BaseZerobusStream {
       return;
     }
     ensureOpen();
-    nativeIngestRecordsOffset(nativeHandle, payloads, true);
+    nativeIngestRecordsNoWait(nativeHandle, payloads, true);
   }
 
   // ==================== Unacknowledged Records ====================

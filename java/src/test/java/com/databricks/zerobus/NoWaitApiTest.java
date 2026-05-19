@@ -32,14 +32,20 @@ public class NoWaitApiTest {
   }
 
   @Test
-  void baseStreamDeclaresNativeNoWaitBridge() throws Exception {
-    Method method =
+  void baseStreamDeclaresNativeNoWaitBridges() throws Exception {
+    Method singleRecord =
         BaseZerobusStream.class.getDeclaredMethod(
             "nativeIngestRecordNoWait", long.class, byte[].class, boolean.class);
+    assertVoidMethod(singleRecord);
+    assertTrue(Modifier.isNative(singleRecord.getModifiers()));
+    assertTrue(Modifier.isProtected(singleRecord.getModifiers()));
 
-    assertVoidMethod(method);
-    assertTrue(Modifier.isNative(method.getModifiers()));
-    assertTrue(Modifier.isProtected(method.getModifiers()));
+    Method batch =
+        BaseZerobusStream.class.getDeclaredMethod(
+            "nativeIngestRecordsNoWait", long.class, List.class, boolean.class);
+    assertVoidMethod(batch);
+    assertTrue(Modifier.isNative(batch.getModifiers()));
+    assertTrue(Modifier.isProtected(batch.getModifiers()));
   }
 
   private static void assertVoidMethod(Method method) {
