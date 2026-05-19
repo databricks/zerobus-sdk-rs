@@ -1,7 +1,7 @@
 package zerobus
 
-// Experimental/Unsupported: Arrow Flight ingestion is experimental and not yet
-// supported for production use. The API may change in future releases.
+// Beta: Arrow Flight ingestion is in Beta. The API is stabilising but may still
+// change before reaching GA.
 //
 // Arrow Flight support lets you ingest Apache Arrow RecordBatches directly into
 // Databricks Delta tables using the high-performance Arrow Flight protocol.
@@ -102,7 +102,8 @@ func DefaultArrowStreamConfigurationOptions() *ArrowStreamConfigurationOptions {
 // ZerobusArrowStream is an active Arrow Flight stream for ingesting Arrow RecordBatches.
 // Batches are supplied as Arrow IPC stream bytes produced by the Apache Arrow Go library's ipc.Writer.
 type ZerobusArrowStream struct {
-	ptr unsafe.Pointer
+	ptr            unsafe.Pointer
+	ipcCompression IPCCompressionType
 }
 
 // CreateArrowStream creates an Arrow Flight stream authenticated with OAuth client credentials.
@@ -128,7 +129,11 @@ func (s *ZerobusSdk) CreateArrowStream(
 		return nil, err
 	}
 
-	stream := &ZerobusArrowStream{ptr: ptr}
+	compression := IPCCompressionNone
+	if options != nil {
+		compression = options.IPCCompression
+	}
+	stream := &ZerobusArrowStream{ptr: ptr, ipcCompression: compression}
 	runtime.SetFinalizer(stream, func(st *ZerobusArrowStream) {
 		st.Close() //nolint:errcheck
 	})
@@ -155,7 +160,11 @@ func (s *ZerobusSdk) CreateArrowStreamWithHeadersProvider(
 		return nil, err
 	}
 
-	stream := &ZerobusArrowStream{ptr: ptr}
+	compression := IPCCompressionNone
+	if options != nil {
+		compression = options.IPCCompression
+	}
+	stream := &ZerobusArrowStream{ptr: ptr, ipcCompression: compression}
 	runtime.SetFinalizer(stream, func(st *ZerobusArrowStream) {
 		st.Close() //nolint:errcheck
 	})
@@ -165,9 +174,16 @@ func (s *ZerobusSdk) CreateArrowStreamWithHeadersProvider(
 // IngestBatch queues one Arrow RecordBatch for ingestion and returns its logical offset.
 // ipcBytes must be Arrow IPC stream bytes containing exactly one RecordBatch.
 // Use WaitForOffset or Flush to wait for server acknowledgment.
+//
+// When the stream was created with an IPC compression codec, the IPC bytes are
+// deserialized to a RecordBatch in Rust and re-serialized with compression applied
+// before forwarding to the server.
 func (st *ZerobusArrowStream) IngestBatch(ipcBytes []byte) (int64, error) {
 	if st.ptr == nil {
 		return -1, &ZerobusError{Message: "Arrow stream has been closed", IsRetryable: false}
+	}
+	if st.ipcCompression == IPCCompressionLZ4Frame || st.ipcCompression == IPCCompressionZstd {
+		return arrowStreamIngestBatchViaRecordBatch(st.ptr, ipcBytes)
 	}
 	return arrowStreamIngestBatch(st.ptr, ipcBytes)
 }
