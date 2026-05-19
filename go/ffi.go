@@ -105,6 +105,22 @@ extern int64_t zerobus_stream_ingest_json_records(CZerobusStream* stream,
                                                     const char** json_records,
                                                     uintptr_t num_records,
                                                     CResult* result);
+extern void zerobus_stream_ingest_proto_record_nowait(CZerobusStream* stream,
+                                                       const uint8_t* data,
+                                                       uintptr_t data_len,
+                                                       CResult* result);
+extern void zerobus_stream_ingest_json_record_nowait(CZerobusStream* stream,
+                                                      const char* json_data,
+                                                      CResult* result);
+extern void zerobus_stream_ingest_proto_records_nowait(CZerobusStream* stream,
+                                                        const uint8_t** records,
+                                                        const uintptr_t* record_lens,
+                                                        uintptr_t num_records,
+                                                        CResult* result);
+extern void zerobus_stream_ingest_json_records_nowait(CZerobusStream* stream,
+                                                       const char** json_records,
+                                                       uintptr_t num_records,
+                                                       CResult* result);
 extern bool zerobus_stream_wait_for_offset(CZerobusStream* stream,
                                              int64_t offset,
                                              CResult* result);
@@ -504,6 +520,134 @@ func streamIngestJSONRecord(streamPtr unsafe.Pointer, jsonData string) (int64, e
 	}
 
 	return int64(offset), nil
+}
+
+// streamIngestProtoRecordNowait ingests a protobuf record without waiting (fire-and-forget).
+// Returns immediately; ingestion errors are silently ignored by the background task.
+func streamIngestProtoRecordNowait(streamPtr unsafe.Pointer, data []byte) error {
+	if len(data) == 0 {
+		return &ZerobusError{Message: "empty data", IsRetryable: false}
+	}
+
+	var pinner runtime.Pinner
+	defer pinner.Unpin()
+
+	cData := (*C.uint8_t)(unsafe.SliceData(data))
+	pinner.Pin(cData)
+
+	var cres C.CResult
+	C.zerobus_stream_ingest_proto_record_nowait(
+		(*C.CZerobusStream)(streamPtr),
+		cData,
+		C.size_t(len(data)),
+		&cres,
+	)
+
+	return ffiResult(cres)
+}
+
+// streamIngestJSONRecordNowait ingests a JSON record without waiting (fire-and-forget).
+// Returns immediately; ingestion errors are silently ignored by the background task.
+func streamIngestJSONRecordNowait(streamPtr unsafe.Pointer, jsonData string) error {
+	cJSON := C.CString(jsonData)
+	defer C.free(unsafe.Pointer(cJSON))
+
+	var cres C.CResult
+	C.zerobus_stream_ingest_json_record_nowait(
+		(*C.CZerobusStream)(streamPtr),
+		cJSON,
+		&cres,
+	)
+
+	return ffiResult(cres)
+}
+
+// streamIngestProtoRecordsNowait ingests a batch of protobuf records without waiting (fire-and-forget).
+// The Rust side copies all record data before spawning, so Go memory is safe to release on return.
+func streamIngestProtoRecordsNowait(streamPtr unsafe.Pointer, records [][]byte) error {
+	if len(records) == 0 {
+		return nil
+	}
+
+	ptrSize := C.size_t(unsafe.Sizeof((*C.uint8_t)(nil)))
+	lenSize := C.size_t(unsafe.Sizeof(C.size_t(0)))
+	n := C.size_t(len(records))
+
+	cPtrArray := C.malloc(n * ptrSize)
+	if cPtrArray == nil {
+		return &ZerobusError{Message: "out of memory allocating record pointer array", IsRetryable: false}
+	}
+	defer C.free(cPtrArray)
+
+	cLenArray := C.malloc(n * lenSize)
+	if cLenArray == nil {
+		return &ZerobusError{Message: "out of memory allocating record length array", IsRetryable: false}
+	}
+	defer C.free(cLenArray)
+
+	recordPtrs := (*[1 << 30]*C.uint8_t)(cPtrArray)[:len(records):len(records)]
+	recordLens := (*[1 << 30]C.size_t)(cLenArray)[:len(records):len(records)]
+
+	// Pin Go memory so it isn't moved while Rust copies it (before returning).
+	var pinner runtime.Pinner
+	defer pinner.Unpin()
+
+	for i, record := range records {
+		if len(record) > 0 {
+			ptr := (*C.uint8_t)(unsafe.SliceData(records[i]))
+			pinner.Pin(ptr)
+			recordPtrs[i] = ptr
+			recordLens[i] = C.size_t(len(record))
+		}
+	}
+
+	var cres C.CResult
+	C.zerobus_stream_ingest_proto_records_nowait(
+		(*C.CZerobusStream)(streamPtr),
+		(**C.uint8_t)(cPtrArray),
+		(*C.size_t)(cLenArray),
+		n,
+		&cres,
+	)
+
+	return ffiResult(cres)
+}
+
+// streamIngestJSONRecordsNowait ingests a batch of JSON records without waiting (fire-and-forget).
+// The Rust side copies all strings before spawning, so C strings are safe to free on return.
+func streamIngestJSONRecordsNowait(streamPtr unsafe.Pointer, records []string) error {
+	if len(records) == 0 {
+		return nil
+	}
+
+	ptrSize := C.size_t(unsafe.Sizeof((*C.char)(nil)))
+	cPtrArray := C.malloc(C.size_t(len(records)) * ptrSize)
+	if cPtrArray == nil {
+		return &ZerobusError{Message: "out of memory allocating C string array", IsRetryable: false}
+	}
+	defer C.free(cPtrArray)
+
+	cStrings := (*[1 << 30]*C.char)(cPtrArray)[:len(records):len(records)]
+	for i, record := range records {
+		cStrings[i] = C.CString(record)
+	}
+	defer func() {
+		for _, cStr := range cStrings {
+			if cStr != nil {
+				C.free(unsafe.Pointer(cStr))
+			}
+		}
+	}()
+
+	var cres C.CResult
+	C.zerobus_stream_ingest_json_records_nowait(
+		(*C.CZerobusStream)(streamPtr),
+		(**C.char)(cPtrArray),
+		C.size_t(len(records)),
+		&cres,
+	)
+
+	return ffiResult(cres)
 }
 
 // streamIngestProtoRecords ingests a batch of protobuf records

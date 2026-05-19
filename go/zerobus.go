@@ -418,6 +418,94 @@ func (st *ZerobusStream) IngestRecordOffset(payload interface{}) (int64, error) 
 	return offset, nil
 }
 
+// IngestRecordNowait ingests a record into the stream without waiting for it to be queued (fire-and-forget).
+// The function returns immediately after spawning a background task to queue the record.
+// Ingestion errors from the background task are silently ignored.
+//
+// The payload parameter accepts either:
+//   - []byte for Protocol Buffer encoded records
+//   - string for JSON encoded records
+//
+// Returns an error only for argument validation failures (e.g. nil stream, invalid payload type).
+//
+// Note: The stream must remain open until all background tasks have completed.
+//
+// Example:
+//
+//	err := stream.IngestRecordNowait(`{"field": "value"}`)
+//	if err != nil {
+//	    log.Fatal(err)
+//	}
+func (st *ZerobusStream) IngestRecordNowait(payload interface{}) error {
+	if st.ptr == nil {
+		return &ZerobusError{Message: "Stream has been closed", IsRetryable: false}
+	}
+
+	switch v := payload.(type) {
+	case []byte:
+		return streamIngestProtoRecordNowait(st.ptr, v)
+	case string:
+		return streamIngestJSONRecordNowait(st.ptr, v)
+	default:
+		return &ZerobusError{
+			Message:     "Invalid payload type: must be []byte or string",
+			IsRetryable: false,
+		}
+	}
+}
+
+// IngestRecordsNowait ingests a batch of records without waiting for them to be queued (fire-and-forget).
+// Returns immediately after the records are handed off; ingestion errors from the background task are silently ignored.
+//
+// The records parameter accepts a slice where each element is either:
+//   - []byte for Protocol Buffer encoded records
+//   - string for JSON encoded records
+//
+// All records in the batch must be of the same type.
+// Returns an error only for argument validation failures (nil stream, mixed types, invalid payload type).
+//
+// Note: The stream must remain open until all background tasks have completed.
+//
+// Example:
+//
+//	err := stream.IngestRecordsNowait([]interface{}{
+//	    `{"field": "value1"}`,
+//	    `{"field": "value2"}`,
+//	})
+func (st *ZerobusStream) IngestRecordsNowait(records []interface{}) error {
+	if st.ptr == nil {
+		return &ZerobusError{Message: "Stream has been closed", IsRetryable: false}
+	}
+	if len(records) == 0 {
+		return nil
+	}
+
+	switch records[0].(type) {
+	case []byte:
+		byteRecords := make([][]byte, len(records))
+		for i, r := range records {
+			b, ok := r.([]byte)
+			if !ok {
+				return &ZerobusError{Message: "All records in batch must be of the same type ([]byte)", IsRetryable: false}
+			}
+			byteRecords[i] = b
+		}
+		return streamIngestProtoRecordsNowait(st.ptr, byteRecords)
+	case string:
+		stringRecords := make([]string, len(records))
+		for i, r := range records {
+			s, ok := r.(string)
+			if !ok {
+				return &ZerobusError{Message: "All records in batch must be of the same type (string)", IsRetryable: false}
+			}
+			stringRecords[i] = s
+		}
+		return streamIngestJSONRecordsNowait(st.ptr, stringRecords)
+	default:
+		return &ZerobusError{Message: "Invalid payload type: must be []byte or string", IsRetryable: false}
+	}
+}
+
 // IngestRecordsOffset ingests a batch of records into the stream and returns one offset for the entire batch.
 // This is an optimized API for ingesting multiple records at once.
 // This method blocks until all records are queued and returns the batch offset.
