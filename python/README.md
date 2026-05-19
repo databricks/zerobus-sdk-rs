@@ -352,20 +352,11 @@ for batch in unacked_batches:
 
 ## Performance Tips
 
-| Method | Throughput | Use Case |
-|--------|-----------|----------|
-| `ingest_record_nowait()` | **Highest** | Maximum throughput, fire-and-forget |
-| `ingest_record_offset()` | Medium | Need offset tracking |
-| `ingest_record()` | Low | **Deprecated** - avoid |
-
-Benchmarked with 100k records on a local connection:
-
-| Record Size | `ingest_record` (sequential) | `ingest_record_nowait` |
-|-------------|------------------------------|------------------------|
-| 20 bytes    | 0.35 MB/s                    | 7.55 MB/s (20x faster) |
-| 220 bytes   | 2.00 MB/s                    | 77 MB/s (38x faster)   |
-| 750 bytes   | 16 MB/s                      | 257 MB/s (16x faster)  |
-| 10 KB       | 188 MB/s                     | 382 MB/s (2x faster)   |
+| Method | Throughput | Use case |
+|--------|------------|----------|
+| `ingest_record_nowait()` | **Highest** | Fire-and-forget: no offset returned; maximum throughput when you do not need per-record ack tracking in the hot path |
+| `ingest_record_offset()` | Medium | Recommended for most apps: returns an offset after queueing; call `wait_for_offset()` when you need durability confirmation |
+| `ingest_record()` | Low | **Deprecated** — prefer offset-based APIs |
 
 ## API Reference
 

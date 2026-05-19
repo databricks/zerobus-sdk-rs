@@ -1,7 +1,7 @@
 //! Arrow Flight stream implementation for high-performance Arrow data ingestion.
 //!
-//! **Experimental/Unsupported**: This module is experimental and not yet supported
-//! for production use. The API may change in future releases.
+//! **Beta**: This module is in Beta. The API is stabilising but may still change
+//! before reaching GA.
 //!
 //! This module provides `ZerobusArrowStream`, a client for ingesting Arrow `RecordBatch`
 //! data into Databricks Delta tables using the Arrow Flight protocol.
@@ -15,7 +15,7 @@ use std::sync::Arc;
 
 use arrow_flight::error::FlightError;
 use arrow_flight::{FlightClient, FlightData, PutResult, SchemaAsIpc};
-use arrow_ipc::writer::{DictionaryTracker, IpcDataGenerator, IpcWriteOptions};
+use arrow_ipc::writer::{CompressionContext, DictionaryTracker, IpcDataGenerator, IpcWriteOptions};
 use bytes::Bytes;
 use futures::{Stream, StreamExt};
 use tokio::sync::{mpsc, watch, Mutex};
@@ -64,24 +64,28 @@ impl ArrowPayload {
 
 /// Properties for an Arrow Flight ingestion table.
 ///
-/// Unlike `TableProperties` which requires a protobuf descriptor, Arrow Flight
-/// streams derive the schema from the first RecordBatch sent.
+/// **Do not construct this directly.** Configure Arrow streams via the builder API:
+/// `sdk.stream_builder().table("catalog.schema.table").arrow(schema)`.
 #[derive(Debug, Clone)]
-pub struct ArrowTableProperties {
+pub(crate) struct ArrowTableProperties {
     /// The fully qualified table name (e.g., "catalog.schema.table").
-    pub table_name: String,
+    pub(crate) table_name: String,
     /// The Arrow schema for the data being ingested.
     /// This is used to validate RecordBatches before sending and is sent
     /// as the first message in the Flight stream.
-    pub schema: Arc<ArrowSchema>,
+    pub(crate) schema: Arc<ArrowSchema>,
 }
 
 /// A pending batch waiting for acknowledgment.
 #[derive(Clone)]
 struct PendingBatch {
     payload: ArrowPayload,
-    /// Logical offset ID assigned by the client for this batch.
-    offset_id: OffsetId,
+    /// Logical (user-visible) offset ID assigned by the client for this batch.
+    /// Monotonic across the lifetime of the stream — never resets on recovery.
+    /// This is the value handed back from `ingest_batch` / `ingest_ipc_batch`
+    /// and broadcast on `last_ack_tx` so that `wait_for_offset` callers see a
+    /// monotonically non-decreasing acked offset.
+    logical_offset_id: OffsetId,
     /// Cumulative record count before this batch.
     start_record: u64,
     /// Cumulative record count after this batch.
@@ -115,7 +119,7 @@ fn slice_batch_for_recovery(
         Ok(Some(pb.payload.clone()))
     } else {
         debug!(
-            offset_id = pb.offset_id,
+            offset_id = pb.logical_offset_id,
             total_rows = total_rows,
             records_already_acked = records_already_acked,
             remaining_rows = remaining_rows,
@@ -132,7 +136,7 @@ fn slice_batch_for_recovery(
                 let b = materialize_ipc(bytes).map_err(|e| {
                     ZerobusError::InvalidArgument(format!(
                         "IPC batch could not be deserialised for partial recovery (offset_id={}): {e}",
-                        pb.offset_id
+                        pb.logical_offset_id
                     ))
                 })?;
                 Ok(Some(ArrowPayload::Batch(b.slice(
@@ -364,8 +368,9 @@ fn record_batch_to_flight_data(
         &mut dict_tracker,
         opts,
     );
+    let mut compression_context = CompressionContext::default();
     let (dict_batches, encoded) = data_gen
-        .encoded_batch(batch, &mut dict_tracker, opts)
+        .encode(batch, &mut dict_tracker, opts, &mut compression_context)
         .map_err(|e| ZerobusError::InvalidArgument(format!("Failed to encode RecordBatch: {e}")))?;
     let mut flight_data: Vec<FlightData> = dict_batches.into_iter().map(Into::into).collect();
     flight_data.push(encoded.into());
@@ -410,6 +415,7 @@ fn record_batch_to_flight_data(
 /// # Ok(())
 /// # }
 /// ```
+#[non_exhaustive]
 pub struct ZerobusArrowStream {
     /// Table properties including name and schema.
     pub(crate) table_properties: ArrowTableProperties,
@@ -417,8 +423,20 @@ pub struct ZerobusArrowStream {
     pub(crate) options: ArrowStreamConfigurationOptions,
     /// Channel to send FlightData to the encoder task.
     batch_tx: BatchSender,
-    /// Generator for logical offset IDs.
-    offset_generator: OffsetIdGenerator,
+    /// Generator for logical (user-visible) offset IDs.
+    ///
+    /// Monotonic across the lifetime of the stream — never reset on recovery.
+    /// The values returned by `ingest_batch` / `ingest_ipc_batch` come from
+    /// here, so that `wait_for_offset` semantics hold even if the underlying
+    /// Flight stream reconnects.
+    logical_offset_generator: Arc<OffsetIdGenerator>,
+    /// Generator for physical (wire) offset IDs sent in `FlightBatchMetadata`.
+    ///
+    /// The server enforces sequential offsets starting at 0 per Flight stream,
+    /// so this is reset to `0` on each successful reconnect (specifically,
+    /// repositioned to `replay_offset` so fresh ingests continue from where
+    /// the replay's wire offsets left off).
+    physical_offset_generator: Arc<OffsetIdGenerator>,
     /// Watch channel for tracking the last acknowledged offset.
     last_ack_tx: tokio::sync::watch::Sender<Option<OffsetId>>,
     /// Receiver for the watch channel (kept alive to prevent sender errors).
@@ -449,6 +467,14 @@ pub struct ZerobusArrowStream {
     cumulative_records_sent: Arc<AtomicU64>,
     /// Last acknowledged cumulative record count (for recovery slicing).
     last_acked_records: Arc<AtomicU64>,
+    /// Flag indicating the stream is paused due to a server close signal.
+    /// When true, new `ingest_batch()` calls are still accepted and buffered,
+    /// but the receiver continues draining in-flight acks before triggering recovery.
+    is_paused: Arc<AtomicBool>,
+    /// Final value sent as the HTTP `user-agent` header on every request.
+    /// Either `"zerobus-sdk-rs/<version>"` or `"zerobus-sdk-rs/<version> <application_name>"`.
+    /// Re-applied to each fresh Channel built during recovery.
+    sdk_identifier: Arc<str>,
 }
 
 impl ZerobusArrowStream {
@@ -465,6 +491,7 @@ impl ZerobusArrowStream {
         table_properties: ArrowTableProperties,
         headers_provider: Arc<dyn HeadersProvider>,
         options: ArrowStreamConfigurationOptions,
+        sdk_identifier: Arc<str>,
     ) -> ZerobusResult<Self> {
         let (last_ack_tx, _last_ack_rx) = tokio::sync::watch::channel(None);
         let is_closed = Arc::new(AtomicBool::new(false));
@@ -475,6 +502,7 @@ impl ZerobusArrowStream {
         let receiver_task = Arc::new(Mutex::new(None));
         let cumulative_records_sent = Arc::new(AtomicU64::new(0));
         let last_acked_records = Arc::new(AtomicU64::new(0));
+        let is_paused = Arc::new(AtomicBool::new(false));
 
         let (server_error_tx, server_error_rx) = watch::channel(None);
 
@@ -482,7 +510,8 @@ impl ZerobusArrowStream {
             table_properties,
             options,
             batch_tx,
-            offset_generator: OffsetIdGenerator::default(),
+            logical_offset_generator: Arc::new(OffsetIdGenerator::default()),
+            physical_offset_generator: Arc::new(OffsetIdGenerator::default()),
             last_ack_tx,
             _last_ack_rx,
             is_closed,
@@ -498,6 +527,8 @@ impl ZerobusArrowStream {
             server_error_rx,
             cumulative_records_sent,
             last_acked_records,
+            is_paused,
+            sdk_identifier,
         };
 
         // Initialize the connection with retry logic.
@@ -515,6 +546,7 @@ impl ZerobusArrowStream {
             let table_properties = table_properties.clone();
             let options = options.clone();
             let headers_provider = Arc::clone(&headers_provider);
+            let sdk_identifier = Arc::clone(&stream.sdk_identifier);
 
             async move {
                 tokio::time::timeout(
@@ -525,6 +557,7 @@ impl ZerobusArrowStream {
                         &table_properties,
                         &options,
                         &headers_provider,
+                        &sdk_identifier,
                     ),
                 )
                 .await
@@ -568,7 +601,11 @@ impl ZerobusArrowStream {
             stream.server_error_tx.clone(),
             Arc::clone(&stream.cumulative_records_sent),
             Arc::clone(&stream.last_acked_records),
+            Arc::clone(&stream.is_paused),
+            Arc::clone(&stream.physical_offset_generator),
+            Arc::clone(&stream.ingest_mutex),
             response_stream,
+            Arc::clone(&stream.sdk_identifier),
         );
 
         {
@@ -592,6 +629,7 @@ impl ZerobusArrowStream {
         table_properties: &ArrowTableProperties,
         options: &ArrowStreamConfigurationOptions,
         headers_provider: &Arc<dyn HeadersProvider>,
+        sdk_identifier: &str,
     ) -> ZerobusResult<(
         Pin<Box<dyn Stream<Item = Result<PutResult, FlightError>> + Send>>,
         mpsc::Sender<Result<FlightData, FlightError>>,
@@ -602,6 +640,7 @@ impl ZerobusArrowStream {
             table_properties,
             options,
             headers_provider,
+            sdk_identifier,
         )
         .await?;
 
@@ -615,10 +654,13 @@ impl ZerobusArrowStream {
         table_properties: &ArrowTableProperties,
         options: &ArrowStreamConfigurationOptions,
         headers_provider: &Arc<dyn HeadersProvider>,
+        sdk_identifier: &str,
     ) -> ZerobusResult<FlightClient> {
         let connection_timeout = Duration::from_millis(options.connection_timeout_ms);
 
         let base_endpoint = Channel::from_shared(endpoint.to_string())
+            .map_err(|e| ZerobusError::ChannelCreationError(e.to_string()))?
+            .user_agent(sdk_identifier)
             .map_err(|e| ZerobusError::ChannelCreationError(e.to_string()))?
             .connect_timeout(connection_timeout)
             .timeout(connection_timeout);
@@ -773,7 +815,11 @@ impl ZerobusArrowStream {
         server_error_tx: watch::Sender<Option<ZerobusError>>,
         cumulative_records_sent: Arc<AtomicU64>,
         last_acked_records: Arc<AtomicU64>,
+        is_paused: Arc<AtomicBool>,
+        physical_offset_generator: Arc<OffsetIdGenerator>,
+        ingest_mutex: Arc<Mutex<()>>,
         initial_response_stream: Pin<Box<dyn Stream<Item = Result<PutResult, FlightError>> + Send>>,
+        sdk_identifier: Arc<str>,
     ) -> tokio::task::JoinHandle<ZerobusResult<()>> {
         tokio::spawn(async move {
             let ack_timeout = Duration::from_millis(options.server_lack_of_ack_timeout_ms);
@@ -794,6 +840,8 @@ impl ZerobusArrowStream {
                     ack_timeout,
                     server_error_tx.clone(),
                     Arc::clone(&last_acked_records),
+                    Arc::clone(&is_paused),
+                    &options,
                 )
                 .await;
 
@@ -857,6 +905,9 @@ impl ZerobusArrowStream {
                                 &pending_batches,
                                 &cumulative_records_sent,
                                 &last_acked_records,
+                                &sdk_identifier,
+                                &physical_offset_generator,
+                                &ingest_mutex,
                             ),
                         )
                         .await;
@@ -865,6 +916,8 @@ impl ZerobusArrowStream {
                             Ok(Ok(new_response_stream)) => {
                                 info!("Supervisor: Recovery successful, resuming");
                                 recovery_attempts.store(0, Ordering::Relaxed);
+                                // Now that a fresh sender is installed, lift the pause gate.
+                                is_paused.store(false, Ordering::Relaxed);
                                 response_stream = new_response_stream;
                                 // Loop continues with new stream.
                             }
@@ -914,6 +967,9 @@ impl ZerobusArrowStream {
         pending_batches: &Arc<Mutex<Vec<PendingBatch>>>,
         cumulative_records_sent: &Arc<AtomicU64>,
         last_acked_records: &Arc<AtomicU64>,
+        sdk_identifier: &str,
+        physical_offset_generator: &Arc<OffsetIdGenerator>,
+        ingest_mutex: &Arc<Mutex<()>>,
     ) -> ZerobusResult<Pin<Box<dyn Stream<Item = Result<PutResult, FlightError>> + Send>>> {
         // Create new client.
         let client = Self::create_flight_client(
@@ -922,6 +978,7 @@ impl ZerobusArrowStream {
             table_properties,
             options,
             headers_provider,
+            sdk_identifier,
         )
         .await?;
 
@@ -1013,6 +1070,14 @@ impl ZerobusArrowStream {
 
         // Replay pending batches, slicing partially-acked ones if present.
         // We rebuild the pending list to drop fully-acked batches.
+        //
+        // The `ingest_mutex` is held for the entire replay so that concurrent
+        // `ingest_batch` callers cannot read a stale value from
+        // `physical_offset_generator` between the replay (which renumbers wire
+        // offsets from 0) and the generator reset at the end. Lock order
+        // matches `ingest_batch`: `ingest_mutex` -> `pending_batches`.
+        let _ingest_guard = ingest_mutex.lock().await;
+        let mut replay_offset: i64 = 0;
         {
             let mut pending = pending_batches.lock().await;
             if !pending.is_empty() {
@@ -1024,12 +1089,14 @@ impl ZerobusArrowStream {
 
                 let mut new_pending = Vec::with_capacity(pending.len());
                 let mut new_cumulative: u64 = 0;
-                let mut replay_offset: i64 = 0;
 
                 for pb in pending.drain(..) {
                     let payload = match slice_batch_for_recovery(&pb, acked_before_disconnect)? {
                         None => {
-                            debug!(offset_id = pb.offset_id, "Skipping fully-acked batch");
+                            debug!(
+                                offset_id = pb.logical_offset_id,
+                                "Skipping fully-acked batch"
+                            );
                             continue;
                         }
                         Some(p) => p,
@@ -1075,7 +1142,7 @@ impl ZerobusArrowStream {
 
                     new_pending.push(PendingBatch {
                         payload,
-                        offset_id: pb.offset_id,
+                        logical_offset_id: pb.logical_offset_id,
                         start_record,
                         end_record,
                     });
@@ -1085,6 +1152,10 @@ impl ZerobusArrowStream {
                 cumulative_records_sent.store(new_cumulative, Ordering::Relaxed);
             }
         }
+
+        // Reposition the physical (wire) offset generator so the next fresh
+        // `ingest_batch` continues from where the replay left off.
+        physical_offset_generator.set_next(replay_offset);
 
         Ok(response_stream)
     }
@@ -1119,19 +1190,105 @@ impl ZerobusArrowStream {
         ack_timeout: Duration,
         server_error_tx: watch::Sender<Option<ZerobusError>>,
         last_acked_records: Arc<AtomicU64>,
+        is_paused: Arc<AtomicBool>,
+        options: &ArrowStreamConfigurationOptions,
     ) -> ZerobusResult<()> {
+        let mut pause_deadline: Option<tokio::time::Instant> = None;
+
         loop {
             if is_closed.load(Ordering::Relaxed) {
                 debug!("Stream closed, stopping ack processor");
                 return Ok(());
             }
 
-            let result = tokio::time::timeout(ack_timeout, response_stream.next()).await;
+            // Check pause state: exit when deadline reached or all batches acked.
+            // Returns a retriable error to trigger recovery in the supervisor.
+            if let Some(deadline) = pause_deadline {
+                let now = tokio::time::Instant::now();
+                let all_acked = pending_batches.lock().await.is_empty();
+
+                if now >= deadline {
+                    info!("Graceful close timeout reached. Triggering recovery.");
+                    return Err(ZerobusError::StreamClosedError(tonic::Status::unavailable(
+                        "Graceful close timeout reached",
+                    )));
+                } else if all_acked {
+                    info!("All in-flight batches acknowledged during graceful close. Triggering recovery.");
+                    return Err(ZerobusError::StreamClosedError(tonic::Status::unavailable(
+                        "All in-flight batches acked during graceful close",
+                    )));
+                }
+            }
+
+            let result = if let Some(deadline) = pause_deadline {
+                tokio::select! {
+                    biased;
+                    _ = tokio::time::sleep_until(deadline) => {
+                        continue;
+                    }
+                    res = tokio::time::timeout(ack_timeout, response_stream.next()) => res,
+                }
+            } else {
+                tokio::time::timeout(ack_timeout, response_stream.next()).await
+            };
 
             match result {
                 Ok(Some(Ok(put_result))) => {
                     match FlightAckMetadata::from_bytes(&put_result.app_metadata) {
                         Ok(ack) => {
+                            // Handle close stream signal.
+                            if ack.is_close_signal() {
+                                if options.recovery {
+                                    let server_duration_ms =
+                                        ack.close_stream_duration_ms.unwrap_or(0);
+
+                                    let wait_duration_ms = match options
+                                        .stream_paused_max_wait_time_ms
+                                    {
+                                        None => server_duration_ms,
+                                        Some(0) => {
+                                            info!(
+                                                    "Server will close the stream in {}ms. Triggering stream recovery.",
+                                                    server_duration_ms
+                                                );
+                                            return Err(ZerobusError::StreamClosedError(
+                                                tonic::Status::unavailable(
+                                                    "Immediate recovery on close signal",
+                                                ),
+                                            ));
+                                        }
+                                        Some(max_wait) => {
+                                            std::cmp::min(max_wait, server_duration_ms)
+                                        }
+                                    };
+
+                                    if wait_duration_ms == 0 {
+                                        info!("Server will close the stream. Triggering immediate recovery.");
+                                        return Err(ZerobusError::StreamClosedError(
+                                            tonic::Status::unavailable(
+                                                "Immediate recovery on close signal",
+                                            ),
+                                        ));
+                                    }
+
+                                    is_paused.store(true, Ordering::Relaxed);
+                                    pause_deadline = Some(
+                                        tokio::time::Instant::now()
+                                            + Duration::from_millis(wait_duration_ms),
+                                    );
+                                    info!(
+                                        "Server will close the stream in {}ms. Entering graceful close period (waiting up to {}ms for in-flight acks).",
+                                        server_duration_ms, wait_duration_ms
+                                    );
+                                }
+                                // Process any ack data that came with the close signal.
+                                // Fall through to ack processing below only if there's
+                                // meaningful ack data (non-zero records count).
+                                if ack.ack_up_to_records == 0 {
+                                    continue;
+                                }
+                            }
+
                             let acked_records = ack.ack_up_to_records;
                             debug!(
                                 ack_up_to_offset = ack.ack_up_to_offset,
@@ -1151,8 +1308,9 @@ impl ZerobusArrowStream {
                                     if acked_records >= pb.end_record {
                                         // Batch is fully acknowledged
                                         max_acked_offset = Some(
-                                            max_acked_offset
-                                                .map_or(pb.offset_id, |o| o.max(pb.offset_id)),
+                                            max_acked_offset.map_or(pb.logical_offset_id, |o| {
+                                                o.max(pb.logical_offset_id)
+                                            }),
                                         );
                                         false // Remove from pending
                                     } else {
@@ -1172,29 +1330,43 @@ impl ZerobusArrowStream {
                     }
                 }
                 Ok(Some(Err(e))) => {
+                    // During graceful close, errors are expected (server closes after grace period).
+                    // Return retriable error to trigger recovery.
+                    if pause_deadline.is_some() {
+                        info!(
+                            "Stream error during graceful close period, triggering recovery: {}",
+                            e
+                        );
+                        return Err(ZerobusError::StreamClosedError(tonic::Status::unavailable(
+                            "Stream error during graceful close",
+                        )));
+                    }
                     error!("Flight stream error: {}", e);
-                    // Convert FlightError to tonic::Status - this properly extracts
-                    // the underlying status if it's a Tonic error, preserving the
-                    // original error code and message from the server.
                     let status: tonic::Status = e.into();
                     let error = ZerobusError::StreamClosedError(status);
-                    // Store the error in watch channel for immediate, race-free access
-                    // by ingest_batch when channel send fails.
                     let _ = server_error_tx.send(Some(error.clone()));
-                    // Don't fail pending acks here - let the supervisor handle it.
-                    // If retriable, supervisor will recover and replay batches.
-                    // If non-retriable, supervisor will fail the acks.
                     return Err(error);
                 }
                 Ok(None) => {
+                    // During graceful close, stream end is expected.
+                    // Return retriable error to trigger recovery.
+                    if pause_deadline.is_some() {
+                        info!("Server closed stream during graceful close period, triggering recovery.");
+                        return Err(ZerobusError::StreamClosedError(tonic::Status::unavailable(
+                            "Server closed stream during graceful close",
+                        )));
+                    }
                     debug!("Server closed the stream");
                     let error = ZerobusError::StreamClosedError(tonic::Status::unknown(
                         "Server closed the stream",
                     ));
-                    // Don't fail pending acks here - let the supervisor handle it.
                     return Err(error);
                 }
                 Err(_timeout) => {
+                    // During graceful close, ack timeout is not an error.
+                    if pause_deadline.is_some() {
+                        continue;
+                    }
                     // Check if there are pending acks that should have been received.
                     let pending = pending_batches.lock().await;
                     if !pending.is_empty() {
@@ -1205,7 +1377,6 @@ impl ZerobusArrowStream {
                         let error = ZerobusError::StreamClosedError(
                             tonic::Status::deadline_exceeded("Server ack timeout"),
                         );
-                        // Don't fail pending acks here - let the supervisor handle it.
                         return Err(error);
                     }
                 }
@@ -1222,7 +1393,8 @@ impl ZerobusArrowStream {
         &self,
         payload: ArrowPayload,
         flight_data_messages: Vec<FlightData>,
-        offset_id: OffsetId,
+        logical_offset_id: OffsetId,
+        physical_offset_id: OffsetId,
         start_record: u64,
         end_record: u64,
     ) -> ZerobusResult<OffsetId> {
@@ -1230,10 +1402,14 @@ impl ZerobusArrowStream {
             let mut pending = self.pending_batches.lock().await;
             pending.push(PendingBatch {
                 payload,
-                offset_id,
+                logical_offset_id,
                 start_record,
                 end_record,
             });
+        }
+
+        if self.is_paused.load(Ordering::Relaxed) {
+            return Ok(logical_offset_id);
         }
 
         let sender = {
@@ -1258,7 +1434,7 @@ impl ZerobusArrowStream {
         let msg_count = flight_data_messages.len();
         for (i, mut flight_data) in flight_data_messages.into_iter().enumerate() {
             if i == msg_count - 1 {
-                let metadata = FlightBatchMetadata::new(offset_id);
+                let metadata = FlightBatchMetadata::new(physical_offset_id);
                 if let Ok(bytes) = metadata.to_bytes() {
                     flight_data.app_metadata = bytes.into();
                 }
@@ -1267,14 +1443,15 @@ impl ZerobusArrowStream {
                 warn!("Send failed: {}", e);
                 if self.options.recovery {
                     debug!(
-                        offset_id = offset_id,
+                        logical_offset_id = logical_offset_id,
+                        physical_offset_id = physical_offset_id,
                         "Send failed but recovery enabled - supervisor will handle recovery"
                     );
-                    return Ok(offset_id);
+                    return Ok(logical_offset_id);
                 } else {
                     {
                         let mut pending = self.pending_batches.lock().await;
-                        pending.retain(|pb| pb.offset_id != offset_id);
+                        pending.retain(|pb| pb.logical_offset_id != logical_offset_id);
                     }
                     let _ = tokio::time::timeout(
                         Duration::from_millis(100),
@@ -1291,7 +1468,7 @@ impl ZerobusArrowStream {
             }
         }
 
-        Ok(offset_id)
+        Ok(logical_offset_id)
     }
 
     /// Ingests a single Arrow RecordBatch into the stream.
@@ -1348,7 +1525,8 @@ impl ZerobusArrowStream {
         let _guard = self.ingest_mutex.lock().await;
 
         let record_count = batch.num_rows() as u64;
-        let offset_id = self.offset_generator.next();
+        let logical_offset_id = self.logical_offset_generator.next();
+        let physical_offset_id = self.physical_offset_generator.next();
         let start_record = self
             .cumulative_records_sent
             .fetch_add(record_count, Ordering::Relaxed);
@@ -1359,11 +1537,16 @@ impl ZerobusArrowStream {
             &make_ipc_write_options(self.options.ipc_compression)?,
         )?;
 
-        debug!(offset_id = offset_id, "Batch queued for ingestion");
+        debug!(
+            logical_offset_id = logical_offset_id,
+            physical_offset_id = physical_offset_id,
+            "Batch queued for ingestion"
+        );
         self.send_flight_data_internal(
             ArrowPayload::Batch(batch),
             flight_data_messages,
-            offset_id,
+            logical_offset_id,
+            physical_offset_id,
             start_record,
             end_record,
         )
@@ -1417,17 +1600,23 @@ impl ZerobusArrowStream {
 
         let _guard = self.ingest_mutex.lock().await;
 
-        let offset_id = self.offset_generator.next();
+        let logical_offset_id = self.logical_offset_generator.next();
+        let physical_offset_id = self.physical_offset_generator.next();
         let start_record = self
             .cumulative_records_sent
             .fetch_add(parsed.num_rows, Ordering::Relaxed);
         let end_record = start_record + parsed.num_rows;
 
-        debug!(offset_id = offset_id, "IPC batch queued for ingestion");
+        debug!(
+            logical_offset_id = logical_offset_id,
+            physical_offset_id = physical_offset_id,
+            "IPC batch queued for ingestion"
+        );
         self.send_flight_data_internal(
             ArrowPayload::Ipc(ipc_bytes),
             parsed.flight_data,
-            offset_id,
+            logical_offset_id,
+            physical_offset_id,
             start_record,
             end_record,
         )
@@ -1456,7 +1645,7 @@ impl ZerobusArrowStream {
                 let current_ack = *offset_rx.borrow_and_update();
                 if let Some(ack_offset) = current_ack {
                     if ack_offset >= offset_to_wait {
-                        info!(
+                        debug!(
                             ack_offset = ack_offset,
                             target_offset = offset_to_wait,
                             "{} completed",
@@ -1549,7 +1738,7 @@ impl ZerobusArrowStream {
             )));
         }
 
-        let target_offset = match self.offset_generator.last() {
+        let target_offset = match self.logical_offset_generator.last() {
             Some(offset) => offset,
             None => {
                 debug!("No batches to flush");
@@ -1724,7 +1913,7 @@ impl ZerobusArrowStream {
                 result.push(pb.payload.materialize().map_err(|e| {
                     ZerobusError::InvalidArgument(format!(
                         "unacked batch at offset_id {} could not be materialised: {e}",
-                        pb.offset_id
+                        pb.logical_offset_id
                     ))
                 })?);
             }
@@ -1757,11 +1946,6 @@ impl ZerobusArrowStream {
     /// Returns the Arrow schema for this stream.
     pub fn schema(&self) -> &Arc<ArrowSchema> {
         &self.table_properties.schema
-    }
-
-    /// Returns the table properties for this stream.
-    pub fn table_properties(&self) -> &ArrowTableProperties {
-        &self.table_properties
     }
 
     /// Returns the configuration options for this stream.

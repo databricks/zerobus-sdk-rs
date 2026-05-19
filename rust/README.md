@@ -95,8 +95,6 @@ The SDK supports two serialization formats and two ingestion methods:
 - **Single-record** (`ingest_record_offset`): Ingest records one at a time with per-record acknowledgment
 - **Batch** (`ingest_records_offset`): Ingest multiple records at once with all-or-nothing semantics for higher throughput
 
-> **Note:** The older `ingest_record()` and `ingest_records()` methods are deprecated as of v0.4.0. Use the `_offset` variants instead.
-
 See [`examples/README.md`](https://github.com/databricks/zerobus-sdk/blob/main/rust/examples/README.md) for detailed setup instructions and examples for all combinations.
 
 ## Repository Structure
@@ -142,24 +140,17 @@ zerobus_rust_sdk/
 │
 ├── examples/
 │   ├── README.md                       # Examples documentation
-│   ├── json/
-│   │   ├── README.md                   # JSON examples documentation
-│   │   ├── single/                     # JSON single-record example
-│   │   │   ├── src/main.rs
-│   │   │   └── Cargo.toml
-│   │   └── batch/                      # JSON batch ingestion example
-│   │       ├── src/main.rs
-│   │       └── Cargo.toml
-│   └── proto/
-│       ├── README.md                   # Protocol Buffers examples documentation
-│       ├── single/                     # Protocol Buffers single-record example
-│       │   ├── src/main.rs
-│       │   ├── output/                 # Generated schema files
-│       │   └── Cargo.toml
-│       └── batch/                      # Protocol Buffers batch ingestion example
-│           ├── src/main.rs
-│           ├── output/                 # Generated schema files
-│           └── Cargo.toml
+│   ├── json/                           # JSON examples (single Cargo package)
+│   │   ├── README.md
+│   │   ├── Cargo.toml
+│   │   ├── single.rs                   # JSON single-record example
+│   │   └── batch.rs                    # JSON batch ingestion example
+│   └── proto/                          # Protocol Buffers examples (single Cargo package)
+│       ├── README.md
+│       ├── Cargo.toml
+│       ├── single.rs                   # Protocol Buffers single-record example
+│       ├── batch.rs                    # Protocol Buffers batch ingestion example
+│       └── output/                     # Generated schema files (shared)
 │
 ├── tests/                              # Integration tests crate
 │   ├── src/
@@ -189,7 +180,7 @@ zerobus_rust_sdk/
 +-----------------+
 |    Your App     |
 +-----------------+
-        | 1. create_stream()
+        | 1. stream_builder().build()
         v
 +-----------------+
 |   ZerobusSdk    |
@@ -227,10 +218,10 @@ zerobus_rust_sdk/
 
 ### Data Flow
 
-1. **Ingestion** - Your app calls `stream.ingest_record(data)` or `stream.ingest_records(batch)`
+1. **Ingestion** - Your app calls `stream.ingest_record_offset(data)` or `stream.ingest_records_offset(batch)`
 2. **Buffering** - Records are placed in the landing zone with logical offsets
 3. **Sending** - Sender task sends records over gRPC with physical offsets
-4. **Acknowledgment** - Receiver task gets server ack and resolves the future
+4. **Acknowledgment** - Receiver task gets server ack; callers wait via `stream.wait_for_offset(offset)`
 5. **Recovery** - If connection fails, supervisor reconnects and resends unacked records
 
 ### Authentication Flow
@@ -270,13 +261,14 @@ impl HeadersProvider for MyCustomAuthProvider {
     }
 }
 
-async fn example(sdk: ZerobusSdk, table_properties: TableProperties) -> ZerobusResult<()> {
+async fn example(sdk: ZerobusSdk) -> ZerobusResult<()> {
     let custom_provider = Arc::new(MyCustomAuthProvider {});
-    let stream = sdk.create_stream_with_headers_provider(
-        table_properties,
-        custom_provider,
-        None,
-    ).await?;
+    let stream = sdk
+        .stream_builder().table("catalog.schema.table")
+        .headers_provider(custom_provider)
+        .json()
+        .build()
+        .await?;
     Ok(())
 }
 ```
@@ -288,7 +280,7 @@ The SDK supports two approaches for data serialization:
 1. **JSON** - Simpler approach that uses JSON strings. No schema generation required, making it ideal for quick prototyping. See [`examples/README.md`](https://github.com/databricks/zerobus-sdk/blob/main/rust/examples/README.md) for a complete example.
 2. **Protocol Buffers** - Type-safe approach with schema validation at compile time. Recommended for production use cases. This guide focuses on the Protocol Buffers approach.
 
-For JSON-based ingestion, you can skip the schema generation step and directly pass JSON strings to `ingest_record()`.
+For JSON-based ingestion, you can skip the schema generation step and directly pass JSON strings to `ingest_record_offset()`.
 
 ### 1. Generate Protocol Buffer Schema (Protocol Buffers approach only)
 
@@ -397,7 +389,24 @@ See [`examples/README.md`](https://github.com/databricks/zerobus-sdk/blob/main/r
 
 ### 4. Create a Stream
 
-Configure table properties and stream options:
+Use the `stream_builder()` API to create a stream:
+
+#### JSON Stream
+
+```rust
+let mut stream = sdk
+    .stream_builder().table("catalog.schema.orders")
+    .oauth(client_id, client_secret)
+    .json()
+    .max_inflight_requests(10_000)
+    .recovery_timeout_ms(15_000)
+    .recovery_backoff_ms(2_000)
+    .recovery_retries(4)
+    .build()
+    .await?;
+```
+
+#### Protocol Buffers Stream
 
 ```rust
 use std::fs;
@@ -424,27 +433,19 @@ let descriptor_proto = load_descriptor(
     "table_Orders",
 );
 
-let table_properties = TableProperties {
-    table_name: "catalog.schema.orders".to_string(),
-    descriptor_proto,
-};
-
-let options = StreamConfigurationOptions {
-    max_inflight_requests: 10000,
-    recovery: true,
-    recovery_timeout_ms: 15000,
-    recovery_backoff_ms: 2000,
-    recovery_retries: 4,
-    ..Default::default()
-};
-
-let mut stream = sdk.create_stream(
-    table_properties,
-    client_id,
-    client_secret,
-    Some(options),
-).await?;
+let mut stream = sdk
+    .stream_builder().table("catalog.schema.orders")
+    .oauth(client_id, client_secret)
+    .compiled_proto(descriptor_proto)
+    .max_inflight_requests(10_000)
+    .recovery_timeout_ms(15_000)
+    .recovery_backoff_ms(2_000)
+    .recovery_retries(4)
+    .build()
+    .await?;
 ```
+
+Setters can be called in any order. The builder validates at `build()` time that both authentication and format have been configured.
 
 ### 5. Ingest Data
 
@@ -576,22 +577,18 @@ impl AckCallback for MyCallback {
 }
 
 // Configure stream with callback
-let options = StreamConfigurationOptions {
-    max_inflight_requests: 10000,
-    ack_callback: Some(Arc::new(MyCallback)),
-    ..Default::default()
-};
-
-let mut stream = sdk.create_stream(
-    table_properties,
-    client_id,
-    client_secret,
-    Some(options),
-).await?;
+let mut stream = sdk
+    .stream_builder().table("catalog.schema.orders")
+    .oauth(client_id, client_secret)
+    .compiled_proto(descriptor_proto)
+    .max_inflight_requests(10_000)
+    .ack_callback(Arc::new(MyCallback))
+    .build()
+    .await?;
 
 for i in 0..1000 {
     let record = YourMessage { id: Some(i), /* ... */ };
-    stream.ingest_record_offset(record.encode_to_vec()).await?;
+    stream.ingest_record_offset(ProtoMessage(record)).await?;
     // Callback fires when this record is acknowledged
 }
 
@@ -682,14 +679,18 @@ match stream.close().await {
 **Example:**
 
 ```rust
-let options = StreamConfigurationOptions {
-    max_inflight_requests: 50000,
-    recovery: true,
-    recovery_timeout_ms: 20000,
-    recovery_retries: 5,
-    flush_timeout_ms: 600000,
-    ..Default::default()
-};
+let stream = sdk
+    .stream_builder()
+    .table("catalog.schema.orders")
+    .oauth(client_id, client_secret)
+    .json()
+    .max_inflight_requests(50_000)
+    .recovery(true)
+    .recovery_timeout_ms(20_000)
+    .recovery_retries(5)
+    .flush_timeout_ms(600_000)
+    .build()
+    .await?;
 ```
 
 ## Error Handling
@@ -715,9 +716,9 @@ Require manual intervention:
 **Check if an error is retryable:**
 
 ```rust
-match stream.ingest_record(payload).await {
-    Ok(ack) => {
-        let offset = ack.await?;
+match stream.ingest_record_offset(payload).await {
+    Ok(offset) => {
+        stream.wait_for_offset(offset).await?;
     }
     Err(e) if e.is_retryable() => {
         eprintln!("Retryable error, SDK will auto-recover: {}", e);
@@ -735,12 +736,12 @@ match stream.ingest_record(payload).await {
 
 The `examples/` directory contains four working examples covering different serialization formats and ingestion patterns:
 
-| Example | Serialization | Ingestion | Package |
-|---------|--------------|-----------|---------|
-| `json/single/` | JSON | Single-record | `example_json_single` |
-| `json/batch/` | JSON | Batch | `example_json_batch` |
-| `proto/single/` | Protocol Buffers | Single-record | `example_proto_single` |
-| `proto/batch/` | Protocol Buffers | Batch | `example_proto_batch` |
+| Example | Serialization | Ingestion | Run with |
+|---------|--------------|-----------|----------|
+| `json/single.rs` | JSON | Single-record | `cargo run -p rust-examples-json --example json_single` |
+| `json/batch.rs` | JSON | Batch | `cargo run -p rust-examples-json --example json_batch` |
+| `proto/single.rs` | Protocol Buffers | Single-record | `cargo run -p rust-examples-proto --example proto_single` |
+| `proto/batch.rs` | Protocol Buffers | Batch | `cargo run -p rust-examples-proto --example proto_batch` |
 
 
 Check [`examples/README.md`](https://github.com/databricks/zerobus-sdk/blob/main/rust/examples/README.md) for setup instructions and detailed comparisons.
@@ -753,18 +754,18 @@ let sdk = ZerobusSdk::builder()
     .unity_catalog_url(uc_endpoint)
     .build()?;
 
-let mut stream = sdk.create_stream(
-    table_properties.clone(),
-    client_id.clone(),
-    client_secret.clone(),
-    Some(options),
-).await?;
+let mut stream = sdk
+    .stream_builder().table("catalog.schema.table")
+    .oauth(client_id, client_secret)
+    .json()
+    .build()
+    .await?;
 
 // Ingest data...
 match stream.close().await {
     Err(_) => {
         // Stream failed, recreate with unacked records
-        stream = sdk.recreate_stream(stream).await?;
+        stream = sdk.recreate_stream(&stream).await?;
     }
     Ok(_) => println!("Closed successfully"),
 }
@@ -791,7 +792,6 @@ cargo test -p tests -- --nocapture
    - Use `ingest_records_offset()` for high throughput batch ingestion
    - Use `ingest_record_offset()` when processing records individually
    - Both return offsets directly; use `wait_for_offset()` to explicitly wait for acknowledgments
-   - The older `ingest_record()` and `ingest_records()` methods are deprecated
 4. **Tune Inflight Limits** - Adjust `max_inflight_requests` based on memory and throughput needs
 5. **Enable Recovery** - Always set `recovery: true` in production environments
 6. **Handle Ack Futures** - Use `tokio::spawn` for fire-and-forget or batch-wait for verification
@@ -816,33 +816,19 @@ let sdk = ZerobusSdk::builder()
 ```
 
 **Methods:**
+
 ```rust
-pub async fn create_stream(
-    &self,
-    table_properties: TableProperties,
-    client_id: String,
-    client_secret: String,
-    options: Option<StreamConfigurationOptions>,
-) -> ZerobusResult<ZerobusStream>
+pub fn stream_builder(&self) -> StreamBuilder<'_>
 ```
+Returns a fluent builder for creating ingestion streams. All setters can be called in any order. Call `validate()` to check the configuration without opening a stream, or `build()` / `build_arrow()` to open the stream. See [Create a Stream](#4-create-a-stream) for usage.
 
 ```rust
 pub async fn recreate_stream(
     &self,
-    stream: ZerobusStream
+    stream: &ZerobusStream
 ) -> ZerobusResult<ZerobusStream>
 ```
 Recreates a failed stream, preserving and re-ingesting unacknowledged records.
-
-```rust
-pub async fn create_stream_with_headers_provider(
-    &self,
-    table_properties: TableProperties,
-    headers_provider: Arc<dyn HeadersProvider>,
-    options: Option<StreamConfigurationOptions>,
-) -> ZerobusResult<ZerobusStream>
-```
-Creates a stream with a custom headers provider for advanced authentication.
 
 ### `ZerobusStream`
 
@@ -864,22 +850,6 @@ pub async fn ingest_records_offset(
 ) -> ZerobusResult<Option<OffsetId>>
 ```
 Ingests multiple encoded records as a batch with all-or-nothing semantics. The entire batch either succeeds or fails as a unit. The await queues the batch for sending and returns the logical offset ID directly (or `None` for empty batches). Use `wait_for_offset()` to explicitly wait for server acknowledgment.
-
-```rust
-pub async fn ingest_record(
-    &self,
-    payload: Vec<u8>
-) -> ZerobusResult<impl Future<Output = ZerobusResult<OffsetId>>>>
-```
-**Deprecated:** Use `ingest_record_offset()` instead. Returns a future that resolves to the offset ID.
-
-```rust
-pub async fn ingest_records(
-    &self,
-    payloads: Vec<Vec<u8>>
-) -> ZerobusResult<impl Future<Output = ZerobusResult<Option<OffsetId>>>>
-```
-**Deprecated:** Use `ingest_records_offset()` instead. Returns a future that resolves to `Some(offset_id)` for non-empty batches, or `None` if the batch is empty.
 
 ```rust
 pub async fn wait_for_offset(&self, offset_id: OffsetId) -> ZerobusResult<()>
@@ -905,48 +875,14 @@ Returns an iterator over all unacknowledged records as individual `EncodedRecord
 pub async fn get_unacked_batches(&self) -> ZerobusResult<Vec<EncodedBatch>>
 ```
 Returns unacknowledged records grouped by batch, preserving the original batch structure. Records ingested together remain grouped:
-- Each `ingest_record()` call creates a batch containing one record
-- Each `ingest_records()` call creates a batch containing multiple records
+- Each `ingest_record_offset()` call creates a batch containing one record
+- Each `ingest_records_offset()` call creates a batch containing multiple records
 
 Only call after stream failure.
 
-### `TableProperties`
+### `StreamBuilder`
 
-Configuration for the target table.
-
-**Fields:**
-```rust
-pub struct TableProperties {
-    pub table_name: String,
-    pub descriptor_proto: Option<prost_types::DescriptorProto>,
-}
-```
-
-- `table_name` - Full table name (e.g., "catalog.schema.table")
-- `descriptor_proto` - Optional Protocol buffer descriptor loaded from generated files (required for Proto record type, None for JSON)
-
-### `StreamConfigurationOptions`
-
-Stream behavior configuration.
-
-**Fields:**
-```rust
-pub struct StreamConfigurationOptions {
-    pub max_inflight_requests: usize,
-    pub recovery: bool,
-    pub recovery_timeout_ms: u64,
-    pub recovery_backoff_ms: u64,
-    pub recovery_retries: u32,
-    pub server_lack_of_ack_timeout_ms: u64,
-    pub flush_timeout_ms: u64,
-    pub record_type: RecordType,
-    pub stream_paused_max_wait_time_ms: Option<u64>,
-    pub ack_callback: Option<Arc<dyn AckCallback>>,
-    pub callback_max_wait_time_ms: Option<u64>
-}
-```
-
-See [Configuration Options](#configuration-options) for details.
+Configure stream parameters via fluent setters; all configuration goes through the builder. See [Create a Stream](#4-create-a-stream) for usage and [Configuration Options](#configuration-options) for the full list of available setters and their defaults.
 
 ### `AckCallback`
 
@@ -1064,16 +1000,16 @@ cargo build -p databricks-zerobus-ingest-sdk
 cargo build -p generate_files
 
 # Build and run JSON single-record example
-cargo run -p example_json_single
+cargo run -p rust-examples-json --example json_single
 
 # Build and run JSON batch example
-cargo run -p example_json_batch
+cargo run -p rust-examples-json --example json_batch
 
 # Build and run Protocol Buffers single-record example
-cargo run -p example_proto_single
+cargo run -p rust-examples-proto --example proto_single
 
 # Build and run Protocol Buffers batch example
-cargo run -p example_proto_batch
+cargo run -p rust-examples-proto --example proto_batch
 ```
 
 ## Community and Contributing

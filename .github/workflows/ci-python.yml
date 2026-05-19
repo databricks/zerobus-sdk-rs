@@ -57,12 +57,12 @@ jobs:
         shell: bash
         run: cp ../LICENSE LICENSE
 
-      - name: Patch Cargo.toml to use local Rust SDK
-        if: inputs.use_local_sdk
-        working-directory: python/rust
-        shell: bash
-        run: |
-          printf '\n[patch.crates-io]\ndatabricks-zerobus-ingest-sdk = { path = "../../rust/sdk" }\n' >> Cargo.toml
+      # - name: Patch Cargo.toml to use local Rust SDK
+      #   if: inputs.use_local_sdk
+      #   working-directory: python/rust
+      #   shell: bash
+      #   run: |
+      #     printf '\n[patch.crates-io]\ndatabricks-zerobus-ingest-sdk = { path = "../../rust/sdk" }\n' >> Cargo.toml
 
       - name: Run tests (Linux)
         if: runner.os != 'Windows'

@@ -55,7 +55,8 @@ impl From<JsonEncodedRecord> for EncodedRecord {
 /// # use databricks_zerobus_ingest_sdk::{ZerobusStream, ProtoBytes};
 /// # async fn example(stream: &ZerobusStream) -> Result<(), Box<dyn std::error::Error>> {
 /// let proto_bytes = vec![1, 2, 3, 4];
-/// let ack = stream.ingest_record(ProtoBytes(proto_bytes)).await?;
+/// let offset = stream.ingest_record_offset(ProtoBytes(proto_bytes)).await?;
+/// stream.wait_for_offset(offset).await?;
 /// # Ok(())
 /// # }
 /// ```
@@ -78,7 +79,8 @@ impl From<ProtoBytes> for EncodedRecord {
 /// # use databricks_zerobus_ingest_sdk::{ZerobusStream, JsonString};
 /// # async fn example(stream: &ZerobusStream) -> Result<(), Box<dyn std::error::Error>> {
 /// let json_str = r#"{"name":"test","value":42}"#.to_string();
-/// let ack = stream.ingest_record(JsonString(json_str)).await?;
+/// let offset = stream.ingest_record_offset(JsonString(json_str)).await?;
+/// stream.wait_for_offset(offset).await?;
 /// # Ok(())
 /// # }
 /// ```
@@ -102,7 +104,8 @@ impl From<JsonString> for EncodedRecord {
 /// # use databricks_zerobus_ingest_sdk::{ZerobusStream, ProtoMessage};
 /// # async fn example(stream: &ZerobusStream, my_proto_msg: impl prost::Message) -> Result<(), Box<dyn std::error::Error>> {
 /// // Ingest a protobuf message - it will be automatically serialized
-/// let ack = stream.ingest_record(ProtoMessage(my_proto_msg)).await?;
+/// let offset = stream.ingest_record_offset(ProtoMessage(my_proto_msg)).await?;
+/// stream.wait_for_offset(offset).await?;
 /// # Ok(())
 /// # }
 /// ```
@@ -134,7 +137,8 @@ impl<T: Message> From<ProtoMessage<T>> for EncodedRecord {
 ///
 /// let my_data = MyData { name: "test".into(), value: 42 };
 /// // Ingest a JSON object - it will be automatically serialized
-/// let ack = stream.ingest_record(JsonValue(my_data)).await?;
+/// let offset = stream.ingest_record_offset(JsonValue(my_data)).await?;
+/// stream.wait_for_offset(offset).await?;
 /// # Ok(())
 /// # }
 /// ```

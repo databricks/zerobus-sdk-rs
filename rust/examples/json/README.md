@@ -24,8 +24,8 @@ JSON examples are recommended for getting started - they're simpler and don't re
 - Great for quick prototyping
 
 **Available examples:**
-- **`single/`** - Ingest records one at a time using `ingest_record_offset()` / `ingest_record()`
-- **`batch/`** - Ingest multiple records at once using `ingest_records_offset()` / `ingest_records()`
+- **`single.rs`** - Ingest records one at a time using `ingest_record_offset()` / `ingest_record()`
+- **`batch.rs`** - Ingest multiple records at once using `ingest_records_offset()` / `ingest_records()`
 
 ## Three Ways to Pass Data
 
@@ -46,34 +46,27 @@ The SDK supports three approaches for passing JSON data:
 
 ### Running the Example
 
-1. Configure credentials in `single/src/main.rs` (see [Prerequisites](../README.md#prerequisites))
+1. Configure credentials in `single.rs` (see [Prerequisites](../README.md#prerequisites))
 
 2. Run the example:
    ```bash
-   cargo run -p example_json_single
+   cargo run -p rust-examples-json --example json_single
    ```
 
 **Expected output:**
 ```
-=== Offset-based API (Recommended) ===
 [Auto-serializing] Record sent with offset ID: 0
 [Auto-serializing] Record acknowledged with offset ID: 0
 [Pre-serialized] Record sent with offset ID: 1
 [Pre-serialized] Record acknowledged with offset ID: 1
 [Backward-compatible] Record sent with offset ID: 2
 [Backward-compatible] Record acknowledged with offset ID: 2
-=== Future-based API (Deprecated) ===
-[Auto-serializing] Record acknowledged with offset ID: 3
-[Pre-serialized] Record acknowledged with offset ID: 4
-[Backward-compatible] Record acknowledged with offset ID: 5
 Stream closed successfully
 ```
 
 ### Code Highlights
 
-The example demonstrates all three data-passing approaches with both API styles:
-
-**Offset-based API (Recommended):**
+The example demonstrates all three data-passing approaches:
 
 ```rust
 use databricks_zerobus_ingest_sdk::{JsonValue, JsonString};
@@ -100,60 +93,40 @@ let offset = stream.ingest_record_offset(json).await?;
 stream.wait_for_offset(offset).await?;
 ```
 
-**Future-based API (Deprecated):**
-
+**Building a JSON stream:**
 ```rust
-// 1. Auto-serializing
-let ack = stream.ingest_record(JsonValue(order)).await?;
-let offset = ack.await?;
-
-// 2. Pre-serialized
-let ack = stream.ingest_record(JsonString(json)).await?;
-let offset = ack.await?;
-
-// 3. Backward-compatible
-let ack = stream.ingest_record(json).await?;
-let offset = ack.await?;
-```
-
-**Key configuration for JSON:**
-```rust
-let stream_configuration_options = StreamConfigurationOptions {
-    record_type: RecordType::Json,  // Important!
-    ..Default::default()
-};
+let stream = sdk
+    .stream_builder()
+    .table(TABLE_NAME)
+    .oauth(DATABRICKS_CLIENT_ID, DATABRICKS_CLIENT_SECRET)
+    .json()
+    .build()
+    .await?;
 ```
 
 ## Batch Example
 
 ### Running the Example
 
-1. Configure credentials in `batch/src/main.rs` (see [Prerequisites](../README.md#prerequisites))
+1. Configure credentials in `batch.rs` (see [Prerequisites](../README.md#prerequisites))
 
 2. Run the example:
    ```bash
-   cargo run -p example_json_batch
+   cargo run -p rust-examples-json --example json_batch
    ```
 
 **Expected output:**
 ```
-=== Offset-based API (Recommended) ===
 [Auto-serializing] Batch of 3 records sent with offset ID: 0
 [Auto-serializing] Batch acknowledged with offset ID: 0
 [Pre-serialized] Batch of 3 records sent with offset ID: 1
 [Pre-serialized] Batch acknowledged with offset ID: 1
 [Backward-compatible] Batch of 3 records sent with offset ID: 2
 [Backward-compatible] Batch acknowledged with offset ID: 2
-=== Future-based API (Deprecated) ===
-[Auto-serializing] Batch acknowledged with offset ID: 3
-[Pre-serialized] Batch acknowledged with offset ID: 4
-[Backward-compatible] Batch acknowledged with offset ID: 5
 Stream closed successfully
 ```
 
 ### Code Highlights
-
-**Offset-based API (Recommended):**
 
 ```rust
 use databricks_zerobus_ingest_sdk::{JsonValue, JsonString};
@@ -198,15 +171,6 @@ let batch: Vec<String> = vec![
 ];
 if let Some(offset) = stream.ingest_records_offset(batch).await? {
     stream.wait_for_offset(offset).await?;
-}
-```
-
-**Future-based API (Deprecated):**
-
-```rust
-// Works the same way, returns Option<Future> instead of Option<OffsetId>
-if let Some(ack) = stream.ingest_records(batch).await? {
-    let offset = ack.await?;
 }
 ```
 

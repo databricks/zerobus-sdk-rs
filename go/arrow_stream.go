@@ -76,6 +76,11 @@ type ArrowStreamConfigurationOptions struct {
 	// Arrow IPC compression codec.
 	// Default: IPCCompressionNone
 	IPCCompression IPCCompressionType
+
+	// Maximum time in milliseconds to wait during graceful stream close.
+	// nil = wait full server duration, 0 = immediate recovery, >0 = wait up to min(this, server_duration).
+	// Default: nil (wait full server duration)
+	StreamPausedMaxWaitTimeMs *uint64
 }
 
 // DefaultArrowStreamConfigurationOptions returns default configuration for Arrow streams

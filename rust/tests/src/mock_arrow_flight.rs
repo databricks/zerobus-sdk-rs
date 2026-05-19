@@ -60,6 +60,19 @@ pub enum MockFlightResponse {
     Error { status: Status, delay_ms: u64 },
     /// Close stream (drop the connection) - useful for testing recovery.
     CloseStream { delay_ms: u64 },
+    /// Graceful close signal - sends a close signal with grace period duration.
+    /// Optionally carries ack data in the same message (simulating the server
+    /// acking in-flight batches alongside the close signal).
+    GracefulClose {
+        /// Grace period duration in milliseconds sent to the client.
+        duration_ms: u64,
+        delay_ms: u64,
+        /// Optional ack data to include with the close signal.
+        /// When set, the close signal PutResult also carries ack information,
+        /// allowing the client to mark batches as acked during the grace period.
+        ack_up_to_offset: Option<i64>,
+        ack_up_to_records: Option<u64>,
+    },
 }
 
 /// Mock Arrow Flight server for testing
@@ -378,6 +391,45 @@ impl FlightService for MockFlightServer {
                                 indices.insert(table_name.clone(), response_index);
                             }
                             return;
+                        }
+                        MockFlightResponse::GracefulClose {
+                            duration_ms,
+                            delay_ms,
+                            ack_up_to_offset,
+                            ack_up_to_records,
+                        } => {
+                            if *delay_ms > 0 {
+                                sleep(Duration::from_millis(*delay_ms)).await;
+                            }
+                            info!(
+                                "Sending graceful close signal with {}ms grace period",
+                                duration_ms
+                            );
+
+                            // Send close signal metadata via PutResult.
+                            // Optionally includes ack data if provided.
+                            let close_metadata = serde_json::json!({
+                                "ack_up_to_offset": ack_up_to_offset.unwrap_or(-1),
+                                "ack_up_to_records": ack_up_to_records.unwrap_or(0),
+                                "close_stream_duration_ms": duration_ms,
+                            });
+                            let close_bytes = serde_json::to_vec(&close_metadata).unwrap();
+                            let put_result = PutResult {
+                                app_metadata: close_bytes.into(),
+                            };
+
+                            if tx.send(Ok(put_result)).await.is_err() {
+                                error!("Failed to send graceful close signal - channel closed");
+                                return;
+                            }
+                            response_index += 1;
+                            {
+                                let mut indices = response_indices.lock().await;
+                                indices.insert(table_name.clone(), response_index);
+                            }
+                            // Continue processing - the main loop waits for more batches.
+                            // During grace period the client won't send new batches,
+                            // so this effectively waits until the client disconnects.
                         }
                     }
                 } else {

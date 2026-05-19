@@ -1,6 +1,6 @@
 [package]
 name = "databricks-zerobus-ingest-sdk"
-version = "1.2.0"
+version = "2.0.0"
 authors = ["Databricks"]
 edition = "2021"
 rust-version = "1.70"
@@ -13,40 +13,41 @@ categories = ["database", "api-bindings"]
 documentation = "https://docs.rs/databricks-zerobus-ingest-sdk"
 
 [dependencies]
-async-trait = "0.1"
-prost = "0.13.3"
-prost-types = "0.13.3"
-reqwest = { version = "0.12", features = ["json", "rustls-tls-native-roots", "rustls-tls-webpki-roots"], default-features = false }
-serde = { version = "1.0", features = ["derive"] }
-serde_json = "1.0"
-thiserror = "1.0"
-tokio = { version = "1.42.0", features = ["macros", "rt-multi-thread", "fs", "sync"] }
-tokio-retry = "0.3"
-tokio-stream = "0.1.16"
-tokio-util = { version = "0.7.17", features = ["rt"] }
-tonic = { version = "0.13", features = ["tls-native-roots", "transport"] }
-tracing = "0.1.41"
-hyper-http-proxy = { version = "1.1", default-features = false, features = ["rustls-tls-native-roots"] }
-hyper-util = { version = "0.1", features = ["client-legacy", "tokio"] }
-smallvec = "1.15.1"
-bytes = "1"
+async-trait.workspace = true
+prost.workspace = true
+prost-types.workspace = true
+reqwest.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "fs", "sync"] }
+tokio-retry.workspace = true
+tokio-stream.workspace = true
+tokio-util = { workspace = true, features = ["rt"] }
+tonic = { workspace = true, features = ["tls-native-roots", "transport"] }
+tonic-prost.workspace = true
+tracing.workspace = true
+hyper-http-proxy.workspace = true
+hyper-util.workspace = true
+smallvec.workspace = true
+bytes.workspace = true
 
 # Arrow Flight dependencies
-arrow-flight = { version = "56.2.0", default-features = false, optional = true }
-arrow-array = { version = "56.2.0", default-features = false, optional = true }
-arrow-schema = { version = "56.2.0", default-features = false, optional = true }
-arrow-ipc = { version = "56.2.0", default-features = false, optional = true, features = ["lz4","zstd"] }
-futures = { version = "0.3", optional = true }
+arrow-flight = { workspace = true, optional = true }
+arrow-array = { workspace = true, optional = true }
+arrow-schema = { workspace = true, optional = true }
+arrow-ipc = { workspace = true, optional = true, features = ["lz4", "zstd"] }
+futures = { workspace = true, optional = true }
 
 [dev-dependencies]
-tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+tracing-subscriber.workspace = true
 
 [build-dependencies]
-tonic-build = "0.13"
-protoc-bin-vendored = "3.0.0"
+tonic-prost-build.workspace = true
+protoc-bin-vendored.workspace = true
 
 [features]
 default = []
-# Arrow Flight is experimental/unsupported
+# Arrow Flight is in Beta
 arrow-flight = ["dep:arrow-flight", "dep:arrow-array", "dep:arrow-schema", "dep:arrow-ipc", "dep:futures"]
 testing = []

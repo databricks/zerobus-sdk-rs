@@ -4,15 +4,12 @@ mod utils;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
-use databricks_zerobus_ingest_sdk::databricks::zerobus::RecordType;
-use databricks_zerobus_ingest_sdk::{
-    NoTlsConfig, StreamConfigurationOptions, TableProperties, ZerobusSdk,
-};
+use databricks_zerobus_ingest_sdk::{NoTlsConfig, ZerobusSdk};
 use mock_grpc::{start_mock_server, MockResponse};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
 use tracing::info;
-use utils::{create_test_descriptor_proto, setup_tracing, TestHeadersProvider};
+use utils::{setup_tracing, TestHeadersProvider};
 
 const TABLE_NAME: &str = "test_catalog.test_schema.test_table";
 
@@ -87,24 +84,14 @@ async fn ingest_one_record(server_url: &str) -> Result<(), Box<dyn std::error::E
         .tls_config(Arc::new(NoTlsConfig))
         .build()?;
 
-    let table_properties = TableProperties {
-        table_name: TABLE_NAME.to_string(),
-        descriptor_proto: create_test_descriptor_proto(),
-    };
-
-    let options = StreamConfigurationOptions {
-        max_inflight_requests: 10,
-        record_type: RecordType::Json,
-        recovery: false,
-        ..Default::default()
-    };
-
     let mut stream = sdk
-        .create_stream_with_headers_provider(
-            table_properties,
-            Arc::new(TestHeadersProvider::default()),
-            Some(options),
-        )
+        .stream_builder()
+        .table(TABLE_NAME)
+        .headers_provider(Arc::new(TestHeadersProvider::default()))
+        .json()
+        .max_inflight_requests(10)
+        .recovery(false)
+        .build()
         .await?;
 
     let json = r#"{"id": 1, "message": "proxy test"}"#.to_string();

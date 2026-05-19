@@ -512,35 +512,48 @@ func streamIngestProtoRecords(streamPtr unsafe.Pointer, records [][]byte) (int64
 		return -1, nil // Return special value for empty batch
 	}
 
-	// Create arrays of pointers and lengths
-	recordPtrs := make([]*C.uint8_t, len(records))
-	recordLens := make([]C.size_t, len(records))
+	// Allocate pointer and length arrays in C memory so they are invisible to
+	// the Go GC: no pinning needed for the arrays themselves, and no Go heap
+	// allocation pressure per call (issue #271).
+	ptrSize := C.size_t(unsafe.Sizeof((*C.uint8_t)(nil)))
+	lenSize := C.size_t(unsafe.Sizeof(C.size_t(0)))
+	n := C.size_t(len(records))
 
-	// Pin all record data to prevent GC from moving it while Rust reads
+	cPtrArray := C.malloc(n * ptrSize)
+	if cPtrArray == nil {
+		return -1, &ZerobusError{Message: "out of memory allocating record pointer array", IsRetryable: false}
+	}
+	defer C.free(cPtrArray)
+
+	cLenArray := C.malloc(n * lenSize)
+	if cLenArray == nil {
+		return -1, &ZerobusError{Message: "out of memory allocating record length array", IsRetryable: false}
+	}
+	defer C.free(cLenArray)
+
+	recordPtrs := (*[1 << 30]*C.uint8_t)(cPtrArray)[:len(records):len(records)]
+	recordLens := (*[1 << 30]C.size_t)(cLenArray)[:len(records):len(records)]
+
+	// The record data itself lives in caller-owned Go []byte slices and must
+	// be pinned so the GC does not move it while Rust reads it.
 	var pinner runtime.Pinner
 	defer pinner.Unpin()
 
 	for i, record := range records {
 		if len(record) > 0 {
-			unsafeRecord := (*C.uint8_t)(unsafe.SliceData(records[i]))
-			pinner.Pin(unsafeRecord)
-			recordPtrs[i] = unsafeRecord
+			ptr := (*C.uint8_t)(unsafe.SliceData(records[i]))
+			pinner.Pin(ptr)
+			recordPtrs[i] = ptr
 			recordLens[i] = C.size_t(len(record))
 		}
 	}
 
-	// Get pointers to the arrays for passing to C
-	inRecords := (**C.uint8_t)(unsafe.SliceData(recordPtrs))
-	inLengths := (*C.size_t)(unsafe.SliceData(recordLens))
-	pinner.Pin(inRecords)
-	pinner.Pin(inLengths)
-
 	var cres C.CResult
 	offset := C.zerobus_stream_ingest_proto_records(
 		(*C.CZerobusStream)(streamPtr),
-		inRecords,
-		inLengths,
-		C.size_t(len(records)),
+		(**C.uint8_t)(cPtrArray),
+		(*C.size_t)(cLenArray),
+		n,
 		&cres,
 	)
 
@@ -560,27 +573,36 @@ func streamIngestJSONRecords(streamPtr unsafe.Pointer, records []string) (int64,
 		return -1, nil // Return special value for empty batch
 	}
 
-	// Create array of C string pointers
-	cStrings := make([]*C.char, len(records))
-
-	// Convert each Go string to C string
-	for i, record := range records {
-		cStr := C.CString(record)
-		cStrings[i] = cStr
-		defer C.free(unsafe.Pointer(cStr))
+	// Allocate the pointer array in C memory so it is invisible to the Go GC:
+	// no pinning needed, and no Go heap allocation pressure per call.
+	ptrSize := C.size_t(unsafe.Sizeof((*C.char)(nil)))
+	cPtrArray := C.malloc(C.size_t(len(records)) * ptrSize)
+	if cPtrArray == nil {
+		return -1, &ZerobusError{Message: "out of memory allocating C string array", IsRetryable: false}
 	}
+	defer C.free(cPtrArray)
 
-	var pinner runtime.Pinner
-	defer pinner.Unpin()
+	// View the C allocation as a slice for convenient indexing.
+	cStrings := (*[1 << 30]*C.char)(cPtrArray)[:len(records):len(records)]
 
-	// Get pointer to the array for passing to C
-	inStrings := (**C.char)(unsafe.SliceData(cStrings))
-	pinner.Pin(inStrings)
+	// Convert each Go string to a C string. Free them all in a single deferred
+	// closure — one defer record regardless of batch size, avoiding the
+	// per-element defer accumulation that caused GC pressure (issue #271).
+	for i, record := range records {
+		cStrings[i] = C.CString(record)
+	}
+	defer func() {
+		for _, cStr := range cStrings {
+			if cStr != nil {
+				C.free(unsafe.Pointer(cStr))
+			}
+		}
+	}()
 
 	var cres C.CResult
 	offset := C.zerobus_stream_ingest_json_records(
 		(*C.CZerobusStream)(streamPtr),
-		inStrings,
+		(**C.char)(cPtrArray),
 		C.size_t(len(records)),
 		&cres,
 	)
