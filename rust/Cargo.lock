@@ -3388,6 +3388,7 @@ version = "1.1.0"
 dependencies = [
  "arrow-ipc",
  "async-trait",
+ "bytes",
  "cbindgen",
  "databricks-zerobus-ingest-sdk",
  "libc",
