@@ -217,6 +217,8 @@ pub struct ZerobusStream {
     cancellation_token: CancellationToken,
     /// Callback handler task that executes callbacks in a separate thread.
     callback_handler_task: Option<tokio::task::JoinHandle<()>>,
+    /// Sender used to report acknowledgements and failures to the callback handler.
+    callback_tx: Option<tokio::sync::mpsc::UnboundedSender<CallbackMessage>>,
 }
 
 /// The main interface for interacting with the Zerobus API.
@@ -954,6 +956,7 @@ impl ZerobusStream {
             server_error_rx,
             cancellation_token,
             callback_handler_task,
+            callback_tx,
         };
 
         Ok(stream)
@@ -2108,6 +2111,16 @@ impl ZerobusStream {
             error!("Stream ID is None during closing");
         }
         let flush_result = self.flush().await;
+        if let Err(error) = &flush_result {
+            Self::fail_all_pending_records(
+                Arc::clone(&self.landing_zone),
+                Arc::clone(&self.oneshot_map),
+                Arc::clone(&self.failed_records),
+                error,
+                &self.callback_tx,
+            )
+            .await;
+        }
         self.is_closed.store(true, Ordering::Relaxed);
         self.shutdown_all_tasks_gracefully().await;
         flush_result

@@ -20,6 +20,8 @@
 
 ### Bug Fixes
 
+- Preserve pending records for recovery when `ZerobusStream::close()` fails while flushing.
+
 ### Documentation
 
 ### Internal Changes

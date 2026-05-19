@@ -8,6 +8,8 @@
 
 ### Bug Fixes
 
+- Preserve unacknowledged Proto/JSON records for stream recreation when close fails while flushing.
+
 ### Documentation
 
 ### Internal Changes
