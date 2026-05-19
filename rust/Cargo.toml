@@ -64,4 +64,4 @@ anyhow = "1"
 clap = { version = "4.6", features = ["derive"] }
 urlencoding = "2.1"
 tempfile = "3.27"
-jni = "0.21"
+jni = "0.22"
