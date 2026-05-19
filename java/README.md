@@ -1051,11 +1051,6 @@ CompletableFuture<Void> ingestRecord(RecordType record) throws ZerobusException
 ```
 Ingests a record and returns a Future that completes on acknowledgment.
 
-```java
-void ingestRecordNoWait(RecordType record) throws ZerobusException
-```
-Queues a record without returning an offset or waiting for acknowledgment.
-
 **Lifecycle Methods:** `waitForOffset()`, `flush()`, `close()`, `isClosed()`
 
 **Accessors:**

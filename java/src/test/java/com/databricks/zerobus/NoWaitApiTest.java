@@ -32,11 +32,6 @@ public class NoWaitApiTest {
   }
 
   @Test
-  void legacyStreamExposesNoWaitOverload() throws Exception {
-    assertVoidMethod(ZerobusStream.class.getMethod("ingestRecordNoWait", Message.class));
-  }
-
-  @Test
   void baseStreamDeclaresNativeNoWaitBridge() throws Exception {
     Method method =
         BaseZerobusStream.class.getDeclaredMethod(
