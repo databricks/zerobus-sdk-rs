@@ -33,7 +33,7 @@ We are keen to hear feedback from you on this SDK. Please [file issues](https://
 - [Configuration Options](#configuration-options)
 - [Error Handling](#error-handling)
 - [Examples](#examples)
-- [Arrow Flight Ingestion (Experimental)](#arrow-flight-ingestion-experimental)
+- [Arrow Flight Ingestion (Beta)](#arrow-flight-ingestion-beta)
 - [Tests](#tests)
 - [Best Practices](#best-practices)
 - [Migration Guide](#migration-guide)
@@ -64,7 +64,7 @@ This SDK wraps the [Rust SDK](https://github.com/databricks/zerobus-sdk/tree/mai
 - **Configurable timeouts and retry policies**
 - **Immediate offset returns** for ingested records
 - **Graceful stream management** - Proper flushing and resource cleanup
-- **[Experimental] Arrow Flight ingestion** - High-throughput Apache Arrow RecordBatch ingestion via the Arrow Flight protocol
+- **[Beta] Arrow Flight ingestion** - High-throughput Apache Arrow RecordBatch ingestion via the Arrow Flight protocol
 ## Getting Started
 
 Choose your installation path:
@@ -749,7 +749,7 @@ The `examples/` directory contains complete, runnable examples organized by form
 - **`examples/proto/single/`** - Single record ingestion with protobuf
 - **`examples/proto/batch/`** - Batch ingestion with protobuf
 
-**Arrow Flight Examples (Experimental):**
+**Arrow Flight Examples (Beta):**
 - **`examples/arrow/`** - Arrow RecordBatch ingestion via Arrow Flight protocol
 
 **To run an example:**
@@ -771,9 +771,9 @@ go run main.go
 
 Each example includes detailed comments and demonstrates best practices for production use. See [`examples/README.md`](examples/README.md) for complete setup instructions, prerequisites, and detailed comparisons between examples.
 
-## Arrow Flight Ingestion (Experimental)
+## Arrow Flight Ingestion (Beta)
 
-> **Experimental/Unsupported**: Arrow Flight ingestion is experimental and not yet supported for production use. The API may change in future releases.
+> **Beta**: Arrow Flight ingestion is in Beta. The API is stabilising but may still change before reaching GA.
 
 Ingest Apache Arrow RecordBatches directly into Databricks Delta tables using the Arrow Flight protocol. Use this if your pipeline already works with Arrow data. For JSON or Protocol Buffers, use the standard `ZerobusStream`.
 
@@ -1323,7 +1323,7 @@ func (e *ZerobusError) Retryable() bool
 
 Returns `true` if the error can be automatically recovered by the SDK.
 
-### `ZerobusArrowStream` (Experimental)
+### `ZerobusArrowStream` (Beta)
 
 Represents an active Arrow Flight ingestion stream.
 
@@ -1359,7 +1359,7 @@ func (s *ZerobusArrowStream) GetUnackedBatches() ([][]byte, error)
 
 Returns unacknowledged batches as Arrow IPC bytes. Call only after stream failure.
 
-### `ArrowStreamConfigurationOptions` (Experimental)
+### `ArrowStreamConfigurationOptions` (Beta)
 
 Arrow stream configuration. See [ArrowStreamConfigurationOptions](#arrowstreamconfigurationoptions) for details.
 
