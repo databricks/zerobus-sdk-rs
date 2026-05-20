@@ -33,6 +33,19 @@
   previously only logged ack errors via `eprintln!`; subclasses overriding
   `on_error` would never see the call. They will now.
 
+### Behavior Changes
+
+- **`StreamConfigurationOptions.max_inflight_records` default raised from
+  `50_000` to `1_000_000`** to match the Rust SDK 2.0.0 default. Previously the
+  Python wrapper hard-coded 50k while the Rust SDK quietly raised its default
+  to 1M, so Python clients ran with a 20× lower in-flight ceiling than Rust
+  clients for no good reason. Callers who relied on the old cap can pin it
+  back explicitly:
+
+  ```python
+  StreamConfigurationOptions(max_inflight_records=50_000)
+  ```
+
 ### Bug Fixes
 
 - `TableProperties(name, MyMessage.DESCRIPTOR)` proto-descriptor

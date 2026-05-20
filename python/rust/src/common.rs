@@ -323,7 +323,7 @@ impl StreamConfigurationOptions {
 impl Default for StreamConfigurationOptions {
     fn default() -> Self {
         Self {
-            max_inflight_records: 50_000,
+            max_inflight_records: 1_000_000,
             recovery: true,
             recovery_timeout_ms: 15_000,
             recovery_backoff_ms: 2_000,
