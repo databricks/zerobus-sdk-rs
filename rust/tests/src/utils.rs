@@ -109,6 +109,22 @@ pub fn create_test_dict_record_batch(
         .expect("Failed to create dictionary RecordBatch")
 }
 
+/// Creates a large RecordBatch for testing chunking behavior.
+///
+/// Produces `num_rows` rows where the `message` column contains a fixed-size string
+/// of `payload_bytes_per_row` bytes. The resulting batch is roughly
+/// `num_rows * (8 + payload_bytes_per_row)` bytes when IPC-encoded.
+pub fn create_large_test_record_batch(
+    schema: Arc<ArrowSchema>,
+    num_rows: usize,
+    payload_bytes_per_row: usize,
+) -> RecordBatch {
+    let ids: Vec<i64> = (0..num_rows as i64).collect();
+    let payload = "x".repeat(payload_bytes_per_row);
+    let messages: Vec<Option<&str>> = vec![Some(payload.as_str()); num_rows];
+    create_test_record_batch(schema, ids, messages)
+}
+
 /// Deserialise Arrow IPC stream bytes back into a [`RecordBatch`].
 pub fn ipc_bytes_to_record_batch(bytes: &bytes::Bytes) -> RecordBatch {
     let mut reader = arrow_ipc::reader::StreamReader::try_new(Cursor::new(bytes.as_ref()), None)
