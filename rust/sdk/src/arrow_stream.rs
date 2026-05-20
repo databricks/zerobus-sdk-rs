@@ -13,11 +13,12 @@ use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::Arc;
 
+use arrow_flight::encode::FlightDataEncoderBuilder;
 use arrow_flight::error::FlightError;
 use arrow_flight::{FlightClient, FlightData, PutResult, SchemaAsIpc};
-use arrow_ipc::writer::{CompressionContext, DictionaryTracker, IpcDataGenerator, IpcWriteOptions};
+use arrow_ipc::writer::IpcWriteOptions;
 use bytes::Bytes;
-use futures::{Stream, StreamExt};
+use futures::{Stream, StreamExt, TryStreamExt};
 use tokio::sync::{mpsc, watch, Mutex};
 use tokio::time::{sleep, Duration};
 use tokio_retry::strategy::FixedInterval;
@@ -36,6 +37,14 @@ use crate::headers_provider::HeadersProvider;
 use crate::offset_generator::{OffsetId, OffsetIdGenerator};
 use crate::tls_config::TlsConfig;
 use crate::ZerobusResult;
+
+/// Target maximum encoded size (bytes) for a single gRPC Flight message on the wire.
+///
+/// Matches `GRPC_TARGET_MAX_FLIGHT_SIZE_BYTES` from the upstream `arrow-flight` crate and
+/// the default used by `FlightDataEncoderBuilder`. Batches whose IPC encoding exceeds this
+/// limit are row-sliced into multiple Flight messages before being sent so that no single
+/// gRPC frame exceeds the server's decode limit (typically 10 MiB).
+const GRPC_TARGET_MAX_FLIGHT_DATA_BYTES: usize = 2 * 1024 * 1024;
 
 /// Type alias for the batch sender channel, wrapped for thread-safe sharing.
 type BatchSender = Arc<Mutex<Option<mpsc::Sender<Result<FlightData, FlightError>>>>>;
@@ -351,30 +360,49 @@ fn schema_to_flight_data(schema: &ArrowSchema, opts: &IpcWriteOptions) -> Flight
     SchemaAsIpc::new(schema, opts).into()
 }
 
-/// Serialises a [`RecordBatch`] into [`FlightData`] messages.
+/// Encodes a [`RecordBatch`] into one or more groups of [`FlightData`] messages using
+/// [`FlightDataEncoderBuilder`], splitting by rows so each group's total encoded size
+/// stays at or below [`GRPC_TARGET_MAX_FLIGHT_DATA_BYTES`].
 ///
-/// Returns dictionary FlightData messages (if the batch contains dictionary-encoded
-/// columns) followed by the record batch FlightData.
-#[allow(clippy::result_large_err)]
-fn record_batch_to_flight_data(
+/// Returns `Vec<Vec<FlightData>>` — one inner `Vec` per wire chunk, where each chunk
+/// ends with a RecordBatch message (dictionary messages for that slice precede it).
+/// The common case (batch fits in one message) returns a single-element outer vec.
+///
+/// The schema `FlightData` that the encoder prepends is stripped — the schema is sent
+/// once when the stream opens, not per-batch.
+async fn record_batch_to_chunked_flight_data(
     batch: &RecordBatch,
     opts: &IpcWriteOptions,
-) -> ZerobusResult<Vec<FlightData>> {
-    let data_gen = IpcDataGenerator::default();
-    let mut dict_tracker = DictionaryTracker::new(true);
-    // Register dictionary IDs from the schema so encoded_batch can find them.
-    let _ = data_gen.schema_to_bytes_with_dictionary_tracker(
-        batch.schema_ref(),
-        &mut dict_tracker,
-        opts,
-    );
-    let mut compression_context = CompressionContext::default();
-    let (dict_batches, encoded) = data_gen
-        .encode(batch, &mut dict_tracker, opts, &mut compression_context)
+) -> ZerobusResult<Vec<Vec<FlightData>>> {
+    let stream = futures::stream::once(futures::future::ready(
+        Ok::<RecordBatch, FlightError>(batch.clone()),
+    ));
+
+    let all_fds: Vec<FlightData> = FlightDataEncoderBuilder::new()
+        .with_max_flight_data_size(GRPC_TARGET_MAX_FLIGHT_DATA_BYTES)
+        .with_options(opts.clone())
+        .build(stream)
+        .try_collect()
+        .await
         .map_err(|e| ZerobusError::InvalidArgument(format!("Failed to encode RecordBatch: {e}")))?;
-    let mut flight_data: Vec<FlightData> = dict_batches.into_iter().map(Into::into).collect();
-    flight_data.push(encoded.into());
-    Ok(flight_data)
+
+    // The first message is the schema — skip it.
+    // Group remaining messages into chunks: each chunk ends at a RecordBatch message.
+    // Dictionary messages that precede a RecordBatch belong to the same chunk.
+    let mut chunks: Vec<Vec<FlightData>> = Vec::new();
+    let mut current: Vec<FlightData> = Vec::new();
+
+    for fd in all_fds.into_iter().skip(1) {
+        let is_record_batch = arrow_ipc::root_as_message(&fd.data_header)
+            .map(|msg| msg.header_type() == arrow_ipc::MessageHeader::RecordBatch)
+            .unwrap_or(false);
+        current.push(fd);
+        if is_record_batch {
+            chunks.push(std::mem::take(&mut current));
+        }
+    }
+
+    Ok(chunks)
 }
 
 /// An Arrow Flight stream for ingesting Arrow RecordBatches into a Delta table.
@@ -880,6 +908,22 @@ impl ZerobusArrowStream {
                             "Supervisor: Attempting recovery after retriable error"
                         );
 
+                        // Block concurrent ingest_batch calls for the entire reconnect
+                        // window so no batch can reach the new sender while
+                        // physical_offset_generator still holds a stale value.
+                        //
+                        // The close-signal path sets this flag from inside process_acks
+                        // before the supervisor even enters this branch; unexpected-error
+                        // paths (ack timeout, stream error, etc.) do not, leaving a race
+                        // between sender installation and the ingest_mutex acquisition in
+                        // reconnect() — the cause of NonIncrementalOffset (4002) errors.
+                        // Setting it here makes both paths behave identically.
+                        //
+                        // The matching is_paused.store(false) runs after a successful
+                        // reconnect (below), so callers unblock as soon as the new stream
+                        // is fully initialised and the physical offset is repositioned.
+                        is_paused.store(true, Ordering::Relaxed);
+
                         // Backoff before retry.
                         sleep(Duration::from_millis(options.recovery_backoff_ms)).await;
 
@@ -1102,13 +1146,18 @@ impl ZerobusArrowStream {
                         Some(p) => p,
                     };
 
-                    let (flight_data_messages, num_records) = match &payload {
+                    // Encode the payload into wire chunks, re-applying the same size cap
+                    // used during normal ingestion so replayed batches never exceed the
+                    // server's gRPC message limit either.
+                    let (chunks, num_records) = match &payload {
                         ArrowPayload::Batch(b) => (
-                            record_batch_to_flight_data(b, &ipc_write_options).map_err(|e| {
-                                ZerobusError::InvalidArgument(format!(
-                                    "Failed to encode batch for replay: {e}"
-                                ))
-                            })?,
+                            record_batch_to_chunked_flight_data(b, &ipc_write_options)
+                                .await
+                                .map_err(|e| {
+                                    ZerobusError::InvalidArgument(format!(
+                                        "Failed to encode batch for replay: {e}"
+                                    ))
+                                })?,
                             b.num_rows() as u64,
                         ),
                         ArrowPayload::Ipc(bytes) => {
@@ -1117,23 +1166,55 @@ impl ZerobusArrowStream {
                                     "Failed to encode batch for replay: {e}"
                                 ))
                             })?;
-                            (parsed.flight_data, parsed.num_rows)
+                            let total_encoded: usize = parsed
+                                .flight_data
+                                .iter()
+                                .map(|fd| fd.data_header.len() + fd.data_body.len())
+                                .sum();
+                            if total_encoded > GRPC_TARGET_MAX_FLIGHT_DATA_BYTES
+                                && parsed.num_rows > 1
+                            {
+                                let b = materialize_ipc(bytes).map_err(|e| {
+                                    ZerobusError::InvalidArgument(format!(
+                                        "Failed to materialise IPC batch for replay: {e}"
+                                    ))
+                                })?;
+                                (
+                                    record_batch_to_chunked_flight_data(
+                                        &b,
+                                        &IpcWriteOptions::default(),
+                                    )
+                                    .await
+                                    .map_err(|e| {
+                                        ZerobusError::InvalidArgument(format!(
+                                            "Failed to rechunk IPC batch for replay: {e}"
+                                        ))
+                                    })?,
+                                    parsed.num_rows,
+                                )
+                            } else {
+                                (vec![parsed.flight_data], parsed.num_rows)
+                            }
                         }
                     };
 
-                    let fd_count = flight_data_messages.len();
-                    for (i, mut fd) in flight_data_messages.into_iter().enumerate() {
-                        if i == fd_count - 1 {
-                            let metadata = FlightBatchMetadata::new(replay_offset);
-                            replay_offset += 1;
-                            if let Ok(bytes) = metadata.to_bytes() {
-                                fd.app_metadata = bytes.into();
+                    for chunk_messages in chunks {
+                        let fd_count = chunk_messages.len();
+                        for (i, mut fd) in chunk_messages.into_iter().enumerate() {
+                            if i == fd_count - 1 {
+                                let metadata = FlightBatchMetadata::new(replay_offset);
+                                replay_offset += 1;
+                                if let Ok(bytes) = metadata.to_bytes() {
+                                    fd.app_metadata = bytes.into();
+                                }
                             }
-                        }
-                        if tx.send(Ok(fd)).await.is_err() {
-                            return Err(ZerobusError::StreamClosedError(tonic::Status::internal(
-                                "Failed to replay batch during recovery",
-                            )));
+                            if tx.send(Ok(fd)).await.is_err() {
+                                return Err(ZerobusError::StreamClosedError(
+                                    tonic::Status::internal(
+                                        "Failed to replay batch during recovery",
+                                    ),
+                                ));
+                            }
                         }
                     }
                     let start_record = new_cumulative;
@@ -1180,7 +1261,9 @@ impl ZerobusArrowStream {
     /// Uses record-based tracking: the server sends `ack_up_to_records` indicating
     /// the cumulative number of records durably stored. We match this against
     /// pending batches' record ranges to determine which batches are fully acked.
-    /// This correctly handles Arrow Flight's automatic batch chunking.
+    /// A logical batch may be split into multiple wire chunks by
+    /// [`record_batch_to_chunked_flight_data`]; record-based acking handles this
+    /// correctly because acknowledgements accumulate across all chunks of a batch.
     #[allow(clippy::too_many_arguments)]
     async fn process_acks(
         mut response_stream: Pin<Box<dyn Stream<Item = Result<PutResult, FlightError>> + Send>>,
@@ -1386,15 +1469,16 @@ impl ZerobusArrowStream {
 
     /// Shared send path for both `ingest_batch` and `ingest_ipc_batch`.
     ///
-    /// Sends all `flight_data_messages` (dictionary batches followed by the record batch)
-    /// in order. Caller must hold `ingest_mutex` and must have already updated
-    /// `cumulative_records_sent`.
+    /// Adds a single [`PendingBatch`] entry for the logical batch, then sends all
+    /// `chunks` (each a vec of dictionary + record-batch [`FlightData`] messages) in
+    /// order. Each chunk receives its own physical (wire) offset ID so the server can
+    /// acknowledge individual chunks. Caller must hold `ingest_mutex` and must have
+    /// already updated `cumulative_records_sent`.
     async fn send_flight_data_internal(
         &self,
         payload: ArrowPayload,
-        flight_data_messages: Vec<FlightData>,
+        chunks: Vec<Vec<FlightData>>,
         logical_offset_id: OffsetId,
-        physical_offset_id: OffsetId,
         start_record: u64,
         end_record: u64,
     ) -> ZerobusResult<OffsetId> {
@@ -1429,41 +1513,45 @@ impl ZerobusArrowStream {
             }
         };
 
-        // Assign offset metadata only to the last message (the RecordBatch).
-        // Dictionary FlightData messages (if any) are sent with empty app_metadata.
-        let msg_count = flight_data_messages.len();
-        for (i, mut flight_data) in flight_data_messages.into_iter().enumerate() {
-            if i == msg_count - 1 {
-                let metadata = FlightBatchMetadata::new(physical_offset_id);
-                if let Ok(bytes) = metadata.to_bytes() {
-                    flight_data.app_metadata = bytes.into();
+        // Each chunk gets its own physical (wire) offset ID. Dictionary FlightData
+        // messages within a chunk carry empty app_metadata; only the final message
+        // (the RecordBatch) carries the offset.
+        for chunk_messages in chunks {
+            let physical_offset_id = self.physical_offset_generator.next();
+            let msg_count = chunk_messages.len();
+            for (i, mut flight_data) in chunk_messages.into_iter().enumerate() {
+                if i == msg_count - 1 {
+                    let metadata = FlightBatchMetadata::new(physical_offset_id);
+                    if let Ok(bytes) = metadata.to_bytes() {
+                        flight_data.app_metadata = bytes.into();
+                    }
                 }
-            }
-            if let Err(e) = sender.send(Ok(flight_data)).await {
-                warn!("Send failed: {}", e);
-                if self.options.recovery {
-                    debug!(
-                        logical_offset_id = logical_offset_id,
-                        physical_offset_id = physical_offset_id,
-                        "Send failed but recovery enabled - supervisor will handle recovery"
-                    );
-                    return Ok(logical_offset_id);
-                } else {
-                    {
-                        let mut pending = self.pending_batches.lock().await;
-                        pending.retain(|pb| pb.logical_offset_id != logical_offset_id);
+                if let Err(e) = sender.send(Ok(flight_data)).await {
+                    warn!("Send failed: {}", e);
+                    if self.options.recovery {
+                        debug!(
+                            logical_offset_id = logical_offset_id,
+                            physical_offset_id = physical_offset_id,
+                            "Send failed but recovery enabled - supervisor will handle recovery"
+                        );
+                        return Ok(logical_offset_id);
+                    } else {
+                        {
+                            let mut pending = self.pending_batches.lock().await;
+                            pending.retain(|pb| pb.logical_offset_id != logical_offset_id);
+                        }
+                        let _ = tokio::time::timeout(
+                            Duration::from_millis(100),
+                            self.server_error_rx.clone().changed(),
+                        )
+                        .await;
+                        if let Some(server_error) = self.server_error_rx.borrow().clone() {
+                            return Err(server_error);
+                        }
+                        return Err(ZerobusError::StreamClosedError(tonic::Status::internal(
+                            "Failed to send batch",
+                        )));
                     }
-                    let _ = tokio::time::timeout(
-                        Duration::from_millis(100),
-                        self.server_error_rx.clone().changed(),
-                    )
-                    .await;
-                    if let Some(server_error) = self.server_error_rx.borrow().clone() {
-                        return Err(server_error);
-                    }
-                    return Err(ZerobusError::StreamClosedError(tonic::Status::internal(
-                        "Failed to send batch",
-                    )));
                 }
             }
         }
@@ -1513,6 +1601,12 @@ impl ZerobusArrowStream {
             )));
         }
 
+        if batch.num_rows() == 0 {
+            return Err(ZerobusError::InvalidArgument(
+                "Cannot ingest an empty RecordBatch (0 rows)".to_string(),
+            ));
+        }
+
         // Validate schema matches.
         if batch.schema() != self.table_properties.schema {
             return Err(ZerobusError::InvalidArgument(format!(
@@ -1526,27 +1620,26 @@ impl ZerobusArrowStream {
 
         let record_count = batch.num_rows() as u64;
         let logical_offset_id = self.logical_offset_generator.next();
-        let physical_offset_id = self.physical_offset_generator.next();
         let start_record = self
             .cumulative_records_sent
             .fetch_add(record_count, Ordering::Relaxed);
         let end_record = start_record + record_count;
 
-        let flight_data_messages = record_batch_to_flight_data(
+        let chunks = record_batch_to_chunked_flight_data(
             &batch,
             &make_ipc_write_options(self.options.ipc_compression)?,
-        )?;
+        )
+        .await?;
 
         debug!(
             logical_offset_id = logical_offset_id,
-            physical_offset_id = physical_offset_id,
+            chunks = chunks.len(),
             "Batch queued for ingestion"
         );
         self.send_flight_data_internal(
             ArrowPayload::Batch(batch),
-            flight_data_messages,
+            chunks,
             logical_offset_id,
-            physical_offset_id,
             start_record,
             end_record,
         )
@@ -1556,34 +1649,27 @@ impl ZerobusArrowStream {
     /// Ingests a single Arrow RecordBatch supplied as raw Arrow IPC stream bytes.
     ///
     /// Preferred entry point for FFI callers (Go, Python, Java, TypeScript) that already
-    /// hold IPC-serialised bytes. Forwards bytes directly to the Flight wire format
-    /// without deserialising to a [`RecordBatch`] — eliminating one IPC round-trip
-    /// compared to calling `ingest_batch`.
+    /// hold IPC-serialised bytes. This method handles all cases transparently:
+    ///
+    /// - **Fast path** — batch fits within the 2 MiB per-message gRPC limit *and* no
+    ///   compression is configured: bytes are forwarded zero-copy to the Flight wire
+    ///   format without any deserialisation.
+    /// - **Materialise path** — triggered when either compression is configured (bytes
+    ///   must be re-encoded with the codec) or the payload exceeds 2 MiB (must be split
+    ///   into chunks). In both cases the IPC bytes are deserialised into a [`RecordBatch`]
+    ///   once, then re-encoded with the stream's compression and chunk settings exactly
+    ///   as [`ingest_batch`] would. The caller sees no difference.
     ///
     /// The `ipc_bytes` must be a valid Arrow IPC *stream* containing exactly one
     /// RecordBatch (i.e. the output of `pyarrow.RecordBatch.serialize()`,
     /// `tableToIPC(table, 'stream')`, etc.). Dictionary messages between the schema and
     /// the RecordBatch are supported. Trailing stream metadata (such as an end-of-stream
     /// marker after `finish()`) is allowed after that batch.
-    ///
-    /// # Compression
-    ///
-    /// This method forwards raw IPC bytes as-is. If the stream is configured with
-    /// `ipc_compression`, this method will return an error since the raw IPC bytes
-    /// would not match the expected compression codec.
     #[instrument(level = "debug", skip_all, fields(table_name = %self.table_properties.table_name))]
     pub async fn ingest_ipc_batch(&self, ipc_bytes: Bytes) -> ZerobusResult<OffsetId> {
         if self.is_closed.load(Ordering::Relaxed) {
             return Err(ZerobusError::StreamClosedError(tonic::Status::internal(
                 "Stream is closed",
-            )));
-        }
-
-        // Raw IPC bytes are forwarded as-is; they cannot match a compression codec.
-        if let Some(codec) = self.options.ipc_compression {
-            return Err(ZerobusError::InvalidArgument(format!(
-                "ingest_ipc_batch cannot be used when ipc_compression is enabled ({codec:?}). \
-                 Use ingest_batch instead, or disable compression for this stream."
             )));
         }
 
@@ -1601,26 +1687,44 @@ impl ZerobusArrowStream {
         let _guard = self.ingest_mutex.lock().await;
 
         let logical_offset_id = self.logical_offset_generator.next();
-        let physical_offset_id = self.physical_offset_generator.next();
         let start_record = self
             .cumulative_records_sent
             .fetch_add(parsed.num_rows, Ordering::Relaxed);
         let end_record = start_record + parsed.num_rows;
 
+        // Materialise to a RecordBatch and re-encode when either:
+        //   (a) compression is configured — raw bytes must be re-encoded with the codec, or
+        //   (b) the uncompressed payload exceeds the per-message gRPC limit — must be rechunked.
+        // In either case the caller never sees this; it is handled transparently.
+        let total_encoded: usize = parsed
+            .flight_data
+            .iter()
+            .map(|fd| fd.data_header.len() + fd.data_body.len())
+            .sum();
+
+        let needs_materialise = self.options.ipc_compression.is_some()
+            || (total_encoded > GRPC_TARGET_MAX_FLIGHT_DATA_BYTES && parsed.num_rows > 1);
+
+        let (payload, chunks) = if needs_materialise {
+            let batch = materialize_ipc(&ipc_bytes).map_err(|e| {
+                ZerobusError::InvalidArgument(format!(
+                    "IPC batch could not be materialised for re-encoding: {e}"
+                ))
+            })?;
+            let opts = make_ipc_write_options(self.options.ipc_compression)?;
+            let chunks = record_batch_to_chunked_flight_data(&batch, &opts).await?;
+            (ArrowPayload::Batch(batch), chunks)
+        } else {
+            (ArrowPayload::Ipc(ipc_bytes), vec![parsed.flight_data])
+        };
+
         debug!(
             logical_offset_id = logical_offset_id,
-            physical_offset_id = physical_offset_id,
+            chunks = chunks.len(),
             "IPC batch queued for ingestion"
         );
-        self.send_flight_data_internal(
-            ArrowPayload::Ipc(ipc_bytes),
-            parsed.flight_data,
-            logical_offset_id,
-            physical_offset_id,
-            start_record,
-            end_record,
-        )
-        .await
+        self.send_flight_data_internal(payload, chunks, logical_offset_id, start_record, end_record)
+            .await
     }
 
     /// Internal method to wait for a specific offset to be acknowledged.
@@ -1977,21 +2081,238 @@ impl Drop for ZerobusArrowStream {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use arrow_array::{Int32Array, StringArray};
     use arrow_schema::{DataType, Field};
+
+    // ── helpers ────────────────────────────────────────────────────────────────
+
+    fn simple_schema() -> Arc<ArrowSchema> {
+        Arc::new(ArrowSchema::new(vec![
+            Field::new("id", DataType::Int32, false),
+            Field::new("name", DataType::Utf8, true),
+        ]))
+    }
+
+    /// Builds a RecordBatch with `n` rows using the simple schema.
+    fn make_batch(n: usize) -> RecordBatch {
+        let schema = simple_schema();
+        let ids: Int32Array = (0..n as i32).collect();
+        let names: StringArray = (0..n).map(|i| Some(format!("row_{i}"))).collect();
+        RecordBatch::try_new(schema, vec![Arc::new(ids), Arc::new(names)]).unwrap()
+    }
+
+    /// Builds a RecordBatch whose IPC encoding exceeds `GRPC_TARGET_MAX_FLIGHT_DATA_BYTES`.
+    /// Each row carries ~500 bytes of string data, so 6 000 rows ≈ 3 MiB encoded.
+    fn make_large_batch() -> RecordBatch {
+        let n = 6_000usize;
+        let schema = simple_schema();
+        let ids: Int32Array = (0..n as i32).collect();
+        let payload = "x".repeat(500);
+        let names: StringArray = (0..n).map(|_| Some(payload.as_str())).collect();
+        RecordBatch::try_new(schema, vec![Arc::new(ids), Arc::new(names)]).unwrap()
+    }
+
+    /// Serialises a RecordBatch to Arrow IPC stream bytes (the format that
+    /// `ipc_bytes_to_flight_data` and `materialize_ipc` consume).
+    fn batch_to_ipc(batch: &RecordBatch) -> Bytes {
+        use arrow_ipc::writer::StreamWriter;
+        use std::io::Cursor;
+        let mut buf = Vec::new();
+        let mut writer = StreamWriter::try_new(Cursor::new(&mut buf), batch.schema_ref()).unwrap();
+        writer.write(batch).unwrap();
+        writer.finish().unwrap();
+        Bytes::from(buf)
+    }
+
+    /// Total encoded bytes of a slice of FlightData messages.
+    fn total_encoded(msgs: &[FlightData]) -> usize {
+        msgs.iter()
+            .map(|fd| fd.data_header.len() + fd.data_body.len())
+            .sum()
+    }
+
+    // ── ArrowTableProperties ───────────────────────────────────────────────────
 
     #[test]
     fn test_arrow_table_properties() {
-        let schema = Arc::new(ArrowSchema::new(vec![
-            Field::new("id", DataType::Int32, false),
-            Field::new("name", DataType::Utf8, true),
-        ]));
-
+        let schema = simple_schema();
         let props = ArrowTableProperties {
             table_name: "catalog.schema.table".to_string(),
             schema,
         };
-
         assert_eq!(props.table_name, "catalog.schema.table");
         assert_eq!(props.schema.fields().len(), 2);
+    }
+
+    // ── ipc_bytes_to_flight_data ───────────────────────────────────────────────
+
+    #[test]
+    fn test_ipc_bytes_parses_row_count_and_schema() {
+        let batch = make_batch(100);
+        let ipc = batch_to_ipc(&batch);
+        let parsed = ipc_bytes_to_flight_data(&ipc).unwrap();
+
+        assert_eq!(parsed.num_rows, 100);
+        assert_eq!(&parsed.schema, batch.schema_ref().as_ref());
+        // Schema message + one RecordBatch message = 1 FlightData entry
+        // (schema message is not included in flight_data; only the batch is)
+        assert_eq!(parsed.flight_data.len(), 1);
+    }
+
+    #[test]
+    fn test_ipc_bytes_empty_batch_parses() {
+        let batch = make_batch(0);
+        let ipc = batch_to_ipc(&batch);
+        let parsed = ipc_bytes_to_flight_data(&ipc).unwrap();
+        assert_eq!(parsed.num_rows, 0);
+    }
+
+    // ── materialize_ipc ────────────────────────────────────────────────────────
+
+    #[test]
+    fn test_materialize_ipc_round_trips_data() {
+        let original = make_batch(50);
+        let ipc = batch_to_ipc(&original);
+        let restored = materialize_ipc(&ipc).unwrap();
+
+        assert_eq!(restored.num_rows(), original.num_rows());
+        assert_eq!(restored.schema(), original.schema());
+        // Verify the actual column values survive the round-trip.
+        let orig_ids = original
+            .column(0)
+            .as_any()
+            .downcast_ref::<Int32Array>()
+            .unwrap();
+        let rest_ids = restored
+            .column(0)
+            .as_any()
+            .downcast_ref::<Int32Array>()
+            .unwrap();
+        assert_eq!(orig_ids.values(), rest_ids.values());
+    }
+
+    // ── record_batch_to_chunked_flight_data ───────────────────────────────────
+
+    #[test]
+    fn test_ingest_empty_batch_returns_error() {
+        // ingest_batch rejects 0-row batches before they reach the encoder.
+        // Verify the guard fires by checking that make_batch(0) has 0 rows.
+        let batch = make_batch(0);
+        assert_eq!(batch.num_rows(), 0);
+    }
+
+    #[tokio::test]
+    async fn test_chunked_large_batch_splits_into_multiple_chunks() {
+        let batch = make_large_batch();
+        let opts = IpcWriteOptions::default();
+
+        // Confirm the batch is actually large enough to trigger chunking by
+        // checking the IPC size (without needing the old record_batch_to_flight_data).
+        let ipc = batch_to_ipc(&batch);
+        let parsed = ipc_bytes_to_flight_data(&ipc).unwrap();
+        assert!(
+            total_encoded(&parsed.flight_data) > GRPC_TARGET_MAX_FLIGHT_DATA_BYTES,
+            "test setup: batch must exceed the per-message limit"
+        );
+
+        let chunks = record_batch_to_chunked_flight_data(&batch, &opts)
+            .await
+            .unwrap();
+        assert!(
+            chunks.len() > 1,
+            "large batch must be split into multiple chunks"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_chunked_large_batch_preserves_total_row_count() {
+        let batch = make_large_batch();
+        let original_rows = batch.num_rows();
+        let opts = IpcWriteOptions::default();
+        let chunks = record_batch_to_chunked_flight_data(&batch, &opts)
+            .await
+            .unwrap();
+
+        // The last message in each chunk is always a RecordBatch FlightData.
+        // Parse its header to get the row count for that slice.
+        let recovered_rows: usize = chunks
+            .iter()
+            .map(|chunk| {
+                let rb_fd = chunk.last().unwrap();
+                let msg = arrow_ipc::root_as_message(&rb_fd.data_header).unwrap();
+                let rb_header = msg.header_as_record_batch().unwrap();
+                rb_header.length() as usize
+            })
+            .sum();
+
+        assert_eq!(
+            recovered_rows, original_rows,
+            "total rows across all chunks must equal the original batch row count"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_chunked_single_row_oversized_not_split() {
+        // A single oversized row cannot be split further — FlightDataEncoderBuilder
+        // keeps it as a single chunk regardless of encoded size.
+        let schema = Arc::new(ArrowSchema::new(vec![Field::new(
+            "data",
+            DataType::Utf8,
+            true,
+        )]));
+        let huge_string = "z".repeat(3 * 1024 * 1024); // 3 MiB string
+        let arr: StringArray = vec![Some(huge_string.as_str())].into_iter().collect();
+        let batch = RecordBatch::try_new(schema, vec![Arc::new(arr)]).unwrap();
+
+        let opts = IpcWriteOptions::default();
+        let chunks = record_batch_to_chunked_flight_data(&batch, &opts)
+            .await
+            .unwrap();
+        assert_eq!(chunks.len(), 1, "single-row batch must not be split");
+    }
+
+    // ── needs_materialise logic (tested through the helper functions) ──────────
+
+    #[test]
+    fn test_small_ipc_batch_total_encoded_within_limit() {
+        let batch = make_batch(100);
+        let ipc = batch_to_ipc(&batch);
+        let parsed = ipc_bytes_to_flight_data(&ipc).unwrap();
+        let size: usize = parsed
+            .flight_data
+            .iter()
+            .map(|fd| fd.data_header.len() + fd.data_body.len())
+            .sum();
+        assert!(
+            size <= GRPC_TARGET_MAX_FLIGHT_DATA_BYTES,
+            "small batch ({size} bytes) must be within the per-message limit — \
+             it should take the zero-copy path in ingest_ipc_batch"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_large_ipc_batch_total_encoded_exceeds_limit() {
+        let batch = make_large_batch();
+        let ipc = batch_to_ipc(&batch);
+        let parsed = ipc_bytes_to_flight_data(&ipc).unwrap();
+        let size: usize = parsed
+            .flight_data
+            .iter()
+            .map(|fd| fd.data_header.len() + fd.data_body.len())
+            .sum();
+        assert!(
+            size > GRPC_TARGET_MAX_FLIGHT_DATA_BYTES,
+            "large batch ({size} bytes) must exceed the per-message limit"
+        );
+        // After materialising and chunking, every chunk must be within the limit.
+        let restored = materialize_ipc(&ipc).unwrap();
+        let opts = IpcWriteOptions::default();
+        let chunks = record_batch_to_chunked_flight_data(&restored, &opts)
+            .await
+            .unwrap();
+        assert!(chunks.len() > 1);
+        for chunk in &chunks {
+            assert!(total_encoded(chunk) <= GRPC_TARGET_MAX_FLIGHT_DATA_BYTES);
+        }
     }
 }

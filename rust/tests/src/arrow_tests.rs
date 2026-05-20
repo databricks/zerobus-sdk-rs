@@ -1428,14 +1428,30 @@ mod arrow_flight_tests {
             Ok(())
         }
 
+        // Previously this test asserted that ingest_ipc_batch returned an error when
+        // ipc_compression was configured on the stream. The behavior was changed so that
+        // ingest_ipc_batch is now fully transparent: it materialises the IPC bytes and
+        // re-encodes with the stream's codec when needed. The test now verifies that
+        // sending via IPC to a compressed stream succeeds end-to-end.
         #[tokio::test]
-        async fn test_ingest_ipc_batch_compression_mismatch(
+        async fn test_ingest_ipc_batch_with_compression_succeeds(
         ) -> Result<(), Box<dyn std::error::Error>> {
             setup_tracing();
-            info!("Starting test_ingest_ipc_batch_compression_mismatch");
+            info!("Starting test_ingest_ipc_batch_with_compression_succeeds");
 
-            let (_mock_server, server_url) = start_mock_flight_server().await?;
+            let (mock_server, server_url) = start_mock_flight_server().await?;
             let schema = create_test_arrow_schema();
+
+            mock_server
+                .inject_responses(
+                    TABLE_NAME,
+                    vec![MockFlightResponse::BatchAck {
+                        ack_up_to_offset: 0,
+                        delay_ms: 0,
+                        ack_up_to_records: 3,
+                    }],
+                )
+                .await;
 
             let sdk = ZerobusSdk::builder()
                 .endpoint(server_url.clone())
@@ -1452,16 +1468,253 @@ mod arrow_flight_tests {
                 .build_arrow()
                 .await?;
 
-            let batch = create_test_record_batch(schema, vec![1], vec![Some("test")]);
+            // Raw IPC bytes are uncompressed; the SDK must materialise and re-encode
+            // with ZSTD. This used to return an InvalidArgument error.
+            let batch =
+                create_test_record_batch(schema, vec![1, 2, 3], vec![Some("a"), Some("b"), None]);
             let ipc_bytes = record_batch_to_ipc_bytes(&batch);
 
-            let result = stream.ingest_ipc_batch(ipc_bytes).await;
-            assert!(result.is_err(), "Expected compression mismatch error");
-            let err_msg = format!("{}", result.unwrap_err());
-            assert!(
-                err_msg.contains("ipc_compression"),
-                "Error should mention compression: {err_msg}"
+            let offset = stream.ingest_ipc_batch(ipc_bytes).await?;
+            assert_eq!(offset, 0, "First batch must get logical offset 0");
+            stream.wait_for_offset(offset).await?;
+            assert_eq!(mock_server.get_batch_count().await, 1);
+
+            Ok(())
+        }
+
+        // Large IPC batch — verify the SDK transparently splits it into multiple
+        // physical Flight messages. The mock validates sequential physical offsets and
+        // returns the logical offset once all rows are acknowledged.
+        //
+        // Batch: 6 000 rows × 500-char strings → ~3 MiB encoded → 3 chunks
+        // (GRPC_TARGET_MAX_FLIGHT_DATA_BYTES = 2 MiB, rows_per_chunk ≈ 2 048).
+        #[tokio::test]
+        async fn test_ingest_ipc_batch_large_auto_chunks() -> Result<(), Box<dyn std::error::Error>>
+        {
+            use crate::utils::create_large_ipc_bytes;
+            setup_tracing();
+            info!("Starting test_ingest_ipc_batch_large_auto_chunks");
+
+            let (mock_server, server_url) = start_mock_flight_server().await?;
+            let schema = create_test_arrow_schema();
+
+            // Three acks — one per expected chunk. Only the last one acks all 6 000
+            // records, which is when wait_for_offset(0) returns.
+            mock_server
+                .inject_responses(
+                    TABLE_NAME,
+                    vec![
+                        MockFlightResponse::BatchAck {
+                            ack_up_to_offset: 0,
+                            delay_ms: 0,
+                            ack_up_to_records: 0,
+                        },
+                        MockFlightResponse::BatchAck {
+                            ack_up_to_offset: 1,
+                            delay_ms: 0,
+                            ack_up_to_records: 0,
+                        },
+                        MockFlightResponse::BatchAck {
+                            ack_up_to_offset: 2,
+                            delay_ms: 0,
+                            ack_up_to_records: 6_000,
+                        },
+                    ],
+                )
+                .await;
+
+            let sdk = ZerobusSdk::builder()
+                .endpoint(server_url.clone())
+                .unity_catalog_url("https://mock-uc.com")
+                .tls_config(Arc::new(NoTlsConfig))
+                .build()?;
+
+            let stream = sdk
+                .stream_builder()
+                .table(TABLE_NAME)
+                .headers_provider(Arc::new(TestHeadersProvider::default()))
+                .arrow(schema.clone())
+                .build_arrow()
+                .await?;
+
+            let ipc_bytes = create_large_ipc_bytes(schema);
+            let offset = stream.ingest_ipc_batch(ipc_bytes).await?;
+
+            assert_eq!(offset, 0, "Large IPC batch must return logical offset 0");
+            stream.wait_for_offset(offset).await?;
+
+            // Mock validates sequential physical offsets 0→1→2 internally;
+            // if they were non-sequential it would have closed the stream with an error.
+            assert_eq!(
+                mock_server.get_batch_count().await,
+                3,
+                "Large batch must be split into 3 physical Flight messages"
             );
+            assert_eq!(
+                mock_server.get_max_offset_received().await,
+                2,
+                "Physical offsets 0, 1, 2 must arrive in order"
+            );
+
+            Ok(())
+        }
+
+        // Same as above but using ingest_batch (RecordBatch path) rather than
+        // ingest_ipc_batch. Verifies that the native Rust path also chunks correctly.
+        #[tokio::test]
+        async fn test_ingest_batch_large_auto_chunks() -> Result<(), Box<dyn std::error::Error>> {
+            use crate::utils::create_large_record_batch;
+            setup_tracing();
+            info!("Starting test_ingest_batch_large_auto_chunks");
+
+            let (mock_server, server_url) = start_mock_flight_server().await?;
+            let schema = create_test_arrow_schema();
+
+            mock_server
+                .inject_responses(
+                    TABLE_NAME,
+                    vec![
+                        MockFlightResponse::BatchAck {
+                            ack_up_to_offset: 0,
+                            delay_ms: 0,
+                            ack_up_to_records: 0,
+                        },
+                        MockFlightResponse::BatchAck {
+                            ack_up_to_offset: 1,
+                            delay_ms: 0,
+                            ack_up_to_records: 0,
+                        },
+                        MockFlightResponse::BatchAck {
+                            ack_up_to_offset: 2,
+                            delay_ms: 0,
+                            ack_up_to_records: 6_000,
+                        },
+                    ],
+                )
+                .await;
+
+            let sdk = ZerobusSdk::builder()
+                .endpoint(server_url.clone())
+                .unity_catalog_url("https://mock-uc.com")
+                .tls_config(Arc::new(NoTlsConfig))
+                .build()?;
+
+            let stream = sdk
+                .stream_builder()
+                .table(TABLE_NAME)
+                .headers_provider(Arc::new(TestHeadersProvider::default()))
+                .arrow(schema.clone())
+                .build_arrow()
+                .await?;
+
+            let batch = create_large_record_batch(schema);
+            let offset = stream.ingest_batch(batch).await?;
+
+            assert_eq!(offset, 0, "Large RecordBatch must return logical offset 0");
+            stream.wait_for_offset(offset).await?;
+
+            assert_eq!(
+                mock_server.get_batch_count().await,
+                3,
+                "Large RecordBatch must be split into 3 physical Flight messages"
+            );
+            assert_eq!(mock_server.get_max_offset_received().await, 2);
+
+            Ok(())
+        }
+
+        // After a large (chunked) IPC batch, subsequent small batches must get
+        // sequential logical offsets. The mock server validates sequential physical
+        // offsets too — a non-sequential offset closes the stream with an error.
+        #[tokio::test]
+        async fn test_large_ipc_batch_then_small_sequential_offsets(
+        ) -> Result<(), Box<dyn std::error::Error>> {
+            use crate::utils::create_large_ipc_bytes;
+            setup_tracing();
+            info!("Starting test_large_ipc_batch_then_small_sequential_offsets");
+
+            let (mock_server, server_url) = start_mock_flight_server().await?;
+            let schema = create_test_arrow_schema();
+
+            // Large batch → 3 chunks (physical offsets 0, 1, 2); then 2 small batches
+            // (physical offsets 3, 4). Logical offsets are 0, 1, 2.
+            mock_server
+                .inject_responses(
+                    TABLE_NAME,
+                    vec![
+                        MockFlightResponse::BatchAck {
+                            ack_up_to_offset: 0,
+                            delay_ms: 0,
+                            ack_up_to_records: 0,
+                        },
+                        MockFlightResponse::BatchAck {
+                            ack_up_to_offset: 1,
+                            delay_ms: 0,
+                            ack_up_to_records: 0,
+                        },
+                        MockFlightResponse::BatchAck {
+                            ack_up_to_offset: 2,
+                            delay_ms: 0,
+                            ack_up_to_records: 6_000,
+                        },
+                        MockFlightResponse::BatchAck {
+                            ack_up_to_offset: 3,
+                            delay_ms: 0,
+                            ack_up_to_records: 6_002,
+                        },
+                        MockFlightResponse::BatchAck {
+                            ack_up_to_offset: 4,
+                            delay_ms: 0,
+                            ack_up_to_records: 6_004,
+                        },
+                    ],
+                )
+                .await;
+
+            let sdk = ZerobusSdk::builder()
+                .endpoint(server_url.clone())
+                .unity_catalog_url("https://mock-uc.com")
+                .tls_config(Arc::new(NoTlsConfig))
+                .build()?;
+
+            let stream = sdk
+                .stream_builder()
+                .table(TABLE_NAME)
+                .headers_provider(Arc::new(TestHeadersProvider::default()))
+                .arrow(schema.clone())
+                .build_arrow()
+                .await?;
+
+            // Logical offset 0: large IPC batch (3 physical chunks)
+            let large_ipc = create_large_ipc_bytes(schema.clone());
+            let offset0 = stream.ingest_ipc_batch(large_ipc).await?;
+            assert_eq!(offset0, 0);
+
+            // Logical offset 1: small batch
+            let small1 = create_test_record_batch(
+                schema.clone(),
+                vec![10001, 10002],
+                vec![Some("after-large-1"), Some("after-large-2")],
+            );
+            let ipc1 = record_batch_to_ipc_bytes(&small1);
+            let offset1 = stream.ingest_ipc_batch(ipc1).await?;
+            assert_eq!(offset1, 1, "Second logical batch must have offset 1");
+
+            // Logical offset 2: another small batch
+            let small2 = create_test_record_batch(
+                schema,
+                vec![20001, 20002],
+                vec![Some("after-large-3"), Some("after-large-4")],
+            );
+            let ipc2 = record_batch_to_ipc_bytes(&small2);
+            let offset2 = stream.ingest_ipc_batch(ipc2).await?;
+            assert_eq!(offset2, 2, "Third logical batch must have offset 2");
+
+            stream.wait_for_offset(offset2).await?;
+
+            // 3 chunks from large batch + 2 small batches = 5 physical messages
+            assert_eq!(mock_server.get_batch_count().await, 5);
+            assert_eq!(mock_server.get_max_offset_received().await, 4);
 
             Ok(())
         }

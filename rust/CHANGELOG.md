@@ -1,5 +1,28 @@
 # Version changelog
 
+## Release v2.0.1
+
+### Major Changes
+
+### New Features and Improvements
+
+### Bug Fixes
+
+- **Arrow Flight reconnect race condition fixed** (`arrow_stream.rs`): on unexpected stream failures (ack timeout, server-side error, network drop) the supervisor now sets `is_paused = true` before starting the reconnect sequence, matching the behaviour already present for the server-close-signal path. Previously, a concurrent `ingest_batch` call could acquire the new sender between its installation and the `ingest_mutex` acquisition in `reconnect()`, sending a batch with a stale physical offset on the fresh stream. The pause gate is lifted only after `reconnect()` completes and `physical_offset_generator` is repositioned to `replay_offset`.
+
+- **Arrow Flight auto-chunking restored** `ingest_batch` and `ingest_ipc_batch` now split oversized `RecordBatches` into multiple Flight messages so no single gRPC frame exceeds the server's 10 MiB decode limit. This restores behaviour that was inadvertently removed in April 2026.
+
+### Documentation
+
+### Internal Changes
+
+- Replaced the hand-rolled row-slicing chunker (`record_batch_to_chunked_flight_data`) with [`FlightDataEncoderBuilder`](https://docs.rs/arrow-flight/latest/arrow_flight/encode/struct.FlightDataEncoderBuilder.html) from the upstream `arrow-flight` crate. This removes ~80 lines of custom splitting logic and delegates size estimation and row-slicing to the well-tested library implementation.
+
+### Breaking Changes
+
+### Deprecations
+
+
 ## Release v2.0.0
 
 ### New Features and Improvements
