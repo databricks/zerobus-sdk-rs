@@ -181,8 +181,11 @@ void zerobus_arrow_stream_free(struct CArrowStream *stream);
  * Ingests one Arrow RecordBatch supplied as Arrow IPC stream bytes.
  *
  * `ipc_bytes` must be a valid Arrow IPC stream (schema + one record batch).
- * Uses the zero-copy path (`ingest_ipc_batch`). If the stream was created with
- * IPC compression, use `zerobus_arrow_stream_ingest_batch_via_record_batch` instead.
+ * This function handles all cases transparently:
+ * - Small uncompressed batches are forwarded zero-copy to the Flight wire format.
+ * - Batches exceeding 2 MiB are materialised and split into ≤2 MiB chunks.
+ * - Streams with IPC compression configured re-encode the bytes with the codec.
+ *
  * Returns the logical offset assigned to this batch, or -1 on error.
  */
 int64_t zerobus_arrow_stream_ingest_batch(struct CArrowStream *stream,

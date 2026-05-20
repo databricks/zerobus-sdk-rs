@@ -1,5 +1,26 @@
 # Version changelog
 
+## Release v2.0.1
+
+### Major Changes
+
+### New Features and Improvements
+
+### Bug Fixes
+
+- **Arrow Flight reconnect race condition fixed** (`arrow_stream.rs`): on unexpected stream failures (ack timeout, server-side error, network drop) the supervisor now sets `is_paused = true` before starting the reconnect sequence, matching the behaviour already present for the server-close-signal path. Previously, a concurrent `ingest_batch` call could acquire the new sender between its installation and the `ingest_mutex` acquisition in `reconnect()`, sending a batch with a stale physical offset on the fresh stream. The pause gate is lifted only after `reconnect()` completes and `physical_offset_generator` is repositioned to `replay_offset`.
+
+- **Arrow Flight auto-chunking restored** (`arrow_stream.rs`): `ingest_batch` now splits `RecordBatch` payloads into multiple ≤2 MiB Flight messages when needed. The same chunking applies during reconnect replay so recovery of large pending batches is also safe.
+
+### Documentation
+
+### Internal Changes
+
+### Breaking Changes
+
+### Deprecations
+
+
 ## Release v2.0.0
 
 ### New Features and Improvements

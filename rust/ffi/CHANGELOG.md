@@ -1,5 +1,26 @@
 # Version changelog
 
+## Release v1.2.1
+
+### Major Changes
+
+### New Features and Improvements
+
+### Bug Fixes
+
+- **`zerobus_arrow_stream_ingest_batch` previously returned an error if the stream had IPC compression configured, or if the batch exceeded the 2 MiB per-message gRPC limit. Both cases are now handled transparently — oversized batches are materialised and split into ≤2 MiB chunks, and compression-enabled streams re-encode the bytes with the correct codec.
+
+### Documentation
+
+### Internal Changes
+
+### Breaking Changes
+
+### Deprecations
+
+### API Changes
+
+
 ## Release v1.2.0
 
 ### Major Changes

@@ -109,6 +109,26 @@ pub fn create_test_dict_record_batch(
         .expect("Failed to create dictionary RecordBatch")
 }
 
+/// Creates a RecordBatch whose IPC encoding reliably exceeds 2 MiB — the
+/// per-message gRPC limit used by the SDK's auto-chunking logic.
+///
+/// Builds 6 000 rows with a 500-character string per row (~3 MiB encoded),
+/// which the chunker splits into exactly 3 physical Flight messages.
+pub fn create_large_record_batch(schema: Arc<ArrowSchema>) -> RecordBatch {
+    let n = 6_000usize;
+    let payload = "x".repeat(500);
+    let ids: arrow_array::Int64Array = (0..n as i64).collect();
+    let messages: arrow_array::StringArray =
+        std::iter::repeat(Some(payload.as_str())).take(n).collect();
+    RecordBatch::try_new(schema, vec![Arc::new(ids), Arc::new(messages)])
+        .expect("Failed to create large RecordBatch")
+}
+
+/// Serialises `create_large_record_batch` to IPC stream bytes.
+pub fn create_large_ipc_bytes(schema: Arc<ArrowSchema>) -> bytes::Bytes {
+    record_batch_to_ipc_bytes(&create_large_record_batch(schema))
+}
+
 /// Deserialise Arrow IPC stream bytes back into a [`RecordBatch`].
 pub fn ipc_bytes_to_record_batch(bytes: &bytes::Bytes) -> RecordBatch {
     let mut reader = arrow_ipc::reader::StreamReader::try_new(Cursor::new(bytes.as_ref()), None)
