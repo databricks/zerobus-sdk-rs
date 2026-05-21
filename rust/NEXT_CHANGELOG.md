@@ -1,6 +1,6 @@
 # NEXT CHANGELOG
 
-## Release v2.2.0
+## Release v2.1.0
 
 ### Major Changes
 
