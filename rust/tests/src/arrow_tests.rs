@@ -1142,11 +1142,6 @@ mod arrow_flight_tests {
             );
             let pending_offset = stream.ingest_batch(pending_batch).await?;
 
-            // Ingest one more batch WITHOUT waiting for pending_offset — this simulates a
-            // caller that is unaware of the in-progress recovery.  With the pause gate the
-            // SDK buffers it; without the gate it may race onto the new connection with a
-            // stale physical offset (e.g. INITIAL_BATCHES+1 instead of 1), causing the
-            // mock to reject with NonIncrementalOffset and breaking the wait below.
             let concurrent_batch = create_test_record_batch(
                 schema.clone(),
                 vec![(INITIAL_BATCHES + 1) as i64],
