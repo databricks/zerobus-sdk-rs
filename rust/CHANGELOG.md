@@ -1,5 +1,39 @@
 # Version changelog
 
+## Release v2.0.1
+
+### Major Changes
+
+### New Features and Improvements
+
+### Bug Fixes
+
+- **Arrow Flight: fix race condition causing stale wire offsets after non-close-signal
+  recovery.** When a stream broke via a server error or ack timeout (rather than a graceful
+  close signal), the supervisor did not set the ingest-pause gate before starting reconnect.
+  A concurrent `ingest_batch` call could send a batch with a pre-recovery wire offset,
+  which the server rejects with error code 4002 (`NonIncrementalOffset`), exhausting
+  recovery retries and failing the entire stream. Fix: set `is_paused = true` immediately
+  when entering the retriable-error retry branch, symmetric with the existing close-signal
+  path.
+
+- **Arrow Flight: restore automatic batch chunking at 2 MiB.** Reverted the manual
+  zero-copy IPC encoding introduced in v2.0.0 back to `FlightDataEncoderBuilder`, which
+  automatically chunks large `RecordBatch` values at 2 MiB. The zero-copy refactor had
+  removed this chunking, causing large batches to exceed the server's message size limit of 10MB and be rejected. `ingest_ipc_batch` now deserialises IPC bytes into a `RecordBatch`
+  before encoding, so it correctly benefits from the same chunking and supports streams
+  with `ipc_compression` enabled.
+
+### Documentation
+
+### Internal Changes
+
+### Breaking Changes
+
+### Deprecations
+
+### API Changes
+
 ## Release v2.0.0
 
 ### New Features and Improvements
@@ -97,12 +131,12 @@
   `sdk.stream_builder().table(name).headers_provider(p).json()` /
   `.compiled_proto(desc).build().await` instead. Removed from all
   examples, documentation, and tests.
-- Removed `ZerobusSdk::create_arrow_stream()` *(feature `arrow-flight`)*
+- Removed `ZerobusSdk::create_arrow_stream()` _(feature `arrow-flight`)_
   (in deprecation since v1.3.0). Use
   `sdk.stream_builder().table(name).oauth(id, secret).arrow(schema).build_arrow().await`
   instead. Removed from all examples, documentation, and tests.
 - Removed `ZerobusSdk::create_arrow_stream_with_headers_provider()`
-  *(feature `arrow-flight`)* (in deprecation since v1.3.0). Use
+  _(feature `arrow-flight`)_ (in deprecation since v1.3.0). Use
   `sdk.stream_builder().table(name).headers_provider(p).arrow(schema).build_arrow().await`
   instead. Removed from all examples, documentation, and tests.
 - Removed `ZerobusStream::ingest_record()` (in deprecation since v0.4.0).
@@ -244,9 +278,11 @@
 ## Release v1.0.1
 
 ### Bug Fixes
+
 - Fixed TLS certificate validation failure when behind corporate VPN/proxy with MITM certificates (e.g., GlobalProtect). Changed `reqwest` TLS configuration from `rustls-tls` to `rustls-tls-native-roots` + `rustls-tls-webpki-roots`, so the SDK now loads CA certificates from the OS native trust store (respecting `SSL_CERT_FILE` and system certificate stores) while keeping bundled Mozilla roots as a fallback for minimal environments.
 
 ### New Features and Improvements
+
 - Exported `OAuthHeadersProvider` in the public API, allowing clients to directly construct and use the built-in OAuth 2.0 headers provider.
 
 ## Release v1.0.0
@@ -254,11 +290,13 @@
 GA release of the Databricks Zerobus Ingest SDK for Rust.
 
 ### New Features and Improvements
+
 - Added HTTP proxy support via standard environment variables (`grpc_proxy`, `https_proxy`, `http_proxy`), following gRPC core conventions. Proxied connections use HTTP CONNECT tunneling with end-to-end TLS. Supports `no_grpc_proxy` / `no_proxy` for bypass rules.
 
 ### Deprecations
 
 ### Bug Fixes
+
 - Fixed a rare race condition in `wait_for_offset_internal` where the actual server error (e.g., `InvalidArgument`) was lost and replaced by a generic `StreamClosedError`. This occurred when `error_rx.changed()` fired but `is_closed` had not yet been set by the supervisor, causing the error to be missed on the next loop iteration.
 
 ## Release v0.6.0
@@ -297,7 +335,6 @@ GA release of the Databricks Zerobus Ingest SDK for Rust.
 - **`ZerobusSdk::new()`**: Use `ZerobusSdk::builder()` instead
 - **`ZerobusSdk.use_tls` field**: TLS is now controlled via the `TlsConfig` trait passed to the builder
 
-
 ### Bug Fixes
 
 - **[Experimental] Record-based acknowledgment tracking for Arrow Flight streams**: Added cumulative record counting to support proper ack tracking and correct recovery when batches are auto-chunked.
@@ -309,7 +346,6 @@ GA release of the Databricks Zerobus Ingest SDK for Rust.
 - Updated all examples to demonstrate three data-passing approaches: auto-encoding/serializing wrappers, pre-encoded/serialized wrappers, and backward-compatible raw types
 
 ### Internal Changes
-
 
 ### API Changes
 

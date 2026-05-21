@@ -1,5 +1,25 @@
 # Version changelog
 
+## Release v1.2.1
+
+### Major Changes
+
+### New Features and Improvements
+
+### Bug Fixes
+
+- **`zerobus_arrow_stream_ingest_batch_via_record_batch` now works correctly on compression-enabled streams.** Previously the function performed its own IPC deserialization and called `ingest_batch` directly, bypassing the compression re-encoding step. It now delegates to `ingest_ipc_batch`, which handles compression transparently. The function is now fully equivalent to `zerobus_arrow_stream_ingest_batch` regardless of stream configuration.
+
+### Documentation
+
+### Internal Changes
+
+### Breaking Changes
+
+### Deprecations
+
+### API Changes
+
 ## Release v1.2.0
 
 ### Major Changes
@@ -43,6 +63,7 @@
 Initial tracked release of the FFI C bindings for the Zerobus SDK.
 
 ### Platforms
+
 - Linux x86_64
 - Linux aarch64
 - macOS x86_64
@@ -50,6 +71,7 @@ Initial tracked release of the FFI C bindings for the Zerobus SDK.
 - Windows x86_64
 
 ### Libraries
+
 - Static library (.a / .lib)
 - Dynamic library (.so / .dylib / .dll)
 - C header file (zerobus.h)

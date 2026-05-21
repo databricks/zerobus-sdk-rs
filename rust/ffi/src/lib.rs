@@ -123,20 +123,6 @@ fn ipc_bytes_to_schema(
     Ok(reader.schema().clone())
 }
 
-/// Deserializes the first `RecordBatch` from Arrow IPC stream bytes.
-#[allow(clippy::result_large_err)]
-fn ipc_bytes_to_record_batch(bytes: &[u8]) -> ZerobusResult<RecordBatch> {
-    use std::io::Cursor;
-    let cursor = Cursor::new(bytes);
-    let mut reader = StreamReader::try_new(cursor, None).map_err(|e| {
-        ZerobusError::InvalidArgument(format!("Failed to parse Arrow IPC stream: {e}"))
-    })?;
-    reader
-        .next()
-        .ok_or_else(|| ZerobusError::InvalidArgument("No record batch in IPC stream".to_string()))?
-        .map_err(|e| ZerobusError::InvalidArgument(format!("Failed to read Arrow IPC batch: {e}")))
-}
-
 /// Serializes a `RecordBatch` to Arrow IPC stream bytes (schema + one batch).
 #[allow(clippy::result_large_err)]
 fn record_batch_to_ipc_bytes(batch: &RecordBatch) -> ZerobusResult<Vec<u8>> {
@@ -342,9 +328,8 @@ pub extern "C" fn zerobus_arrow_stream_free(stream: *mut CArrowStream) {
 /// Ingests one Arrow RecordBatch supplied as Arrow IPC stream bytes.
 ///
 /// `ipc_bytes` must be a valid Arrow IPC stream (schema + one record batch).
-/// Uses the zero-copy path (`ingest_ipc_batch`). If the stream was created with
-/// IPC compression, use `zerobus_arrow_stream_ingest_batch_via_record_batch` instead.
-/// Returns the logical offset assigned to this batch, or -1 on error.
+/// The bytes are deserialised to a RecordBatch internally. Works with all
+/// compression settings. Returns the logical offset assigned to this batch, or -1 on error.
 #[no_mangle]
 pub extern "C" fn zerobus_arrow_stream_ingest_batch(
     stream: *mut CArrowStream,
@@ -389,11 +374,11 @@ pub extern "C" fn zerobus_arrow_stream_ingest_batch(
     }
 }
 
-/// Ingests one Arrow RecordBatch supplied as Arrow IPC stream bytes, deserializing
-/// to a `RecordBatch` first so that any configured `ipc_compression` is applied.
+/// Ingests one Arrow RecordBatch supplied as Arrow IPC stream bytes.
 ///
-/// Use this instead of `zerobus_arrow_stream_ingest_batch` when the stream was created
-/// with `LZ4_FRAME` or `ZSTD` compression.
+/// Equivalent to `zerobus_arrow_stream_ingest_batch`. Both functions deserialise the IPC
+/// bytes to a `RecordBatch` and re-encode with the stream's compression settings, so
+/// either works regardless of whether the stream was created with compression.
 /// Returns the logical offset assigned to this batch, or -1 on error.
 #[no_mangle]
 pub extern "C" fn zerobus_arrow_stream_ingest_batch_via_record_batch(
@@ -417,19 +402,11 @@ pub extern "C" fn zerobus_arrow_stream_ingest_batch_via_record_batch(
 
     let bytes = unsafe { std::slice::from_raw_parts(ipc_bytes, ipc_len) };
 
-    let batch = match ipc_bytes_to_record_batch(bytes) {
-        Ok(b) => b,
-        Err(e) => {
-            if !result.is_null() {
-                unsafe {
-                    *result = CResult::error(e);
-                }
-            }
-            return -1;
-        }
-    };
-
-    let offset_res = RUNTIME.block_on(async { stream_ref.ingest_batch(batch).await });
+    let offset_res = RUNTIME.block_on(async {
+        stream_ref
+            .ingest_ipc_batch(bytes::Bytes::copy_from_slice(bytes))
+            .await
+    });
 
     match offset_res {
         Ok(offset) => {

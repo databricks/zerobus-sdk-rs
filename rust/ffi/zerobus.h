@@ -181,9 +181,8 @@ void zerobus_arrow_stream_free(struct CArrowStream *stream);
  * Ingests one Arrow RecordBatch supplied as Arrow IPC stream bytes.
  *
  * `ipc_bytes` must be a valid Arrow IPC stream (schema + one record batch).
- * Uses the zero-copy path (`ingest_ipc_batch`). If the stream was created with
- * IPC compression, use `zerobus_arrow_stream_ingest_batch_via_record_batch` instead.
- * Returns the logical offset assigned to this batch, or -1 on error.
+ * The bytes are deserialised to a RecordBatch internally. Works with all
+ * compression settings. Returns the logical offset assigned to this batch, or -1 on error.
  */
 int64_t zerobus_arrow_stream_ingest_batch(struct CArrowStream *stream,
                                           const uint8_t *ipc_bytes,
@@ -191,11 +190,11 @@ int64_t zerobus_arrow_stream_ingest_batch(struct CArrowStream *stream,
                                           struct CResult *result);
 
 /**
- * Ingests one Arrow RecordBatch supplied as Arrow IPC stream bytes, deserializing
- * to a `RecordBatch` first so that any configured `ipc_compression` is applied.
+ * Ingests one Arrow RecordBatch supplied as Arrow IPC stream bytes.
  *
- * Use this instead of `zerobus_arrow_stream_ingest_batch` when the stream was created
- * with `LZ4_FRAME` or `ZSTD` compression.
+ * Equivalent to `zerobus_arrow_stream_ingest_batch`. Both functions deserialise the IPC
+ * bytes to a `RecordBatch` and re-encode with the stream's compression settings, so
+ * either works regardless of whether the stream was created with compression.
  * Returns the logical offset assigned to this batch, or -1 on error.
  */
 int64_t zerobus_arrow_stream_ingest_batch_via_record_batch(struct CArrowStream *stream,
