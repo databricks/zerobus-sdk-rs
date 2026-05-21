@@ -665,10 +665,7 @@ impl ZerobusArrowStream {
                             "Supervisor: Attempting recovery after retriable error"
                         );
 
-                        // Pause ingest before reconnect so that concurrent ingest_batch
-                        // callers don't push to pending_batches while reconnect is replaying.
-                        // Symmetric with the close-signal path in process_acks.
-                        // The gate is lifted inside reconnect() while holding ingest_mutex.
+                        // Pause ingest before reconnect; gate is lifted inside reconnect().
                         is_paused.store(true, Ordering::Relaxed);
 
                         // Backoff before retry.
@@ -707,8 +704,7 @@ impl ZerobusArrowStream {
                             Ok(Ok(new_response_stream)) => {
                                 info!("Supervisor: Recovery successful, resuming");
                                 recovery_attempts.store(0, Ordering::Relaxed);
-                                // is_paused was already cleared inside reconnect() while
-                                // holding ingest_mutex, so no action needed here.
+                                // is_paused was already cleared inside reconnect().
                                 response_stream = new_response_stream;
                                 // Loop continues with new stream.
                             }
@@ -885,12 +881,6 @@ impl ZerobusArrowStream {
 
         // Replay pending batches, slicing partially-acked ones if present.
         // We rebuild the pending list to drop fully-acked batches.
-        //
-        // Hold ingest_mutex for the entire replay and clear is_paused before
-        // releasing it. This ensures that any ingest_batch caller waiting on
-        // the mutex sees is_paused = false when it acquires — there is no window
-        // between the mutex release and the is_paused clear on which another
-        // thread could observe is_paused = true and silently buffer a batch.
         // Lock order matches ingest_batch: ingest_mutex -> pending_batches.
         let _ingest_guard = ingest_mutex.lock().await;
         {
@@ -951,9 +941,7 @@ impl ZerobusArrowStream {
             }
         }
 
-        // Clear the pause gate while still holding ingest_mutex. Any ingest_batch
-        // caller that acquires the mutex after this point will see is_paused = false
-        // and send normally.
+        // Clear the pause gate while still holding ingest_mutex.
         is_paused.store(false, Ordering::Relaxed);
 
         Ok(response_stream)
