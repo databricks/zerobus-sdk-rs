@@ -6,6 +6,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use arrow_flight::flight_service_server::{FlightService, FlightServiceServer};
+use arrow_ipc;
 use arrow_flight::{
     Action, ActionType, Criteria, Empty, FlightData, FlightDescriptor, FlightInfo,
     HandshakeRequest, HandshakeResponse, PutResult, SchemaResult, Ticket,
@@ -120,6 +121,11 @@ impl MockFlightServer {
     /// Get the number of batches received
     pub async fn get_batch_count(&self) -> u64 {
         *self.batch_count.lock().await
+    }
+
+    /// Get the total number of rows received across all batches
+    pub async fn get_total_records_received(&self) -> u64 {
+        *self.row_count.lock().await
     }
 
     /// Reset the server state
@@ -311,10 +317,15 @@ impl FlightService for MockFlightServer {
                         *count += 1;
                     }
 
-                    // Try to decode and count rows (simplified - just count data_body presence)
-                    if !flight_data.data_body.is_empty() {
+                    // Decode the IPC data_header flatbuffer to get the actual row count.
+                    let rows = arrow_ipc::root_as_message(&flight_data.data_header)
+                        .ok()
+                        .and_then(|msg| msg.header_as_record_batch())
+                        .map(|rb| rb.length() as u64)
+                        .unwrap_or(0);
+                    if rows > 0 {
                         let mut count = row_count.lock().await;
-                        *count += 1; // Simplified: count batches as rows for testing
+                        *count += rows;
                     }
                 }
 

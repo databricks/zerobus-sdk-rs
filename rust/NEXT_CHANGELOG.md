@@ -20,10 +20,9 @@
 - **Arrow Flight: restore automatic batch chunking at 2 MiB.** Reverted the manual
   zero-copy IPC encoding introduced in v2.0.0 back to `FlightDataEncoderBuilder`, which
   automatically chunks large `RecordBatch` values at 2 MiB. The zero-copy refactor had
-  removed this chunking, causing large batches to exceed tonic's default 4 MiB server
-  decode limit and be silently dropped. `ingest_ipc_batch` now deserialises IPC bytes
-  into a `RecordBatch` before encoding, so it correctly benefits from the same chunking
-  and supports streams with `ipc_compression` enabled.
+  removed this chunking, causing large batches to exceed the server's message size limit of 10MB and be rejected. `ingest_ipc_batch` now deserialises IPC bytes into a `RecordBatch`
+  before encoding, so it correctly benefits from the same chunking and supports streams
+  with `ipc_compression` enabled.
 
 ### Documentation
 

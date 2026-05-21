@@ -92,9 +92,6 @@ fn slice_batch_for_recovery(
     if remaining_rows == 0 {
         // Fully acked
         None
-    } else if records_already_acked == 0 {
-        // No records acked (shouldn't happen given first check, but be safe)
-        Some(pb.batch.clone())
     } else {
         // Partially acked - slice to get un-acked portion
         debug!(
@@ -668,7 +665,7 @@ impl ZerobusArrowStream {
                         // Pause ingest before reconnect so that concurrent ingest_batch
                         // callers don't push to pending_batches while reconnect is replaying.
                         // Symmetric with the close-signal path in process_acks.
-                        // The gate is lifted after a successful reconnect below.
+                        // The gate is lifted inside reconnect() while holding ingest_mutex.
                         is_paused.store(true, Ordering::Relaxed);
 
                         // Backoff before retry.
@@ -698,6 +695,7 @@ impl ZerobusArrowStream {
                                 &last_acked_records,
                                 &sdk_identifier,
                                 &ingest_mutex,
+                                &is_paused,
                             ),
                         )
                         .await;
@@ -706,11 +704,8 @@ impl ZerobusArrowStream {
                             Ok(Ok(new_response_stream)) => {
                                 info!("Supervisor: Recovery successful, resuming");
                                 recovery_attempts.store(0, Ordering::Relaxed);
-                                // Now that a fresh sender is installed and replay is done,
-                                // lift the pause gate. No await between here and the
-                                // ingest_mutex release in reconnect(), so woken
-                                // ingest_batch tasks cannot race through before this store.
-                                is_paused.store(false, Ordering::Relaxed);
+                                // is_paused was already cleared inside reconnect() while
+                                // holding ingest_mutex, so no action needed here.
                                 response_stream = new_response_stream;
                                 // Loop continues with new stream.
                             }
@@ -750,11 +745,11 @@ impl ZerobusArrowStream {
 
     /// Reconnects to the server and replays pending batches.
     ///
-    /// Holds `ingest_mutex` for the entire replay so that concurrent `ingest_batch`
-    /// callers cannot interleave with the replay. `is_paused` is set to `true` by
-    /// the supervisor before calling this, so callers that are not yet blocked on
-    /// the mutex will buffer into `pending_batches` and be picked up by the next
-    /// recovery cycle.
+    /// Holds `ingest_mutex` for the entire replay and clears `is_paused` before
+    /// releasing the mutex. This guarantees that any `ingest_batch` caller that
+    /// acquires the mutex after this function returns sees `is_paused = false` and
+    /// sends normally — there is no window in which a batch can be buffered but
+    /// never sent.
     #[allow(clippy::too_many_arguments)]
     async fn reconnect(
         endpoint: &str,
@@ -768,6 +763,7 @@ impl ZerobusArrowStream {
         last_acked_records: &Arc<AtomicU64>,
         sdk_identifier: &str,
         ingest_mutex: &Arc<Mutex<()>>,
+        is_paused: &Arc<AtomicBool>,
     ) -> ZerobusResult<Pin<Box<dyn Stream<Item = Result<PutResult, FlightError>> + Send>>> {
         // Create new client.
         let client = Self::create_flight_client(
@@ -887,10 +883,12 @@ impl ZerobusArrowStream {
         // Replay pending batches, slicing partially-acked ones if present.
         // We rebuild the pending list to drop fully-acked batches.
         //
-        // Hold ingest_mutex for the entire replay so that concurrent ingest_batch
-        // callers (which are blocked on the mutex) cannot push new batches into
-        // pending_batches until the replay is finished and is_paused is cleared
-        // by the supervisor. Lock order matches ingest_batch: ingest_mutex -> pending_batches.
+        // Hold ingest_mutex for the entire replay and clear is_paused before
+        // releasing it. This ensures that any ingest_batch caller waiting on
+        // the mutex sees is_paused = false when it acquires — there is no window
+        // between the mutex release and the is_paused clear on which another
+        // thread could observe is_paused = true and silently buffer a batch.
+        // Lock order matches ingest_batch: ingest_mutex -> pending_batches.
         let _ingest_guard = ingest_mutex.lock().await;
         {
             let mut pending = pending_batches.lock().await;
@@ -933,6 +931,27 @@ impl ZerobusArrowStream {
                 cumulative_records_sent.store(new_cumulative, Ordering::Relaxed);
             }
         }
+
+        #[cfg(debug_assertions)]
+        {
+            let pending = pending_batches.lock().await;
+            let mut expected_start: u64 = 0;
+            for pb in pending.iter() {
+                debug_assert_eq!(
+                    pb.start_record, expected_start,
+                    "pending_batches has non-contiguous record ranges after recovery \
+                     (expected start_record = {}, found {} for offset_id {}); \
+                     possible orphaned buffered batch from pause-gate handoff race",
+                    expected_start, pb.start_record, pb.offset_id,
+                );
+                expected_start = pb.end_record;
+            }
+        }
+
+        // Clear the pause gate while still holding ingest_mutex. Any ingest_batch
+        // caller that acquires the mutex after this point will see is_paused = false
+        // and send normally.
+        is_paused.store(false, Ordering::Relaxed);
 
         Ok(response_stream)
     }
