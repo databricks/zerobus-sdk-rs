@@ -1099,9 +1099,7 @@ mod arrow_flight_tests {
                 ack_up_to_records: (INITIAL_BATCHES + 2) as u64,
             });
 
-            mock_server
-                .inject_responses(TABLE_NAME, responses)
-                .await;
+            mock_server.inject_responses(TABLE_NAME, responses).await;
 
             let sdk = ZerobusSdk::builder()
                 .endpoint(server_url)
@@ -1125,11 +1123,8 @@ mod arrow_flight_tests {
             // Ingest INITIAL_BATCHES batches and wait for each ack, advancing
             // the wire offset counter to INITIAL_BATCHES on connection 1.
             for i in 0..INITIAL_BATCHES {
-                let batch = create_test_record_batch(
-                    schema.clone(),
-                    vec![i as i64],
-                    vec![Some("init")],
-                );
+                let batch =
+                    create_test_record_batch(schema.clone(), vec![i as i64], vec![Some("init")]);
                 let offset = stream.ingest_batch(batch).await?;
                 stream.wait_for_offset(offset).await?;
             }
@@ -1243,8 +1238,9 @@ mod arrow_flight_tests {
                     let stream = Arc::clone(&stream);
                     let schema = schema.clone();
                     tokio::spawn(async move {
-                        let ids: Vec<i64> =
-                            (0..ROWS_PER_BATCH as i64).map(|r| i as i64 * 100 + r).collect();
+                        let ids: Vec<i64> = (0..ROWS_PER_BATCH as i64)
+                            .map(|r| i as i64 * 100 + r)
+                            .collect();
                         let strings: Vec<Option<&str>> = vec![Some("row"); ROWS_PER_BATCH];
                         let batch = create_test_record_batch(schema, ids, strings);
                         stream.ingest_batch(batch).await
@@ -1349,8 +1345,9 @@ mod arrow_flight_tests {
                     let stream = Arc::clone(&stream);
                     let schema = schema.clone();
                     tokio::spawn(async move {
-                        let ids: Vec<i64> =
-                            (0..ROWS_PER_BATCH as i64).map(|r| i as i64 * 100 + r).collect();
+                        let ids: Vec<i64> = (0..ROWS_PER_BATCH as i64)
+                            .map(|r| i as i64 * 100 + r)
+                            .collect();
                         let strings: Vec<Option<&str>> = vec![Some("row"); ROWS_PER_BATCH];
                         let batch = create_test_record_batch(schema, ids, strings);
                         stream.ingest_batch(batch).await
@@ -1753,8 +1750,8 @@ mod arrow_flight_tests {
         }
 
         #[tokio::test]
-        async fn test_ingest_ipc_batch_with_compression(
-        ) -> Result<(), Box<dyn std::error::Error>> {
+        async fn test_ingest_ipc_batch_with_compression() -> Result<(), Box<dyn std::error::Error>>
+        {
             setup_tracing();
             info!("Starting test_ingest_ipc_batch_with_compression");
 
@@ -1882,8 +1879,7 @@ mod arrow_flight_tests {
         /// (`ingest_batch` path). Fails before the fix (batch_count == 1) and
         /// passes after (batch_count >= 2, max_offset >= 1).
         #[tokio::test]
-        async fn test_large_batch_is_split_into_chunks(
-        ) -> Result<(), Box<dyn std::error::Error>> {
+        async fn test_large_batch_is_split_into_chunks() -> Result<(), Box<dyn std::error::Error>> {
             setup_tracing();
             info!("Starting test_large_batch_is_split_into_chunks");
 

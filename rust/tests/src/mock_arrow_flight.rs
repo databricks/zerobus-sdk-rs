@@ -6,11 +6,11 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use arrow_flight::flight_service_server::{FlightService, FlightServiceServer};
-use arrow_ipc;
 use arrow_flight::{
     Action, ActionType, Criteria, Empty, FlightData, FlightDescriptor, FlightInfo,
     HandshakeRequest, HandshakeResponse, PutResult, SchemaResult, Ticket,
 };
+use arrow_ipc;
 use futures::Stream;
 use serde::{Deserialize, Serialize};
 use tokio::sync::{mpsc, Mutex};

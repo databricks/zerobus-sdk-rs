@@ -101,7 +101,10 @@ fn slice_batch_for_recovery(
             remaining_rows = remaining_rows,
             "Slicing partially-acked batch for recovery"
         );
-        Some(pb.batch.slice(records_already_acked as usize, remaining_rows))
+        Some(
+            pb.batch
+                .slice(records_already_acked as usize, remaining_rows),
+        )
     }
 }
 
