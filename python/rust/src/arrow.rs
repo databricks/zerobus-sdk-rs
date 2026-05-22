@@ -8,7 +8,6 @@
 
 use std::sync::Arc;
 
-use bytes::Bytes;
 use pyo3::prelude::*;
 use pyo3::types::PyBytes;
 use tokio::sync::RwLock;
@@ -291,9 +290,6 @@ impl ArrowStreamConfigurationOptions {
         Ok(b)
     }
 
-    pub(crate) fn ipc_compression_enabled(&self) -> bool {
-        !matches!(self.ipc_compression, IPCCompression::Uncompressed)
-    }
 }
 
 // =============================================================================
@@ -308,38 +304,21 @@ impl ArrowStreamConfigurationOptions {
 pub struct ZerobusArrowStream {
     pub(crate) inner: Arc<RwLock<RustZerobusArrowStream>>,
     pub(crate) runtime: Arc<tokio::runtime::Runtime>,
-    pub(crate) ipc_compression_enabled: bool,
 }
 
 #[pymethods]
 impl ZerobusArrowStream {
     /// Ingest a single Arrow RecordBatch (as IPC bytes) and return the offset.
-    ///
-    /// When `ipc_compression` is disabled (the default) the IPC bytes are
-    /// forwarded to the server unchanged via the zero-copy `ingest_ipc_batch`
-    /// path. When compression is enabled the bytes are parsed into a
-    /// RecordBatch and re-serialised with compression by the SDK.
     fn ingest_batch(&self, py: Python, ipc_bytes: &PyBytes) -> PyResult<i64> {
+        let batch = ipc_bytes_to_record_batch(ipc_bytes.as_bytes()).map_err(map_error)?;
         let stream = self.inner.clone();
         let runtime = self.runtime.clone();
-
-        if self.ipc_compression_enabled {
-            let batch = ipc_bytes_to_record_batch(ipc_bytes.as_bytes()).map_err(map_error)?;
-            py.allow_threads(|| {
-                runtime.block_on(async move {
-                    let guard = stream.read().await;
-                    guard.ingest_batch(batch).await.map_err(map_error)
-                })
+        py.allow_threads(|| {
+            runtime.block_on(async move {
+                let guard = stream.read().await;
+                guard.ingest_batch(batch).await.map_err(map_error)
             })
-        } else {
-            let bytes = Bytes::copy_from_slice(ipc_bytes.as_bytes());
-            py.allow_threads(|| {
-                runtime.block_on(async move {
-                    let guard = stream.read().await;
-                    guard.ingest_ipc_batch(bytes).await.map_err(map_error)
-                })
-            })
-        }
+        })
     }
 
     /// Wait for a specific offset to be acknowledged.
@@ -441,28 +420,18 @@ impl ZerobusArrowStream {
 #[pyclass(name = "AsyncZerobusArrowStream")]
 pub struct AsyncZerobusArrowStream {
     pub(crate) inner: Arc<RwLock<RustZerobusArrowStream>>,
-    pub(crate) ipc_compression_enabled: bool,
 }
 
 #[pymethods]
 impl AsyncZerobusArrowStream {
     /// Ingest a single Arrow RecordBatch (as IPC bytes) and return the offset.
     fn ingest_batch<'py>(&self, py: Python<'py>, ipc_bytes: &PyBytes) -> PyResult<&'py PyAny> {
+        let batch = ipc_bytes_to_record_batch(ipc_bytes.as_bytes()).map_err(map_error)?;
         let stream = self.inner.clone();
-
-        if self.ipc_compression_enabled {
-            let batch = ipc_bytes_to_record_batch(ipc_bytes.as_bytes()).map_err(map_error)?;
-            pyo3_asyncio::tokio::future_into_py(py, async move {
-                let guard = stream.read().await;
-                guard.ingest_batch(batch).await.map_err(map_error)
-            })
-        } else {
-            let bytes = Bytes::copy_from_slice(ipc_bytes.as_bytes());
-            pyo3_asyncio::tokio::future_into_py(py, async move {
-                let guard = stream.read().await;
-                guard.ingest_ipc_batch(bytes).await.map_err(map_error)
-            })
-        }
+        pyo3_asyncio::tokio::future_into_py(py, async move {
+            let guard = stream.read().await;
+            guard.ingest_batch(batch).await.map_err(map_error)
+        })
     }
 
     /// Wait for a specific offset to be acknowledged.
@@ -583,7 +552,6 @@ pub fn create_arrow_stream_sync(
     options: Option<&ArrowStreamConfigurationOptions>,
 ) -> PyResult<ZerobusArrowStream> {
     let opts = options.cloned().unwrap_or_default();
-    let ipc_compression_enabled = opts.ipc_compression_enabled();
     let sdk = sdk.clone();
     let runtime = runtime.clone();
     let runtime_for_return = runtime.clone();
@@ -608,7 +576,6 @@ pub fn create_arrow_stream_sync(
     Ok(ZerobusArrowStream {
         inner: Arc::new(RwLock::new(stream)),
         runtime: runtime_for_return,
-        ipc_compression_enabled,
     })
 }
 
@@ -623,7 +590,6 @@ pub fn create_arrow_stream_with_headers_provider_sync(
     options: Option<&ArrowStreamConfigurationOptions>,
 ) -> PyResult<ZerobusArrowStream> {
     let opts = options.cloned().unwrap_or_default();
-    let ipc_compression_enabled = opts.ipc_compression_enabled();
     let sdk = sdk.clone();
     let runtime = runtime.clone();
     let runtime_for_return = runtime.clone();
@@ -648,7 +614,6 @@ pub fn create_arrow_stream_with_headers_provider_sync(
     Ok(ZerobusArrowStream {
         inner: Arc::new(RwLock::new(stream)),
         runtime: runtime_for_return,
-        ipc_compression_enabled,
     })
 }
 
@@ -663,7 +628,6 @@ pub fn recreate_arrow_stream_sync(
     let old = old_stream.inner.clone();
     let runtime = runtime.clone();
     let runtime_for_return = runtime.clone();
-    let ipc_compression_enabled = old_stream.ipc_compression_enabled;
 
     let stream = py.allow_threads(|| {
         runtime.block_on(async move {
@@ -679,7 +643,6 @@ pub fn recreate_arrow_stream_sync(
     Ok(ZerobusArrowStream {
         inner: Arc::new(RwLock::new(stream)),
         runtime: runtime_for_return,
-        ipc_compression_enabled,
     })
 }
 
@@ -695,7 +658,6 @@ pub fn create_arrow_stream_async<'py>(
     options: Option<ArrowStreamConfigurationOptions>,
 ) -> PyResult<&'py PyAny> {
     let opts = options.unwrap_or_default();
-    let ipc_compression_enabled = opts.ipc_compression_enabled();
     let sdk = sdk.clone();
 
     pyo3_asyncio::tokio::future_into_py(py, async move {
@@ -712,7 +674,6 @@ pub fn create_arrow_stream_async<'py>(
         let stream = builder.build_arrow().await.map_err(map_error)?;
         Ok(AsyncZerobusArrowStream {
             inner: Arc::new(RwLock::new(stream)),
-            ipc_compression_enabled,
         })
     })
 }
@@ -727,7 +688,6 @@ pub fn create_arrow_stream_with_headers_provider_async<'py>(
     options: Option<ArrowStreamConfigurationOptions>,
 ) -> PyResult<&'py PyAny> {
     let opts = options.unwrap_or_default();
-    let ipc_compression_enabled = opts.ipc_compression_enabled();
     let sdk = sdk.clone();
 
     pyo3_asyncio::tokio::future_into_py(py, async move {
@@ -744,7 +704,6 @@ pub fn create_arrow_stream_with_headers_provider_async<'py>(
         let stream = builder.build_arrow().await.map_err(map_error)?;
         Ok(AsyncZerobusArrowStream {
             inner: Arc::new(RwLock::new(stream)),
-            ipc_compression_enabled,
         })
     })
 }
@@ -757,7 +716,6 @@ pub fn recreate_arrow_stream_async<'py>(
 ) -> PyResult<&'py PyAny> {
     let sdk = sdk.clone();
     let old = old_stream.inner.clone();
-    let ipc_compression_enabled = old_stream.ipc_compression_enabled;
 
     pyo3_asyncio::tokio::future_into_py(py, async move {
         let old_guard = old.read().await;
@@ -768,7 +726,6 @@ pub fn recreate_arrow_stream_async<'py>(
             .map_err(map_error)?;
         Ok(AsyncZerobusArrowStream {
             inner: Arc::new(RwLock::new(stream)),
-            ipc_compression_enabled,
         })
     })
 }

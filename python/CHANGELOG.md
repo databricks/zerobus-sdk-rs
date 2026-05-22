@@ -4,8 +4,8 @@
 
 ### New Features and Improvements
 
-- **Built on Rust SDK 2.0.0**: The Python wrapper now depends on
-  `databricks-zerobus-ingest-sdk = "2.0.0"` from crates.io (was 1.2.0).
+- **Built on Rust SDK 2.0.1**: The Python wrapper now depends on
+  `databricks-zerobus-ingest-sdk = "2.0.1"` from crates.io (was 1.2.0).
   Internal PyO3 binding was rewritten to use the new `StreamBuilder`
   typestate API exclusively. The Python-facing API surface
   (`TableProperties`, `create_stream(client_id, client_secret,
@@ -14,16 +14,10 @@
 - **Arrow Flight promoted to Beta**: `ZerobusArrowStream` /
   `ArrowStreamConfigurationOptions` and the surrounding documentation are
   no longer labelled experimental/unsupported. The API is stabilising but
-  may still change before reaching GA. (Mirrors the Rust SDK 2.0.0
+  may still change before reaching GA. (Mirrors the Rust SDK 2.0.1
   promotion.)
 - **Arrow Flight — graceful stream close**: On server signaled close, the client pauses sending, drains in-flight acks within a bounded wait, then recovers.
 - **`stream_paused_max_wait_time_ms`** on `ArrowStreamConfigurationOptions`: Optional milliseconds cap for the paused wait (`None` = full server duration, `0` = immediate recovery).
-- **Zero-copy Arrow ingest path**: `ZerobusArrowStream.ingest_batch(...)`
-  now forwards Arrow IPC bytes straight to Arrow Flight via the Rust SDK's
-  `ingest_ipc_batch` API when `ipc_compression=IPCCompression.NONE` (the
-  default), eliminating one parse + re-serialise round trip on the Rust
-  side. Setting a compression codec falls back to the existing
-  `RecordBatch` path.
 - **Python SDK identifier on the wire**: The SDK now reports itself as
   `zerobus-sdk-py/<version>` on the HTTP `user-agent` header
   (previously it inherited the Rust SDK identifier
@@ -35,8 +29,12 @@
 
 ### Behavior Changes
 
+- **`StreamConfigurationOptions.record_type` is no longer applied**: Format
+  is now set on the stream builder from `TableProperties` (proto descriptor
+  present → Proto, absent → JSON). The field is kept for API compatibility.
+
 - **`StreamConfigurationOptions.max_inflight_records` default raised from
-  `50_000` to `1_000_000`** to match the Rust SDK 2.0.0 default. Previously the
+  `50_000` to `1_000_000`** to match the Rust SDK 2.0.1 default. Previously the
   Python wrapper hard-coded 50k while the Rust SDK quietly raised its default
   to 1M, so Python clients ran with a 20× lower in-flight ceiling than Rust
   clients for no good reason. Callers who relied on the old cap can pin it
@@ -63,16 +61,15 @@
 
 ### Internal Changes
 
-- Bumped Rust dependencies to match the Rust SDK 2.0.0 workspace:
+- Bumped Rust dependencies to match the Rust SDK 2.0.1 workspace:
   `prost` / `prost-types` 0.13 → 0.14, `tonic` 0.13 → 0.14, `arrow-ipc` /
-  `arrow-schema` / `arrow-array` 56.2 → 58.2. Added `bytes = "1"` for the
-  zero-copy Arrow path.
+  `arrow-schema` / `arrow-array` 56.2 → 58.2.
 - Removed the in-tree `[patch.crates-io]` redirect for
-  `databricks-zerobus-ingest-sdk` — the 2.0.0 release is now resolved
+  `databricks-zerobus-ingest-sdk` — the 2.0.1 release is now resolved
   from crates.io.
 - `StreamConfigurationOptions` and `ArrowStreamConfigurationOptions`
   fields are now applied via `StreamBuilder` setters because the
-  underlying Rust structs are `#[non_exhaustive]` in 2.0.0.
+  underlying Rust structs are `#[non_exhaustive]` in 2.0.1.
 - Bounded the `HeadersProviderWrapper` static-key leak: header names are
   now interned in a process-wide table so each distinct name is leaked at
   most once, instead of once per `get_headers()` call.
@@ -80,7 +77,7 @@
   bridge moved into `python/rust/src/common.rs`, removing duplicated code
   between `sync_wrapper.rs` and `async_wrapper.rs`.
 - `ZerobusSdk.set_use_tls(...)` is retained as a no-op for backwards
-  compatibility. Rust SDK 2.0.0 removed the underlying TLS toggle; TLS is
+  compatibility. Rust SDK 2.0.1 removed the underlying TLS toggle; TLS is
   always controlled via the SDK builder.
 
 ## Release v1.2.0

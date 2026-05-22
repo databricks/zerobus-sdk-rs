@@ -470,13 +470,8 @@ pub(crate) fn encoded_record_to_pybytes(py: Python, record: EncodedRecord) -> Py
 }
 
 /// Apply a Python `StreamConfigurationOptions` to a `StreamBuilder` via the
-/// builder's setters. The Rust `StreamConfigurationOptions` struct is now
-/// `#[non_exhaustive]` upstream, so the only supported way to configure a
-/// stream is through these setters.
-///
-/// `format_record_type` overrides the options' `record_type` field. The Python
-/// facade passes the format selected via `TableProperties` so the two stay in
-/// sync; the original `options.record_type` is otherwise honoured.
+/// builder's setters. Record format is set separately by `apply_table_and_format`
+/// from `TableProperties`; `StreamConfigurationOptions.record_type` is ignored.
 pub(crate) fn apply_grpc_options<'a>(
     builder: StreamBuilder<'a>,
     opts: &StreamConfigurationOptions,
