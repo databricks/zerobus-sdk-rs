@@ -107,7 +107,6 @@ extern CArrowStream *zerobus_sdk_create_arrow_stream_with_headers_provider(
 
 extern void    zerobus_arrow_stream_free(CArrowStream *stream);
 extern int64_t zerobus_arrow_stream_ingest_batch(CArrowStream *stream, const uint8_t *ipc_bytes, uintptr_t ipc_len, CResult *result);
-extern int64_t zerobus_arrow_stream_ingest_batch_via_record_batch(CArrowStream *stream, const uint8_t *ipc_bytes, uintptr_t ipc_len, CResult *result);
 extern bool    zerobus_arrow_stream_wait_for_offset(CArrowStream *stream, int64_t offset, CResult *result);
 extern bool    zerobus_arrow_stream_flush(CArrowStream *stream, CResult *result);
 extern bool    zerobus_arrow_stream_close(CArrowStream *stream, CResult *result);
@@ -321,9 +320,7 @@ func arrowStreamFree(ptr unsafe.Pointer) {
 	C.zerobus_arrow_stream_free((*C.CArrowStream)(ptr))
 }
 
-// arrowStreamIngestBatch sends one Arrow IPC-encoded batch to the stream via the
-// zero-copy path (ingest_ipc_batch). Use arrowStreamIngestBatchViaRecordBatch when
-// the stream has IPC compression configured.
+// arrowStreamIngestBatch sends one Arrow IPC-encoded batch to the stream.
 // Returns the logical offset assigned to this batch.
 func arrowStreamIngestBatch(streamPtr unsafe.Pointer, ipcBytes []byte) (int64, error) {
 	if len(ipcBytes) == 0 {
@@ -337,32 +334,6 @@ func arrowStreamIngestBatch(streamPtr unsafe.Pointer, ipcBytes []byte) (int64, e
 
 	var cres C.CResult
 	offset := C.zerobus_arrow_stream_ingest_batch(
-		(*C.CArrowStream)(streamPtr),
-		cBytes,
-		C.uintptr_t(len(ipcBytes)),
-		&cres,
-	)
-	if !cres.success {
-		return -1, arrowFfiResult(cres)
-	}
-	return int64(offset), nil
-}
-
-// arrowStreamIngestBatchViaRecordBatch sends one Arrow IPC-encoded batch via the
-// RecordBatch path, which applies any configured IPC compression on the Rust side.
-// Returns the logical offset assigned to this batch.
-func arrowStreamIngestBatchViaRecordBatch(streamPtr unsafe.Pointer, ipcBytes []byte) (int64, error) {
-	if len(ipcBytes) == 0 {
-		return -1, &ZerobusError{Message: "empty IPC bytes", IsRetryable: false}
-	}
-
-	var pinner runtime.Pinner
-	defer pinner.Unpin()
-	cBytes := (*C.uint8_t)(unsafe.SliceData(ipcBytes))
-	pinner.Pin(cBytes)
-
-	var cres C.CResult
-	offset := C.zerobus_arrow_stream_ingest_batch_via_record_batch(
 		(*C.CArrowStream)(streamPtr),
 		cBytes,
 		C.uintptr_t(len(ipcBytes)),
