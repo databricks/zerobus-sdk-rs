@@ -50,7 +50,7 @@ Args:
     record_type: Serialization format (RecordType.PROTO or RecordType.JSON).
         Default: RecordType.PROTO
     max_inflight_records: Maximum number of records that can be sent to the
-        server before waiting for acknowledgment. Default: 50000
+        server before waiting for acknowledgment. Default: 1000000
     recovery: Whether to enable automatic recovery of the stream in case of
         failure. Default: True
     recovery_timeout_ms: Timeout for stream recovery in milliseconds (for one
