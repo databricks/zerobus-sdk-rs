@@ -289,7 +289,6 @@ impl ArrowStreamConfigurationOptions {
             .stream_paused_max_wait_time_ms(self.stream_paused_max_wait_time_ms.map(|v| v as u64));
         Ok(b)
     }
-
 }
 
 // =============================================================================
