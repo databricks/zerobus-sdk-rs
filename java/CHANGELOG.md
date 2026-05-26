@@ -46,9 +46,15 @@
 - Updated `README.md`, `examples/README.md`, `examples/arrow/README.md`,
   and Javadoc on `ZerobusArrowStream` / `ArrowStreamConfigurationOptions`
   / `ZerobusSdk.createArrowStream` to reflect the Beta promotion.
+- Documented the JDK 9+ `--add-opens=java.base/java.nio=...` JVM flags
+  required by `arrow-memory-netty` 17.x when using `ZerobusArrowStream`,
+  in both the main README and the Arrow examples README.
 
 ### Internal Changes
 
+- `maven-surefire-plugin` now passes the required `--add-opens` flags so
+  Arrow integration tests run cleanly on JDK 9+ without per-developer
+  setup.
 - Bumped `zerobus-jni` crate version from `1.1.1` to `1.2.0` (used by the
   Java SDK identifier embedded at compile time via `CARGO_PKG_VERSION`).
 

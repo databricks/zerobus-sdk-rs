@@ -31,6 +31,24 @@ Arrow Flight requires additional dependencies (not bundled with the SDK):
 </dependency>
 ```
 
+## JVM module flags (JDK 9+)
+
+Apache Arrow Java's `arrow-memory-netty` allocator needs reflective access to `java.nio.Buffer` and fails on startup without it:
+
+```
+java.lang.RuntimeException: Failed to initialize MemoryUtil. You must start Java with
+  `--add-opens=java.base/java.nio=org.apache.arrow.memory.core,ALL-UNNAMED`
+```
+
+Pass both opens to your application JVM whenever you use `ZerobusArrowStream`:
+
+```
+--add-opens=java.base/java.nio=ALL-UNNAMED
+--add-opens=java.base/java.nio=org.apache.arrow.memory.core
+```
+
+(Two opens because Arrow resolves the importing module as `org.apache.arrow.memory.core` under JPMS and `ALL-UNNAMED` on the classic classpath — covering both works in either setup.)
+
 ## Building and Running
 
 ```bash
@@ -50,12 +68,16 @@ export DATABRICKS_CLIENT_ID="your-client-id"
 export DATABRICKS_CLIENT_SECRET="your-client-secret"
 
 # Run single batch example
-java -cp ".:../target/zerobus-ingest-sdk-*-jar-with-dependencies.jar:$ARROW_CP" \
-  com.databricks.zerobus.examples.arrow.SingleBatchExample
+java --add-opens=java.base/java.nio=ALL-UNNAMED \
+     --add-opens=java.base/java.nio=org.apache.arrow.memory.core \
+     -cp ".:../target/zerobus-ingest-sdk-*-jar-with-dependencies.jar:$ARROW_CP" \
+     com.databricks.zerobus.examples.arrow.SingleBatchExample
 
 # Run batch ingestion example
-java -cp ".:../target/zerobus-ingest-sdk-*-jar-with-dependencies.jar:$ARROW_CP" \
-  com.databricks.zerobus.examples.arrow.BatchIngestionExample
+java --add-opens=java.base/java.nio=ALL-UNNAMED \
+     --add-opens=java.base/java.nio=org.apache.arrow.memory.core \
+     -cp ".:../target/zerobus-ingest-sdk-*-jar-with-dependencies.jar:$ARROW_CP" \
+     com.databricks.zerobus.examples.arrow.BatchIngestionExample
 ```
 
 ## Examples
