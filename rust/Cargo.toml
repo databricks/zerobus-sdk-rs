@@ -9,6 +9,7 @@ members = [
     "tools/*",
     "tests",
 ]
+exclude = ["tools/zeroparser"]
 resolver = "2"
 
 [workspace.dependencies]

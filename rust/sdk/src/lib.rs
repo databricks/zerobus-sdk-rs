@@ -102,6 +102,7 @@ pub use stream_configuration::StreamConfigurationOptions;
 #[cfg(feature = "testing")]
 pub use tls_config::NoTlsConfig;
 pub use tls_config::{SecureTlsConfig, TlsConfig};
+pub use zeroparser;
 
 const SHUTDOWN_TIMEOUT_SECS: u64 = 1;
 

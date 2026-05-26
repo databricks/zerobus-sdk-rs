@@ -1,0 +1,38 @@
+[package]
+name = "e2e"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+zeroparser = { path = ".." }
+
+[dev-dependencies]
+criterion = { version = "0.5", default-features = false, features = ["html_reports"] }
+plotters = { version = "0.3", default-features = false, features = ["svg_backend"] }
+prost = "0.14"
+prost-reflect = { version = "0.16", features = ["serde"] }
+prost-types = "0.14"
+rstest = "0.24"
+serde_json = "1.0"
+strum = { version = "0.27", features = ["derive"] }
+
+[build-dependencies]
+prost-build = "0.14"
+
+[[bench]]
+name = "parser_bench"
+path = "benches/parser_bench.rs"
+harness = false
+
+[[bench]]
+name = "bench_plot"
+path = "benches/bench_plot.rs"
+harness = false
+
+[[test]]
+name = "e2e"
+path = "tests/e2e.rs"

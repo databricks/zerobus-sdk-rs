@@ -31,6 +31,7 @@ hyper-http-proxy.workspace = true
 hyper-util.workspace = true
 smallvec.workspace = true
 bytes.workspace = true
+zeroparser = { path = "../tools/zeroparser" }
 
 # Arrow Flight dependencies
 arrow-flight = { workspace = true, optional = true }
