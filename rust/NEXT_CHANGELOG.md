@@ -6,8 +6,6 @@
 
 ### New Features and Improvements
 
-- Added `zeroparser`: zero-copy, single-pass protobuf parser. Check `tools/zeroparser/README.md` for more details.
-
 ### Bug Fixes
 
 ### Documentation
