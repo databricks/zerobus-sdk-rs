@@ -28,7 +28,7 @@ The Databricks Zerobus Ingest SDK for TypeScript provides a high-performance cli
 - **High-throughput ingestion**: Optimized for high-volume data ingestion with native Rust implementation
 - **Automatic recovery**: Built-in retry and recovery mechanisms for transient failures
 - **Flexible configuration**: Customizable stream behavior and timeouts
-- **Multiple serialization formats**: Support for JSON and Protocol Buffers
+- **Multiple serialization formats**: Support for JSON, Protocol Buffers, and Arrow Flight (Beta) with optional LZ4 / ZSTD compression
 - **Type widening**: Accept high-level types (plain objects, protobuf messages) or low-level types (strings, buffers) - automatically handles serialization
 - **Batch ingestion**: Ingest multiple records with a single acknowledgment for higher throughput
 - **OAuth 2.0 authentication**: Secure authentication with client credentials

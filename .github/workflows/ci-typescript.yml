@@ -80,8 +80,13 @@ jobs:
         run: Add-Content -Path Cargo.toml -Value "`n[patch.crates-io]`ndatabricks-zerobus-ingest-sdk = { path = `"../rust/sdk`" }`n"
         shell: powershell
 
+      # `npm install` (not `ci`): v1.1.0 bumps the platform-package
+      # `optionalDependencies` to a version that doesn't exist on the
+      # registry until publish, so `npm ci`'s strict lockfile validation
+      # rejects the gap. `npm install` tolerates it. CI builds its own
+      # `.node` so the missing prebuilts don't matter.
       - name: Install dependencies
-        run: npm ci
+        run: npm install --no-audit --no-fund
 
       - name: Build
         run: npm run build -- --target ${{ matrix.target }}
@@ -151,7 +156,8 @@ jobs:
         shell: powershell
 
       - name: Install dependencies
-        run: npm ci
+        # See the Build job for the `npm install` rationale.
+        run: npm install --no-audit --no-fund
 
       - name: Build
         run: npm run build:debug

@@ -7,7 +7,7 @@ This directory contains examples demonstrating how to use the Zerobus TypeScript
 - [Overview](#overview)
 - [JSON Examples](json/README.md)
 - [Protocol Buffers Examples](proto/README.md)
-- [Arrow Flight Examples](arrow/README.md) (Experimental)
+- [Arrow Flight Examples](arrow/README.md) (Beta)
 - [Prerequisites](#prerequisites)
 - [Common Code Patterns](#common-code-patterns)
 - [API Styles](#api-styles)
@@ -21,7 +21,7 @@ The SDK supports three serialization formats and two ingestion methods:
 **Serialization Formats:**
 - **[JSON](json/README.md)** - Simpler, no schema generation required. Great for getting started.
 - **[Protocol Buffers](proto/README.md)** - Type-safe with compile-time validation. Better for production.
-- **[Arrow Flight](arrow/README.md)** - High-performance columnar format for analytics. **(Experimental/Unsupported)**
+- **[Arrow Flight](arrow/README.md)** - High-performance columnar format for analytics. **(Beta)** API is stabilising but may still change before reaching GA.
 
 **Ingestion Methods:**
 - **Single-record** (`ingestRecordOffset`) - Ingest records one at a time
@@ -197,6 +197,6 @@ if (offset !== null) {
 | **Performance** | Text-based | Efficient binary encoding | High-performance columnar |
 | **Flexibility** | Easy to modify | Schema changes require regeneration | Dynamic schema |
 | **Best For** | Prototyping, simple use cases | Production, high-throughput | Analytics, data science |
-| **Status** | Stable | Stable | Experimental/Unsupported |
+| **Status** | Stable | Stable | Beta |
 
-**Recommendation:** Start with JSON for quick prototyping, then migrate to Protocol Buffers for production row-oriented workloads. Use Arrow Flight (when stable) for analytics and columnar workloads.
+**Recommendation:** Start with JSON for quick prototyping, then migrate to Protocol Buffers for production row-oriented workloads. Arrow Flight (Beta) is suitable for analytics and columnar workloads; the API is stabilising but may still change before reaching GA.

@@ -60,7 +60,10 @@ jobs:
           sudo apt-get install -y gcc-aarch64-linux-gnu g++-aarch64-linux-gnu
 
       - name: Install dependencies
-        run: npm ci
+        # `npm install` (not `ci`) tolerates platform-package
+        # `optionalDependencies` referencing the in-progress release
+        # version. See ci-typescript.yml.
+        run: npm install --no-audit --no-fund
 
       - name: Build
         run: npm run build -- --target ${{ matrix.target }}
