@@ -246,14 +246,15 @@ impl<'a> PackedField<'a> {
         remaining: &mut &'a [u8],
         field_num: i32,
     ) -> ParseResult<&'a [u8; N]> {
-        let Some((chunk, rest)) = remaining.split_first_chunk::<N>() else {
-            return Err(ParseError::BufferTooShort {
+        let chunk: &'a [u8; N] = remaining
+            .get(..N)
+            .and_then(|s| s.try_into().ok())
+            .ok_or(ParseError::BufferTooShort {
                 needed: N,
                 available: remaining.len(),
                 field_num,
-            });
-        };
-        *remaining = rest;
+            })?;
+        *remaining = &remaining[N..];
         Ok(chunk)
     }
 }
