@@ -8,6 +8,10 @@
   promotion. The API is stabilising but may still change before reaching GA.
   The `arrow-flight` feature is no longer labelled experimental/unsupported
   in docs and examples.
+- **macOS pre-built binaries.** Added `@databricks/zerobus-ingest-sdk-darwin-x64`
+  and `@databricks/zerobus-ingest-sdk-darwin-arm64` to `optionalDependencies`,
+  so `npm install` on Intel and Apple Silicon Macs now fetches a pre-built
+  `.node` binary instead of falling back to a source build.
 - **`waitForOffset` precision.** Replaced the `Number(bigint)` round-trip
   with napi-rs's lossless `BigInt::get_i64()`. Both gRPC and Arrow streams
   now error cleanly on offsets that exceed `i64` range instead of silently

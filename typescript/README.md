@@ -137,8 +137,6 @@ source $HOME/.cargo/env
 
 #### Installation Steps
 
-**Note for macOS users**: Pre-built binaries are not available. The package will automatically build from source during `npm install`. Ensure you have Rust toolchain and Xcode Command Line Tools installed (see prerequisites above).
-
 1. Clone the repository:
    ```bash
    git clone https://github.com/databricks/zerobus-sdk.git
@@ -1127,14 +1125,15 @@ The SDK supports all platforms where Node.js and Rust are available.
 Pre-built native binaries are available for:
 
 - **Linux**: x64, ARM64
+- **macOS**: x64, ARM64
 - **Windows**: x64
 
 ### Build from Source
 
-**macOS users**: Pre-built binaries are not available for macOS. The package will automatically build from source during `npm install`, which requires:
+Other platforms (e.g. Linux musl, FreeBSD) need to build from source during `npm install`, which requires:
 
 - **Rust toolchain** (1.70+): Install via `curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh`
-- **Xcode Command Line Tools**: Install via `xcode-select --install`
+- Platform C/C++ build tools (Xcode CLT on macOS, build-essential on Debian/Ubuntu, etc.)
 
 The build process happens automatically during installation and typically takes 2-3 minutes.
 
