@@ -81,6 +81,3 @@ jobs:
       - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
       - name: Run tests
         run: cargo test --workspace
-      - name: Run tests (zeroparser sub-workspace)
-        working-directory: rust/tools/zeroparser
-        run: cargo test

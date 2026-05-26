@@ -4,6 +4,10 @@ Zero-copy, single-pass protobuf parser driven by a `DescriptorProto`. Parses
 nested messages in one O(N) traversal; all string and byte values borrow from
 the input buffer.
 
+Ships as part of the [Zerobus SDK](https://github.com/databricks/zerobus-sdk)
+behind the optional `zeroparser` feature flag — there is no standalone
+`zeroparser` crate on crates.io.
+
 ## Why
 
 `prost-reflect`'s `DynamicMessage` is convenient when you have a schema only at
@@ -14,7 +18,8 @@ cache, and `&str`/`&[u8]` values point straight into the input.
 
 ## Benchmark
 
-`cargo bench --bench bench_plot` writes `bench_plot.svg`:
+`cargo bench --features zeroparser --bench zeroparser_bench_plot` writes
+`bench_plot.svg`:
 
 ![Decode throughput](bench_plot.svg)
 
@@ -42,30 +47,36 @@ win most.
 
 Each Rust measurement is averaged over 3 trials in-bench; C++ values are the
 mean of 6 runs of an out-of-tree harness against libprotobuf 32.1 (see
-`e2e/benches/README.md`).
+`benches/README.md`).
 
 Measured on: Apple M4 Max (16-core, arm64), 64 GB RAM, macOS 26.4.1, rustc
 1.90.0, libprotobuf 32.1, clang++ from Apple Xcode.
 
 ## Quick start
 
-Zeroparser is an internal sub-crate of the [Zerobus SDK](https://github.com/databricks/zerobus-sdk).
+Enable the feature in your `Cargo.toml`:
+
+```toml
+[dependencies]
+databricks-zerobus-ingest-sdk = { version = "...", features = ["zeroparser"] }
+```
+
+Then:
 
 ```rust
 use prost_types::DescriptorProto;
 use databricks_zerobus_ingest_sdk::zeroparser::{
-    MessageRegistry, parser::ParsedMessage, types::FieldValueRef,
+    parser::ParsedMessage, types::FieldValueRef, MessageRegistry, ParseResult,
 };
 
-let descriptor: DescriptorProto = /* from a .proto file or reflection */;
+# fn run(descriptor: DescriptorProto, bytes: &[u8]) -> ParseResult<()> {
 let registry = MessageRegistry::from_descriptor(&descriptor);
-
-let bytes: &[u8] = /* protobuf-encoded message */;
 let parsed = ParsedMessage::parse(bytes, &registry)?;
 
 if let Some(FieldValueRef::String(s)) = parsed.get_scalar(1) {
     println!("field 1 = {s}");
 }
+# Ok(()) }
 ```
 
 ### API
@@ -78,66 +89,49 @@ if let Some(FieldValueRef::String(s)) = parsed.get_scalar(1) {
 | `get_repeated_scalars(field_num)`  | `&[FieldValueRef]`                                  |
 | `get_repeated_messages(field_num)` | `&[ParsedMessage]`                                  |
 | `get_map_entries(field_num)`       | `impl Iterator<Item=(&MapKeyRef, &ParsedMapValue)>` |
-| `get_map_entries_count(field_num)` | `usize`                                             |
 
-`FieldValueRef` is one of `String(&str)`, `Int32`, `Int64`, `UInt32`, `UInt64`,
-`Bool`, `Float`, `Double`, `Bytes(&[u8])`. Enum fields parse as `Int32`.
+## Test and bench commands
 
-## Architecture
+From `rust/sdk/`:
 
 ```
-input &[u8]
-   |
-   v
-wire.rs          - varint / fixed / length-delimited field decoder
-   |
-   v
-registry.rs      - DescriptorProto -> per-field cache
-                   (field_type, is_scalar, is_repeated, storage_index,
-                    oneof_index, ...)
-   |
-   v
-parser.rs        - recursive single-pass parse into ParsedMessage:
-                   scalars: Box<[Option<FieldValueRef>]>  (no enum wrapper)
-                   complex: Box<[ComplexType]>
-                            (Empty | Message | RepeatedScalar |
-                             RepeatedMessage | Map)
+cargo test --features zeroparser --lib                          # 72 unit tests inline in src/zeroparser/*.rs
+cargo test --features zeroparser --test zeroparser_e2e          # integration tests in src/zeroparser/tests/e2e.rs
+cargo test --features zeroparser                                # everything: lib + integration + doc tests
+cargo bench --features zeroparser --bench zeroparser_parser_bench   # full criterion sweep
+cargo bench --features zeroparser --bench zeroparser_bench_plot     # produces bench_plot.svg
 ```
 
-Scalars use `Option<FieldValueRef>` directly to avoid an enum-discriminant
-check on the hot path. Complex fields (nested messages, maps, repeated) use a
-discriminated enum.
-
-## Build & test
-
-```bash
-cargo build
-cargo test --lib                   # 72 unit tests inside src/ (#[cfg(test)] modules)
-cargo test --test e2e              # 97 integration tests in e2e/tests/e2e.rs
-cargo test                         # everything: lib + integration + doc tests
-cargo bench --bench parser_bench   # full criterion sweep
-cargo bench --bench bench_plot     # produces bench_plot.svg
-```
+Or from anywhere in the workspace, `cargo test --workspace` covers it — the
+`rust/tests` member enables the `zeroparser` feature on the SDK so the moved
+tests run as part of normal CI.
 
 Requires `protoc` on `PATH` for the build script (used to compile the test and
 bench `.proto` files). On Debian/Ubuntu: `apt install protobuf-compiler`.
 
 ## Layout
 
-Crate is exported by the SDK as `databricks_zerobus_ingest_sdk::zeroparser`; (not published to crates.io).
-`e2e/` is a workspace member that holds integration tests and benchmarks.
-
 ```
-src/wire.rs                 — wire format, varint parsing, field decoding
-src/registry.rs             — MessageRegistry, field descriptor caching
-src/parser.rs               — single-pass recursive parser
-src/types.rs                — FieldValueRef, ComplexType, conversions
-src/errors.rs               — ParseError, ParseResult
-src/sparse_field_map.rs     — O(1) per-descriptor field lookup
-src/owned.rs                — owning wrapper
-
-e2e/                        — workspace member, not published
-  build.rs                  — compiles tests/proto and benches/proto via prost-build
-  tests/e2e.rs              — integration tests
-  benches/                  — criterion sweep + MB/s bar plot
+rust/sdk/src/zeroparser/
+  mod.rs                  — module entry: doc, mod decls, re-exports
+  wire.rs                 — wire format, varint parsing, field decoding
+  registry.rs             — MessageRegistry, field descriptor caching
+  parser.rs               — single-pass recursive parser
+  types.rs                — FieldValueRef, ComplexType, conversions
+  errors.rs               — ParseError, ParseResult
+  sparse_field_map.rs     — O(1) per-descriptor field lookup
+  owned.rs                — owning wrapper
+  tests/                  — integration tests (wired via [[test]] in sdk/Cargo.toml)
+    e2e.rs
+    common/mod.rs
+    proto/                — proto2/proto3 fixtures compiled by sdk/build.rs
+  benches/                — criterion sweep + MB/s bar plot
+    parser_bench.rs       — full criterion sweep
+    bench_plot.rs         — produces bench_plot.svg
+    common/mod.rs
+    proto/                — AirQuality, ClickBench, SupportedNullableTypes
 ```
+
+The proto fixtures are compiled in `rust/sdk/build.rs` only when the
+`zeroparser` feature is enabled (`CARGO_FEATURE_ZEROPARSER` env check), so
+consumers without the feature don't pay for the proto build step.

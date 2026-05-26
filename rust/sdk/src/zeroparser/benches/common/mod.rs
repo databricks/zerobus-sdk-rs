@@ -1,12 +1,12 @@
 use criterion::black_box as bb;
+use databricks_zerobus_ingest_sdk::zeroparser::parser::ParsedMessage;
+use databricks_zerobus_ingest_sdk::zeroparser::types::FieldValueRef;
+use databricks_zerobus_ingest_sdk::zeroparser::MessageRegistry;
 use prost::Message;
 use prost_reflect::{DescriptorPool, DynamicMessage, MessageDescriptor, ReflectMessage, Value};
 use prost_types::field_descriptor_proto::Type as ProstFieldType;
 use prost_types::{DescriptorProto, FieldDescriptorProto, FileDescriptorSet};
 use serde_json::Value as JsonValue;
-use zeroparser::parser::ParsedMessage;
-use zeroparser::types::FieldValueRef;
-use zeroparser::MessageRegistry;
 
 pub const BENCH_DESCRIPTOR_SET: &[u8] =
     include_bytes!(concat!(env!("OUT_DIR"), "/bench_descriptor_set.bin"));

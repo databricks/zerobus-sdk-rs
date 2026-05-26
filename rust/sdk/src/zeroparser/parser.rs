@@ -4,14 +4,14 @@ use std::collections::HashMap;
 
 use prost_types::field_descriptor_proto::Type;
 
-use crate::errors::{ParseError, ParseResult};
-use crate::registry::{DescriptorWithFieldCache, FieldInfo, MessageRegistry};
-use crate::types::{
+use super::errors::{ParseError, ParseResult};
+use super::registry::{DescriptorWithFieldCache, FieldInfo, MessageRegistry};
+use super::types::{
     convert_scalar_value, default_value_for_type, ComplexType, FieldValueRef, MapKeyRef,
     PackedField, ParsedMapValue, MAP_ENTRY_KEY_FIELD_NUM, MAP_ENTRY_VALUE_FIELD_NUM,
     MAX_NESTING_DEPTH,
 };
-use crate::wire::{try_parse_field, WireValue};
+use super::wire::{try_parse_field, WireValue};
 
 /// Pre-parsed message with all nested messages recursively parsed in a single pass.
 /// Uses separate storage for scalars (hot path) vs complex fields.
@@ -490,7 +490,7 @@ pub mod tests {
     };
 
     use super::*;
-    use crate::sparse_field_map::MAX_INLINE_CAPACITY;
+    use crate::zeroparser::sparse_field_map::MAX_INLINE_CAPACITY;
 
     const LABEL_OPTIONAL: i32 = 1;
     const LABEL_REPEATED: i32 = 3;

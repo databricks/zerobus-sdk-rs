@@ -7,12 +7,12 @@ use common::{
     deeply_nested_message_fields, encode_message_for_version, field_num, nested_message_fields,
     supported_types_fields, ProtoVersion,
 };
+use databricks_zerobus_ingest_sdk::zeroparser::parser::ParsedMessage;
+use databricks_zerobus_ingest_sdk::zeroparser::types::{FieldValueRef, MapKeyRef};
+use databricks_zerobus_ingest_sdk::zeroparser::{MessageRegistry, ParseError};
 use prost_types::field_descriptor_proto::Type;
 use prost_types::{DescriptorProto, FieldDescriptorProto};
 use rstest::rstest;
-use zeroparser::parser::ParsedMessage;
-use zeroparser::types::{FieldValueRef, MapKeyRef};
-use zeroparser::{MessageRegistry, ParseError};
 
 #[allow(clippy::enum_variant_names)]
 mod proto2 {
@@ -380,7 +380,7 @@ fn test_repeated_fields(#[case] version: ProtoVersion) {
 #[case(ProtoVersion::Proto2)]
 #[case(ProtoVersion::Proto3)]
 fn test_map_fields(#[case] version: ProtoVersion) {
-    use zeroparser::types::ParsedMapValue;
+    use databricks_zerobus_ingest_sdk::zeroparser::types::ParsedMapValue;
 
     // Test with populated map fields
     let (buf, registry) = match version {
@@ -2005,8 +2005,8 @@ fn test_complex_nested_with_null_values(#[case] version: ProtoVersion) {
 #[case(ProtoVersion::Proto2)]
 #[case(ProtoVersion::Proto3)]
 fn test_map_duplicate_keys_last_value_wins(#[case] version: ProtoVersion) {
+    use databricks_zerobus_ingest_sdk::zeroparser::types::ParsedMapValue;
     use prost::Message;
-    use zeroparser::types::ParsedMapValue;
 
     let mut buf1 = Vec::new();
     let mut buf2 = Vec::new();
@@ -2093,7 +2093,7 @@ fn test_map_duplicate_keys_last_value_wins(#[case] version: ProtoVersion) {
 #[case(ProtoVersion::Proto2)]
 #[case(ProtoVersion::Proto3)]
 fn test_map_with_complex_nested_values(#[case] version: ProtoVersion) {
-    use zeroparser::types::ParsedMapValue;
+    use databricks_zerobus_ingest_sdk::zeroparser::types::ParsedMapValue;
 
     let msg = proto2::ComplexNested {
         id: Some(1),

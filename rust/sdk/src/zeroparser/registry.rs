@@ -4,7 +4,7 @@ use std::collections::HashMap;
 
 use prost_types::{field_descriptor_proto, DescriptorProto};
 
-use crate::sparse_field_map::{SparseFieldMap, MAX_INLINE_CAPACITY};
+use super::sparse_field_map::{SparseFieldMap, MAX_INLINE_CAPACITY};
 
 /// LABEL_REPEATED = 3 in protobuf.
 const LABEL_REPEATED: i32 = 3;
@@ -225,7 +225,7 @@ impl MessageRegistry {
 #[cfg(test)]
 pub mod tests {
     use super::*;
-    use crate::parser::tests::{make_descriptor, make_field};
+    use crate::zeroparser::parser::tests::{make_descriptor, make_field};
 
     impl MessageRegistry {
         pub fn get_field_name(&self, field_num: i32) -> Option<&str> {

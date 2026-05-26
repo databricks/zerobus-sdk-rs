@@ -6,9 +6,11 @@
 //!
 //! ```no_run
 //! use prost_types::DescriptorProto;
-//! use zeroparser::{MessageRegistry, parser::ParsedMessage, types::FieldValueRef};
+//! use databricks_zerobus_ingest_sdk::zeroparser::{
+//!     parser::ParsedMessage, types::FieldValueRef, MessageRegistry, ParseResult,
+//! };
 //!
-//! # fn run(descriptor: DescriptorProto, bytes: &[u8]) -> zeroparser::ParseResult<()> {
+//! # fn run(descriptor: DescriptorProto, bytes: &[u8]) -> ParseResult<()> {
 //! let registry = MessageRegistry::from_descriptor(&descriptor);
 //! let parsed = ParsedMessage::parse(bytes, &registry)?;
 //! if let Some(FieldValueRef::String(s)) = parsed.get_scalar(1) {

@@ -5,8 +5,8 @@ use std::fmt;
 
 use prost_types::field_descriptor_proto::Type;
 
-use crate::errors::{ParseError, ParseResult};
-use crate::wire::{decode_zigzag32, decode_zigzag64, try_read_varint, WireValue};
+use super::errors::{ParseError, ParseResult};
+use super::wire::{decode_zigzag32, decode_zigzag64, try_read_varint, WireValue};
 
 /// Maximum allowed nesting depth for protobuf messages.
 /// Protobuf messages can be nested arbitrarily deep, but to prevent stack overflow
@@ -310,7 +310,7 @@ impl<'a> MapKeyRef<'a> {
 #[derive(Debug)]
 pub enum ParsedMapValue<'a> {
     Scalar(FieldValueRef<'a>),
-    Message(crate::parser::ParsedMessage<'a>),
+    Message(super::parser::ParsedMessage<'a>),
 }
 
 /// Storage type for complex (non-scalar) field types.
@@ -319,11 +319,11 @@ pub enum ComplexType<'a> {
     /// Field not present in the message.
     Empty,
     /// Singular message field.
-    Message(crate::parser::ParsedMessage<'a>),
+    Message(super::parser::ParsedMessage<'a>),
     /// Repeated scalar field.
     RepeatedScalar(Vec<FieldValueRef<'a>>),
     /// Repeated message field.
-    RepeatedMessage(Vec<crate::parser::ParsedMessage<'a>>),
+    RepeatedMessage(Vec<super::parser::ParsedMessage<'a>>),
     /// Map field.
     Map(HashMap<MapKeyRef<'a>, ParsedMapValue<'a>>),
 }

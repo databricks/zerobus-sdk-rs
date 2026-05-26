@@ -11,9 +11,9 @@ use std::sync::Arc;
 
 use self_cell::self_cell;
 
-use crate::errors::ParseError;
-use crate::parser::ParsedMessage;
-use crate::registry::MessageRegistry;
+use super::errors::ParseError;
+use super::parser::ParsedMessage;
+use super::registry::MessageRegistry;
 
 /// Owns the encoded bytes and the registry referenced by a `ParsedMessage`.
 ///

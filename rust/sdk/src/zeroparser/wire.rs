@@ -1,6 +1,6 @@
 //! Wire format types and low-level parsing functions.
 
-pub use crate::errors::{ParseError, ParseResult};
+pub use super::errors::{ParseError, ParseResult};
 
 /// Raw wire value before schema interpretation.
 #[derive(Debug, PartialEq, Clone, Copy)]

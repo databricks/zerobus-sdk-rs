@@ -1,6 +1,6 @@
+use databricks_zerobus_ingest_sdk::zeroparser::MessageRegistry;
 use prost::Message;
 use prost_types::{DescriptorProto, FileDescriptorSet};
-use zeroparser::MessageRegistry;
 
 pub const E2E_DESCRIPTOR_SET: &[u8] =
     include_bytes!(concat!(env!("OUT_DIR"), "/e2e_descriptor_set.bin"));
