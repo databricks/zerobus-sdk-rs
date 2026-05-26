@@ -28,8 +28,7 @@ examples/
 │   └── BatchIngestionExample.java
 ├── arrow/                 (Arrow Flight examples - ZerobusArrowStream, Beta)
 │   ├── README.md
-│   ├── SingleBatchExample.java
-│   └── BatchIngestionExample.java
+│   └── ArrowIngestionExample.java
 └── legacy/                (Legacy examples - ZerobusStream)
     └── LegacyStreamExample.java
 ```
@@ -42,8 +41,7 @@ examples/
 | `proto/BatchIngestionExample` | `ZerobusProtoStream` | Batch ingestion |
 | `json/SingleRecordExample` | `ZerobusJsonStream` | Single record ingestion (Object + String) |
 | `json/BatchIngestionExample` | `ZerobusJsonStream` | Batch ingestion |
-| `arrow/SingleBatchExample` | `ZerobusArrowStream` | Single Arrow batch ingestion (Beta) |
-| `arrow/BatchIngestionExample` | `ZerobusArrowStream` | Multiple batches with custom options + recovery (Beta) |
+| `arrow/ArrowIngestionExample` | `ZerobusArrowStream` | Three streams demonstrating each IPC compression codec (NONE, LZ4_FRAME, ZSTD); 10 batches per stream, waitForOffset + flush + close (Beta) |
 | `legacy/LegacyStreamExample` | `ZerobusStream` | Legacy Future-based API |
 
 Each example demonstrates: single ingestion + wait, batch ingestion + wait for last, and recreateStream.

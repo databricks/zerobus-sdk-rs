@@ -38,11 +38,10 @@
 
 ### Documentation
 
-- Replaced the single `ArrowIngestionExample.java` with two examples that
-  mirror the proto/json layout: `SingleBatchExample.java` (minimal
-  end-to-end) and `BatchIngestionExample.java` (loop with periodic
-  checkpoints, custom options including IPC compression and graceful
-  close, recovery via `recreateArrowStream`).
+- Updated `ArrowIngestionExample.java` to demonstrate all three IPC
+  compression codecs end-to-end. Opens three streams in sequence (`NONE`,
+  `LZ4_FRAME`, `ZSTD`), ingests 10 batches per stream, then
+  `waitForOffset` + `flush` + `close`.
 - Updated `README.md`, `examples/README.md`, `examples/arrow/README.md`,
   and Javadoc on `ZerobusArrowStream` / `ArrowStreamConfigurationOptions`
   / `ZerobusSdk.createArrowStream` to reflect the Beta promotion.

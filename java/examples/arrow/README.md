@@ -57,8 +57,7 @@ cd examples
 # Compile (requires Arrow JARs on classpath)
 ARROW_CP=$(echo ../target/arrow-deps/*.jar | tr ' ' ':')
 javac -d . -cp "../target/classes:$ARROW_CP" \
-  arrow/SingleBatchExample.java \
-  arrow/BatchIngestionExample.java
+  arrow/ArrowIngestionExample.java
 
 # Set environment variables
 export ZEROBUS_SERVER_ENDPOINT="https://<workspace-id>.zerobus.<region>.cloud.databricks.com"
@@ -67,32 +66,18 @@ export ZEROBUS_TABLE_NAME="catalog.schema.table"
 export DATABRICKS_CLIENT_ID="your-client-id"
 export DATABRICKS_CLIENT_SECRET="your-client-secret"
 
-# Run single batch example
+# Run
 java --add-opens=java.base/java.nio=ALL-UNNAMED \
      --add-opens=java.base/java.nio=org.apache.arrow.memory.core \
      -cp ".:../target/zerobus-ingest-sdk-*-jar-with-dependencies.jar:$ARROW_CP" \
-     com.databricks.zerobus.examples.arrow.SingleBatchExample
-
-# Run batch ingestion example
-java --add-opens=java.base/java.nio=ALL-UNNAMED \
-     --add-opens=java.base/java.nio=org.apache.arrow.memory.core \
-     -cp ".:../target/zerobus-ingest-sdk-*-jar-with-dependencies.jar:$ARROW_CP" \
-     com.databricks.zerobus.examples.arrow.BatchIngestionExample
+     com.databricks.zerobus.examples.arrow.ArrowIngestionExample
 ```
 
 ## Examples
 
-### SingleBatchExample
+### ArrowIngestionExample
 
-Minimal end-to-end Arrow Flight usage: build a schema, create the stream, populate a single `VectorSchemaRoot`, ingest it, wait for the ack, and close.
-
-### BatchIngestionExample
-
-Realistic loop-driven usage covering everything you need for production:
-
-- Ingesting many batches with periodic `waitForOffset` checkpoints
-- Custom `ArrowStreamConfigurationOptions` (max inflight, IPC compression, recovery, graceful close wait)
-- Recovery via `getUnackedBatches()` + `recreateArrowStream()` after a stream close
+Opens three Arrow Flight streams against the same table, one per IPC compression codec (`NONE`, `LZ4_FRAME`, `ZSTD`). For each stream, ingests 10 batches × 10 rows, waits for the last batch's offset to be acknowledged, flushes pending batches, then closes the stream.
 
 ## API Overview
 
