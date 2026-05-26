@@ -573,13 +573,13 @@ func streamIngestProtoRecordsNowait(streamPtr unsafe.Pointer, records [][]byte) 
 	lenSize := C.size_t(unsafe.Sizeof(C.size_t(0)))
 	n := C.size_t(len(records))
 
-	cPtrArray := C.malloc(n * ptrSize)
+	cPtrArray := C.calloc(n, ptrSize)
 	if cPtrArray == nil {
 		return &ZerobusError{Message: "out of memory allocating record pointer array", IsRetryable: false}
 	}
 	defer C.free(cPtrArray)
 
-	cLenArray := C.malloc(n * lenSize)
+	cLenArray := C.calloc(n, lenSize)
 	if cLenArray == nil {
 		return &ZerobusError{Message: "out of memory allocating record length array", IsRetryable: false}
 	}
@@ -663,13 +663,13 @@ func streamIngestProtoRecords(streamPtr unsafe.Pointer, records [][]byte) (int64
 	lenSize := C.size_t(unsafe.Sizeof(C.size_t(0)))
 	n := C.size_t(len(records))
 
-	cPtrArray := C.malloc(n * ptrSize)
+	cPtrArray := C.calloc(n, ptrSize)
 	if cPtrArray == nil {
 		return -1, &ZerobusError{Message: "out of memory allocating record pointer array", IsRetryable: false}
 	}
 	defer C.free(cPtrArray)
 
-	cLenArray := C.malloc(n * lenSize)
+	cLenArray := C.calloc(n, lenSize)
 	if cLenArray == nil {
 		return -1, &ZerobusError{Message: "out of memory allocating record length array", IsRetryable: false}
 	}
