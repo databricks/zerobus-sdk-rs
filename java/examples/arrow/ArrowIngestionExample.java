@@ -2,7 +2,7 @@ package com.databricks.zerobus.examples.arrow;
 
 import com.databricks.zerobus.*;
 import java.util.Arrays;
-import java.util.List;
+import java.util.Optional;
 import org.apache.arrow.memory.BufferAllocator;
 import org.apache.arrow.memory.RootAllocator;
 import org.apache.arrow.vector.BigIntVector;
@@ -14,10 +14,16 @@ import org.apache.arrow.vector.types.pojo.Field;
 import org.apache.arrow.vector.types.pojo.Schema;
 
 /**
- * Arrow Flight ingestion example.
+ * Arrow Flight ingestion example (Beta).
  *
- * <p>Demonstrates ingesting columnar data using Apache Arrow record batches via the Arrow Flight
- * protocol. This provides high-performance ingestion for large datasets.
+ * <p>Opens three Arrow Flight streams against the same table, one per IPC compression codec
+ * ({@link IPCCompressionType#NONE}, {@link IPCCompressionType#LZ4_FRAME}, {@link
+ * IPCCompressionType#ZSTD}). For each stream the example ingests {@value #BATCHES_PER_STREAM}
+ * batches of {@value #ROWS_PER_BATCH} rows, waits for the last offset to be acknowledged,
+ * flushes pending batches, then closes the stream.
+ *
+ * <p>Arrow Flight ingestion is in Beta. The API is stabilising but may still change before
+ * reaching GA.
  *
  * <p>Prerequisites:
  *
@@ -29,6 +35,9 @@ import org.apache.arrow.vector.types.pojo.Schema;
  * <p>Run with: {@code java -cp <classpath> com.databricks.zerobus.examples.arrow.ArrowIngestionExample}
  */
 public class ArrowIngestionExample {
+
+  private static final int BATCHES_PER_STREAM = 10;
+  private static final int ROWS_PER_BATCH = 10;
 
   public static void main(String[] args) throws Exception {
     String serverEndpoint = System.getenv("ZEROBUS_SERVER_ENDPOINT");
@@ -49,9 +58,8 @@ public class ArrowIngestionExample {
       System.exit(1);
     }
 
-    System.out.println("=== Arrow Flight Ingestion Example ===\n");
+    System.out.println("=== Arrow Flight Ingestion Example (Beta) ===\n");
 
-    // Define the Arrow schema matching the Delta table
     Schema schema =
         new Schema(
             Arrays.asList(
@@ -62,110 +70,83 @@ public class ArrowIngestionExample {
     try (BufferAllocator allocator = new RootAllocator();
         ZerobusSdk sdk = new ZerobusSdk(serverEndpoint, workspaceUrl)) {
 
-      // === Single batch ingestion ===
-      System.out.println("--- Single Batch Ingestion ---");
+      runStream(
+          sdk, allocator, schema, tableName, clientId, clientSecret,
+          "NONE", IPCCompressionType.NONE);
+      runStream(
+          sdk, allocator, schema, tableName, clientId, clientSecret,
+          "LZ4_FRAME", IPCCompressionType.LZ4_FRAME);
+      runStream(
+          sdk, allocator, schema, tableName, clientId, clientSecret,
+          "ZSTD", IPCCompressionType.ZSTD);
 
-      ZerobusArrowStream stream =
-          sdk.createArrowStream(tableName, schema, clientId, clientSecret).join();
-
-      try {
-        try (VectorSchemaRoot batch = VectorSchemaRoot.create(schema, allocator)) {
-          LargeVarCharVector nameVector = (LargeVarCharVector) batch.getVector("device_name");
-          IntVector tempVector = (IntVector) batch.getVector("temp");
-          BigIntVector humidityVector = (BigIntVector) batch.getVector("humidity");
-
-          int rowCount = 5;
-          batch.allocateNew();
-          for (int i = 0; i < rowCount; i++) {
-            nameVector.setSafe(i, ("arrow-device-" + i).getBytes());
-            tempVector.setSafe(i, 20 + i);
-            humidityVector.setSafe(i, 50 + i);
-          }
-          batch.setRowCount(rowCount);
-
-          long offset = stream.ingestBatch(batch).get();
-          stream.waitForOffset(offset);
-          System.out.println(
-              "  " + rowCount + " rows ingested and acknowledged (offset: " + offset + ")");
-        }
-
-        // === Multiple batch ingestion ===
-        System.out.println("\n--- Multiple Batch Ingestion ---");
-
-        long lastOffset = -1;
-        for (int batchNum = 0; batchNum < 3; batchNum++) {
-          try (VectorSchemaRoot batch = VectorSchemaRoot.create(schema, allocator)) {
-            LargeVarCharVector nameVector = (LargeVarCharVector) batch.getVector("device_name");
-            IntVector tempVector = (IntVector) batch.getVector("temp");
-            BigIntVector humidityVector = (BigIntVector) batch.getVector("humidity");
-
-            int rowCount = 10;
-            batch.allocateNew();
-            for (int i = 0; i < rowCount; i++) {
-              nameVector.setSafe(i, ("arrow-batch-" + batchNum + "-row-" + i).getBytes());
-              tempVector.setSafe(i, 30 + i);
-              humidityVector.setSafe(i, 60 + i);
-            }
-            batch.setRowCount(rowCount);
-
-            lastOffset = stream.ingestBatch(batch).get();
-          }
-        }
-        stream.flush();
-        System.out.println("  3 batches (30 rows total) ingested and flushed");
-
-        // === Custom options ===
-        System.out.println("\n--- Custom Options ---");
-
-        ArrowStreamConfigurationOptions customOptions =
-            ArrowStreamConfigurationOptions.builder()
-                .setMaxInflightBatches(2000)
-                .setFlushTimeoutMs(600000)
-                .setRecovery(true)
-                .setRecoveryRetries(5)
-                .setIpcCompression(IPCCompressionType.LZ4_FRAME)
-                .build();
-        System.out.println(
-            "  maxInflightBatches: " + customOptions.maxInflightBatches());
-        System.out.println("  flushTimeoutMs: " + customOptions.flushTimeoutMs());
-        System.out.println("  recoveryRetries: " + customOptions.recoveryRetries());
-        System.out.println("  ipcCompression: " + customOptions.ipcCompression());
-
-      } finally {
-        stream.close();
-      }
-
-      // === Demonstrate getUnackedBatches and recreateArrowStream ===
-      System.out.println("\n--- Unacked Batches (after close) ---");
-
-      List<byte[]> unackedBatches = stream.getUnackedBatches();
-      System.out.println("  Unacked batches: " + unackedBatches.size());
-      System.out.println("  (Expected 0 after successful flush/close)");
-
-      System.out.println("\n--- Recreate Arrow Stream ---");
-
-      ZerobusArrowStream newStream = sdk.recreateArrowStream(stream).join();
-      try {
-        try (VectorSchemaRoot batch = VectorSchemaRoot.create(schema, allocator)) {
-          LargeVarCharVector nameVector = (LargeVarCharVector) batch.getVector("device_name");
-          IntVector tempVector = (IntVector) batch.getVector("temp");
-          BigIntVector humidityVector = (BigIntVector) batch.getVector("humidity");
-
-          batch.allocateNew();
-          nameVector.setSafe(0, "arrow-recreated".getBytes());
-          tempVector.setSafe(0, 99);
-          humidityVector.setSafe(0, 99);
-          batch.setRowCount(1);
-
-          long offset = newStream.ingestBatch(batch).get();
-          newStream.waitForOffset(offset);
-          System.out.println("  1 row ingested on recreated stream (offset: " + offset + ")");
-        }
-      } finally {
-        newStream.close();
-      }
-
-      System.out.println("\n=== Arrow Flight Example Complete ===");
+      System.out.println("\n=== Done ===");
     }
+  }
+
+  /**
+   * Opens one stream with the given IPC compression codec, ingests {@value #BATCHES_PER_STREAM}
+   * batches, waits for the last batch's offset to be acknowledged, flushes, and closes.
+   */
+  private static void runStream(
+      ZerobusSdk sdk,
+      BufferAllocator allocator,
+      Schema schema,
+      String tableName,
+      String clientId,
+      String clientSecret,
+      String codecLabel,
+      IPCCompressionType codec)
+      throws Exception {
+    System.out.println("--- Stream with ipcCompression=" + codecLabel + " ---");
+
+    ArrowStreamConfigurationOptions options =
+        ArrowStreamConfigurationOptions.builder().setIpcCompression(codec).build();
+
+    ZerobusArrowStream stream =
+        sdk.createArrowStream(tableName, schema, clientId, clientSecret, options).join();
+
+    try {
+      long lastOffset = -1L;
+      for (int batchNum = 0; batchNum < BATCHES_PER_STREAM; batchNum++) {
+        try (VectorSchemaRoot batch = VectorSchemaRoot.create(schema, allocator)) {
+          populateBatch(batch, codecLabel, batchNum);
+          Optional<Long> offset = stream.ingestBatch(batch);
+          if (offset.isPresent()) {
+            lastOffset = offset.get();
+          }
+        }
+      }
+
+      if (lastOffset >= 0) {
+        stream.waitForOffset(lastOffset);
+        System.out.println(
+            "  "
+                + BATCHES_PER_STREAM
+                + " batches × "
+                + ROWS_PER_BATCH
+                + " rows acknowledged (lastOffset="
+                + lastOffset
+                + ")");
+      }
+
+      stream.flush();
+    } finally {
+      stream.close();
+    }
+  }
+
+  private static void populateBatch(VectorSchemaRoot batch, String codecLabel, int batchNum) {
+    LargeVarCharVector nameVector = (LargeVarCharVector) batch.getVector("device_name");
+    IntVector tempVector = (IntVector) batch.getVector("temp");
+    BigIntVector humidityVector = (BigIntVector) batch.getVector("humidity");
+
+    batch.allocateNew();
+    for (int i = 0; i < ROWS_PER_BATCH; i++) {
+      nameVector.setSafe(i, ("arrow-" + codecLabel + "-b" + batchNum + "-r" + i).getBytes());
+      tempVector.setSafe(i, 20 + i);
+      humidityVector.setSafe(i, 50 + i);
+    }
+    batch.setRowCount(ROWS_PER_BATCH);
   }
 }

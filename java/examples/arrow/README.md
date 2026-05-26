@@ -1,8 +1,8 @@
-# Arrow Flight Examples (Experimental)
+# Arrow Flight Examples (Beta)
 
 This directory contains examples for ingesting data using `ZerobusArrowStream` via the Arrow Flight protocol.
 
-**Note**: Arrow Flight is not yet supported by default from the Zerobus server side.
+> **Beta**: Arrow Flight ingestion is in Beta. The API is stabilising but may still change before reaching GA.
 
 ## Overview
 
@@ -10,6 +10,7 @@ This directory contains examples for ingesting data using `ZerobusArrowStream` v
 - **Apache Arrow native types** - Accepts `VectorSchemaRoot` directly
 - **Zero-overhead queuing** - `ingestBatch()` returns immediately with an offset
 - **Automatic IPC serialization** - VectorSchemaRoot is serialized to Arrow IPC internally
+- **Optional IPC compression** - LZ4 or ZSTD compression on the wire
 - **Recovery support** - Unacknowledged batches can be retrieved and re-ingested
 
 ## Dependencies
@@ -29,6 +30,24 @@ Arrow Flight requires additional dependencies (not bundled with the SDK):
 </dependency>
 ```
 
+## JVM module flags (JDK 9+)
+
+Apache Arrow Java's `arrow-memory-netty` allocator needs reflective access to `java.nio.Buffer` and fails on startup without it:
+
+```
+java.lang.RuntimeException: Failed to initialize MemoryUtil. You must start Java with
+  `--add-opens=java.base/java.nio=org.apache.arrow.memory.core,ALL-UNNAMED`
+```
+
+Pass both opens to your application JVM whenever you use `ZerobusArrowStream`:
+
+```
+--add-opens=java.base/java.nio=ALL-UNNAMED
+--add-opens=java.base/java.nio=org.apache.arrow.memory.core
+```
+
+(Two opens because Arrow resolves the importing module as `org.apache.arrow.memory.core` under JPMS and `ALL-UNNAMED` on the classic classpath — covering both works in either setup.)
+
 ## Building and Running
 
 ```bash
@@ -47,9 +66,17 @@ export DATABRICKS_CLIENT_ID="your-client-id"
 export DATABRICKS_CLIENT_SECRET="your-client-secret"
 
 # Run
-java -cp ".:../target/zerobus-ingest-sdk-*-jar-with-dependencies.jar:$ARROW_CP" \
-  com.databricks.zerobus.examples.arrow.ArrowIngestionExample
+java --add-opens=java.base/java.nio=ALL-UNNAMED \
+     --add-opens=java.base/java.nio=org.apache.arrow.memory.core \
+     -cp ".:../target/zerobus-ingest-sdk-*-jar-with-dependencies.jar:$ARROW_CP" \
+     com.databricks.zerobus.examples.arrow.ArrowIngestionExample
 ```
+
+## Examples
+
+### ArrowIngestionExample
+
+Opens three Arrow Flight streams against the same table, one per IPC compression codec (`NONE`, `LZ4_FRAME`, `ZSTD`). For each stream, ingests 10 batches × 10 rows, waits for the last batch's offset to be acknowledged, flushes pending batches, then closes the stream.
 
 ## API Overview
 
@@ -75,7 +102,7 @@ try (VectorSchemaRoot batch = VectorSchemaRoot.create(schema, allocator)) {
     batch.setRowCount(rowCount);
 
     Optional<Long> offset = stream.ingestBatch(batch);
-    offset.ifPresent(o -> stream.waitForOffset(o));
+    offset.ifPresent(stream::waitForOffset);
 }
 ```
 
@@ -87,6 +114,8 @@ ArrowStreamConfigurationOptions options = ArrowStreamConfigurationOptions.builde
     .setFlushTimeoutMs(600000)
     .setRecovery(true)
     .setRecoveryRetries(5)
+    .setIpcCompression(IPCCompressionType.ZSTD)
+    .setStreamPausedMaxWaitTimeMs(5000)
     .build();
 
 ZerobusArrowStream stream = sdk.createArrowStream(
@@ -94,30 +123,18 @@ ZerobusArrowStream stream = sdk.createArrowStream(
 ).join();
 ```
 
-### Getting Unacknowledged Batches
-
-```java
-// After close, retrieve unacked batches as IPC byte arrays
-List<byte[]> unacked = stream.getUnackedBatches();
-```
-
-### Recreating a Stream
+### Recovering Unacknowledged Batches
 
 ```java
 stream.close();
-ZerobusArrowStream newStream = sdk.recreateArrowStream(stream).join();
+
+List<byte[]> unacked = stream.getUnackedBatches();
+if (!unacked.isEmpty()) {
+    ZerobusArrowStream recovered = sdk.recreateArrowStream(stream).join();
+    // recreateArrowStream re-ingests the unacked batches and flushes
+    recovered.close();
+}
 ```
-
-## Examples
-
-### ArrowIngestionExample
-
-Demonstrates the full Arrow Flight lifecycle:
-1. **Single batch** - 5 rows ingested and acknowledged
-2. **Multiple batches** - 3 batches × 10 rows = 30 rows flushed
-3. **Custom options** - Stream with custom configuration
-4. **Unacked batches** - Retrieve after close
-5. **Recreate stream** - 1 row on recreated stream
 
 ## When to Use Arrow
 
