@@ -17,7 +17,7 @@ public class StreamConfigurationOptionsTest {
   void testDefaultValues() {
     StreamConfigurationOptions options = StreamConfigurationOptions.getDefault();
 
-    assertEquals(50000, options.maxInflightRecords());
+    assertEquals(1_000_000, options.maxInflightRecords());
     assertTrue(options.recovery());
     assertEquals(15000, options.recoveryTimeoutMs());
     assertEquals(2000, options.recoveryBackoffMs());
@@ -116,7 +116,7 @@ public class StreamConfigurationOptionsTest {
     StreamConfigurationOptions options = StreamConfigurationOptions.builder().build();
 
     // Should have all defaults.
-    assertEquals(50000, options.maxInflightRecords());
+    assertEquals(1_000_000, options.maxInflightRecords());
     assertTrue(options.recovery());
   }
 }

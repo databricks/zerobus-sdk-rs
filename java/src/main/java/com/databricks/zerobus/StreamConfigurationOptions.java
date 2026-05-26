@@ -28,7 +28,7 @@ import java.util.function.Consumer;
  */
 public class StreamConfigurationOptions {
 
-  private int maxInflightRecords = 50000;
+  private int maxInflightRecords = 1_000_000;
   private boolean recovery = true;
   private int recoveryTimeoutMs = 15000;
   private int recoveryBackoffMs = 2000;
@@ -178,7 +178,7 @@ public class StreamConfigurationOptions {
    * <p>Default values:
    *
    * <ul>
-   *   <li>maxInflightRecords: 50000
+   *   <li>maxInflightRecords: 1_000_000
    *   <li>recovery: true
    *   <li>recoveryTimeoutMs: 15000
    *   <li>recoveryBackoffMs: 2000

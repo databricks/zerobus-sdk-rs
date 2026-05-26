@@ -17,6 +17,9 @@ import org.slf4j.LoggerFactory;
 /**
  * Stream for ingesting Apache Arrow record batches into a table via Arrow Flight.
  *
+ * <p><b>Beta:</b> Arrow Flight ingestion is in Beta. The API is stabilising but may still change
+ * before reaching GA.
+ *
  * <p>This class provides high-performance columnar data ingestion using the Apache Arrow Flight
  * protocol. Data is sent as Arrow {@link VectorSchemaRoot} batches, which are automatically
  * serialized to Arrow IPC format for transmission over the wire.
