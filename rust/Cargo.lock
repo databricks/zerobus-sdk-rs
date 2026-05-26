@@ -3401,7 +3401,7 @@ dependencies = [
 
 [[package]]
 name = "zerobus-jni"
-version = "1.1.1"
+version = "1.2.0"
 dependencies = [
  "arrow-array",
  "arrow-ipc",

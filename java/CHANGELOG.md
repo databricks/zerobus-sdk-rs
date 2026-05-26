@@ -1,5 +1,61 @@
 # Version changelog
 
+## Release v1.2.0
+
+### New Features and Improvements
+
+- **Built on Rust SDK 2.0.1**: The JNI layer (`rust/jni/`) now depends on
+  `databricks-zerobus-ingest-sdk = "2.0.1"` (was 2.0.0). The Java-facing API
+  surface (`ZerobusSdk`, `ZerobusProtoStream`, `ZerobusJsonStream`,
+  `ZerobusArrowStream`, `StreamConfigurationOptions`,
+  `ArrowStreamConfigurationOptions`) is unchanged.
+- **Arrow Flight promoted to Beta**: `ZerobusArrowStream` /
+  `ArrowStreamConfigurationOptions` and the surrounding documentation
+  (README, examples) are no longer labelled experimental. The API is
+  stabilising but may still change before reaching GA. (Mirrors the Rust
+  SDK 2.0.1 promotion.)
+- **`ArrowStreamConfigurationOptions`**: Added `streamPausedMaxWaitTimeMs` for the maximum time (milliseconds) to wait in the paused state during graceful close (`-1` = full server duration, `0` = immediate recovery).
+- **Java SDK identifier on the wire**: The SDK now reports itself as
+  `zerobus-sdk-java/<version>` on the HTTP `user-agent` header (previously
+  it inherited the Rust SDK identifier `zerobus-sdk-rs/<rust-version>`).
+  Server-side telemetry can now distinguish Java clients from Rust clients.
+
+### Behavior Changes
+
+- **`StreamConfigurationOptions.maxInflightRecords` default raised from
+  `50_000` to `1_000_000`** to match the Rust SDK 2.0.1 default. The Java
+  wrapper previously hard-coded 50k while the Rust SDK quietly raised its
+  default to 1M, so Java clients ran with a 20× lower in-flight ceiling
+  than Rust clients. Callers who relied on the old cap can pin it back
+  explicitly:
+
+  ```java
+  StreamConfigurationOptions.builder()
+      .setMaxInflightRecords(50_000)
+      .build();
+  ```
+
+### Documentation
+
+- Updated `ArrowIngestionExample.java` to demonstrate all three IPC
+  compression codecs end-to-end. Opens three streams in sequence (`NONE`,
+  `LZ4_FRAME`, `ZSTD`), ingests 10 batches per stream, then
+  `waitForOffset` + `flush` + `close`.
+- Updated `README.md`, `examples/README.md`, `examples/arrow/README.md`,
+  and Javadoc on `ZerobusArrowStream` / `ArrowStreamConfigurationOptions`
+  / `ZerobusSdk.createArrowStream` to reflect the Beta promotion.
+- Documented the JDK 9+ `--add-opens=java.base/java.nio=...` JVM flags
+  required by `arrow-memory-netty` 17.x when using `ZerobusArrowStream`,
+  in both the main README and the Arrow examples README.
+
+### Internal Changes
+
+- `maven-surefire-plugin` now passes the required `--add-opens` flags so
+  Arrow integration tests run cleanly on JDK 9+ without per-developer
+  setup.
+- Bumped `zerobus-jni` crate version from `1.1.1` to `1.2.0` (used by the
+  Java SDK identifier embedded at compile time via `CARGO_PKG_VERSION`).
+
 ## Release v1.1.1
 
 ### Bug Fixes
