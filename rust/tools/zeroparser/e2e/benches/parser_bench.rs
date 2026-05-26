@@ -62,8 +62,11 @@ fn run_decode_benchmark(c: &mut Criterion, scenario: BenchScenario) {
             );
             let actual_message_size = encoded_messages.first().map(|m| m.len()).unwrap_or(0);
             let total_bytes = actual_message_size * count;
-            let description =
-                format_args!("{} size x {} messages", format_bytes(actual_message_size), count);
+            let description = format_args!(
+                "{} size x {} messages",
+                format_bytes(actual_message_size),
+                count
+            );
             group.throughput(Throughput::Bytes(total_bytes as u64));
 
             group.bench_with_input(

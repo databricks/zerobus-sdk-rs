@@ -2,23 +2,17 @@ mod common;
 
 // Proto2 and proto3 have usually the same field ordinals, so we can use the same constants.
 use all_types_fields::{proto2 as all_types_ordinals, proto3 as all_types_ordinals_proto3};
+use common::{
+    all_types_fields, complex_nested_fields, create_registry_for_version,
+    deeply_nested_message_fields, encode_message_for_version, field_num, nested_message_fields,
+    supported_types_fields, ProtoVersion,
+};
 use prost_types::field_descriptor_proto::Type;
 use prost_types::{DescriptorProto, FieldDescriptorProto};
 use rstest::rstest;
 use zeroparser::parser::ParsedMessage;
 use zeroparser::types::{FieldValueRef, MapKeyRef};
 use zeroparser::{MessageRegistry, ParseError};
-use common::{
-    all_types_fields,
-    complex_nested_fields,
-    create_registry_for_version,
-    deeply_nested_message_fields,
-    encode_message_for_version,
-    field_num,
-    nested_message_fields,
-    supported_types_fields,
-    ProtoVersion,
-};
 
 #[allow(clippy::enum_variant_names)]
 mod proto2 {
@@ -64,7 +58,10 @@ fn test_all_scalar_types(#[case] version: ProtoVersion) {
 
     let parsed = ParsedMessage::parse(&buf, &registry).unwrap();
 
-    assert_eq!(parsed.get_scalar(all_types_ordinals::F_INT32), Some(&FieldValueRef::Int32(-42)));
+    assert_eq!(
+        parsed.get_scalar(all_types_ordinals::F_INT32),
+        Some(&FieldValueRef::Int32(-42))
+    );
     assert_eq!(
         parsed.get_scalar(all_types_ordinals::F_INT64),
         Some(&FieldValueRef::Int64(-9223372036854775807))
@@ -101,12 +98,18 @@ fn test_all_scalar_types(#[case] version: ProtoVersion) {
         parsed.get_scalar(all_types_ordinals::F_SFIXED64),
         Some(&FieldValueRef::Int64(-123456789012345))
     );
-    assert_eq!(parsed.get_scalar(all_types_ordinals::F_FLOAT), Some(&FieldValueRef::Float(3.25)));
+    assert_eq!(
+        parsed.get_scalar(all_types_ordinals::F_FLOAT),
+        Some(&FieldValueRef::Float(3.25))
+    );
     assert_eq!(
         parsed.get_scalar(all_types_ordinals::F_DOUBLE),
         Some(&FieldValueRef::Double(2.125))
     );
-    assert_eq!(parsed.get_scalar(all_types_ordinals::F_BOOL), Some(&FieldValueRef::Bool(true)));
+    assert_eq!(
+        parsed.get_scalar(all_types_ordinals::F_BOOL),
+        Some(&FieldValueRef::Bool(true))
+    );
     assert_eq!(
         parsed.get_scalar(all_types_ordinals::F_STRING),
         Some(&FieldValueRef::String("test_string"))
@@ -115,7 +118,10 @@ fn test_all_scalar_types(#[case] version: ProtoVersion) {
         parsed.get_scalar(all_types_ordinals::F_BYTES),
         Some(&FieldValueRef::Bytes(&[0xDE, 0xAD, 0xBE, 0xEF]))
     );
-    assert_eq!(parsed.get_scalar(all_types_ordinals::F_ENUM), Some(&FieldValueRef::Int32(2)));
+    assert_eq!(
+        parsed.get_scalar(all_types_ordinals::F_ENUM),
+        Some(&FieldValueRef::Int32(2))
+    );
 }
 
 #[rstest]
@@ -496,8 +502,14 @@ fn test_map_fields(#[case] version: ProtoVersion) {
     let parsed_empty = ParsedMessage::parse(&buf_empty, &registry_empty).unwrap();
 
     assert_eq!(parsed_empty.get_map_entries_count(map_int_string_field), 0);
-    assert_eq!(parsed_empty.get_map_entries_count(map_string_string_field), 0);
-    assert_eq!(parsed_empty.get_map_entries_count(map_string_message_field), 0);
+    assert_eq!(
+        parsed_empty.get_map_entries_count(map_string_string_field),
+        0
+    );
+    assert_eq!(
+        parsed_empty.get_map_entries_count(map_string_message_field),
+        0
+    );
 }
 
 #[rstest]
@@ -588,7 +600,9 @@ fn test_string_and_binary_data(#[case] version: ProtoVersion) {
     // Verify binary data
     assert_eq!(
         parsed.get_scalar(all_types_ordinals::F_BYTES),
-        Some(&FieldValueRef::Bytes(&[0x00, 0xFF, 0xAB, 0xCD, 0xEF, 0x12, 0x34, 0x56]))
+        Some(&FieldValueRef::Bytes(&[
+            0x00, 0xFF, 0xAB, 0xCD, 0xEF, 0x12, 0x34, 0x56
+        ]))
     );
 
     // Verify repeated strings with international characters
@@ -627,19 +641,31 @@ fn test_unknown_fields(#[case] version: ProtoVersion) {
         parsed.get_scalar(supported_types_fields::APPROVED),
         Some(&FieldValueRef::Bool(true))
     );
-    assert_eq!(parsed.get_scalar(supported_types_fields::DAY_NUM), Some(&FieldValueRef::Int32(10)));
-    assert_eq!(parsed.get_scalar(supported_types_fields::COST), Some(&FieldValueRef::Int64(5000)));
+    assert_eq!(
+        parsed.get_scalar(supported_types_fields::DAY_NUM),
+        Some(&FieldValueRef::Int32(10))
+    );
+    assert_eq!(
+        parsed.get_scalar(supported_types_fields::COST),
+        Some(&FieldValueRef::Int64(5000))
+    );
     assert_eq!(
         parsed.get_scalar(supported_types_fields::DESCRIPTION),
         Some(&FieldValueRef::String("test"))
     );
 
-    assert!(!parsed.has_field(supported_types_fields::DISCOUNT), "discount should be unknown");
+    assert!(
+        !parsed.has_field(supported_types_fields::DISCOUNT),
+        "discount should be unknown"
+    );
     assert!(
         !parsed.has_field(supported_types_fields::COST_WITH_DISCOUNT),
         "cost_with_discount should be unknown"
     );
-    assert!(!parsed.has_field(supported_types_fields::PHOTO), "photo should be unknown");
+    assert!(
+        !parsed.has_field(supported_types_fields::PHOTO),
+        "photo should be unknown"
+    );
     assert_eq!(
         parsed
             .get_repeated_scalars(supported_types_fields::TAGS)
@@ -716,7 +742,10 @@ fn test_negative_numbers(#[case] version: ProtoVersion) {
 
     let parsed = ParsedMessage::parse(&buf, &registry).unwrap();
 
-    assert_eq!(parsed.get_scalar(all_types_ordinals::F_INT32), Some(&FieldValueRef::Int32(-12345)));
+    assert_eq!(
+        parsed.get_scalar(all_types_ordinals::F_INT32),
+        Some(&FieldValueRef::Int32(-12345))
+    );
     assert_eq!(
         parsed.get_scalar(all_types_ordinals::F_INT64),
         Some(&FieldValueRef::Int64(-9876543210))
@@ -737,7 +766,10 @@ fn test_negative_numbers(#[case] version: ProtoVersion) {
         parsed.get_scalar(all_types_ordinals::F_SFIXED64),
         Some(&FieldValueRef::Int64(-9999999999))
     );
-    assert_eq!(parsed.get_scalar(all_types_ordinals::F_FLOAT), Some(&FieldValueRef::Float(-3.25)));
+    assert_eq!(
+        parsed.get_scalar(all_types_ordinals::F_FLOAT),
+        Some(&FieldValueRef::Float(-3.25))
+    );
     assert_eq!(
         parsed.get_scalar(all_types_ordinals::F_DOUBLE),
         Some(&FieldValueRef::Double(-2.125))
@@ -881,9 +913,18 @@ fn test_oneof_fields(#[case] version: ProtoVersion) {
 
     let parsed_int = ParsedMessage::parse(&buf_int, &registry_int).unwrap();
 
-    assert!(parsed_int.has_field(oneof_int_field), "oneof_int should be present");
-    assert_eq!(parsed_int.get_scalar(oneof_int_field), Some(&FieldValueRef::Int32(42)));
-    assert!(!parsed_int.has_field(oneof_string_field), "oneof_string should be absent");
+    assert!(
+        parsed_int.has_field(oneof_int_field),
+        "oneof_int should be present"
+    );
+    assert_eq!(
+        parsed_int.get_scalar(oneof_int_field),
+        Some(&FieldValueRef::Int32(42))
+    );
+    assert!(
+        !parsed_int.has_field(oneof_string_field),
+        "oneof_string should be absent"
+    );
     assert!(
         parsed_int.get_message(oneof_message_field).is_none(),
         "oneof_message should be absent"
@@ -913,8 +954,14 @@ fn test_oneof_fields(#[case] version: ProtoVersion) {
 
     let parsed_string = ParsedMessage::parse(&buf_string, &registry_string).unwrap();
 
-    assert!(!parsed_string.has_field(oneof_int_field), "oneof_int should be absent");
-    assert!(parsed_string.has_field(oneof_string_field), "oneof_string should be present");
+    assert!(
+        !parsed_string.has_field(oneof_int_field),
+        "oneof_int should be absent"
+    );
+    assert!(
+        parsed_string.has_field(oneof_string_field),
+        "oneof_string should be present"
+    );
     assert_eq!(
         parsed_string.get_scalar(oneof_string_field),
         Some(&FieldValueRef::String("oneof_test"))
@@ -954,8 +1001,14 @@ fn test_oneof_fields(#[case] version: ProtoVersion) {
 
     let parsed_message = ParsedMessage::parse(&buf_message, &registry_message).unwrap();
 
-    assert!(!parsed_message.has_field(oneof_int_field), "oneof_int should be absent");
-    assert!(!parsed_message.has_field(oneof_string_field), "oneof_string should be absent");
+    assert!(
+        !parsed_message.has_field(oneof_int_field),
+        "oneof_int should be absent"
+    );
+    assert!(
+        !parsed_message.has_field(oneof_string_field),
+        "oneof_string should be absent"
+    );
     let nested = parsed_message
         .get_message(oneof_message_field)
         .expect("oneof_message should be present");
@@ -987,7 +1040,9 @@ fn test_oneof_last_writer_wins_on_wire(#[case] version: ProtoVersion) {
     };
     let msg_string = proto2::AllTypesMessage {
         f_required: 1,
-        f_oneof: Some(proto2::all_types_message::FOneof::OneofString("winner".to_string())),
+        f_oneof: Some(proto2::all_types_message::FOneof::OneofString(
+            "winner".to_string(),
+        )),
         ..Default::default()
     };
     let msg_message = proto2::AllTypesMessage {
@@ -1021,7 +1076,10 @@ fn test_oneof_last_writer_wins_on_wire(#[case] version: ProtoVersion) {
         !parsed.has_field(oneof_int_field),
         "oneof_int should be cleared by later oneof_string"
     );
-    assert_eq!(parsed.get_scalar(oneof_string_field), Some(&FieldValueRef::String("winner")));
+    assert_eq!(
+        parsed.get_scalar(oneof_string_field),
+        Some(&FieldValueRef::String("winner"))
+    );
     assert!(parsed.get_message(oneof_message_field).is_none());
 
     // Case 2: scalar → message. Message wins; scalar is cleared.
@@ -1050,7 +1108,10 @@ fn test_oneof_last_writer_wins_on_wire(#[case] version: ProtoVersion) {
         "oneof_message should be cleared by later oneof_int"
     );
     assert!(!parsed.has_field(oneof_string_field));
-    assert_eq!(parsed.get_scalar(oneof_int_field), Some(&FieldValueRef::Int32(42)));
+    assert_eq!(
+        parsed.get_scalar(oneof_int_field),
+        Some(&FieldValueRef::Int32(42))
+    );
 }
 
 #[rstest]
@@ -1066,7 +1127,9 @@ fn test_proto3_optional_coexists_with_oneof(#[case] version: ProtoVersion) {
     let msg_a = proto3::AllTypesMessage {
         f_optional_int32: Some(1),
         f_optional_string: Some("keep".to_string()),
-        f_oneof: Some(proto3::all_types_message::FOneof::OneofString("first".to_string())),
+        f_oneof: Some(proto3::all_types_message::FOneof::OneofString(
+            "first".to_string(),
+        )),
         ..Default::default()
     };
     let msg_b = proto3::AllTypesMessage {
@@ -1299,7 +1362,10 @@ fn test_complex_nested_all_field_types(#[case] version: ProtoVersion) {
 
     let parsed = ParsedMessage::parse(&buf, &registry).unwrap();
 
-    assert_eq!(parsed.get_scalar(complex_nested_fields::ID), Some(&FieldValueRef::Int32(100)));
+    assert_eq!(
+        parsed.get_scalar(complex_nested_fields::ID),
+        Some(&FieldValueRef::Int32(100))
+    );
     assert_eq!(
         parsed.get_scalar(complex_nested_fields::NAME),
         Some(&FieldValueRef::String("complex"))
@@ -1345,11 +1411,20 @@ fn test_complex_nested_all_field_types(#[case] version: ProtoVersion) {
         Some(&FieldValueRef::Int64(222))
     );
 
-    assert_eq!(parsed.get_map_entries_count(complex_nested_fields::STRING_TO_INT), 2);
+    assert_eq!(
+        parsed.get_map_entries_count(complex_nested_fields::STRING_TO_INT),
+        2
+    );
 
-    assert_eq!(parsed.get_map_entries_count(complex_nested_fields::INT_TO_STRING), 2);
+    assert_eq!(
+        parsed.get_map_entries_count(complex_nested_fields::INT_TO_STRING),
+        2
+    );
 
-    assert_eq!(parsed.get_map_entries_count(complex_nested_fields::STRING_TO_MESSAGE), 1);
+    assert_eq!(
+        parsed.get_map_entries_count(complex_nested_fields::STRING_TO_MESSAGE),
+        1
+    );
 
     let data_with_maps = parsed
         .get_message(complex_nested_fields::DATA_WITH_MAPS)
@@ -1381,7 +1456,10 @@ fn test_complex_nested_all_field_types(#[case] version: ProtoVersion) {
             .len(),
         2
     );
-    assert_eq!(items[0].get_map_entries_count(complex_nested_fields::complex_item::ATTRIBUTES), 1);
+    assert_eq!(
+        items[0].get_map_entries_count(complex_nested_fields::complex_item::ATTRIBUTES),
+        1
+    );
 
     // Verify tree structure
     let tree_root = parsed
@@ -1479,15 +1557,42 @@ fn test_all_types_message_with_null_values(#[case] version: ProtoVersion) {
     let parsed = ParsedMessage::parse(&buf, &registry).unwrap();
 
     // All optional scalar fields should be absent
-    assert!(!parsed.has_field(all_types_ordinals::F_INT32), "f_int32 should be absent");
-    assert!(!parsed.has_field(all_types_ordinals::F_INT64), "f_int64 should be absent");
-    assert!(!parsed.has_field(all_types_ordinals::F_FLOAT), "f_float should be absent");
-    assert!(!parsed.has_field(all_types_ordinals::F_DOUBLE), "f_double should be absent");
-    assert!(!parsed.has_field(all_types_ordinals::F_BOOL), "f_bool should be absent");
-    assert!(!parsed.has_field(all_types_ordinals::F_STRING), "f_string should be absent");
-    assert!(!parsed.has_field(all_types_ordinals::F_BYTES), "f_bytes should be absent");
-    assert!(!parsed.has_field(all_types_ordinals::F_ENUM), "f_enum should be absent");
-    assert!(!parsed.has_field(all_types_ordinals::F_DEFAULT_INT), "f_default_int should be absent");
+    assert!(
+        !parsed.has_field(all_types_ordinals::F_INT32),
+        "f_int32 should be absent"
+    );
+    assert!(
+        !parsed.has_field(all_types_ordinals::F_INT64),
+        "f_int64 should be absent"
+    );
+    assert!(
+        !parsed.has_field(all_types_ordinals::F_FLOAT),
+        "f_float should be absent"
+    );
+    assert!(
+        !parsed.has_field(all_types_ordinals::F_DOUBLE),
+        "f_double should be absent"
+    );
+    assert!(
+        !parsed.has_field(all_types_ordinals::F_BOOL),
+        "f_bool should be absent"
+    );
+    assert!(
+        !parsed.has_field(all_types_ordinals::F_STRING),
+        "f_string should be absent"
+    );
+    assert!(
+        !parsed.has_field(all_types_ordinals::F_BYTES),
+        "f_bytes should be absent"
+    );
+    assert!(
+        !parsed.has_field(all_types_ordinals::F_ENUM),
+        "f_enum should be absent"
+    );
+    assert!(
+        !parsed.has_field(all_types_ordinals::F_DEFAULT_INT),
+        "f_default_int should be absent"
+    );
     assert!(
         !parsed.has_field(all_types_ordinals::F_DEFAULT_STRING),
         "f_default_string should be absent"
@@ -1496,14 +1601,23 @@ fn test_all_types_message_with_null_values(#[case] version: ProtoVersion) {
         !parsed.has_field(all_types_ordinals::F_DEFAULT_BOOL),
         "f_default_bool should be absent"
     );
-    assert!(!parsed.has_field(all_types_ordinals::F_NESTED), "f_nested should be absent");
+    assert!(
+        !parsed.has_field(all_types_ordinals::F_NESTED),
+        "f_nested should be absent"
+    );
     assert!(
         !parsed.has_field(all_types_ordinals::F_DEEPLY_NESTED),
         "f_deeply_nested should be absent"
     );
     // Required field should be present
-    assert!(parsed.has_field(all_types_ordinals::F_REQUIRED), "f_required should be present");
-    assert_eq!(parsed.get_scalar(all_types_ordinals::F_REQUIRED), Some(&FieldValueRef::Int32(1)));
+    assert!(
+        parsed.has_field(all_types_ordinals::F_REQUIRED),
+        "f_required should be present"
+    );
+    assert_eq!(
+        parsed.get_scalar(all_types_ordinals::F_REQUIRED),
+        Some(&FieldValueRef::Int32(1))
+    );
     // Empty repeated fields
     assert_eq!(
         parsed
@@ -1536,11 +1650,23 @@ fn test_all_types_message_with_null_values(#[case] version: ProtoVersion) {
         0
     );
     // Empty maps
-    assert_eq!(parsed.get_map_entries_count(all_types_ordinals::F_MAP_INT_STRING), 0);
-    assert_eq!(parsed.get_map_entries_count(all_types_ordinals::F_MAP_STRING_STRING), 0);
-    assert_eq!(parsed.get_map_entries_count(all_types_ordinals::F_MAP_STRING_MESSAGE), 0);
+    assert_eq!(
+        parsed.get_map_entries_count(all_types_ordinals::F_MAP_INT_STRING),
+        0
+    );
+    assert_eq!(
+        parsed.get_map_entries_count(all_types_ordinals::F_MAP_STRING_STRING),
+        0
+    );
+    assert_eq!(
+        parsed.get_map_entries_count(all_types_ordinals::F_MAP_STRING_MESSAGE),
+        0
+    );
     // Oneof should have no value set
-    assert!(!parsed.has_field(all_types_ordinals::F_ONEOF_INT), "oneof_int should not be set");
+    assert!(
+        !parsed.has_field(all_types_ordinals::F_ONEOF_INT),
+        "oneof_int should not be set"
+    );
     assert!(
         !parsed.has_field(all_types_ordinals::F_ONEOF_STRING),
         "oneof_string should not be set"
@@ -1572,7 +1698,10 @@ fn test_all_types_message_with_null_values(#[case] version: ProtoVersion) {
 
     // Required field should be present in proto2
     if version == ProtoVersion::Proto2 {
-        assert!(parsed.has_field(all_types_ordinals::F_REQUIRED), "f_required should be present");
+        assert!(
+            parsed.has_field(all_types_ordinals::F_REQUIRED),
+            "f_required should be present"
+        );
         assert_eq!(
             parsed.get_scalar(all_types_ordinals::F_REQUIRED),
             Some(&FieldValueRef::Int32(1))
@@ -1646,7 +1775,10 @@ fn test_complex_nested_with_null_values(#[case] version: ProtoVersion) {
     match version {
         ProtoVersion::Proto2 => {
             // Top level null field
-            assert!(!parsed.has_field(complex_nested_fields::ID), "id should be absent");
+            assert!(
+                !parsed.has_field(complex_nested_fields::ID),
+                "id should be absent"
+            );
             assert_eq!(
                 parsed.get_scalar(complex_nested_fields::NAME),
                 Some(&FieldValueRef::String("partial"))
@@ -1778,9 +1910,18 @@ fn test_complex_nested_with_null_values(#[case] version: ProtoVersion) {
     );
 
     // Empty maps
-    assert_eq!(parsed.get_map_entries_count(complex_nested_fields::STRING_TO_INT), 0);
-    assert_eq!(parsed.get_map_entries_count(complex_nested_fields::INT_TO_STRING), 0);
-    assert_eq!(parsed.get_map_entries_count(complex_nested_fields::STRING_TO_MESSAGE), 0);
+    assert_eq!(
+        parsed.get_map_entries_count(complex_nested_fields::STRING_TO_INT),
+        0
+    );
+    assert_eq!(
+        parsed.get_map_entries_count(complex_nested_fields::INT_TO_STRING),
+        0
+    );
+    assert_eq!(
+        parsed.get_map_entries_count(complex_nested_fields::STRING_TO_MESSAGE),
+        0
+    );
 
     // Null nested message
     assert!(
@@ -1915,7 +2056,11 @@ fn test_map_duplicate_keys_last_value_wins(#[case] version: ProtoVersion) {
 
     let map_int_string_field = field_num(version, "f_map_int_string");
 
-    assert_eq!(parsed.get_map_entries_count(map_int_string_field), 3, "Should have 3 unique keys");
+    assert_eq!(
+        parsed.get_map_entries_count(map_int_string_field),
+        3,
+        "Should have 3 unique keys"
+    );
 
     let mut found_overridden = false;
     let mut found_second = false;
@@ -1936,7 +2081,10 @@ fn test_map_duplicate_keys_last_value_wins(#[case] version: ProtoVersion) {
         }
     }
 
-    assert!(found_overridden, "Key 1 should have 'overridden' (last value wins)");
+    assert!(
+        found_overridden,
+        "Key 1 should have 'overridden' (last value wins)"
+    );
     assert!(found_second, "Key 2 should have 'second'");
     assert!(found_third, "Key 3 should have 'third'");
 }
@@ -1976,7 +2124,10 @@ fn test_map_with_complex_nested_values(#[case] version: ProtoVersion) {
     let (buf, registry) = encode_message_for_version(version, &msg, "ComplexNested");
     let parsed = ParsedMessage::parse(&buf, &registry).unwrap();
 
-    assert_eq!(parsed.get_map_entries_count(complex_nested_fields::STRING_TO_MESSAGE), 1);
+    assert_eq!(
+        parsed.get_map_entries_count(complex_nested_fields::STRING_TO_MESSAGE),
+        1
+    );
 
     let string_to_message: Vec<_> = parsed
         .get_map_entries(complex_nested_fields::STRING_TO_MESSAGE)
@@ -2050,7 +2201,11 @@ fn test_interleaved_repeated_fields(#[case] version: ProtoVersion) {
     let repeated_string_field = field_num(version, "f_repeated_string");
 
     let repeated_int32 = parsed.get_repeated_scalars(repeated_int32_field);
-    assert_eq!(repeated_int32.len(), 5, "Should accumulate all repeated int32 values");
+    assert_eq!(
+        repeated_int32.len(),
+        5,
+        "Should accumulate all repeated int32 values"
+    );
     assert_eq!(repeated_int32[0], FieldValueRef::Int32(1));
     assert_eq!(repeated_int32[1], FieldValueRef::Int32(2));
     assert_eq!(repeated_int32[2], FieldValueRef::Int32(3));
@@ -2058,7 +2213,11 @@ fn test_interleaved_repeated_fields(#[case] version: ProtoVersion) {
     assert_eq!(repeated_int32[4], FieldValueRef::Int32(5));
 
     let repeated_string = parsed.get_repeated_scalars(repeated_string_field);
-    assert_eq!(repeated_string.len(), 3, "Should accumulate all repeated string values");
+    assert_eq!(
+        repeated_string.len(),
+        3,
+        "Should accumulate all repeated string values"
+    );
     assert_eq!(repeated_string[0], FieldValueRef::String("first"));
     assert_eq!(repeated_string[1], FieldValueRef::String("second"));
     assert_eq!(repeated_string[2], FieldValueRef::String("third"));
@@ -2078,7 +2237,11 @@ fn test_mixed_packed_unpacked_encoding(#[case] version: ProtoVersion) {
     encode_key(repeated_int32_field as u32, WireType::Varint, &mut buf);
     encode_varint(100, &mut buf);
 
-    encode_key(repeated_int32_field as u32, WireType::LengthDelimited, &mut buf);
+    encode_key(
+        repeated_int32_field as u32,
+        WireType::LengthDelimited,
+        &mut buf,
+    );
     let mut packed_data = Vec::new();
     encode_varint(200, &mut packed_data);
     encode_varint(300, &mut packed_data);
@@ -2091,7 +2254,11 @@ fn test_mixed_packed_unpacked_encoding(#[case] version: ProtoVersion) {
     let parsed = ParsedMessage::parse(&buf, &registry).unwrap();
     let repeated = parsed.get_repeated_scalars(repeated_int32_field);
 
-    assert_eq!(repeated.len(), 4, "Should handle mixed packed and unpacked encoding");
+    assert_eq!(
+        repeated.len(),
+        4,
+        "Should handle mixed packed and unpacked encoding"
+    );
     assert_eq!(repeated[0], FieldValueRef::Int32(100));
     assert_eq!(repeated[1], FieldValueRef::Int32(200));
     assert_eq!(repeated[2], FieldValueRef::Int32(300));
@@ -2159,8 +2326,14 @@ fn test_length_delimited_field_with_zero_length(#[case] version: ProtoVersion) {
             let nested = parsed
                 .get_message(all_types_ordinals::F_NESTED)
                 .expect("Empty nested message should be present in proto2");
-            assert!(!nested.has_field(1), "Empty nested message should have no fields");
-            assert!(!nested.has_field(2), "Empty nested message should have no fields");
+            assert!(
+                !nested.has_field(1),
+                "Empty nested message should have no fields"
+            );
+            assert!(
+                !nested.has_field(2),
+                "Empty nested message should have no fields"
+            );
         }
         ProtoVersion::Proto3 => {
             assert!(
@@ -2174,8 +2347,14 @@ fn test_length_delimited_field_with_zero_length(#[case] version: ProtoVersion) {
 
             let nested = parsed.get_message(all_types_ordinals::F_NESTED);
             if let Some(nested_msg) = nested {
-                assert!(!nested_msg.has_field(1), "Empty nested message should have no fields");
-                assert!(!nested_msg.has_field(2), "Empty nested message should have no fields");
+                assert!(
+                    !nested_msg.has_field(1),
+                    "Empty nested message should have no fields"
+                );
+                assert!(
+                    !nested_msg.has_field(2),
+                    "Empty nested message should have no fields"
+                );
             }
         }
     }
@@ -2659,7 +2838,10 @@ fn test_invalid_field_numbers(#[case] version: ProtoVersion) {
 
     let test_cases = vec![
         (vec![0x00, 0x42], "field number 0"),
-        (vec![0x80, 0x80, 0x80, 0x80, 0x10, 0x42], "field number > max"),
+        (
+            vec![0x80, 0x80, 0x80, 0x80, 0x10, 0x42],
+            "field number > max",
+        ),
     ];
 
     for (malformed, description) in test_cases {
@@ -2715,9 +2897,18 @@ fn test_invalid_utf8_various_errors(#[case] version: ProtoVersion) {
         (vec![0x62, 0x02, 0xC0, 0x81], "overlong encoding"),
         (vec![0x62, 0x02, 0xC2, 0x00], "invalid continuation byte"),
         (vec![0x62, 0x02, 0xE0, 0xA0], "truncated multibyte sequence"),
-        (vec![0x62, 0x03, 0xED, 0xA0, 0x80], "UTF-16 surrogate halves"),
-        (vec![0x62, 0x03, 0x80, 0x80, 0x80], "continuation without start byte"),
-        (vec![0x62, 0x04, 0xF5, 0x80, 0x80, 0x80], "invalid 4-byte sequence (out of range)"),
+        (
+            vec![0x62, 0x03, 0xED, 0xA0, 0x80],
+            "UTF-16 surrogate halves",
+        ),
+        (
+            vec![0x62, 0x03, 0x80, 0x80, 0x80],
+            "continuation without start byte",
+        ),
+        (
+            vec![0x62, 0x04, 0xF5, 0x80, 0x80, 0x80],
+            "invalid 4-byte sequence (out of range)",
+        ),
     ];
 
     for (malformed, description) in test_cases {
@@ -2835,13 +3026,22 @@ fn test_proto2_required_and_default_values(#[case] version: ProtoVersion) {
         encode_message_for_version(version, &msg_unset, "AllTypesMessage");
     let parsed_unset = ParsedMessage::parse(&buf_unset, &registry_unset).unwrap();
 
-    assert!(parsed_unset.has_field(all_types_ordinals::F_REQUIRED), "f_required should be present");
+    assert!(
+        parsed_unset.has_field(all_types_ordinals::F_REQUIRED),
+        "f_required should be present"
+    );
     assert_eq!(
         parsed_unset.get_scalar(all_types_ordinals::F_REQUIRED),
         Some(&FieldValueRef::Int32(42))
     );
-    assert!(!parsed_unset.has_field(all_types_ordinals::F_INT32), "f_int32 should be absent");
-    assert!(!parsed_unset.has_field(all_types_ordinals::F_STRING), "f_string should be absent");
+    assert!(
+        !parsed_unset.has_field(all_types_ordinals::F_INT32),
+        "f_int32 should be absent"
+    );
+    assert!(
+        !parsed_unset.has_field(all_types_ordinals::F_STRING),
+        "f_string should be absent"
+    );
     assert!(
         !parsed_unset.has_field(all_types_ordinals::F_DEFAULT_INT),
         "f_default_int should be absent when not set"
@@ -2939,14 +3139,38 @@ fn test_zero_values_proto2(#[case] version: ProtoVersion) {
 
     let parsed = ParsedMessage::parse(&buf, &registry).unwrap();
 
-    assert!(parsed.has_field(all_types_ordinals::F_INT32), "f_int32 should be present");
-    assert_eq!(parsed.get_scalar(all_types_ordinals::F_INT32), Some(&FieldValueRef::Int32(0)));
-    assert!(parsed.has_field(all_types_ordinals::F_INT64), "f_int64 should be present");
-    assert_eq!(parsed.get_scalar(all_types_ordinals::F_INT64), Some(&FieldValueRef::Int64(0)));
-    assert!(parsed.has_field(all_types_ordinals::F_BOOL), "f_bool should be present");
-    assert_eq!(parsed.get_scalar(all_types_ordinals::F_BOOL), Some(&FieldValueRef::Bool(false)));
-    assert!(parsed.has_field(all_types_ordinals::F_STRING), "f_string should be present");
-    assert_eq!(parsed.get_scalar(all_types_ordinals::F_STRING), Some(&FieldValueRef::String("")));
+    assert!(
+        parsed.has_field(all_types_ordinals::F_INT32),
+        "f_int32 should be present"
+    );
+    assert_eq!(
+        parsed.get_scalar(all_types_ordinals::F_INT32),
+        Some(&FieldValueRef::Int32(0))
+    );
+    assert!(
+        parsed.has_field(all_types_ordinals::F_INT64),
+        "f_int64 should be present"
+    );
+    assert_eq!(
+        parsed.get_scalar(all_types_ordinals::F_INT64),
+        Some(&FieldValueRef::Int64(0))
+    );
+    assert!(
+        parsed.has_field(all_types_ordinals::F_BOOL),
+        "f_bool should be present"
+    );
+    assert_eq!(
+        parsed.get_scalar(all_types_ordinals::F_BOOL),
+        Some(&FieldValueRef::Bool(false))
+    );
+    assert!(
+        parsed.has_field(all_types_ordinals::F_STRING),
+        "f_string should be present"
+    );
+    assert_eq!(
+        parsed.get_scalar(all_types_ordinals::F_STRING),
+        Some(&FieldValueRef::String(""))
+    );
 }
 
 // ============================================================================
@@ -3047,7 +3271,10 @@ fn test_zero_values_proto3(#[case] version: ProtoVersion) {
         !parsed.has_field(all_types_ordinals::F_INT64),
         "f_int64 zero value should not be present"
     );
-    assert!(!parsed.has_field(all_types_ordinals::F_BOOL), "f_bool false should not be present");
+    assert!(
+        !parsed.has_field(all_types_ordinals::F_BOOL),
+        "f_bool false should not be present"
+    );
     assert!(
         !parsed.has_field(all_types_ordinals::F_STRING),
         "f_string empty should not be present"
@@ -3063,7 +3290,11 @@ fn test_proto3_packed_vs_unpacked_encoding(#[case] version: ProtoVersion) {
     let repeated_int32_field = field_num(version, "f_repeated_int32");
 
     let mut buf_packed = Vec::new();
-    encode_key(repeated_int32_field as u32, WireType::LengthDelimited, &mut buf_packed);
+    encode_key(
+        repeated_int32_field as u32,
+        WireType::LengthDelimited,
+        &mut buf_packed,
+    );
     let values = vec![10, 20, 30];
     let mut packed_data = Vec::new();
     for val in &values {
@@ -3081,7 +3312,11 @@ fn test_proto3_packed_vs_unpacked_encoding(#[case] version: ProtoVersion) {
 
     let mut buf_unpacked = Vec::new();
     for val in &values {
-        encode_key(repeated_int32_field as u32, WireType::Varint, &mut buf_unpacked);
+        encode_key(
+            repeated_int32_field as u32,
+            WireType::Varint,
+            &mut buf_unpacked,
+        );
         encode_varint(*val as u64, &mut buf_unpacked);
     }
 

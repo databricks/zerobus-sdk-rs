@@ -143,7 +143,10 @@ mod tests {
         // and triggers ParseError::InvalidWireType regardless of descriptor.
         let invalid = vec![0x0Eu8];
         let (err, recovered) = OwnedParsedMessage::parse(invalid.clone(), registry).unwrap_err();
-        assert!(matches!(err, ParseError::InvalidWireType(6)), "unexpected error: {err:?}");
+        assert!(
+            matches!(err, ParseError::InvalidWireType(6)),
+            "unexpected error: {err:?}"
+        );
         assert_eq!(recovered, invalid);
     }
 }

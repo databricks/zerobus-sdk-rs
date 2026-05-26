@@ -15,13 +15,22 @@ pub const SAMPLE_DATA_JSON: &str = include_str!("../bench_sample_data.json");
 
 pub mod proto {
     pub mod air_quality {
-        include!(concat!(env!("OUT_DIR"), "/zeroparser.benches.air_quality.rs"));
+        include!(concat!(
+            env!("OUT_DIR"),
+            "/zeroparser.benches.air_quality.rs"
+        ));
     }
     pub mod click_bench {
-        include!(concat!(env!("OUT_DIR"), "/zeroparser.benches.click_bench.rs"));
+        include!(concat!(
+            env!("OUT_DIR"),
+            "/zeroparser.benches.click_bench.rs"
+        ));
     }
     pub mod supported_nullable_types {
-        include!(concat!(env!("OUT_DIR"), "/zeroparser.benches.supported_nullable_types.rs"));
+        include!(concat!(
+            env!("OUT_DIR"),
+            "/zeroparser.benches.supported_nullable_types.rs"
+        ));
     }
 }
 
@@ -119,8 +128,8 @@ pub struct BenchmarkConfig {
 
 impl BenchmarkConfig {
     pub fn for_message(message_name: &str) -> Self {
-        let file_desc_set = FileDescriptorSet::decode(BENCH_DESCRIPTOR_SET)
-            .expect("decode bench descriptor set");
+        let file_desc_set =
+            FileDescriptorSet::decode(BENCH_DESCRIPTOR_SET).expect("decode bench descriptor set");
         let (descriptor_proto, file_proto, package) =
             find_message_and_file(&file_desc_set, message_name);
 
@@ -150,7 +159,11 @@ impl BenchmarkConfig {
 fn find_message_and_file<'a>(
     file_desc_set: &'a FileDescriptorSet,
     message_name: &str,
-) -> (&'a DescriptorProto, &'a prost_types::FileDescriptorProto, &'a str) {
+) -> (
+    &'a DescriptorProto,
+    &'a prost_types::FileDescriptorProto,
+    &'a str,
+) {
     for file in &file_desc_set.file {
         for msg_desc in &file.message_type {
             if msg_desc.name.as_deref() == Some(message_name) {

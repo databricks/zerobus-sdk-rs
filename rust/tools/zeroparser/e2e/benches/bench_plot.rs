@@ -258,7 +258,9 @@ fn draw_plot(results: &[Measurement]) -> Result<(), Box<dyn std::error::Error>> 
     let bars_per_group: &[Bar] = &[
         ("prost-reflect", RGBColor(220, 80, 80), |m| m.reflect_mbps),
         ("prost", RGBColor(235, 145, 70), |m| m.prost_typed_mbps),
-        ("C++ reflect", RGBColor(120, 100, 180), |m| m.cpp_reflect_mbps),
+        ("C++ reflect", RGBColor(120, 100, 180), |m| {
+            m.cpp_reflect_mbps
+        }),
         ("C++ typed", RGBColor(95, 165, 110), |m| m.cpp_typed_mbps),
         ("Zeroparser", RGBColor(60, 130, 200), |m| m.zeroparser_mbps),
     ];
@@ -282,10 +284,7 @@ fn draw_plot(results: &[Measurement]) -> Result<(), Box<dyn std::error::Error>> 
         .margin(20)
         .x_label_area_size(60)
         .y_label_area_size(80)
-        .build_cartesian_2d(
-            -0.5f64..(group_count as f64 - 0.5),
-            0.0f64..y_max,
-        )?;
+        .build_cartesian_2d(-0.5f64..(group_count as f64 - 0.5), 0.0f64..y_max)?;
 
     chart
         .configure_mesh()

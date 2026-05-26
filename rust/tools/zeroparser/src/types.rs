@@ -44,13 +44,13 @@ pub(crate) fn convert_scalar_value<'a>(
     match field_type {
         Type::String => Ok(FieldValueRef::String(wire_value.try_as_str(field_num)?)),
         Type::Int32 => Ok(FieldValueRef::Int32(wire_value.try_as_i32(field_num)?)),
-        Type::Sint32 => {
-            Ok(FieldValueRef::Int32(decode_zigzag32(wire_value.try_as_u32(field_num)?)))
-        }
+        Type::Sint32 => Ok(FieldValueRef::Int32(decode_zigzag32(
+            wire_value.try_as_u32(field_num)?,
+        ))),
         Type::Int64 => Ok(FieldValueRef::Int64(wire_value.try_as_i64(field_num)?)),
-        Type::Sint64 => {
-            Ok(FieldValueRef::Int64(decode_zigzag64(wire_value.try_as_u64(field_num)?)))
-        }
+        Type::Sint64 => Ok(FieldValueRef::Int64(decode_zigzag64(
+            wire_value.try_as_u64(field_num)?,
+        ))),
         Type::Uint32 | Type::Fixed32 => {
             Ok(FieldValueRef::UInt32(wire_value.try_as_u32(field_num)?))
         }
@@ -355,7 +355,10 @@ mod tests {
     fn field_value_ref_traits() {
         assert_eq!(FieldValueRef::Int32(42), FieldValueRef::Int32(42));
         assert_ne!(FieldValueRef::Int32(42), FieldValueRef::Int64(42));
-        assert_eq!(FieldValueRef::String("hello"), FieldValueRef::String("hello"));
+        assert_eq!(
+            FieldValueRef::String("hello"),
+            FieldValueRef::String("hello")
+        );
 
         let val = FieldValueRef::UInt64(12345);
         let copy = val;
@@ -512,24 +515,69 @@ mod tests {
 
     #[test]
     fn default_value_for_all_types() {
-        assert_eq!(default_value_for_type(Type::String), FieldValueRef::String(""));
+        assert_eq!(
+            default_value_for_type(Type::String),
+            FieldValueRef::String("")
+        );
         assert_eq!(default_value_for_type(Type::Int32), FieldValueRef::Int32(0));
         assert_eq!(default_value_for_type(Type::Int64), FieldValueRef::Int64(0));
-        assert_eq!(default_value_for_type(Type::Uint32), FieldValueRef::UInt32(0));
-        assert_eq!(default_value_for_type(Type::Uint64), FieldValueRef::UInt64(0));
-        assert_eq!(default_value_for_type(Type::Sint32), FieldValueRef::Int32(0));
-        assert_eq!(default_value_for_type(Type::Sint64), FieldValueRef::Int64(0));
-        assert_eq!(default_value_for_type(Type::Fixed32), FieldValueRef::UInt32(0));
-        assert_eq!(default_value_for_type(Type::Fixed64), FieldValueRef::UInt64(0));
-        assert_eq!(default_value_for_type(Type::Sfixed32), FieldValueRef::Int32(0));
-        assert_eq!(default_value_for_type(Type::Sfixed64), FieldValueRef::Int64(0));
-        assert_eq!(default_value_for_type(Type::Bool), FieldValueRef::Bool(false));
-        assert_eq!(default_value_for_type(Type::Float), FieldValueRef::Float(0.0));
-        assert_eq!(default_value_for_type(Type::Double), FieldValueRef::Double(0.0));
-        assert_eq!(default_value_for_type(Type::Bytes), FieldValueRef::Bytes(&[]));
-        assert_eq!(default_value_for_type(Type::Message), FieldValueRef::Bytes(&[]));
+        assert_eq!(
+            default_value_for_type(Type::Uint32),
+            FieldValueRef::UInt32(0)
+        );
+        assert_eq!(
+            default_value_for_type(Type::Uint64),
+            FieldValueRef::UInt64(0)
+        );
+        assert_eq!(
+            default_value_for_type(Type::Sint32),
+            FieldValueRef::Int32(0)
+        );
+        assert_eq!(
+            default_value_for_type(Type::Sint64),
+            FieldValueRef::Int64(0)
+        );
+        assert_eq!(
+            default_value_for_type(Type::Fixed32),
+            FieldValueRef::UInt32(0)
+        );
+        assert_eq!(
+            default_value_for_type(Type::Fixed64),
+            FieldValueRef::UInt64(0)
+        );
+        assert_eq!(
+            default_value_for_type(Type::Sfixed32),
+            FieldValueRef::Int32(0)
+        );
+        assert_eq!(
+            default_value_for_type(Type::Sfixed64),
+            FieldValueRef::Int64(0)
+        );
+        assert_eq!(
+            default_value_for_type(Type::Bool),
+            FieldValueRef::Bool(false)
+        );
+        assert_eq!(
+            default_value_for_type(Type::Float),
+            FieldValueRef::Float(0.0)
+        );
+        assert_eq!(
+            default_value_for_type(Type::Double),
+            FieldValueRef::Double(0.0)
+        );
+        assert_eq!(
+            default_value_for_type(Type::Bytes),
+            FieldValueRef::Bytes(&[])
+        );
+        assert_eq!(
+            default_value_for_type(Type::Message),
+            FieldValueRef::Bytes(&[])
+        );
         assert_eq!(default_value_for_type(Type::Enum), FieldValueRef::Int32(0));
-        assert_eq!(default_value_for_type(Type::Group), FieldValueRef::Bytes(&[]));
+        assert_eq!(
+            default_value_for_type(Type::Group),
+            FieldValueRef::Bytes(&[])
+        );
     }
 
     #[test]
@@ -666,7 +714,10 @@ mod tests {
             1, /* field_num */
         );
         assert!(result.is_err());
-        assert!(matches!(result, Err(ParseError::InvalidPackedFieldType { field_num: 1 })));
+        assert!(matches!(
+            result,
+            Err(ParseError::InvalidPackedFieldType { field_num: 1 })
+        ));
 
         // Fixed32 with non-fixed32 type.
         let mut dest = Vec::new();
@@ -736,7 +787,10 @@ mod tests {
 
         // Int64.
         let key = MapKeyRef::Int64(-1_000_000_000_000);
-        assert_eq!(key.to_field_value(), FieldValueRef::Int64(-1_000_000_000_000));
+        assert_eq!(
+            key.to_field_value(),
+            FieldValueRef::Int64(-1_000_000_000_000)
+        );
 
         // UInt32.
         let key = MapKeyRef::UInt32(42);
@@ -744,7 +798,10 @@ mod tests {
 
         // UInt64.
         let key = MapKeyRef::UInt64(1_000_000_000_000);
-        assert_eq!(key.to_field_value(), FieldValueRef::UInt64(1_000_000_000_000));
+        assert_eq!(
+            key.to_field_value(),
+            FieldValueRef::UInt64(1_000_000_000_000)
+        );
 
         // Bool true.
         let key = MapKeyRef::Bool(true);
