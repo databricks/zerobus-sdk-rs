@@ -315,14 +315,13 @@ pub fn try_parse_field(data: &[u8]) -> ParseResult<(WireField<'_>, &[u8])> {
         }
         WireType::I64 => {
             // Fixed 8 bytes in little-endian order.
-            let bytes: &[u8; 8] = remainder
-                .get(..8)
-                .and_then(|s| s.try_into().ok())
-                .ok_or(ParseError::BufferTooShort {
+            let bytes: &[u8; 8] = remainder.get(..8).and_then(|s| s.try_into().ok()).ok_or(
+                ParseError::BufferTooShort {
                     needed: 8,
                     available: remainder.len(),
                     field_num,
-                })?;
+                },
+            )?;
             let value = u64::from_le_bytes(*bytes);
             (WireValue::I64(value), &remainder[8..])
         }
@@ -341,14 +340,13 @@ pub fn try_parse_field(data: &[u8]) -> ParseResult<(WireField<'_>, &[u8])> {
         }
         WireType::I32 => {
             // Fixed 4 bytes in little-endian order.
-            let bytes: &[u8; 4] = remainder
-                .get(..4)
-                .and_then(|s| s.try_into().ok())
-                .ok_or(ParseError::BufferTooShort {
+            let bytes: &[u8; 4] = remainder.get(..4).and_then(|s| s.try_into().ok()).ok_or(
+                ParseError::BufferTooShort {
                     needed: 4,
                     available: remainder.len(),
                     field_num,
-                })?;
+                },
+            )?;
             let value = u32::from_le_bytes(*bytes);
             (WireValue::I32(value), &remainder[4..])
         }
