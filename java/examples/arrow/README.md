@@ -11,7 +11,6 @@ This directory contains examples for ingesting data using `ZerobusArrowStream` v
 - **Zero-overhead queuing** - `ingestBatch()` returns immediately with an offset
 - **Automatic IPC serialization** - VectorSchemaRoot is serialized to Arrow IPC internally
 - **Optional IPC compression** - LZ4 or ZSTD compression on the wire
-- **Graceful close** - On server-signaled close the stream drains in-flight acks within a bounded wait, then recovers
 - **Recovery support** - Unacknowledged batches can be retrieved and re-ingested
 
 ## Dependencies
