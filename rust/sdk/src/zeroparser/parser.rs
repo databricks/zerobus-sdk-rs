@@ -135,9 +135,103 @@ impl<'a> ParsedMessage<'a> {
         self.scalars[field_info.storage_index] = Some(value);
     }
 
+    /// Singular embedded message: if a value already exists at this slot,
+    /// merge per protobuf `MergeFrom` semantics; otherwise install it. Callers
+    /// must run `clear_oneof_siblings` first if the field is in a oneof — that
+    /// preserves the spec rule that any oneof write clears its siblings while
+    /// still allowing repeats of the same oneof member to merge with themselves.
     #[inline(always)]
-    fn set_message(&mut self, field_info: &FieldInfo, value: ParsedMessage<'a>) {
-        self.complex[field_info.storage_index] = ComplexType::Message(value);
+    fn merge_or_set_message(&mut self, field_info: &FieldInfo, value: ParsedMessage<'a>) {
+        let slot = &mut self.complex[field_info.storage_index];
+        if let ComplexType::Message(existing) = slot {
+            existing.merge_from(value);
+        } else {
+            *slot = ComplexType::Message(value);
+        }
+    }
+
+    /// Protobuf `MergeFrom` semantics:
+    /// - Singular scalars in `other` overwrite those in `self`.
+    /// - Singular embedded messages are merged recursively.
+    /// - Repeated fields are concatenated (`other` appended to `self`).
+    /// - Map entries from `other` overwrite same-key entries in `self`.
+    /// - Oneof: if `other` has any member set in a group, the other members
+    ///   in `self` for that group are cleared first.
+    ///
+    /// Both messages must share the same descriptor.
+    #[inline(always)]
+    fn merge_from(&mut self, other: ParsedMessage<'a>) {
+        debug_assert!(
+            std::ptr::eq(self.descriptor, other.descriptor),
+            "merge_from requires both messages to share a descriptor"
+        );
+
+        // Clear oneof siblings in self for any group active in other. `other`
+        // was itself parsed with sibling-clearing, so at most one member is set
+        // per group there.
+        for group in self.descriptor.oneof_groups() {
+            let active = group.iter().find(|m| {
+                if m.is_scalar {
+                    other.scalars[m.storage_index].is_some()
+                } else {
+                    !matches!(other.complex[m.storage_index], ComplexType::Empty)
+                }
+            });
+            if let Some(active) = active {
+                for m in group {
+                    if m.is_scalar == active.is_scalar && m.storage_index == active.storage_index {
+                        continue;
+                    }
+                    if m.is_scalar {
+                        self.scalars[m.storage_index] = None;
+                    } else {
+                        self.complex[m.storage_index] = ComplexType::Empty;
+                    }
+                }
+            }
+        }
+
+        let other_scalars = Vec::from(other.scalars);
+        for (slot, value) in self.scalars.iter_mut().zip(other_scalars) {
+            if value.is_some() {
+                *slot = value;
+            }
+        }
+
+        let other_complex = Vec::from(other.complex);
+        for (slot, value) in self.complex.iter_mut().zip(other_complex) {
+            match value {
+                ComplexType::Empty => {}
+                ComplexType::Message(om) => {
+                    if let ComplexType::Message(sm) = slot {
+                        sm.merge_from(om);
+                    } else {
+                        *slot = ComplexType::Message(om);
+                    }
+                }
+                ComplexType::RepeatedScalar(ov) => {
+                    if let ComplexType::RepeatedScalar(sv) = slot {
+                        sv.extend(ov);
+                    } else {
+                        *slot = ComplexType::RepeatedScalar(ov);
+                    }
+                }
+                ComplexType::RepeatedMessage(ov) => {
+                    if let ComplexType::RepeatedMessage(sv) = slot {
+                        sv.extend(ov);
+                    } else {
+                        *slot = ComplexType::RepeatedMessage(ov);
+                    }
+                }
+                ComplexType::Map(om) => {
+                    if let ComplexType::Map(sm) = slot {
+                        sm.extend(om);
+                    } else {
+                        *slot = ComplexType::Map(om);
+                    }
+                }
+            }
+        }
     }
 
     /// Add a value to a repeated scalar field.
@@ -325,11 +419,13 @@ impl<'a> ParsedMessage<'a> {
                 if field_info.is_repeated {
                     result.add_repeated_message(field_info, field_num, nested)?;
                 } else {
-                    // Clear sibling oneof fields before setting this one.
+                    // Clear sibling oneof fields before merging into this one;
+                    // repeats of the same oneof member fall through to the
+                    // merge path, matching protobuf MergeFrom semantics.
                     if let Some(idx) = field_info.oneof_index {
                         result.clear_oneof_siblings(idx, field_info);
                     }
-                    result.set_message(field_info, nested);
+                    result.merge_or_set_message(field_info, nested);
                 }
             } else {
                 // Repeated scalar field (is_scalar is false, but not a Message).
@@ -412,12 +508,22 @@ impl<'a> ParsedMessage<'a> {
                         if field_info.field_type == Type::Message {
                             let nested_bytes =
                                 parsed_field.value.try_as_bytes(parsed_field.field_num)?;
-                            value = Some(Self::parse_map_message_value(
+                            let new_value = Self::parse_map_message_value(
                                 field_info.type_name.as_deref().unwrap_or(""),
                                 nested_bytes,
                                 registry,
                                 depth,
-                            )?);
+                            )?;
+                            // Repeated value-field within a single map entry:
+                            // protobuf MergeFrom rules apply (merge embedded
+                            // messages). Mismatched prior variants are replaced.
+                            match (value.as_mut(), new_value) {
+                                (
+                                    Some(ParsedMapValue::Message(existing)),
+                                    ParsedMapValue::Message(new_msg),
+                                ) => existing.merge_from(new_msg),
+                                (_, new_value) => value = Some(new_value),
+                            }
                         } else {
                             let v = convert_scalar_value(
                                 field_info.field_type,
@@ -556,6 +662,17 @@ pub mod tests {
             .get_scalar(field_num)
             .unwrap_or_else(|| panic!("Field {} not found", field_num));
         assert_eq!(*actual, expected, "Field {} mismatch", field_num);
+    }
+
+    /// Length-delimited field encoding: tag = (field<<3)|2, single-byte len, payload.
+    /// Suitable for small test payloads (<128 bytes).
+    fn ld(field: u8, payload: &[u8]) -> Vec<u8> {
+        assert!(payload.len() < 128, "ld helper assumes single-byte length");
+        let mut v = Vec::with_capacity(payload.len() + 2);
+        v.push(field << 3 | 2);
+        v.push(payload.len() as u8);
+        v.extend_from_slice(payload);
+        v
     }
 
     #[test]
@@ -1621,53 +1738,429 @@ pub mod tests {
     }
 
     #[test]
-    fn parse_last_occurrence_wins_nested_messages() {
-        // Extend the existing last-occurrence-wins test to cover nested messages.
-        // When a singular message field appears multiple times, the last one wins completely.
+    fn parse_singular_message_merges_scalars_per_spec() {
+        // Spec: "all singular scalar fields in the latter instance replace
+        // those in the former". Covers all three scalar merge paths in one
+        // shot — gain (other.Some, self.None), last-wins (both Some), preserve
+        // (other.None, self.Some).
         let inner = make_descriptor(
             "Inner",
             vec![
                 make_field(1, "x", Type::Int32, false, None),
-                make_field(2, "y", Type::String, false, None),
+                make_field(2, "y", Type::Int32, false, None),
+                make_field(3, "z", Type::String, false, None),
             ],
         );
         let mut outer = make_descriptor(
             "Outer",
-            vec![
-                make_field(1, "id", Type::Int32, false, None),
-                make_field(2, "inner", Type::Message, false, Some(".Outer.Inner")),
-            ],
+            vec![make_field(
+                1,
+                "inner",
+                Type::Message,
+                false,
+                Some(".Outer.Inner"),
+            )],
         );
         outer.nested_type.push(inner);
-
         let registry = MessageRegistry::from_descriptor(&outer);
 
-        // First inner message: x=10, y="first".
-        let inner1 = &[8, 10, 18, 5, b'f', b'i', b'r', b's', b't'];
-        // Second inner message: x=20 (no y field).
-        let inner2 = &[8, 20];
+        // inner1: y=1, z="z1" (no x); inner2: x=10, y=2 (no z).
+        let mut wire = ld(1, &[16, 1, 26, 2, b'z', b'1']);
+        wire.extend(ld(1, &[8, 10, 16, 2]));
 
-        let mut wire = vec![
-            8,
-            100, // id=100
-            18,
-            inner1.len() as u8, // First inner message.
-        ];
-        wire.extend_from_slice(inner1);
-        wire.push(18); // Second inner message.
-        wire.push(inner2.len() as u8);
-        wire.extend_from_slice(inner2);
+        let m = ParsedMessage::parse(&wire, &registry).unwrap();
+        let i = m.get_message(1).expect("inner");
+        assert_eq!(i.get_scalar(1), Some(&FieldValueRef::Int32(10))); // gain
+        assert_eq!(i.get_scalar(2), Some(&FieldValueRef::Int32(2))); // last-wins
+        assert_eq!(i.get_scalar(3), Some(&FieldValueRef::String("z1"))); // preserve
+    }
+
+    #[test]
+    fn parse_singular_message_merge_recurses_through_nested() {
+        // A { B b { C c { x, y } } } — outer A appears twice with different
+        // scalars in C; merge must walk through B into C.
+        let c = make_descriptor(
+            "C",
+            vec![
+                make_field(1, "x", Type::Int32, false, None),
+                make_field(2, "y", Type::Int32, false, None),
+            ],
+        );
+        let mut b = make_descriptor(
+            "B",
+            vec![make_field(1, "c", Type::Message, false, Some(".A.B.C"))],
+        );
+        b.nested_type.push(c);
+        let mut a = make_descriptor(
+            "A",
+            vec![make_field(1, "b", Type::Message, false, Some(".A.B"))],
+        );
+        a.nested_type.push(b);
+        let registry = MessageRegistry::from_descriptor(&a);
+
+        let mut wire = ld(1, &ld(1, &[8, 7])); // A { B { C{x=7} } }
+        wire.extend(ld(1, &ld(1, &[16, 9]))); // A { B { C{y=9} } }
 
         let parsed = ParsedMessage::parse(&wire, &registry).unwrap();
+        let c = parsed.get_message(1).expect("b").get_message(1).expect("c");
+        assert_eq!(c.get_scalar(1), Some(&FieldValueRef::Int32(7)));
+        assert_eq!(c.get_scalar(2), Some(&FieldValueRef::Int32(9)));
+    }
 
-        assert_eq!(parsed.get_scalar(1), Some(&FieldValueRef::Int32(100)));
+    #[test]
+    fn parse_singular_message_merge_handles_oneofs() {
+        // Outer wraps Wrapper{oneof payload {int32 a; string b; Inner msg}}.
+        // When Outer's `w` appears twice on the wire, merge_from must apply
+        // MergeFrom rules to the oneof: writes from `other` clear pre-existing
+        // siblings in `self`, and same-member message repeats merge.
+        let inner = make_descriptor("Inner", vec![make_field(1, "x", Type::Int32, false, None)]);
+        let mut wrapper = make_descriptor_with_oneofs(
+            "Wrapper",
+            vec![
+                make_oneof_field(1, "a", Type::Int32, false, None, Some(0)),
+                make_oneof_field(2, "b", Type::String, false, None, Some(0)),
+                make_oneof_field(
+                    3,
+                    "msg",
+                    Type::Message,
+                    false,
+                    Some(".Outer.Wrapper.Inner"),
+                    Some(0),
+                ),
+            ],
+            vec!["payload"],
+        );
+        wrapper.nested_type.push(inner);
+        let mut outer = make_descriptor(
+            "Outer",
+            vec![make_field(
+                1,
+                "w",
+                Type::Message,
+                false,
+                Some(".Outer.Wrapper"),
+            )],
+        );
+        outer.nested_type.push(wrapper);
+        let registry = MessageRegistry::from_descriptor(&outer);
 
-        // Last occurrence wins: only second inner message is present.
-        let inner_msg = parsed.get_message(2).expect("inner should be present");
-        assert_eq!(inner_msg.get_scalar(1), Some(&FieldValueRef::Int32(20)));
-        // Field y from first message is NOT merged - second message completely replaces first.
-        assert!(!inner_msg.has_field(2));
-        assert_eq!(inner_msg.get_scalar(2), None);
+        // A: scalar `a` then message `msg` — merge_from clears scalar `a`.
+        let mut wire = ld(1, &[8, 7]);
+        wire.extend(ld(1, &ld(3, &[8, 1])));
+        let p = ParsedMessage::parse(&wire, &registry).unwrap();
+        let w = p.get_message(1).unwrap();
+        assert!(!w.has_field(1) && !w.has_field(2));
+        assert_eq!(
+            w.get_message(3).unwrap().get_scalar(1),
+            Some(&FieldValueRef::Int32(1))
+        );
+
+        // B: same message member twice — inner messages merge (Inner has only x,
+        // so scalar last-wins semantics surface inside the merged inner).
+        let mut wire = ld(1, &ld(3, &[8, 1]));
+        wire.extend(ld(1, &ld(3, &[8, 10])));
+        let p = ParsedMessage::parse(&wire, &registry).unwrap();
+        assert_eq!(
+            p.get_message(1)
+                .unwrap()
+                .get_message(3)
+                .unwrap()
+                .get_scalar(1),
+            Some(&FieldValueRef::Int32(10))
+        );
+
+        // C: message `msg` then scalar `b` — merge_from clears the message
+        // slot before installing the scalar.
+        let mut wire = ld(1, &ld(3, &[8, 1]));
+        wire.extend(ld(1, &[18, 2, b'h', b'i']));
+        let p = ParsedMessage::parse(&wire, &registry).unwrap();
+        let w = p.get_message(1).unwrap();
+        assert!(w.get_message(3).is_none());
+        assert_eq!(w.get_scalar(2), Some(&FieldValueRef::String("hi")));
+    }
+
+    #[test]
+    fn parse_singular_message_merges_complex_variants() {
+        // Wrapper carries repeated scalars, repeated messages, and a map.
+        // When Outer's singular `w` appears twice, merge_from must concatenate
+        // repeated variants and union Map variants (last-wins on common keys).
+        let item = make_descriptor("Item", vec![make_field(1, "v", Type::Int32, false, None)]);
+        let map_entry = make_map_entry_descriptor("CE", Type::String, Type::Int32);
+        let mut wrapper = make_descriptor(
+            "Wrapper",
+            vec![
+                make_field(1, "vals", Type::Int32, true, None),
+                make_field(2, "items", Type::Message, true, Some(".Outer.Wrapper.Item")),
+                make_field(3, "counts", Type::Message, true, Some(".Outer.Wrapper.CE")),
+            ],
+        );
+        wrapper.nested_type.push(item);
+        wrapper.nested_type.push(map_entry);
+        let mut outer = make_descriptor(
+            "Outer",
+            vec![make_field(
+                1,
+                "w",
+                Type::Message,
+                false,
+                Some(".Outer.Wrapper"),
+            )],
+        );
+        outer.nested_type.push(wrapper);
+        let registry = MessageRegistry::from_descriptor(&outer);
+
+        // w1: vals=[1,2], items=[Item{v=1}], counts={"a":10}.
+        // w2: vals=[3],   items=[Item{v=2}], counts={"a":99, "b":20}. "a" overlaps.
+        let mut w1 = vec![8u8, 1, 8, 2];
+        w1.extend(ld(2, &[8, 1]));
+        w1.extend(ld(3, &[10, 1, b'a', 16, 10]));
+        let mut w2 = vec![8u8, 3];
+        w2.extend(ld(2, &[8, 2]));
+        w2.extend(ld(3, &[10, 1, b'a', 16, 99]));
+        w2.extend(ld(3, &[10, 1, b'b', 16, 20]));
+        let mut wire = ld(1, &w1);
+        wire.extend(ld(1, &w2));
+
+        let parsed = ParsedMessage::parse(&wire, &registry).unwrap();
+        let w = parsed.get_message(1).expect("w");
+
+        assert_eq!(
+            w.get_repeated_scalars(1),
+            &[
+                FieldValueRef::Int32(1),
+                FieldValueRef::Int32(2),
+                FieldValueRef::Int32(3),
+            ]
+        );
+        let item_vs: Vec<_> = w
+            .get_repeated_messages(2)
+            .iter()
+            .map(|m| m.get_scalar(1).copied())
+            .collect();
+        assert_eq!(
+            item_vs,
+            vec![Some(FieldValueRef::Int32(1)), Some(FieldValueRef::Int32(2))]
+        );
+
+        let counts: std::collections::HashMap<_, i32> = w
+            .get_map_entries(3)
+            .map(|(k, v)| match v {
+                ParsedMapValue::Scalar(FieldValueRef::Int32(n)) => (*k, *n),
+                _ => panic!("non-int value"),
+            })
+            .collect();
+        assert_eq!(counts.get(&MapKeyRef::String("a")), Some(&99)); // last-wins
+        assert_eq!(counts.get(&MapKeyRef::String("b")), Some(&20));
+    }
+
+    #[test]
+    fn parse_singular_message_merge_preserves_untouched_oneof() {
+        // When the second occurrence doesn't touch the oneof at all,
+        // merge_from must NOT clear the oneof member set by the first
+        // occurrence. Covers the oneof block path where `other` has no
+        // active member (`find` returns None).
+        let mut wrapper = make_descriptor_with_oneofs(
+            "Wrapper",
+            vec![
+                make_oneof_field(1, "a", Type::Int32, false, None, Some(0)),
+                make_oneof_field(2, "b", Type::String, false, None, Some(0)),
+                make_field(4, "always", Type::Int32, false, None),
+            ],
+            vec!["payload"],
+        );
+        let mut outer = make_descriptor(
+            "Outer",
+            vec![make_field(
+                1,
+                "w",
+                Type::Message,
+                false,
+                Some(".Outer.Wrapper"),
+            )],
+        );
+        outer.nested_type.push(std::mem::take(&mut wrapper));
+        let registry = MessageRegistry::from_descriptor(&outer);
+
+        // First: Wrapper{a=7}. Second: Wrapper{always=42} (tag for field 4
+        // scalar varint = 4<<3 = 32). Result: a=7 preserved, always=42.
+        let mut wire = ld(1, &[8, 7]);
+        wire.extend(ld(1, &[32, 42]));
+        let parsed = ParsedMessage::parse(&wire, &registry).unwrap();
+        let w = parsed.get_message(1).unwrap();
+        assert_eq!(w.get_scalar(1), Some(&FieldValueRef::Int32(7)));
+        assert_eq!(w.get_scalar(4), Some(&FieldValueRef::Int32(42)));
+        assert!(!w.has_field(2));
+    }
+
+    #[test]
+    fn parse_singular_message_merge_installs_into_empty_complex_slots() {
+        // Self has Empty in Message and Map slots; other populates them.
+        // merge_from's complex loop must install (gain) rather than skip.
+        let inner = make_descriptor("Inner", vec![make_field(1, "x", Type::Int32, false, None)]);
+        let map_entry = make_map_entry_descriptor("CE", Type::String, Type::Int32);
+        let mut wrapper = make_descriptor(
+            "Wrapper",
+            vec![
+                make_field(1, "id", Type::Int32, false, None),
+                make_field(
+                    2,
+                    "inner",
+                    Type::Message,
+                    false,
+                    Some(".Outer.Wrapper.Inner"),
+                ),
+                make_field(3, "counts", Type::Message, true, Some(".Outer.Wrapper.CE")),
+            ],
+        );
+        wrapper.nested_type.push(inner);
+        wrapper.nested_type.push(map_entry);
+        let mut outer = make_descriptor(
+            "Outer",
+            vec![make_field(
+                1,
+                "w",
+                Type::Message,
+                false,
+                Some(".Outer.Wrapper"),
+            )],
+        );
+        outer.nested_type.push(wrapper);
+        let registry = MessageRegistry::from_descriptor(&outer);
+
+        // w1: id=1 (no inner, no counts). w2: inner={x=5}, counts={"a":7}.
+        let mut wire = ld(1, &[8, 1]);
+        let mut w2 = ld(2, &[8, 5]);
+        w2.extend(ld(3, &[10, 1, b'a', 16, 7]));
+        wire.extend(ld(1, &w2));
+
+        let parsed = ParsedMessage::parse(&wire, &registry).unwrap();
+        let w = parsed.get_message(1).unwrap();
+        assert_eq!(w.get_scalar(1), Some(&FieldValueRef::Int32(1))); // preserved
+        assert_eq!(
+            w.get_message(2).unwrap().get_scalar(1),
+            Some(&FieldValueRef::Int32(5))
+        ); // installed
+        let counts: Vec<_> = w.get_map_entries(3).collect();
+        assert_eq!(counts.len(), 1);
+        assert_eq!(*counts[0].0, MapKeyRef::String("a"));
+    }
+
+    #[test]
+    fn parse_singular_message_merge_no_op_when_other_is_empty() {
+        // Second occurrence parses to a completely empty ParsedMessage;
+        // merge_from must leave self untouched. Targets the "all None / Empty
+        // in other" path of every loop in merge_from.
+        let wrapper = make_descriptor(
+            "Wrapper",
+            vec![make_field(1, "id", Type::Int32, false, None)],
+        );
+        let mut outer = make_descriptor(
+            "Outer",
+            vec![make_field(
+                1,
+                "w",
+                Type::Message,
+                false,
+                Some(".Outer.Wrapper"),
+            )],
+        );
+        outer.nested_type.push(wrapper);
+        let registry = MessageRegistry::from_descriptor(&outer);
+
+        // First Wrapper{id=10}, second empty Wrapper{} (zero-length payload).
+        let mut wire = ld(1, &[8, 10]);
+        wire.extend(ld(1, &[]));
+        let parsed = ParsedMessage::parse(&wire, &registry).unwrap();
+        let w = parsed.get_message(1).unwrap();
+        assert_eq!(w.get_scalar(1), Some(&FieldValueRef::Int32(10)));
+    }
+
+    #[test]
+    fn parse_map_entry_single_message_value_field_installs() {
+        // Targets parse_map_entry_recursive's "prior None + new Message" arm
+        // (the `(_, new_value)` catch-all). Single map entry, single value
+        // field, message-typed.
+        let inner = make_descriptor("Inner", vec![make_field(1, "x", Type::Int32, false, None)]);
+        let mut map_entry = make_descriptor(
+            "ME",
+            vec![
+                make_field(1, "key", Type::String, false, None),
+                make_field(2, "value", Type::Message, false, Some(".Outer.Inner")),
+            ],
+        );
+        map_entry.options = Some(MessageOptions {
+            map_entry: Some(true),
+            ..Default::default()
+        });
+        let mut outer = make_descriptor(
+            "Outer",
+            vec![make_field(1, "m", Type::Message, true, Some(".Outer.ME"))],
+        );
+        outer.nested_type.push(inner);
+        outer.nested_type.push(map_entry);
+        let registry = MessageRegistry::from_descriptor(&outer);
+
+        let mut entry = vec![10u8, 1, b'k'];
+        entry.extend(ld(2, &[8, 42]));
+        let wire = ld(1, &entry);
+
+        let parsed = ParsedMessage::parse(&wire, &registry).unwrap();
+        let entries: Vec<_> = parsed.get_map_entries(1).collect();
+        assert_eq!(entries.len(), 1);
+        let (k, v) = entries[0];
+        assert_eq!(*k, MapKeyRef::String("k"));
+        let ParsedMapValue::Message(m) = v else {
+            panic!("expected Message value");
+        };
+        assert_eq!(m.get_scalar(1), Some(&FieldValueRef::Int32(42)));
+    }
+
+    #[test]
+    fn parse_map_entry_repeated_value_field_merges_for_messages() {
+        // A single map entry whose message-typed value field appears twice;
+        // parse_map_entry_recursive must merge per MergeFrom rules.
+        let inner = make_descriptor(
+            "Inner",
+            vec![
+                make_field(1, "x", Type::Int32, false, None),
+                make_field(2, "y", Type::Int32, false, None),
+            ],
+        );
+        let mut map_entry = make_descriptor(
+            "ME",
+            vec![
+                make_field(1, "key", Type::String, false, None),
+                make_field(2, "value", Type::Message, false, Some(".Outer.Inner")),
+            ],
+        );
+        map_entry.options = Some(MessageOptions {
+            map_entry: Some(true),
+            ..Default::default()
+        });
+        let mut outer = make_descriptor(
+            "Outer",
+            vec![make_field(1, "m", Type::Message, true, Some(".Outer.ME"))],
+        );
+        outer.nested_type.push(inner);
+        outer.nested_type.push(map_entry);
+        let registry = MessageRegistry::from_descriptor(&outer);
+
+        // Entry: key="k", value=Inner{x=10}, value=Inner{y=20}.
+        let mut entry = vec![10u8, 1, b'k'];
+        entry.extend(ld(2, &[8, 10]));
+        entry.extend(ld(2, &[16, 20]));
+        let wire = ld(1, &entry);
+
+        let parsed = ParsedMessage::parse(&wire, &registry).unwrap();
+        let entries: Vec<_> = parsed.get_map_entries(1).collect();
+        assert_eq!(entries.len(), 1);
+        let (k, v) = entries[0];
+        assert_eq!(*k, MapKeyRef::String("k"));
+        let ParsedMapValue::Message(m) = v else {
+            panic!("expected Message value");
+        };
+        assert_eq!(m.get_scalar(1), Some(&FieldValueRef::Int32(10)));
+        assert_eq!(m.get_scalar(2), Some(&FieldValueRef::Int32(20)));
     }
 
     #[test]

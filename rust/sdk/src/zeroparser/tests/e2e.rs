@@ -3327,3 +3327,53 @@ fn test_proto3_packed_vs_unpacked_encoding(#[case] version: ProtoVersion) {
     assert_eq!(repeated_unpacked[1], FieldValueRef::Int32(20));
     assert_eq!(repeated_unpacked[2], FieldValueRef::Int32(30));
 }
+
+#[rstest]
+#[case(ProtoVersion::Proto2)]
+fn test_proto2_packed_unpacked_cross_acceptance(#[case] version: ProtoVersion) {
+    // Spec: a repeated primitive field declared with `[packed = true]` must
+    // still accept unpacked wire bytes, and vice versa. proto2's
+    // `f_repeated_packed` is declared `[packed = true]`, `f_repeated_unpacked`
+    // is declared `[packed = false]`. Both must round-trip under either wire
+    // encoding.
+    use prost::encoding::{encode_key, encode_varint, WireType};
+
+    let registry = create_registry_for_version(version, "AllTypesMessage");
+    let packed_field = field_num(version, "f_repeated_packed");
+    let unpacked_field = field_num(version, "f_repeated_unpacked");
+    let values = [10i32, 20, 30];
+    let expected = [
+        FieldValueRef::Int32(10),
+        FieldValueRef::Int32(20),
+        FieldValueRef::Int32(30),
+    ];
+
+    // (A) `[packed = true]` field encoded with UNPACKED wire bytes.
+    let mut buf = Vec::new();
+    for v in &values {
+        encode_key(packed_field as u32, WireType::Varint, &mut buf);
+        encode_varint(*v as u64, &mut buf);
+    }
+    let parsed = ParsedMessage::parse(&buf, &registry).unwrap();
+    assert_eq!(
+        parsed.get_repeated_scalars(packed_field),
+        &expected,
+        "field declared `packed = true` must accept unpacked wire encoding"
+    );
+
+    // (B) `[packed = false]` field encoded with PACKED wire bytes.
+    let mut buf = Vec::new();
+    encode_key(unpacked_field as u32, WireType::LengthDelimited, &mut buf);
+    let mut payload = Vec::new();
+    for v in &values {
+        encode_varint(*v as u64, &mut payload);
+    }
+    encode_varint(payload.len() as u64, &mut buf);
+    buf.extend_from_slice(&payload);
+    let parsed = ParsedMessage::parse(&buf, &registry).unwrap();
+    assert_eq!(
+        parsed.get_repeated_scalars(unpacked_field),
+        &expected,
+        "field declared `packed = false` must accept packed wire encoding"
+    );
+}

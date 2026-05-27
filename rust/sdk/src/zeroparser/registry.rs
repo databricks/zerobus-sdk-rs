@@ -144,11 +144,18 @@ impl DescriptorWithFieldCache {
     }
 
     /// Returns the members of a oneof group by index.
+    #[inline(always)]
     pub fn get_oneof_group(&self, oneof_index: i32) -> &[OneofMember] {
         self.oneof_groups
             .get(oneof_index as usize)
             .map(|v| v.as_slice())
             .unwrap_or(&[])
+    }
+
+    /// Returns all oneof groups. Synthetic proto3-`optional` groups appear as empty slots.
+    #[inline(always)]
+    pub fn oneof_groups(&self) -> &[Vec<OneofMember>] {
+        &self.oneof_groups
     }
 }
 
