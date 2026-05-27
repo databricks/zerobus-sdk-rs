@@ -1,5 +1,32 @@
 # Version changelog
 
+## Release v2.1.1
+
+### Major Changes
+
+### New Features and Improvements
+
+### Bug Fixes
+
+- Fix the Arrow Flight example so it works against the prerequisite `orders`
+  table — corrected the schema to `LargeUtf8` for `STRING`,
+  `Timestamp(Microsecond, Some("UTC"))` for `TIMESTAMP`, and `nullable: true`.
+  JSON / Protocol Buffers examples now use `timestamp_micros()` for Delta
+  `TIMESTAMP` columns instead of seconds.
+
+### Documentation
+
+- Enable `all-features` on docs.rs so `arrow-flight` and `zeroparser` are
+  visible. Re-export `TimeUnit` from the SDK root.
+
+### Internal Changes
+
+### Breaking Changes
+
+### Deprecations
+
+### API Changes
+
 ## Release v2.1.0
 
 ### Major Changes

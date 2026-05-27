@@ -56,7 +56,8 @@ async fn main() -> Result<(), Box<dyn Error>> {
 async fn ingest_with_offset_api(stream: &mut ZerobusStream) -> Result<(), Box<dyn Error>> {
     println!("=== Offset-based API (Recommended) ===");
 
-    let now = chrono::Utc::now().timestamp();
+    // Zerobus encodes Delta TIMESTAMP as int64 microseconds since epoch UTC.
+    let now = chrono::Utc::now().timestamp_micros();
 
     // 1. Auto-encoding: ProtoMessage - pass messages directly, SDK handles encoding.
     let batch: Vec<ProtoMessage<TableOrders>> = vec![
