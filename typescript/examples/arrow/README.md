@@ -1,16 +1,16 @@
-# Arrow Flight Examples (Beta)
+# Arrow Flight Example (Beta)
 
 > **Beta**: API is stabilising but may still change before reaching GA.
 
 High-throughput columnar ingestion via Arrow Flight. Each batch is supplied
 as an Arrow IPC stream (`tableToIPC(table, 'stream')` from `apache-arrow`).
 
-| File | What it shows |
-|------|---------------|
-| `single.ts` | Single-batch ingestion with default (uncompressed) IPC. |
-| `batch.ts`  | `ipcCompression: IpcCompressionType.Zstd` — the SDK re-encodes with the codec on the way to Flight. |
+`single.ts` opens one stream, ingests 10 batches (5 rows each) in a
+loop, waits for the last offset, flushes, and closes.
 
 ## Compression
+
+`ArrowStreamConfigurationOptions.ipcCompression` is optional:
 
 | `ipcCompression` | Behaviour |
 |---|---|
@@ -21,7 +21,7 @@ as an Arrow IPC stream (`tableToIPC(table, 'stream')` from `apache-arrow`).
 ## Building Arrow tables in JS
 
 `apache-arrow` JS dictionary-encodes string columns by default and infers
-non-nullable fields for typed-array-backed columns. The examples construct
+non-nullable fields for typed-array-backed columns. The example constructs
 a `RecordBatch` with an explicit `Schema` so every field is nullable to
 match the Delta target:
 
@@ -45,10 +45,9 @@ const offset = await stream.ingestBatch(ipc);
 
 ## Run
 
-Build with Arrow support and run the examples:
+Build with Arrow support and run the example:
 
 ```bash
 npm run build:debug:arrow
-npm run example:arrow:single
-npm run example:arrow:batch
+npm run example:arrow
 ```

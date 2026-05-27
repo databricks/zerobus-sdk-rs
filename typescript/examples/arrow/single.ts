@@ -1,13 +1,17 @@
 /**
- * Arrow Flight single-batch ingestion example (Beta).
+ * Arrow Flight ingestion example (Beta).
  *
- * Default (uncompressed) IPC: `ipcCompression` is left unset, so the SDK
- * sends the IPC payload to the server without applying a codec.
+ * Opens one Arrow Flight stream, ingests 10 batches (5 rows each) in a
+ * loop, waits for the last offset to be acknowledged, flushes, and
+ * closes. Each iteration calls `ingestBatch` with an Arrow IPC stream
+ * containing one RecordBatch — the offset-based API resolves as soon
+ * as the batch is queued, so the loop runs without blocking on the
+ * server for each batch.
  *
  * `apache-arrow` JS dictionary-encodes string columns by default and
  * marks typed-array-backed numeric columns as non-nullable. We build a
- * `RecordBatch` with an explicit `Schema` so every field is nullable and
- * the IPC payload matches the schema declared on the stream.
+ * `RecordBatch` with an explicit `Schema` so every field is nullable
+ * and the IPC payload matches the schema declared on the stream.
  */
 
 import {
@@ -40,29 +44,34 @@ const TABLE_NAME = process.env.ZEROBUS_TABLE_NAME || 'catalog.schema.table';
 const CLIENT_ID = process.env.DATABRICKS_CLIENT_ID || 'your-client-id';
 const CLIENT_SECRET = process.env.DATABRICKS_CLIENT_SECRET || 'your-client-secret';
 
-function buildIpc(
-    deviceName: string[],
-    temp: Int32Array,
-    humidity: BigInt64Array,
-): Buffer {
-    const schema = new Schema([
-        new Field('device_name', new Utf8(), true),
-        new Field('temp', new Int32(), true),
-        new Field('humidity', new Int64(), true),
-    ]);
+const SCHEMA = new Schema([
+    new Field('device_name', new Utf8(), true),
+    new Field('temp', new Int32(), true),
+    new Field('humidity', new Int64(), true),
+]);
+
+function buildBatchIpc(batchIndex: number, rowsPerBatch: number): Buffer {
+    const start = batchIndex * rowsPerBatch;
+    const deviceName = Array.from({ length: rowsPerBatch }, (_, i) => `sensor-${start + i}`);
+    const temp = Int32Array.from({ length: rowsPerBatch }, (_, i) => 20 + ((start + i) % 15));
+    const humidity = BigInt64Array.from(
+        { length: rowsPerBatch },
+        (_, i) => BigInt(50 + ((start + i) % 40)),
+    );
+
     const dev = vectorFromArray(deviceName, new Utf8());
     const t = makeVector(temp);
     const h = makeVector(humidity);
     const data = makeData({
-        type: new Struct(schema.fields),
-        length: deviceName.length,
+        type: new Struct(SCHEMA.fields),
+        length: rowsPerBatch,
         children: [dev.data[0], t.data[0], h.data[0]],
     });
-    return Buffer.from(tableToIPC(new Table(new RecordBatch(schema, data)), 'stream'));
+    return Buffer.from(tableToIPC(new Table(new RecordBatch(SCHEMA, data)), 'stream'));
 }
 
 async function main() {
-    console.log('Arrow Flight Single-Batch Example (Beta)');
+    console.log('Arrow Flight Example (Beta)');
     console.log('='.repeat(60));
 
     const sdk = new ZerobusSdk(SERVER_ENDPOINT, DATABRICKS_WORKSPACE_URL);
@@ -78,23 +87,25 @@ async function main() {
 
     const options: ArrowStreamConfigurationOptions = {
         maxInflightBatches: 50,
-        // ipcCompression left unset → no compression on the wire
     };
 
     const stream = await sdk.createArrowStream(tableProperties, CLIENT_ID, CLIENT_SECRET, options);
     console.log('Arrow stream created');
 
     try {
-        const ipc = buildIpc(
-            ['sensor-1', 'sensor-2', 'sensor-3'],
-            Int32Array.from([21, 19, 23]),
-            BigInt64Array.from([55n, 60n, 50n]),
-        );
+        const NUM_BATCHES = 10;
+        const ROWS_PER_BATCH = 5;
+        let lastOffset = 0n;
 
-        const offset = await stream.ingestBatch(ipc);
-        console.log(`Queued Arrow batch → offset=${offset}`);
-        await stream.waitForOffset(offset);
-        console.log(`Server acknowledged offset ${offset}`);
+        for (let i = 0; i < NUM_BATCHES; i++) {
+            const ipc = buildBatchIpc(i, ROWS_PER_BATCH);
+            lastOffset = await stream.ingestBatch(ipc);
+            console.log(`Queued batch ${i + 1}/${NUM_BATCHES} (${ROWS_PER_BATCH} rows) → offset=${lastOffset}`);
+        }
+
+        await stream.waitForOffset(lastOffset);
+        console.log(`Server acknowledged up to offset ${lastOffset}`);
+
         await stream.flush();
     } finally {
         await stream.close();
