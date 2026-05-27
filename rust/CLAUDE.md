@@ -55,6 +55,7 @@ Any change to the Rust SDK's public API surface has cascading effects:
 ## Feature flags
 
 - `arrow-flight` — Arrow Flight support (Beta). API is stabilising but may still change before GA.
+- `zeroparser` — Zero-copy, single-pass protobuf parser driven by `prost_types::DescriptorProto`. Off by default; opt-in for downstream consumers. Source under `sdk/src/zeroparser/`; see its README for details.
 - `testing` — Test utilities.
 
 ## Error handling

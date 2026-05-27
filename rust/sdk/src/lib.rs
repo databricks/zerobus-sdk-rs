@@ -103,6 +103,9 @@ pub use stream_configuration::StreamConfigurationOptions;
 pub use tls_config::NoTlsConfig;
 pub use tls_config::{SecureTlsConfig, TlsConfig};
 
+#[cfg(feature = "zeroparser")]
+pub mod zeroparser;
+
 const SHUTDOWN_TIMEOUT_SECS: u64 = 1;
 
 /// Maximum time to wait for the receiver/sender tasks to finish during stream

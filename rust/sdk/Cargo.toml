@@ -31,6 +31,7 @@ hyper-http-proxy.workspace = true
 hyper-util.workspace = true
 smallvec.workspace = true
 bytes.workspace = true
+self_cell = { version = "1.2", optional = true }
 
 # Arrow Flight dependencies
 arrow-flight = { workspace = true, optional = true }
@@ -41,13 +42,39 @@ futures = { workspace = true, optional = true }
 
 [dev-dependencies]
 tracing-subscriber.workspace = true
+# zeroparser e2e + bench dev-deps
+criterion = { version = "0.5", default-features = false, features = ["html_reports"] }
+plotters = { version = "0.3", default-features = false, features = ["svg_backend"] }
+prost-reflect = { workspace = true, features = ["serde"] }
+rstest = "0.24"
+strum = { version = "0.27", features = ["derive"] }
 
 [build-dependencies]
 tonic-prost-build.workspace = true
 protoc-bin-vendored.workspace = true
+prost-build = { version = "0.14", optional = true }
 
 [features]
 default = []
 # Arrow Flight is in Beta
 arrow-flight = ["dep:arrow-flight", "dep:arrow-array", "dep:arrow-schema", "dep:arrow-ipc", "dep:futures"]
+# Zero-copy protobuf parser.
+zeroparser = ["dep:self_cell", "dep:prost-build"]
 testing = []
+
+[[test]]
+name = "zeroparser_e2e"
+path = "src/zeroparser/tests/e2e.rs"
+required-features = ["zeroparser"]
+
+[[bench]]
+name = "zeroparser_parser_bench"
+path = "src/zeroparser/benches/parser_bench.rs"
+harness = false
+required-features = ["zeroparser"]
+
+[[bench]]
+name = "zeroparser_bench_plot"
+path = "src/zeroparser/benches/bench_plot.rs"
+harness = false
+required-features = ["zeroparser"]

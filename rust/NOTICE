@@ -19,6 +19,7 @@ This Software includes the following open source components:
 - **serde_json**: Copyright (c) 2014 David Tolnay (https://github.com/serde-rs/json)
 - **bytes**: Copyright (c) 2018 Carl Lerche (https://github.com/tokio-rs/bytes)
 - **smallvec**: Copyright (c) 2018 The Servo Project Developers (https://github.com/servo/rust-smallvec)
+- **self_cell**: Copyright (c) 2020 Lukas Bergdoll (https://github.com/Voultapher/self_cell)
 
 ## Apache License 2.0
 

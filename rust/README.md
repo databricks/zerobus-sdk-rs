@@ -47,6 +47,7 @@ The Zerobus Rust SDK provides a robust, async-first interface for ingesting larg
 - **Flexible Configuration** - Fine-tune timeouts, retries, and recovery behavior
 - **Graceful Stream Management** - Proper flushing and acknowledgment tracking
 - **Acknowledgment Callbacks** - Receive notifications when records are acknowledged or encounter errors
+- **Zeroparser** *(opt-in)* — Zero-copy, single-pass protobuf parser for runtime-known schemas. Enable with `features = ["zeroparser"]`; see [`sdk/src/zeroparser/README.md`](sdk/src/zeroparser/README.md).
 
 ## Installation
 
