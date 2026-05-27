@@ -11,8 +11,6 @@
 - Fix the Arrow Flight example so it works against the prerequisite `orders`
   table — corrected the schema to `LargeUtf8` for `STRING`,
   `Timestamp(Microsecond, Some("UTC"))` for `TIMESTAMP`, and `nullable: true`.
-  JSON / Protocol Buffers examples now use `timestamp_micros()` for Delta
-  `TIMESTAMP` columns instead of seconds.
 
 ### Documentation
 

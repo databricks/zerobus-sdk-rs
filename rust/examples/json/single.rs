@@ -59,8 +59,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
 async fn ingest_with_offset_api(stream: &mut ZerobusStream) -> Result<(), Box<dyn Error>> {
     println!("=== Offset-based API (Recommended) ===");
 
-    // Zerobus encodes Delta TIMESTAMP as int64 microseconds since epoch UTC.
-    let now = chrono::Utc::now().timestamp_micros();
+    let now = chrono::Utc::now().timestamp();
 
     // 1. Auto-serializing: JsonValue - pass struct, SDK handles JSON conversion.
     let order = Order {
