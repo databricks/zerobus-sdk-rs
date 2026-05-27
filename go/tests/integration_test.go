@@ -566,6 +566,155 @@ func TestIngestBatchRecords(t *testing.T) {
 	t.Logf("✓ Successfully ingested batch of %d records at offset %d", len(batch), offsetID)
 }
 
+// TestIngestRecordNowait tests that IngestRecordNowait returns immediately and the
+// record is eventually delivered to the server.
+func TestIngestRecordNowait(t *testing.T) {
+	mockServer, serverURL, grpcServer, err := StartMockServer()
+	if err != nil {
+		t.Fatalf("Failed to start mock server: %v", err)
+	}
+	defer grpcServer.Stop()
+
+	mockServer.InjectResponses(testTableName, []MockResponse{
+		CreateStreamResponse("test_stream_nowait", 0),
+		RecordAckResponse(0, 0),
+	})
+
+	time.Sleep(200 * time.Millisecond)
+
+	sdk, err := zerobus.NewZerobusSdk(serverURL, "https://mock-uc.com")
+	if err != nil {
+		t.Fatalf("Failed to create SDK: %v", err)
+	}
+	defer sdk.Free()
+
+	tableProps := zerobus.TableProperties{
+		TableName:       testTableName,
+		DescriptorProto: CreateTestDescriptorProto(),
+	}
+
+	options := &zerobus.StreamConfigurationOptions{
+		MaxInflightRequests: 100,
+		Recovery:            false,
+	}
+
+	stream, err := sdk.CreateStreamWithHeadersProvider(tableProps, &TestHeadersProvider{}, options)
+	if err != nil {
+		t.Fatalf("Failed to create stream: %v", err)
+	}
+	defer stream.Close()
+
+	err = stream.IngestRecordNowait([]byte("nowait proto record"))
+	if err != nil {
+		t.Fatalf("IngestRecordNowait returned unexpected error: %v", err)
+	}
+
+	// Give the background task time to queue and the server time to receive the record.
+	time.Sleep(300 * time.Millisecond)
+
+	if writeCount := mockServer.GetWriteCount(); writeCount != 1 {
+		t.Errorf("Expected write count 1, got %d", writeCount)
+	}
+
+	t.Log("✓ IngestRecordNowait: record delivered to server")
+}
+
+// TestIngestRecordNowaitJSON tests IngestRecordNowait with a JSON payload.
+func TestIngestRecordNowaitJSON(t *testing.T) {
+	mockServer, serverURL, grpcServer, err := StartMockServer()
+	if err != nil {
+		t.Fatalf("Failed to start mock server: %v", err)
+	}
+	defer grpcServer.Stop()
+
+	mockServer.InjectResponses(testTableName, []MockResponse{
+		CreateStreamResponse("test_stream_nowait_json", 0),
+		RecordAckResponse(0, 0),
+	})
+
+	time.Sleep(200 * time.Millisecond)
+
+	sdk, err := zerobus.NewZerobusSdk(serverURL, "https://mock-uc.com")
+	if err != nil {
+		t.Fatalf("Failed to create SDK: %v", err)
+	}
+	defer sdk.Free()
+
+	tableProps := zerobus.TableProperties{
+		TableName:       testTableName,
+		DescriptorProto: CreateTestDescriptorProto(),
+	}
+
+	options := &zerobus.StreamConfigurationOptions{
+		MaxInflightRequests: 100,
+		Recovery:            false,
+		RecordType:          zerobus.RecordTypeJson,
+	}
+
+	stream, err := sdk.CreateStreamWithHeadersProvider(tableProps, &TestHeadersProvider{}, options)
+	if err != nil {
+		t.Fatalf("Failed to create stream: %v", err)
+	}
+	defer stream.Close()
+
+	err = stream.IngestRecordNowait(`{"id": 1, "message": "hello"}`)
+	if err != nil {
+		t.Fatalf("IngestRecordNowait (JSON) returned unexpected error: %v", err)
+	}
+
+	time.Sleep(300 * time.Millisecond)
+
+	if writeCount := mockServer.GetWriteCount(); writeCount != 1 {
+		t.Errorf("Expected write count 1, got %d", writeCount)
+	}
+
+	t.Log("✓ IngestRecordNowait (JSON): record delivered to server")
+}
+
+// TestIngestRecordNowaitInvalidPayload tests that IngestRecordNowait rejects invalid payload types.
+func TestIngestRecordNowaitInvalidPayload(t *testing.T) {
+	mockServer, serverURL, grpcServer, err := StartMockServer()
+	if err != nil {
+		t.Fatalf("Failed to start mock server: %v", err)
+	}
+	defer grpcServer.Stop()
+
+	mockServer.InjectResponses(testTableName, []MockResponse{
+		CreateStreamResponse("test_stream_nowait_invalid", 0),
+	})
+
+	time.Sleep(200 * time.Millisecond)
+
+	sdk, err := zerobus.NewZerobusSdk(serverURL, "https://mock-uc.com")
+	if err != nil {
+		t.Fatalf("Failed to create SDK: %v", err)
+	}
+	defer sdk.Free()
+
+	tableProps := zerobus.TableProperties{
+		TableName:       testTableName,
+		DescriptorProto: CreateTestDescriptorProto(),
+	}
+
+	options := &zerobus.StreamConfigurationOptions{
+		MaxInflightRequests: 100,
+		Recovery:            false,
+	}
+
+	stream, err := sdk.CreateStreamWithHeadersProvider(tableProps, &TestHeadersProvider{}, options)
+	if err != nil {
+		t.Fatalf("Failed to create stream: %v", err)
+	}
+	defer stream.Close()
+
+	err = stream.IngestRecordNowait(12345) // invalid type
+	if err == nil {
+		t.Fatal("Expected error for invalid payload type, got nil")
+	}
+
+	t.Logf("✓ IngestRecordNowait correctly rejected invalid payload: %v", err)
+}
+
 // TestIngestRecordsAfterClose tests that batch ingesting after close returns an error
 func TestIngestRecordsAfterClose(t *testing.T) {
 	mockServer, serverURL, grpcServer, err := StartMockServer()

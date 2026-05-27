@@ -6,13 +6,13 @@ This directory contains examples demonstrating how to use the Zerobus Go SDK to 
 
 Examples are organized by data format and ingestion pattern:
 
-| Example | Format | Method | Location |
-|---------|--------|--------|----------|
-| JSON Single | JSON | Single-record | `examples/json/single/main.go` |
-| JSON Batch | JSON | Batch | `examples/json/batch/main.go` |
-| Proto Single | Protocol Buffers | Single-record | `examples/proto/single/main.go` |
-| Proto Batch | Protocol Buffers | Batch | `examples/proto/batch/main.go` |
-| Arrow Flight | Arrow IPC | Batch (RecordBatch) | `examples/arrow/main.go` |
+| Example      | Format           | Method              | Location                        |
+| ------------ | ---------------- | ------------------- | ------------------------------- |
+| JSON Single  | JSON             | Single-record       | `examples/json/single/main.go`  |
+| JSON Batch   | JSON             | Batch               | `examples/json/batch/main.go`   |
+| Proto Single | Protocol Buffers | Single-record       | `examples/proto/single/main.go` |
+| Proto Batch  | Protocol Buffers | Batch               | `examples/proto/batch/main.go`  |
+| Arrow Flight | Arrow IPC        | Batch (RecordBatch) | `examples/arrow/main.go`        |
 
 ## Prerequisites
 
@@ -92,24 +92,26 @@ go run main.go
 
 ## Choosing a Format
 
-| Feature | JSON | Protocol Buffers |
-|---------|------|------------------|
-| Setup | No schema generation needed | Requires `protoc` and code generation |
-| Type Safety | Runtime validation only | Compile-time type checking |
-| Performance | Text-based encoding | Efficient binary encoding |
-| Best For | Prototyping, simple use cases | Production, high-throughput |
+| Feature     | JSON                          | Protocol Buffers                      |
+| ----------- | ----------------------------- | ------------------------------------- |
+| Setup       | No schema generation needed   | Requires `protoc` and code generation |
+| Type Safety | Runtime validation only       | Compile-time type checking            |
+| Performance | Text-based encoding           | Efficient binary encoding             |
+| Best For    | Prototyping, simple use cases | Production, high-throughput           |
 
 ## Code Pattern Comparison
 
 ### Single Record Ingestion
 
 **JSON:**
+
 ```go
 jsonRecord := `{"device_name": "sensor-001", "temp": 20, "humidity": 60}`
 offset, err := stream.IngestRecordOffset(jsonRecord)
 ```
 
 **Protocol Buffers:**
+
 ```go
 message := &pb.AirQuality{
     DeviceName: proto.String("sensor-001"),
@@ -123,6 +125,7 @@ offset, err := stream.IngestRecordOffset(data)
 ### Batch Ingestion
 
 **JSON:**
+
 ```go
 records := []interface{}{
     `{"device_name": "sensor-001", "temp": 20, "humidity": 60}`,
@@ -132,6 +135,7 @@ batchOffset, err := stream.IngestRecordsOffset(records)
 ```
 
 **Protocol Buffers:**
+
 ```go
 var records []interface{}
 for i := 0; i < 5; i++ {
@@ -142,9 +146,31 @@ for i := 0; i < 5; i++ {
 batchOffset, err := stream.IngestRecordsOffset(records)
 ```
 
-## Running Arrow Flight Examples (Experimental)
+### Fire-and-Forget Ingestion
 
-> **Experimental/Unsupported**: Arrow Flight ingestion is experimental and not yet supported for production use. The API may change in future releases.
+Use `IngestRecordNowait` when you want to queue a record without blocking at all.
+Ingestion errors from the background task are silently ignored.
+
+```go
+// Single record
+err := stream.IngestRecordNowait(`{"device_name": "sensor-001", "temp": 20, "humidity": 60}`)
+if err != nil {
+    // Only argument-validation errors (nil stream, wrong type) are returned here.
+    log.Fatal(err)
+}
+
+// Batch
+err = stream.IngestRecordsNowait([]interface{}{
+    `{"device_name": "sensor-001", "temp": 20, "humidity": 60}`,
+    `{"device_name": "sensor-002", "temp": 21, "humidity": 61}`,
+})
+
+// Call stream.Flush() or stream.Close() before exiting to ensure durability.
+```
+
+## Running Arrow Flight Examples (Beta)
+
+> **Beta**: Arrow Flight ingestion is in Beta. The API is stabilising but may still change before reaching GA.
 
 The Arrow Flight example demonstrates ingestion of Apache Arrow RecordBatches. The schema defined in the example must match the target Delta table's column names and types.
 

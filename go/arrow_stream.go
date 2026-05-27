@@ -1,7 +1,7 @@
 package zerobus
 
-// Experimental/Unsupported: Arrow Flight ingestion is experimental and not yet
-// supported for production use. The API may change in future releases.
+// Beta: Arrow Flight ingestion is in Beta. The API is stabilising but may still
+// change before reaching GA.
 //
 // Arrow Flight support lets you ingest Apache Arrow RecordBatches directly into
 // Databricks Delta tables using the high-performance Arrow Flight protocol.

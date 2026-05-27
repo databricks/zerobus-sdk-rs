@@ -1,5 +1,19 @@
 # Version changelog
 
+## Release v1.2.0
+
+### New Features and Improvements
+
+- **`IngestRecordNowait` / `IngestRecordsNowait`**: New fire-and-forget ingestion methods on `ZerobusStream`. Both return immediately after spawning a background task; ingestion errors are silently ignored. `IngestRecordNowait` accepts a single `[]byte` or `string` payload; `IngestRecordsNowait` accepts a batch as `[]interface{}`. Returns immediately after spawning a background task to queue the record; accepts `[]byte` (protobuf) or `string` (JSON). Ingestion errors from the background task are silently ignored.
+- **Arrow Flight promoted to Beta**: The Arrow Flight ingestion API (`ZerobusArrowStream`, `CreateArrowStream`, `CreateArrowStreamWithHeadersProvider`, `ArrowStreamConfigurationOptions`) is no longer labelled experimental/unsupported. The API is stabilising but may still change before reaching GA.
+- **Arrow Flight — graceful stream close**: When the server signals an impending close, the client pauses sends, drains in-flight acks within a bounded wait, then recovers.
+- **`ArrowStreamConfigurationOptions.StreamPausedMaxWaitTimeMs`**: Optional `*uint64` limiting how long to wait (ms) while paused (`nil` = full server duration, `0` = immediate recovery).
+
+### Bug Fixes
+
+- **Reduced GC pressure in batch ingest FFI paths** ([#271](https://github.com/databricks/zerobus-sdk/issues/271)): `streamIngestJSONRecords` was allocating one heap-allocated closure per record per call (defer-in-loop). These closures are not pooled by the Go runtime, causing measurable allocation growth at high ingestion rates. Fixed by replacing N defers with a single closure. `streamIngestProtoRecords` was also allocating the pointer/length arrays on the Go heap and unnecessarily pinning them; both are now allocated in C memory via `C.malloc`.
+- **Vendoring support**: `go mod vendor` now preserves the prebuilt FFI archives under `lib/<GOOS>_<GOARCH>/` when downstream consumers vendor this module. Previously, cgo `#cgo LDFLAGS` paths were invisible to the vendor tool's dependency analysis, so vendored builds failed to link.
+
 ## Release v1.1.1
 
 Re-release of v1.1.0 with pre-built FFI libraries included. v1.1.0 is retracted due to missing native libraries.
