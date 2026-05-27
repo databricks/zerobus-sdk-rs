@@ -92,11 +92,6 @@ pub struct StreamConfigurationOptions {
     pub stream_paused_max_wait_time_ms: Option<u32>,
 }
 
-// In Rust SDK 2.0 `StreamConfigurationOptions` is `#[non_exhaustive]` and
-// cannot be constructed via struct literal from this crate. Stream options
-// are now applied via individual setters on `sdk.stream_builder()` inside
-// `create_stream` below.
-
 /// Properties of the target Delta table for ingestion.
 ///
 /// Specifies which Unity Catalog table to write to and optionally the schema descriptor
@@ -111,10 +106,6 @@ pub struct TableProperties {
     /// If not provided, JSON encoding will be used.
     pub descriptor_proto: Option<String>,
 }
-
-// Rust SDK 2.0 made `TableProperties` private; the table name and descriptor
-// are now passed to `sdk.stream_builder().table(...).compiled_proto(...)`
-// directly. See `create_stream` below for the descriptor decoding.
 
 /// Custom error type for Zerobus operations.
 ///
@@ -280,10 +271,6 @@ impl ZerobusStream {
     #[napi(ts_return_type = "Promise<bigint>")]
     #[allow(deprecated)]
     pub fn ingest_record(&self, env: Env, payload: Unknown) -> Result<JsObject> {
-        // Rust SDK 2.0 removed the blocking `ingest_record`. The v1 contract
-        // (`Promise<bigint>` resolving after server ack) is preserved here by
-        // queuing via `ingest_record_offset` and then awaiting
-        // `wait_for_offset`.
         let record_payload = convert_js_to_record_payload(&env, payload)?;
         let stream = self.inner.clone();
 

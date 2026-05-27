@@ -18,6 +18,19 @@ loop, waits for the last offset, flushes, and closes.
 | `IpcCompressionType.Lz4Frame` | LZ4_FRAME — fast compression, modest ratio. |
 | `IpcCompressionType.Zstd`     | ZSTD — slower but smaller payloads. |
 
+## Available Data Types
+
+| `ArrowDataType` | Description |
+|---|---|
+| `Boolean` | Boolean values |
+| `Int8`, `Int16`, `Int32`, `Int64` | Signed integers |
+| `UInt8`, `UInt16`, `UInt32`, `UInt64` | Unsigned integers |
+| `Float32`, `Float64` | Floating point |
+| `Utf8`, `LargeUtf8` | Strings |
+| `Binary`, `LargeBinary` | Binary data |
+| `Date32`, `Date64` | Dates |
+| `TimestampMicros`, `TimestampNanos` | Timestamps |
+
 ## Building Arrow tables in JS
 
 `apache-arrow` JS dictionary-encodes string columns by default and infers
