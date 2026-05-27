@@ -1,6 +1,6 @@
 {
   "name": "@databricks/zerobus-ingest-sdk",
-  "version": "1.0.2",
+  "version": "1.1.0",
   "description": "TypeScript/Node.js SDK for streaming data ingestion into Databricks Delta tables using Zerobus",
   "main": "index.js",
   "types": "index.d.ts",
@@ -63,17 +63,18 @@
     "example:json:batch": "tsx examples/json/batch.ts",
     "example:proto:single": "tsx examples/proto/single.ts",
     "example:proto:batch": "tsx examples/proto/batch.ts",
-    "example:arrow:single": "tsx examples/arrow/single.ts",
-    "example:arrow:batch": "tsx examples/arrow/batch.ts"
+    "example:arrow": "tsx examples/arrow/batch.ts"
   },
   "optionalDependencies": {
-    "@databricks/zerobus-ingest-sdk-linux-x64-gnu": "1.0.2",
-    "@databricks/zerobus-ingest-sdk-linux-arm64-gnu": "1.0.2",
-    "@databricks/zerobus-ingest-sdk-win32-x64-msvc": "1.0.2"
+    "@databricks/zerobus-ingest-sdk-linux-x64-gnu": "1.1.0",
+    "@databricks/zerobus-ingest-sdk-linux-arm64-gnu": "1.1.0",
+    "@databricks/zerobus-ingest-sdk-win32-x64-msvc": "1.1.0",
+    "@databricks/zerobus-ingest-sdk-darwin-x64": "1.1.0",
+    "@databricks/zerobus-ingest-sdk-darwin-arm64": "1.1.0"
   },
   "peerDependencies": {
     "protobufjs": "^7.0.0",
-    "apache-arrow": "^56.0.0"
+    "apache-arrow": "^18.0.0"
   },
   "peerDependenciesMeta": {
     "protobufjs": {
