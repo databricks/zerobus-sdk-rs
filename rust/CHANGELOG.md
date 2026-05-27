@@ -11,6 +11,10 @@
 - Fix the Arrow Flight example so it works against the prerequisite `orders`
   table — corrected the schema to `LargeUtf8` for `STRING`,
   `Timestamp(Microsecond, Some("UTC"))` for `TIMESTAMP`, and `nullable: true`.
+  All four `examples/{json,proto}/{batch,single}.rs` now use
+  `timestamp_micros()` so `created_at` / `updated_at` land at the current
+  time instead of January 1970 (the server stores any int64 in a TIMESTAMP
+  column without unit validation).
 
 ### Documentation
 
