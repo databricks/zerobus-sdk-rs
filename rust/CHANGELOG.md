@@ -18,6 +18,9 @@
 
 - Enable `all-features` on docs.rs so `arrow-flight` and `zeroparser` are
   visible. Re-export `TimeUnit` from the SDK root.
+- Refresh `rust/README.md`: correct `prost` / `tokio` versions in the
+  install snippet, fix the schema-tool build command, advertise the
+  `arrow-flight` Beta feature, and update Repository Structure.
 
 ### Internal Changes
 
