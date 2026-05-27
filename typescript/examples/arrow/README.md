@@ -5,7 +5,7 @@
 High-throughput columnar ingestion via Arrow Flight. Each batch is supplied
 as an Arrow IPC stream (`tableToIPC(table, 'stream')` from `apache-arrow`).
 
-`single.ts` opens one stream, ingests 10 batches (5 rows each) in a
+`batch.ts` opens one stream, ingests 10 batches (5 rows each) in a
 loop, waits for the last offset, flushes, and closes.
 
 ## Compression

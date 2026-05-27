@@ -63,7 +63,7 @@
     "example:json:batch": "tsx examples/json/batch.ts",
     "example:proto:single": "tsx examples/proto/single.ts",
     "example:proto:batch": "tsx examples/proto/batch.ts",
-    "example:arrow": "tsx examples/arrow/single.ts"
+    "example:arrow": "tsx examples/arrow/batch.ts"
   },
   "optionalDependencies": {
     "@databricks/zerobus-ingest-sdk-linux-x64-gnu": "1.1.0",
