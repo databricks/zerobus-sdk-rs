@@ -1,5 +1,28 @@
 # Version changelog
 
+## Release v2.1.0
+
+### Major Changes
+
+### New Features and Improvements
+
+- **`zeroparser` (opt-in Cargo feature): zero-copy, descriptor-driven
+  protobuf parser** for ingestion paths where the schema is only known at
+  runtime. Exposes `databricks_zerobus_ingest_sdk::zeroparser`. Off by
+  default; see `sdk/src/zeroparser/README.md`.
+
+### Bug Fixes
+
+### Documentation
+
+### Internal Changes
+
+### Breaking Changes
+
+### Deprecations
+
+### API Changes
+
 ## Release v2.0.1
 
 ### Major Changes
