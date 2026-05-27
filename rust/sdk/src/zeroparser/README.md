@@ -95,7 +95,7 @@ if let Some(FieldValueRef::String(s)) = parsed.get_scalar(1) {
 From `rust/sdk/`:
 
 ```
-cargo test --features zeroparser --lib                          # 72 unit tests inline in src/zeroparser/*.rs
+cargo test --features zeroparser --lib                          # unit tests inline in src/zeroparser/*.rs
 cargo test --features zeroparser --test zeroparser_e2e          # integration tests in src/zeroparser/tests/e2e.rs
 cargo test --features zeroparser                                # everything: lib + integration + doc tests
 cargo bench --features zeroparser --bench zeroparser_parser_bench   # full criterion sweep

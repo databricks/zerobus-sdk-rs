@@ -1,5 +1,37 @@
 # Version changelog
 
+## Release v2.1.1
+
+### Major Changes
+
+### New Features and Improvements
+
+### Bug Fixes
+
+- Fix the Arrow Flight example so it works against the prerequisite `orders`
+  table — corrected the schema to `LargeUtf8` for `STRING`,
+  `Timestamp(Microsecond, Some("UTC"))` for `TIMESTAMP`, and `nullable: true`.
+  All four `examples/{json,proto}/{batch,single}.rs` now use
+  `timestamp_micros()` so `created_at` / `updated_at` land at the current
+  time instead of January 1970 (the server stores any int64 in a TIMESTAMP
+  column without unit validation).
+
+### Documentation
+
+- Enable `all-features` on docs.rs so `arrow-flight` and `zeroparser` are
+  visible. Re-export `TimeUnit` from the SDK root.
+- Refresh `rust/README.md`: correct `prost` / `tokio` versions in the
+  install snippet, fix the schema-tool build command, advertise the
+  `arrow-flight` Beta feature, and update Repository Structure.
+
+### Internal Changes
+
+### Breaking Changes
+
+### Deprecations
+
+### API Changes
+
 ## Release v2.1.0
 
 ### Major Changes

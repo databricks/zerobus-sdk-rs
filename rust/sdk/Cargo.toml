@@ -1,6 +1,6 @@
 [package]
 name = "databricks-zerobus-ingest-sdk"
-version = "2.1.0"
+version = "2.1.1"
 authors = ["Databricks"]
 edition = "2021"
 rust-version = "1.70"
@@ -11,6 +11,11 @@ repository = "https://github.com/databricks/zerobus-sdk"
 keywords = ["databricks", "delta", "streaming", "ingestion", "zerobus"]
 categories = ["database", "api-bindings"]
 documentation = "https://docs.rs/databricks-zerobus-ingest-sdk"
+
+# Build docs on docs.rs with all optional features enabled so feature-gated
+# modules (arrow-flight, zeroparser) are visible on the rendered page.
+[package.metadata.docs.rs]
+all-features = true
 
 [dependencies]
 async-trait.workspace = true

@@ -59,7 +59,8 @@ async fn main() -> Result<(), Box<dyn Error>> {
 async fn ingest_with_offset_api(stream: &mut ZerobusStream) -> Result<(), Box<dyn Error>> {
     println!("=== Offset-based API (Recommended) ===");
 
-    let now = chrono::Utc::now().timestamp();
+    // Delta TIMESTAMP is int64 microseconds since epoch UTC.
+    let now = chrono::Utc::now().timestamp_micros();
 
     // 1. Auto-serializing: JsonValue - pass structs, SDK handles JSON conversion.
     let batch: Vec<JsonValue<Order>> = vec![
