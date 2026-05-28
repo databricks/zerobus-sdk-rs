@@ -243,6 +243,8 @@ pub struct ZerobusArrowStream {
     /// Either `"zerobus-sdk-rs/<version>"` or `"zerobus-sdk-rs/<version> <application_name>"`.
     /// Re-applied to each fresh Channel built during recovery.
     sdk_identifier: Arc<str>,
+    /// Guard that releases the per-table concurrent-stream count when dropped.
+    stream_usage_guard: Option<crate::client_warnings::ConcurrentStreamsGuard>,
 }
 
 impl ZerobusArrowStream {
@@ -296,6 +298,7 @@ impl ZerobusArrowStream {
             last_acked_records,
             is_paused,
             sdk_identifier,
+            stream_usage_guard: None,
         };
 
         // Initialize the connection with retry logic.
@@ -382,6 +385,11 @@ impl ZerobusArrowStream {
         info!(
             table_name = %stream.table_properties.table_name,
             "Arrow Flight stream created successfully"
+        );
+
+        crate::client_warnings::record_stream_opened(&stream.table_properties.table_name);
+        stream.stream_usage_guard = crate::client_warnings::register_stream_opened(
+            &stream.table_properties.table_name,
         );
 
         Ok(stream)
@@ -1549,6 +1557,7 @@ impl ZerobusArrowStream {
 
         // Mark as closed.
         self.is_closed.store(true, Ordering::Relaxed);
+        self.stream_usage_guard = None; // release count eagerly on explicit close
 
         // Drop the batch sender to signal end of stream.
         {

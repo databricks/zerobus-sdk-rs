@@ -42,6 +42,7 @@ mod arrow_metadata;
 #[cfg(feature = "arrow-flight")]
 mod arrow_stream;
 mod builder;
+mod client_warnings;
 mod callbacks;
 mod default_token_factory;
 mod errors;
@@ -231,6 +232,8 @@ pub struct ZerobusStream {
     cancellation_token: CancellationToken,
     /// Callback handler task that executes callbacks in a separate thread.
     callback_handler_task: Option<tokio::task::JoinHandle<()>>,
+    /// Guard that releases the per-table concurrent-stream count when dropped.
+    stream_usage_guard: Option<client_warnings::ConcurrentStreamsGuard>,
 }
 
 /// Default identifier the SDK sends as the HTTP `user-agent` header on every
@@ -611,6 +614,10 @@ impl ZerobusStream {
             )
         })??);
 
+        client_warnings::record_stream_opened(&table_properties.table_name);
+        let stream_usage_guard =
+            client_warnings::register_stream_opened(&table_properties.table_name);
+
         let stream = Self {
             stream_type: StreamType::Ephemeral,
             headers_provider,
@@ -629,6 +636,7 @@ impl ZerobusStream {
             server_error_rx,
             cancellation_token,
             callback_handler_task,
+            stream_usage_guard,
         };
 
         Ok(stream)
@@ -1718,6 +1726,7 @@ impl ZerobusStream {
         }
         let flush_result = self.flush().await;
         self.is_closed.store(true, Ordering::Relaxed);
+        self.stream_usage_guard = None;
         self.shutdown_all_tasks_gracefully().await;
         flush_result
     }

@@ -676,6 +676,28 @@ match stream.close().await {
 }
 ```
 
+## Client-side warnings
+
+The SDK logs `WARN`-level messages via [`tracing`](https://docs.rs/tracing) to surface common misuse patterns early. Both warnings are process-wide and per-table-name.
+
+### Warning 1: too many concurrent open streams
+
+Logs when **32 or more** ingest streams for the same table are open at the same time.
+
+### Warning 2: high stream open rate (churn)
+
+Logs when **100 or more** streams for the same table are opened within a 60-second sliding window. The warning fires again if the rate drops below the threshold and later surges again. At most 1000 distinct tables are tracked; when the limit is reached, the oldest-tracked table is evicted.
+
+### Suppressing warnings
+
+Set the environment variable before starting the process:
+
+```bash
+ZEROBUS_SDK_WARNINGS_ENABLED=false
+```
+
+Also accepts `0` or `no`.
+
 ## Configuration Options
 
 ### StreamConfigurationOptions
