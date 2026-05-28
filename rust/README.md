@@ -18,6 +18,7 @@ A high-performance Rust client for streaming data ingestion into Databricks Delt
   - [5. Ingest Data](#5-ingest-data)
   - [6. Handle Acknowledgments](#6-handle-acknowledgments)
   - [7. Close the Stream](#7-close-the-stream)
+- [Client-side warnings](#client-side-warnings)
 - [Configuration Options](#configuration-options)
 - [Error Handling](#error-handling)
 - [Examples](#examples)
@@ -675,6 +676,18 @@ match stream.close().await {
     Ok(_) => println!("Stream closed successfully"),
 }
 ```
+
+## Client-side warnings
+
+The SDK logs a `WARN`-level message via [`tracing`](https://docs.rs/tracing) when **100 or more** streams for the same table are opened within a 60-second sliding window. This usually indicates a "one stream per record" misuse pattern. The warning fires again if the rate drops below the threshold and later surges again.
+
+To suppress, set the environment variable before starting the process:
+
+```bash
+ZEROBUS_SDK_WARNINGS_ENABLED=false
+```
+
+Also accepts `0` or `no`.
 
 ## Configuration Options
 

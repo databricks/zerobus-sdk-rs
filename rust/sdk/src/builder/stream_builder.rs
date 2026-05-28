@@ -374,13 +374,15 @@ impl<'a> StreamBuilder<'a> {
         };
 
         let channel = self.sdk.get_or_create_channel_zerobus_client().await?;
-        ZerobusStream::new_stream(
+        let stream = ZerobusStream::new_stream(
             channel,
             table_properties,
             headers_provider,
             self.grpc_config,
         )
-        .await
+        .await?;
+        crate::client_warnings::notify_stream_opened(stream.table_properties.table_name.as_str());
+        Ok(stream)
     }
 
     /// Build and open an Arrow Flight ingestion stream.
@@ -411,7 +413,8 @@ impl<'a> StreamBuilder<'a> {
             schema,
         };
 
-        ZerobusArrowStream::new(
+        let table_name = table_properties.table_name.clone();
+        let stream = ZerobusArrowStream::new(
             &self.sdk.zerobus_endpoint,
             Arc::clone(&self.sdk.tls_config),
             table_properties,
@@ -419,7 +422,9 @@ impl<'a> StreamBuilder<'a> {
             self.arrow_config,
             Arc::clone(&self.sdk.sdk_identifier),
         )
-        .await
+        .await?;
+        crate::client_warnings::notify_stream_opened(&table_name);
+        Ok(stream)
     }
 }
 
