@@ -765,10 +765,23 @@ Auto-recovered if `recovery` is enabled:
 Require manual intervention:
 - `InvalidUCTokenError` - Invalid OAuth credentials
 - `InvalidTableName` - Table doesn't exist or invalid format
-- `InvalidArgument` - Invalid parameters or schema mismatch
+- `InvalidArgument` - Invalid parameters, schema mismatch, or payload too large (see [Payload Size Limit](#payload-size-limit))
 - `Code::Unauthenticated` - Authentication failure
 - `Code::PermissionDenied` - Insufficient table permissions
 - `ChannelCreationError` - Failed to establish TLS connection
+
+### Payload Size Limit
+
+The Zerobus server enforces a **10 MiB limit** per ingest call. The SDK enforces this client-side so you get an immediate `InvalidArgument` error rather than a server rejection:
+
+```rust
+// This will immediately return Err(ZerobusError::InvalidArgument(...))
+let oversized = vec![0u8; 11 * 1024 * 1024];
+let result = stream.ingest_record_offset(oversized).await;
+// Err: Ingest payload too large: 11534336 bytes exceeds the 10 MiB limit
+```
+
+The limit applies to the total encoded size of the call — the sum of all record bytes passed to `ingest_record_offset` or `ingest_records_offset`. Split large payloads across multiple calls to stay within the limit.
 
 **Check if an error is retryable:**
 

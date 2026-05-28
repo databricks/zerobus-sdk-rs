@@ -985,6 +985,64 @@ mod schema_tests {
     }
 
     #[tokio::test]
+    async fn test_ingest_record_too_large_fails() -> Result<(), Box<dyn std::error::Error>> {
+        setup_tracing();
+        info!("Starting test_ingest_record_too_large_fails");
+
+        let (_mock_server, server_url) = start_mock_server().await?;
+        let sdk = ZerobusSdk::builder()
+            .endpoint(server_url.clone())
+            .unity_catalog_url("https://mock-uc.com")
+            .tls_config(Arc::new(NoTlsConfig))
+            .build()?;
+
+        let stream = sdk
+            .stream_builder()
+            .table(TABLE_NAME)
+            .headers_provider(Arc::new(TestHeadersProvider::default()))
+            .compiled_proto(Default::default())
+            .build()
+            .await?;
+
+        // 10 MiB + 1 byte
+        let oversized = vec![0u8; 10 * 1024 * 1024 + 1];
+        let result = stream.ingest_record_offset(oversized).await;
+
+        assert!(matches!(result, Err(ZerobusError::InvalidArgument(_))));
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_ingest_batch_too_large_fails() -> Result<(), Box<dyn std::error::Error>> {
+        setup_tracing();
+        info!("Starting test_ingest_batch_too_large_fails");
+
+        let (_mock_server, server_url) = start_mock_server().await?;
+        let sdk = ZerobusSdk::builder()
+            .endpoint(server_url.clone())
+            .unity_catalog_url("https://mock-uc.com")
+            .tls_config(Arc::new(NoTlsConfig))
+            .build()?;
+
+        let stream = sdk
+            .stream_builder()
+            .table(TABLE_NAME)
+            .headers_provider(Arc::new(TestHeadersProvider::default()))
+            .compiled_proto(Default::default())
+            .build()
+            .await?;
+
+        // Two records whose combined size exceeds 10 MiB
+        let batch = vec![vec![0u8; 6 * 1024 * 1024], vec![0u8; 5 * 1024 * 1024]];
+        let result = stream.ingest_records_offset(batch).await;
+
+        assert!(matches!(result, Err(ZerobusError::InvalidArgument(_))));
+
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn test_json_stream_creation_with_descriptor_warns(
     ) -> Result<(), Box<dyn std::error::Error>> {
         setup_tracing();

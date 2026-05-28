@@ -116,6 +116,11 @@ pub mod zeroparser;
 
 const SHUTDOWN_TIMEOUT_SECS: u64 = 1;
 
+/// Maximum encoded byte size allowed per `ingest_record_offset` / `ingest_records_offset` call.
+/// This mirrors the server-side limit: payloads exceeding this size will be rejected by the
+/// server anyway, so we enforce it client-side for a faster, clearer error.
+const MAX_INGEST_PAYLOAD_BYTES: usize = 10 * 1024 * 1024; // 10 MiB
+
 /// Maximum time to wait for the receiver/sender tasks to finish during stream
 /// teardown.
 const STREAM_TEARDOWN_DRAIN_TIMEOUT_MS: u64 = 500;
@@ -1166,6 +1171,13 @@ impl ZerobusStream {
 
     /// Internal unified method for ingesting records and batches
     async fn ingest_internal_v2(&self, encoded_batch: EncodedBatch) -> ZerobusResult<OffsetId> {
+        let byte_size = encoded_batch.total_byte_size();
+        if byte_size > MAX_INGEST_PAYLOAD_BYTES {
+            return Err(ZerobusError::InvalidArgument(format!(
+                "Ingest payload too large: {byte_size} bytes exceeds the 10 MiB limit ({MAX_INGEST_PAYLOAD_BYTES} bytes)"
+            )));
+        }
+
         if self.is_closed.load(Ordering::Relaxed) {
             error!(table_name = %self.table_properties.table_name, "Stream closed");
             return Err(ZerobusError::StreamClosedError(tonic::Status::internal(
