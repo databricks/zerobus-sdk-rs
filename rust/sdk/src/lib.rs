@@ -117,8 +117,7 @@ pub mod zeroparser;
 const SHUTDOWN_TIMEOUT_SECS: u64 = 1;
 
 /// Maximum encoded byte size allowed per `ingest_record_offset` / `ingest_records_offset` call.
-/// This mirrors the server-side limit: payloads exceeding this size will be rejected by the
-/// server anyway, so we enforce it client-side for a faster, clearer error.
+/// Matches the server limit so oversize payloads fail fast client-side.
 const MAX_INGEST_PAYLOAD_BYTES: usize = 10 * 1024 * 1024; // 10 MiB
 
 /// Maximum time to wait for the receiver/sender tasks to finish during stream
