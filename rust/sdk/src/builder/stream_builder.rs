@@ -295,8 +295,8 @@ impl<'a> StreamBuilder<'a> {
     /// ```rust,ignore
     /// let builder = sdk
     ///     .stream_builder()
-    ///     .table("catalog.schema.table")
-    ///     .oauth("client-id", "client-secret")
+    ///     .table(\"catalog.schema.table\")
+    ///     .oauth(\"client-id\", \"client-secret\")
     ///     .json();
     ///
     /// // Check configuration before opening the stream
@@ -308,6 +308,30 @@ impl<'a> StreamBuilder<'a> {
             return Err(ZerobusError::InvalidArgument(
                 "table name is required: call .table()".into(),
             ));
+        }
+        {
+            let parts: Vec<&str> = self.table_name.split('.').collect();
+            if parts.len() != 3 {
+                return Err(ZerobusError::InvalidTableName(format!(
+                    "Table name must have exactly 3 parts (catalog.schema.table), found {} parts",
+                    parts.len()
+                )));
+            }
+            if parts[0].is_empty() {
+                return Err(ZerobusError::InvalidTableName(
+                    "Catalog name cannot be empty".to_string(),
+                ));
+            }
+            if parts[1].is_empty() {
+                return Err(ZerobusError::InvalidTableName(
+                    "Schema name cannot be empty".to_string(),
+                ));
+            }
+            if parts[2].is_empty() {
+                return Err(ZerobusError::InvalidTableName(
+                    "Table name cannot be empty".to_string(),
+                ));
+            }
         }
         if self.auth.is_none() {
             return Err(ZerobusError::InvalidArgument(
