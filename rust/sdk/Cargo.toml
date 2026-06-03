@@ -51,7 +51,7 @@ tracing-subscriber.workspace = true
 criterion = { version = "0.5", default-features = false, features = ["html_reports"] }
 plotters = { version = "0.3", default-features = false, features = ["svg_backend"] }
 prost-reflect = { workspace = true, features = ["serde"] }
-rstest = "0.24"
+rstest = "0.26"
 strum = { version = "0.27", features = ["derive"] }
 
 [build-dependencies]
