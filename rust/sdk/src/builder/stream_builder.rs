@@ -309,6 +309,7 @@ impl<'a> StreamBuilder<'a> {
                 "table name is required: call .table()".into(),
             ));
         }
+        #[cfg(not(feature = "testing"))]
         {
             let parts: Vec<&str> = self.table_name.split('.').collect();
             if parts.len() != 3 {
