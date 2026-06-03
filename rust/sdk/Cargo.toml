@@ -52,7 +52,7 @@ criterion = { version = "0.5", default-features = false, features = ["html_repor
 plotters = { version = "0.3", default-features = false, features = ["svg_backend"] }
 prost-reflect = { workspace = true, features = ["serde"] }
 rstest = "0.24"
-strum = { version = "0.27", features = ["derive"] }
+strum = { version = "0.28", features = ["derive"] }
 
 [build-dependencies]
 tonic-prost-build.workspace = true
