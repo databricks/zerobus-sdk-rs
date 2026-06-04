@@ -75,11 +75,16 @@ This SDK includes native libraries for the following platforms:
 
 | Platform | Architecture | Status |
 |----------|--------------|--------|
-| Linux    | x86_64       | Supported |
-| Linux    | aarch64      | Supported |
+| Linux (glibc) | x86_64  | Supported |
+| Linux (glibc) | aarch64 | Supported |
+| Linux (musl / Alpine) | x86_64  | Supported |
+| Linux (musl / Alpine) | aarch64 | Supported |
 | Windows  | x86_64       | Supported |
 | macOS    | x86_64       | Supported |
 | macOS    | aarch64 (Apple Silicon) | Supported |
+
+On Linux, the libc flavor (glibc vs musl) is detected at runtime. To override detection, set
+`-Dzerobus.libc=musl` or `-Dzerobus.libc=glibc` on the JVM command line.
 
 ### Dependencies
 
