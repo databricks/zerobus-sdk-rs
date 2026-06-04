@@ -69,17 +69,16 @@ fn churn_monitor() -> &'static Mutex<StreamChurnState> {
     CHURN_MONITOR.get_or_init(|| Mutex::new(StreamChurnState::new()))
 }
 
-/// Records one user-initiated stream open for `table_name`.
+/// Records one user-initiated stream creation for `table_name`.
 ///
-/// Maintains a per-table sliding window of open timestamps. Logs a `WARN`-level
-/// message when the count within the window reaches [`CHURN_WARN_THRESHOLD`]
-/// (100). "Recovery" is purely time-based: old timestamps age out of the
-/// 60-second window automatically, so no `notify_stream_closed` is needed.
-/// The warning re-fires if the rate surges again after the window drains.
+/// Maintains a per-table sliding window of creation timestamps. Logs a
+/// `WARN`-level message when the count within the window reaches
+/// [`CHURN_WARN_THRESHOLD`] (100), and again each time the window drains
+/// and a new surge reaches the threshold.
 ///
 /// Must only be called from user-facing stream creation paths, not from internal
 /// reconnect / recovery paths.
-pub(crate) fn notify_stream_opened(table_name: &str) {
+pub(crate) fn record_stream_creation(table_name: &str) {
     if !warnings_enabled() {
         return;
     }
@@ -114,9 +113,8 @@ pub(crate) fn notify_stream_opened(table_name: &str) {
         deque.len()
     };
 
-    // Fire exactly when the window count hits the threshold. Old timestamps are
-    // evicted above, so the count falls naturally over time without any close
-    // signal — re-fires if the rate surges again after the window drains.
+    // Fire exactly when the window count hits the threshold; re-fires each time
+    // the window drains below the threshold and a new surge reaches it.
     if count == CHURN_WARN_THRESHOLD {
         warn!(
             "Zerobus SDK: {} ingest streams opened for table `{}` in the last {}s in this \
@@ -194,8 +192,8 @@ mod tests {
         FAKE_CLOCK_MS.store(0, Ordering::Relaxed);
         let table = "cat.sch.churn_tracks";
 
-        notify_stream_opened(table);
-        notify_stream_opened(table);
+        record_stream_creation(table);
+        record_stream_creation(table);
         assert_eq!(open_count_in_window_for_testing(table), 2);
     }
 
@@ -208,13 +206,13 @@ mod tests {
         let table = "cat.sch.churn_evict";
 
         for _ in 0..10 {
-            notify_stream_opened(table);
+            record_stream_creation(table);
         }
         assert_eq!(open_count_in_window_for_testing(table), 10);
 
         // Advance past the window; the next open evicts all 10 old entries.
         FAKE_CLOCK_MS.store(61_000, Ordering::Relaxed);
-        notify_stream_opened(table);
+        record_stream_creation(table);
         assert_eq!(open_count_in_window_for_testing(table), 1);
     }
 
@@ -227,16 +225,16 @@ mod tests {
         let table = "cat.sch.churn_threshold";
 
         for _ in 0..99 {
-            notify_stream_opened(table);
+            record_stream_creation(table);
         }
         assert_eq!(open_count_in_window_for_testing(table), 99);
 
         // 100th open crosses the threshold.
-        notify_stream_opened(table);
+        record_stream_creation(table);
         assert_eq!(open_count_in_window_for_testing(table), 100);
 
         // 101st does not re-fire (count != CHURN_WARN_THRESHOLD).
-        notify_stream_opened(table);
+        record_stream_creation(table);
         assert_eq!(open_count_in_window_for_testing(table), 101);
     }
 
@@ -249,19 +247,19 @@ mod tests {
         let table = "cat.sch.churn_refire";
 
         for _ in 0..100 {
-            notify_stream_opened(table);
+            record_stream_creation(table);
         }
         assert_eq!(open_count_in_window_for_testing(table), 100);
 
         // Advance past window so all previous opens are evicted.
         FAKE_CLOCK_MS.store(61_000, Ordering::Relaxed);
         for _ in 0..99 {
-            notify_stream_opened(table);
+            record_stream_creation(table);
         }
         assert_eq!(open_count_in_window_for_testing(table), 99);
 
         // 100th open in the new window crosses the threshold again.
-        notify_stream_opened(table);
+        record_stream_creation(table);
         assert_eq!(open_count_in_window_for_testing(table), 100);
     }
 
@@ -275,10 +273,10 @@ mod tests {
         let t2 = "cat.sch.churn_indep2";
 
         for _ in 0..5 {
-            notify_stream_opened(t1);
+            record_stream_creation(t1);
         }
         for _ in 0..3 {
-            notify_stream_opened(t2);
+            record_stream_creation(t2);
         }
         assert_eq!(open_count_in_window_for_testing(t1), 5);
         assert_eq!(open_count_in_window_for_testing(t2), 3);

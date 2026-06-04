@@ -381,7 +381,7 @@ impl<'a> StreamBuilder<'a> {
             self.grpc_config,
         )
         .await?;
-        crate::client_warnings::notify_stream_opened(stream.table_properties.table_name.as_str());
+        crate::client_warnings::record_stream_creation(stream.table_properties.table_name.as_str());
         Ok(stream)
     }
 
@@ -423,7 +423,7 @@ impl<'a> StreamBuilder<'a> {
             Arc::clone(&self.sdk.sdk_identifier),
         )
         .await?;
-        crate::client_warnings::notify_stream_opened(&table_name);
+        crate::client_warnings::record_stream_creation(&table_name);
         Ok(stream)
     }
 }
