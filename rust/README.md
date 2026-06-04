@@ -399,6 +399,8 @@ let sdk = ZerobusSdk::builder()
     .build()?;
 ```
 
+A `.no_tls()` shorthand on `ZerobusSdkBuilder` is also available behind the `testing` feature and is equivalent to the snippet above. Paired with `StreamBuilder::no_auth()` (also `testing`-gated, uses `NoAuthHeadersProvider`), it covers local testing against an unauthenticated plaintext server.
+
 For custom certificate handling, implement the `TlsConfig` trait:
 
 ```rust

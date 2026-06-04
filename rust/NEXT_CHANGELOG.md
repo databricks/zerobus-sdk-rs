@@ -1,6 +1,6 @@
 # NEXT CHANGELOG
 
-## Release v2.3.0
+## Release v2.3.1
 
 ### Major Changes
 
@@ -9,6 +9,12 @@
 - Token caching for the default OAuth path. Tokens obtained via `.oauth(...)` are now cached per table on the `ZerobusSdk` instance and reused across stream creations and recoveries until they near expiry, instead of minting a fresh token on every stream. This reduces load on the Unity Catalog token endpoint for clients that create many short-lived streams. Caching is on by default and can be tuned via `ZerobusSdkBuilder::token_cache_enabled` and `ZerobusSdkBuilder::token_refresh_buffer`.
 - On a server-side authentication rejection during stream creation, the cached token is invalidated so the next attempt re-mints (re-checking grants at Unity Catalog), rather than reusing a rejected token until the refresh window.
 - `OAuthHeadersProvider::new` now caches tokens for the lifetime of the returned provider (previously it minted a fresh token on every call). Behavior is unchanged for the common path of constructing streams through `ZerobusSdk`, which already shares a cache.
+- Add `StreamBuilder::no_auth()` and `NoAuthHeadersProvider` for local testing
+  against Zerobus endpoints that do not enforce authentication. Both are gated
+  behind the `testing` feature flag.
+- Add `ZerobusSdkBuilder::no_tls()` convenience method as a shortcut for
+  `.tls_config(Arc::new(NoTlsConfig))` when connecting to plaintext `http://`
+  endpoints. Gated behind the `testing` feature flag.
 
 ### Bug Fixes
 

@@ -5,6 +5,8 @@ use std::time::Duration;
 
 use crate::proxy::ConnectorFactory;
 use crate::token_cache::DEFAULT_REFRESH_BUFFER;
+#[cfg(feature = "testing")]
+use crate::NoTlsConfig;
 use crate::{
     SecureTlsConfig, TlsConfig, ZerobusError, ZerobusResult, ZerobusSdk, DEFAULT_SDK_IDENTIFIER,
 };
@@ -86,6 +88,16 @@ impl ZerobusSdkBuilder {
     /// * `tls_config` - A TLS configuration implementing the `TlsConfig` trait
     pub fn tls_config(mut self, tls_config: Arc<dyn TlsConfig>) -> Self {
         self.tls_config = Some(tls_config);
+        self
+    }
+
+    /// Disable TLS and connect over plaintext.
+    ///
+    /// Intended only for local testing against a Zerobus service reached via an
+    /// `http://` endpoint. Available behind the `testing` feature flag.
+    #[cfg(feature = "testing")]
+    pub fn no_tls(mut self) -> Self {
+        self.tls_config = Some(Arc::new(NoTlsConfig));
         self
     }
 
