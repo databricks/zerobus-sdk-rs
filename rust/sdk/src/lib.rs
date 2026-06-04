@@ -43,6 +43,7 @@ mod arrow_metadata;
 mod arrow_stream;
 mod builder;
 mod callbacks;
+mod client_warnings;
 mod default_token_factory;
 mod errors;
 mod headers_provider;
