@@ -1,5 +1,27 @@
 # Version changelog
 
+## Release v2.2.0
+
+### Major Changes
+
+### New Features and Improvements
+
+- Added a process-wide stream churn warning: logs a `WARN` when 100 or more streams for the same table are opened within a 60-second sliding window, which may indicate a "one stream per record" misuse pattern. Applies to `ZerobusStream` and `ZerobusArrowStream`. Set `ZEROBUS_SDK_WARNINGS_ENABLED=false` to suppress.
+
+### Bug Fixes
+
+### Documentation
+
+### Internal Changes
+
+- `DefaultTokenFactory` now requests OAuth tokens scoped to the `zerobuswrite` operation by including `"operations": ["zerobuswrite"]` in the token mint authorization details. Tightens token scope on the target table; transparent to callers using `ZerobusSdkBuilder::oauth(...)`.
+
+### Breaking Changes
+
+### Deprecations
+
+### API Changes
+
 ## Release v2.1.1
 
 ### Major Changes
