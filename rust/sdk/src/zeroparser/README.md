@@ -34,13 +34,12 @@ compile-time-typed (`prost`, C++ generated accessors).
 | AirQuality             | ~200 B      | ~1283 MB/s    | ~4942 MB/s | ~3300 MB/s  | ~4988 MB/s | ~5366 MB/s  |
 | AirQuality             | 1 KB        | ~5438 MB/s    | ~13491 MB/s| ~9519 MB/s  | ~11682 MB/s| ~18686 MB/s |
 | SupportedNullableTypes | 1 KB        | ~763 MB/s     | ~1618 MB/s | ~1813 MB/s  | ~2048 MB/s | ~2057 MB/s  |
-| ClickBench             | 1 KB        | ~193 MB/s     | ~671 MB/s  | ~623 MB/s   | ~1150 MB/s | ~1771 MB/s  |
 
 Vs runtime-schema peers, Zeroparser is 4–9x faster than `prost-reflect` and
 1.1–2.8x faster than C++ Reflection. Vs compile-time-typed peers
 (`prost`, C++ typed), it keeps pace on small messages and pulls ahead on
 larger/wider ones — despite carrying a runtime descriptor that they don't.
-The advantage widens with field count: ClickBench's 105 fields make
+The advantage widens with field count: Wide schema with 100+ fields make
 per-message overhead the bottleneck for reflection-based decoders, which is
 where Zeroparser's pre-sized field cache and zero-copy `&str`/`&[u8]` layout
 win most.
@@ -129,7 +128,7 @@ rust/sdk/src/zeroparser/
     parser_bench.rs       — full criterion sweep
     bench_plot.rs         — produces bench_plot.svg
     common/mod.rs
-    proto/                — AirQuality, ClickBench, SupportedNullableTypes
+    proto/                — AirQuality, SupportedNullableTypes
 ```
 
 The proto fixtures are compiled in `rust/sdk/build.rs` only when the
