@@ -26,12 +26,12 @@ fn air_quality_scenario() -> BenchScenario {
     }
 }
 
-fn clickbench_scenario() -> BenchScenario {
+fn wide_schema_scenario() -> BenchScenario {
     BenchScenario {
-        group_name: "clickbench_decode",
-        config: BenchmarkConfig::for_message("ClickBench"),
-        sample_json: load_bench_sample("click_bench_json"),
-        padding_field: "URL",
+        group_name: "wide_schema_decode",
+        config: BenchmarkConfig::for_message("WideSchema"),
+        sample_json: load_bench_sample("wide_schema_json"),
+        padding_field: "endpoint_url",
         message_sizes: &[1_024],
         message_counts: &[100_000, 1_000_000],
     }
@@ -108,8 +108,8 @@ fn bench_air_quality(c: &mut Criterion) {
     run_decode_benchmark(c, air_quality_scenario());
 }
 
-fn bench_clickbench(c: &mut Criterion) {
-    run_decode_benchmark(c, clickbench_scenario());
+fn bench_wide_schema(c: &mut Criterion) {
+    run_decode_benchmark(c, wide_schema_scenario());
 }
 
 fn bench_supported_nullable_types(c: &mut Criterion) {
@@ -119,7 +119,7 @@ fn bench_supported_nullable_types(c: &mut Criterion) {
 criterion_group! {
     name = parser_benches;
     config = Criterion::default().sample_size(10);
-    targets = bench_air_quality, bench_clickbench, bench_supported_nullable_types,
+    targets = bench_air_quality, bench_wide_schema, bench_supported_nullable_types,
 }
 
 criterion_main!(parser_benches);

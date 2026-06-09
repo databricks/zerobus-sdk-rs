@@ -11,7 +11,10 @@ use common::{
 use plotters::prelude::*;
 use plotters::style::text_anchor::{HPos, Pos, VPos};
 
-const OUTPUT_PATH: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../bench_plot.svg");
+const OUTPUT_PATH: &str = concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/src/zeroparser/benches/bench_plot.svg"
+);
 const MIN_MEASURE_SECS: f64 = 1.0;
 const MAX_ITERATIONS: u64 = 1_000;
 const TRIALS_PER_MEASUREMENT: usize = 3;
@@ -53,11 +56,13 @@ fn cpp_baselines() -> HashMap<&'static str, CppBaseline> {
             typed_mbps: 2048.0,
         },
     );
+    // WideSchema (100-field device-telemetry record), libprotobuf 32.1, mean of
+    // 3 runs of the out-of-tree harness (see benches/README.md).
     m.insert(
-        "ClickBench@1025B",
+        "WideSchema@1025B",
         CppBaseline {
-            reflect_mbps: 623.0,
-            typed_mbps: 1150.0,
+            reflect_mbps: 608.0,
+            typed_mbps: 1042.0,
         },
     );
     m
@@ -103,12 +108,12 @@ fn supported_nullable_types_scenario() -> PlotScenario {
     }
 }
 
-fn clickbench_scenario() -> PlotScenario {
+fn wide_schema_scenario() -> PlotScenario {
     PlotScenario {
-        label: "ClickBench",
-        config: BenchmarkConfig::for_message("ClickBench"),
-        sample_json: load_bench_sample("click_bench_json"),
-        padding_field: "URL",
+        label: "WideSchema",
+        config: BenchmarkConfig::for_message("WideSchema"),
+        sample_json: load_bench_sample("wide_schema_json"),
+        padding_field: "endpoint_url",
         target_size: 1_024,
         count: 50_000,
     }
@@ -214,7 +219,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let mut scenarios = air_quality_scenarios();
     scenarios.push(supported_nullable_types_scenario());
-    scenarios.push(clickbench_scenario());
+    scenarios.push(wide_schema_scenario());
 
     let results: Vec<Measurement> = scenarios
         .iter()
