@@ -26,7 +26,7 @@ pub fn compile() {
         .compile_protos(
             &[
                 "src/zeroparser/benches/proto/air_quality.proto",
-                "src/zeroparser/benches/proto/click_bench.proto",
+                "src/zeroparser/benches/proto/wide_schema.proto",
                 "src/zeroparser/benches/proto/supported_nullable_types.proto",
             ],
             &["src/zeroparser/benches/proto"],

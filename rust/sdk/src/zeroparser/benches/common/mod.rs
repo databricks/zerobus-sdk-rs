@@ -20,10 +20,10 @@ pub mod proto {
             "/zeroparser.benches.air_quality.rs"
         ));
     }
-    pub mod click_bench {
+    pub mod wide_schema {
         include!(concat!(
             env!("OUT_DIR"),
-            "/zeroparser.benches.click_bench.rs"
+            "/zeroparser.benches.wide_schema.rs"
         ));
     }
     pub mod supported_nullable_types {
@@ -38,7 +38,7 @@ pub mod proto {
 pub enum ProstTypedKind {
     AirQuality,
     SupportedNullableTypes,
-    ClickBench,
+    WideSchema,
 }
 
 impl ProstTypedKind {
@@ -46,7 +46,7 @@ impl ProstTypedKind {
         match name {
             "AirQuality" => Self::AirQuality,
             "SupportedNullableTypes" => Self::SupportedNullableTypes,
-            "ClickBench" => Self::ClickBench,
+            "WideSchema" => Self::WideSchema,
             other => panic!("no prost typed walker for message {other}"),
         }
     }
@@ -225,7 +225,7 @@ pub fn bench_prost_typed_decode(kind: ProstTypedKind, encoded_messages: &[Vec<u8
     match kind {
         ProstTypedKind::AirQuality => walk_air_quality(encoded_messages),
         ProstTypedKind::SupportedNullableTypes => walk_supported_nullable_types(encoded_messages),
-        ProstTypedKind::ClickBench => walk_click_bench(encoded_messages),
+        ProstTypedKind::WideSchema => walk_wide_schema(encoded_messages),
     }
 }
 
@@ -266,117 +266,112 @@ fn walk_supported_nullable_types(encoded_messages: &[Vec<u8>]) -> u64 {
     total
 }
 
-fn walk_click_bench(encoded_messages: &[Vec<u8>]) -> u64 {
-    use proto::click_bench::ClickBench;
+fn walk_wide_schema(encoded_messages: &[Vec<u8>]) -> u64 {
+    use proto::wide_schema::WideSchema;
     let mut total = 0u64;
     for bytes in encoded_messages {
-        let m = ClickBench::decode(bytes.as_slice()).expect("decode ClickBench");
-        bb(m.watch_id as u64);
-        bb(m.java_enable as u64);
-        bb(m.title.len() as u64);
-        bb(m.good_event as u64);
-        bb(m.event_time as u64);
-        bb(m.event_date as u64);
-        bb(m.counter_id as u64);
-        bb(m.client_ip as u64);
+        let m = WideSchema::decode(bytes.as_slice()).expect("decode WideSchema");
+        bb(m.device_id as u64);
+        bb(m.device_model.len() as u64);
+        bb(m.firmware_version.len() as u64);
+        bb(m.hardware_revision.len() as u64);
+        bb(m.device_class as u64);
+        bb(m.manufacturer_id as u64);
+        bb(m.account_id as u64);
+        bb(m.org_id as u64);
         bb(m.region_id as u64);
-        bb(m.user_id as u64);
-        bb(m.counter_class as u64);
-        bb(m.os as u64);
-        bb(m.user_agent as u64);
-        bb(m.url.len() as u64);
-        bb(m.referer.len() as u64);
-        bb(m.is_refresh as u64);
-        bb(m.referer_category_id as u64);
-        bb(m.referer_region_id as u64);
-        bb(m.url_category_id as u64);
-        bb(m.url_region_id as u64);
-        bb(m.resolution_width as u64);
-        bb(m.resolution_height as u64);
-        bb(m.resolution_depth as u64);
-        bb(m.flash_major as u64);
-        bb(m.flash_minor as u64);
-        bb(m.flash_minor2.len() as u64);
-        bb(m.net_major as u64);
-        bb(m.net_minor as u64);
-        bb(m.user_agent_major as u64);
-        bb(m.user_agent_minor.len() as u64);
-        bb(m.cookie_enable as u64);
-        bb(m.javascript_enable as u64);
-        bb(m.is_mobile as u64);
-        bb(m.mobile_phone as u64);
-        bb(m.mobile_phone_model.len() as u64);
-        bb(m.params.len() as u64);
-        bb(m.ip_network_id as u64);
-        bb(m.trafic_source_id as u64);
-        bb(m.search_engine_id as u64);
-        bb(m.search_phrase.len() as u64);
-        bb(m.adv_engine_id as u64);
-        bb(m.is_artifical as u64);
-        bb(m.window_client_width as u64);
-        bb(m.window_client_height as u64);
-        bb(m.client_time_zone as u64);
-        bb(m.client_event_time as u64);
-        bb(m.silverlight_version1 as u64);
-        bb(m.silverlight_version2 as u64);
-        bb(m.silverlight_version3 as u64);
-        bb(m.silverlight_version4 as u64);
-        bb(m.page_charset.len() as u64);
-        bb(m.code_version as u64);
-        bb(m.is_link as u64);
-        bb(m.is_download as u64);
-        bb(m.is_not_bounce as u64);
-        bb(m.f_uniq_id as u64);
-        bb(m.original_url.len() as u64);
-        bb(m.hid as u64);
-        bb(m.is_old_counter as u64);
-        bb(m.is_event as u64);
-        bb(m.is_parameter as u64);
-        bb(m.dont_count_hits as u64);
-        bb(m.with_hash as u64);
-        bb(m.hit_color.len() as u64);
-        bb(m.local_event_time as u64);
-        bb(m.age as u64);
-        bb(m.sex as u64);
-        bb(m.income as u64);
-        bb(m.interests as u64);
-        bb(m.robotness as u64);
-        bb(m.remote_ip as u64);
-        bb(m.window_name as u64);
-        bb(m.opener_name as u64);
-        bb(m.history_length as u64);
-        bb(m.browser_language.len() as u64);
-        bb(m.browser_country.len() as u64);
-        bb(m.social_network.len() as u64);
-        bb(m.social_action.len() as u64);
-        bb(m.http_error as u64);
-        bb(m.send_timing as u64);
-        bb(m.dns_timing as u64);
-        bb(m.connect_timing as u64);
-        bb(m.response_start_timing as u64);
-        bb(m.response_end_timing as u64);
-        bb(m.fetch_timing as u64);
-        bb(m.social_source_network_id as u64);
-        bb(m.social_source_page.len() as u64);
-        bb(m.param_price as u64);
-        bb(m.param_order_id.len() as u64);
-        bb(m.param_currency.len() as u64);
-        bb(m.param_currency_id as u64);
-        bb(m.openstat_service_name.len() as u64);
-        bb(m.openstat_campaign_id.len() as u64);
-        bb(m.openstat_ad_id.len() as u64);
-        bb(m.openstat_source_id.len() as u64);
-        bb(m.utm_source.len() as u64);
-        bb(m.utm_medium.len() as u64);
-        bb(m.utm_campaign.len() as u64);
-        bb(m.utm_content.len() as u64);
-        bb(m.utm_term.len() as u64);
-        bb(m.from_tag.len() as u64);
-        bb(m.has_gclid as u64);
-        bb(m.referer_hash as u64);
-        bb(m.url_hash as u64);
-        bb(m.clid as u64);
-        total += 105;
+        bb(m.site_id as u64);
+        bb(m.site_name.len() as u64);
+        bb(m.location_label.len() as u64);
+        bb(m.latitude_e6 as u64);
+        bb(m.longitude_e6 as u64);
+        bb(m.altitude_m as u64);
+        bb(m.timezone_offset_min as u64);
+        bb(m.boot_time_us as u64);
+        bb(m.reading_time_us as u64);
+        bb(m.reading_date as u64);
+        bb(m.uptime_s as u64);
+        bb(m.is_online as u64);
+        bb(m.is_charging as u64);
+        bb(m.is_battery_powered as u64);
+        bb(m.battery_level as u64);
+        bb(m.battery_health as u64);
+        bb(m.power_mode as u64);
+        bb(m.voltage_mv as u64);
+        bb(m.current_ma as u64);
+        bb(m.temperature_c as u64);
+        bb(m.humidity_pct as u64);
+        bb(m.pressure_hpa as u64);
+        bb(m.co2_ppm as u64);
+        bb(m.pm25_ugm3 as u64);
+        bb(m.noise_db as u64);
+        bb(m.light_lux as u64);
+        bb(m.signal_strength as u64);
+        bb(m.link_quality as u64);
+        bb(m.network_type_id as u64);
+        bb(m.network_operator.len() as u64);
+        bb(m.apn.len() as u64);
+        bb(m.gateway_ip as u64);
+        bb(m.peer_ip as u64);
+        bb(m.subnet_id as u64);
+        bb(m.port as u64);
+        bb(m.endpoint_url.len() as u64);
+        bb(m.upstream_host.len() as u64);
+        bb(m.protocol.len() as u64);
+        bb(m.protocol_version as u64);
+        bb(m.tls_version_id as u64);
+        bb(m.is_encrypted as u64);
+        bb(m.send_latency_ms as u64);
+        bb(m.dns_latency_ms as u64);
+        bb(m.connect_latency_ms as u64);
+        bb(m.handshake_latency_ms as u64);
+        bb(m.response_latency_ms as u64);
+        bb(m.fetch_latency_ms as u64);
+        bb(m.retry_count as u64);
+        bb(m.error_code as u64);
+        bb(m.error_message.len() as u64);
+        bb(m.packets_sent as u64);
+        bb(m.packets_lost as u64);
+        bb(m.bytes_sent as u64);
+        bb(m.bytes_received as u64);
+        bb(m.session_id.len() as u64);
+        bb(m.session_uniq_id as u64);
+        bb(m.job_id.len() as u64);
+        bb(m.command_label.len() as u64);
+        bb(m.command_id as u64);
+        bb(m.is_synthetic as u64);
+        bb(m.is_healthy as u64);
+        bb(m.is_legacy_device as u64);
+        bb(m.schema_version as u64);
+        bb(m.charset.len() as u64);
+        bb(m.locale.len() as u64);
+        bb(m.country_code.len() as u64);
+        bb(m.status_color.len() as u64);
+        bb(m.sensor_id as u64);
+        bb(m.sensor_count as u64);
+        bb(m.calib_param1 as u64);
+        bb(m.calib_param2 as u64);
+        bb(m.calib_param3 as u64);
+        bb(m.calib_param4 as u64);
+        bb(m.config_params.len() as u64);
+        bb(m.modem_model.len() as u64);
+        bb(m.modem_present as u64);
+        bb(m.meter_reading as u64);
+        bb(m.unit.len() as u64);
+        bb(m.unit_id as u64);
+        bb(m.provider_name.len() as u64);
+        bb(m.asset_tag.len() as u64);
+        bb(m.tag_source.len() as u64);
+        bb(m.tag_medium.len() as u64);
+        bb(m.tag_group.len() as u64);
+        bb(m.has_gps as u64);
+        bb(m.gps_fix_quality as u64);
+        bb(m.satellites as u64);
+        bb(m.cluster_id as u64);
+        bb(m.shard_id as u64);
+        bb(m.upstream_hash as u64);
+        bb(m.record_hash as u64);
+        total += 100;
     }
     total
 }
