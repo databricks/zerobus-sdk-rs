@@ -128,6 +128,7 @@ package zerobus
 
 import (
 	"runtime"
+	"strings"
 	"unsafe"
 )
 
@@ -143,17 +144,60 @@ type ZerobusStream struct {
 	ptr unsafe.Pointer
 }
 
+type sdkOptions struct {
+	applicationName string
+	noTLS           bool
+}
+
+// SdkOption configures a ZerobusSdk created via NewZerobusSdk.
+type SdkOption func(*sdkOptions)
+
+// WithNoTLS selects a no-TLS gRPC channel. Intended for local development
+// against a plain `http://` endpoint; do not use against production.
+func WithNoTLS() SdkOption {
+	return func(o *sdkOptions) {
+		o.noTLS = true
+	}
+}
+
+// WithApplicationName appends a caller-supplied identifier (e.g. "my-app/1.0")
+// to the HTTP `user-agent` header. The wire value becomes
+// `zerobus-sdk-go/<version> <name>`. Empty or whitespace-only values are
+// ignored.
+func WithApplicationName(name string) SdkOption {
+	name = strings.TrimSpace(name)
+	return func(o *sdkOptions) {
+		o.applicationName = name
+	}
+}
+
 // NewZerobusSdk creates a new SDK instance.
 //
 // Parameters:
-//   - zerobusEndpoint: The gRPC endpoint for the Zerobus service (e.g., "https://zerobus.databricks.com")
-//   - unityCatalogURL: The Unity Catalog URL for OAuth token acquisition (e.g., "https://workspace.databricks.com")
+//   - zerobusEndpoint: Zerobus gRPC endpoint
+//   - unityCatalogURL: Unity Catalog URL for OAuth token acquisition
+//   - opts: optional SdkOption values (e.g., WithApplicationName, WithNoTLS)
 //
-// Returns an error if:
-//   - Invalid endpoint URLs
-//   - Unable to extract workspace ID from Unity Catalog URL
-func NewZerobusSdk(zerobusEndpoint, unityCatalogURL string) (*ZerobusSdk, error) {
-	ptr, err := sdkNew(zerobusEndpoint, unityCatalogURL)
+// Returns an error if the endpoint URLs are invalid or the workspace ID
+// cannot be extracted.
+//
+// Example:
+//
+//	sdk, err := zerobus.NewZerobusSdk(
+//	    "https://workspace.zerobus.databricks.com",
+//	    "https://workspace.cloud.databricks.com",
+//	    zerobus.WithApplicationName("my-app/1.0"),
+//	)
+func NewZerobusSdk(zerobusEndpoint, unityCatalogURL string, opts ...SdkOption) (*ZerobusSdk, error) {
+	var resolved sdkOptions
+	for _, opt := range opts {
+		if opt == nil {
+			continue
+		}
+		opt(&resolved)
+	}
+
+	ptr, err := sdkNew(zerobusEndpoint, unityCatalogURL, resolved)
 	if err != nil {
 		return nil, err
 	}

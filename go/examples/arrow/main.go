@@ -44,7 +44,14 @@ func main() {
 	}
 
 	// ── 2. Create the SDK instance ────────────────────────────────────────────
-	sdk, err := zerobus.NewZerobusSdk(endpoint, ucURL)
+	//
+	// WithApplicationName is optional; appends a caller identifier to the
+	// wire user-agent (final: `zerobus-sdk-go/<version> my-app/1.0`).
+	sdk, err := zerobus.NewZerobusSdk(
+		endpoint,
+		ucURL,
+		zerobus.WithApplicationName("my-app/1.0"),
+	)
 	if err != nil {
 		log.Fatalf("Failed to create SDK: %v", err)
 	}

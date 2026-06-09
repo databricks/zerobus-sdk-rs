@@ -439,6 +439,20 @@ if err != nil {
 defer sdk.Free()
 ```
 
+#### Identifying your application in the `user-agent` header
+
+The SDK sends `zerobus-sdk-go/<version>` as the HTTP `user-agent` header on every request, identifying the binding to the server. To additionally identify your application (recommended for server-side telemetry), pass `WithApplicationName`:
+
+```go
+sdk, err := zerobus.NewZerobusSdk(
+    "https://your-shard-id.zerobus.region.cloud.databricks.com",
+    "https://your-workspace.cloud.databricks.com",
+    zerobus.WithApplicationName("my-app/1.0"),
+)
+```
+
+The wire value becomes `zerobus-sdk-go/<version> my-app/1.0`. By convention, application names use `<product>/<version>`. The SDK owns the `user-agent` header at the gRPC channel level — values returned by a custom `HeadersProvider` cannot override it.
+
 ### 2. Configure Authentication
 
 The SDK handles authentication automatically. You just need to provide your OAuth credentials:

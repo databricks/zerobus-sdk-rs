@@ -15,6 +15,7 @@ package zerobus
 
 // Forward declare opaque types
 typedef struct CZerobusSdk CZerobusSdk;
+typedef struct CZerobusSdkBuilder CZerobusSdkBuilder;
 typedef struct CZerobusStream CZerobusStream;
 
 // Define result type
@@ -69,8 +70,15 @@ typedef struct CStreamConfigurationOptions {
 extern CZerobusSdk* zerobus_sdk_new(const char* zerobus_endpoint,
                                      const char* unity_catalog_url,
                                      CResult* result);
+extern CZerobusSdkBuilder* zerobus_sdk_builder_new(void);
+extern void zerobus_sdk_builder_endpoint(CZerobusSdkBuilder* builder, const char* value);
+extern void zerobus_sdk_builder_unity_catalog_url(CZerobusSdkBuilder* builder, const char* value);
+extern void zerobus_sdk_builder_sdk_identifier(CZerobusSdkBuilder* builder, const char* value);
+extern void zerobus_sdk_builder_application_name(CZerobusSdkBuilder* builder, const char* value);
+extern void zerobus_sdk_builder_disable_tls(CZerobusSdkBuilder* builder);
+extern CZerobusSdk* zerobus_sdk_builder_build(CZerobusSdkBuilder* builder, CResult* result);
+extern void zerobus_sdk_builder_free(CZerobusSdkBuilder* builder);
 extern void zerobus_sdk_free(CZerobusSdk* sdk);
-extern void zerobus_sdk_set_use_tls(CZerobusSdk* sdk, bool use_tls);
 extern CZerobusStream* zerobus_sdk_create_stream(CZerobusSdk* sdk,
                                                    const char* table_name,
                                                    const uint8_t* descriptor_proto_bytes,
@@ -270,26 +278,54 @@ func convertConfigToC(opts *StreamConfigurationOptions) C.CStreamConfigurationOp
 	}
 }
 
-// sdkNew creates a new SDK instance via FFI
-func sdkNew(zerobusEndpoint, unityCatalogURL string) (unsafe.Pointer, error) {
-	cEndpoint := C.CString(zerobusEndpoint)
-	defer C.free(unsafe.Pointer(cEndpoint))
+// setBuilderString wraps the cgo allocate/set/free boilerplate so adding a
+// new string-valued builder option is a one-liner.
+func setBuilderString(builder *C.CZerobusSdkBuilder, value string, setter func(*C.CZerobusSdkBuilder, *C.char)) {
+	cValue := C.CString(value)
+	defer C.free(unsafe.Pointer(cValue))
+	setter(builder, cValue)
+}
 
-	cCatalogURL := C.CString(unityCatalogURL)
-	defer C.free(unsafe.Pointer(cCatalogURL))
+// sdkNew drives the C SDK builder. To expose a new option: add an sdkOptions
+// field, a WithFoo constructor in zerobus.go, and one builder setter call
+// below. The FFI surface stays additive.
+func sdkNew(zerobusEndpoint, unityCatalogURL string, opts sdkOptions) (unsafe.Pointer, error) {
+	builder := C.zerobus_sdk_builder_new()
+	// _build always consumes the builder. _free is only needed if we abandon
+	// it before reaching _build (defensive against panics in this function).
+	consumed := false
+	defer func() {
+		if !consumed {
+			C.zerobus_sdk_builder_free(builder)
+		}
+	}()
+
+	setBuilderString(builder, zerobusEndpoint, func(b *C.CZerobusSdkBuilder, v *C.char) {
+		C.zerobus_sdk_builder_endpoint(b, v)
+	})
+	setBuilderString(builder, unityCatalogURL, func(b *C.CZerobusSdkBuilder, v *C.char) {
+		C.zerobus_sdk_builder_unity_catalog_url(b, v)
+	})
+	setBuilderString(builder, sdkIdentifier(), func(b *C.CZerobusSdkBuilder, v *C.char) {
+		C.zerobus_sdk_builder_sdk_identifier(b, v)
+	})
+
+	if opts.applicationName != "" {
+		setBuilderString(builder, opts.applicationName, func(b *C.CZerobusSdkBuilder, v *C.char) {
+			C.zerobus_sdk_builder_application_name(b, v)
+		})
+	}
+	if opts.noTLS {
+		C.zerobus_sdk_builder_disable_tls(builder)
+	}
 
 	var cres C.CResult
-	ptr := C.zerobus_sdk_new(cEndpoint, cCatalogURL, &cres)
+	ptr := C.zerobus_sdk_builder_build(builder, &cres)
+	consumed = true
 
 	if ptr == nil {
 		return nil, ffiResult(cres)
 	}
-
-	// Disable TLS if using HTTP endpoint (for testing/mock servers)
-	if len(zerobusEndpoint) >= 7 && zerobusEndpoint[:7] == "http://" {
-		C.zerobus_sdk_set_use_tls(ptr, C.bool(false))
-	}
-
 	return unsafe.Pointer(ptr), nil
 }
 

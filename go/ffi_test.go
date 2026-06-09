@@ -167,6 +167,44 @@ func TestMockHeadersProviderWithError(t *testing.T) {
 	}
 }
 
+// TestSdkIdentifierFormat verifies the SDK identifier is `zerobus-sdk-go/<version>`
+// — regression guard against the wrapper reporting `zerobus-sdk-rs/<version>`.
+func TestSdkIdentifierFormat(t *testing.T) {
+	got := sdkIdentifier()
+	want := "zerobus-sdk-go/" + sdkVersion
+	if got != want {
+		t.Errorf("sdkIdentifier() = %q, want %q", got, want)
+	}
+}
+
+// TestWithApplicationName verifies the option mutates resolved options.
+func TestWithApplicationName(t *testing.T) {
+	var o sdkOptions
+	WithApplicationName("my-app/1.0")(&o)
+	if o.applicationName != "my-app/1.0" {
+		t.Errorf("WithApplicationName did not set applicationName, got %q", o.applicationName)
+	}
+}
+
+// TestNewZerobusSdkSkipsNilOption verifies nil entries in the variadic opts
+// list are skipped rather than panicking.
+func TestNewZerobusSdkSkipsNilOption(t *testing.T) {
+	sdk, err := NewZerobusSdk(
+		"https://workspace.zerobus.databricks.com",
+		"https://workspace.cloud.databricks.com",
+		nil,
+		WithApplicationName("ok"),
+		nil,
+	)
+	if err != nil {
+		t.Fatalf("NewZerobusSdk should not error on nil opts, got: %v", err)
+	}
+	if sdk == nil {
+		t.Fatal("expected non-nil SDK")
+	}
+	sdk.Free()
+}
+
 // TestZerobusError tests the ZerobusError type
 func TestZerobusError(t *testing.T) {
 	err := &ZerobusError{
