@@ -16,8 +16,6 @@
 
 ### Behavior Changes
 
-- `zerobus_sdk_new` no longer infers TLS-off from `http://` endpoints; it uses the default `SecureTlsConfig` regardless of scheme. Callers needing a plain-HTTP channel must use the builder API and call `zerobus_sdk_builder_disable_tls` explicitly.
-
 ### Breaking Changes
 
 ### Deprecations

@@ -9,7 +9,7 @@
 
 ### Behavior changes
 
-- `NewZerobusSdk` no longer infers TLS-off from `http://` endpoints. Use `WithNoTLS()` explicitly. Matches the Rust SDK's model.
+- Removed an internal dead-code path in `NewZerobusSdk` that called `zerobus_sdk_set_use_tls(false)` on `http://` endpoints. That FFI symbol has been a no-op since the Rust core 2.0.0 release, so the runtime behavior is unchanged: tonic's gRPC transport already routes `http://` URLs through plain HTTP/2 regardless of TLS config. Use `WithNoTLS()` for explicit intent.
 
 ### Deprecations
 
