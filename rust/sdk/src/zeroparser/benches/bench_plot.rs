@@ -11,8 +11,10 @@ use common::{
 use plotters::prelude::*;
 use plotters::style::text_anchor::{HPos, Pos, VPos};
 
-const OUTPUT_PATH: &str =
-    concat!(env!("CARGO_MANIFEST_DIR"), "/src/zeroparser/benches/bench_plot.svg");
+const OUTPUT_PATH: &str = concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/src/zeroparser/benches/bench_plot.svg"
+);
 const MIN_MEASURE_SECS: f64 = 1.0;
 const MAX_ITERATIONS: u64 = 1_000;
 const TRIALS_PER_MEASUREMENT: usize = 3;
