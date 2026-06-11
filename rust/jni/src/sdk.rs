@@ -78,9 +78,11 @@ pub extern "system" fn Java_com_databricks_zerobus_ZerobusSdk_nativeCreate<'loca
     };
 
     // Create the SDK
+    let sdk_identifier = format!("zerobus-sdk-java/{}", env!("CARGO_PKG_VERSION"));
     match ZerobusSdk::builder()
         .endpoint(server_endpoint)
         .unity_catalog_url(unity_catalog_endpoint)
+        .sdk_identifier(sdk_identifier)
         .build()
     {
         Ok(sdk) => NativeSdkHandle::new(sdk).into_raw(),

@@ -285,7 +285,7 @@ stream = sdk.create_stream(client_id, client_secret, table_properties, options)
 | Option | Type | Default | Description |
 |--------|------|---------|-------------|
 | `record_type` | `RecordType` | `RecordType.PROTO` | Serialization format: `PROTO` or `JSON` |
-| `max_inflight_records` | `int` | `50000` | Maximum number of unacknowledged records |
+| `max_inflight_records` | `int` | `1000000` | Maximum number of unacknowledged records |
 | `recovery` | `bool` | `True` | Enable automatic stream recovery |
 | `recovery_timeout_ms` | `int` | `15000` | Timeout for recovery operations (ms) |
 | `recovery_backoff_ms` | `int` | `2000` | Delay between recovery attempts (ms) |

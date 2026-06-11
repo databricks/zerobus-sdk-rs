@@ -43,6 +43,7 @@ mod arrow_metadata;
 mod arrow_stream;
 mod builder;
 mod callbacks;
+mod client_warnings;
 mod default_token_factory;
 mod errors;
 mod headers_provider;
@@ -88,7 +89,7 @@ use landing_zone::LandingZone;
 #[cfg(feature = "arrow-flight")]
 pub use arrow_configuration::ArrowStreamConfigurationOptions;
 #[cfg(feature = "arrow-flight")]
-pub use arrow_stream::{ArrowSchema, DataType, Field, RecordBatch, ZerobusArrowStream};
+pub use arrow_stream::{ArrowSchema, DataType, Field, RecordBatch, TimeUnit, ZerobusArrowStream};
 pub use builder::{StreamBuilder, ZerobusSdkBuilder};
 pub use callbacks::AckCallback;
 pub use default_token_factory::DefaultTokenFactory;
@@ -106,6 +107,9 @@ pub use stream_configuration::StreamConfigurationOptions;
 #[cfg(feature = "testing")]
 pub use tls_config::NoTlsConfig;
 pub use tls_config::{SecureTlsConfig, TlsConfig};
+
+#[cfg(feature = "zeroparser")]
+pub mod zeroparser;
 
 const SHUTDOWN_TIMEOUT_SECS: u64 = 1;
 

@@ -181,12 +181,26 @@ void zerobus_arrow_stream_free(struct CArrowStream *stream);
  * Ingests one Arrow RecordBatch supplied as Arrow IPC stream bytes.
  *
  * `ipc_bytes` must be a valid Arrow IPC stream (schema + one record batch).
- * Returns the logical offset assigned to this batch, or -1 on error.
+ * The bytes are deserialised to a RecordBatch internally. Works with all
+ * compression settings. Returns the logical offset assigned to this batch, or -1 on error.
  */
 int64_t zerobus_arrow_stream_ingest_batch(struct CArrowStream *stream,
                                           const uint8_t *ipc_bytes,
                                           uintptr_t ipc_len,
                                           struct CResult *result);
+
+/**
+ * Ingests one Arrow RecordBatch supplied as Arrow IPC stream bytes.
+ *
+ * Equivalent to `zerobus_arrow_stream_ingest_batch`. Both functions deserialise the IPC
+ * bytes to a `RecordBatch` and re-encode with the stream's compression settings, so
+ * either works regardless of whether the stream was created with compression.
+ * Returns the logical offset assigned to this batch, or -1 on error.
+ */
+int64_t zerobus_arrow_stream_ingest_batch_via_record_batch(struct CArrowStream *stream,
+                                                           const uint8_t *ipc_bytes,
+                                                           uintptr_t ipc_len,
+                                                           struct CResult *result);
 
 /**
  * Waits until the server acknowledges the batch at the given logical offset.
@@ -325,6 +339,62 @@ int64_t zerobus_stream_ingest_json_records(struct CZerobusStream *stream,
                                            const char *const *json_records,
                                            uintptr_t num_records,
                                            struct CResult *result);
+
+/**
+ * Ingest a protobuf record without waiting for the record to be queued (fire-and-forget).
+ *
+ * Spawns a background task to queue the record and returns immediately.
+ * The result only reflects argument validation errors; ingestion errors are silently ignored.
+ *
+ * # Safety
+ * The stream must remain valid until all background tasks spawned by this function complete.
+ */
+void zerobus_stream_ingest_proto_record_nowait(struct CZerobusStream *stream,
+                                               const uint8_t *data,
+                                               uintptr_t data_len,
+                                               struct CResult *result);
+
+/**
+ * Ingest a JSON record without waiting for the record to be queued (fire-and-forget).
+ *
+ * Spawns a background task to queue the record and returns immediately.
+ * The result only reflects argument validation errors; ingestion errors are silently ignored.
+ *
+ * # Safety
+ * The stream must remain valid until all background tasks spawned by this function complete.
+ */
+void zerobus_stream_ingest_json_record_nowait(struct CZerobusStream *stream,
+                                              const char *json_data,
+                                              struct CResult *result);
+
+/**
+ * Ingest a batch of protobuf records without waiting (fire-and-forget).
+ *
+ * Copies all record data before spawning the background task, so the caller's
+ * memory is safe to release immediately after this function returns.
+ *
+ * # Safety
+ * The stream must remain valid until all background tasks spawned by this function complete.
+ */
+void zerobus_stream_ingest_proto_records_nowait(struct CZerobusStream *stream,
+                                                const uint8_t *const *records,
+                                                const uintptr_t *record_lens,
+                                                uintptr_t num_records,
+                                                struct CResult *result);
+
+/**
+ * Ingest a batch of JSON records without waiting (fire-and-forget).
+ *
+ * Copies all strings before spawning the background task, so the caller's
+ * memory is safe to release immediately after this function returns.
+ *
+ * # Safety
+ * The stream must remain valid until all background tasks spawned by this function complete.
+ */
+void zerobus_stream_ingest_json_records_nowait(struct CZerobusStream *stream,
+                                               const char *const *json_records,
+                                               uintptr_t num_records,
+                                               struct CResult *result);
 
 /**
  * Wait for a specific offset to be acknowledged by the server

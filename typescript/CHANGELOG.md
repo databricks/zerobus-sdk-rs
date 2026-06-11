@@ -1,5 +1,47 @@
 # Version changelog
 
+## Release v1.1.0
+
+### New Features and Improvements
+
+- Arrow Flight ingestion promoted to Beta. Mirrors the Rust SDK 2.0
+  promotion. The API is stabilising but may still change before reaching GA.
+  The `arrow-flight` feature is no longer labelled experimental/unsupported
+  in docs and examples.
+- macOS pre-built binaries. Added `@databricks/zerobus-ingest-sdk-darwin-x64`
+  and `@databricks/zerobus-ingest-sdk-darwin-arm64` to `optionalDependencies`,
+  so `npm install` on Intel and Apple Silicon Macs now fetches a pre-built
+  `.node` binary instead of falling back to a source build.
+- `waitForOffset` precision. Replaced the `Number(bigint)` round-trip
+  with napi-rs's lossless `BigInt::get_i64()`. Both gRPC and Arrow streams
+  now error cleanly on offsets that exceed `i64` range instead of silently
+  truncating past `2^53 - 1`.
+
+### Bug Fixes
+
+- Fixed bogus `apache-arrow` peer dependency. v1.0.x declared
+  `apache-arrow: "^56.0.0"`, which doesn't exist on npm (56 was a Rust
+  crate version copied by mistake). Corrected to `^18.0.0` to match the
+  current dev dep range.
+
+### Internal Changes
+
+- Depends on Rust SDK 2.0.1. The wrapper now goes through
+  `sdk.stream_builder()` (Rust 2.0 removed the legacy
+  `create_stream_with_headers_provider` / `create_arrow_stream` /
+  `ingest_record` / `ingest_records` methods). The TS-facing API is
+  unchanged — the v1 deprecated `ingestRecord` / `ingestRecords` methods
+  still resolve after server ack (now via `ingest_record_offset` +
+  `wait_for_offset` under the hood).
+- Arrow crates bumped 56.2.0 → 58.2 to match the Rust SDK 2.0
+  workspace. `bytes` added so the wrapper can hand IPC payloads to
+  `ingest_ipc_batch` as `Bytes`.
+- `napi6` feature on `napi-rs` so `BigInt::get_i64()` is available.
+- CI install step switched from `npm ci` to `npm install --no-audit
+  --no-fund`. `npm ci`'s strict lockfile validation rejects
+  `optionalDependencies` referencing a not-yet-published version (every
+  napi-rs major-version bump hits this); `npm install` tolerates it.
+
 ## Release v1.0.2
 
 ### Bug Fixes

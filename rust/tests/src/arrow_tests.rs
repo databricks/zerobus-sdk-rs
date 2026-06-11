@@ -1057,6 +1057,327 @@ mod arrow_flight_tests {
 
             Ok(())
         }
+
+        /// Regression test: after a non-close-signal recovery (server Error, ack timeout, etc.)
+        /// the supervisor must set `is_paused = true` before reconnecting so that concurrent
+        /// `ingest_batch` calls cannot send to the new connection with a stale wire offset.
+        ///
+        /// Setup: advance the wire offset counter to N by acking N batches on connection 1,
+        /// then trigger a server Error while one more batch is pending.  Ingest a further batch
+        /// immediately (simulating a concurrent caller) before recovery completes.  The mock
+        /// validates strictly-sequential offsets on every new DoPut connection (resets to 0).
+        /// If the pause gate is missing, the concurrent batch may be sent with offset N on the
+        /// new connection → mock rejects with `NonIncrementalOffset` → recovery fails.
+        #[tokio::test]
+        async fn test_no_stale_offset_after_non_close_signal_recovery(
+        ) -> Result<(), Box<dyn std::error::Error>> {
+            setup_tracing();
+            info!("Starting test_no_stale_offset_after_non_close_signal_recovery");
+
+            const INITIAL_BATCHES: usize = 5;
+
+            let (mock_server, server_url) = start_mock_flight_server().await?;
+            let schema = create_test_arrow_schema();
+
+            // Ack each of the initial batches individually, then Error on the next one,
+            // then ack the replay (which starts at offset 0 on the new connection).
+            let mut responses: Vec<MockFlightResponse> = (0..INITIAL_BATCHES)
+                .map(|i| MockFlightResponse::BatchAck {
+                    ack_up_to_offset: i as i64,
+                    delay_ms: 0,
+                    ack_up_to_records: (i + 1) as u64,
+                })
+                .collect();
+            responses.push(MockFlightResponse::Error {
+                status: tonic::Status::unavailable("Simulated disconnect"),
+                delay_ms: 0,
+            });
+            // On the new connection offsets restart from 0.  Ack covers all replayed rows.
+            responses.push(MockFlightResponse::BatchAck {
+                ack_up_to_offset: 0,
+                delay_ms: 0,
+                ack_up_to_records: (INITIAL_BATCHES + 2) as u64,
+            });
+
+            mock_server.inject_responses(TABLE_NAME, responses).await;
+
+            let sdk = ZerobusSdk::builder()
+                .endpoint(server_url)
+                .unity_catalog_url("https://mock-uc.com")
+                .tls_config(Arc::new(NoTlsConfig))
+                .build()?;
+
+            let stream = sdk
+                .stream_builder()
+                .table(TABLE_NAME)
+                .headers_provider(Arc::new(TestHeadersProvider::default()))
+                .arrow(schema.clone())
+                .recovery(true)
+                .recovery_retries(3)
+                .recovery_backoff_ms(100)
+                .recovery_timeout_ms(10_000)
+                .flush_timeout_ms(15_000)
+                .build_arrow()
+                .await?;
+
+            // Ingest INITIAL_BATCHES batches and wait for each ack, advancing
+            // the wire offset counter to INITIAL_BATCHES on connection 1.
+            for i in 0..INITIAL_BATCHES {
+                let batch =
+                    create_test_record_batch(schema.clone(), vec![i as i64], vec![Some("init")]);
+                let offset = stream.ingest_batch(batch).await?;
+                stream.wait_for_offset(offset).await?;
+            }
+
+            // This batch lands in flight when the server fires the Error.
+            let pending_batch = create_test_record_batch(
+                schema.clone(),
+                vec![INITIAL_BATCHES as i64],
+                vec![Some("pending")],
+            );
+            let pending_offset = stream.ingest_batch(pending_batch).await?;
+
+            let concurrent_batch = create_test_record_batch(
+                schema.clone(),
+                vec![(INITIAL_BATCHES + 1) as i64],
+                vec![Some("concurrent")],
+            );
+            let concurrent_offset = stream.ingest_batch(concurrent_batch).await?;
+
+            let r1 = stream.wait_for_offset(pending_offset).await;
+            let r2 = stream.wait_for_offset(concurrent_offset).await;
+
+            assert!(
+                r1.is_ok(),
+                "Pending batch recovery failed (stale offset on new connection?): {r1:?}",
+            );
+            assert!(
+                r2.is_ok(),
+                "Concurrent batch recovery failed (stale offset on new connection?): {r2:?}",
+            );
+
+            // All INITIAL_BATCHES + 2 rows must have physically reached the server.
+            // This catches silent data loss: if a batch is falsely acked without being
+            // sent, the server row count will fall short.
+            let total_rows = mock_server.get_total_records_received().await;
+            assert!(
+                total_rows >= (INITIAL_BATCHES + 2) as u64,
+                "Server received {total_rows} rows, expected at least {}",
+                INITIAL_BATCHES + 2,
+            );
+
+            Ok(())
+        }
+
+        /// Verifies no records are silently dropped when many concurrent `ingest_batch`
+        /// calls are in flight during a server-error recovery.
+        ///
+        /// The `is_paused` gate + `ingest_mutex` ordering must ensure that every batch
+        /// pushed to `pending_batches` is either sent on the current connection or
+        /// replayed on the new one — never buffered-but-unsent and then falsely acked.
+        ///
+        /// Uses a multi-threaded runtime so the ingest_mutex-release / is_paused-clear
+        /// race that this PR fixes can actually manifest if the gate is broken.
+        #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+        async fn test_no_lost_records_during_non_close_signal_recovery(
+        ) -> Result<(), Box<dyn std::error::Error>> {
+            use futures::future::join_all;
+
+            setup_tracing();
+            info!("Starting test_no_lost_records_during_non_close_signal_recovery");
+
+            const CONCURRENT_TASKS: usize = 10;
+            const ROWS_PER_BATCH: usize = 3;
+            const TOTAL_UNIQUE_ROWS: u64 = (CONCURRENT_TASKS * ROWS_PER_BATCH) as u64;
+
+            let (mock_server, server_url) = start_mock_flight_server().await?;
+            let schema = create_test_arrow_schema();
+
+            // Fire Error before any ack → all CONCURRENT_TASKS batches are pending at recovery.
+            // On the new connection, ack everything in one shot.
+            mock_server
+                .inject_responses(
+                    TABLE_NAME,
+                    vec![
+                        MockFlightResponse::Error {
+                            status: tonic::Status::unavailable("Simulated disconnect"),
+                            delay_ms: 0,
+                        },
+                        MockFlightResponse::BatchAck {
+                            ack_up_to_offset: CONCURRENT_TASKS as i64 - 1,
+                            delay_ms: 0,
+                            ack_up_to_records: TOTAL_UNIQUE_ROWS,
+                        },
+                    ],
+                )
+                .await;
+
+            let sdk = ZerobusSdk::builder()
+                .endpoint(server_url)
+                .unity_catalog_url("https://mock-uc.com")
+                .tls_config(Arc::new(NoTlsConfig))
+                .build()?;
+
+            let stream = Arc::new(
+                sdk.stream_builder()
+                    .table(TABLE_NAME)
+                    .headers_provider(Arc::new(TestHeadersProvider::default()))
+                    .arrow(schema.clone())
+                    .recovery(true)
+                    .recovery_retries(3)
+                    .recovery_backoff_ms(50)
+                    .recovery_timeout_ms(10_000)
+                    .flush_timeout_ms(15_000)
+                    .build_arrow()
+                    .await?,
+            );
+
+            // Kick off CONCURRENT_TASKS ingest_batch calls simultaneously.
+            let handles: Vec<_> = (0..CONCURRENT_TASKS)
+                .map(|i| {
+                    let stream = Arc::clone(&stream);
+                    let schema = schema.clone();
+                    tokio::spawn(async move {
+                        let ids: Vec<i64> = (0..ROWS_PER_BATCH as i64)
+                            .map(|r| i as i64 * 100 + r)
+                            .collect();
+                        let strings: Vec<Option<&str>> = vec![Some("row"); ROWS_PER_BATCH];
+                        let batch = create_test_record_batch(schema, ids, strings);
+                        stream.ingest_batch(batch).await
+                    })
+                })
+                .collect();
+
+            let offsets: Vec<_> = join_all(handles)
+                .await
+                .into_iter()
+                .enumerate()
+                .map(|(i, r)| {
+                    r.unwrap_or_else(|e| panic!("task {i} panicked: {e:?}"))
+                        .unwrap_or_else(|e| panic!("task {i} ingest_batch failed: {e}"))
+                })
+                .collect();
+
+            // Every batch must be acknowledged — a falsely-acked batch would cause
+            // wait_for_offset to succeed even though the server never received it,
+            // but the row-count assertion below would catch the discrepancy.
+            for offset in &offsets {
+                stream.wait_for_offset(*offset).await?;
+            }
+
+            // The server must have physically received at least TOTAL_UNIQUE_ROWS rows.
+            // Replay means the actual count may be higher, but never lower — a shortfall
+            // indicates a batch was falsely acked without being sent to the server.
+            let total_rows = mock_server.get_total_records_received().await;
+            assert!(
+                total_rows >= TOTAL_UNIQUE_ROWS,
+                "Server received {total_rows} rows; expected at least {TOTAL_UNIQUE_ROWS} \
+                 (possible silent data loss from pause-gate race)",
+            );
+
+            Ok(())
+        }
+
+        /// Same as `test_no_lost_records_during_non_close_signal_recovery` but recovery
+        /// is triggered by a server-sent graceful-close signal rather than an error.
+        ///
+        /// The graceful-close path sets `is_paused = true` inside `process_acks` and
+        /// then waits for the grace period to expire before triggering reconnect.
+        /// Concurrent `ingest_batch` callers that arrive after the close signal must
+        /// buffer into `pending_batches` and be replayed — not silently dropped.
+        #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+        async fn test_no_lost_records_during_close_signal_recovery(
+        ) -> Result<(), Box<dyn std::error::Error>> {
+            use futures::future::join_all;
+
+            setup_tracing();
+            info!("Starting test_no_lost_records_during_close_signal_recovery");
+
+            const CONCURRENT_TASKS: usize = 10;
+            const ROWS_PER_BATCH: usize = 3;
+            const TOTAL_UNIQUE_ROWS: u64 = (CONCURRENT_TASKS * ROWS_PER_BATCH) as u64;
+
+            let (mock_server, server_url) = start_mock_flight_server().await?;
+            let schema = create_test_arrow_schema();
+
+            // GracefulClose with a short grace period, then ack everything on the new connection.
+            mock_server
+                .inject_responses(
+                    TABLE_NAME,
+                    vec![
+                        MockFlightResponse::GracefulClose {
+                            duration_ms: 100,
+                            delay_ms: 0,
+                            ack_up_to_offset: None,
+                            ack_up_to_records: None,
+                        },
+                        MockFlightResponse::BatchAck {
+                            ack_up_to_offset: CONCURRENT_TASKS as i64 - 1,
+                            delay_ms: 0,
+                            ack_up_to_records: TOTAL_UNIQUE_ROWS,
+                        },
+                    ],
+                )
+                .await;
+
+            let sdk = ZerobusSdk::builder()
+                .endpoint(server_url)
+                .unity_catalog_url("https://mock-uc.com")
+                .tls_config(Arc::new(NoTlsConfig))
+                .build()?;
+
+            let stream = Arc::new(
+                sdk.stream_builder()
+                    .table(TABLE_NAME)
+                    .headers_provider(Arc::new(TestHeadersProvider::default()))
+                    .arrow(schema.clone())
+                    .recovery(true)
+                    .recovery_retries(3)
+                    .recovery_backoff_ms(50)
+                    .recovery_timeout_ms(10_000)
+                    .flush_timeout_ms(15_000)
+                    .build_arrow()
+                    .await?,
+            );
+
+            let handles: Vec<_> = (0..CONCURRENT_TASKS)
+                .map(|i| {
+                    let stream = Arc::clone(&stream);
+                    let schema = schema.clone();
+                    tokio::spawn(async move {
+                        let ids: Vec<i64> = (0..ROWS_PER_BATCH as i64)
+                            .map(|r| i as i64 * 100 + r)
+                            .collect();
+                        let strings: Vec<Option<&str>> = vec![Some("row"); ROWS_PER_BATCH];
+                        let batch = create_test_record_batch(schema, ids, strings);
+                        stream.ingest_batch(batch).await
+                    })
+                })
+                .collect();
+
+            let offsets: Vec<_> = join_all(handles)
+                .await
+                .into_iter()
+                .enumerate()
+                .map(|(i, r)| {
+                    r.unwrap_or_else(|e| panic!("task {i} panicked: {e:?}"))
+                        .unwrap_or_else(|e| panic!("task {i} ingest_batch failed: {e}"))
+                })
+                .collect();
+
+            for offset in &offsets {
+                stream.wait_for_offset(*offset).await?;
+            }
+
+            let total_rows = mock_server.get_total_records_received().await;
+            assert!(
+                total_rows >= TOTAL_UNIQUE_ROWS,
+                "Server received {total_rows} rows; expected at least {TOTAL_UNIQUE_ROWS} \
+                 (possible silent data loss from pause-gate race)",
+            );
+
+            Ok(())
+        }
     }
 
     mod ipc_ingestion_tests {
@@ -1429,10 +1750,10 @@ mod arrow_flight_tests {
         }
 
         #[tokio::test]
-        async fn test_ingest_ipc_batch_compression_mismatch(
-        ) -> Result<(), Box<dyn std::error::Error>> {
+        async fn test_ingest_ipc_batch_with_compression() -> Result<(), Box<dyn std::error::Error>>
+        {
             setup_tracing();
-            info!("Starting test_ingest_ipc_batch_compression_mismatch");
+            info!("Starting test_ingest_ipc_batch_with_compression");
 
             let (_mock_server, server_url) = start_mock_flight_server().await?;
             let schema = create_test_arrow_schema();
@@ -1452,15 +1773,15 @@ mod arrow_flight_tests {
                 .build_arrow()
                 .await?;
 
+            // ingest_ipc_batch now materialises the IPC bytes and re-encodes with the
+            // stream compression setting, so this should succeed.
             let batch = create_test_record_batch(schema, vec![1], vec![Some("test")]);
             let ipc_bytes = record_batch_to_ipc_bytes(&batch);
-
             let result = stream.ingest_ipc_batch(ipc_bytes).await;
-            assert!(result.is_err(), "Expected compression mismatch error");
-            let err_msg = format!("{}", result.unwrap_err());
             assert!(
-                err_msg.contains("ipc_compression"),
-                "Error should mention compression: {err_msg}"
+                result.is_ok(),
+                "ingest_ipc_batch should succeed when compression is enabled: {:?}",
+                result.err()
             );
 
             Ok(())
@@ -1539,6 +1860,225 @@ mod arrow_flight_tests {
             stream.wait_for_offset(offset3).await?;
 
             assert_eq!(mock_server.get_batch_count().await, 3);
+
+            Ok(())
+        }
+    }
+
+    mod chunking_tests {
+        use super::*;
+        use crate::utils::create_large_test_record_batch;
+
+        // 10 500 rows × 200-byte payload ≈ 2.12 MiB IPC-encoded — safely above the
+        // 2 MiB chunking threshold and below tonic's 4 MiB default decode limit.
+        // At 2 MiB/chunk this batch requires at least 2 physical Flight messages.
+        const LARGE_BATCH_ROWS: usize = 10_500;
+        const PAYLOAD_BYTES_PER_ROW: usize = 200;
+
+        /// A large RecordBatch must be split into multiple physical Flight messages
+        /// (`ingest_batch` path). Fails before the fix (batch_count == 1) and
+        /// passes after (batch_count >= 2, max_offset >= 1).
+        #[tokio::test]
+        async fn test_large_batch_is_split_into_chunks() -> Result<(), Box<dyn std::error::Error>> {
+            setup_tracing();
+            info!("Starting test_large_batch_is_split_into_chunks");
+
+            let (mock_server, server_url) = start_mock_flight_server().await?;
+            let schema = create_test_arrow_schema();
+
+            // Ack fires on the first chunk (offset 0) and covers all rows, so the
+            // logical batch is fully acknowledged regardless of how many physical
+            // chunks follow. Subsequent chunks hit the auto-ack path, but
+            // pending_batches is already empty so no re-ack occurs.
+            mock_server
+                .inject_responses(
+                    TABLE_NAME,
+                    vec![MockFlightResponse::BatchAck {
+                        // Fire ack only when offset 1 arrives (second chunk).
+                        // This guarantees both chunks are counted before wait_for_offset returns.
+                        ack_up_to_offset: 1,
+                        delay_ms: 0,
+                        ack_up_to_records: LARGE_BATCH_ROWS as u64,
+                    }],
+                )
+                .await;
+
+            let sdk = ZerobusSdk::builder()
+                .endpoint(server_url)
+                .unity_catalog_url("https://mock-uc.com")
+                .tls_config(Arc::new(NoTlsConfig))
+                .build()?;
+
+            let stream = sdk
+                .stream_builder()
+                .table(TABLE_NAME)
+                .headers_provider(Arc::new(TestHeadersProvider::default()))
+                .arrow(schema.clone())
+                .flush_timeout_ms(10_000)
+                .build_arrow()
+                .await?;
+
+            let batch =
+                create_large_test_record_batch(schema, LARGE_BATCH_ROWS, PAYLOAD_BYTES_PER_ROW);
+            let offset = stream.ingest_batch(batch).await?;
+            assert_eq!(offset, 0);
+
+            stream.wait_for_offset(offset).await?;
+
+            // Without chunking the whole batch lands in one Flight message
+            // (batch_count == 1, max_offset == 0).  With chunking in place each
+            // chunk gets its own physical offset, so both counters grow.
+            let batch_count = mock_server.get_batch_count().await;
+            assert!(
+                batch_count >= 2,
+                "Expected large batch to be split into ≥2 Flight messages (chunks), got {batch_count}",
+            );
+
+            let max_offset = mock_server.get_max_offset_received().await;
+            assert!(
+                max_offset >= 1,
+                "Expected max wire offset ≥1 (multiple chunks), got {max_offset}",
+            );
+
+            Ok(())
+        }
+
+        /// A large IPC batch must be split into multiple physical Flight messages
+        /// (`ingest_ipc_batch` path). Same failure/pass criterion as the Batch test.
+        #[tokio::test]
+        async fn test_large_ipc_batch_is_split_into_chunks(
+        ) -> Result<(), Box<dyn std::error::Error>> {
+            setup_tracing();
+            info!("Starting test_large_ipc_batch_is_split_into_chunks");
+
+            let (mock_server, server_url) = start_mock_flight_server().await?;
+            let schema = create_test_arrow_schema();
+
+            mock_server
+                .inject_responses(
+                    TABLE_NAME,
+                    vec![MockFlightResponse::BatchAck {
+                        // Fire ack only when offset 1 arrives (second chunk).
+                        ack_up_to_offset: 1,
+                        delay_ms: 0,
+                        ack_up_to_records: LARGE_BATCH_ROWS as u64,
+                    }],
+                )
+                .await;
+
+            let sdk = ZerobusSdk::builder()
+                .endpoint(server_url)
+                .unity_catalog_url("https://mock-uc.com")
+                .tls_config(Arc::new(NoTlsConfig))
+                .build()?;
+
+            let stream = sdk
+                .stream_builder()
+                .table(TABLE_NAME)
+                .headers_provider(Arc::new(TestHeadersProvider::default()))
+                .arrow(schema.clone())
+                .flush_timeout_ms(10_000)
+                .build_arrow()
+                .await?;
+
+            let batch =
+                create_large_test_record_batch(schema, LARGE_BATCH_ROWS, PAYLOAD_BYTES_PER_ROW);
+            let ipc_bytes = record_batch_to_ipc_bytes(&batch);
+
+            let offset = stream.ingest_ipc_batch(ipc_bytes).await?;
+            assert_eq!(offset, 0);
+
+            stream.wait_for_offset(offset).await?;
+
+            let batch_count = mock_server.get_batch_count().await;
+            assert!(
+                batch_count >= 2,
+                "Expected large IPC batch to be split into ≥2 Flight messages (chunks), got {batch_count}",
+            );
+
+            let max_offset = mock_server.get_max_offset_received().await;
+            assert!(
+                max_offset >= 1,
+                "Expected max wire offset ≥1 (multiple chunks), got {max_offset}",
+            );
+
+            Ok(())
+        }
+
+        /// When a large pending batch is replayed after a disconnect, the replay path
+        /// must also chunk it — not blast a single oversized Flight message.
+        ///
+        /// Failure criterion (before fix):  batch_count == 2  (1 failed + 1 replayed, no chunking)
+        /// Pass criterion   (after  fix):   batch_count >= 3  (1 failed + ≥2 replayed chunks)
+        #[tokio::test]
+        async fn test_large_batch_chunking_preserved_on_recovery(
+        ) -> Result<(), Box<dyn std::error::Error>> {
+            setup_tracing();
+            info!("Starting test_large_batch_chunking_preserved_on_recovery");
+
+            let (mock_server, server_url) = start_mock_flight_server().await?;
+            let schema = create_test_arrow_schema();
+
+            mock_server
+                .inject_responses(
+                    TABLE_NAME,
+                    vec![
+                        // Drop the connection when the first (or only) chunk arrives,
+                        // before sending any ack.
+                        MockFlightResponse::Error {
+                            status: tonic::Status::unavailable("Simulated disconnect"),
+                            delay_ms: 0,
+                        },
+                        // On reconnect the batch is replayed. Ack fires on the second
+                        // replayed chunk (offset 1 on the new connection), guaranteeing both
+                        // chunks are counted before wait_for_offset returns.
+                        MockFlightResponse::BatchAck {
+                            ack_up_to_offset: 1,
+                            delay_ms: 0,
+                            ack_up_to_records: LARGE_BATCH_ROWS as u64,
+                        },
+                    ],
+                )
+                .await;
+
+            let sdk = ZerobusSdk::builder()
+                .endpoint(server_url)
+                .unity_catalog_url("https://mock-uc.com")
+                .tls_config(Arc::new(NoTlsConfig))
+                .build()?;
+
+            let stream = sdk
+                .stream_builder()
+                .table(TABLE_NAME)
+                .headers_provider(Arc::new(TestHeadersProvider::default()))
+                .arrow(schema.clone())
+                .recovery(true)
+                .recovery_retries(3)
+                .recovery_backoff_ms(100)
+                .recovery_timeout_ms(10_000)
+                .flush_timeout_ms(15_000)
+                .build_arrow()
+                .await?;
+
+            let batch =
+                create_large_test_record_batch(schema, LARGE_BATCH_ROWS, PAYLOAD_BYTES_PER_ROW);
+            let offset = stream.ingest_batch(batch).await?;
+
+            let result = stream.wait_for_offset(offset).await;
+            assert!(
+                result.is_ok(),
+                "Expected recovery replay of large batch to succeed: {result:?}",
+            );
+
+            // batch_count accumulates across connections.
+            // Before fix: ack_up_to_offset=1 never fires (only 1 chunk per connection),
+            //             so wait_for_offset times out and result.is_ok() fails above.
+            // After  fix: 1 (failed first chunk) + 2 (both replay chunks) = 3 ≥ 3.
+            let batch_count = mock_server.get_batch_count().await;
+            assert!(
+                batch_count >= 3,
+                "Expected ≥3 total Flight messages (1 failed + ≥2 replayed chunks), got {batch_count}",
+            );
 
             Ok(())
         }

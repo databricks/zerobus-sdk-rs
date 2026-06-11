@@ -21,8 +21,7 @@ use async_trait::async_trait;
 use databricks_zerobus_ingest_sdk::databricks::zerobus::RecordType as RustRecordType;
 use databricks_zerobus_ingest_sdk::{
     DefaultTokenFactory, EncodedRecord as RustRecordPayload,
-    HeadersProvider as RustHeadersProvider, StreamConfigurationOptions as RustStreamOptions,
-    TableProperties as RustTableProperties, ZerobusError as RustZerobusError,
+    HeadersProvider as RustHeadersProvider, ZerobusError as RustZerobusError,
     ZerobusResult as RustZerobusResult, ZerobusSdk as RustZerobusSdk,
     ZerobusStream as RustZerobusStream,
 };
@@ -93,47 +92,6 @@ pub struct StreamConfigurationOptions {
     pub stream_paused_max_wait_time_ms: Option<u32>,
 }
 
-impl From<StreamConfigurationOptions> for RustStreamOptions {
-    fn from(opts: StreamConfigurationOptions) -> Self {
-        let default = RustStreamOptions::default();
-
-        let record_type = match opts.record_type {
-            Some(0) => RustRecordType::Json,
-            Some(1) => RustRecordType::Proto,
-            _ => RustRecordType::Proto,
-        };
-
-        RustStreamOptions {
-            max_inflight_requests: opts
-                .max_inflight_requests
-                .unwrap_or(default.max_inflight_requests as u32)
-                as usize,
-            recovery: opts.recovery.unwrap_or(default.recovery),
-            recovery_timeout_ms: opts
-                .recovery_timeout_ms
-                .map(|v| v as u64)
-                .unwrap_or(default.recovery_timeout_ms),
-            recovery_backoff_ms: opts
-                .recovery_backoff_ms
-                .map(|v| v as u64)
-                .unwrap_or(default.recovery_backoff_ms),
-            recovery_retries: opts.recovery_retries.unwrap_or(default.recovery_retries),
-            flush_timeout_ms: opts
-                .flush_timeout_ms
-                .map(|v| v as u64)
-                .unwrap_or(default.flush_timeout_ms),
-            server_lack_of_ack_timeout_ms: opts
-                .server_lack_of_ack_timeout_ms
-                .map(|v| v as u64)
-                .unwrap_or(default.server_lack_of_ack_timeout_ms),
-            record_type,
-            callback_max_wait_time_ms: None, // Callbacks not supported in TS SDK
-            stream_paused_max_wait_time_ms: opts.stream_paused_max_wait_time_ms.map(|v| v as u64),
-            ack_callback: None, // Callbacks not supported in TS SDK
-        }
-    }
-}
-
 /// Properties of the target Delta table for ingestion.
 ///
 /// Specifies which Unity Catalog table to write to and optionally the schema descriptor
@@ -147,31 +105,6 @@ pub struct TableProperties {
     /// Optional Protocol Buffer descriptor as a base64-encoded string.
     /// If not provided, JSON encoding will be used.
     pub descriptor_proto: Option<String>,
-}
-
-impl TableProperties {
-    fn to_rust(&self) -> Result<RustTableProperties> {
-        let descriptor: Option<prost_types::DescriptorProto> = if let Some(ref desc_str) =
-            self.descriptor_proto
-        {
-            let bytes = base64_decode(desc_str)
-                .map_err(|e| Error::from_reason(format!("Failed to decode descriptor: {}", e)))?;
-
-            let descriptor_proto: prost_types::DescriptorProto = prost::Message::decode(&bytes[..])
-                .map_err(|e| {
-                    Error::from_reason(format!("Failed to parse descriptor proto: {}", e))
-                })?;
-
-            Some(descriptor_proto)
-        } else {
-            None
-        };
-
-        Ok(RustTableProperties {
-            table_name: self.table_name.clone(),
-            descriptor_proto: descriptor,
-        })
-    }
 }
 
 /// Custom error type for Zerobus operations.
@@ -197,6 +130,19 @@ impl ZerobusError {
     pub fn message(&self) -> String {
         self.message.clone()
     }
+}
+
+/// Convert a JS `BigInt` to `i64`, erroring if it can't be represented losslessly.
+/// Used by `waitForOffset` to avoid the precision loss of the old
+/// `Number(bigint)` round-trip past 2^53.
+fn bigint_to_i64(value: BigInt) -> Result<i64> {
+    let (n, lossless) = value.get_i64();
+    if !lossless {
+        return Err(Error::from_reason(
+            "offsetId exceeds i64 range; cannot be represented without loss",
+        ));
+    }
+    Ok(n)
 }
 
 /// Helper function to convert a JavaScript value to a RustRecordPayload.
@@ -326,35 +272,37 @@ impl ZerobusStream {
     #[allow(deprecated)]
     pub fn ingest_record(&self, env: Env, payload: Unknown) -> Result<JsObject> {
         let record_payload = convert_js_to_record_payload(&env, payload)?;
-
-        let ack_future = {
-            let handle = tokio::runtime::Handle::current();
-            let stream = self.inner.clone();
-
-            handle.block_on(async move {
-                let mut guard = stream.lock().await;
-                let stream_ref = guard
-                    .as_mut()
-                    .ok_or_else(|| Error::from_reason("Stream has been closed"))?;
-
-                stream_ref
-                    .ingest_record(record_payload)
-                    .await
-                    .map_err(|e| Error::from_reason(format!("Failed to ingest record: {}", e)))
-            })?
-        };
+        let stream = self.inner.clone();
 
         env.execute_tokio_future(
             async move {
-                ack_future
-                    .await
-                    .map_err(|e| napi::Error::from_reason(format!("Acknowledgment failed: {}", e)))
+                let offset = {
+                    let mut guard = stream.lock().await;
+                    let stream_ref = guard
+                        .as_mut()
+                        .ok_or_else(|| napi::Error::from_reason("Stream has been closed"))?;
+                    stream_ref
+                        .ingest_record_offset(record_payload)
+                        .await
+                        .map_err(|e| {
+                            napi::Error::from_reason(format!("Failed to ingest record: {}", e))
+                        })?
+                };
+                {
+                    let guard = stream.lock().await;
+                    let stream_ref = guard
+                        .as_ref()
+                        .ok_or_else(|| napi::Error::from_reason("Stream has been closed"))?;
+                    stream_ref.wait_for_offset(offset).await.map_err(|e| {
+                        napi::Error::from_reason(format!("Acknowledgment failed: {}", e))
+                    })?;
+                }
+                Ok(offset)
             },
-            |env, result| {
-                let result_str = result.to_string();
+            |env, offset_id| {
                 let global: JsGlobal = env.get_global()?;
                 let bigint_ctor: JsFunction = global.get_named_property("BigInt")?;
-                let js_str = env.create_string(&result_str)?;
+                let js_str = env.create_string(&offset_id.to_string())?;
                 bigint_ctor.call(None, &[js_str.into_unknown()])
             },
         )
@@ -395,48 +343,46 @@ impl ZerobusStream {
     #[napi(ts_return_type = "Promise<bigint | null>")]
     #[allow(deprecated)]
     pub fn ingest_records(&self, env: Env, records: Vec<Unknown>) -> Result<JsObject> {
+        // Rust SDK 2.0 removed the blocking `ingest_records`. v1 semantics
+        // (Promise resolves after server ack; `null` for empty batches) are
+        // preserved via `ingest_records_offset` + `wait_for_offset`.
         let record_payloads: Result<Vec<RustRecordPayload>> = records
             .into_iter()
             .map(|payload| convert_js_to_record_payload(&env, payload))
             .collect();
-
         let record_payloads = record_payloads?;
-
-        let ack_future_option = {
-            let handle = tokio::runtime::Handle::current();
-            let stream = self.inner.clone();
-
-            handle.block_on(async move {
-                let mut guard = stream.lock().await;
-                let stream_ref = guard
-                    .as_mut()
-                    .ok_or_else(|| Error::from_reason("Stream has been closed"))?;
-
-                // Send batch to SDK
-                stream_ref
-                    .ingest_records(record_payloads)
-                    .await
-                    .map_err(|e| Error::from_reason(format!("Failed to ingest batch: {}", e)))
-            })?
-        };
+        let stream = self.inner.clone();
 
         env.execute_tokio_future(
             async move {
-                match ack_future_option.await {
-                    Ok(Some(offset_id)) => Ok(Some(offset_id)),
-                    Ok(None) => Ok(None),
-                    Err(e) => Err(napi::Error::from_reason(format!(
-                        "Batch acknowledgment failed: {}",
-                        e
-                    ))),
+                let offset_opt = {
+                    let mut guard = stream.lock().await;
+                    let stream_ref = guard
+                        .as_mut()
+                        .ok_or_else(|| napi::Error::from_reason("Stream has been closed"))?;
+                    stream_ref
+                        .ingest_records_offset(record_payloads)
+                        .await
+                        .map_err(|e| {
+                            napi::Error::from_reason(format!("Failed to ingest batch: {}", e))
+                        })?
+                };
+                if let Some(offset) = offset_opt {
+                    let guard = stream.lock().await;
+                    let stream_ref = guard
+                        .as_ref()
+                        .ok_or_else(|| napi::Error::from_reason("Stream has been closed"))?;
+                    stream_ref.wait_for_offset(offset).await.map_err(|e| {
+                        napi::Error::from_reason(format!("Batch acknowledgment failed: {}", e))
+                    })?;
                 }
+                Ok(offset_opt)
             },
             |env, result| match result {
                 Some(offset_id) => {
-                    let offset_str = offset_id.to_string();
                     let global: JsGlobal = env.get_global()?;
                     let bigint_ctor: JsFunction = global.get_named_property("BigInt")?;
-                    let js_str = env.create_string(&offset_str)?;
+                    let js_str = env.create_string(&offset_id.to_string())?;
                     let bigint = bigint_ctor.call(None, &[js_str.into_unknown()])?;
                     Ok(bigint.into_unknown())
                 }
@@ -588,12 +534,9 @@ impl ZerobusStream {
     /// // Wait for the last offset (implies all previous are also acknowledged)
     /// await stream.waitForOffset(offsets[offsets.length - 1]);
     /// ```
-    #[napi(ts_args_type = "offsetId: bigint", ts_return_type = "Promise<void>")]
-    pub fn wait_for_offset(&self, env: Env, offset_id: JsUnknown) -> Result<JsObject> {
-        let global: JsGlobal = env.get_global()?;
-        let number_ctor: JsFunction = global.get_named_property("Number")?;
-        let num_result: JsUnknown = number_ctor.call(None, &[offset_id])?;
-        let offset: i64 = num_result.coerce_to_number()?.get_int64()?;
+    #[napi(ts_return_type = "Promise<void>")]
+    pub fn wait_for_offset(&self, env: Env, offset_id: BigInt) -> Result<JsObject> {
+        let offset = bigint_to_i64(offset_id)?;
 
         let stream = self.inner.clone();
 
@@ -1001,8 +944,40 @@ impl ZerobusSdk {
         options: Option<StreamConfigurationOptions>,
         headers_provider: Option<JsHeadersProvider>,
     ) -> Result<JsObject> {
-        let rust_table_props = table_properties.to_rust()?;
-        let rust_options: RustStreamOptions = options.map(|o| o.into()).unwrap_or_default();
+        // Decode the optional protobuf descriptor up-front so we can hand it
+        // to the builder's `.compiled_proto()` setter; the builder constructs
+        // the (now-private) `TableProperties` itself.
+        let descriptor_proto: Option<prost_types::DescriptorProto> =
+            if let Some(ref desc_str) = table_properties.descriptor_proto {
+                let bytes = base64_decode(desc_str).map_err(|e| {
+                    Error::from_reason(format!("Failed to decode descriptor: {}", e))
+                })?;
+                let dp: prost_types::DescriptorProto = prost::Message::decode(&bytes[..])
+                    .map_err(|e| {
+                        Error::from_reason(format!("Failed to parse descriptor proto: {}", e))
+                    })?;
+                Some(dp)
+            } else {
+                None
+            };
+
+        let opts = options.unwrap_or(StreamConfigurationOptions {
+            max_inflight_requests: None,
+            recovery: None,
+            recovery_timeout_ms: None,
+            recovery_backoff_ms: None,
+            recovery_retries: None,
+            flush_timeout_ms: None,
+            server_lack_of_ack_timeout_ms: None,
+            record_type: None,
+            stream_paused_max_wait_time_ms: None,
+        });
+
+        let record_type = match opts.record_type {
+            Some(0) => RustRecordType::Json,
+            Some(1) => RustRecordType::Proto,
+            _ => RustRecordType::Proto,
+        };
 
         let headers_tsfn = match headers_provider {
             Some(JsHeadersProvider {
@@ -1021,36 +996,67 @@ impl ZerobusSdk {
                 let headers_provider_arc: Arc<dyn RustHeadersProvider> = if let Some(tsfn) =
                     headers_tsfn
                 {
-                    // Custom headers provider from JavaScript callback
                     let headers = call_headers_tsfn(tsfn).await.map_err(|e| {
                         napi::Error::from_reason(format!("Headers callback failed: {}", e))
                     })?;
-
                     let static_provider = StaticHeadersProvider::new(headers)
                         .map_err(|e| napi::Error::from_reason(format!("Invalid headers: {}", e)))?;
-
                     Arc::new(static_provider)
                 } else {
-                    // Default OAuth with TS user agent
                     Arc::new(TsOAuthHeadersProvider::new(
                         client_id,
                         client_secret,
-                        table_name,
+                        table_name.clone(),
                         workspace_id,
                         unity_catalog_url,
                     ))
                 };
 
-                let stream = sdk
-                    .create_stream_with_headers_provider(
-                        rust_table_props,
-                        headers_provider_arc,
-                        Some(rust_options),
-                    )
-                    .await
-                    .map_err(|e| {
-                        napi::Error::from_reason(format!("Failed to create stream: {}", e))
-                    })?;
+                let mut builder = sdk
+                    .stream_builder()
+                    .table(table_name)
+                    .headers_provider(headers_provider_arc);
+
+                if let Some(v) = opts.max_inflight_requests {
+                    builder = builder.max_inflight_requests(v as usize);
+                }
+                if let Some(v) = opts.recovery {
+                    builder = builder.recovery(v);
+                }
+                if let Some(v) = opts.recovery_timeout_ms {
+                    builder = builder.recovery_timeout_ms(v as u64);
+                }
+                if let Some(v) = opts.recovery_backoff_ms {
+                    builder = builder.recovery_backoff_ms(v as u64);
+                }
+                if let Some(v) = opts.recovery_retries {
+                    builder = builder.recovery_retries(v);
+                }
+                if let Some(v) = opts.flush_timeout_ms {
+                    builder = builder.flush_timeout_ms(v as u64);
+                }
+                if let Some(v) = opts.server_lack_of_ack_timeout_ms {
+                    builder = builder.server_lack_of_ack_timeout_ms(v as u64);
+                }
+                if let Some(v) = opts.stream_paused_max_wait_time_ms {
+                    builder = builder.stream_paused_max_wait_time_ms(Some(v as u64));
+                }
+
+                let builder = match record_type {
+                    RustRecordType::Json => builder.json(),
+                    RustRecordType::Proto | RustRecordType::Unspecified => {
+                        let desc = descriptor_proto.ok_or_else(|| {
+                            napi::Error::from_reason(
+                                "Proto record type requires descriptor_proto on TableProperties",
+                            )
+                        })?;
+                        builder.compiled_proto(desc)
+                    }
+                };
+
+                let stream = builder.build().await.map_err(|e| {
+                    napi::Error::from_reason(format!("Failed to create stream: {}", e))
+                })?;
 
                 Ok(ZerobusStream {
                     inner: Arc::new(Mutex::new(Some(stream))),
@@ -1122,27 +1128,24 @@ fn base64_decode(input: &str) -> std::result::Result<Vec<u8>, String> {
 }
 
 // =============================================================================
-// Arrow Flight Support (Experimental/Unsupported)
+// Arrow Flight Support (Beta)
 // Enabled with feature flag: cargo build --features arrow-flight
 // =============================================================================
 
 #[cfg(feature = "arrow-flight")]
-use arrow_ipc::reader::StreamReader;
-#[cfg(feature = "arrow-flight")]
 use arrow_ipc::writer::StreamWriter;
 #[cfg(feature = "arrow-flight")]
+use bytes::Bytes;
+#[cfg(feature = "arrow-flight")]
 use databricks_zerobus_ingest_sdk::{
-    ArrowSchema as RustArrowSchema, ArrowStreamConfigurationOptions as RustArrowStreamOptions,
-    ArrowTableProperties as RustArrowTableProperties, DataType as RustDataType, Field as RustField,
+    ArrowSchema as RustArrowSchema, DataType as RustDataType, Field as RustField,
     RecordBatch as RustRecordBatch, ZerobusArrowStream as RustZerobusArrowStream,
 };
-#[cfg(feature = "arrow-flight")]
-use std::io::Cursor;
 
 /// IPC compression type for Arrow Flight streams.
 ///
-/// **Experimental/Unsupported**: Arrow Flight support is experimental and not yet
-/// supported for production use. The API may change in future releases.
+/// **Beta**: Arrow Flight support is in Beta. The API is stabilising but
+/// may still change before reaching GA.
 #[cfg(feature = "arrow-flight")]
 #[napi]
 pub enum IpcCompressionType {
@@ -1154,8 +1157,8 @@ pub enum IpcCompressionType {
 
 /// Configuration options for Arrow Flight streams.
 ///
-/// **Experimental/Unsupported**: Arrow Flight support is experimental and not yet
-/// supported for production use. The API may change in future releases.
+/// **Beta**: Arrow Flight support is in Beta. The API is stabilising but
+/// may still change before reaching GA.
 #[cfg(feature = "arrow-flight")]
 #[napi(object)]
 #[derive(Debug, Clone)]
@@ -1196,52 +1199,23 @@ pub struct ArrowStreamConfigurationOptions {
     pub ipc_compression: Option<i32>,
 }
 
+// Rust SDK 2.0 `ArrowStreamConfigurationOptions` is `#[non_exhaustive]` and
+// cannot be constructed via struct literal from this crate. Arrow options are
+// applied via setters on `sdk.stream_builder()` inside `create_arrow_stream`
+// below.
+
 #[cfg(feature = "arrow-flight")]
-impl From<ArrowStreamConfigurationOptions> for RustArrowStreamOptions {
-    fn from(opts: ArrowStreamConfigurationOptions) -> Self {
-        let default = RustArrowStreamOptions::default();
-
-        let ipc_compression = match opts.ipc_compression {
-            Some(0) => Some(arrow_ipc::CompressionType::LZ4_FRAME),
-            Some(1) => Some(arrow_ipc::CompressionType::ZSTD),
-            _ => None,
-        };
-
-        RustArrowStreamOptions {
-            max_inflight_batches: opts
-                .max_inflight_batches
-                .unwrap_or(default.max_inflight_batches as u32)
-                as usize,
-            recovery: opts.recovery.unwrap_or(default.recovery),
-            recovery_timeout_ms: opts
-                .recovery_timeout_ms
-                .map(|v| v as u64)
-                .unwrap_or(default.recovery_timeout_ms),
-            recovery_backoff_ms: opts
-                .recovery_backoff_ms
-                .map(|v| v as u64)
-                .unwrap_or(default.recovery_backoff_ms),
-            recovery_retries: opts.recovery_retries.unwrap_or(default.recovery_retries),
-            server_lack_of_ack_timeout_ms: opts
-                .server_lack_of_ack_timeout_ms
-                .map(|v| v as u64)
-                .unwrap_or(default.server_lack_of_ack_timeout_ms),
-            flush_timeout_ms: opts
-                .flush_timeout_ms
-                .map(|v| v as u64)
-                .unwrap_or(default.flush_timeout_ms),
-            connection_timeout_ms: opts
-                .connection_timeout_ms
-                .map(|v| v as u64)
-                .unwrap_or(default.connection_timeout_ms),
-            ipc_compression,
-        }
+fn map_ipc_compression(value: Option<i32>) -> Option<arrow_ipc::CompressionType> {
+    match value {
+        Some(0) => Some(arrow_ipc::CompressionType::LZ4_FRAME),
+        Some(1) => Some(arrow_ipc::CompressionType::ZSTD),
+        _ => None,
     }
 }
 
 /// Arrow data type enum for schema definition.
 ///
-/// **Experimental/Unsupported**: Arrow Flight support is experimental.
+/// **Beta**: Arrow Flight support is in Beta.
 #[cfg(feature = "arrow-flight")]
 #[napi]
 pub enum ArrowDataType {
@@ -1313,7 +1287,7 @@ fn convert_arrow_data_type(dt: i32) -> RustDataType {
 
 /// Arrow field definition for schema.
 ///
-/// **Experimental/Unsupported**: Arrow Flight support is experimental.
+/// **Beta**: Arrow Flight support is in Beta.
 #[cfg(feature = "arrow-flight")]
 #[napi(object)]
 #[derive(Debug, Clone)]
@@ -1331,8 +1305,8 @@ pub struct ArrowField {
 /// Unlike `TableProperties` which uses Protocol Buffers, Arrow Flight streams
 /// require an Arrow schema definition.
 ///
-/// **Experimental/Unsupported**: Arrow Flight support is experimental and not yet
-/// supported for production use. The API may change in future releases.
+/// **Beta**: Arrow Flight support is in Beta. The API is stabilising but
+/// may still change before reaching GA.
 #[cfg(feature = "arrow-flight")]
 #[napi(object)]
 #[derive(Debug, Clone)]
@@ -1343,28 +1317,22 @@ pub struct ArrowTableProperties {
     pub schema_fields: Vec<ArrowField>,
 }
 
+// Rust SDK 2.0 made `ArrowTableProperties` non-public; the table name and
+// schema are passed to `sdk.stream_builder().table(...).arrow(schema)`
+// directly. This helper builds just the Arrow `Schema`.
 #[cfg(feature = "arrow-flight")]
-impl ArrowTableProperties {
-    fn to_rust(&self) -> Result<RustArrowTableProperties> {
-        let fields: Vec<RustField> = self
-            .schema_fields
-            .iter()
-            .map(|f| {
-                RustField::new(
-                    &f.name,
-                    convert_arrow_data_type(f.data_type),
-                    f.nullable.unwrap_or(true),
-                )
-            })
-            .collect();
-
-        let schema = Arc::new(RustArrowSchema::new(fields));
-
-        Ok(RustArrowTableProperties {
-            table_name: self.table_name.clone(),
-            schema,
+fn build_arrow_schema(fields: &[ArrowField]) -> Arc<RustArrowSchema> {
+    let rust_fields: Vec<RustField> = fields
+        .iter()
+        .map(|f| {
+            RustField::new(
+                &f.name,
+                convert_arrow_data_type(f.data_type),
+                f.nullable.unwrap_or(true),
+            )
         })
-    }
+        .collect();
+    Arc::new(RustArrowSchema::new(rust_fields))
 }
 
 /// An Arrow Flight stream for ingesting Arrow RecordBatches into a Delta table.
@@ -1372,8 +1340,8 @@ impl ArrowTableProperties {
 /// This stream provides a high-performance interface for streaming Arrow data
 /// to Databricks Delta tables using the Arrow Flight protocol.
 ///
-/// **Experimental/Unsupported**: Arrow Flight support is experimental and not yet
-/// supported for production use. The API may change in future releases.
+/// **Beta**: Arrow Flight support is in Beta. The API is stabilising but
+/// may still change before reaching GA.
 ///
 /// # Lifecycle
 ///
@@ -1405,29 +1373,6 @@ impl ArrowTableProperties {
 pub struct ZerobusArrowStream {
     inner: Arc<Mutex<Option<RustZerobusArrowStream>>>,
     schema: Arc<RustArrowSchema>,
-}
-
-/// Helper to parse Arrow IPC buffer to RecordBatch
-#[cfg(feature = "arrow-flight")]
-fn parse_arrow_ipc_to_batch(
-    ipc_buffer: &[u8],
-    _expected_schema: &RustArrowSchema,
-) -> Result<RustRecordBatch> {
-    let cursor = Cursor::new(ipc_buffer);
-    let reader = StreamReader::try_new(cursor, None)
-        .map_err(|e| Error::from_reason(format!("Failed to parse Arrow IPC: {}", e)))?;
-
-    // Collect all batches (typically just one)
-    let batches: Vec<RustRecordBatch> = reader.filter_map(|r| r.ok()).collect();
-
-    if batches.is_empty() {
-        return Err(Error::from_reason(
-            "Arrow IPC buffer contains no record batches",
-        ));
-    }
-
-    // Return the first batch (or could concatenate if multiple)
-    Ok(batches.into_iter().next().unwrap())
 }
 
 /// Helper to serialize RecordBatch to Arrow IPC buffer
@@ -1477,29 +1422,30 @@ impl ZerobusArrowStream {
     /// ```
     #[napi(ts_return_type = "Promise<bigint>")]
     pub fn ingest_batch(&self, env: Env, ipc_buffer: Buffer) -> Result<JsObject> {
-        let schema = self.schema.clone();
+        // The Rust SDK's `ingest_ipc_batch` materialises the bytes into a
+        // `RecordBatch`, rejects multi-batch streams, and validates the schema
+        // against the stream's schema. No need to duplicate any of that here.
         let stream = self.inner.clone();
         let buffer_vec = ipc_buffer.to_vec();
 
         env.execute_tokio_future(
             async move {
-                let batch = parse_arrow_ipc_to_batch(&buffer_vec, &schema)?;
-
                 let mut guard = stream.lock().await;
                 let stream_ref = guard
                     .as_mut()
                     .ok_or_else(|| napi::Error::from_reason("Arrow stream has been closed"))?;
 
                 stream_ref
-                    .ingest_batch(batch)
+                    .ingest_ipc_batch(Bytes::from(buffer_vec))
                     .await
-                    .map_err(|e| napi::Error::from_reason(format!("Failed to ingest batch: {}", e)))
+                    .map_err(|e| {
+                        napi::Error::from_reason(format!("Failed to ingest batch: {}", e))
+                    })
             },
             |env, offset_id| {
-                let offset_str = offset_id.to_string();
                 let global: JsGlobal = env.get_global()?;
                 let bigint_ctor: JsFunction = global.get_named_property("BigInt")?;
-                let js_str = env.create_string(&offset_str)?;
+                let js_str = env.create_string(&offset_id.to_string())?;
                 bigint_ctor.call(None, &[js_str.into_unknown()])
             },
         )
@@ -1512,12 +1458,9 @@ impl ZerobusArrowStream {
     /// # Arguments
     ///
     /// * `offset_id` - The offset ID to wait for (returned by ingestBatch)
-    #[napi(ts_args_type = "offsetId: bigint", ts_return_type = "Promise<void>")]
-    pub fn wait_for_offset(&self, env: Env, offset_id: JsUnknown) -> Result<JsObject> {
-        let global: JsGlobal = env.get_global()?;
-        let number_ctor: JsFunction = global.get_named_property("Number")?;
-        let num_result: JsUnknown = number_ctor.call(None, &[offset_id])?;
-        let offset: i64 = num_result.coerce_to_number()?.get_int64()?;
+    #[napi(ts_return_type = "Promise<void>")]
+    pub fn wait_for_offset(&self, env: Env, offset_id: BigInt) -> Result<JsObject> {
+        let offset = bigint_to_i64(offset_id)?;
 
         let stream = self.inner.clone();
 
@@ -1623,8 +1566,8 @@ impl ZerobusArrowStream {
 impl ZerobusSdk {
     /// Creates a new Arrow Flight stream to a Delta table.
     ///
-    /// **Experimental/Unsupported**: Arrow Flight support is experimental and not yet
-    /// supported for production use. The API may change in future releases.
+    /// **Beta**: Arrow Flight support is in Beta. The API is stabilising
+    /// but may still change before reaching GA.
     ///
     /// This method establishes an Arrow Flight connection to the Zerobus service
     /// for high-performance columnar data ingestion.
@@ -1668,24 +1611,69 @@ impl ZerobusSdk {
         client_secret: String,
         options: Option<ArrowStreamConfigurationOptions>,
     ) -> Result<JsObject> {
-        let rust_table_props = table_properties.to_rust()?;
-        let schema = rust_table_props.schema.clone();
-        let rust_options: Option<RustArrowStreamOptions> = options.map(|o| o.into());
+        // Rust SDK 2.0 removed the convenience `create_arrow_stream` method;
+        // open via `sdk.stream_builder().table(...).oauth(...).arrow(schema)
+        // .build_arrow()` and apply options via setters. `ArrowTableProperties`
+        // is also private now, so we build just the schema here.
+        let schema = build_arrow_schema(&table_properties.schema_fields);
+        let table_name = table_properties.table_name.clone();
+        let opts = options.unwrap_or(ArrowStreamConfigurationOptions {
+            max_inflight_batches: None,
+            recovery: None,
+            recovery_timeout_ms: None,
+            recovery_backoff_ms: None,
+            recovery_retries: None,
+            server_lack_of_ack_timeout_ms: None,
+            flush_timeout_ms: None,
+            connection_timeout_ms: None,
+            ipc_compression: None,
+        });
+        let ipc_compression = map_ipc_compression(opts.ipc_compression);
+        let schema_for_stream = schema.clone();
 
         let sdk = self.inner.clone();
 
         env.execute_tokio_future(
             async move {
-                let stream = sdk
-                    .create_arrow_stream(rust_table_props, client_id, client_secret, rust_options)
-                    .await
-                    .map_err(|e| {
-                        napi::Error::from_reason(format!("Failed to create arrow stream: {}", e))
-                    })?;
+                let mut builder = sdk
+                    .stream_builder()
+                    .table(table_name)
+                    .oauth(client_id, client_secret)
+                    .arrow(schema.clone());
+
+                if let Some(v) = opts.max_inflight_batches {
+                    builder = builder.max_inflight_batches(v as usize);
+                }
+                if let Some(v) = opts.recovery {
+                    builder = builder.recovery(v);
+                }
+                if let Some(v) = opts.recovery_timeout_ms {
+                    builder = builder.recovery_timeout_ms(v as u64);
+                }
+                if let Some(v) = opts.recovery_backoff_ms {
+                    builder = builder.recovery_backoff_ms(v as u64);
+                }
+                if let Some(v) = opts.recovery_retries {
+                    builder = builder.recovery_retries(v);
+                }
+                if let Some(v) = opts.server_lack_of_ack_timeout_ms {
+                    builder = builder.server_lack_of_ack_timeout_ms(v as u64);
+                }
+                if let Some(v) = opts.flush_timeout_ms {
+                    builder = builder.flush_timeout_ms(v as u64);
+                }
+                if let Some(v) = opts.connection_timeout_ms {
+                    builder = builder.connection_timeout_ms(v as u64);
+                }
+                builder = builder.ipc_compression(ipc_compression);
+
+                let stream = builder.build_arrow().await.map_err(|e| {
+                    napi::Error::from_reason(format!("Failed to create arrow stream: {}", e))
+                })?;
 
                 Ok(ZerobusArrowStream {
                     inner: Arc::new(Mutex::new(Some(stream))),
-                    schema,
+                    schema: schema_for_stream,
                 })
             },
             |_env, stream| Ok(stream),
@@ -1694,7 +1682,7 @@ impl ZerobusSdk {
 
     /// Recreates an Arrow stream with the same configuration and re-ingests unacknowledged batches.
     ///
-    /// **Experimental/Unsupported**: Arrow Flight support is experimental.
+    /// **Beta**: Arrow Flight support is in Beta.
     ///
     /// # Arguments
     ///

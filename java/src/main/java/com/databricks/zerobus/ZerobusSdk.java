@@ -328,6 +328,9 @@ public class ZerobusSdk implements AutoCloseable {
   /**
    * Creates a new Arrow Flight stream for ingesting Arrow record batches into a table.
    *
+   * <p><b>Beta:</b> Arrow Flight ingestion is in Beta. The API is stabilising but may still change
+   * before reaching GA.
+   *
    * @param tableName The fully qualified table name (catalog.schema.table).
    * @param schema The Arrow schema describing the columns of the target table.
    * @param clientId The OAuth client ID for authentication.

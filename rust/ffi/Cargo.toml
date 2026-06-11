@@ -1,6 +1,6 @@
 [package]
 name = "zerobus-ffi"
-version = "1.1.0"
+version = "1.2.1"
 edition = "2021"
 description = "C FFI bindings for the Zerobus Rust SDK"
 license = "Apache-2.0"
@@ -10,7 +10,7 @@ publish = false
 crate-type = ["staticlib", "cdylib"]
 
 [dependencies]
-databricks-zerobus-ingest-sdk = { path = "../sdk", version = "2.0.0", features = ["arrow-flight", "testing"] }
+databricks-zerobus-ingest-sdk = { path = "../sdk", version = "2.0.1", features = ["arrow-flight", "testing"] }
 
 # Arrow IPC for serializing/deserializing RecordBatches across the FFI boundary
 arrow-ipc.workspace = true
@@ -21,6 +21,7 @@ once_cell.workspace = true
 prost.workspace = true
 prost-types.workspace = true
 async-trait.workspace = true
+bytes.workspace = true
 libc.workspace = true
 
 # Logging

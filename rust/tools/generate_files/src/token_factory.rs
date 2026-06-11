@@ -29,7 +29,8 @@ pub async fn get_token(
             "type": "unity_catalog_privileges",
             "privileges": ["SELECT"],
             "object_type": "TABLE",
-            "object_full_path": format!("{}.{}.{}", catalog, schema, table)
+            "object_full_path": format!("{}.{}.{}", catalog, schema, table),
+            "operations": ["zerobuswrite"]
         }
     ]);
 

@@ -81,7 +81,7 @@ jobs:
         shell: powershell
 
       - name: Install dependencies
-        run: npm ci
+        run: npm install --no-audit --no-fund
 
       - name: Build
         run: npm run build -- --target ${{ matrix.target }}
@@ -151,7 +151,7 @@ jobs:
         shell: powershell
 
       - name: Install dependencies
-        run: npm ci
+        run: npm install --no-audit --no-fund
 
       - name: Build
         run: npm run build:debug

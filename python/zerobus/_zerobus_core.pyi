@@ -84,7 +84,7 @@ class StreamConfigurationOptions:
     """
 
     max_inflight_records: int
-    """Maximum number of records that can be sent to the server before waiting for acknowledgment (default: 50000)"""
+    """Maximum number of records that can be sent to the server before waiting for acknowledgment (default: 1000000)"""
 
     recovery: bool
     """Whether to enable automatic recovery of the stream in case of failure (default: True)"""
@@ -118,7 +118,7 @@ class StreamConfigurationOptions:
 
     def __init__(
         self,
-        max_inflight_records: int = 50000,
+        max_inflight_records: int = 1000000,
         recovery: bool = True,
         recovery_timeout_ms: int = 15000,
         recovery_backoff_ms: int = 2000,
@@ -134,7 +134,7 @@ class StreamConfigurationOptions:
         Create stream configuration options.
 
         Args:
-            max_inflight_records: Maximum number of unacknowledged records (default: 50000)
+            max_inflight_records: Maximum number of unacknowledged records (default: 1000000)
             recovery: Enable automatic stream recovery (default: True)
             recovery_timeout_ms: Recovery operation timeout in ms (default: 15000)
             recovery_backoff_ms: Delay between recovery attempts in ms (default: 2000)

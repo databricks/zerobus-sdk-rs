@@ -1,9 +1,11 @@
 use std::error::Error;
 use std::sync::Arc;
 
-use arrow_array::{Float64Array, Int32Array, Int64Array, RecordBatch, StringArray};
+use arrow_array::{
+    Float64Array, Int32Array, LargeStringArray, RecordBatch, TimestampMicrosecondArray,
+};
 use arrow_ipc::CompressionType;
-use databricks_zerobus_ingest_sdk::{ArrowSchema, DataType, Field, ZerobusSdk};
+use databricks_zerobus_ingest_sdk::{ArrowSchema, DataType, Field, TimeUnit, ZerobusSdk};
 
 /// One row of the `orders` table.
 #[derive(Clone)]
@@ -33,17 +35,22 @@ const SERVER_ENDPOINT: &str = "https://<your-shard-id>.zerobus.<region>.cloud.da
 // const DATABRICKS_WORKSPACE_URL: &str = "https://<your-workspace>.azuredatabricks.net";
 // const SERVER_ENDPOINT: &str = "https://<your-shard-id>.zerobus.<region>.azuredatabricks.net";
 
-/// Builds the Arrow schema for the `orders` table.
+/// Builds the Arrow schema for the `orders` table, matching the canonical
+/// Arrow schema the Databricks Arrow Flight server derives from a Delta
+/// table: Delta `STRING` → `LargeUtf8`, Delta `TIMESTAMP` → `Timestamp(
+/// Microsecond, Some("UTC"))`, all columns nullable unless declared
+/// `NOT NULL` in the Delta DDL.
 fn orders_schema() -> Arc<ArrowSchema> {
+    let utc_micros = DataType::Timestamp(TimeUnit::Microsecond, Some("UTC".into()));
     Arc::new(ArrowSchema::new(vec![
-        Field::new("id", DataType::Int32, false),
-        Field::new("customer_name", DataType::Utf8, false),
-        Field::new("product_name", DataType::Utf8, false),
-        Field::new("quantity", DataType::Int32, false),
-        Field::new("price", DataType::Float64, false),
-        Field::new("status", DataType::Utf8, false),
-        Field::new("created_at", DataType::Int64, false),
-        Field::new("updated_at", DataType::Int64, false),
+        Field::new("id", DataType::Int32, true),
+        Field::new("customer_name", DataType::LargeUtf8, true),
+        Field::new("product_name", DataType::LargeUtf8, true),
+        Field::new("quantity", DataType::Int32, true),
+        Field::new("price", DataType::Float64, true),
+        Field::new("status", DataType::LargeUtf8, true),
+        Field::new("created_at", utc_micros.clone(), true),
+        Field::new("updated_at", utc_micros, true),
     ]))
 }
 
@@ -62,13 +69,13 @@ fn build_orders_batch(schema: &Arc<ArrowSchema>, orders: &[Order]) -> RecordBatc
         schema.clone(),
         vec![
             Arc::new(Int32Array::from(ids)),
-            Arc::new(StringArray::from(customer_names)),
-            Arc::new(StringArray::from(product_names)),
+            Arc::new(LargeStringArray::from(customer_names)),
+            Arc::new(LargeStringArray::from(product_names)),
             Arc::new(Int32Array::from(quantities)),
             Arc::new(Float64Array::from(prices)),
-            Arc::new(StringArray::from(statuses)),
-            Arc::new(Int64Array::from(created_at)),
-            Arc::new(Int64Array::from(updated_at)),
+            Arc::new(LargeStringArray::from(statuses)),
+            Arc::new(TimestampMicrosecondArray::from(created_at).with_timezone("UTC")),
+            Arc::new(TimestampMicrosecondArray::from(updated_at).with_timezone("UTC")),
         ],
     )
     .expect("Failed to build RecordBatch")
@@ -100,7 +107,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
     const ROWS_PER_BATCH: usize = 3;
     const WAIT_EVERY: usize = 10;
 
-    let now = chrono::Utc::now().timestamp();
+    let now = chrono::Utc::now().timestamp_micros();
 
     for i in 0..NUM_BATCHES {
         let orders: Vec<Order> = (0..ROWS_PER_BATCH)

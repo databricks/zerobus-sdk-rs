@@ -15,6 +15,7 @@ extern crate libc;
 
 use arrow_ipc::{reader::StreamReader, writer::StreamWriter, CompressionType};
 use async_trait::async_trait;
+use bytes::Bytes;
 use databricks_zerobus_ingest_sdk::databricks::zerobus::RecordType;
 use databricks_zerobus_ingest_sdk::{
     EncodedRecord, HeadersProvider, NoTlsConfig, ZerobusError, ZerobusResult, ZerobusSdk,
@@ -120,20 +121,6 @@ fn ipc_bytes_to_schema(
         ZerobusError::InvalidArgument(format!("Failed to parse Arrow IPC schema: {e}"))
     })?;
     Ok(reader.schema().clone())
-}
-
-/// Deserializes the first `RecordBatch` from Arrow IPC stream bytes.
-#[allow(clippy::result_large_err)]
-fn ipc_bytes_to_record_batch(bytes: &[u8]) -> ZerobusResult<RecordBatch> {
-    use std::io::Cursor;
-    let cursor = Cursor::new(bytes);
-    let mut reader = StreamReader::try_new(cursor, None).map_err(|e| {
-        ZerobusError::InvalidArgument(format!("Failed to parse Arrow IPC stream: {e}"))
-    })?;
-    reader
-        .next()
-        .ok_or_else(|| ZerobusError::InvalidArgument("No record batch in IPC stream".to_string()))?
-        .map_err(|e| ZerobusError::InvalidArgument(format!("Failed to read Arrow IPC batch: {e}")))
 }
 
 /// Serializes a `RecordBatch` to Arrow IPC stream bytes (schema + one batch).
@@ -341,7 +328,8 @@ pub extern "C" fn zerobus_arrow_stream_free(stream: *mut CArrowStream) {
 /// Ingests one Arrow RecordBatch supplied as Arrow IPC stream bytes.
 ///
 /// `ipc_bytes` must be a valid Arrow IPC stream (schema + one record batch).
-/// Returns the logical offset assigned to this batch, or -1 on error.
+/// The bytes are deserialised to a RecordBatch internally. Works with all
+/// compression settings. Returns the logical offset assigned to this batch, or -1 on error.
 #[no_mangle]
 pub extern "C" fn zerobus_arrow_stream_ingest_batch(
     stream: *mut CArrowStream,
@@ -365,8 +353,59 @@ pub extern "C" fn zerobus_arrow_stream_ingest_batch(
     let bytes = unsafe { std::slice::from_raw_parts(ipc_bytes, ipc_len) };
 
     let offset_res = RUNTIME.block_on(async {
-        let batch = ipc_bytes_to_record_batch(bytes)?;
-        stream_ref.ingest_batch(batch).await
+        stream_ref
+            .ingest_ipc_batch(Bytes::copy_from_slice(bytes))
+            .await
+    });
+
+    match offset_res {
+        Ok(offset) => {
+            write_success_result(result);
+            offset
+        }
+        Err(err) => {
+            if !result.is_null() {
+                unsafe {
+                    *result = CResult::error(err);
+                }
+            }
+            -1
+        }
+    }
+}
+
+/// Ingests one Arrow RecordBatch supplied as Arrow IPC stream bytes.
+///
+/// Equivalent to `zerobus_arrow_stream_ingest_batch`. Both functions deserialise the IPC
+/// bytes to a `RecordBatch` and re-encode with the stream's compression settings, so
+/// either works regardless of whether the stream was created with compression.
+/// Returns the logical offset assigned to this batch, or -1 on error.
+#[no_mangle]
+pub extern "C" fn zerobus_arrow_stream_ingest_batch_via_record_batch(
+    stream: *mut CArrowStream,
+    ipc_bytes: *const u8,
+    ipc_len: usize,
+    result: *mut CResult,
+) -> i64 {
+    if ipc_bytes.is_null() || ipc_len == 0 {
+        write_error_result(result, "IPC bytes are required", false);
+        return -1;
+    }
+
+    let stream_ref = match validate_arrow_stream_ptr(stream) {
+        Ok(s) => s,
+        Err(msg) => {
+            write_error_result(result, msg, false);
+            return -1;
+        }
+    };
+
+    let bytes = unsafe { std::slice::from_raw_parts(ipc_bytes, ipc_len) };
+
+    let offset_res = RUNTIME.block_on(async {
+        stream_ref
+            .ingest_ipc_batch(bytes::Bytes::copy_from_slice(bytes))
+            .await
     });
 
     match offset_res {
@@ -1068,8 +1107,8 @@ pub extern "C" fn zerobus_sdk_create_stream(
 
         let stream = builder.build().await.map_err(|e| e.to_string())?;
 
-        let boxed = Box::new(stream);
-        Ok::<*mut CZerobusStream, String>(Box::into_raw(boxed) as *mut CZerobusStream)
+        let arc = Arc::new(stream);
+        Ok::<*mut CZerobusStream, String>(Arc::into_raw(arc) as *mut CZerobusStream)
     });
 
     match res {
@@ -1148,8 +1187,8 @@ pub extern "C" fn zerobus_sdk_create_stream_with_headers_provider(
 
         let stream = builder.build().await.map_err(|e| e.to_string())?;
 
-        let boxed = Box::new(stream);
-        Ok::<*mut CZerobusStream, String>(Box::into_raw(boxed) as *mut CZerobusStream)
+        let arc = Arc::new(stream);
+        Ok::<*mut CZerobusStream, String>(Arc::into_raw(arc) as *mut CZerobusStream)
     });
 
     match res {
@@ -1169,7 +1208,9 @@ pub extern "C" fn zerobus_sdk_create_stream_with_headers_provider(
 pub extern "C" fn zerobus_stream_free(stream: *mut CZerobusStream) {
     if !stream.is_null() {
         unsafe {
-            let _ = Box::from_raw(stream as *mut ZerobusStream);
+            // Reconstruct the Arc and drop it. If nowait tasks still hold clones,
+            // the stream is not freed until the last Arc is dropped.
+            let _ = Arc::from_raw(stream as *const ZerobusStream);
         }
     }
 }
@@ -1406,6 +1447,193 @@ pub extern "C" fn zerobus_stream_ingest_json_records(
             -1
         }
     }
+}
+
+/// Clones the `Arc<ZerobusStream>` from a raw `CZerobusStream` pointer without
+/// consuming the pointer. The caller retains ownership of the original pointer;
+/// the returned `Arc` will keep the stream alive until it is dropped.
+///
+/// # Safety
+/// `stream` must be a non-null pointer produced by `zerobus_sdk_create_stream` or
+/// `zerobus_sdk_create_stream_with_headers_provider` and must not have been freed.
+unsafe fn clone_stream_arc(stream: *mut CZerobusStream) -> Arc<ZerobusStream> {
+    Arc::increment_strong_count(stream as *const ZerobusStream);
+    Arc::from_raw(stream as *const ZerobusStream)
+}
+
+/// Ingest a protobuf record without waiting for the record to be queued (fire-and-forget).
+///
+/// Spawns a background task to queue the record and returns immediately.
+/// The result only reflects argument validation errors; ingestion errors are silently ignored.
+///
+/// # Safety
+/// The stream must remain valid until all background tasks spawned by this function complete.
+#[no_mangle]
+pub extern "C" fn zerobus_stream_ingest_proto_record_nowait(
+    stream: *mut CZerobusStream,
+    data: *const u8,
+    data_len: usize,
+    result: *mut CResult,
+) {
+    if data.is_null() {
+        write_error_result(result, "Invalid data pointer", false);
+        return;
+    }
+
+    if let Err(msg) = validate_stream_ptr(stream) {
+        write_error_result(result, msg, false);
+        return;
+    }
+
+    let data_slice = unsafe { std::slice::from_raw_parts(data, data_len) };
+    let data_vec = data_slice.to_vec();
+    let stream_arc = unsafe { clone_stream_arc(stream) };
+
+    RUNTIME.spawn(async move {
+        let payload = EncodedRecord::Proto(data_vec);
+        let _ = stream_arc.ingest_record_offset(payload).await;
+    });
+
+    write_success_result(result);
+}
+
+/// Ingest a JSON record without waiting for the record to be queued (fire-and-forget).
+///
+/// Spawns a background task to queue the record and returns immediately.
+/// The result only reflects argument validation errors; ingestion errors are silently ignored.
+///
+/// # Safety
+/// The stream must remain valid until all background tasks spawned by this function complete.
+#[no_mangle]
+pub extern "C" fn zerobus_stream_ingest_json_record_nowait(
+    stream: *mut CZerobusStream,
+    json_data: *const c_char,
+    result: *mut CResult,
+) {
+    if let Err(msg) = validate_stream_ptr(stream) {
+        write_error_result(result, msg, false);
+        return;
+    }
+
+    let json_str = match unsafe { c_str_to_string(json_data) } {
+        Ok(s) => s,
+        Err(e) => {
+            write_error_result(result, e, false);
+            return;
+        }
+    };
+
+    let stream_arc = unsafe { clone_stream_arc(stream) };
+
+    RUNTIME.spawn(async move {
+        let payload = EncodedRecord::Json(json_str);
+        let _ = stream_arc.ingest_record_offset(payload).await;
+    });
+
+    write_success_result(result);
+}
+
+/// Ingest a batch of protobuf records without waiting (fire-and-forget).
+///
+/// Copies all record data before spawning the background task, so the caller's
+/// memory is safe to release immediately after this function returns.
+///
+/// # Safety
+/// The stream must remain valid until all background tasks spawned by this function complete.
+#[no_mangle]
+pub extern "C" fn zerobus_stream_ingest_proto_records_nowait(
+    stream: *mut CZerobusStream,
+    records: *const *const u8,
+    record_lens: *const usize,
+    num_records: usize,
+    result: *mut CResult,
+) {
+    if records.is_null() || record_lens.is_null() {
+        write_error_result(result, "Invalid records pointer", false);
+        return;
+    }
+
+    if let Err(msg) = validate_stream_ptr(stream) {
+        write_error_result(result, msg, false);
+        return;
+    }
+
+    if num_records == 0 {
+        write_success_result(result);
+        return;
+    }
+
+    let records_vec: Vec<Vec<u8>> = unsafe {
+        let records_slice = std::slice::from_raw_parts(records, num_records);
+        let lens_slice = std::slice::from_raw_parts(record_lens, num_records);
+        records_slice
+            .iter()
+            .zip(lens_slice.iter())
+            .map(|(ptr, len)| std::slice::from_raw_parts(*ptr, *len).to_vec())
+            .collect()
+    };
+
+    let stream_arc = unsafe { clone_stream_arc(stream) };
+
+    RUNTIME.spawn(async move {
+        let payloads: Vec<EncodedRecord> =
+            records_vec.into_iter().map(EncodedRecord::Proto).collect();
+        let _ = stream_arc.ingest_records_offset(payloads).await;
+    });
+
+    write_success_result(result);
+}
+
+/// Ingest a batch of JSON records without waiting (fire-and-forget).
+///
+/// Copies all strings before spawning the background task, so the caller's
+/// memory is safe to release immediately after this function returns.
+///
+/// # Safety
+/// The stream must remain valid until all background tasks spawned by this function complete.
+#[no_mangle]
+pub extern "C" fn zerobus_stream_ingest_json_records_nowait(
+    stream: *mut CZerobusStream,
+    json_records: *const *const c_char,
+    num_records: usize,
+    result: *mut CResult,
+) {
+    if json_records.is_null() {
+        write_error_result(result, "Invalid records pointer", false);
+        return;
+    }
+
+    if let Err(msg) = validate_stream_ptr(stream) {
+        write_error_result(result, msg, false);
+        return;
+    }
+
+    if num_records == 0 {
+        write_success_result(result);
+        return;
+    }
+
+    let json_vec: Result<Vec<String>, _> = unsafe {
+        let json_slice = std::slice::from_raw_parts(json_records, num_records);
+        json_slice.iter().map(|ptr| c_str_to_string(*ptr)).collect()
+    };
+
+    let json_vec = match json_vec {
+        Ok(v) => v,
+        Err(e) => {
+            write_error_result(result, e, false);
+            return;
+        }
+    };
+
+    let stream_arc = unsafe { clone_stream_arc(stream) };
+
+    RUNTIME.spawn(async move {
+        let payloads: Vec<EncodedRecord> = json_vec.into_iter().map(EncodedRecord::Json).collect();
+        let _ = stream_arc.ingest_records_offset(payloads).await;
+    });
+
+    write_success_result(result);
 }
 
 /// Wait for a specific offset to be acknowledged by the server

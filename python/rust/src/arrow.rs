@@ -1,5 +1,8 @@
 //! PyO3 bindings for Arrow Flight stream support.
 //!
+//! **Beta**: Arrow Flight ingestion is in Beta. The API is stabilising but
+//! may still change before reaching GA.
+//!
 //! These types are always compiled into the wheel, but the Python-side API
 //! gates usage on `pyarrow` being installed at runtime.
 
@@ -10,15 +13,19 @@ use pyo3::types::PyBytes;
 use tokio::sync::RwLock;
 
 use databricks_zerobus_ingest_sdk::{
-    ArrowStreamConfigurationOptions as RustArrowStreamOptions,
-    ArrowTableProperties as RustArrowTableProperties, ZerobusArrowStream as RustZerobusArrowStream,
-    ZerobusError as RustError, ZerobusSdk as RustSdk,
+    StreamBuilder, ZerobusArrowStream as RustZerobusArrowStream, ZerobusError as RustError,
+    ZerobusSdk as RustSdk,
 };
 
 use crate::auth::HeadersProviderWrapper;
 use crate::common::map_error;
 
-/// Deserialize Arrow IPC bytes into exactly one RecordBatch.
+// =============================================================================
+// IPC HELPERS
+// =============================================================================
+
+/// Deserialize Arrow IPC bytes into exactly one RecordBatch (used only on the
+/// compressed ingest path).
 fn ipc_bytes_to_record_batch(ipc_bytes: &[u8]) -> Result<arrow_array::RecordBatch, RustError> {
     let mut reader = arrow_ipc::reader::StreamReader::try_new(ipc_bytes, None).map_err(|e| {
         RustError::InvalidArgument(format!("Failed to parse Arrow IPC data: {}", e))
@@ -40,7 +47,7 @@ fn ipc_bytes_to_record_batch(ipc_bytes: &[u8]) -> Result<arrow_array::RecordBatc
     Ok(batch)
 }
 
-/// Serialize a RecordBatch to Arrow IPC bytes.
+/// Serialize a RecordBatch back to Arrow IPC bytes (used by `get_unacked_batches`).
 fn record_batch_to_ipc_bytes(batch: &arrow_array::RecordBatch) -> Result<Vec<u8>, RustError> {
     let mut buffer = Vec::new();
     {
@@ -59,9 +66,6 @@ fn record_batch_to_ipc_bytes(batch: &arrow_array::RecordBatch) -> Result<Vec<u8>
 }
 
 /// Build an ArrowSchema from Arrow IPC stream bytes (schema-only, no batches).
-///
-/// Python side uses `pa.ipc.new_stream(sink, schema)` followed by `writer.close()`
-/// to produce a full IPC stream containing only the schema message.
 fn ipc_schema_bytes_to_arrow_schema(
     schema_bytes: &[u8],
 ) -> Result<arrow_schema::Schema, RustError> {
@@ -105,7 +109,20 @@ impl IPCCompression {
     }
 }
 
+impl IPCCompression {
+    fn to_rust(self) -> Option<arrow_ipc::CompressionType> {
+        match self {
+            IPCCompression::Uncompressed => None,
+            IPCCompression::LZ4Frame => Some(arrow_ipc::CompressionType::LZ4_FRAME),
+            IPCCompression::Zstd => Some(arrow_ipc::CompressionType::ZSTD),
+        }
+    }
+}
+
 /// Configuration options for Arrow Flight streams.
+///
+/// **Beta**: Arrow Flight ingestion is in Beta. The API is stabilising but
+/// may still change before reaching GA.
 #[pyclass]
 #[derive(Clone)]
 pub struct ArrowStreamConfigurationOptions {
@@ -145,20 +162,20 @@ pub struct ArrowStreamConfigurationOptions {
 
 impl Default for ArrowStreamConfigurationOptions {
     fn default() -> Self {
-        let rust_default = RustArrowStreamOptions::default();
+        // Mirror the Rust SDK 2.0.0 `ArrowStreamConfigurationOptions` defaults.
+        // Hardcoded because the upstream struct is `#[non_exhaustive]` and
+        // its `Default::default()` can no longer be destructured here.
         Self {
-            max_inflight_batches: rust_default.max_inflight_batches as i32,
-            recovery: rust_default.recovery,
-            recovery_timeout_ms: rust_default.recovery_timeout_ms as i64,
-            recovery_backoff_ms: rust_default.recovery_backoff_ms as i64,
-            recovery_retries: rust_default.recovery_retries as i32,
-            server_lack_of_ack_timeout_ms: rust_default.server_lack_of_ack_timeout_ms as i64,
-            flush_timeout_ms: rust_default.flush_timeout_ms as i64,
-            connection_timeout_ms: rust_default.connection_timeout_ms as i64,
+            max_inflight_batches: 1_000,
+            recovery: true,
+            recovery_timeout_ms: 15_000,
+            recovery_backoff_ms: 2_000,
+            recovery_retries: 4,
+            server_lack_of_ack_timeout_ms: 60_000,
+            flush_timeout_ms: 300_000,
+            connection_timeout_ms: 30_000,
             ipc_compression: IPCCompression::Uncompressed,
-            stream_paused_max_wait_time_ms: rust_default
-                .stream_paused_max_wait_time_ms
-                .map(|v| v as i64),
+            stream_paused_max_wait_time_ms: None,
         }
     }
 }
@@ -184,11 +201,13 @@ impl ArrowStreamConfigurationOptions {
                     }
                     "flush_timeout_ms" => options.flush_timeout_ms = value.extract()?,
                     "connection_timeout_ms" => options.connection_timeout_ms = value.extract()?,
-                    "ipc_compression" => {
-                        options.ipc_compression = value.extract()?;
-                    }
+                    "ipc_compression" => options.ipc_compression = value.extract()?,
                     "stream_paused_max_wait_time_ms" => {
-                        options.stream_paused_max_wait_time_ms = value.extract()?
+                        options.stream_paused_max_wait_time_ms = if value.is_none() {
+                            None
+                        } else {
+                            Some(value.extract()?)
+                        };
                     }
                     _ => {
                         return Err(pyo3::exceptions::PyValueError::new_err(format!(
@@ -208,8 +227,7 @@ impl ArrowStreamConfigurationOptions {
             "ArrowStreamConfigurationOptions(max_inflight_batches={}, recovery={}, \
              recovery_timeout_ms={}, recovery_backoff_ms={}, recovery_retries={}, \
              server_lack_of_ack_timeout_ms={}, flush_timeout_ms={}, connection_timeout_ms={}, \
-             ipc_compression={}, \
-             stream_paused_max_wait_time_ms={:?})",
+             ipc_compression={}, stream_paused_max_wait_time_ms={:?})",
             self.max_inflight_batches,
             self.recovery,
             self.recovery_timeout_ms,
@@ -225,41 +243,25 @@ impl ArrowStreamConfigurationOptions {
 }
 
 impl ArrowStreamConfigurationOptions {
-    pub fn to_rust(&self) -> Result<RustArrowStreamOptions, PyErr> {
-        if self.max_inflight_batches < 0 {
-            return Err(pyo3::exceptions::PyValueError::new_err(
-                "max_inflight_batches must be non-negative",
-            ));
-        }
-        if self.recovery_timeout_ms < 0 {
-            return Err(pyo3::exceptions::PyValueError::new_err(
-                "recovery_timeout_ms must be non-negative",
-            ));
-        }
-        if self.recovery_backoff_ms < 0 {
-            return Err(pyo3::exceptions::PyValueError::new_err(
-                "recovery_backoff_ms must be non-negative",
-            ));
-        }
-        if self.recovery_retries < 0 {
-            return Err(pyo3::exceptions::PyValueError::new_err(
-                "recovery_retries must be non-negative",
-            ));
-        }
-        if self.server_lack_of_ack_timeout_ms < 0 {
-            return Err(pyo3::exceptions::PyValueError::new_err(
-                "server_lack_of_ack_timeout_ms must be non-negative",
-            ));
-        }
-        if self.flush_timeout_ms < 0 {
-            return Err(pyo3::exceptions::PyValueError::new_err(
-                "flush_timeout_ms must be non-negative",
-            ));
-        }
-        if self.connection_timeout_ms < 0 {
-            return Err(pyo3::exceptions::PyValueError::new_err(
-                "connection_timeout_ms must be non-negative",
-            ));
+    fn validate(&self) -> PyResult<()> {
+        for (name, val) in [
+            ("max_inflight_batches", self.max_inflight_batches as i64),
+            ("recovery_timeout_ms", self.recovery_timeout_ms),
+            ("recovery_backoff_ms", self.recovery_backoff_ms),
+            ("recovery_retries", self.recovery_retries as i64),
+            (
+                "server_lack_of_ack_timeout_ms",
+                self.server_lack_of_ack_timeout_ms,
+            ),
+            ("flush_timeout_ms", self.flush_timeout_ms),
+            ("connection_timeout_ms", self.connection_timeout_ms),
+        ] {
+            if val < 0 {
+                return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                    "{} must be non-negative",
+                    name
+                )));
+            }
         }
         if let Some(v) = self.stream_paused_max_wait_time_ms {
             if v < 0 {
@@ -268,23 +270,24 @@ impl ArrowStreamConfigurationOptions {
                 ));
             }
         }
-        let ipc_compression = match self.ipc_compression {
-            IPCCompression::Uncompressed => None,
-            IPCCompression::LZ4Frame => Some(arrow_ipc::CompressionType::LZ4_FRAME),
-            IPCCompression::Zstd => Some(arrow_ipc::CompressionType::ZSTD),
-        };
-        Ok(RustArrowStreamOptions {
-            max_inflight_batches: self.max_inflight_batches as usize,
-            recovery: self.recovery,
-            recovery_timeout_ms: self.recovery_timeout_ms as u64,
-            recovery_backoff_ms: self.recovery_backoff_ms as u64,
-            recovery_retries: self.recovery_retries as u32,
-            server_lack_of_ack_timeout_ms: self.server_lack_of_ack_timeout_ms as u64,
-            flush_timeout_ms: self.flush_timeout_ms as u64,
-            connection_timeout_ms: self.connection_timeout_ms as u64,
-            ipc_compression,
-            stream_paused_max_wait_time_ms: self.stream_paused_max_wait_time_ms.map(|v| v as u64),
-        })
+        Ok(())
+    }
+
+    /// Apply Arrow options to a `StreamBuilder` via setters.
+    pub(crate) fn apply<'a>(&self, builder: StreamBuilder<'a>) -> PyResult<StreamBuilder<'a>> {
+        self.validate()?;
+        let b = builder
+            .max_inflight_batches(self.max_inflight_batches as usize)
+            .recovery(self.recovery)
+            .recovery_timeout_ms(self.recovery_timeout_ms as u64)
+            .recovery_backoff_ms(self.recovery_backoff_ms as u64)
+            .recovery_retries(self.recovery_retries as u32)
+            .server_lack_of_ack_timeout_ms(self.server_lack_of_ack_timeout_ms as u64)
+            .flush_timeout_ms(self.flush_timeout_ms as u64)
+            .connection_timeout_ms(self.connection_timeout_ms as u64)
+            .ipc_compression(self.ipc_compression.to_rust())
+            .stream_paused_max_wait_time_ms(self.stream_paused_max_wait_time_ms.map(|v| v as u64));
+        Ok(b)
     }
 }
 
@@ -293,82 +296,65 @@ impl ArrowStreamConfigurationOptions {
 // =============================================================================
 
 /// Synchronous Arrow Flight stream for ingesting pyarrow RecordBatches.
+///
+/// **Beta**: Arrow Flight ingestion is in Beta. The API is stabilising but
+/// may still change before reaching GA.
 #[pyclass]
 pub struct ZerobusArrowStream {
-    inner: Arc<RwLock<RustZerobusArrowStream>>,
-    runtime: Arc<tokio::runtime::Runtime>,
+    pub(crate) inner: Arc<RwLock<RustZerobusArrowStream>>,
+    pub(crate) runtime: Arc<tokio::runtime::Runtime>,
 }
 
 #[pymethods]
 impl ZerobusArrowStream {
     /// Ingest a single Arrow RecordBatch (as IPC bytes) and return the offset.
-    ///
-    /// Args:
-    ///     ipc_bytes: Arrow IPC serialized bytes from pyarrow.RecordBatch.serialize()
     fn ingest_batch(&self, py: Python, ipc_bytes: &PyBytes) -> PyResult<i64> {
-        // TODO(perf): eliminate double IPC serialization - Python-to-IPC-to-RecordBatch here,
-        // then RecordBatch-to-IPC again inside the Rust SDK for Flight. Pass IPC bytes
-        // directly to the SDK instead.
-        let batch = ipc_bytes_to_record_batch(ipc_bytes.as_bytes()).map_err(|e| map_error(e))?;
-
-        let stream_clone = self.inner.clone();
+        let batch = ipc_bytes_to_record_batch(ipc_bytes.as_bytes()).map_err(map_error)?;
+        let stream = self.inner.clone();
         let runtime = self.runtime.clone();
-
         py.allow_threads(|| {
             runtime.block_on(async move {
-                let stream_guard = stream_clone.read().await;
-                stream_guard
-                    .ingest_batch(batch)
-                    .await
-                    .map_err(|e| Python::with_gil(|_py| map_error(e)))
+                let guard = stream.read().await;
+                guard.ingest_batch(batch).await.map_err(map_error)
             })
         })
     }
 
     /// Wait for a specific offset to be acknowledged.
     fn wait_for_offset(&self, py: Python, offset: i64) -> PyResult<()> {
-        let stream_clone = self.inner.clone();
+        let stream = self.inner.clone();
         let runtime = self.runtime.clone();
 
         py.allow_threads(|| {
             runtime.block_on(async move {
-                let stream_guard = stream_clone.read().await;
-                stream_guard
-                    .wait_for_offset(offset)
-                    .await
-                    .map_err(|e| Python::with_gil(|_py| map_error(e)))
+                let guard = stream.read().await;
+                guard.wait_for_offset(offset).await.map_err(map_error)
             })
         })
     }
 
     /// Flush all pending batches, waiting for acknowledgment.
     fn flush(&self, py: Python) -> PyResult<()> {
-        let stream_clone = self.inner.clone();
+        let stream = self.inner.clone();
         let runtime = self.runtime.clone();
 
         py.allow_threads(|| {
             runtime.block_on(async move {
-                let stream_guard = stream_clone.read().await;
-                stream_guard
-                    .flush()
-                    .await
-                    .map_err(|e| Python::with_gil(|_py| map_error(e)))
+                let guard = stream.read().await;
+                guard.flush().await.map_err(map_error)
             })
         })
     }
 
     /// Close the stream gracefully.
     fn close(&self, py: Python) -> PyResult<()> {
-        let stream_clone = self.inner.clone();
+        let stream = self.inner.clone();
         let runtime = self.runtime.clone();
 
         py.allow_threads(|| {
             runtime.block_on(async move {
-                let mut stream_guard = stream_clone.write().await;
-                stream_guard
-                    .close()
-                    .await
-                    .map_err(|e| Python::with_gil(|_py| map_error(e)))
+                let mut guard = stream.write().await;
+                guard.close().await.map_err(map_error)
             })
         })
     }
@@ -376,12 +362,12 @@ impl ZerobusArrowStream {
     /// Check if the stream has been closed.
     #[getter]
     fn is_closed(&self, py: Python) -> bool {
-        let stream_clone = self.inner.clone();
+        let stream = self.inner.clone();
         let runtime = self.runtime.clone();
         py.allow_threads(|| {
             runtime.block_on(async move {
-                let stream_guard = stream_clone.read().await;
-                stream_guard.is_closed()
+                let guard = stream.read().await;
+                guard.is_closed()
             })
         })
     }
@@ -389,37 +375,33 @@ impl ZerobusArrowStream {
     /// Get the table name.
     #[getter]
     fn table_name(&self, py: Python) -> String {
-        let stream_clone = self.inner.clone();
+        let stream = self.inner.clone();
         let runtime = self.runtime.clone();
         py.allow_threads(|| {
             runtime.block_on(async move {
-                let stream_guard = stream_clone.read().await;
-                stream_guard.table_name().to_string()
+                let guard = stream.read().await;
+                guard.table_name().to_string()
             })
         })
     }
 
     /// Get unacknowledged batches as a list of Arrow IPC byte buffers.
     fn get_unacked_batches(&self, py: Python) -> PyResult<Vec<PyObject>> {
-        let stream_clone = self.inner.clone();
+        let stream = self.inner.clone();
         let runtime = self.runtime.clone();
 
         py.allow_threads(|| {
             runtime.block_on(async move {
-                let stream_guard = stream_clone.read().await;
-                let batches = stream_guard
-                    .get_unacked_batches()
-                    .await
-                    .map_err(|e| Python::with_gil(|_py| map_error(e)))?;
+                let guard = stream.read().await;
+                let batches = guard.get_unacked_batches().await.map_err(map_error)?;
 
                 Python::with_gil(|py| {
-                    let mut py_batches: Vec<PyObject> = Vec::with_capacity(batches.len());
+                    let mut out = Vec::with_capacity(batches.len());
                     for batch in &batches {
-                        let ipc_bytes =
-                            record_batch_to_ipc_bytes(batch).map_err(|e| map_error(e))?;
-                        py_batches.push(PyBytes::new(py, &ipc_bytes).into());
+                        let ipc = record_batch_to_ipc_bytes(batch).map_err(map_error)?;
+                        out.push(PyBytes::new(py, &ipc).into());
                     }
-                    Ok(py_batches)
+                    Ok(out)
                 })
             })
         })
@@ -431,66 +413,55 @@ impl ZerobusArrowStream {
 // =============================================================================
 
 /// Asynchronous Arrow Flight stream for ingesting pyarrow RecordBatches.
+///
+/// **Beta**: Arrow Flight ingestion is in Beta. The API is stabilising but
+/// may still change before reaching GA.
 #[pyclass(name = "AsyncZerobusArrowStream")]
 pub struct AsyncZerobusArrowStream {
-    inner: Arc<RwLock<RustZerobusArrowStream>>,
+    pub(crate) inner: Arc<RwLock<RustZerobusArrowStream>>,
 }
 
 #[pymethods]
 impl AsyncZerobusArrowStream {
     /// Ingest a single Arrow RecordBatch (as IPC bytes) and return the offset.
     fn ingest_batch<'py>(&self, py: Python<'py>, ipc_bytes: &PyBytes) -> PyResult<&'py PyAny> {
-        let batch = ipc_bytes_to_record_batch(ipc_bytes.as_bytes()).map_err(|e| map_error(e))?;
-
-        let stream_clone = self.inner.clone();
-
+        let batch = ipc_bytes_to_record_batch(ipc_bytes.as_bytes()).map_err(map_error)?;
+        let stream = self.inner.clone();
         pyo3_asyncio::tokio::future_into_py(py, async move {
-            let stream_guard = stream_clone.read().await;
-            stream_guard
-                .ingest_batch(batch)
-                .await
-                .map_err(|e| Python::with_gil(|_py| map_error(e)))
+            let guard = stream.read().await;
+            guard.ingest_batch(batch).await.map_err(map_error)
         })
     }
 
     /// Wait for a specific offset to be acknowledged.
     fn wait_for_offset<'py>(&self, py: Python<'py>, offset: i64) -> PyResult<&'py PyAny> {
-        let stream_clone = self.inner.clone();
+        let stream = self.inner.clone();
 
         pyo3_asyncio::tokio::future_into_py(py, async move {
-            let stream_guard = stream_clone.read().await;
-            stream_guard
-                .wait_for_offset(offset)
-                .await
-                .map_err(|e| Python::with_gil(|_py| map_error(e)))?;
+            let guard = stream.read().await;
+            guard.wait_for_offset(offset).await.map_err(map_error)?;
             Ok(())
         })
     }
 
     /// Flush all pending batches.
     fn flush<'py>(&self, py: Python<'py>) -> PyResult<&'py PyAny> {
-        let stream_clone = self.inner.clone();
+        let stream = self.inner.clone();
 
         pyo3_asyncio::tokio::future_into_py(py, async move {
-            let stream_guard = stream_clone.read().await;
-            stream_guard
-                .flush()
-                .await
-                .map_err(|e| Python::with_gil(|_py| map_error(e)))?;
+            let guard = stream.read().await;
+            guard.flush().await.map_err(map_error)?;
             Ok(())
         })
     }
 
     /// Close the stream gracefully.
     fn close<'py>(&self, py: Python<'py>) -> PyResult<&'py PyAny> {
-        let stream_clone = self.inner.clone();
+        let stream = self.inner.clone();
 
         pyo3_asyncio::tokio::future_into_py(py, async move {
-            let mut stream_guard = stream_clone.write().await;
-            stream_guard
-                .close()
-                .await
-                .map_err(|e| Python::with_gil(|_py| map_error(e)))?;
+            let mut guard = stream.write().await;
+            guard.close().await.map_err(map_error)?;
             Ok(())
         })
     }
@@ -499,7 +470,7 @@ impl AsyncZerobusArrowStream {
     #[getter]
     fn is_closed(&self) -> PyResult<bool> {
         match self.inner.try_read() {
-            Ok(stream_guard) => Ok(stream_guard.is_closed()),
+            Ok(guard) => Ok(guard.is_closed()),
             Err(_) => Err(pyo3::exceptions::PyRuntimeError::new_err(
                 "Cannot read stream state: lock is held by another operation",
             )),
@@ -510,7 +481,7 @@ impl AsyncZerobusArrowStream {
     #[getter]
     fn table_name(&self) -> PyResult<String> {
         match self.inner.try_read() {
-            Ok(stream_guard) => Ok(stream_guard.table_name().to_string()),
+            Ok(guard) => Ok(guard.table_name().to_string()),
             Err(_) => Err(pyo3::exceptions::PyRuntimeError::new_err(
                 "Cannot read stream state: lock is held by another operation",
             )),
@@ -519,22 +490,19 @@ impl AsyncZerobusArrowStream {
 
     /// Get unacknowledged batches as a list of Arrow IPC byte buffers.
     fn get_unacked_batches<'py>(&self, py: Python<'py>) -> PyResult<&'py PyAny> {
-        let stream_clone = self.inner.clone();
+        let stream = self.inner.clone();
 
         pyo3_asyncio::tokio::future_into_py(py, async move {
-            let stream_guard = stream_clone.read().await;
-            let batches = stream_guard
-                .get_unacked_batches()
-                .await
-                .map_err(|e| Python::with_gil(|_py| map_error(e)))?;
+            let guard = stream.read().await;
+            let batches = guard.get_unacked_batches().await.map_err(map_error)?;
 
             Python::with_gil(|py| {
-                let mut py_batches: Vec<PyObject> = Vec::with_capacity(batches.len());
+                let mut out: Vec<PyObject> = Vec::with_capacity(batches.len());
                 for batch in &batches {
-                    let ipc_bytes = record_batch_to_ipc_bytes(batch).map_err(|e| map_error(e))?;
-                    py_batches.push(PyBytes::new(py, &ipc_bytes).into());
+                    let ipc = record_batch_to_ipc_bytes(batch).map_err(map_error)?;
+                    out.push(PyBytes::new(py, &ipc).into());
                 }
-                Ok(py_batches)
+                Ok(out)
             })
         })
     }
@@ -544,7 +512,34 @@ impl AsyncZerobusArrowStream {
 // SDK METHODS — called from sync_wrapper and async_wrapper
 // =============================================================================
 
+/// Build an Arrow stream via `StreamBuilder` (shared by sync + async helpers).
+fn build_arrow_builder<'a>(
+    sdk_guard: &'a RustSdk,
+    table_name: String,
+    schema_ipc_bytes: &[u8],
+    client_id: Option<String>,
+    client_secret: Option<String>,
+    headers_provider: Option<PyObject>,
+    options: &ArrowStreamConfigurationOptions,
+) -> PyResult<StreamBuilder<'a>> {
+    let schema = ipc_schema_bytes_to_arrow_schema(schema_ipc_bytes).map_err(map_error)?;
+    let mut builder = sdk_guard.stream_builder().table(table_name);
+    if let Some(provider) = headers_provider {
+        builder = builder.headers_provider(Arc::new(HeadersProviderWrapper::new(provider)));
+    } else if let (Some(id), Some(secret)) = (client_id, client_secret) {
+        builder = builder.oauth(id, secret);
+    } else {
+        return Err(pyo3::exceptions::PyValueError::new_err(
+            "auth required: pass client_id+client_secret or a headers_provider",
+        ));
+    }
+    builder = builder.arrow(Arc::new(schema));
+    builder = options.apply(builder)?;
+    Ok(builder)
+}
+
 /// Create an Arrow stream (sync helper).
+#[allow(clippy::too_many_arguments)]
 pub fn create_arrow_stream_sync(
     sdk: &Arc<RwLock<RustSdk>>,
     runtime: &Arc<tokio::runtime::Runtime>,
@@ -555,31 +550,31 @@ pub fn create_arrow_stream_sync(
     client_secret: String,
     options: Option<&ArrowStreamConfigurationOptions>,
 ) -> PyResult<ZerobusArrowStream> {
-    let schema = ipc_schema_bytes_to_arrow_schema(schema_ipc_bytes).map_err(|e| map_error(e))?;
-
-    let table_props = RustArrowTableProperties {
-        table_name,
-        schema: Arc::new(schema),
-    };
-
-    let rust_options = options.map(|o| o.to_rust()).transpose()?;
-
-    let sdk_clone = sdk.clone();
-    let runtime_clone = runtime.clone();
+    let opts = options.cloned().unwrap_or_default();
+    let sdk = sdk.clone();
+    let runtime = runtime.clone();
+    let runtime_for_return = runtime.clone();
+    let schema_bytes = schema_ipc_bytes.to_vec();
 
     let stream = py.allow_threads(|| {
-        runtime_clone.block_on(async move {
-            let sdk_guard = sdk_clone.read().await;
-            sdk_guard
-                .create_arrow_stream(table_props, client_id, client_secret, rust_options)
-                .await
-                .map_err(|e| Python::with_gil(|_py| map_error(e)))
+        runtime.block_on(async move {
+            let sdk_guard = sdk.read().await;
+            let builder = build_arrow_builder(
+                &*sdk_guard,
+                table_name,
+                &schema_bytes,
+                Some(client_id),
+                Some(client_secret),
+                None,
+                &opts,
+            )?;
+            builder.build_arrow().await.map_err(map_error)
         })
     })?;
 
     Ok(ZerobusArrowStream {
         inner: Arc::new(RwLock::new(stream)),
-        runtime: runtime.clone(),
+        runtime: runtime_for_return,
     })
 }
 
@@ -593,32 +588,31 @@ pub fn create_arrow_stream_with_headers_provider_sync(
     headers_provider: PyObject,
     options: Option<&ArrowStreamConfigurationOptions>,
 ) -> PyResult<ZerobusArrowStream> {
-    let schema = ipc_schema_bytes_to_arrow_schema(schema_ipc_bytes).map_err(|e| map_error(e))?;
-
-    let table_props = RustArrowTableProperties {
-        table_name,
-        schema: Arc::new(schema),
-    };
-
-    let rust_options = options.map(|o| o.to_rust()).transpose()?;
-    let provider = Arc::new(HeadersProviderWrapper::new(headers_provider));
-
-    let sdk_clone = sdk.clone();
-    let runtime_clone = runtime.clone();
+    let opts = options.cloned().unwrap_or_default();
+    let sdk = sdk.clone();
+    let runtime = runtime.clone();
+    let runtime_for_return = runtime.clone();
+    let schema_bytes = schema_ipc_bytes.to_vec();
 
     let stream = py.allow_threads(|| {
-        runtime_clone.block_on(async move {
-            let sdk_guard = sdk_clone.read().await;
-            sdk_guard
-                .create_arrow_stream_with_headers_provider(table_props, provider, rust_options)
-                .await
-                .map_err(|e| Python::with_gil(|_py| map_error(e)))
+        runtime.block_on(async move {
+            let sdk_guard = sdk.read().await;
+            let builder = build_arrow_builder(
+                &*sdk_guard,
+                table_name,
+                &schema_bytes,
+                None,
+                None,
+                Some(headers_provider),
+                &opts,
+            )?;
+            builder.build_arrow().await.map_err(map_error)
         })
     })?;
 
     Ok(ZerobusArrowStream {
         inner: Arc::new(RwLock::new(stream)),
-        runtime: runtime.clone(),
+        runtime: runtime_for_return,
     })
 }
 
@@ -629,28 +623,30 @@ pub fn recreate_arrow_stream_sync(
     py: Python,
     old_stream: &ZerobusArrowStream,
 ) -> PyResult<ZerobusArrowStream> {
-    let sdk_clone = sdk.clone();
-    let old_inner = old_stream.inner.clone();
-    let runtime_clone = runtime.clone();
+    let sdk = sdk.clone();
+    let old = old_stream.inner.clone();
+    let runtime = runtime.clone();
+    let runtime_for_return = runtime.clone();
 
     let stream = py.allow_threads(|| {
-        runtime_clone.block_on(async move {
-            let old_guard = old_inner.read().await;
-            let sdk_guard = sdk_clone.read().await;
+        runtime.block_on(async move {
+            let old_guard = old.read().await;
+            let sdk_guard = sdk.read().await;
             sdk_guard
                 .recreate_arrow_stream(&*old_guard)
                 .await
-                .map_err(|e| Python::with_gil(|_py| map_error(e)))
+                .map_err(map_error)
         })
     })?;
 
     Ok(ZerobusArrowStream {
         inner: Arc::new(RwLock::new(stream)),
-        runtime: runtime.clone(),
+        runtime: runtime_for_return,
     })
 }
 
 /// Create an Arrow stream (async helper).
+#[allow(clippy::too_many_arguments)]
 pub fn create_arrow_stream_async<'py>(
     sdk: &Arc<RwLock<RustSdk>>,
     py: Python<'py>,
@@ -660,23 +656,21 @@ pub fn create_arrow_stream_async<'py>(
     client_secret: String,
     options: Option<ArrowStreamConfigurationOptions>,
 ) -> PyResult<&'py PyAny> {
-    let schema = ipc_schema_bytes_to_arrow_schema(&schema_ipc_bytes).map_err(|e| map_error(e))?;
-
-    let table_props = RustArrowTableProperties {
-        table_name,
-        schema: Arc::new(schema),
-    };
-
-    let rust_options = options.map(|o| o.to_rust()).transpose()?;
-    let sdk_clone = sdk.clone();
+    let opts = options.unwrap_or_default();
+    let sdk = sdk.clone();
 
     pyo3_asyncio::tokio::future_into_py(py, async move {
-        let sdk_guard = sdk_clone.read().await;
-        let stream = sdk_guard
-            .create_arrow_stream(table_props, client_id, client_secret, rust_options)
-            .await
-            .map_err(|e| Python::with_gil(|_py| map_error(e)))?;
-
+        let sdk_guard = sdk.read().await;
+        let builder = build_arrow_builder(
+            &*sdk_guard,
+            table_name,
+            &schema_ipc_bytes,
+            Some(client_id),
+            Some(client_secret),
+            None,
+            &opts,
+        )?;
+        let stream = builder.build_arrow().await.map_err(map_error)?;
         Ok(AsyncZerobusArrowStream {
             inner: Arc::new(RwLock::new(stream)),
         })
@@ -692,24 +686,21 @@ pub fn create_arrow_stream_with_headers_provider_async<'py>(
     headers_provider: PyObject,
     options: Option<ArrowStreamConfigurationOptions>,
 ) -> PyResult<&'py PyAny> {
-    let schema = ipc_schema_bytes_to_arrow_schema(&schema_ipc_bytes).map_err(|e| map_error(e))?;
-
-    let table_props = RustArrowTableProperties {
-        table_name,
-        schema: Arc::new(schema),
-    };
-
-    let rust_options = options.map(|o| o.to_rust()).transpose()?;
-    let provider = Arc::new(HeadersProviderWrapper::new(headers_provider));
-    let sdk_clone = sdk.clone();
+    let opts = options.unwrap_or_default();
+    let sdk = sdk.clone();
 
     pyo3_asyncio::tokio::future_into_py(py, async move {
-        let sdk_guard = sdk_clone.read().await;
-        let stream = sdk_guard
-            .create_arrow_stream_with_headers_provider(table_props, provider, rust_options)
-            .await
-            .map_err(|e| Python::with_gil(|_py| map_error(e)))?;
-
+        let sdk_guard = sdk.read().await;
+        let builder = build_arrow_builder(
+            &*sdk_guard,
+            table_name,
+            &schema_ipc_bytes,
+            None,
+            None,
+            Some(headers_provider),
+            &opts,
+        )?;
+        let stream = builder.build_arrow().await.map_err(map_error)?;
         Ok(AsyncZerobusArrowStream {
             inner: Arc::new(RwLock::new(stream)),
         })
@@ -722,17 +713,16 @@ pub fn recreate_arrow_stream_async<'py>(
     py: Python<'py>,
     old_stream: &AsyncZerobusArrowStream,
 ) -> PyResult<&'py PyAny> {
-    let sdk_clone = sdk.clone();
-    let old_inner = old_stream.inner.clone();
+    let sdk = sdk.clone();
+    let old = old_stream.inner.clone();
 
     pyo3_asyncio::tokio::future_into_py(py, async move {
-        let old_guard = old_inner.read().await;
-        let sdk_guard = sdk_clone.read().await;
+        let old_guard = old.read().await;
+        let sdk_guard = sdk.read().await;
         let stream = sdk_guard
             .recreate_arrow_stream(&*old_guard)
             .await
-            .map_err(|e| Python::with_gil(|_py| map_error(e)))?;
-
+            .map_err(map_error)?;
         Ok(AsyncZerobusArrowStream {
             inner: Arc::new(RwLock::new(stream)),
         })

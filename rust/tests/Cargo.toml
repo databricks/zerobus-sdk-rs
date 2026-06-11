@@ -31,7 +31,7 @@ tonic = { workspace = true, features = ["tls-native-roots", "transport"] }
 tonic-prost.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
-databricks-zerobus-ingest-sdk = { path = "../sdk", features = ["testing", "arrow-flight"] }
+databricks-zerobus-ingest-sdk = { path = "../sdk", features = ["testing", "arrow-flight", "zeroparser"] }
 
 # Arrow Flight test dependencies
 arrow-flight.workspace = true

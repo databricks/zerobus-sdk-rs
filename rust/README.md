@@ -18,6 +18,7 @@ A high-performance Rust client for streaming data ingestion into Databricks Delt
   - [5. Ingest Data](#5-ingest-data)
   - [6. Handle Acknowledgments](#6-handle-acknowledgments)
   - [7. Close the Stream](#7-close-the-stream)
+- [Client-side warnings](#client-side-warnings)
 - [Configuration Options](#configuration-options)
 - [Error Handling](#error-handling)
 - [Examples](#examples)
@@ -47,6 +48,8 @@ The Zerobus Rust SDK provides a robust, async-first interface for ingesting larg
 - **Flexible Configuration** - Fine-tune timeouts, retries, and recovery behavior
 - **Graceful Stream Management** - Proper flushing and acknowledgment tracking
 - **Acknowledgment Callbacks** - Receive notifications when records are acknowledged or encounter errors
+- **Arrow Flight Ingestion** *(Beta, opt-in)* — Stream Apache Arrow `RecordBatch` data directly to Zerobus over the Arrow Flight protocol on the same gRPC connection. Enable with `features = ["arrow-flight"]`; see [`examples/arrow/`](https://github.com/databricks/zerobus-sdk/tree/main/rust/examples/arrow).
+- **Zeroparser** *(opt-in)* — Zero-copy, single-pass protobuf parser for runtime-known schemas. Enable with `features = ["zeroparser"]`; see [`sdk/src/zeroparser/README.md`](https://github.com/databricks/zerobus-sdk/blob/main/rust/sdk/src/zeroparser/README.md).
 
 ## Installation
 
@@ -78,9 +81,9 @@ Then in your `Cargo.toml`:
 ```toml
 [dependencies]
 databricks-zerobus-ingest-sdk = { path = "../zerobus-sdk/rust/sdk" }
-prost = "0.13.3"
-prost-types = "0.13.3"
-tokio = { version = "1.42.0", features = ["macros", "rt-multi-thread"] }
+prost = "0.14"
+prost-types = "0.14"
+tokio = { version = "1.52", features = ["macros", "rt-multi-thread"] }
 ```
 
 ## Quick Start
@@ -104,14 +107,23 @@ zerobus_rust_sdk/
 ├── sdk/                                # Core SDK library
 │   ├── src/
 │   │   ├── lib.rs                      # Main SDK and stream implementation
+│   │   ├── builder/                    # Builder pattern for SDK initialization
 │   │   ├── default_token_factory.rs    # OAuth 2.0 token handling
 │   │   ├── errors.rs                   # Error types and retryable logic
 │   │   ├── headers_provider.rs         # Trait for custom authentication headers
-│   │   ├── builder/                    # Builder pattern for SDK initialization
-│   │   ├── tls_config.rs              # TLS configuration strategies
+│   │   ├── callbacks.rs                # Ack/error callback traits
+│   │   ├── record_types.rs             # Record encoding types (JSON, proto, raw)
+│   │   ├── schema.rs                   # Unity Catalog → proto/Arrow schema generation
 │   │   ├── stream_configuration.rs     # Stream options
+│   │   ├── stream_options.rs           # Shared stream configuration
+│   │   ├── tls_config.rs               # TLS configuration strategies
 │   │   ├── landing_zone.rs             # Inflight record buffer
-│   │   └── offset_generator.rs         # Logical offset tracking
+│   │   ├── offset_generator.rs         # Logical offset tracking
+│   │   ├── proxy.rs                    # HTTP proxy support
+│   │   ├── arrow_stream.rs             # Arrow Flight stream (feature: arrow-flight)
+│   │   ├── arrow_configuration.rs      # Arrow Flight options (feature: arrow-flight)
+│   │   ├── arrow_metadata.rs           # Arrow Flight metadata (feature: arrow-flight)
+│   │   └── zeroparser/                 # Descriptor-driven protobuf parser (feature: zeroparser)
 │   ├── zerobus_service.proto           # gRPC protocol definition
 │   ├── build.rs                        # Build script for protobuf compilation
 │   └── Cargo.toml
@@ -131,7 +143,7 @@ zerobus_rust_sdk/
 │   └── Cargo.toml
 │
 ├── tools/
-│   └── generate_files/                 # Schema generation CLI tool
+│   └── generate_files/                 # Schema generation CLI tool (package `tools`)
 │       ├── src/
 │       │   ├── main.rs                 # CLI entry point
 │       │   └── generate.rs             # Unity Catalog -> Proto conversion
@@ -145,17 +157,25 @@ zerobus_rust_sdk/
 │   │   ├── Cargo.toml
 │   │   ├── single.rs                   # JSON single-record example
 │   │   └── batch.rs                    # JSON batch ingestion example
-│   └── proto/                          # Protocol Buffers examples (single Cargo package)
+│   ├── proto/                          # Protocol Buffers examples (single Cargo package)
+│   │   ├── README.md
+│   │   ├── Cargo.toml
+│   │   ├── single.rs                   # Protocol Buffers single-record example
+│   │   ├── batch.rs                    # Protocol Buffers batch ingestion example
+│   │   └── output/                     # Generated schema files (shared)
+│   └── arrow/                          # Arrow Flight example (feature: arrow-flight, Beta)
 │       ├── README.md
 │       ├── Cargo.toml
-│       ├── single.rs                   # Protocol Buffers single-record example
-│       ├── batch.rs                    # Protocol Buffers batch ingestion example
-│       └── output/                     # Generated schema files (shared)
+│       └── src/main.rs                 # Arrow `RecordBatch` ingestion example
 │
 ├── tests/                              # Integration tests crate
 │   ├── src/
 │   │   ├── mock_grpc.rs                # Mock Zerobus gRPC server
-│   │   └── rust_tests.rs               # Test suite
+│   │   ├── mock_arrow_flight.rs        # Mock Arrow Flight server
+│   │   ├── rust_tests.rs               # Core SDK test suite
+│   │   ├── proxy_tests.rs              # HTTP proxy tests
+│   │   ├── arrow_tests.rs              # Arrow Flight test suite
+│   │   └── utils.rs                    # Shared test utilities
 │   ├── build.rs
 │   └── Cargo.toml
 │
@@ -657,6 +677,18 @@ match stream.close().await {
 }
 ```
 
+## Client-side warnings
+
+The SDK logs a `WARN`-level message via [`tracing`](https://docs.rs/tracing) when **100 or more** streams for the same table are opened within a 60-second sliding window. This usually indicates a "one stream per record" misuse pattern. The warning fires again if the rate drops below the threshold and later surges again.
+
+To suppress, set the environment variable before starting the process:
+
+```bash
+ZEROBUS_SDK_WARNINGS_ENABLED=false
+```
+
+Also accepts `0` or `no`.
+
 ## Configuration Options
 
 ### StreamConfigurationOptions
@@ -997,7 +1029,7 @@ cargo build --workspace
 cargo build -p databricks-zerobus-ingest-sdk
 
 # Build only schema tool
-cargo build -p generate_files
+cargo build -p tools
 
 # Build and run JSON single-record example
 cargo run -p rust-examples-json --example json_single

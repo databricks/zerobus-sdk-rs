@@ -7,6 +7,8 @@ use databricks_zerobus_ingest_sdk::{
     HeadersProvider as RustHeadersProvider, ZerobusError as RustError, ZerobusResult as RustResult,
 };
 
+use crate::common::intern_header_name;
+
 /// Base class for custom authentication headers (subclassable from Python)
 ///
 /// The Rust SDK handles OAuth authentication internally by default.
@@ -75,12 +77,14 @@ impl RustHeadersProvider for HeadersProviderWrapper {
             RustError::CreateStreamError(tonic::Status::new(tonic::Code::InvalidArgument, msg))
         })?;
 
-        // Convert Vec<(String, String)> to HashMap<&'static str, String>
-        // Note: We need to leak strings to get 'static lifetime for the Rust SDK
-        let mut map = HashMap::new();
+        // Convert Vec<(String, String)> to HashMap<&'static str, String>.
+        // The Rust SDK's HeadersProvider trait requires &'static str keys.
+        // We intern each distinct header name in a process-wide table so the
+        // leak is bounded to the set of names ever used (typically <10), not
+        // proportional to the number of get_headers() invocations.
+        let mut map = HashMap::with_capacity(headers_vec.len());
         for (key, value) in headers_vec {
-            let key_static: &'static str = Box::leak(key.into_boxed_str());
-            map.insert(key_static, value);
+            map.insert(intern_header_name(key), value);
         }
         Ok(map)
     }
