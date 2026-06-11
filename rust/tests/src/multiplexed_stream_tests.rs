@@ -867,6 +867,89 @@ mod failure_tests {
         Ok(())
     }
 
+    /// Poison must not lose records sitting unacked on a *healthy* sub-stream.
+    ///
+    /// The healthy stream's ack is delayed past the flush timeout, so the
+    /// best-effort flush in the poison path times out and the record is still
+    /// in the landing zone when the stream is torn down via signal_shutdown
+    /// (no supervisor failure → `failed_records` never populated for it).
+    /// `get_unacked_records` must report it anyway.
+    #[tokio::test]
+    async fn test_get_unacked_records_includes_stranded_records_on_healthy_streams(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        setup_tracing();
+        info!("Starting test_get_unacked_records_includes_stranded_records_on_healthy_streams");
+
+        let (mock_server, server_url) = start_mock_server().await?;
+        // Healthy stream: ack arrives long after the flush timeout.
+        mock_server
+            .inject_responses(
+                TABLE_OK,
+                vec![
+                    MockResponse::CreateStream {
+                        stream_id: "stream_ok".to_string(),
+                        delay_ms: 0,
+                    },
+                    MockResponse::RecordAck {
+                        ack_up_to_offset: 0,
+                        delay_ms: 5_000,
+                    },
+                ],
+            )
+            .await;
+        // Failing stream: non-retryable error poisons the mux.
+        mock_server
+            .inject_responses(
+                TABLE_FAIL,
+                vec![
+                    MockResponse::CreateStream {
+                        stream_id: "stream_fail".to_string(),
+                        delay_ms: 0,
+                    },
+                    MockResponse::Error {
+                        status: tonic::Status::permission_denied("boom"),
+                        delay_ms: 0,
+                    },
+                ],
+            )
+            .await;
+
+        let sdk = create_test_sdk(&server_url).await?;
+        let opts = TestOpts {
+            flush_timeout_ms: Some(100),
+            ..default_options()
+        };
+        let s1 = create_test_stream(&sdk, TABLE_OK, opts.clone()).await?;
+        let s2 = create_test_stream(&sdk, TABLE_FAIL, opts).await?;
+        let mut mux = MultiplexedStream::new(vec![s1, s2]);
+
+        // Round-robin: first record lands on the healthy stream and stays
+        // unacked, second lands on the failing stream.
+        let _stranded = mux.ingest_record(b"stranded".to_vec()).await?;
+        let failed = mux.ingest_record(b"failed".to_vec()).await?;
+
+        let result = mux.wait_for_message_id(failed).await;
+        assert!(result.is_err(), "Expected error from failed sub-stream");
+        assert!(mux.is_closed(), "Expected mux to be poisoned");
+
+        let mut unacked: Vec<_> = mux
+            .get_unacked_records()
+            .await?
+            .map(|record| match record {
+                databricks_zerobus_ingest_sdk::EncodedRecord::Proto(b) => b,
+                other => panic!("Unexpected record type: {:?}", other),
+            })
+            .collect();
+        unacked.sort();
+        assert_eq!(
+            unacked,
+            vec![b"failed".to_vec(), b"stranded".to_vec()],
+            "Expected both the failed and the stranded record to be recoverable"
+        );
+
+        Ok(())
+    }
+
     #[tokio::test]
     async fn test_flush_surfaces_sub_stream_error() -> Result<(), Box<dyn std::error::Error>> {
         setup_tracing();

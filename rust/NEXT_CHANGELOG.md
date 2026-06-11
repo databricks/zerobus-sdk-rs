@@ -8,6 +8,12 @@
 
 ### Bug Fixes
 
+- `ZerobusStream::get_unacked_records` / `get_unacked_batches` now also return
+  records still sitting in the landing zone when the stream was closed without
+  a stream failure (e.g. the flush inside `close` timed out). Previously only
+  records captured by the failure path were reported, so such records were
+  silently missing from the result.
+
 ### Documentation
 
 ### Internal Changes

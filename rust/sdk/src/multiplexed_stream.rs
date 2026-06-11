@@ -32,12 +32,12 @@ const OFFSET_MASK: i64 = (1i64 << (64 - STREAM_BITS)) - 1;
 
 /// Opaque identifier returned by ingest methods on MultiplexedStream.
 /// Encodes the sub-stream index and sub-stream offset in a single i64.
+///
+/// Unlike a `ZerobusStream` offset, `MessageId` values are not ordered — pass
+/// them to [`MultiplexedStream::wait_for_message_id`] to await acknowledgment.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct MessageId(i64);
 
-/// `MessageId` is opaque — use `wait_for_message_id` on the stream to wait for
-/// acknowledgment. Keep in mind that formatting to string allocates, so calling
-/// `to_string()` per record in a hot loop will have a performance penalty.
 impl std::fmt::Display for MessageId {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
@@ -51,6 +51,8 @@ impl std::fmt::Display for MessageId {
 
 impl MessageId {
     fn new(stream_index: usize, sub_offset: OffsetId) -> Self {
+        debug_assert!(stream_index < (1 << STREAM_BITS));
+        debug_assert!((0..=OFFSET_MASK).contains(&sub_offset));
         Self(((stream_index as i64) << (64 - STREAM_BITS)) | (sub_offset & OFFSET_MASK))
     }
 
@@ -64,17 +66,25 @@ impl MessageId {
         self.0 & OFFSET_MASK
     }
 
-    /// Returns the raw i64 value.
+    /// Returns the raw i64 value, e.g. for transport across an FFI boundary.
     pub fn raw(&self) -> i64 {
         self.0
     }
 
-    /// Construct from a raw i64 value.
+    /// Construct from a raw i64 value previously obtained from [`MessageId::raw`].
+    ///
+    /// Only round-trip values from `raw()`: a fabricated id pointing at an
+    /// offset that was never ingested makes `wait_for_message_id` wait until
+    /// the flush timeout (indefinitely if none is configured).
     pub fn from_raw(raw: i64) -> Self {
         Self(raw)
     }
 }
 
+/// Distributes ingestion round-robin across a fixed set of [`ZerobusStream`]s.
+///
+/// See the [module-level documentation](self) for routing, `MessageId`, and
+/// poisoning semantics.
 pub struct MultiplexedStream {
     streams: Vec<ZerobusStream>,
     round_robin_counter: AtomicUsize,
@@ -82,6 +92,11 @@ pub struct MultiplexedStream {
 }
 
 impl MultiplexedStream {
+    /// Creates a multiplexed stream over the given sub-streams.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `streams` is empty or holds more than 64 sub-streams.
     pub fn new(streams: Vec<ZerobusStream>) -> Self {
         assert!(
             !streams.is_empty(),
@@ -197,6 +212,12 @@ impl MultiplexedStream {
         e
     }
 
+    /// Ingests a single record into the next sub-stream (round-robin).
+    ///
+    /// Returns once the record is queued; use
+    /// [`wait_for_message_id`](Self::wait_for_message_id) with the returned id
+    /// to await server acknowledgment. If the chosen sub-stream is at capacity,
+    /// this waits for it to drain rather than rerouting.
     pub async fn ingest_record(
         &self,
         payload: impl Into<EncodedRecord>,
@@ -214,6 +235,10 @@ impl MultiplexedStream {
         }
     }
 
+    /// Ingests a batch of records into a single sub-stream (round-robin).
+    ///
+    /// The whole batch lands on one sub-stream so a single returned id covers
+    /// it. Returns `None` for an empty batch.
     // TODO: Check if there is a performance advantage in splitting this payload in multiple streams
     pub async fn ingest_records<I, T>(&self, payload: I) -> ZerobusResult<Option<MessageId>>
     where
@@ -236,18 +261,24 @@ impl MultiplexedStream {
         }
     }
 
+    /// Waits until every record already queued on every sub-stream is
+    /// acknowledged by the server.
+    ///
+    /// If a sub-stream flush fails because that sub-stream reached a terminal
+    /// state, the mux is poisoned. The first flush error is returned;
+    /// additional ones are logged.
     pub async fn flush(&self) -> ZerobusResult<()> {
         self.check_closed()?;
         let results = join_all(self.streams.iter().map(|s| s.flush())).await;
-        let mut first_error: Option<(usize, ZerobusError)> = None;
-        let mut first_closed: Option<usize> = None;
+        let mut first_error: Option<ZerobusError> = None;
+        let mut first_closed: Option<(usize, ZerobusError)> = None;
         for (i, result) in results.into_iter().enumerate() {
             if let Err(e) = result {
                 if self.streams[i].is_closed() && first_closed.is_none() {
-                    first_closed = Some(i);
+                    first_closed = Some((i, e.clone()));
                 }
                 if first_error.is_none() {
-                    first_error = Some((i, e));
+                    first_error = Some(e);
                 } else {
                     warn!(
                         stream_index = i,
@@ -258,11 +289,11 @@ impl MultiplexedStream {
             }
         }
         match first_error {
-            Some((i, e)) => {
-                if let Some(closed_idx) = first_closed {
-                    self.shutdown_on_failure(closed_idx, &e).await;
+            Some(e) => {
+                if let Some((closed_idx, closed_err)) = first_closed {
+                    self.shutdown_on_failure(closed_idx, &closed_err).await;
                 } else {
-                    warn!(stream_index = i, error = %e, "flush errored but sub-streams still alive");
+                    warn!(error = %e, "flush errored but sub-streams still alive");
                 }
                 Err(e)
             }
@@ -270,6 +301,9 @@ impl MultiplexedStream {
         }
     }
 
+    /// Waits for server acknowledgment of the record or batch behind a
+    /// [`MessageId`] returned from [`ingest_record`](Self::ingest_record) or
+    /// [`ingest_records`](Self::ingest_records).
     pub async fn wait_for_message_id(&self, message_id: MessageId) -> ZerobusResult<()> {
         let idx = message_id.stream_index();
         if idx >= self.streams.len() {
@@ -298,12 +332,20 @@ impl MultiplexedStream {
         }
     }
 
+    /// Flushes and closes all sub-streams, releasing their resources.
+    ///
+    /// The first flush/close error is returned (additional ones are logged);
+    /// on error, use [`get_unacked_records`](Self::get_unacked_records) to
+    /// recover records that were never acknowledged.
     pub async fn close(&mut self) -> ZerobusResult<()> {
         info!("Closing MultiplexedStream");
         self.is_closed.store(true, Ordering::Relaxed);
 
         let mut first_error: Option<ZerobusError> = None;
 
+        // Flush all sub-streams in parallel first; the per-stream `close`
+        // below flushes again, but by then each stream is already drained so
+        // the sequential pass is cheap.
         let flush_results = join_all(self.streams.iter().map(|s| s.flush())).await;
         for (i, result) in flush_results.into_iter().enumerate() {
             if let Err(e) = result {
@@ -339,6 +381,8 @@ impl MultiplexedStream {
         }
     }
 
+    /// Returns whether the mux is closed — either via [`close`](Self::close)
+    /// or because a sub-stream failure poisoned it.
     pub fn is_closed(&self) -> bool {
         self.is_closed.load(Ordering::Relaxed)
     }
@@ -423,29 +467,5 @@ mod tests {
         assert_ne!(a, b);
         assert_eq!(a.sub_offset(), b.sub_offset());
         assert_ne!(a.stream_index(), b.stream_index());
-    }
-
-    #[test]
-    fn test_round_robin_counter_increments() {
-        let counter = AtomicUsize::new(0);
-        assert_eq!(counter.fetch_add(1, Ordering::Relaxed), 0);
-        assert_eq!(counter.fetch_add(1, Ordering::Relaxed), 1);
-        assert_eq!(counter.fetch_add(1, Ordering::Relaxed), 2);
-        assert_eq!(counter.load(Ordering::Relaxed), 3);
-    }
-
-    #[test]
-    fn test_is_closed_flag() {
-        let flag = AtomicBool::new(false);
-        assert!(!flag.load(Ordering::Relaxed));
-        flag.store(true, Ordering::Relaxed);
-        assert!(flag.load(Ordering::Relaxed));
-    }
-
-    #[test]
-    fn test_shutdown_on_failure_is_idempotent() {
-        let flag = AtomicBool::new(false);
-        assert!(!flag.swap(true, Ordering::Relaxed));
-        assert!(flag.swap(true, Ordering::Relaxed));
     }
 }
