@@ -3,8 +3,11 @@ mod tests {
     use crate::{
         c_record_type, intern_header_key, validate_sdk_ptr, validate_stream_ptr,
         write_error_result, write_success_result, zerobus_free_error_message,
-        zerobus_get_default_config, CHeaders, CResult, CallbackHeadersProvider, RecordType,
-        ZerobusError,
+        zerobus_get_default_config, zerobus_sdk_builder_application_name,
+        zerobus_sdk_builder_build, zerobus_sdk_builder_disable_tls, zerobus_sdk_builder_endpoint,
+        zerobus_sdk_builder_free, zerobus_sdk_builder_new, zerobus_sdk_builder_sdk_identifier,
+        zerobus_sdk_builder_unity_catalog_url, zerobus_sdk_free, CHeaders, CResult,
+        CallbackHeadersProvider, RecordType, ZerobusError,
     };
     use databricks_zerobus_ingest_sdk::HeadersProvider;
     use std::ffi::{CStr, CString};
@@ -172,6 +175,161 @@ mod tests {
         assert_eq!(c_record_type(2), RecordType::Json);
         assert_eq!(c_record_type(999), RecordType::Unspecified);
         assert_eq!(c_record_type(0), RecordType::Unspecified);
+    }
+
+    // ========================================================================
+    // zerobus_sdk_builder Tests
+    // ========================================================================
+
+    /// Builds an SDK via the C builder API. Caller frees the SDK and any
+    /// error message.
+    fn build_via_c_builder(
+        endpoint: &str,
+        unity_catalog_url: &str,
+        sdk_identifier: Option<&str>,
+        application_name: Option<&str>,
+    ) -> (*mut crate::CZerobusSdk, CResult) {
+        let endpoint_c = CString::new(endpoint).unwrap();
+        let uc_c = CString::new(unity_catalog_url).unwrap();
+
+        let builder = zerobus_sdk_builder_new();
+        assert!(!builder.is_null());
+
+        zerobus_sdk_builder_endpoint(builder, endpoint_c.as_ptr());
+        zerobus_sdk_builder_unity_catalog_url(builder, uc_c.as_ptr());
+
+        if let Some(id) = sdk_identifier {
+            let id_c = CString::new(id).unwrap();
+            zerobus_sdk_builder_sdk_identifier(builder, id_c.as_ptr());
+        }
+        if let Some(app) = application_name {
+            let app_c = CString::new(app).unwrap();
+            zerobus_sdk_builder_application_name(builder, app_c.as_ptr());
+        }
+
+        let mut result = CResult {
+            success: false,
+            error_message: ptr::null_mut(),
+            is_retryable: false,
+        };
+        let sdk = zerobus_sdk_builder_build(builder, &mut result);
+        (sdk, result)
+    }
+
+    #[test]
+    fn test_builder_minimal() {
+        let (sdk, result) =
+            build_via_c_builder("https://workspace.zerobus.databricks.com", "", None, None);
+        assert!(result.success, "expected success, got error");
+        assert!(!sdk.is_null());
+        zerobus_sdk_free(sdk);
+    }
+
+    #[test]
+    fn test_builder_with_sdk_identifier() {
+        let (sdk, result) = build_via_c_builder(
+            "https://workspace.zerobus.databricks.com",
+            "",
+            Some("zerobus-sdk-go/1.3.0"),
+            None,
+        );
+        assert!(result.success);
+        assert!(!sdk.is_null());
+        zerobus_sdk_free(sdk);
+    }
+
+    #[test]
+    fn test_builder_with_application_name() {
+        let (sdk, result) = build_via_c_builder(
+            "https://workspace.zerobus.databricks.com",
+            "",
+            None,
+            Some("my-app/1.0"),
+        );
+        assert!(result.success);
+        assert!(!sdk.is_null());
+        zerobus_sdk_free(sdk);
+    }
+
+    #[test]
+    fn test_builder_both_user_agent_options() {
+        let (sdk, result) = build_via_c_builder(
+            "https://workspace.zerobus.databricks.com",
+            "",
+            Some("zerobus-sdk-go/1.3.0"),
+            Some("my-app/1.0"),
+        );
+        assert!(result.success);
+        assert!(!sdk.is_null());
+        zerobus_sdk_free(sdk);
+    }
+
+    #[test]
+    fn test_builder_empty_strings_are_noops() {
+        // Empty identifier/application_name must not produce a trailing space.
+        let (sdk, result) = build_via_c_builder(
+            "https://workspace.zerobus.databricks.com",
+            "",
+            Some(""),
+            Some(""),
+        );
+        assert!(result.success);
+        assert!(!sdk.is_null());
+        zerobus_sdk_free(sdk);
+    }
+
+    #[test]
+    fn test_builder_build_consumes_on_error() {
+        // Missing endpoint fails build. Builder must still be consumed —
+        // don't _free the pointer afterward (use-after-free).
+        let builder = zerobus_sdk_builder_new();
+        let mut result = CResult {
+            success: false,
+            error_message: ptr::null_mut(),
+            is_retryable: false,
+        };
+        let sdk = zerobus_sdk_builder_build(builder, &mut result);
+        assert!(sdk.is_null());
+        assert!(!result.success);
+        zerobus_free_error_message(result.error_message);
+    }
+
+    #[test]
+    fn test_builder_free_without_build() {
+        let builder = zerobus_sdk_builder_new();
+        zerobus_sdk_builder_free(builder);
+    }
+
+    #[test]
+    fn test_builder_free_on_null_is_safe() {
+        zerobus_sdk_builder_free(ptr::null_mut());
+    }
+
+    #[test]
+    fn test_builder_setters_on_null_are_safe() {
+        let s = CString::new("x").unwrap();
+        zerobus_sdk_builder_endpoint(ptr::null_mut(), s.as_ptr());
+        zerobus_sdk_builder_unity_catalog_url(ptr::null_mut(), s.as_ptr());
+        zerobus_sdk_builder_sdk_identifier(ptr::null_mut(), s.as_ptr());
+        zerobus_sdk_builder_application_name(ptr::null_mut(), s.as_ptr());
+        zerobus_sdk_builder_disable_tls(ptr::null_mut());
+    }
+
+    #[test]
+    fn test_builder_disable_tls_for_plain_http() {
+        let endpoint_c = CString::new("http://localhost:50051").unwrap();
+        let builder = zerobus_sdk_builder_new();
+        zerobus_sdk_builder_endpoint(builder, endpoint_c.as_ptr());
+        zerobus_sdk_builder_disable_tls(builder);
+        let mut result = CResult {
+            success: false,
+            error_message: ptr::null_mut(),
+            is_retryable: false,
+        };
+        let sdk = zerobus_sdk_builder_build(builder, &mut result);
+        assert!(result.success);
+        assert!(!sdk.is_null());
+        zerobus_sdk_free(sdk);
     }
 
     #[test]

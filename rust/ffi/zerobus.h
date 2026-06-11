@@ -103,6 +103,14 @@ typedef struct CArrowBatchArray {
   uintptr_t count;
 } CArrowBatchArray;
 
+/**
+ * Opaque handle for an SDK builder. Allocated by `_new`, consumed by
+ * `_build`, or dropped by `_free`. Must not be used after either finalizer.
+ */
+typedef struct CZerobusSdkBuilder {
+  uint8_t _private[0];
+} CZerobusSdkBuilder;
+
 typedef struct CZerobusStream {
   uint8_t _private[0];
 } CZerobusStream;
@@ -249,8 +257,62 @@ struct CArrowStreamConfigurationOptions zerobus_arrow_get_default_config(void);
 void zerobus_free_headers(struct CHeaders headers);
 
 /**
- * Create a new ZerobusSdk instance
- * Returns NULL on error. Check the result parameter for error details.
+ * Allocates a new SDK builder. Must be terminated by exactly one of
+ * `_build` or `_free`.
+ */
+struct CZerobusSdkBuilder *zerobus_sdk_builder_new(void);
+
+/**
+ * Sets the Zerobus gRPC endpoint URL (required). No-op on null.
+ */
+void zerobus_sdk_builder_endpoint(struct CZerobusSdkBuilder *builder, const char *value);
+
+/**
+ * Sets the Unity Catalog URL. Optional with a custom headers provider.
+ * No-op on null.
+ */
+void zerobus_sdk_builder_unity_catalog_url(struct CZerobusSdkBuilder *builder, const char *value);
+
+/**
+ * Overrides the SDK prefix of the `user-agent` header (default
+ * `zerobus-sdk-rs/<version>`). Wrappers pass their own identifier here.
+ * Null and empty values are no-ops.
+ */
+void zerobus_sdk_builder_sdk_identifier(struct CZerobusSdkBuilder *builder, const char *value);
+
+/**
+ * Appends an application identifier to the `user-agent` header. Wire value
+ * becomes `<sdk_identifier> <application_name>`. Null and empty values are
+ * no-ops.
+ */
+void zerobus_sdk_builder_application_name(struct CZerobusSdkBuilder *builder, const char *value);
+
+/**
+ * Selects a no-TLS gRPC channel. TLS is on by default.
+ */
+void zerobus_sdk_builder_disable_tls(struct CZerobusSdkBuilder *builder);
+
+/**
+ * Consumes the builder and returns a `CZerobusSdk*`, or NULL on error.
+ * Frees the builder on both paths — any further use of the pointer is
+ * undefined behavior. Null `builder` writes an error to `result`.
+ */
+struct CZerobusSdk *zerobus_sdk_builder_build(struct CZerobusSdkBuilder *builder,
+                                              struct CResult *result);
+
+/**
+ * Drops an unconsumed builder. No-op on null.
+ */
+void zerobus_sdk_builder_free(struct CZerobusSdkBuilder *builder);
+
+/**
+ * Creates a new ZerobusSdk with default user-agent and TLS settings.
+ *
+ * Retained for ABI back-compat with v1.2.x; new code should use the
+ * `zerobus_sdk_builder_*` API. Does not infer TLS state from the endpoint
+ * scheme — callers needing a plain-HTTP channel must use the builder API.
+ *
+ * Returns NULL on error; see `result` for details.
  */
 struct CZerobusSdk *zerobus_sdk_new(const char *zerobus_endpoint,
                                     const char *unity_catalog_url,
