@@ -1385,7 +1385,8 @@ mod arrow_flight_tests {
         use crate::utils::{ipc_bytes_to_record_batch, record_batch_to_ipc_bytes};
 
         #[tokio::test]
-        async fn test_ingest_ipc_batch_basic() -> Result<(), Box<dyn std::error::Error>> {
+        async fn test_
+        _basic() -> Result<(), Box<dyn std::error::Error>> {
             setup_tracing();
             info!("Starting test_ingest_ipc_batch_basic");
 

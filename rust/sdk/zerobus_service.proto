@@ -81,11 +81,12 @@ message CreateIngestStreamRequest {
   // This is a required field for all stream creation requests.
   optional string table_name = 1;
   
-  // NOT SUPPORTED: Stream identifier for opening existing persisted streams.
-  // optional string stream_id = 2;
-  reserved "stream_id";
-  reserved 2;
-  
+  // Identifier of an existing persistent stream to resume. When set, the server reopens that
+  // stream and resumes ingestion after its last committed offset (returned in
+  // CreateIngestStreamResponse.last_committed_offset) rather than creating a new stream. When
+  // unset, the server creates a new stream and assigns a fresh stream_id in the response.
+  optional string stream_id = 2;
+
   // Protocol buffer descriptor for record serialization/deserialization.
   // 
   // This descriptor defines the structure of the records being ingested.
@@ -109,10 +110,10 @@ message CreateIngestStreamResponse {
   // Unique identifier assigned to this ephemeral ingestion stream.
   optional string stream_id = 1;
   
-  // NOT SUPPORTED: Last acknowledged offset for this stream.
-  // optional int64 last_offset_id = 2;
-  reserved "last_offset_id";
-  reserved 2;
+  // Highest offset already durably committed for the resumed stream (set only when the request
+  // carried a stream_id). The client resumes sending from last_committed_offset + 1. Unset/0 for a
+  // newly created stream.
+  optional int64 last_committed_offset = 2;
 }
 
 /*

@@ -16,6 +16,10 @@ path = "src/proxy_tests.rs"
 name = "arrow_tests"
 path = "src/arrow_tests.rs"
 
+[[test]]
+name = "persistent_tests"
+path = "src/persistent_tests.rs"
+
 [dependencies]
 async-trait.workspace = true
 prost.workspace = true

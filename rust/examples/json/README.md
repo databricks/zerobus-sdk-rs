@@ -26,6 +26,7 @@ JSON examples are recommended for getting started - they're simpler and don't re
 **Available examples:**
 - **`single.rs`** - Ingest records one at a time using `ingest_record_offset()` / `ingest_record()`
 - **`batch.rs`** - Ingest multiple records at once using `ingest_records_offset()` / `ingest_records()`
+- **`persistent.rs`** - **Prototype**: open a persistent stream, fetch its `stream_id`, close it, then resume by id (`build_persistent()` / `resume_persistent()`)
 
 ## Three Ways to Pass Data
 
@@ -178,6 +179,51 @@ if let Some(offset) = stream.ingest_records_offset(batch).await? {
 - **All-or-nothing**: The entire batch succeeds or fails as a unit
 - **Single acknowledgment**: One offset ID for the whole batch
 - **Empty batches**: Returns `None` (no-op)
+
+## Persistent Stream Example (Prototype)
+
+`persistent.rs` demonstrates the prototype **resumable** stream path: open a stream, fetch the
+server-assigned `stream_id`, close it, then reconnect by that id and keep ingesting. Both the open
+and the resume go through the same `EphemeralStream` RPC — once *without* a `stream_id` (create) and
+once *with* it (resume).
+
+### Running the Example
+
+```bash
+cargo run -p rust-examples-json --example json_persistent
+```
+
+### Code Highlights
+
+```rust
+use databricks_zerobus_ingest_sdk::ZerobusSdk;
+
+// 1. Open a NEW persistent stream and capture the server-assigned id.
+let stream = sdk
+    .stream_builder()
+    .table(TABLE_NAME)
+    .oauth(DATABRICKS_CLIENT_ID, DATABRICKS_CLIENT_SECRET)
+    .json()
+    .build_persistent()
+    .await?;
+let stream_id = stream.stream_id().to_string();
+stream.ingest(r#"{"id": 1}"#.to_string()).await?;
+stream.close().await?;
+
+// 2. Resume by stream_id; continue after the server's last committed offset.
+let resumed = sdk
+    .stream_builder()
+    .table(TABLE_NAME)
+    .oauth(DATABRICKS_CLIENT_ID, DATABRICKS_CLIENT_SECRET)
+    .json()
+    .resume_persistent(stream_id)
+    .await?;
+println!("resumed at {:?}", resumed.last_committed_offset());
+```
+
+> **Note:** server-side resume (offset persistence + dedup) is not implemented yet, so against
+> today's server `resume_persistent` opens a fresh stream rather than truly resuming. This example
+> exercises the client path and wire contract.
 
 ## Adapting for Your Custom Table
 

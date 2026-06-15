@@ -25,7 +25,9 @@ use crate::callbacks::AckCallback;
 use crate::databricks::zerobus::RecordType;
 use crate::headers_provider::{HeadersProvider, OAuthHeadersProvider};
 use crate::stream_configuration::StreamConfigurationOptions;
-use crate::{TableProperties, ZerobusError, ZerobusResult, ZerobusSdk, ZerobusStream};
+use crate::{
+    PersistentStream, TableProperties, ZerobusError, ZerobusResult, ZerobusSdk, ZerobusStream,
+};
 
 #[cfg(feature = "arrow-flight")]
 use crate::arrow_configuration::ArrowStreamConfigurationOptions;
@@ -383,6 +385,69 @@ impl<'a> StreamBuilder<'a> {
         .await?;
         crate::client_warnings::record_stream_creation(stream.table_properties.table_name.as_str());
         Ok(stream)
+    }
+
+    /// **Prototype**: open a *new* persistent stream over the `EphemeralStream` RPC.
+    ///
+    /// Sends a `CreateStream` request **without** a `stream_id`; the server assigns one, available
+    /// via [`PersistentStream::stream_id`]. Reconnect later with [`Self::resume_persistent`]. This
+    /// is a separate, prototype-only path from [`Self::build`] — no landing zone or recovery.
+    pub async fn build_persistent(mut self) -> ZerobusResult<PersistentStream> {
+        self.validate()?;
+        let headers_provider = self.resolve_headers_provider()?;
+        let (record_type, descriptor_proto) = self.take_record_format()?;
+        let channel = self.sdk.get_or_create_channel_zerobus_client().await?;
+        let table_properties = TableProperties {
+            table_name: self.table_name,
+            descriptor_proto,
+        };
+        PersistentStream::create(channel, table_properties, headers_provider, record_type).await
+    }
+
+    /// **Prototype**: resume an existing persistent stream by `stream_id`.
+    ///
+    /// Sends a `CreateStream` request **with** the given `stream_id`; the server resumes after its
+    /// last committed offset (see [`PersistentStream::last_committed_offset`]).
+    pub async fn resume_persistent(
+        mut self,
+        stream_id: impl Into<String>,
+    ) -> ZerobusResult<PersistentStream> {
+        self.validate()?;
+        let headers_provider = self.resolve_headers_provider()?;
+        let (record_type, descriptor_proto) = self.take_record_format()?;
+        let channel = self.sdk.get_or_create_channel_zerobus_client().await?;
+        let table_properties = TableProperties {
+            table_name: self.table_name,
+            descriptor_proto,
+        };
+        PersistentStream::resume(
+            channel,
+            table_properties,
+            headers_provider,
+            record_type,
+            stream_id.into(),
+        )
+        .await
+    }
+
+    /// Resolves the selected record format for the persistent-stream path. Arrow is not supported
+    /// in this prototype.
+    fn take_record_format(
+        &mut self,
+    ) -> ZerobusResult<(RecordType, Option<prost_types::DescriptorProto>)> {
+        match self.format.take() {
+            Some(FormatConfig::Json) => Ok((RecordType::Json, None)),
+            Some(FormatConfig::CompiledProto(descriptor)) => {
+                Ok((RecordType::Proto, Some(*descriptor)))
+            }
+            #[cfg(feature = "arrow-flight")]
+            Some(FormatConfig::Arrow(_)) => Err(ZerobusError::InvalidArgument(
+                "persistent streams do not support Arrow format in this prototype".to_string(),
+            )),
+            None => Err(ZerobusError::InvalidArgument(
+                "record format is required: call .json() or .compiled_proto()".to_string(),
+            )),
+        }
     }
 
     /// Build and open an Arrow Flight ingestion stream.

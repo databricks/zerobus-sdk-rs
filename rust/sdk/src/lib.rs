@@ -49,6 +49,7 @@ mod errors;
 mod headers_provider;
 mod landing_zone;
 mod offset_generator;
+mod persistent_stream;
 mod proxy;
 mod record_types;
 pub mod schema;
@@ -94,6 +95,7 @@ pub use default_token_factory::DefaultTokenFactory;
 pub use errors::ZerobusError;
 pub use headers_provider::{HeadersProvider, OAuthHeadersProvider};
 pub use offset_generator::{OffsetId, OffsetIdGenerator};
+pub use persistent_stream::PersistentStream;
 pub use proxy::{ConnectorFactory, ProxyConnector};
 pub use record_types::{
     EncodedBatch, EncodedBatchIter, EncodedRecord, JsonEncodedRecord, JsonString, JsonValue,
@@ -904,6 +906,8 @@ impl ZerobusStream {
 
         let create_stream_request = RequestPayload::CreateStream(CreateIngestStreamRequest {
             table_name: Some(table_properties.table_name.to_string()),
+            // Ephemeral streams never resume; persistent resume lives in PersistentStream.
+            stream_id: None,
             descriptor_proto,
             record_type: Some(record_type.into()),
         });

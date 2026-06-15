@@ -12,6 +12,10 @@ path = "batch.rs"
 name = "json_single"
 path = "single.rs"
 
+[[example]]
+name = "json_persistent"
+path = "persistent.rs"
+
 [dependencies]
 databricks-zerobus-ingest-sdk = { path = "../../sdk" }
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }

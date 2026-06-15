@@ -181,6 +181,7 @@ impl Zerobus for MockZerobusServer {
                                                     ResponsePayload::CreateStreamResponse(
                                                         CreateIngestStreamResponse {
                                                             stream_id: Some(custom_id.clone()),
+                                                            last_committed_offset: None,
                                                         },
                                                     ),
                                                 ),
@@ -226,6 +227,7 @@ impl Zerobus for MockZerobusServer {
                                     payload: Some(ResponsePayload::CreateStreamResponse(
                                         CreateIngestStreamResponse {
                                             stream_id: Some(stream_id.clone()),
+                                            last_committed_offset: None,
                                         },
                                     )),
                                 };
