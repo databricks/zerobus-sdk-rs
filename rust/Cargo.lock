@@ -103,9 +103,27 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "841321891f247aa86c6112c80d83d89cb36e0addd020fa2425085b8eb6c3f579"
 dependencies = [
  "ahash",
- "arrow-buffer",
- "arrow-data",
- "arrow-schema",
+ "arrow-buffer 58.2.0",
+ "arrow-data 58.2.0",
+ "arrow-schema 58.2.0",
+ "chrono",
+ "half",
+ "hashbrown 0.17.0",
+ "num-complex",
+ "num-integer",
+ "num-traits",
+]
+
+[[package]]
+name = "arrow-array"
+version = "59.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0c60c79628e9a97cb90d7a0dc3e944f216a902f837d4ecabc14d524bddbbc137"
+dependencies = [
+ "ahash",
+ "arrow-buffer 59.0.0",
+ "arrow-data 59.0.0",
+ "arrow-schema 59.0.0",
  "chrono",
  "half",
  "hashbrown 0.17.0",
@@ -127,17 +145,29 @@ dependencies = [
 ]
 
 [[package]]
+name = "arrow-buffer"
+version = "59.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6026f638c400e9878c1b1cc05c3cfd46fbf381285916ab408678701c1df46c1a"
+dependencies = [
+ "bytes",
+ "half",
+ "num-bigint",
+ "num-traits",
+]
+
+[[package]]
 name = "arrow-cast"
 version = "58.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ca5e686972523798f76bef355145bc1ae25a84c731e650268d31ab763c701663"
 dependencies = [
- "arrow-array",
- "arrow-buffer",
- "arrow-data",
+ "arrow-array 58.2.0",
+ "arrow-buffer 58.2.0",
+ "arrow-data 58.2.0",
  "arrow-ord",
- "arrow-schema",
- "arrow-select",
+ "arrow-schema 58.2.0",
+ "arrow-select 58.2.0",
  "atoi",
  "base64",
  "chrono",
@@ -153,8 +183,21 @@ version = "58.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "db3b5846209775b6dc8056d77ff9a032b27043383dd5488abd0b663e265b9373"
 dependencies = [
- "arrow-buffer",
- "arrow-schema",
+ "arrow-buffer 58.2.0",
+ "arrow-schema 58.2.0",
+ "half",
+ "num-integer",
+ "num-traits",
+]
+
+[[package]]
+name = "arrow-data"
+version = "59.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7bd568aa70c4ec5947027b0d5caee94877433b661a0bb9e8ddceeeb5f0c9b1ab"
+dependencies = [
+ "arrow-buffer 59.0.0",
+ "arrow-schema 59.0.0",
  "half",
  "num-integer",
  "num-traits",
@@ -166,11 +209,11 @@ version = "58.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e7c379738a9e41eda5873bb3256c89164f87c65b16b0b153cccc74d8a462b7e8"
 dependencies = [
- "arrow-array",
- "arrow-buffer",
+ "arrow-array 58.2.0",
+ "arrow-buffer 58.2.0",
  "arrow-cast",
- "arrow-ipc",
- "arrow-schema",
+ "arrow-ipc 58.2.0",
+ "arrow-schema 58.2.0",
  "base64",
  "bytes",
  "futures",
@@ -186,11 +229,25 @@ version = "58.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "fd8907ddd8f9fbabf91ec2c85c1d81fe2874e336d2443eb36373595e28b98dd5"
 dependencies = [
- "arrow-array",
- "arrow-buffer",
- "arrow-data",
- "arrow-schema",
- "arrow-select",
+ "arrow-array 58.2.0",
+ "arrow-buffer 58.2.0",
+ "arrow-data 58.2.0",
+ "arrow-schema 58.2.0",
+ "arrow-select 58.2.0",
+ "flatbuffers",
+]
+
+[[package]]
+name = "arrow-ipc"
+version = "59.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e57ee4d470eab1a021bc4b63fa2b2c15d572892bf227b0a982d3b755a6c662b5"
+dependencies = [
+ "arrow-array 59.0.0",
+ "arrow-buffer 59.0.0",
+ "arrow-data 59.0.0",
+ "arrow-schema 59.0.0",
+ "arrow-select 59.0.0",
  "flatbuffers",
  "lz4_flex",
  "zstd",
@@ -202,11 +259,11 @@ version = "58.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "efa70d9d6b1356f1fb9f1f651b84a725b7e0abb93f188cf7d31f14abfa2f2e6f"
 dependencies = [
- "arrow-array",
- "arrow-buffer",
- "arrow-data",
- "arrow-schema",
- "arrow-select",
+ "arrow-array 58.2.0",
+ "arrow-buffer 58.2.0",
+ "arrow-data 58.2.0",
+ "arrow-schema 58.2.0",
+ "arrow-select 58.2.0",
 ]
 
 [[package]]
@@ -216,16 +273,36 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "18aa020f6bc8e5201dcd2d4b7f98c68f8a410ef37128263243e6ff2a47a67d4f"
 
 [[package]]
+name = "arrow-schema"
+version = "59.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "80b3e786a0dd9103acd583a6fb486dbf2f3268466cc0bd571dcf34cef231c1f1"
+
+[[package]]
 name = "arrow-select"
 version = "58.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "a657ab5132e9c8ca3b24eb15a823d0ced38017fe3930ff50167466b02e2d592c"
 dependencies = [
  "ahash",
- "arrow-array",
- "arrow-buffer",
- "arrow-data",
- "arrow-schema",
+ "arrow-array 58.2.0",
+ "arrow-buffer 58.2.0",
+ "arrow-data 58.2.0",
+ "arrow-schema 58.2.0",
+ "num-traits",
+]
+
+[[package]]
+name = "arrow-select"
+version = "59.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "067a67e0361f6c31f4a7248759f36ca4ca71b187a941ed4d49da1c7d3d4db624"
+dependencies = [
+ "ahash",
+ "arrow-array 59.0.0",
+ "arrow-buffer 59.0.0",
+ "arrow-data 59.0.0",
+ "arrow-schema 59.0.0",
  "num-traits",
 ]
 
@@ -597,10 +674,10 @@ dependencies = [
 name = "databricks-zerobus-ingest-sdk"
 version = "2.2.2"
 dependencies = [
- "arrow-array",
+ "arrow-array 58.2.0",
  "arrow-flight",
- "arrow-ipc",
- "arrow-schema",
+ "arrow-ipc 59.0.0",
+ "arrow-schema 58.2.0",
  "async-trait",
  "bytes",
  "criterion",
@@ -679,8 +756,8 @@ dependencies = [
 name = "example_arrow"
 version = "0.1.0"
 dependencies = [
- "arrow-array",
- "arrow-ipc",
+ "arrow-array 58.2.0",
+ "arrow-ipc 59.0.0",
  "chrono",
  "databricks-zerobus-ingest-sdk",
  "tokio",
@@ -2546,10 +2623,10 @@ dependencies = [
 name = "tests"
 version = "0.1.0"
 dependencies = [
- "arrow-array",
+ "arrow-array 58.2.0",
  "arrow-flight",
- "arrow-ipc",
- "arrow-schema",
+ "arrow-ipc 59.0.0",
+ "arrow-schema 58.2.0",
  "async-trait",
  "bytes",
  "databricks-zerobus-ingest-sdk",
@@ -3681,7 +3758,7 @@ dependencies = [
 name = "zerobus-ffi"
 version = "1.3.0"
 dependencies = [
- "arrow-ipc",
+ "arrow-ipc 59.0.0",
  "async-trait",
  "bytes",
  "cbindgen",
@@ -3698,9 +3775,9 @@ dependencies = [
 name = "zerobus-jni"
 version = "1.2.0"
 dependencies = [
- "arrow-array",
- "arrow-ipc",
- "arrow-schema",
+ "arrow-array 58.2.0",
+ "arrow-ipc 59.0.0",
+ "arrow-schema 58.2.0",
  "databricks-zerobus-ingest-sdk",
  "jni",
  "prost",
