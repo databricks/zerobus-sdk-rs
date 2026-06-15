@@ -1,7 +1,9 @@
 package com.databricks.zerobus;
 
+import java.io.BufferedReader;
 import java.io.File;
 import java.io.FileOutputStream;
+import java.io.FileReader;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
@@ -22,12 +24,17 @@ import org.slf4j.LoggerFactory;
  * <p>Supported platforms:
  *
  * <ul>
- *   <li>Linux x86_64 (linux-x86_64)
- *   <li>Linux aarch64 (linux-aarch64)
+ *   <li>Linux glibc x86_64 (linux-x86_64)
+ *   <li>Linux glibc aarch64 (linux-aarch64)
+ *   <li>Linux musl x86_64 / Alpine (linux-musl-x86_64)
+ *   <li>Linux musl aarch64 / Alpine (linux-musl-aarch64)
  *   <li>macOS x86_64 (osx-x86_64)
  *   <li>macOS aarch64 / Apple Silicon (osx-aarch64)
  *   <li>Windows x86_64 (windows-x86_64)
  * </ul>
+ *
+ * <p>On Linux, the libc flavor (glibc vs musl) is detected automatically. To override detection,
+ * set the system property {@code -Dzerobus.libc=musl} or {@code -Dzerobus.libc=glibc}.
  */
 public final class NativeLoader {
   private static final Logger logger = LoggerFactory.getLogger(NativeLoader.class);
@@ -143,13 +150,14 @@ public final class NativeLoader {
     return tempFile;
   }
 
-  private static String getPlatformIdentifier() {
+  // Package-private for unit testing.
+  static String getPlatformIdentifier() {
     String os = System.getProperty("os.name", "").toLowerCase(Locale.ROOT);
     String arch = System.getProperty("os.arch", "").toLowerCase(Locale.ROOT);
 
     String osName;
     if (os.contains("linux")) {
-      osName = "linux";
+      osName = isMuslLinux() ? "linux-musl" : "linux";
     } else if (os.contains("mac") || os.contains("darwin")) {
       osName = "osx";
     } else if (os.contains("windows")) {
@@ -168,6 +176,47 @@ public final class NativeLoader {
     }
 
     return osName + "-" + archName;
+  }
+
+  private static boolean isMuslLinux() {
+    String override = System.getProperty("zerobus.libc");
+    if (override != null && !override.isEmpty()) {
+      if ("musl".equalsIgnoreCase(override)) {
+        return true;
+      }
+      if ("glibc".equalsIgnoreCase(override)) {
+        return false;
+      }
+      throw new UnsatisfiedLinkError(
+          "Invalid value for system property zerobus.libc: '"
+              + override
+              + "'. Expected 'musl' or 'glibc'.");
+    }
+    // Prefer /proc/self/maps — it reflects the libc actually loaded into THIS process,
+    // which is authoritative on hosts that have both glibc and musl tooling installed.
+    try (BufferedReader reader = new BufferedReader(new FileReader("/proc/self/maps"))) {
+      String line;
+      while ((line = reader.readLine()) != null) {
+        if (line.contains("ld-musl-") || line.contains("libc.musl-")) {
+          return true;
+        }
+        if (line.contains("ld-linux-") || line.contains("/libc.so.6")) {
+          return false;
+        }
+      }
+    } catch (IOException | SecurityException ignored) {
+      // /proc/self/maps unavailable (sandboxed JVM / restrictive SecurityManager);
+      // fall through to loader-file existence check below.
+    }
+    try {
+      if (new File("/lib/ld-musl-x86_64.so.1").exists()
+          || new File("/lib/ld-musl-aarch64.so.1").exists()) {
+        return true;
+      }
+    } catch (SecurityException ignored) {
+      // File.exists() blocked by SecurityManager; assume glibc.
+    }
+    return false;
   }
 
   private static String getLibraryFileName() {
