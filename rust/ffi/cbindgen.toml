@@ -8,6 +8,6 @@ namespace = "zerobus"
 cpp_compat = true
 
 [export]
-include = ["CZerobusSdk", "CZerobusStream", "CResult", "CStreamConfigurationOptions", "CRecord", "CRecordArray", "CHeader", "CHeaders", "CArrowStream", "CArrowStreamConfigurationOptions", "CArrowBatchArray"]
+include = ["CZerobusSdk", "CZerobusStream", "CResult", "CStreamConfigurationOptions", "CRecord", "CRecordArray", "CHeader", "CHeaders", "CArrowStream", "CArrowStreamConfigurationOptions", "CArrowBatchArray", "CZerobusProtoSchema"]
 
 [export.rename]

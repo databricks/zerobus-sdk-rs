@@ -3701,7 +3701,9 @@ dependencies = [
  "libc",
  "once_cell",
  "prost",
+ "prost-reflect",
  "prost-types",
+ "serde_json",
  "tokio",
  "tracing-subscriber",
 ]

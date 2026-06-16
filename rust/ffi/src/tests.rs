@@ -441,4 +441,244 @@ mod tests {
         assert_eq!(headers.len(), 1);
         assert!(headers.contains_key("Authorization"));
     }
+
+    // ========================================================================
+    // Dynamic protobuf schema tests
+    // ========================================================================
+
+    use crate::{
+        zerobus_free_proto_bytes, zerobus_proto_schema_descriptor_bytes,
+        zerobus_proto_schema_encode_json, zerobus_proto_schema_free,
+        zerobus_proto_schema_from_uc_json,
+    };
+    use prost::Message;
+    use prost_reflect::{DescriptorPool, DynamicMessage, MessageDescriptor};
+
+    // Minimal Unity Catalog table-metadata JSON, shaped like the body of
+    // GET /api/2.1/unity-catalog/tables/{name}.
+    fn sample_uc_table_json() -> CString {
+        let json = r#"{
+            "name": "events",
+            "catalog_name": "main",
+            "schema_name": "analytics",
+            "columns": [
+                {"name": "id", "type_name": "BIGINT", "type_text": "bigint", "nullable": false, "position": 0},
+                {"name": "payload", "type_name": "STRING", "type_text": "string", "nullable": true, "position": 1},
+                {"name": "ts", "type_name": "TIMESTAMP", "type_text": "timestamp", "nullable": true, "position": 2}
+            ]
+        }"#;
+        CString::new(json).unwrap()
+    }
+
+    // A CResult to be written into by the function under test. Starts as a
+    // failure so a success-path test proves the call flipped it to success.
+    fn unwritten_result() -> CResult {
+        CResult {
+            success: false,
+            error_message: ptr::null_mut(),
+            is_retryable: false,
+        }
+    }
+
+    // As above but starts successful, so an error-path test proves the call
+    // flipped it to failure.
+    fn presumed_success_result() -> CResult {
+        CResult {
+            success: true,
+            error_message: ptr::null_mut(),
+            is_retryable: false,
+        }
+    }
+
+    // Rebuild a MessageDescriptor from the bare DescriptorProto bytes the handle
+    // exposes, so a test can decode encoded records back and assert field values
+    // — proving the descriptor given to the server and the encoder agree.
+    fn message_descriptor_from_bytes(descriptor_bytes: &[u8]) -> MessageDescriptor {
+        let descriptor = prost_types::DescriptorProto::decode(descriptor_bytes).unwrap();
+        let name = descriptor.name().to_string();
+        let file = prost_types::FileDescriptorProto {
+            name: Some("test.proto".to_string()),
+            message_type: vec![descriptor],
+            ..Default::default()
+        };
+        let mut pool = DescriptorPool::new();
+        pool.add_file_descriptor_proto(file).unwrap();
+        pool.get_message_by_name(&name).unwrap()
+    }
+
+    #[test]
+    fn test_proto_schema_from_uc_json_roundtrip() {
+        let json = sample_uc_table_json();
+        let mut result = unwritten_result();
+        let schema = zerobus_proto_schema_from_uc_json(json.as_ptr(), &mut result as *mut CResult);
+        assert!(!schema.is_null(), "schema build failed");
+        assert!(result.success);
+
+        // Descriptor bytes must decode to the bare DescriptorProto that the
+        // server is given via zerobus_sdk_create_stream.
+        let mut dlen: usize = 0;
+        let dptr = zerobus_proto_schema_descriptor_bytes(schema, &mut dlen as *mut usize);
+        assert!(!dptr.is_null());
+        assert!(dlen > 0);
+        let desc_bytes = unsafe { std::slice::from_raw_parts(dptr, dlen) };
+        let descriptor = prost_types::DescriptorProto::decode(desc_bytes).unwrap();
+        // schema_name + table_name, sanitized to PascalCase.
+        assert_eq!(descriptor.name(), "AnalyticsEvents");
+        assert_eq!(descriptor.field.len(), 3);
+
+        // Encode a record; unknown keys are ignored, timestamps are integers.
+        let record =
+            CString::new(r#"{"id": 7, "payload": "hello", "ts": 1700000000000000, "extra": "x"}"#)
+                .unwrap();
+        let mut out_data: *mut u8 = ptr::null_mut();
+        let mut out_len: usize = 0;
+        let mut enc_result = unwritten_result();
+        let ok = zerobus_proto_schema_encode_json(
+            schema,
+            record.as_ptr(),
+            &mut out_data as *mut *mut u8,
+            &mut out_len as *mut usize,
+            &mut enc_result as *mut CResult,
+        );
+        assert!(ok, "encode failed");
+        assert!(enc_result.success);
+        assert!(!out_data.is_null());
+        assert!(out_len > 0);
+
+        // Decode the encoded bytes against the same descriptor and assert the
+        // values round-trip: the encoding is correct, not merely non-empty.
+        let encoded = unsafe { std::slice::from_raw_parts(out_data, out_len) };
+        let msg_desc = message_descriptor_from_bytes(desc_bytes);
+        let decoded = DynamicMessage::decode(msg_desc, encoded).unwrap();
+        assert_eq!(decoded.get_field_by_name("id").unwrap().as_i64(), Some(7));
+        assert_eq!(
+            decoded.get_field_by_name("payload").unwrap().as_str(),
+            Some("hello")
+        );
+        assert_eq!(
+            decoded.get_field_by_name("ts").unwrap().as_i64(),
+            Some(1700000000000000)
+        );
+
+        zerobus_free_proto_bytes(out_data, out_len);
+        zerobus_proto_schema_free(schema);
+    }
+
+    #[test]
+    fn test_proto_schema_from_uc_json_invalid_json_errors() {
+        let bad = CString::new("not json").unwrap();
+        let mut result = presumed_success_result();
+        let schema = zerobus_proto_schema_from_uc_json(bad.as_ptr(), &mut result as *mut CResult);
+        assert!(schema.is_null());
+        assert!(!result.success);
+        assert!(!result.error_message.is_null());
+        zerobus_free_error_message(result.error_message);
+    }
+
+    #[test]
+    fn test_proto_schema_from_uc_json_unsupported_type_errors() {
+        // Parses cleanly into UcTableSchema but carries a column type the
+        // descriptor builder rejects — exercises the schema-conversion error
+        // path, distinct from a JSON parse failure.
+        let json = CString::new(
+            r#"{
+                "name": "t", "catalog_name": "c", "schema_name": "s",
+                "columns": [
+                    {"name": "x", "type_name": "GEOGRAPHY", "type_text": "geography", "nullable": true, "position": 0}
+                ]
+            }"#,
+        )
+        .unwrap();
+        let mut result = presumed_success_result();
+        let schema = zerobus_proto_schema_from_uc_json(json.as_ptr(), &mut result as *mut CResult);
+        assert!(schema.is_null());
+        assert!(!result.success);
+        assert!(!result.error_message.is_null());
+        zerobus_free_error_message(result.error_message);
+    }
+
+    #[test]
+    fn test_proto_schema_from_uc_json_null_input_errors() {
+        let mut result = presumed_success_result();
+        let schema = zerobus_proto_schema_from_uc_json(ptr::null(), &mut result as *mut CResult);
+        assert!(schema.is_null());
+        assert!(!result.success);
+        zerobus_free_error_message(result.error_message);
+    }
+
+    #[test]
+    fn test_proto_schema_descriptor_bytes_null_handle() {
+        // A null handle must yield a null pointer and zero the out-length so the
+        // caller never reads a stale length.
+        let mut len: usize = 123;
+        let dptr = zerobus_proto_schema_descriptor_bytes(ptr::null(), &mut len as *mut usize);
+        assert!(dptr.is_null());
+        assert_eq!(len, 0);
+    }
+
+    #[test]
+    fn test_proto_schema_encode_null_schema_errors() {
+        let record = CString::new(r#"{"id": 1}"#).unwrap();
+        let mut out_data: *mut u8 = ptr::null_mut();
+        let mut out_len: usize = 0;
+        let mut result = presumed_success_result();
+        let ok = zerobus_proto_schema_encode_json(
+            ptr::null(),
+            record.as_ptr(),
+            &mut out_data as *mut *mut u8,
+            &mut out_len as *mut usize,
+            &mut result as *mut CResult,
+        );
+        assert!(!ok);
+        assert!(!result.success);
+        zerobus_free_error_message(result.error_message);
+    }
+
+    #[test]
+    fn test_proto_schema_encode_malformed_record_errors() {
+        let json = sample_uc_table_json();
+        let mut build = unwritten_result();
+        let schema = zerobus_proto_schema_from_uc_json(json.as_ptr(), &mut build as *mut CResult);
+        assert!(!schema.is_null());
+
+        let bad_record = CString::new("{ not valid json").unwrap();
+        let mut out_data: *mut u8 = ptr::null_mut();
+        let mut out_len: usize = 0;
+        let mut enc_result = presumed_success_result();
+        let ok = zerobus_proto_schema_encode_json(
+            schema,
+            bad_record.as_ptr(),
+            &mut out_data as *mut *mut u8,
+            &mut out_len as *mut usize,
+            &mut enc_result as *mut CResult,
+        );
+        assert!(!ok);
+        assert!(!enc_result.success);
+        assert!(!enc_result.error_message.is_null());
+        assert!(out_data.is_null(), "no buffer should be allocated on error");
+        zerobus_free_error_message(enc_result.error_message);
+        zerobus_proto_schema_free(schema);
+    }
+
+    #[test]
+    fn test_proto_schema_encode_null_out_pointers_errors() {
+        let json = sample_uc_table_json();
+        let mut build = unwritten_result();
+        let schema = zerobus_proto_schema_from_uc_json(json.as_ptr(), &mut build as *mut CResult);
+        assert!(!schema.is_null());
+
+        let record = CString::new(r#"{"id": 1}"#).unwrap();
+        let mut enc_result = presumed_success_result();
+        let ok = zerobus_proto_schema_encode_json(
+            schema,
+            record.as_ptr(),
+            ptr::null_mut(),
+            ptr::null_mut(),
+            &mut enc_result as *mut CResult,
+        );
+        assert!(!ok);
+        assert!(!enc_result.success);
+        zerobus_free_error_message(enc_result.error_message);
+        zerobus_proto_schema_free(schema);
+    }
 }
