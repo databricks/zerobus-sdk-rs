@@ -147,6 +147,14 @@ typedef struct CRecordArray {
   uintptr_t len;
 } CRecordArray;
 
+/**
+ * Holds a table's serialized `DescriptorProto` plus a prepared protobuf
+ * encoder built from it. Opaque to C; the concrete type is [`ProtoSchema`].
+ */
+typedef struct CZerobusProtoSchema {
+  uint8_t _private[0];
+} CZerobusProtoSchema;
+
 #ifdef __cplusplus
 extern "C" {
 #endif // __cplusplus
@@ -496,6 +504,41 @@ void zerobus_free_error_message(char *message);
  * Get default stream configuration options
  */
 struct CStreamConfigurationOptions zerobus_get_default_config(void);
+
+/**
+ * Build a protobuf schema from Unity Catalog table metadata JSON.
+ * Returns NULL on error; free with `zerobus_proto_schema_free`.
+ */
+struct CZerobusProtoSchema *zerobus_proto_schema_from_uc_json(const char *uc_table_json,
+                                                              struct CResult *result);
+
+/**
+ * Borrow the serialized descriptor bytes. Valid until `zerobus_proto_schema_free`.
+ * Pass directly to `zerobus_sdk_create_stream`. Returns NULL on null handle.
+ */
+const uint8_t *zerobus_proto_schema_descriptor_bytes(const struct CZerobusProtoSchema *schema,
+                                                     uintptr_t *out_len);
+
+/**
+ * Encode JSON record to protobuf bytes. Unknown keys are ignored.
+ * DATE/TIMESTAMP columns must be integers (days/micros since epoch), not strings.
+ * Returns true on success; caller must free buffer with `zerobus_free_proto_bytes`.
+ */
+bool zerobus_proto_schema_encode_json(const struct CZerobusProtoSchema *schema,
+                                      const char *record_json,
+                                      uint8_t **out_data,
+                                      uintptr_t *out_len,
+                                      struct CResult *result);
+
+/**
+ * Free a buffer returned by `zerobus_proto_schema_encode_json`.
+ */
+void zerobus_free_proto_bytes(uint8_t *data, uintptr_t len);
+
+/**
+ * Free a handle from `zerobus_proto_schema_from_uc_json`.
+ */
+void zerobus_proto_schema_free(struct CZerobusProtoSchema *schema);
 
 #ifdef __cplusplus
 }  // extern "C"

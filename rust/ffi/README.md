@@ -58,6 +58,40 @@ private static extern IntPtr zerobus_sdk_new(string endpoint, string ucUrl, ref 
 // Link with -lzerobus_ffi
 ```
 
+### Dynamic protobuf from a Unity Catalog schema (pure C)
+
+Build a protobuf descriptor and encode records straight from Unity Catalog
+table metadata — no pre-generated `.proto` file and no second Rust crate:
+
+```c
+CResult r = {0};
+
+/* init: fetch GET /api/2.1/unity-catalog/tables/{name} and pass its JSON body */
+CZerobusProtoSchema *schema = zerobus_proto_schema_from_uc_json(uc_table_json, &r);
+/* on error schema == NULL; read r.error_message then zerobus_free_error_message(r.error_message) */
+
+uintptr_t dlen;
+const uint8_t *desc = zerobus_proto_schema_descriptor_bytes(schema, &dlen);
+CZerobusStream *stream = zerobus_sdk_create_stream(sdk, table_name, desc, dlen,
+                                                   client_id, client_secret, &opts, &r);
+
+/* per record, at flush time */
+uint8_t *buf; uintptr_t len;
+if (zerobus_proto_schema_encode_json(schema, record_json, &buf, &len, &r)) {
+    /* collect buf/len into a batch, ingest via zerobus_stream_ingest_proto_records(...) */
+    zerobus_free_proto_bytes(buf, len);
+}
+
+/* shutdown */
+zerobus_proto_schema_free(schema);
+```
+
+Encoding contract: record object keys are matched to column names; unknown keys
+are ignored (upstream records often carry extra non-column metadata). `DATE`,
+`TIMESTAMP`, and `TIMESTAMP_NTZ` columns are encoded as integers — supply days
+(for `DATE`) or microseconds since the Unix epoch (for `TIMESTAMP*`), not
+ISO-8601 strings.
+
 ## API Reference
 
 See `zerobus.h` for the complete C API documentation.

@@ -17,12 +17,14 @@ use arrow_ipc::{reader::StreamReader, writer::StreamWriter, CompressionType};
 use async_trait::async_trait;
 use bytes::Bytes;
 use databricks_zerobus_ingest_sdk::databricks::zerobus::RecordType;
+use databricks_zerobus_ingest_sdk::schema::{descriptor_from_uc_schema, UcTableSchema};
 use databricks_zerobus_ingest_sdk::{
     EncodedRecord, HeadersProvider, NoTlsConfig, ZerobusError, ZerobusResult, ZerobusSdk,
     ZerobusSdkBuilder, ZerobusStream,
 };
 use databricks_zerobus_ingest_sdk::{RecordBatch, StreamBuilder, ZerobusArrowStream};
 use prost::Message;
+use prost_reflect::{DescriptorPool, DeserializeOptions, DynamicMessage, MessageDescriptor};
 use std::sync::Arc;
 
 // Test module
@@ -619,14 +621,10 @@ pub extern "C" fn zerobus_arrow_free_batch_array(array: CArrowBatchArray) {
             // Reconstruct as Box<[T]> using the original length. This is safe because
             // the pointers were produced by Box::into_raw(vec.into_boxed_slice()),
             // which guarantees capacity == len.
-            let ptrs = Box::from_raw(std::ptr::slice_from_raw_parts_mut(
-                array.batches,
-                array.count,
-            ));
-            let lens = Box::from_raw(std::ptr::slice_from_raw_parts_mut(
-                array.lengths,
-                array.count,
-            ));
+            let ptrs =
+                Box::from_raw(std::ptr::slice_from_raw_parts_mut(array.batches, array.count));
+            let lens =
+                Box::from_raw(std::ptr::slice_from_raw_parts_mut(array.lengths, array.count));
             for (&ptr, &len) in ptrs.iter().zip(lens.iter()) {
                 if !ptr.is_null() && len > 0 {
                     // Each batch slice was produced by Box::into_raw(bytes.into_boxed_slice()),
@@ -1973,5 +1971,207 @@ pub extern "C" fn zerobus_get_default_config() -> CStreamConfigurationOptions {
         has_stream_paused_max_wait_time_ms: false,
         callback_max_wait_time_ms: defaults::CALLBACK_MAX_WAIT_TIME_MS,
         has_callback_max_wait_time_ms: true,
+    }
+}
+
+// ============================================================================
+// Dynamic Protobuf FFI
+// ============================================================================
+//
+// Pure-C consumers can build a protobuf descriptor from Unity Catalog metadata
+// and encode JSON records to protobuf bytes without a companion Rust crate.
+// Lifecycle: `_from_uc_json` → `_descriptor_bytes` / `_encode_json` → `_free`.
+
+/// Holds a table's serialized `DescriptorProto` plus a prepared protobuf
+/// encoder built from it. Opaque to C; the concrete type is [`ProtoSchema`].
+#[repr(C)]
+pub struct CZerobusProtoSchema {
+    _private: [u8; 0],
+}
+
+/// Concrete type behind `*mut CZerobusProtoSchema`.
+struct ProtoSchema {
+    /// Serialized `DescriptorProto` bytes (passed to `zerobus_sdk_create_stream`).
+    descriptor_bytes: Vec<u8>,
+    /// Message descriptor for encoding JSON records to protobuf.
+    message: MessageDescriptor,
+}
+
+/// Safe wrapper to validate proto schema pointer
+fn validate_proto_schema_ptr<'a>(
+    schema: *const CZerobusProtoSchema,
+) -> Result<&'a ProtoSchema, &'static str> {
+    if schema.is_null() {
+        return Err("Proto schema pointer is null");
+    }
+    unsafe { Ok(&*(schema as *const ProtoSchema)) }
+}
+
+/// Builds a [`ProtoSchema`] from Unity Catalog table-metadata JSON.
+fn build_proto_schema(uc_table_json: &str) -> Result<ProtoSchema, String> {
+    let schema: UcTableSchema = serde_json::from_str(uc_table_json)
+        .map_err(|e| format!("failed to parse Unity Catalog table JSON: {e}"))?;
+    let descriptor = descriptor_from_uc_schema(&schema).map_err(|e| e.to_string())?;
+    let descriptor_bytes = descriptor.encode_to_vec();
+    let message_name = descriptor.name().to_string();
+
+    let file = prost_types::FileDescriptorProto {
+        name: Some("zerobus_dynamic.proto".to_string()),
+        message_type: vec![descriptor],
+        ..Default::default()
+    };
+    let mut pool = DescriptorPool::new();
+    pool.add_file_descriptor_proto(file)
+        .map_err(|e| format!("failed to build descriptor pool: {e}"))?;
+    // No package on the synthetic file, so the fully-qualified name is the
+    // bare message name.
+    let message = pool
+        .get_message_by_name(&message_name)
+        .ok_or_else(|| format!("message '{message_name}' not found in descriptor pool"))?;
+
+    Ok(ProtoSchema {
+        descriptor_bytes,
+        message,
+    })
+}
+
+/// Build a protobuf schema from Unity Catalog table metadata JSON.
+/// Returns NULL on error; free with `zerobus_proto_schema_free`.
+#[no_mangle]
+pub extern "C" fn zerobus_proto_schema_from_uc_json(
+    uc_table_json: *const c_char,
+    result: *mut CResult,
+) -> *mut CZerobusProtoSchema {
+    let json = match unsafe { c_str_to_string(uc_table_json) } {
+        Ok(s) => s,
+        Err(e) => {
+            write_error_result(result, e, false);
+            return ptr::null_mut();
+        }
+    };
+
+    match build_proto_schema(&json) {
+        Ok(schema) => {
+            write_success_result(result);
+            Box::into_raw(Box::new(schema)) as *mut CZerobusProtoSchema
+        }
+        Err(err) => {
+            write_error_result(result, &err, false);
+            ptr::null_mut()
+        }
+    }
+}
+
+/// Borrow the serialized descriptor bytes. Valid until `zerobus_proto_schema_free`.
+/// Pass directly to `zerobus_sdk_create_stream`. Returns NULL on null handle.
+#[no_mangle]
+pub extern "C" fn zerobus_proto_schema_descriptor_bytes(
+    schema: *const CZerobusProtoSchema,
+    out_len: *mut usize,
+) -> *const u8 {
+    let schema_ref = match validate_proto_schema_ptr(schema) {
+        Ok(s) => s,
+        Err(_) => {
+            if !out_len.is_null() {
+                unsafe {
+                    *out_len = 0;
+                }
+            }
+            return ptr::null();
+        }
+    };
+    if !out_len.is_null() {
+        unsafe {
+            *out_len = schema_ref.descriptor_bytes.len();
+        }
+    }
+    schema_ref.descriptor_bytes.as_ptr()
+}
+
+/// Encode JSON record to protobuf bytes. Unknown keys are ignored.
+/// DATE/TIMESTAMP columns must be integers (days/micros since epoch), not strings.
+/// Returns true on success; caller must free buffer with `zerobus_free_proto_bytes`.
+#[no_mangle]
+pub extern "C" fn zerobus_proto_schema_encode_json(
+    schema: *const CZerobusProtoSchema,
+    record_json: *const c_char,
+    out_data: *mut *mut u8,
+    out_len: *mut usize,
+    result: *mut CResult,
+) -> bool {
+    let schema_ref = match validate_proto_schema_ptr(schema) {
+        Ok(s) => s,
+        Err(msg) => {
+            write_error_result(result, msg, false);
+            return false;
+        }
+    };
+    if out_data.is_null() || out_len.is_null() {
+        write_error_result(result, "Output pointers are null", false);
+        return false;
+    }
+    let json = match unsafe { c_str_to_string(record_json) } {
+        Ok(s) => s,
+        Err(e) => {
+            write_error_result(result, e, false);
+            return false;
+        }
+    };
+
+    let mut deserializer = serde_json::Deserializer::from_str(&json);
+    // Records carry extra non-column fields; ignore them rather than erroring.
+    let options = DeserializeOptions::new().deny_unknown_fields(false);
+    let message = match DynamicMessage::deserialize_with_options(
+        schema_ref.message.clone(),
+        &mut deserializer,
+        &options,
+    ) {
+        Ok(m) => m,
+        Err(e) => {
+            write_error_result(result, &format!("failed to encode record: {e}"), false);
+            return false;
+        }
+    };
+    if let Err(e) = deserializer.end() {
+        write_error_result(
+            result,
+            &format!("unexpected trailing content in record JSON: {e}"),
+            false,
+        );
+        return false;
+    }
+
+    let bytes = message.encode_to_vec();
+    let len = bytes.len();
+    // into_boxed_slice() shrinks capacity to len so the matching
+    // zerobus_free_proto_bytes reconstruction is sound.
+    let data_ptr = Box::into_raw(bytes.into_boxed_slice()) as *mut u8;
+    unsafe {
+        *out_data = data_ptr;
+        *out_len = len;
+    }
+    write_success_result(result);
+    true
+}
+
+/// Free a buffer returned by `zerobus_proto_schema_encode_json`.
+#[no_mangle]
+pub extern "C" fn zerobus_free_proto_bytes(data: *mut u8, len: usize) {
+    if !data.is_null() && len > 0 {
+        unsafe {
+            // data came from Box::into_raw(bytes.into_boxed_slice()), so
+            // capacity == len and this reconstruction is sound.
+            let _ = Box::from_raw(std::ptr::slice_from_raw_parts_mut(data, len));
+        }
+    }
+}
+
+/// Free a handle from `zerobus_proto_schema_from_uc_json`.
+#[no_mangle]
+pub extern "C" fn zerobus_proto_schema_free(schema: *mut CZerobusProtoSchema) {
+    if !schema.is_null() {
+        unsafe {
+            let _ = Box::from_raw(schema as *mut ProtoSchema);
+        }
     }
 }
