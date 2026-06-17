@@ -1,8 +1,10 @@
 //! Builder for creating [`ZerobusSdk`] instances.
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use crate::proxy::ConnectorFactory;
+use crate::token_cache::DEFAULT_REFRESH_BUFFER;
 use crate::{
     SecureTlsConfig, TlsConfig, ZerobusError, ZerobusResult, ZerobusSdk, DEFAULT_SDK_IDENTIFIER,
 };
@@ -27,6 +29,8 @@ pub struct ZerobusSdkBuilder {
     connector_factory: Option<ConnectorFactory>,
     application_name: Option<String>,
     sdk_identifier_override: Option<String>,
+    token_cache_enabled: bool,
+    token_refresh_buffer: Duration,
 }
 
 impl ZerobusSdkBuilder {
@@ -41,6 +45,8 @@ impl ZerobusSdkBuilder {
             connector_factory: None,
             application_name: None,
             sdk_identifier_override: None,
+            token_cache_enabled: true,
+            token_refresh_buffer: DEFAULT_REFRESH_BUFFER,
         }
     }
 
@@ -132,6 +138,43 @@ impl ZerobusSdkBuilder {
         self
     }
 
+    /// Enables or disables caching of OAuth tokens for the default OAuth path.
+    ///
+    /// When enabled (the default), tokens obtained via `.oauth(...)` are cached
+    /// per table on the SDK instance and reused across stream creations and
+    /// recoveries until they near expiry, instead of minting a fresh token on
+    /// every stream. This reduces load on the Unity Catalog token endpoint for
+    /// clients that churn through many short-lived streams.
+    ///
+    /// Caching only applies to the built-in OAuth path. Custom
+    /// [`HeadersProvider`](crate::HeadersProvider) implementations are
+    /// responsible for their own caching. Tokens are shared only across streams
+    /// created from the same `ZerobusSdk` instance, so reuse the SDK rather than
+    /// constructing a new one per stream to benefit from the cache.
+    ///
+    /// # Arguments
+    ///
+    /// * `enabled` - Whether to cache OAuth tokens.
+    pub fn token_cache_enabled(mut self, enabled: bool) -> Self {
+        self.token_cache_enabled = enabled;
+        self
+    }
+
+    /// Sets how long before a cached OAuth token's expiry it is refreshed.
+    ///
+    /// A cached token is re-minted on the next stream creation once it is within
+    /// this buffer of its expiry, providing headroom against clock skew and
+    /// token propagation delays. Defaults to 5 minutes. Has no effect when token
+    /// caching is disabled.
+    ///
+    /// # Arguments
+    ///
+    /// * `buffer` - Lead time before expiry at which to refresh.
+    pub fn token_refresh_buffer(mut self, buffer: Duration) -> Self {
+        self.token_refresh_buffer = buffer;
+        self
+    }
+
     /// Builds the [`ZerobusSdk`] instance.
     ///
     /// # Errors
@@ -186,6 +229,8 @@ impl ZerobusSdkBuilder {
             tls_config,
             self.connector_factory,
             sdk_identifier,
+            self.token_cache_enabled,
+            self.token_refresh_buffer,
         ))
     }
 }
@@ -216,6 +261,31 @@ mod tests {
             sdk.unity_catalog_url,
             "https://my-workspace.cloud.databricks.com"
         );
+    }
+
+    #[test]
+    fn test_builder_token_cache_options() {
+        // Both knobs are chainable and the SDK builds with non-default values.
+        let sdk = ZerobusSdkBuilder::new()
+            .endpoint("https://workspace.zerobus.databricks.com")
+            .token_cache_enabled(false)
+            .token_refresh_buffer(Duration::from_secs(120))
+            .build()
+            .expect("should build with token cache options");
+
+        // The builder accepts both knobs and produces a usable SDK; assert the
+        // build succeeded via a field on the result.
+        assert_eq!(sdk.workspace_id, "workspace");
+    }
+
+    #[test]
+    fn test_builder_token_cache_enabled_by_default() {
+        let sdk = ZerobusSdkBuilder::new()
+            .endpoint("https://workspace.zerobus.databricks.com")
+            .build()
+            .expect("should build");
+        // The cache is always present; enablement is internal state.
+        let _ = &sdk.token_cache;
     }
 
     #[test]

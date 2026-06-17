@@ -55,6 +55,7 @@ pub mod schema;
 mod stream_configuration;
 pub mod stream_options;
 mod tls_config;
+mod token_cache;
 
 use std::collections::HashMap;
 use std::fmt::Debug;
@@ -275,6 +276,9 @@ pub struct ZerobusSdk {
     /// Final value sent as the HTTP `user-agent` header on every request.
     /// Either `"zerobus-sdk-rs/<version>"` or `"zerobus-sdk-rs/<version> <application_name>"`.
     pub(crate) sdk_identifier: Arc<str>,
+    /// Shared cache of OAuth tokens, keyed per table, reused across all streams
+    /// created from this SDK instance via the default OAuth path.
+    pub(crate) token_cache: Arc<token_cache::TokenCache>,
 }
 
 impl ZerobusSdk {
@@ -336,6 +340,7 @@ impl ZerobusSdk {
     /// fully-resolved value sent as the HTTP `user-agent` header; the builder
     /// is responsible for composing it from the default prefix and any
     /// caller-supplied `application_name` or override.
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn new_with_config(
         zerobus_endpoint: String,
         unity_catalog_url: String,
@@ -343,6 +348,8 @@ impl ZerobusSdk {
         tls_config: Arc<dyn TlsConfig>,
         connector_factory: Option<ConnectorFactory>,
         sdk_identifier: Arc<str>,
+        token_cache_enabled: bool,
+        token_refresh_buffer: Duration,
     ) -> Self {
         ZerobusSdk {
             zerobus_endpoint,
@@ -352,6 +359,10 @@ impl ZerobusSdk {
             tls_config,
             connector_factory,
             sdk_identifier,
+            token_cache: Arc::new(token_cache::TokenCache::new(
+                token_cache_enabled,
+                token_refresh_buffer,
+            )),
         }
     }
 
@@ -822,6 +833,11 @@ impl ZerobusStream {
                 let _ = server_error_tx.send(Some(error.clone()));
                 if !error.is_retryable() || !options.recovery {
                     is_closed.store(true, Ordering::Relaxed);
+                    // A mid-stream auth rejection means the cached token is no
+                    // longer accepted; drop it so the next stream re-mints.
+                    if error.is_auth_rejection() {
+                        headers_provider.invalidate().await;
+                    }
                     Self::fail_all_pending_records(
                         landing_zone.clone(),
                         oneshot_map.clone(),
@@ -839,8 +855,38 @@ impl ZerobusStream {
     /// Creates a stream connection to the Zerobus API.
     /// Returns a tuple containing the sender, response gRPC stream, and stream ID.
     /// If the stream creation fails, it returns an error.
-    #[instrument(level = "debug", skip_all, fields(table_name = %table_properties.table_name))]
+    ///
+    /// On a server-side authentication rejection it asks the headers provider to
+    /// invalidate cached credentials so the next attempt re-derives them. This
+    /// covers IdP-revoked tokens, not a same-named table recreated within the
+    /// token's lifetime, which the server accepts.
     async fn create_stream_connection(
+        channel: ZerobusClient<Channel>,
+        table_properties: &TableProperties,
+        headers_provider: &Arc<dyn HeadersProvider>,
+        record_type: RecordType,
+    ) -> ZerobusResult<(
+        tokio::sync::mpsc::Sender<EphemeralStreamRequest>,
+        tonic::Streaming<EphemeralStreamResponse>,
+        String,
+    )> {
+        let result = Self::create_stream_connection_inner(
+            channel,
+            table_properties,
+            headers_provider,
+            record_type,
+        )
+        .await;
+        if let Err(err) = &result {
+            if err.is_auth_rejection() {
+                headers_provider.invalidate().await;
+            }
+        }
+        result
+    }
+
+    #[instrument(level = "debug", skip_all, fields(table_name = %table_properties.table_name))]
+    async fn create_stream_connection_inner(
         mut channel: ZerobusClient<Channel>,
         table_properties: &TableProperties,
         headers_provider: &Arc<dyn HeadersProvider>,
@@ -866,8 +912,10 @@ impl ZerobusStream {
                 }
                 "authorization" => {
                     let mut auth_value = MetadataValue::try_from(value.as_str()).map_err(|_| {
-                        error!(table_name = %table_properties.table_name, "Invalid token: {}", value);
-                        ZerobusError::InvalidUCTokenError(value)
+                        error!(table_name = %table_properties.table_name, "authorization token is not a valid HTTP header value");
+                        ZerobusError::InvalidUCTokenError(
+                            "authorization token is not a valid HTTP header value".to_string(),
+                        )
                     })?;
                     auth_value.set_sensitive(true);
                     stream_metadata.insert("authorization", auth_value);

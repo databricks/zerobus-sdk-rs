@@ -86,4 +86,66 @@ impl ZerobusError {
             ZerobusError::TokenFetchError(_) => true,
         }
     }
+
+    /// Reports whether this is a server-side authentication/authorization
+    /// rejection (as opposed to a transient or unrelated failure). Used to
+    /// decide when to invalidate cached credentials so the next attempt
+    /// re-derives them.
+    pub(crate) fn is_auth_rejection(&self) -> bool {
+        matches!(
+            self,
+            ZerobusError::CreateStreamError(status) | ZerobusError::StreamClosedError(status)
+                if matches!(
+                    status.code(),
+                    tonic::Code::Unauthenticated | tonic::Code::PermissionDenied
+                )
+        )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn auth_rejection_classification() {
+        assert!(
+            ZerobusError::CreateStreamError(tonic::Status::unauthenticated("x"))
+                .is_auth_rejection()
+        );
+        assert!(
+            ZerobusError::CreateStreamError(tonic::Status::permission_denied("x"))
+                .is_auth_rejection()
+        );
+        assert!(
+            ZerobusError::StreamClosedError(tonic::Status::unauthenticated("x"))
+                .is_auth_rejection()
+        );
+        // Non-auth gRPC codes are not rejections.
+        assert!(!ZerobusError::CreateStreamError(tonic::Status::internal("x")).is_auth_rejection());
+        assert!(
+            !ZerobusError::CreateStreamError(tonic::Status::unavailable("x")).is_auth_rejection()
+        );
+        // Other variants are never auth rejections.
+        assert!(!ZerobusError::TokenFetchError("x".to_string()).is_auth_rejection());
+    }
+
+    /// Pins the cross-crate invariant the Arrow path relies on: `FlightError ->
+    /// tonic::Status` via `From` preserves the inner gRPC code (unlike
+    /// `Status::from_error`, which flattens it to `Unknown`). A future
+    /// `arrow-flight` change to that `From` impl fails here instead of silently
+    /// disabling Arrow auth-rejection detection.
+    #[cfg(feature = "arrow-flight")]
+    #[test]
+    fn auth_rejection_survives_flight_error_conversion() {
+        use arrow_flight::error::FlightError;
+
+        let auth: tonic::Status =
+            FlightError::Tonic(Box::new(tonic::Status::permission_denied("denied"))).into();
+        assert!(ZerobusError::CreateStreamError(auth).is_auth_rejection());
+
+        let non_auth: tonic::Status =
+            FlightError::Tonic(Box::new(tonic::Status::unavailable("blip"))).into();
+        assert!(!ZerobusError::CreateStreamError(non_auth).is_auth_rejection());
+    }
 }

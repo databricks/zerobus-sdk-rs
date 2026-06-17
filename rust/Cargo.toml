@@ -53,6 +53,7 @@ arrow-ipc = { version = "58.2", default-features = false }
 # Misc
 futures = "0.3"
 chrono = "0.4"
+sha2 = "0.10"
 once_cell = "1.21"
 bytes = "1.11"
 smallvec = "1.15.1"

@@ -252,7 +252,30 @@ The SDK uses OAuth 2.0 client credentials flow:
 2. Sends request to `{uc_endpoint}/oidc/v1/token` with client credentials
 3. Token includes scoped permissions for the specific table
 4. Token is attached to gRPC metadata as Bearer token
-5. Fresh tokens are fetched automatically on each connection
+5. Tokens are cached per table and reused across connections until they near expiry (see Token Caching below)
+
+### Token Caching
+
+OAuth tokens minted via Unity Catalog have a lifetime chosen by Unity Catalog (currently one hour) that the SDK cannot configure, while a single stream lives at most ~15 minutes. By default the SDK caches the token for each table on the `ZerobusSdk` instance and reuses it across stream creations and recoveries, refreshing it only once it nears the expiry the server reported (so it adapts to whatever lifetime UC returns). This avoids minting a fresh token on every stream and reduces load on the Unity Catalog token endpoint.
+
+Caching applies only to the built-in OAuth path (`.oauth(...)`). Tokens are shared only across streams created from the same `ZerobusSdk`, so reuse a single SDK instance rather than constructing a new one per stream. Custom `HeadersProvider` implementations manage their own caching.
+
+Two builder options tune the behavior:
+
+```rust
+use databricks_zerobus_ingest_sdk::ZerobusSdk;
+use std::time::Duration;
+
+let sdk = ZerobusSdk::builder()
+    .endpoint("https://<your-workspace>.zerobus.<region>.cloud.databricks.com")
+    .unity_catalog_url("https://<your-workspace>.cloud.databricks.com")
+    // Refresh a cached token once it is within 10 minutes of expiry (default: 5 minutes).
+    .token_refresh_buffer(Duration::from_secs(600))
+    // Or disable caching entirely to mint a fresh token per stream.
+    // .token_cache_enabled(false)
+    .build()?;
+# Ok::<(), databricks_zerobus_ingest_sdk::ZerobusError>(())
+```
 
 ### Custom Authentication
 
