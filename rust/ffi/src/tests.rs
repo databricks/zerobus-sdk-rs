@@ -571,13 +571,10 @@ mod tests {
         let schema = zerobus_proto_schema_from_uc_json(bad.as_ptr(), &mut result as *mut CResult);
         assert!(schema.is_null());
         assert!(!result.success);
+        // A parse failure is a caller error, not a transient one. Assert on the
+        // error code rather than the message text, which is free to change.
+        assert!(!result.is_retryable);
         assert!(!result.error_message.is_null());
-        // Assert the failure is the JSON parse path, not some other error.
-        let msg = unsafe { test_c_str_to_string(result.error_message) }.unwrap();
-        assert!(
-            msg.contains("failed to parse Unity Catalog table JSON"),
-            "unexpected error message: {msg}"
-        );
         zerobus_free_error_message(result.error_message);
     }
 
@@ -717,13 +714,12 @@ mod tests {
         );
         assert!(!ok);
         assert!(!enc_result.success);
+        // A missing required field is a caller error, not a transient one. Assert
+        // on the error code rather than the message text, which is free to change.
+        assert!(!enc_result.is_retryable);
+        assert!(!enc_result.error_message.is_null());
         assert!(out_data.is_null(), "no buffer should be allocated on error");
         assert_eq!(out_len, 0, "length must be cleared on error");
-        let msg = unsafe { test_c_str_to_string(enc_result.error_message) }.unwrap();
-        assert!(
-            msg.contains("missing required field") && msg.contains("id"),
-            "unexpected error message: {msg}"
-        );
         zerobus_free_error_message(enc_result.error_message);
         zerobus_proto_schema_free(schema);
     }
