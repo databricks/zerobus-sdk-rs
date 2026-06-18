@@ -66,31 +66,33 @@ Stream closed successfully
 
 ### Code Highlights
 
-The example demonstrates all three data-passing approaches:
+The example demonstrates all three data-passing approaches. Each `ingest_record_offset()`
+returns as soon as the record is queued; we ingest all of them and `flush()` once at the end
+rather than waiting per record (waiting per record forces a server round-trip each time):
 
 ```rust
 use databricks_zerobus_ingest_sdk::{JsonValue, JsonString};
 
 // 1. Auto-serializing: pass struct directly
 let order = Order { id: 1, customer_name: "Alice".to_string(), /* ... */ };
-let offset = stream.ingest_record_offset(JsonValue(order)).await?;
-stream.wait_for_offset(offset).await?;
+let _offset = stream.ingest_record_offset(JsonValue(order)).await?;
 
 // 2. Pre-serialized: pass JSON string with wrapper
 let json = r#"{
     "id": 2,
     "customer_name": "Bob"
 }"#.to_string();
-let offset = stream.ingest_record_offset(JsonString(json)).await?;
-stream.wait_for_offset(offset).await?;
+let _offset = stream.ingest_record_offset(JsonString(json)).await?;
 
 // 3. Backward-compatible: pass raw string (no wrapper)
 let json = r#"{
     "id": 3,
     "customer_name": "Carol"
 }"#.to_string();
-let offset = stream.ingest_record_offset(json).await?;
-stream.wait_for_offset(offset).await?;
+let _offset = stream.ingest_record_offset(json).await?;
+
+// Confirm all queued records at once.
+stream.flush().await?;
 ```
 
 **Building a JSON stream:**

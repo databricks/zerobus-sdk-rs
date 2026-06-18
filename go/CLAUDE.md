@@ -2,6 +2,24 @@
 
 Go wrapper around the Rust core via cgo and the C FFI library.
 
+## Client code patterns (performance)
+
+When writing or reviewing client/example code, follow the idiomatic async flow.
+`IngestRecordOffset()` (and `IngestRecordsOffset()` / `IngestBatch()`) return as
+soon as the record is queued; the SDK sends it and tracks its acknowledgment in
+the background.
+
+- Ingest in a loop, then call `Flush()` to confirm durability — once for a
+  bounded batch, or periodically for a long-running stream.
+- Acks are ordered, so if you only need to confirm a group of records, call
+  `WaitForOffset()` on the LAST offset — it confirms all prior offsets too.
+- Use `WaitForOffset()` when a specific record must be confirmed before
+  continuing; prefer `Flush()` for bulk durability. Avoid calling
+  `WaitForOffset()` after every record in a tight loop, since that limits
+  throughput to one record per round-trip.
+- There is no ack-callback API in the Go SDK; use `Flush()` / `WaitForOffset()`
+  (or the fire-and-forget `IngestRecordNowait`/`IngestRecordsNowait`).
+
 ## Structure
 
 ```

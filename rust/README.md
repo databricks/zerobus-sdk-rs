@@ -505,23 +505,31 @@ The SDK provides flexible ways to ingest data with different levels of abstracti
 | `JsonString` | JSON | Pre-serialized: pass JSON strings with explicit wrapper |
 | `String` | JSON | Backward-compatible: raw strings without wrapper |
 
-#### Single Record Ingestion
+> **How acknowledgment works:** `ingest_record_offset()` returns as soon as the record is **queued**; the SDK sends it and tracks its acknowledgment in the background. To confirm records are durably committed, call `flush()` — it returns once everything queued so far is acknowledged. The returned `OffsetId` is a handle you can also wait on individually with `wait_for_offset()` when a specific record must be confirmed before continuing. Avoid calling `wait_for_offset()` after *every* record in a loop, though: that waits out a full round-trip before sending the next record and limits throughput to one record per round-trip.
+
+#### Recommended: high-throughput ingestion
+
+Ingest in a loop, then `flush()` to confirm all pending acknowledgments. For long-running streams, `flush()` periodically to bound memory:
 
 ```rust
 use databricks_zerobus_ingest_sdk::ProtoMessage;
 
-let record = YourMessage { id: Some(1), name: Some("Alice".to_string()) };
+for i in 0..100_000 {
+    let record = YourMessage { id: Some(i), /* ... */ };
+    // Returns immediately once queued; flush() below confirms the batch.
+    let _offset = stream.ingest_record_offset(ProtoMessage(record)).await?;
 
-// Ingest and get offset (after queuing)
-let offset = stream.ingest_record_offset(ProtoMessage(record)).await?;
-
-// Wait for server acknowledgment
-stream.wait_for_offset(offset).await?;
+    // Periodically flush to bound memory on long-running streams.
+    if (i + 1) % 10_000 == 0 {
+        stream.flush().await?;
+    }
+}
+stream.flush().await?; // Wait once for every pending acknowledgment.
 ```
 
 #### Batch Ingestion
 
-Ingest multiple records at once for higher throughput with all-or-nothing semantics.
+For records you already have grouped, send them as one batch with all-or-nothing semantics. This is the most efficient option in hot paths — it amortizes per-call overhead:
 
 ```rust
 use databricks_zerobus_ingest_sdk::ProtoMessage;
@@ -532,27 +540,21 @@ let records: Vec<ProtoMessage<YourMessage>> = vec![
     ProtoMessage(YourMessage { id: Some(3), /* ... */ }),
 ];
 
-// Returns Some(offset) for non-empty batches, None for empty batches
-if let Some(offset) = stream.ingest_records_offset(records).await? {
-    stream.wait_for_offset(offset).await?;
-}
+// Returns Some(offset) for non-empty batches, None for empty batches.
+// Queue many batches this way; flush() once when done.
+let _offset = stream.ingest_records_offset(records).await?;
 ```
 
-#### High Throughput Pattern
+#### Per-record confirmation
 
-Ingest many records without waiting for each acknowledgment, then flush periodically:
+When a specific record must be confirmed as durably committed before you continue — e.g. low-volume control messages — wait on its returned offset. This is the right tool for that case; for high-volume ingestion, prefer the loop-then-`flush()` pattern above, since waiting on each record limits throughput to one round-trip per record.
 
 ```rust
-for i in 0..100_000 {
-    let record = YourMessage { id: Some(i), /* ... */ };
-    let _offset = stream.ingest_record_offset(ProtoMessage(record)).await?;
+use databricks_zerobus_ingest_sdk::ProtoMessage;
 
-    // Periodically flush to avoid unbounded memory growth
-    if (i + 1) % 10_000 == 0 {
-        stream.flush().await?;
-    }
-}
-stream.flush().await?;
+let record = YourMessage { id: Some(1), name: Some("Alice".to_string()) };
+let offset = stream.ingest_record_offset(ProtoMessage(record)).await?;
+stream.wait_for_offset(offset).await?; // OK for one-off / low-volume records.
 ```
 
 See [`examples/`](https://github.com/databricks/zerobus-sdk/tree/main/rust/examples) for complete working examples with all wrapper types, serialization formats, and ingestion patterns.
@@ -564,38 +566,24 @@ The recommended `ingest_record_offset()` and `ingest_records_offset()` methods r
 - `ingest_records_offset()` returns `Option<OffsetId>` (None if the batch is empty)
 
 ```rust
-// Ingest and get offset, after queuing the record.
-let offset_id = stream.ingest_record_offset(data).await?;
-println!("Record sent with offset Id: {}", offset_id);
+// Preferred: ingest without waiting, then confirm everything at once.
+for i in 0..1000 {
+    // Returns the offset as soon as the record is queued; does NOT block on the ack.
+    let _offset = stream.ingest_record_offset(record).await?;
+}
+stream.flush().await?; // Waits for all pending acknowledgments in one shot.
 
-// Wait for acknowledgment when needed.
+// Batches return Option<OffsetId> (None if the batch is empty). Queue them the
+// same way — keep ingesting, and flush() once when you're done.
+let batch = vec![data1, data2, data3];
+let _offset = stream.ingest_records_offset(batch).await?;
+stream.flush().await?;
+
+// Low volume only: wait on a single returned offset when you must confirm that
+// specific record is committed before continuing. Never do this inside a hot loop.
+let offset_id = stream.ingest_record_offset(data).await?;
 stream.wait_for_offset(offset_id).await?;
 println!("Record committed at offset: {}", offset_id);
-
-// For batches, the method returns Option<OffsetId>.
-// None if the batch is empty.
-let batch = vec![data1, data2, data3];
-if let Some(offset_id) = stream.ingest_records_offset(batch).await? {
-    println!("Batch sent with last offset: {}", offset_id);
-    stream.wait_for_offset(offset_id).await?;
-    println!("Batch committed");
-} else {
-    println!("Empty batch, no records ingested");
-}
-
-// High-throughput: collect offsets and wait selectively.
-let mut offsets = Vec::new();
-for i in 0..1000 {
-    let offset = stream.ingest_record_offset(record).await?;
-    offsets.push(offset);
-}
-// Wait for specific offsets as needed.
-for offset in offsets {
-    stream.wait_for_offset(offset).await?;
-}
-
-// Or use flush() to wait for all pending acknowledgments at once.
-stream.flush().await?;
 ```
 
 #### Using Acknowledgment Callbacks
@@ -871,17 +859,18 @@ cargo test -p tests -- --nocapture
 
 1. **Reuse SDK Instances** - Create one `ZerobusSdk` per application and reuse for multiple streams
 2. **Always Close Streams** - Use `stream.close().await?` to ensure all data is flushed
-3. **Choose the Right Ingestion Method**:
+3. **Confirm with `flush()`, not per-record waits** - The idiomatic flow is to ingest in a loop and `flush()` once (or periodically). Use `wait_for_offset()` only when a specific record must be confirmed individually — calling it after every record serializes the pipeline into one round-trip per record.
+4. **Choose the Right Ingestion Method**:
    - Use `ingest_records_offset()` for high throughput batch ingestion
    - Use `ingest_record_offset()` when processing records individually
-   - Both return offsets directly; use `wait_for_offset()` to explicitly wait for acknowledgments
-4. **Tune Inflight Limits** - Adjust `max_inflight_requests` based on memory and throughput needs
-5. **Enable Recovery** - Always set `recovery: true` in production environments
-6. **Handle Ack Futures** - Use `tokio::spawn` for fire-and-forget or batch-wait for verification
-7. **Monitor Errors** - Log and alert on non-retryable errors
-8. **Validate Schemas** - Use the schema generation tool to ensure type safety (for Protocol Buffers)
-9. **Secure Credentials** - Never hardcode secrets; use environment variables or secret managers
-10. **Test Recovery** - Simulate failures to verify your error handling logic
+   - Both return offsets directly; confirm with `flush()` at the end, or `wait_for_offset()` only when you need per-record confirmation
+5. **Tune Inflight Limits** - Adjust `max_inflight_requests` based on memory and throughput needs
+6. **Enable Recovery** - Always set `recovery: true` in production environments
+7. **Use Ack Callbacks for async tracking** - Register an `ack_callback` for metrics/logging instead of blocking on `wait_for_offset()`
+8. **Monitor Errors** - Log and alert on non-retryable errors
+9. **Validate Schemas** - Use the schema generation tool to ensure type safety (for Protocol Buffers)
+10. **Secure Credentials** - Never hardcode secrets; use environment variables or secret managers
+11. **Test Recovery** - Simulate failures to verify your error handling logic
 
 ## API Reference
 
