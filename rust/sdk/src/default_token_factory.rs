@@ -1,4 +1,45 @@
+use std::time::Duration;
+
+use tokio::time::Instant;
+use tracing::{debug, info, warn};
+
 use crate::{ZerobusError, ZerobusResult};
+
+/// An access token together with its time-to-live as reported by the OAuth
+/// server, if any.
+pub(crate) struct FetchedToken {
+    /// The OAuth 2.0 access token.
+    pub(crate) token: String,
+    /// Lifetime of the token derived from the `expires_in` field of the OAuth
+    /// response. `None` if the server did not return a usable `expires_in`, in
+    /// which case the token must not be cached.
+    pub(crate) expires_in: Option<Duration>,
+}
+
+/// Why a token mint was triggered. Logged on the mint so operators can tell a
+/// cold start from a proactive refresh from caching being off.
+#[derive(Clone, Copy, Debug)]
+pub(crate) enum MintReason {
+    /// No usable cached token (cold start or the cached token had expired).
+    ColdMiss,
+    /// A cached token entered the refresh window and was proactively renewed.
+    Refresh,
+    /// Token caching is disabled, so every stream creation mints.
+    CacheDisabled,
+    /// Minted outside the cache via the public `get_token`.
+    Direct,
+}
+
+impl MintReason {
+    fn as_str(self) -> &'static str {
+        match self {
+            MintReason::ColdMiss => "cold_miss",
+            MintReason::Refresh => "refresh",
+            MintReason::CacheDisabled => "cache_disabled",
+            MintReason::Direct => "direct",
+        }
+    }
+}
 
 /// Default OAuth 2.0 token factory for Unity Catalog authentication.
 ///
@@ -31,6 +72,79 @@ impl DefaultTokenFactory {
         client_secret: &str,
         workspace_id: &str,
     ) -> ZerobusResult<String> {
+        Self::fetch_token(
+            uc_endpoint,
+            table_name,
+            client_id,
+            client_secret,
+            workspace_id,
+            MintReason::Direct,
+        )
+        .await
+        .map(|fetched| fetched.token)
+    }
+
+    /// Obtains an OAuth 2.0 access token along with its reported lifetime.
+    ///
+    /// This is the caching-aware variant of [`get_token`](Self::get_token): in
+    /// addition to the token it returns the `expires_in` value from the OAuth
+    /// response so callers can cache the token until it nears expiry.
+    pub(crate) async fn fetch_token(
+        uc_endpoint: &str,
+        table_name: &str,
+        client_id: &str,
+        client_secret: &str,
+        workspace_id: &str,
+        reason: MintReason,
+    ) -> ZerobusResult<FetchedToken> {
+        debug!(table = %table_name, "requesting UC OAuth token");
+        let started = Instant::now();
+        let result = Self::fetch_token_inner(
+            uc_endpoint,
+            table_name,
+            client_id,
+            client_secret,
+            workspace_id,
+        )
+        .await;
+        let elapsed_ms = started.elapsed().as_millis() as u64;
+        match &result {
+            Ok(FetchedToken {
+                expires_in: Some(ttl),
+                ..
+            }) => info!(
+                table = %table_name,
+                reason = reason.as_str(),
+                expires_in_secs = ttl.as_secs(),
+                elapsed_ms,
+                "minted UC OAuth token"
+            ),
+            Ok(FetchedToken {
+                expires_in: None, ..
+            }) => warn!(
+                table = %table_name,
+                reason = reason.as_str(),
+                elapsed_ms,
+                "minted UC OAuth token but UC returned no expires_in; token will not be cached"
+            ),
+            Err(err) => warn!(
+                table = %table_name,
+                reason = reason.as_str(),
+                retryable = err.is_retryable(),
+                elapsed_ms,
+                "failed to mint UC OAuth token: {err}"
+            ),
+        }
+        result
+    }
+
+    async fn fetch_token_inner(
+        uc_endpoint: &str,
+        table_name: &str,
+        client_id: &str,
+        client_secret: &str,
+        workspace_id: &str,
+    ) -> ZerobusResult<FetchedToken> {
         let (catalog, schema, table) = Self::parse_table_name(table_name)?;
 
         let uc_endpoint = uc_endpoint.to_string();
@@ -103,7 +217,35 @@ impl DefaultTokenFactory {
             .as_str()
             .ok_or_else(|| ZerobusError::InvalidUCTokenError("access_token missing".to_string()))?
             .to_string();
-        Ok(token)
+
+        // Reject a token that can't be a header value before it is returned, so
+        // an unusable token never enters the cache and poisons it until expiry.
+        if !Self::is_usable_as_header(&token) {
+            return Err(ZerobusError::InvalidUCTokenError(
+                "access token is not a valid HTTP header value".to_string(),
+            ));
+        }
+
+        let expires_in = Self::parse_expires_in(&body);
+
+        Ok(FetchedToken { token, expires_in })
+    }
+
+    /// Reports whether `token` can be sent as the `authorization` header value
+    /// (`Bearer <token>`). The gRPC and Arrow paths both encode it this way, so a
+    /// token that fails here is unusable and must not be cached.
+    fn is_usable_as_header(token: &str) -> bool {
+        tonic::metadata::AsciiMetadataValue::try_from(format!("Bearer {token}").as_str()).is_ok()
+    }
+
+    /// Parses the OAuth `expires_in` field (token lifetime in seconds) into a
+    /// `Duration`. It is optional in the OAuth spec; if it is missing or not a
+    /// positive integer the token has no known TTL and must not be cached.
+    fn parse_expires_in(body: &serde_json::Value) -> Option<Duration> {
+        body["expires_in"]
+            .as_u64()
+            .filter(|secs| *secs > 0)
+            .map(Duration::from_secs)
     }
 
     /// Classifies HTTP status codes as retryable or non-retryable errors.
@@ -209,6 +351,36 @@ mod tests {
         assert_eq!(catalog, "catalog_1");
         assert_eq!(schema, "schema_2");
         assert_eq!(table, "table_3");
+    }
+
+    #[test]
+    fn test_parse_expires_in() {
+        let with_ttl = serde_json::json!({ "expires_in": 3600 });
+        assert_eq!(
+            DefaultTokenFactory::parse_expires_in(&with_ttl),
+            Some(Duration::from_secs(3600))
+        );
+
+        let missing = serde_json::json!({ "access_token": "abc" });
+        assert_eq!(DefaultTokenFactory::parse_expires_in(&missing), None);
+
+        let zero = serde_json::json!({ "expires_in": 0 });
+        assert_eq!(DefaultTokenFactory::parse_expires_in(&zero), None);
+
+        // A string value (non-integer) is not usable and yields no TTL.
+        let non_numeric = serde_json::json!({ "expires_in": "3600" });
+        assert_eq!(DefaultTokenFactory::parse_expires_in(&non_numeric), None);
+    }
+
+    #[test]
+    fn test_is_usable_as_header() {
+        // A normal JWT-shaped token is a valid header value.
+        assert!(DefaultTokenFactory::is_usable_as_header(
+            "eyJhbGciOiJSUzI1NiJ9.eyJzdWIiOiIxIn0.sig-_value"
+        ));
+        // Control characters (e.g. an embedded newline) make it unusable.
+        assert!(!DefaultTokenFactory::is_usable_as_header("bad\ntoken"));
+        assert!(!DefaultTokenFactory::is_usable_as_header("bad\0token"));
     }
 
     #[test]

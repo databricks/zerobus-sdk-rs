@@ -410,7 +410,15 @@ impl ZerobusArrowStream {
         )
         .await?;
 
-        Self::start_stream_connection(client, table_properties, options).await
+        let result = Self::start_stream_connection(client, table_properties, options).await;
+
+        // Drop the rejected token so the next attempt re-mints.
+        if let Err(err) = &result {
+            if err.is_auth_rejection() {
+                headers_provider.invalidate().await;
+            }
+        }
+        result
     }
 
     /// Creates a Flight client connected to the endpoint.
@@ -515,7 +523,9 @@ impl ZerobusArrowStream {
         let mut response_stream = client
             .do_put(flight_data_stream)
             .await
-            .map_err(|e| ZerobusError::CreateStreamError(tonic::Status::from_error(Box::new(e))))?;
+            // `.into()` preserves the inner gRPC code; `Status::from_error` would
+            // flatten it to `Unknown` and break auth/retry classification.
+            .map_err(|e| ZerobusError::CreateStreamError(e.into()))?;
 
         // Wait for server's "ready" signal to confirm setup succeeded.
         // The server sends ack_up_to_offset = -1 after successful auth, schema validation,
@@ -552,9 +562,7 @@ impl ZerobusArrowStream {
             Ok(Some(Err(flight_error))) => {
                 // Server sent an error during setup (auth failed, schema mismatch, blocked table, etc.)
                 error!("Stream setup failed: {:?}", flight_error);
-                return Err(ZerobusError::CreateStreamError(tonic::Status::from_error(
-                    Box::new(flight_error),
-                )));
+                return Err(ZerobusError::CreateStreamError(flight_error.into()));
             }
             Ok(None) => {
                 // Server closed the stream without sending anything.
@@ -709,6 +717,11 @@ impl ZerobusArrowStream {
                                 // Loop continues with new stream.
                             }
                             Ok(Err(e)) => {
+                                // Mirror the initial-connect path: drop the cached
+                                // token on auth rejection so recovery re-mints.
+                                if e.is_auth_rejection() {
+                                    headers_provider.invalidate().await;
+                                }
                                 warn!("Supervisor: Reconnection failed: {}", e);
                                 // Loop continues, will retry if retries remain.
                                 // Create a dummy stream that immediately errors.
@@ -733,6 +746,11 @@ impl ZerobusArrowStream {
                         // Non-retriable error or recovery disabled.
                         error!("Supervisor: Non-retriable error, closing stream: {}", error);
                         is_closed.store(true, Ordering::Relaxed);
+                        // A mid-stream auth rejection means the cached token is no
+                        // longer accepted; drop it so the next stream re-mints.
+                        if error.is_auth_rejection() {
+                            headers_provider.invalidate().await;
+                        }
                         // Move pending batches to failed and fail the ack futures.
                         Self::move_pending_to_failed(&pending_batches, &failed_batches).await;
                         return Err(error);
@@ -809,7 +827,9 @@ impl ZerobusArrowStream {
         let mut response_stream = flight_client
             .do_put(flight_data_stream)
             .await
-            .map_err(|e| ZerobusError::CreateStreamError(tonic::Status::from_error(Box::new(e))))?;
+            // `.into()` preserves the inner gRPC code; `Status::from_error` would
+            // flatten it to `Unknown` and break auth/retry classification.
+            .map_err(|e| ZerobusError::CreateStreamError(e.into()))?;
 
         // Wait for server's "ready" signal to confirm reconnection succeeded.
         let setup_timeout = Duration::from_millis(options.connection_timeout_ms);
@@ -841,9 +861,7 @@ impl ZerobusArrowStream {
             }
             Ok(Some(Err(flight_error))) => {
                 error!("Reconnection setup failed: {:?}", flight_error);
-                return Err(ZerobusError::CreateStreamError(tonic::Status::from_error(
-                    Box::new(flight_error),
-                )));
+                return Err(ZerobusError::CreateStreamError(flight_error.into()));
             }
             Ok(None) => {
                 error!("Server closed stream during reconnect without response");
