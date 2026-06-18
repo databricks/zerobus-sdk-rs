@@ -81,7 +81,10 @@ async fn ingest_with_offset_api(stream: &mut ZerobusStream) -> Result<(), Box<dy
 
     // Queue the record; the call returns immediately without waiting for the ack.
     let offset_id = stream.ingest_record_offset(ProtoMessage(order)).await?;
-    println!("[Auto-encoding] Record queued with offset ID: {}", offset_id);
+    println!(
+        "[Auto-encoding] Record queued with offset ID: {}",
+        offset_id
+    );
 
     // 2. Pre-encoded: ProtoBytes - pass bytes with explicit wrapper.
     let order = TableOrders {
