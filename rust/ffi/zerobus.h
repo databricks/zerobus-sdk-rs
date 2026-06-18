@@ -521,8 +521,19 @@ const uint8_t *zerobus_proto_schema_descriptor_bytes(const struct CZerobusProtoS
 
 /**
  * Encode JSON record to protobuf bytes. Unknown keys are ignored.
- * DATE/TIMESTAMP columns must be integers (days/micros since epoch), not strings.
+ *
+ * Values follow protobuf's JSON mapping; a few column types need shaping:
+ * - DATE/TIMESTAMP/TIMESTAMP_NTZ: integers (days / micros since epoch), not strings.
+ * - BINARY: base64-encoded string, not a JSON array of bytes.
+ * - DECIMAL: string (e.g. "123.45"), to preserve precision/scale.
+ * - VARIANT: a JSON-encoded string (a string whose contents are the variant's JSON).
+ * - ARRAY/MAP/STRUCT: JSON array / object / object respectively.
+ * - LONG/BIGINT above 2^53: pass as a JSON string, else the value loses
+ *   precision as a JSON number.
+ *
+ * Non-nullable columns are proto2 `required`; a record missing one fails.
  * Returns true on success; caller must free buffer with `zerobus_free_proto_bytes`.
+ * On failure `*out_data` is set to NULL and `*out_len` to 0.
  */
 bool zerobus_proto_schema_encode_json(const struct CZerobusProtoSchema *schema,
                                       const char *record_json,

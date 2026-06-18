@@ -87,10 +87,50 @@ zerobus_proto_schema_free(schema);
 ```
 
 Encoding contract: record object keys are matched to column names; unknown keys
-are ignored (upstream records often carry extra non-column metadata). `DATE`,
-`TIMESTAMP`, and `TIMESTAMP_NTZ` columns are encoded as integers — supply days
-(for `DATE`) or microseconds since the Unix epoch (for `TIMESTAMP*`), not
-ISO-8601 strings.
+are ignored (upstream records often carry extra non-column metadata). Records are
+encoded through protobuf's JSON mapping, so a few column types need their JSON
+value shaped accordingly:
+
+| Unity Catalog type            | Proto type      | JSON value to supply                                             |
+|-------------------------------|-----------------|------------------------------------------------------------------|
+| `STRING`                      | `string`        | string                                                           |
+| `INT`/`INTEGER`, `SHORT`/`SMALLINT` | `int32`   | number                                                           |
+| `LONG`/`BIGINT`               | `int64`         | number **or string** — use a **string** above 2^53 (see below)   |
+| `FLOAT`, `DOUBLE`             | `float`/`double`| number                                                           |
+| `BOOLEAN`                     | `bool`          | boolean                                                          |
+| `BINARY`                      | `bytes`         | **base64-encoded string** (not a JSON array of byte values)      |
+| `DATE`                        | `int32`         | integer — days since the Unix epoch (not an ISO-8601 string)     |
+| `TIMESTAMP`                   | `int64`         | integer — microseconds since the Unix epoch (not an ISO-8601 string) |
+| `VARIANT`                     | `string`        | **JSON-encoded string** — a string whose contents are the variant's JSON (objects, arrays, or primitives) |
+| `ARRAY<T>`                    | `repeated T`    | JSON array of `T` values                                         |
+| `MAP<K,V>`                    | `map<K,V>`      | JSON object (`K` must be an integral, bool, or string type)      |
+| `STRUCT<...>`                 | nested `message`| JSON object                                                      |
+
+This table mirrors the supported set in the [Zerobus type-support
+reference](https://docs.databricks.com/aws/en/ingestion/zerobus-limits#type-support).
+Beyond that reference, the encoder additionally accepts `BYTE`/`TINYINT` (→
+`int32`), `TIMESTAMP_NTZ` (→ `int64` micros, same wire shape as `TIMESTAMP`),
+and `DECIMAL` (→ `string`, e.g. `"123.45"`, to preserve precision/scale).
+Complex columns (`ARRAY`/`MAP`/`STRUCT`) require the column's `type_json` from
+the Unity Catalog REST response to be present in the input.
+
+Two precision pitfalls worth calling out:
+
+- **64-bit integers above 2^53** (large `BIGINT` values, and `TIMESTAMP` micros
+  past year 2255) lose precision when emitted as a JSON number by most encoders.
+  Pass them as JSON **strings** (the canonical protobuf-JSON form for 64-bit
+  ints), which round-trip exactly.
+- **`DATE`/`TIMESTAMP*` unit mismatches** are silent: writing milliseconds where
+  microseconds are expected shifts every row by 10³.
+
+Non-nullable columns become proto2 `required` fields; a record missing one is
+rejected with an error rather than encoded.
+
+The schema handle is reference-counted internally, so it is safe to share one
+handle across threads: worker threads may call `zerobus_proto_schema_encode_json`
+and `zerobus_proto_schema_descriptor_bytes` concurrently, and a concurrent
+`zerobus_proto_schema_free` will not free the schema out from under an in-flight
+call. Call `zerobus_proto_schema_free` exactly once when done.
 
 ## API Reference
 

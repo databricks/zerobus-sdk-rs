@@ -572,6 +572,12 @@ mod tests {
         assert!(schema.is_null());
         assert!(!result.success);
         assert!(!result.error_message.is_null());
+        // Assert the failure is the JSON parse path, not some other error.
+        let msg = unsafe { test_c_str_to_string(result.error_message) }.unwrap();
+        assert!(
+            msg.contains("failed to parse Unity Catalog table JSON"),
+            "unexpected error message: {msg}"
+        );
         zerobus_free_error_message(result.error_message);
     }
 
@@ -619,8 +625,12 @@ mod tests {
     #[test]
     fn test_proto_schema_encode_null_schema_errors() {
         let record = CString::new(r#"{"id": 1}"#).unwrap();
-        let mut out_data: *mut u8 = ptr::null_mut();
-        let mut out_len: usize = 0;
+        // Seed the outputs with non-null/non-zero sentinels: a failed call must
+        // clear them so a caller that frees on error hits a no-op. The schema
+        // check fails before any encoding, exercising the earliest failure path.
+        let mut sentinel: u8 = 0;
+        let mut out_data: *mut u8 = &mut sentinel as *mut u8;
+        let mut out_len: usize = 999;
         let mut result = presumed_success_result();
         let ok = zerobus_proto_schema_encode_json(
             ptr::null(),
@@ -631,6 +641,8 @@ mod tests {
         );
         assert!(!ok);
         assert!(!result.success);
+        assert!(out_data.is_null(), "outputs must be cleared on failure");
+        assert_eq!(out_len, 0, "outputs must be cleared on failure");
         zerobus_free_error_message(result.error_message);
     }
 
@@ -656,6 +668,7 @@ mod tests {
         assert!(!enc_result.success);
         assert!(!enc_result.error_message.is_null());
         assert!(out_data.is_null(), "no buffer should be allocated on error");
+        assert_eq!(out_len, 0, "length must be cleared on error");
         zerobus_free_error_message(enc_result.error_message);
         zerobus_proto_schema_free(schema);
     }
@@ -679,6 +692,257 @@ mod tests {
         assert!(!ok);
         assert!(!enc_result.success);
         zerobus_free_error_message(enc_result.error_message);
+        zerobus_proto_schema_free(schema);
+    }
+
+    #[test]
+    fn test_proto_schema_encode_missing_required_field_errors() {
+        // `id` is non-nullable (proto2 `required`); a record omitting it must be
+        // rejected rather than encoded.
+        let json = sample_uc_table_json();
+        let mut build = unwritten_result();
+        let schema = zerobus_proto_schema_from_uc_json(json.as_ptr(), &mut build as *mut CResult);
+        assert!(!schema.is_null());
+
+        let record = CString::new(r#"{"payload": "hello"}"#).unwrap();
+        let mut out_data: *mut u8 = ptr::null_mut();
+        let mut out_len: usize = 0;
+        let mut enc_result = presumed_success_result();
+        let ok = zerobus_proto_schema_encode_json(
+            schema,
+            record.as_ptr(),
+            &mut out_data as *mut *mut u8,
+            &mut out_len as *mut usize,
+            &mut enc_result as *mut CResult,
+        );
+        assert!(!ok);
+        assert!(!enc_result.success);
+        assert!(out_data.is_null(), "no buffer should be allocated on error");
+        assert_eq!(out_len, 0, "length must be cleared on error");
+        let msg = unsafe { test_c_str_to_string(enc_result.error_message) }.unwrap();
+        assert!(
+            msg.contains("missing required field") && msg.contains("id"),
+            "unexpected error message: {msg}"
+        );
+        zerobus_free_error_message(enc_result.error_message);
+        zerobus_proto_schema_free(schema);
+    }
+
+    // UC table JSON for the type-contract tests: a required key plus one column
+    // of the type under test.
+    fn uc_table_json_with_column(col_name: &str, type_name: &str) -> CString {
+        let json = format!(
+            r#"{{
+                "name": "t", "catalog_name": "c", "schema_name": "s",
+                "columns": [
+                    {{"name": "k", "type_name": "BIGINT", "type_text": "bigint", "nullable": false, "position": 0}},
+                    {{"name": "{col_name}", "type_name": "{type_name}", "type_text": "{type_name}", "nullable": true, "position": 1}}
+                ]
+            }}"#
+        );
+        CString::new(json).unwrap()
+    }
+
+    // Build a schema + encode one record, returning the decoded message so a test
+    // can assert how a given JSON value lands on the wire.
+    fn encode_and_decode(table_json: &CString, record_json: &str) -> DynamicMessage {
+        let mut build = unwritten_result();
+        let schema =
+            zerobus_proto_schema_from_uc_json(table_json.as_ptr(), &mut build as *mut CResult);
+        assert!(!schema.is_null(), "schema build failed");
+
+        let mut dlen: usize = 0;
+        let dptr = zerobus_proto_schema_descriptor_bytes(schema, &mut dlen as *mut usize);
+        let desc_bytes = unsafe { std::slice::from_raw_parts(dptr, dlen) };
+        let msg_desc = message_descriptor_from_bytes(desc_bytes);
+
+        let record = CString::new(record_json).unwrap();
+        let mut out_data: *mut u8 = ptr::null_mut();
+        let mut out_len: usize = 0;
+        let mut enc_result = unwritten_result();
+        let ok = zerobus_proto_schema_encode_json(
+            schema,
+            record.as_ptr(),
+            &mut out_data as *mut *mut u8,
+            &mut out_len as *mut usize,
+            &mut enc_result as *mut CResult,
+        );
+        assert!(ok, "encode failed");
+        let encoded = unsafe { std::slice::from_raw_parts(out_data, out_len) };
+        let decoded = DynamicMessage::decode(msg_desc, encoded).unwrap();
+
+        zerobus_free_proto_bytes(out_data, out_len);
+        zerobus_proto_schema_free(schema);
+        decoded
+    }
+
+    #[test]
+    fn test_proto_schema_encode_binary_is_base64_string() {
+        // BINARY maps to proto `bytes`; prost-reflect's serde layer accepts it
+        // only as a base64-encoded string (not a JSON array of byte values).
+        let table = uc_table_json_with_column("blob", "BINARY");
+        // "aGVsbG8=" is base64 for "hello".
+        let decoded = encode_and_decode(&table, r#"{"k": 1, "blob": "aGVsbG8="}"#);
+        assert_eq!(
+            decoded
+                .get_field_by_name("blob")
+                .unwrap()
+                .as_bytes()
+                .map(|b| b.as_ref()),
+            Some(b"hello".as_slice())
+        );
+    }
+
+    #[test]
+    fn test_proto_schema_encode_decimal_is_string() {
+        // DECIMAL maps to proto `string`; the value must be passed as a JSON
+        // string to preserve precision and scale.
+        let table = uc_table_json_with_column("price", "DECIMAL");
+        let decoded = encode_and_decode(&table, r#"{"k": 1, "price": "123.45"}"#);
+        assert_eq!(
+            decoded.get_field_by_name("price").unwrap().as_str(),
+            Some("123.45")
+        );
+    }
+
+    #[test]
+    fn test_proto_schema_encode_large_int64_as_string_preserves_precision() {
+        // int64 above 2^53 loses precision as a JSON number; passing it as a
+        // string round-trips exactly.
+        let table = uc_table_json_with_column("big", "BIGINT");
+        let decoded = encode_and_decode(&table, r#"{"k": 1, "big": "9223372036854775807"}"#);
+        assert_eq!(
+            decoded.get_field_by_name("big").unwrap().as_i64(),
+            Some(9223372036854775807)
+        );
+    }
+
+    #[test]
+    fn test_proto_schema_encode_variant_is_json_encoded_string() {
+        // VARIANT maps to proto `string`; the value is a JSON-encoded string
+        // (a string whose contents are the variant's JSON).
+        let table = uc_table_json_with_column("v", "VARIANT");
+        let decoded = encode_and_decode(&table, r#"{"k": 1, "v": "{\"a\":1,\"b\":[2,3]}"}"#);
+        assert_eq!(
+            decoded.get_field_by_name("v").unwrap().as_str(),
+            Some(r#"{"a":1,"b":[2,3]}"#)
+        );
+    }
+
+    #[test]
+    fn test_proto_schema_encode_array_is_json_array() {
+        // ARRAY<T> maps to `repeated T`; the value is a JSON array. Complex
+        // columns carry their shape in `type_json`, so build the table directly.
+        let table = CString::new(
+            r#"{
+                "name": "t", "catalog_name": "c", "schema_name": "s",
+                "columns": [
+                    {"name": "k", "type_name": "BIGINT", "type_text": "bigint", "nullable": false, "position": 0},
+                    {"name": "tags", "type_name": "ARRAY", "type_text": "array<int>", "nullable": true, "position": 1,
+                     "type_json": "{\"type\":\"array\",\"elementType\":\"integer\",\"containsNull\":false}"}
+                ]
+            }"#,
+        )
+        .unwrap();
+        let decoded = encode_and_decode(&table, r#"{"k": 1, "tags": [10, 20, 30]}"#);
+        let list = decoded.get_field_by_name("tags").unwrap();
+        let values: Vec<i64> = list
+            .as_list()
+            .unwrap()
+            .iter()
+            .map(|v| v.as_i32().unwrap() as i64)
+            .collect();
+        assert_eq!(values, vec![10, 20, 30]);
+    }
+
+    #[test]
+    fn test_free_proto_bytes_handles_empty_encoding() {
+        // A record with no fields set encodes to zero bytes: out_len == 0 but
+        // out_data is a non-null, zero-length boxed slice. Freeing it must
+        // reclaim that allocation, not leak it.
+        let table = CString::new(
+            r#"{
+                "name": "t", "catalog_name": "c", "schema_name": "s",
+                "columns": [
+                    {"name": "opt", "type_name": "INT", "type_text": "int", "nullable": true, "position": 0}
+                ]
+            }"#,
+        )
+        .unwrap();
+        let mut build = unwritten_result();
+        let schema = zerobus_proto_schema_from_uc_json(table.as_ptr(), &mut build as *mut CResult);
+        assert!(!schema.is_null(), "schema build failed");
+
+        let record = CString::new(r#"{}"#).unwrap();
+        let mut out_data: *mut u8 = ptr::null_mut();
+        let mut out_len: usize = 0;
+        let mut enc_result = unwritten_result();
+        let ok = zerobus_proto_schema_encode_json(
+            schema,
+            record.as_ptr(),
+            &mut out_data as *mut *mut u8,
+            &mut out_len as *mut usize,
+            &mut enc_result as *mut CResult,
+        );
+        assert!(ok, "encode failed");
+        assert_eq!(
+            out_len, 0,
+            "record with no fields set should encode to zero bytes"
+        );
+        assert!(
+            !out_data.is_null(),
+            "buffer pointer should be non-null even when empty"
+        );
+
+        // The assertion is the absence of a leak/crash on free.
+        zerobus_free_proto_bytes(out_data, out_len);
+        zerobus_proto_schema_free(schema);
+    }
+
+    #[test]
+    fn test_proto_schema_shared_across_threads() {
+        // The handle is reference-counted, so many threads may encode through one
+        // shared handle concurrently before it is freed once. A plain Box would
+        // race the drop against in-flight encodes.
+        use std::thread;
+
+        let json = sample_uc_table_json();
+        let mut build = unwritten_result();
+        let schema = zerobus_proto_schema_from_uc_json(json.as_ptr(), &mut build as *mut CResult);
+        assert!(!schema.is_null(), "schema build failed");
+
+        // Raw pointers aren't Send; pass the address as a usize and rebuild it
+        // per thread. Safe: threads only read, and the handle outlives them.
+        let handle_addr = schema as usize;
+        let mut workers = Vec::new();
+        for t in 0..8 {
+            workers.push(thread::spawn(move || {
+                let handle = handle_addr as *const crate::CZerobusProtoSchema;
+                for i in 0..200 {
+                    let record = CString::new(format!(
+                        r#"{{"id": {}, "payload": "p{}"}}"#,
+                        t * 1000 + i,
+                        i
+                    ))
+                    .unwrap();
+                    let mut out_data: *mut u8 = ptr::null_mut();
+                    let mut out_len: usize = 0;
+                    let mut enc = unwritten_result();
+                    let ok = zerobus_proto_schema_encode_json(
+                        handle,
+                        record.as_ptr(),
+                        &mut out_data as *mut *mut u8,
+                        &mut out_len as *mut usize,
+                        &mut enc as *mut CResult,
+                    );
+                    assert!(ok, "concurrent encode failed");
+                    zerobus_free_proto_bytes(out_data, out_len);
+                }
+            }));
+        }
+        for w in workers {
+            w.join().unwrap();
+        }
         zerobus_proto_schema_free(schema);
     }
 }

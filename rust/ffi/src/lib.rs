@@ -24,7 +24,9 @@ use databricks_zerobus_ingest_sdk::{
 };
 use databricks_zerobus_ingest_sdk::{RecordBatch, StreamBuilder, ZerobusArrowStream};
 use prost::Message;
-use prost_reflect::{DescriptorPool, DeserializeOptions, DynamicMessage, MessageDescriptor};
+use prost_reflect::{
+    Cardinality, DescriptorPool, DeserializeOptions, DynamicMessage, MessageDescriptor,
+};
 use std::sync::Arc;
 
 // Test module
@@ -2001,14 +2003,26 @@ struct ProtoSchema {
     message: MessageDescriptor,
 }
 
-/// Safe wrapper to validate proto schema pointer
-fn validate_proto_schema_ptr<'a>(
+/// Validate a schema handle and clone its owning [`Arc`], keeping the
+/// [`ProtoSchema`] alive for the caller even if another thread frees the
+/// handle concurrently.
+///
+/// # Safety
+///
+/// `schema` must be null or a live handle from
+/// [`zerobus_proto_schema_from_uc_json`] not yet passed to
+/// [`zerobus_proto_schema_free`].
+unsafe fn clone_proto_schema_arc(
     schema: *const CZerobusProtoSchema,
-) -> Result<&'a ProtoSchema, &'static str> {
+) -> Result<Arc<ProtoSchema>, &'static str> {
     if schema.is_null() {
         return Err("Proto schema pointer is null");
     }
-    unsafe { Ok(&*(schema as *const ProtoSchema)) }
+    let ptr = schema as *const ProtoSchema;
+    // Bump the strong count so the returned Arc is ours, leaving the handle's
+    // own reference intact.
+    Arc::increment_strong_count(ptr);
+    Ok(Arc::from_raw(ptr))
 }
 
 /// Builds a [`ProtoSchema`] from Unity Catalog table-metadata JSON.
@@ -2057,7 +2071,9 @@ pub extern "C" fn zerobus_proto_schema_from_uc_json(
     match build_proto_schema(&json) {
         Ok(schema) => {
             write_success_result(result);
-            Box::into_raw(Box::new(schema)) as *mut CZerobusProtoSchema
+            // Reference-counted so a concurrent `_free` can't drop the schema
+            // while another thread is mid-encode.
+            Arc::into_raw(Arc::new(schema)) as *mut CZerobusProtoSchema
         }
         Err(err) => {
             write_error_result(result, &err, false);
@@ -2073,7 +2089,8 @@ pub extern "C" fn zerobus_proto_schema_descriptor_bytes(
     schema: *const CZerobusProtoSchema,
     out_len: *mut usize,
 ) -> *const u8 {
-    let schema_ref = match validate_proto_schema_ptr(schema) {
+    // SAFETY: caller upholds the handle contract (valid, unfreed handle).
+    let schema_ref = match unsafe { clone_proto_schema_arc(schema) } {
         Ok(s) => s,
         Err(_) => {
             if !out_len.is_null() {
@@ -2089,12 +2106,25 @@ pub extern "C" fn zerobus_proto_schema_descriptor_bytes(
             *out_len = schema_ref.descriptor_bytes.len();
         }
     }
+    // Valid until the caller's `_free`: the handle's reference keeps the
+    // allocation live after our local `Arc` drops.
     schema_ref.descriptor_bytes.as_ptr()
 }
 
 /// Encode JSON record to protobuf bytes. Unknown keys are ignored.
-/// DATE/TIMESTAMP columns must be integers (days/micros since epoch), not strings.
+///
+/// Values follow protobuf's JSON mapping; a few column types need shaping:
+/// - DATE/TIMESTAMP/TIMESTAMP_NTZ: integers (days / micros since epoch), not strings.
+/// - BINARY: base64-encoded string, not a JSON array of bytes.
+/// - DECIMAL: string (e.g. "123.45"), to preserve precision/scale.
+/// - VARIANT: a JSON-encoded string (a string whose contents are the variant's JSON).
+/// - ARRAY/MAP/STRUCT: JSON array / object / object respectively.
+/// - LONG/BIGINT above 2^53: pass as a JSON string, else the value loses
+///   precision as a JSON number.
+///
+/// Non-nullable columns are proto2 `required`; a record missing one fails.
 /// Returns true on success; caller must free buffer with `zerobus_free_proto_bytes`.
+/// On failure `*out_data` is set to NULL and `*out_len` to 0.
 #[no_mangle]
 pub extern "C" fn zerobus_proto_schema_encode_json(
     schema: *const CZerobusProtoSchema,
@@ -2103,17 +2133,27 @@ pub extern "C" fn zerobus_proto_schema_encode_json(
     out_len: *mut usize,
     result: *mut CResult,
 ) -> bool {
-    let schema_ref = match validate_proto_schema_ptr(schema) {
+    if out_data.is_null() || out_len.is_null() {
+        write_error_result(result, "Output pointers are null", false);
+        return false;
+    }
+    // Initialize outputs up front so every failure path leaves them null/0 — a
+    // caller that frees on failure then hits a no-op rather than a stale or
+    // uninitialized pointer.
+    unsafe {
+        *out_data = ptr::null_mut();
+        *out_len = 0;
+    }
+
+    // SAFETY: caller upholds the handle contract (valid, unfreed handle); the
+    // cloned Arc keeps the schema alive for the duration of this call.
+    let schema_ref = match unsafe { clone_proto_schema_arc(schema) } {
         Ok(s) => s,
         Err(msg) => {
             write_error_result(result, msg, false);
             return false;
         }
     };
-    if out_data.is_null() || out_len.is_null() {
-        write_error_result(result, "Output pointers are null", false);
-        return false;
-    }
     let json = match unsafe { c_str_to_string(record_json) } {
         Ok(s) => s,
         Err(e) => {
@@ -2145,6 +2185,24 @@ pub extern "C" fn zerobus_proto_schema_encode_json(
         return false;
     }
 
+    // Non-nullable columns are proto2 `required`, but prost-reflect doesn't
+    // enforce presence on encode — reject a missing one here rather than emit
+    // wire bytes the server rejects.
+    let missing: Vec<String> = schema_ref
+        .message
+        .fields()
+        .filter(|f| matches!(f.cardinality(), Cardinality::Required) && !message.has_field(f))
+        .map(|f| f.name().to_string())
+        .collect();
+    if !missing.is_empty() {
+        write_error_result(
+            result,
+            &format!("record missing required field(s): {}", missing.join(", ")),
+            false,
+        );
+        return false;
+    }
+
     let bytes = message.encode_to_vec();
     let len = bytes.len();
     // into_boxed_slice() shrinks capacity to len so the matching
@@ -2161,10 +2219,13 @@ pub extern "C" fn zerobus_proto_schema_encode_json(
 /// Free a buffer returned by `zerobus_proto_schema_encode_json`.
 #[no_mangle]
 pub extern "C" fn zerobus_free_proto_bytes(data: *mut u8, len: usize) {
-    if !data.is_null() && len > 0 {
+    // An all-default record encodes to zero bytes: a non-null, zero-length
+    // boxed slice. Reconstruct on `!data.is_null()` alone; gating on `len > 0`
+    // would leak it.
+    if !data.is_null() {
         unsafe {
             // data came from Box::into_raw(bytes.into_boxed_slice()), so
-            // capacity == len and this reconstruction is sound.
+            // capacity == len and this reconstruction is sound (len 0 included).
             let _ = Box::from_raw(std::ptr::slice_from_raw_parts_mut(data, len));
         }
     }
@@ -2175,7 +2236,9 @@ pub extern "C" fn zerobus_free_proto_bytes(data: *mut u8, len: usize) {
 pub extern "C" fn zerobus_proto_schema_free(schema: *mut CZerobusProtoSchema) {
     if !schema.is_null() {
         unsafe {
-            let _ = Box::from_raw(schema as *mut ProtoSchema);
+            // Release the handle's strong reference; the schema drops only when
+            // the last reference does, so a free racing an in-flight call is safe.
+            let _ = Arc::from_raw(schema as *const ProtoSchema);
         }
     }
 }
