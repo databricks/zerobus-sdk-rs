@@ -45,7 +45,10 @@ tracing = "0.1.41"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
 # Arrow
-arrow-flight = { version = "58.2", default-features = false }
+# arrow-flight is vendored locally with a slice-aware batch-split fix
+# (arrow-rs#9388 / #5352); see rust/third_party/arrow-flight. `path` is used for
+# in-tree builds (Rust, Go/FFI, Java/JNI); `version` keeps the crate publishable.
+arrow-flight = { path = "third_party/arrow-flight", version = "58.2", default-features = false }
 arrow-array = { version = "58.2", default-features = false }
 arrow-schema = { version = "58.2", default-features = false }
 arrow-ipc = { version = "58.2", default-features = false }
@@ -66,9 +69,3 @@ clap = { version = "4.6", features = ["derive"] }
 urlencoding = "2.1"
 tempfile = "3.27"
 jni = "0.21"
-
-# Override arrow-flight with a vendored copy carrying the slice-aware batch-split
-# fix (arrow-rs#9388 / #5352). Applies to every crate built from this workspace
-# (sdk, ffi/Go, jni/Java, examples, tests). See rust/third_party/arrow-flight.
-[patch.crates-io]
-arrow-flight = { path = "third_party/arrow-flight" }
