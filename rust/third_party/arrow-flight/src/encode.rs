@@ -1928,7 +1928,11 @@ mod tests {
         ])
         .unwrap();
 
-        verify_encoded_split(batch, 120).await;
+        // DATABRICKS PATCH (arrow-rs#9388 / #5352): the slice-aware size estimate in
+        // `split_batch_for_grpc_response` measures only the bytes a slice spans, so
+        // fixed-width batches are split into slightly fewer/larger messages than the
+        // buffer-capacity estimate did. Overage rises from 120 to 400 for this case.
+        verify_encoded_split(batch, 400).await;
     }
 
     #[tokio::test]
