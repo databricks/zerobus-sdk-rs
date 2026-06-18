@@ -163,8 +163,6 @@ dependencies = [
 [[package]]
 name = "arrow-flight"
 version = "58.2.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e7c379738a9e41eda5873bb3256c89164f87c65b16b0b153cccc74d8a462b7e8"
 dependencies = [
  "arrow-array",
  "arrow-buffer",

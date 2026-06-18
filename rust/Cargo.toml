@@ -66,3 +66,9 @@ clap = { version = "4.6", features = ["derive"] }
 urlencoding = "2.1"
 tempfile = "3.27"
 jni = "0.21"
+
+# Override arrow-flight with a vendored copy carrying the slice-aware batch-split
+# fix (arrow-rs#9388 / #5352). Applies to every crate built from this workspace
+# (sdk, ffi/Go, jni/Java, examples, tests). See rust/third_party/arrow-flight.
+[patch.crates-io]
+arrow-flight = { path = "third_party/arrow-flight" }

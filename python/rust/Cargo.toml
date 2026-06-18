@@ -20,3 +20,10 @@ tonic = "0.14"
 arrow-ipc = { version = "58.2", default-features = false }
 arrow-schema = { version = "58.2", default-features = false }
 arrow-array = { version = "58.2", default-features = false }
+
+# Override arrow-flight (pulled in transitively via databricks-zerobus-ingest-sdk's
+# arrow-flight feature) with the vendored copy carrying the slice-aware batch-split
+# fix (arrow-rs#9388 / #5352). The wheel is built from this manifest, so the patch
+# must live here too. See rust/third_party/arrow-flight.
+[patch.crates-io]
+arrow-flight = { path = "../../rust/third_party/arrow-flight" }
