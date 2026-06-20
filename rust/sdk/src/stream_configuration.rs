@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use crate::callbacks::AckCallback;
 use crate::databricks::zerobus::RecordType;
-use crate::stream_options::defaults;
+use crate::stream_options::{defaults, RetryStrategy};
 
 /// Configuration options for stream creation, recovery of broken streams and flushing.
 ///
@@ -52,10 +52,24 @@ pub struct StreamConfigurationOptions {
 
     /// Backoff time in milliseconds between stream recovery retry attempts.
     ///
-    /// The SDK will wait this duration before attempting another recovery after a failure.
+    /// For fixed retry strategy, the SDK will wait this duration before each retry.
+    /// For exponential retry strategy, this is the base delay before jitter is applied;
+    /// retries use full jitter in the range `0..=computed_delay`.
     ///
     /// Default: 2,000 (2 seconds)
     pub recovery_backoff_ms: u64,
+
+    /// Maximum recovery backoff time in milliseconds.
+    ///
+    /// This caps the exponential retry strategy. It is ignored by the fixed strategy.
+    ///
+    /// Default: 30,000 (30 seconds)
+    pub max_recovery_backoff_ms: u64,
+
+    /// Retry strategy for stream creation and recovery.
+    ///
+    /// Default: `RetryStrategy::ExponentialBackoffWithJitter`
+    pub retry_strategy: RetryStrategy,
 
     /// Maximum number of recovery retry attempts before giving up.
     ///
@@ -166,6 +180,8 @@ impl Default for StreamConfigurationOptions {
             recovery: defaults::RECOVERY,
             recovery_timeout_ms: defaults::RECOVERY_TIMEOUT_MS,
             recovery_backoff_ms: defaults::RECOVERY_BACKOFF_MS,
+            max_recovery_backoff_ms: defaults::MAX_RECOVERY_BACKOFF_MS,
+            retry_strategy: RetryStrategy::default(),
             recovery_retries: defaults::RECOVERY_RETRIES,
             server_lack_of_ack_timeout_ms: defaults::SERVER_LACK_OF_ACK_TIMEOUT_MS,
             flush_timeout_ms: defaults::FLUSH_TIMEOUT_MS,
@@ -174,5 +190,24 @@ impl Default for StreamConfigurationOptions {
             ack_callback: None,
             callback_max_wait_time_ms: Some(defaults::CALLBACK_MAX_WAIT_TIME_MS),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn defaults_use_exponential_retry_strategy_with_cap() {
+        let options = StreamConfigurationOptions::default();
+
+        assert_eq!(
+            options.retry_strategy,
+            RetryStrategy::ExponentialBackoffWithJitter
+        );
+        assert_eq!(
+            options.max_recovery_backoff_ms,
+            defaults::MAX_RECOVERY_BACKOFF_MS
+        );
     }
 }

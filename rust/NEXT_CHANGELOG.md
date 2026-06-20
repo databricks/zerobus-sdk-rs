@@ -9,6 +9,7 @@
 - Token caching for the default OAuth path. Tokens obtained via `.oauth(...)` are now cached per table on the `ZerobusSdk` instance and reused across stream creations and recoveries until they near expiry, instead of minting a fresh token on every stream. This reduces load on the Unity Catalog token endpoint for clients that create many short-lived streams. Caching is on by default and can be tuned via `ZerobusSdkBuilder::token_cache_enabled` and `ZerobusSdkBuilder::token_refresh_buffer`.
 - On a server-side authentication rejection during stream creation, the cached token is invalidated so the next attempt re-mints (re-checking grants at Unity Catalog), rather than reusing a rejected token until the refresh window.
 - `OAuthHeadersProvider::new` now caches tokens for the lifetime of the returned provider (previously it minted a fresh token on every call). Behavior is unchanged for the common path of constructing streams through `ZerobusSdk`, which already shares a cache.
+- Stream creation and recovery now default to exponential backoff with jitter instead of a fixed retry interval. `recovery_backoff_ms` remains the fixed interval for `RetryStrategy::Fixed` and becomes the base delay for `RetryStrategy::ExponentialBackoffWithJitter` before jitter, capped by `max_recovery_backoff_ms` (default 30 seconds).
 
 ### Bug Fixes
 
@@ -29,3 +30,4 @@
 - Added `ZerobusSdkBuilder::token_cache_enabled(bool)` to enable or disable OAuth token caching (default enabled).
 - Added `ZerobusSdkBuilder::token_refresh_buffer(Duration)` to configure how long before a cached token's expiry it is refreshed (default 5 minutes).
 - Added `HeadersProvider::invalidate` with a default no-op implementation; the SDK calls it when the server rejects the supplied credentials so a provider can drop cached auth state. Existing trait implementations are unaffected.
+- Added `RetryStrategy`, `retry_strategy(...)`, and `max_recovery_backoff_ms(...)` for Rust stream recovery configuration.

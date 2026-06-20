@@ -444,6 +444,7 @@ let mut stream = sdk
     .max_inflight_requests(10_000)
     .recovery_timeout_ms(15_000)
     .recovery_backoff_ms(2_000)
+    .max_recovery_backoff_ms(30_000)
     .recovery_retries(4)
     .build()
     .await?;
@@ -483,6 +484,7 @@ let mut stream = sdk
     .max_inflight_requests(10_000)
     .recovery_timeout_ms(15_000)
     .recovery_backoff_ms(2_000)
+    .max_recovery_backoff_ms(30_000)
     .recovery_retries(4)
     .build()
     .await?;
@@ -721,7 +723,9 @@ Also accepts `0` or `no`.
 | `max_inflight_requests` | `usize` | 1,000,000 | Maximum unacknowledged requests in flight |
 | `recovery` | `bool` | true | Enable automatic stream recovery on failure |
 | `recovery_timeout_ms` | `u64` | 15,000 | Timeout for recovery operations (ms) |
-| `recovery_backoff_ms` | `u64` | 2,000 | Delay between recovery retry attempts (ms) |
+| `recovery_backoff_ms` | `u64` | 2,000 | Base delay for exponential recovery retries before jitter, or interval for fixed recovery retries (ms) |
+| `max_recovery_backoff_ms` | `u64` | 30,000 | Maximum exponential recovery retry delay (ms) |
+| `retry_strategy` | `RetryStrategy` | `ExponentialBackoffWithJitter` | Recovery retry strategy (`Fixed` or `ExponentialBackoffWithJitter`) |
 | `recovery_retries` | `u32` | 4 | Maximum number of recovery attempts |
 | `server_lack_of_ack_timeout_ms` | `u64` | 60,000 | Timeout waiting for server acks (ms) |
 | `flush_timeout_ms` | `u64` | 300,000 | Timeout for flush operations (ms) |
@@ -742,6 +746,7 @@ let stream = sdk
     .max_inflight_requests(50_000)
     .recovery(true)
     .recovery_timeout_ms(20_000)
+    .max_recovery_backoff_ms(30_000)
     .recovery_retries(5)
     .flush_timeout_ms(600_000)
     .build()

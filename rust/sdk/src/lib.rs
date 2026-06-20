@@ -66,7 +66,6 @@ use std::sync::Arc;
 use prost::Message;
 use tokio::sync::RwLock;
 use tokio::time::Duration;
-use tokio_retry::strategy::FixedInterval;
 use tokio_retry::RetryIf;
 use tokio_stream::wrappers::ReceiverStream;
 use tokio_util::sync::CancellationToken;
@@ -101,6 +100,7 @@ pub use record_types::{
     ProtoBytes, ProtoEncodedRecord, ProtoMessage,
 };
 pub use stream_configuration::StreamConfigurationOptions;
+pub use stream_options::RetryStrategy;
 #[cfg(feature = "testing")]
 pub use tls_config::NoTlsConfig;
 pub use tls_config::{SecureTlsConfig, TlsConfig};
@@ -681,8 +681,12 @@ impl ZerobusStream {
             let landing_zone_recovery = Arc::clone(&landing_zone);
 
             // 1. Create a stream.
-            let strategy = FixedInterval::from_millis(options.recovery_backoff_ms)
-                .take(options.recovery_retries as usize);
+            let strategy = stream_options::recovery_retry_strategy(
+                options.retry_strategy,
+                options.recovery_backoff_ms,
+                options.max_recovery_backoff_ms,
+            )
+            .take(options.recovery_retries as usize);
 
             let create_attempt = || {
                 let channel = channel.clone();
