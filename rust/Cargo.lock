@@ -111,7 +111,7 @@ dependencies = [
  "arrow-array",
  "arrow-buffer",
  "arrow-data",
- "arrow-schema",
+ "arrow-schema 58.3.0",
  "chrono",
  "num-traits",
 ]
@@ -125,7 +125,7 @@ dependencies = [
  "ahash",
  "arrow-buffer",
  "arrow-data",
- "arrow-schema",
+ "arrow-schema 58.3.0",
  "chrono",
  "chrono-tz",
  "half",
@@ -157,7 +157,7 @@ dependencies = [
  "arrow-buffer",
  "arrow-data",
  "arrow-ord",
- "arrow-schema",
+ "arrow-schema 58.3.0",
  "arrow-select",
  "atoi",
  "base64",
@@ -176,7 +176,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3c88210023a2bfee1896af366309a3028fc3bcbd6515fa29a7990ee1baa08ee0"
 dependencies = [
  "arrow-buffer",
- "arrow-schema",
+ "arrow-schema 58.3.0",
  "half",
  "num-integer",
  "num-traits",
@@ -195,7 +195,7 @@ dependencies = [
  "arrow-ipc",
  "arrow-ord",
  "arrow-row",
- "arrow-schema",
+ "arrow-schema 58.3.0",
  "arrow-select",
  "arrow-string",
  "assert_cmd",
@@ -231,7 +231,7 @@ dependencies = [
  "arrow-array",
  "arrow-buffer",
  "arrow-data",
- "arrow-schema",
+ "arrow-schema 58.3.0",
  "arrow-select",
  "flatbuffers",
  "lz4_flex",
@@ -247,7 +247,7 @@ dependencies = [
  "arrow-array",
  "arrow-buffer",
  "arrow-data",
- "arrow-schema",
+ "arrow-schema 58.3.0",
  "arrow-select",
 ]
 
@@ -260,7 +260,7 @@ dependencies = [
  "arrow-array",
  "arrow-buffer",
  "arrow-data",
- "arrow-schema",
+ "arrow-schema 58.3.0",
  "half",
 ]
 
@@ -269,6 +269,12 @@ name = "arrow-schema"
 version = "58.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f633dbfdf39c039ada1bf9e34c694816eb71fbb7dc78f613993b7245e078a1ed"
+
+[[package]]
+name = "arrow-schema"
+version = "59.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "80b3e786a0dd9103acd583a6fb486dbf2f3268466cc0bd571dcf34cef231c1f1"
 
 [[package]]
 name = "arrow-select"
@@ -280,7 +286,7 @@ dependencies = [
  "arrow-array",
  "arrow-buffer",
  "arrow-data",
- "arrow-schema",
+ "arrow-schema 58.3.0",
  "num-traits",
 ]
 
@@ -293,7 +299,7 @@ dependencies = [
  "arrow-array",
  "arrow-buffer",
  "arrow-data",
- "arrow-schema",
+ "arrow-schema 58.3.0",
  "arrow-select",
  "memchr",
  "num-traits",
@@ -759,7 +765,7 @@ dependencies = [
  "arrow-array",
  "arrow-flight",
  "arrow-ipc",
- "arrow-schema",
+ "arrow-schema 59.0.0",
  "async-trait",
  "bytes",
  "criterion",
@@ -2839,7 +2845,7 @@ dependencies = [
  "arrow-array",
  "arrow-flight",
  "arrow-ipc",
- "arrow-schema",
+ "arrow-schema 59.0.0",
  "async-trait",
  "bytes",
  "databricks-zerobus-ingest-sdk",
@@ -4027,7 +4033,7 @@ version = "1.2.0"
 dependencies = [
  "arrow-array",
  "arrow-ipc",
- "arrow-schema",
+ "arrow-schema 59.0.0",
  "databricks-zerobus-ingest-sdk",
  "jni",
  "prost",
