@@ -62,7 +62,7 @@ mod token_cache;
 use std::collections::HashMap;
 use std::fmt::Debug;
 use std::future::Future;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
 
 use prost::Message;
@@ -682,6 +682,13 @@ impl ZerobusStream {
                 return Ok(());
             }
 
+            if !initial_stream_creation {
+                info!(
+                    pending_records = landing_zone.len(),
+                    "Stream lost; starting recovery"
+                );
+            }
+
             let landing_zone_sender = Arc::clone(&landing_zone);
             let landing_zone_receiver = Arc::clone(&landing_zone);
             let landing_zone_recovery = Arc::clone(&landing_zone);
@@ -690,14 +697,17 @@ impl ZerobusStream {
             let strategy = FixedInterval::from_millis(options.recovery_backoff_ms)
                 .take(options.recovery_retries as usize);
 
+            let attempt = AtomicUsize::new(0);
             let create_attempt = || {
                 let channel = channel.clone();
                 let table_properties = table_properties.clone();
                 let headers_provider = Arc::clone(&headers_provider);
                 let record_type = options.record_type;
+                let attempt = &attempt;
 
                 async move {
-                    tokio::time::timeout(
+                    let attempt_no = attempt.fetch_add(1, Ordering::Relaxed) + 1;
+                    let result = tokio::time::timeout(
                         Duration::from_millis(options.recovery_timeout_ms),
                         Self::create_stream_connection(
                             channel,
@@ -711,7 +721,19 @@ impl ZerobusStream {
                         ZerobusError::CreateStreamError(tonic::Status::deadline_exceeded(
                             "Stream creation timed out",
                         ))
-                    })?
+                    })
+                    .and_then(|res| res);
+                    if let Err(ref e) = result {
+                        warn!(
+                            attempt = attempt_no,
+                            max_attempts = options.recovery_retries + 1,
+                            retryable = e.is_retryable(),
+                            backoff_ms = options.recovery_backoff_ms,
+                            "Stream creation attempt failed: {}",
+                            e
+                        );
+                    }
+                    result
                 }
             };
             let should_retry = |e: &ZerobusError| options.recovery && e.is_retryable();
@@ -750,7 +772,14 @@ impl ZerobusStream {
             }
 
             // 2. Reset landing zone.
-            landing_zone_recovery.reset_observe();
+            let resent_records = landing_zone_recovery.reset_observe();
+            if resent_records > 0 {
+                info!(
+                    stream_id = %stream_id,
+                    resent_records,
+                    "Recovered stream; re-sending unacknowledged records"
+                );
+            }
 
             // 3. Spawn receiver and sender task.
             let is_paused = Arc::new(AtomicBool::new(false));
@@ -1531,6 +1560,14 @@ impl ZerobusStream {
         let mut failed = failed_records.write().await;
         failed.reserve(landing_zone.len());
         let records = landing_zone.remove_all();
+        if !records.is_empty() {
+            error!(
+                unacked_records = records.len(),
+                "Stream failed; {} records left unacknowledged and retained for retrieval via get_unacked_records/get_unacked_batches: {}",
+                records.len(),
+                error
+            );
+        }
         let mut map = oneshot_map.lock().await;
         let error_message = error.to_string();
         for record in records {

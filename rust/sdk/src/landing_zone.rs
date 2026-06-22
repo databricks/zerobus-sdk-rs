@@ -158,11 +158,18 @@ impl<T: Clone> LandingZone<T> {
     ///
     /// This is used during stream recovery to re-send items that were observed but
     /// not yet acknowledged by the server.
-    pub fn reset_observe(&self) {
+    ///
+    /// # Returns
+    ///
+    /// The number of items moved back to the queue.
+    pub fn reset_observe(&self) -> usize {
         let mut state = self.state.lock().expect("Lock poisoned");
+        let mut moved = 0;
         while let Some(observed_item) = state.observed_items.pop_back() {
             state.queue.push_front(observed_item);
+            moved += 1;
         }
+        moved
     }
 
     /// Checks if there are no observed items waiting for acknowledgement.
