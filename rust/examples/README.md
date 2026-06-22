@@ -257,7 +257,7 @@ if let Some(offset) = stream.ingest_records_offset(records).await? {
 ## Next Steps
 
 - Try ingesting larger batches of records
-- Experiment with different `StreamConfigurationOptions`
+- Experiment with different `StreamConfigurationOptions`, including `.max_recovery_backoff_ms(...)` and `.retry_strategy(...)` for recovery tuning
 - Add error handling and retry logic
 - Implement monitoring and metrics
 - Use the SDK in a production application

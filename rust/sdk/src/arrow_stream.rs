@@ -21,7 +21,6 @@ use bytes::Bytes;
 use futures::{Stream, StreamExt};
 use tokio::sync::{mpsc, watch, Mutex};
 use tokio::time::{sleep, Duration};
-use tokio_retry::strategy::FixedInterval;
 use tokio_retry::RetryIf;
 use tonic::transport::Channel;
 use tracing::{debug, error, info, instrument, warn};
@@ -35,6 +34,7 @@ use crate::arrow_metadata::{FlightAckMetadata, FlightBatchMetadata};
 use crate::errors::ZerobusError;
 use crate::headers_provider::HeadersProvider;
 use crate::offset_generator::{OffsetId, OffsetIdGenerator};
+use crate::stream_options;
 use crate::tls_config::TlsConfig;
 use crate::ZerobusResult;
 
@@ -304,8 +304,12 @@ impl ZerobusArrowStream {
         let table_properties = stream.table_properties.clone();
         let options = stream.options.clone();
         let headers_provider = Arc::clone(&stream.headers_provider);
-        let strategy = FixedInterval::from_millis(options.recovery_backoff_ms)
-            .take(options.recovery_retries as usize);
+        let strategy = stream_options::recovery_retry_strategy(
+            options.retry_strategy,
+            options.recovery_backoff_ms,
+            options.max_recovery_backoff_ms,
+        )
+        .take(options.recovery_retries as usize);
 
         let create_attempt = || {
             let endpoint = endpoint.clone();
@@ -618,6 +622,13 @@ impl ZerobusArrowStream {
             let ack_timeout = Duration::from_millis(options.server_lack_of_ack_timeout_ms);
             let mut response_stream = initial_response_stream;
 
+            let mut recovery_strategy = stream_options::recovery_retry_strategy(
+                options.retry_strategy,
+                options.recovery_backoff_ms,
+                options.max_recovery_backoff_ms,
+            )
+            .take(options.recovery_retries as usize);
+
             loop {
                 if is_closed.load(Ordering::Relaxed) {
                     debug!("Supervisor: Stream closed, exiting");
@@ -677,7 +688,9 @@ impl ZerobusArrowStream {
                         is_paused.store(true, Ordering::Relaxed);
 
                         // Backoff before retry.
-                        sleep(Duration::from_millis(options.recovery_backoff_ms)).await;
+                        if let Some(delay) = recovery_strategy.next() {
+                            sleep(delay).await;
+                        }
 
                         // Clear the server error.
                         let _ = server_error_tx.send(None);
@@ -712,6 +725,12 @@ impl ZerobusArrowStream {
                             Ok(Ok(new_response_stream)) => {
                                 info!("Supervisor: Recovery successful, resuming");
                                 recovery_attempts.store(0, Ordering::Relaxed);
+                                recovery_strategy = stream_options::recovery_retry_strategy(
+                                    options.retry_strategy,
+                                    options.recovery_backoff_ms,
+                                    options.max_recovery_backoff_ms,
+                                )
+                                .take(options.recovery_retries as usize);
                                 // is_paused was already cleared inside reconnect().
                                 response_stream = new_response_stream;
                                 // Loop continues with new stream.

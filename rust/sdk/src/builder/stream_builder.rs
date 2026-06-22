@@ -25,6 +25,7 @@ use crate::callbacks::AckCallback;
 use crate::databricks::zerobus::RecordType;
 use crate::headers_provider::{HeadersProvider, OAuthHeadersProvider};
 use crate::stream_configuration::StreamConfigurationOptions;
+use crate::stream_options::RetryStrategy;
 use crate::{TableProperties, ZerobusError, ZerobusResult, ZerobusSdk, ZerobusStream};
 
 #[cfg(feature = "arrow-flight")]
@@ -195,11 +196,34 @@ impl<'a> StreamBuilder<'a> {
     }
 
     /// Set the backoff time in milliseconds between recovery retries.
+    ///
+    /// This is the interval for fixed retry strategy and the initial delay for
+    /// exponential retry strategy.
     pub fn recovery_backoff_ms(mut self, ms: u64) -> Self {
         self.grpc_config.recovery_backoff_ms = ms;
         #[cfg(feature = "arrow-flight")]
         {
             self.arrow_config.recovery_backoff_ms = ms;
+        }
+        self
+    }
+
+    /// Set the maximum backoff time in milliseconds for exponential recovery retries.
+    pub fn max_recovery_backoff_ms(mut self, ms: u64) -> Self {
+        self.grpc_config.max_recovery_backoff_ms = ms;
+        #[cfg(feature = "arrow-flight")]
+        {
+            self.arrow_config.max_recovery_backoff_ms = ms;
+        }
+        self
+    }
+
+    /// Set the retry strategy for stream creation and recovery.
+    pub fn retry_strategy(mut self, strategy: RetryStrategy) -> Self {
+        self.grpc_config.retry_strategy = strategy;
+        #[cfg(feature = "arrow-flight")]
+        {
+            self.arrow_config.retry_strategy = strategy;
         }
         self
     }
@@ -503,7 +527,7 @@ mod tests {
     #[test]
     fn config_setters_chain() {
         let sdk = test_sdk();
-        let _builder = sdk
+        let builder = sdk
             .stream_builder()
             .table("t")
             .oauth("a", "b")
@@ -511,12 +535,18 @@ mod tests {
             .recovery(false)
             .recovery_timeout_ms(10_000)
             .recovery_backoff_ms(1_000)
+            .max_recovery_backoff_ms(30_000)
+            .retry_strategy(RetryStrategy::Fixed)
             .recovery_retries(3)
             .server_lack_of_ack_timeout_ms(30_000)
             .flush_timeout_ms(60_000)
             .max_inflight_requests(500)
             .stream_paused_max_wait_time_ms(Some(5_000))
             .callback_max_wait_time_ms(None);
+
+        assert_eq!(builder.grpc_config.recovery_backoff_ms, 1_000);
+        assert_eq!(builder.grpc_config.max_recovery_backoff_ms, 30_000);
+        assert_eq!(builder.grpc_config.retry_strategy, RetryStrategy::Fixed);
     }
 
     #[test]
@@ -525,6 +555,11 @@ mod tests {
         let builder = sdk.stream_builder().table("t").oauth("a", "b").json();
         assert_eq!(builder.grpc_config.max_inflight_requests, 1_000_000);
         assert!(builder.grpc_config.recovery);
+        assert_eq!(
+            builder.grpc_config.retry_strategy,
+            RetryStrategy::ExponentialBackoffWithJitter
+        );
+        assert_eq!(builder.grpc_config.max_recovery_backoff_ms, 30_000);
     }
 
     #[tokio::test]
@@ -654,6 +689,8 @@ mod tests {
             .recovery(false)
             .recovery_timeout_ms(5_000)
             .recovery_backoff_ms(500)
+            .max_recovery_backoff_ms(5_000)
+            .retry_strategy(RetryStrategy::Fixed)
             .recovery_retries(2)
             .server_lack_of_ack_timeout_ms(10_000)
             .flush_timeout_ms(20_000)
@@ -661,6 +698,8 @@ mod tests {
         assert!(!builder.arrow_config.recovery);
         assert_eq!(builder.arrow_config.recovery_timeout_ms, 5_000);
         assert_eq!(builder.arrow_config.recovery_backoff_ms, 500);
+        assert_eq!(builder.arrow_config.max_recovery_backoff_ms, 5_000);
+        assert_eq!(builder.arrow_config.retry_strategy, RetryStrategy::Fixed);
         assert_eq!(builder.arrow_config.recovery_retries, 2);
         assert_eq!(builder.arrow_config.server_lack_of_ack_timeout_ms, 10_000);
         assert_eq!(builder.arrow_config.flush_timeout_ms, 20_000);
