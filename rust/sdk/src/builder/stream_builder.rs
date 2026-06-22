@@ -328,12 +328,13 @@ impl<'a> StreamBuilder<'a> {
             Some(AuthConfig::OAuth {
                 client_id,
                 client_secret,
-            }) => Ok(Arc::new(OAuthHeadersProvider::new(
+            }) => Ok(Arc::new(OAuthHeadersProvider::with_cache(
                 client_id.clone(),
                 client_secret.clone(),
                 self.table_name.clone(),
                 self.sdk.workspace_id.clone(),
                 self.sdk.unity_catalog_url.clone(),
+                Arc::clone(&self.sdk.token_cache),
             ))),
             Some(AuthConfig::HeadersProvider(p)) => Ok(Arc::clone(p)),
             None => Err(ZerobusError::InvalidArgument(
@@ -441,6 +442,8 @@ mod tests {
             Arc::new(crate::tls_config::SecureTlsConfig::new()),
             None,
             Arc::from(crate::DEFAULT_SDK_IDENTIFIER),
+            true,
+            crate::token_cache::DEFAULT_REFRESH_BUFFER,
         )
     }
 
