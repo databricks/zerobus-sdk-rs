@@ -620,6 +620,22 @@ mod tests {
     }
 
     #[test]
+    fn test_proto_schema_descriptor_bytes_null_out_len() {
+        // The descriptor bytes are not null-terminated, so a null out_len leaves
+        // the caller no way to size them. A valid handle must still yield a null
+        // pointer rather than a length-less buffer.
+        let json = sample_uc_table_json();
+        let mut build = unwritten_result();
+        let schema = zerobus_proto_schema_from_uc_json(json.as_ptr(), &mut build as *mut CResult);
+        assert!(!schema.is_null(), "schema build failed");
+
+        let dptr = zerobus_proto_schema_descriptor_bytes(schema, ptr::null_mut());
+        assert!(dptr.is_null());
+
+        zerobus_proto_schema_free(schema);
+    }
+
+    #[test]
     fn test_proto_schema_encode_null_schema_errors() {
         let record = CString::new(r#"{"id": 1}"#).unwrap();
         // Seed the outputs with non-null/non-zero sentinels: a failed call must
