@@ -987,6 +987,48 @@ mod failure_tests {
     }
 
     #[tokio::test]
+    async fn test_public_is_closed_reports_closed_substream(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        setup_tracing();
+
+        // Public `is_closed()` should be an eager status check: even when the
+        // mux has not lazily observed the failed lane through ingest/flush/wait,
+        // it should report a sub-stream that has closed asynchronously.
+        let (mock_server, server_url) = start_mock_server().await?;
+        mock_server
+            .inject_responses(
+                TABLE_FAIL,
+                vec![
+                    MockResponse::CreateStream {
+                        stream_id: "s1".to_string(),
+                        delay_ms: 0,
+                    },
+                    MockResponse::Error {
+                        status: tonic::Status::permission_denied("async close"),
+                        delay_ms: 0,
+                    },
+                ],
+            )
+            .await;
+
+        let sdk = create_test_sdk(&server_url).await?;
+        let stream = create_test_stream(&sdk, TABLE_FAIL, default_options()).await?;
+
+        let _ = stream.ingest_record_offset(b"data".to_vec()).await?;
+        let mux = MultiplexedStream::new(vec![stream]);
+
+        tokio::time::timeout(std::time::Duration::from_secs(1), async {
+            while !mux.is_closed() {
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("mux public is_closed should report the closed inner stream");
+
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn test_is_closed_when_sub_stream_closes() -> Result<(), Box<dyn std::error::Error>> {
         setup_tracing();
 

@@ -116,12 +116,16 @@ impl MultiplexedStream {
 
     #[allow(clippy::result_large_err)]
     fn check_closed(&self) -> ZerobusResult<()> {
-        if self.is_closed.load(Ordering::Relaxed) {
+        if self.is_closed_fast() {
             return Err(ZerobusError::InvalidStateError(
                 "MultiplexedStream is closed".to_string(),
             ));
         }
         Ok(())
+    }
+
+    fn is_closed_fast(&self) -> bool {
+        self.is_closed.load(Ordering::Relaxed)
     }
 
     async fn shutdown_on_failure(&self, trigger_index: usize, cause: &ZerobusError) {
@@ -384,7 +388,7 @@ impl MultiplexedStream {
     /// Returns whether the mux is closed — either via [`close`](Self::close)
     /// or because a sub-stream failure poisoned it.
     pub fn is_closed(&self) -> bool {
-        self.is_closed.load(Ordering::Relaxed)
+        self.is_closed_fast() || self.streams.iter().any(ZerobusStream::is_closed)
     }
 
     /// Returns records that were ingested but not acknowledged.
