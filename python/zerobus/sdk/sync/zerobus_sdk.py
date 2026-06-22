@@ -38,7 +38,7 @@ Example:
     >>> offset = ack.wait_for_ack(timeout_sec=30)
 """
 
-from typing import Iterator
+from typing import Iterator, Optional
 
 # Import Rust-backed implementations
 import zerobus._zerobus_core as _core
@@ -197,8 +197,8 @@ class ZerobusArrowStream:
 class ZerobusSdk:
     """Python wrapper around Rust ZerobusSdk that provides unified create_stream API."""
 
-    def __init__(self, host: str, unity_catalog_url: str):
-        self._inner = _RustZerobusSdk(host, unity_catalog_url)
+    def __init__(self, host: str, unity_catalog_url: str, application_name: Optional[str] = None):
+        self._inner = _RustZerobusSdk(host, unity_catalog_url, application_name)
 
     def create_arrow_stream(
         self, table_name: str, schema, client_id: str, client_secret: str, options=None

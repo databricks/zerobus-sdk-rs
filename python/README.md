@@ -365,8 +365,10 @@ for batch in unacked_batches:
 Main entry point. Sync: `from zerobus.sdk.sync import ZerobusSdk` / Async: `from zerobus.sdk.aio import ZerobusSdk`
 
 ```python
-sdk = ZerobusSdk(server_endpoint: str, unity_catalog_endpoint: str)
+sdk = ZerobusSdk(server_endpoint: str, unity_catalog_endpoint: str, application_name: Optional[str] = None)
 ```
+
+`application_name` is optional; when set it is appended to the `user-agent` header (e.g. `zerobus-sdk-py/<version> my-app/1.0`).
 
 ```python
 # Sync
