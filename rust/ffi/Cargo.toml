@@ -24,6 +24,12 @@ async-trait.workspace = true
 bytes.workspace = true
 libc.workspace = true
 
+# Dynamic protobuf: build a descriptor pool from a UC-derived DescriptorProto
+# and encode JSON records into protobuf bytes (UC schema -> proto path for
+# pure-C consumers). serde_json parses the UC table metadata + record JSON.
+prost-reflect = { workspace = true, features = ["serde"] }
+serde_json.workspace = true
+
 # Logging
 tracing-subscriber = { workspace = true, features = ["fmt"] }
 
