@@ -778,10 +778,23 @@ The Zerobus server enforces a **10 MiB limit** per ingest call. The SDK enforces
 // This will immediately return Err(ZerobusError::InvalidArgument(...))
 let oversized = vec![0u8; 11 * 1024 * 1024];
 let result = stream.ingest_record_offset(oversized).await;
-// Err: Ingest payload too large: 11534336 bytes exceeds the 10 MiB limit
+// Err: Ingest payload too large: 11534336 bytes exceeds the configured limit of 10485760 bytes
 ```
 
 The limit applies to the total encoded size of the call — the sum of all record bytes passed to `ingest_record_offset` or `ingest_records_offset`. Split large payloads across multiple calls to stay within the limit.
+
+The limit defaults to 10 MiB (matching the server) but is configurable per stream via the builder.
+
+```rust
+let stream = sdk
+    .stream_builder()
+    .table("catalog.schema.table")
+    .oauth("client-id", "client-secret")
+    .json()
+    .max_ingest_payload_bytes(5 * 1024 * 1024) // 5 MiB
+    .build()
+    .await?;
+```
 
 **Check if an error is retryable:**
 

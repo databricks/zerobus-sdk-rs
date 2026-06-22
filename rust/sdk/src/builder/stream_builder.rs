@@ -267,6 +267,18 @@ impl<'a> StreamBuilder<'a> {
         self
     }
 
+    /// Set the maximum total encoded byte size allowed per ingest call.
+    ///
+    /// This is the sum of all record bytes passed to a single ingest call.
+    /// Calls exceeding this limit fail fast with
+    /// [`ZerobusError::InvalidArgument`] before any network I/O.
+    ///
+    /// Defaults to 10 MiB, which matches the server-side limit.
+    pub fn max_ingest_payload_bytes(mut self, bytes: usize) -> Self {
+        self.grpc_config.max_ingest_payload_bytes = bytes;
+        self
+    }
+
     /// Set the maximum wait time during graceful stream pause (JSON/proto and Arrow streams).
     pub fn stream_paused_max_wait_time_ms(mut self, ms: Option<u64>) -> Self {
         self.grpc_config.stream_paused_max_wait_time_ms = ms;
@@ -550,6 +562,25 @@ mod tests {
         let builder = sdk.stream_builder().table("t").oauth("a", "b").json();
         assert_eq!(builder.grpc_config.max_inflight_requests, 1_000_000);
         assert!(builder.grpc_config.recovery);
+        assert_eq!(
+            builder.grpc_config.max_ingest_payload_bytes,
+            10 * 1024 * 1024
+        );
+    }
+
+    #[test]
+    fn max_ingest_payload_bytes_override() {
+        let sdk = test_sdk();
+        let builder = sdk
+            .stream_builder()
+            .table("t")
+            .oauth("a", "b")
+            .json()
+            .max_ingest_payload_bytes(5 * 1024 * 1024);
+        assert_eq!(
+            builder.grpc_config.max_ingest_payload_bytes,
+            5 * 1024 * 1024
+        );
     }
 
     #[tokio::test]

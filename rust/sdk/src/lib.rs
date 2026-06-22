@@ -116,10 +116,6 @@ pub mod zeroparser;
 
 const SHUTDOWN_TIMEOUT_SECS: u64 = 1;
 
-/// Maximum encoded byte size allowed per `ingest_record_offset` / `ingest_records_offset` call.
-/// Matches the server limit so oversize payloads fail fast client-side.
-const MAX_INGEST_PAYLOAD_BYTES: usize = 10 * 1024 * 1024; // 10 MiB
-
 /// Maximum time to wait for the receiver/sender tasks to finish during stream
 /// teardown.
 const STREAM_TEARDOWN_DRAIN_TIMEOUT_MS: u64 = 500;
@@ -1171,9 +1167,10 @@ impl ZerobusStream {
     /// Internal unified method for ingesting records and batches
     async fn ingest_internal_v2(&self, encoded_batch: EncodedBatch) -> ZerobusResult<OffsetId> {
         let byte_size = encoded_batch.total_byte_size();
-        if byte_size > MAX_INGEST_PAYLOAD_BYTES {
+        let max_payload_bytes = self.options.max_ingest_payload_bytes;
+        if byte_size > max_payload_bytes {
             return Err(ZerobusError::InvalidArgument(format!(
-                "Ingest payload too large: {byte_size} bytes exceeds the 10 MiB limit ({MAX_INGEST_PAYLOAD_BYTES} bytes)"
+                "Ingest payload too large: {byte_size} bytes exceeds the configured limit of {max_payload_bytes} bytes"
             )));
         }
 

@@ -15,7 +15,7 @@
 - Add `ZerobusSdkBuilder::no_tls()` convenience method as a shortcut for
   `.tls_config(Arc::new(NoTlsConfig))` when connecting to plaintext `http://`
   endpoints. Gated behind the `testing` feature flag.
-- Added a 10 MiB payload size limit per `ingest_record_offset` / `ingest_records_offset` call. Attempts to ingest more than 10 MiB of encoded data in a single call now return `ZerobusError::InvalidArgument` immediately, before any network I/O.
+- Added a configurable payload size limit per `ingest_record_offset` / `ingest_records_offset` call, defaulting to 10 MiB to match the server limit. Attempts to ingest more than the limit of encoded data in a single call now return `ZerobusError::InvalidArgument` immediately, before any network I/O. The limit is tunable per stream via `StreamBuilder::max_ingest_payload_bytes`.
 
 ### Bug Fixes
 - Redacted the OAuth authorization token from an error log and error message on the gRPC stream-setup path; a malformed token value is no longer written to logs.
