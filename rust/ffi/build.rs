@@ -14,6 +14,9 @@ fn main() {
         .expect("Unable to generate bindings")
         .write_to_file(&output_file);
 
-    println!("cargo:rerun-if-changed=src/lib.rs");
+    // Watch the whole src tree: the FFI surface is split across module files
+    // (arrow.rs, stream.rs, ...), so regenerating zerobus.h must trigger on any
+    // of them, not just lib.rs — otherwise the header silently goes stale.
+    println!("cargo:rerun-if-changed=src");
     println!("cargo:rerun-if-changed=cbindgen.toml");
 }
