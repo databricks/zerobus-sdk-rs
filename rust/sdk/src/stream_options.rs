@@ -22,6 +22,6 @@ pub mod defaults {
     pub const CONNECTION_TIMEOUT_MS: u64 = 30_000;
     /// Default: 5 seconds callback timeout
     pub const CALLBACK_MAX_WAIT_TIME_MS: u64 = 5_000;
-    /// Default: 10 MiB maximum encoded payload size per ingest call.
-    pub const MAX_INGEST_PAYLOAD_BYTES: usize = 10 * 1024 * 1024;
+    /// Default: max ingest payload, slightly below the 10 MiB server limit to leave envelope headroom
+    pub const MAX_INGEST_PAYLOAD_BYTES: usize = 10 * 1024 * 1024 - 64 * 1024;
 }

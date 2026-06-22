@@ -267,13 +267,18 @@ impl<'a> StreamBuilder<'a> {
         self
     }
 
-    /// Set the maximum total encoded byte size allowed per ingest call.
+    /// Set the maximum total encoded record byte size allowed per ingest call
+    /// (gRPC JSON/proto streams only).
     ///
     /// This is the sum of all record bytes passed to a single ingest call.
     /// Calls exceeding this limit fail fast with
     /// [`ZerobusError::InvalidArgument`] before any network I/O.
     ///
-    /// Defaults to 10 MiB, which matches the server-side limit.
+    /// Defaults to slightly below the 10 MiB server limit.
+    ///
+    /// Note: this setting only applies to streams built with [`build()`](Self::build).
+    /// Arrow Flight streams (built with `build_arrow()`) do not read this value
+    /// and have no client-side payload-size enforcement.
     pub fn max_ingest_payload_bytes(mut self, bytes: usize) -> Self {
         self.grpc_config.max_ingest_payload_bytes = bytes;
         self
@@ -430,6 +435,15 @@ impl<'a> StreamBuilder<'a> {
     #[cfg(feature = "arrow-flight")]
     pub async fn build_arrow(self) -> ZerobusResult<ZerobusArrowStream> {
         self.validate()?;
+
+        // `max_ingest_payload_bytes` only applies to gRPC streams; warn if the
+        // user changed it from the default before building an Arrow stream.
+        if self.grpc_config.max_ingest_payload_bytes
+            != StreamConfigurationOptions::default().max_ingest_payload_bytes
+        {
+            crate::client_warnings::warn_payload_limit_ignored_for_arrow();
+        }
+
         let headers_provider = self.resolve_headers_provider()?;
 
         let schema = match self.format {
@@ -564,8 +578,9 @@ mod tests {
         assert!(builder.grpc_config.recovery);
         assert_eq!(
             builder.grpc_config.max_ingest_payload_bytes,
-            10 * 1024 * 1024
+            crate::stream_options::defaults::MAX_INGEST_PAYLOAD_BYTES
         );
+        assert!(builder.grpc_config.max_ingest_payload_bytes < 10 * 1024 * 1024);
     }
 
     #[test]

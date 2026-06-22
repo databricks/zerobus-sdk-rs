@@ -772,18 +772,18 @@ Require manual intervention:
 
 ### Payload Size Limit
 
-The Zerobus server enforces a **10 MiB limit** per ingest call. The SDK enforces this client-side so you get an immediate `InvalidArgument` error rather than a server rejection:
+The Zerobus server applies a **10 MiB limit** to the raw record bytes of an ingest call, and *additionally* enforces a transport-layer limit on the full serialized request (record bytes plus protobuf framing and stream metadata). The SDK enforces a limit client-side so you get an immediate `InvalidArgument` error rather than a server rejection:
 
 ```rust
 // This will immediately return Err(ZerobusError::InvalidArgument(...))
 let oversized = vec![0u8; 11 * 1024 * 1024];
 let result = stream.ingest_record_offset(oversized).await;
-// Err: Ingest payload too large: 11534336 bytes exceeds the configured limit of 10485760 bytes
+// Err: Ingest payload too large: 11534336 bytes exceeds the configured limit of 10420224 bytes
 ```
 
 The limit applies to the total encoded size of the call — the sum of all record bytes passed to `ingest_record_offset` or `ingest_records_offset`. Split large payloads across multiple calls to stay within the limit.
 
-The limit defaults to 10 MiB (matching the server) but is configurable per stream via the builder.
+The default limit is set **slightly below 10 MiB** to leave headroom for the request envelope, so that a payload accepted client-side isn't later rejected by the server's transport layer. It is configurable per stream via the builder (gRPC JSON/proto streams only — Arrow Flight streams do not enforce this limit, and setting it before `build_arrow()` logs a warning):
 
 ```rust
 let stream = sdk
