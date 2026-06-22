@@ -1988,8 +1988,9 @@ pub extern "C" fn zerobus_get_default_config() -> CStreamConfigurationOptions {
 // and encode JSON records to protobuf bytes without a companion Rust crate.
 // Lifecycle: `_from_uc_json` → `_descriptor_bytes` / `_encode_json` → `_free`.
 
-/// Holds a table's serialized `DescriptorProto` plus a prepared protobuf
-/// encoder built from it. Opaque to C; the concrete type is [`ProtoSchema`].
+/// Opaque handle to a table's protobuf schema: its serialized descriptor plus a
+/// prepared encoder. C code only ever holds a pointer to it; the backing
+/// allocation is owned by the SDK and released by zerobus_proto_schema_free.
 #[repr(C)]
 pub struct CZerobusProtoSchema {
     _private: [u8; 0],
@@ -2003,26 +2004,20 @@ struct ProtoSchema {
     message: MessageDescriptor,
 }
 
-/// Validate a schema handle and clone its owning [`Arc`], keeping the
-/// [`ProtoSchema`] alive for the caller even if another thread frees the
-/// handle concurrently.
+/// Null-check a schema handle and borrow the [`ProtoSchema`] behind it.
 ///
 /// # Safety
 ///
 /// `schema` must be null or a live handle from
-/// [`zerobus_proto_schema_from_uc_json`] not yet passed to
-/// [`zerobus_proto_schema_free`].
-unsafe fn clone_proto_schema_arc(
+/// [`zerobus_proto_schema_from_uc_json`]. The caller must not free the handle
+/// (via [`zerobus_proto_schema_free`]) for the lifetime of the returned borrow.
+unsafe fn proto_schema_ref<'a>(
     schema: *const CZerobusProtoSchema,
-) -> Result<Arc<ProtoSchema>, &'static str> {
+) -> Result<&'a ProtoSchema, &'static str> {
     if schema.is_null() {
         return Err("Proto schema pointer is null");
     }
-    let ptr = schema as *const ProtoSchema;
-    // Bump the strong count so the returned Arc is ours, leaving the handle's
-    // own reference intact.
-    Arc::increment_strong_count(ptr);
-    Ok(Arc::from_raw(ptr))
+    Ok(&*(schema as *const ProtoSchema))
 }
 
 /// Builds a [`ProtoSchema`] from Unity Catalog table-metadata JSON.
@@ -2071,9 +2066,9 @@ pub extern "C" fn zerobus_proto_schema_from_uc_json(
     match build_proto_schema(&json) {
         Ok(schema) => {
             write_success_result(result);
-            // Reference-counted so a concurrent `_free` can't drop the schema
-            // while another thread is mid-encode.
-            Arc::into_raw(Arc::new(schema)) as *mut CZerobusProtoSchema
+            // Hand ownership of the allocation to C as a raw pointer; it is
+            // reclaimed by zerobus_proto_schema_free.
+            Box::into_raw(Box::new(schema)) as *mut CZerobusProtoSchema
         }
         Err(err) => {
             write_error_result(result, &err, false);
@@ -2083,31 +2078,35 @@ pub extern "C" fn zerobus_proto_schema_from_uc_json(
 }
 
 /// Borrow the serialized descriptor bytes. Valid until `zerobus_proto_schema_free`.
-/// Pass directly to `zerobus_sdk_create_stream`. Returns NULL on null handle.
+/// Pass directly to `zerobus_sdk_create_stream`.
+///
+/// `out_len` is required: the bytes are not null-terminated, so the caller needs
+/// the length to read them. Returns NULL without touching `out_len` if it is
+/// NULL, and NULL with `*out_len` set to 0 on a null handle.
 #[no_mangle]
 pub extern "C" fn zerobus_proto_schema_descriptor_bytes(
     schema: *const CZerobusProtoSchema,
     out_len: *mut usize,
 ) -> *const u8 {
+    // The bytes are not null-terminated, so a pointer without a length is
+    // unusable. Refuse rather than hand back something the caller can't size.
+    if out_len.is_null() {
+        return ptr::null();
+    }
     // SAFETY: caller upholds the handle contract (valid, unfreed handle).
-    let schema_ref = match unsafe { clone_proto_schema_arc(schema) } {
+    let schema_ref = match unsafe { proto_schema_ref(schema) } {
         Ok(s) => s,
         Err(_) => {
-            if !out_len.is_null() {
-                unsafe {
-                    *out_len = 0;
-                }
+            unsafe {
+                *out_len = 0;
             }
             return ptr::null();
         }
     };
-    if !out_len.is_null() {
-        unsafe {
-            *out_len = schema_ref.descriptor_bytes.len();
-        }
+    unsafe {
+        *out_len = schema_ref.descriptor_bytes.len();
     }
-    // Valid until the caller's `_free`: the handle's reference keeps the
-    // allocation live after our local `Arc` drops.
+    // Valid until the caller's `_free`, which owns the backing allocation.
     schema_ref.descriptor_bytes.as_ptr()
 }
 
@@ -2122,7 +2121,11 @@ pub extern "C" fn zerobus_proto_schema_descriptor_bytes(
 /// - LONG/BIGINT above 2^53: pass as a JSON string, else the value loses
 ///   precision as a JSON number.
 ///
-/// Non-nullable columns are proto2 `required`; a record missing one fails.
+/// Presence is enforced only for top-level non-nullable scalar and struct
+/// columns (proto2 `required`); a record omitting one fails. Non-nullable
+/// ARRAY/MAP columns map to `repeated`, which has no presence, so an omitted one
+/// encodes as empty rather than failing; required fields nested inside a STRUCT
+/// are likewise not presence-checked.
 /// Returns true on success; caller must free buffer with `zerobus_free_proto_bytes`.
 /// On failure `*out_data` is set to NULL and `*out_len` to 0.
 #[no_mangle]
@@ -2145,9 +2148,9 @@ pub extern "C" fn zerobus_proto_schema_encode_json(
         *out_len = 0;
     }
 
-    // SAFETY: caller upholds the handle contract (valid, unfreed handle); the
-    // cloned Arc keeps the schema alive for the duration of this call.
-    let schema_ref = match unsafe { clone_proto_schema_arc(schema) } {
+    // SAFETY: caller upholds the handle contract — a valid handle not freed for
+    // the duration of this call.
+    let schema_ref = match unsafe { proto_schema_ref(schema) } {
         Ok(s) => s,
         Err(msg) => {
             write_error_result(result, msg, false);
@@ -2185,9 +2188,10 @@ pub extern "C" fn zerobus_proto_schema_encode_json(
         return false;
     }
 
-    // Non-nullable columns are proto2 `required`, but prost-reflect doesn't
-    // enforce presence on encode — reject a missing one here rather than emit
-    // wire bytes the server rejects.
+    // Top-level non-nullable scalar/struct columns are proto2 `required`, but
+    // prost-reflect doesn't enforce presence on encode — reject a missing one
+    // here rather than emit wire bytes the server rejects. (ARRAY/MAP are
+    // `repeated`, which has no presence, and nested struct fields aren't walked.)
     let missing: Vec<String> = schema_ref
         .message
         .fields()
@@ -2231,14 +2235,16 @@ pub extern "C" fn zerobus_free_proto_bytes(data: *mut u8, len: usize) {
     }
 }
 
-/// Free a handle from `zerobus_proto_schema_from_uc_json`.
+/// Free a handle from `zerobus_proto_schema_from_uc_json`. Call exactly once,
+/// after every other call using this handle has returned. The handle may be
+/// shared by concurrent readers (`descriptor_bytes`, `encode_json`), but `free`
+/// must not race any of them.
 #[no_mangle]
 pub extern "C" fn zerobus_proto_schema_free(schema: *mut CZerobusProtoSchema) {
     if !schema.is_null() {
         unsafe {
-            // Release the handle's strong reference; the schema drops only when
-            // the last reference does, so a free racing an in-flight call is safe.
-            let _ = Arc::from_raw(schema as *const ProtoSchema);
+            // Reclaim the Box handed to C by from_uc_json and drop it.
+            let _ = Box::from_raw(schema as *mut ProtoSchema);
         }
     }
 }

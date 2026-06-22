@@ -852,6 +852,114 @@ mod tests {
     }
 
     #[test]
+    fn test_proto_schema_encode_map_roundtrip() {
+        // MAP<K,V> maps to a synthetic map-entry message + `repeated`; the value
+        // is a JSON object. Protobuf-JSON map keys are always strings on the wire.
+        let table = CString::new(
+            r#"{
+                "name": "t", "catalog_name": "c", "schema_name": "s",
+                "columns": [
+                    {"name": "k", "type_name": "BIGINT", "type_text": "bigint", "nullable": false, "position": 0},
+                    {"name": "attrs", "type_name": "MAP", "type_text": "map<string,int>", "nullable": true, "position": 1,
+                     "type_json": "{\"type\":\"map\",\"keyType\":\"string\",\"valueType\":\"integer\",\"valueContainsNull\":false}"}
+                ]
+            }"#,
+        )
+        .unwrap();
+        let decoded = encode_and_decode(&table, r#"{"k": 1, "attrs": {"a": 1, "b": 2}}"#);
+        let field = decoded.get_field_by_name("attrs").unwrap();
+        let map = field.as_map().unwrap();
+        let mut pairs: Vec<(String, i32)> = map
+            .iter()
+            .map(|(k, v)| (k.as_str().unwrap().to_string(), v.as_i32().unwrap()))
+            .collect();
+        pairs.sort();
+        assert_eq!(pairs, vec![("a".to_string(), 1), ("b".to_string(), 2)]);
+    }
+
+    #[test]
+    fn test_proto_schema_encode_struct_roundtrip() {
+        // STRUCT<...> maps to a nested message; the value is a JSON object.
+        let table = CString::new(
+            r#"{
+                "name": "t", "catalog_name": "c", "schema_name": "s",
+                "columns": [
+                    {"name": "k", "type_name": "BIGINT", "type_text": "bigint", "nullable": false, "position": 0},
+                    {"name": "addr", "type_name": "STRUCT", "type_text": "struct<city:string,zip:int>", "nullable": true, "position": 1,
+                     "type_json": "{\"type\":\"struct\",\"fields\":[{\"name\":\"city\",\"type\":\"string\",\"nullable\":true,\"metadata\":{}},{\"name\":\"zip\",\"type\":\"integer\",\"nullable\":true,\"metadata\":{}}]}"}
+                ]
+            }"#,
+        )
+        .unwrap();
+        let decoded =
+            encode_and_decode(&table, r#"{"k": 1, "addr": {"city": "NYC", "zip": 10001}}"#);
+        let field = decoded.get_field_by_name("addr").unwrap();
+        let addr = field.as_message().unwrap();
+        assert_eq!(
+            addr.get_field_by_name("city").unwrap().as_str(),
+            Some("NYC")
+        );
+        assert_eq!(addr.get_field_by_name("zip").unwrap().as_i32(), Some(10001));
+    }
+
+    #[test]
+    fn test_proto_schema_encode_array_of_struct_roundtrip() {
+        // ARRAY<STRUCT<...>> maps to `repeated <nested message>`; the value is a
+        // JSON array of objects.
+        let table = CString::new(
+            r#"{
+                "name": "t", "catalog_name": "c", "schema_name": "s",
+                "columns": [
+                    {"name": "k", "type_name": "BIGINT", "type_text": "bigint", "nullable": false, "position": 0},
+                    {"name": "items", "type_name": "ARRAY", "type_text": "array<struct<id:int>>", "nullable": true, "position": 1,
+                     "type_json": "{\"type\":\"array\",\"elementType\":{\"type\":\"struct\",\"fields\":[{\"name\":\"id\",\"type\":\"integer\",\"nullable\":true,\"metadata\":{}}]},\"containsNull\":false}"}
+                ]
+            }"#,
+        )
+        .unwrap();
+        let decoded = encode_and_decode(&table, r#"{"k": 1, "items": [{"id": 1}, {"id": 2}]}"#);
+        let field = decoded.get_field_by_name("items").unwrap();
+        let ids: Vec<i32> = field
+            .as_list()
+            .unwrap()
+            .iter()
+            .map(|v| {
+                v.as_message()
+                    .unwrap()
+                    .get_field_by_name("id")
+                    .unwrap()
+                    .as_i32()
+                    .unwrap()
+            })
+            .collect();
+        assert_eq!(ids, vec![1, 2]);
+    }
+
+    #[test]
+    fn test_proto_schema_encode_date_is_days_since_epoch() {
+        // DATE maps to proto `int32`; the value is days since the Unix epoch, an
+        // integer (not an ISO-8601 string). 19000 days ≈ 2022-01-08.
+        let table = uc_table_json_with_column("d", "DATE");
+        let decoded = encode_and_decode(&table, r#"{"k": 1, "d": 19000}"#);
+        assert_eq!(
+            decoded.get_field_by_name("d").unwrap().as_i32(),
+            Some(19000)
+        );
+    }
+
+    #[test]
+    fn test_proto_schema_encode_timestamp_ntz_is_micros() {
+        // TIMESTAMP_NTZ maps to proto `int64` (same wire shape as TIMESTAMP); the
+        // value is microseconds since the epoch, an integer.
+        let table = uc_table_json_with_column("tsn", "TIMESTAMP_NTZ");
+        let decoded = encode_and_decode(&table, r#"{"k": 1, "tsn": 1700000000000000}"#);
+        assert_eq!(
+            decoded.get_field_by_name("tsn").unwrap().as_i64(),
+            Some(1700000000000000)
+        );
+    }
+
+    #[test]
     fn test_free_proto_bytes_handles_empty_encoding() {
         // A record with no fields set encodes to zero bytes: out_len == 0 but
         // out_data is a non-null, zero-length boxed slice. Freeing it must
@@ -897,9 +1005,9 @@ mod tests {
 
     #[test]
     fn test_proto_schema_shared_across_threads() {
-        // The handle is reference-counted, so many threads may encode through one
-        // shared handle concurrently before it is freed once. A plain Box would
-        // race the drop against in-flight encodes.
+        // The handle may be shared by concurrent readers: many threads encode
+        // through one handle at once. `free` is ordered after every worker has
+        // joined, so it never races an in-flight encode.
         use std::thread;
 
         let json = sample_uc_table_json();

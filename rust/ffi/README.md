@@ -123,14 +123,17 @@ Two precision pitfalls worth calling out:
 - **`DATE`/`TIMESTAMP*` unit mismatches** are silent: writing milliseconds where
   microseconds are expected shifts every row by 10³.
 
-Non-nullable columns become proto2 `required` fields; a record missing one is
-rejected with an error rather than encoded.
+Top-level non-nullable scalar and struct columns become proto2 `required`
+fields; a record missing one is rejected rather than encoded. Non-nullable
+`ARRAY`/`MAP` columns map to `repeated`, which has no presence, so an omitted one
+encodes as empty rather than being rejected; required fields nested inside a
+`STRUCT` are likewise not presence-checked.
 
-The schema handle is reference-counted internally, so it is safe to share one
-handle across threads: worker threads may call `zerobus_proto_schema_encode_json`
-and `zerobus_proto_schema_descriptor_bytes` concurrently, and a concurrent
-`zerobus_proto_schema_free` will not free the schema out from under an in-flight
-call. Call `zerobus_proto_schema_free` exactly once when done.
+A handle may be shared by concurrent readers: worker threads may call
+`zerobus_proto_schema_encode_json` and `zerobus_proto_schema_descriptor_bytes`
+on the same handle concurrently. `zerobus_proto_schema_free` must be called
+exactly once, after all in-flight calls on the handle have returned — it must
+not race any other use of the handle.
 
 ## API Reference
 

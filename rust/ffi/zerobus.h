@@ -148,8 +148,9 @@ typedef struct CRecordArray {
 } CRecordArray;
 
 /**
- * Holds a table's serialized `DescriptorProto` plus a prepared protobuf
- * encoder built from it. Opaque to C; the concrete type is [`ProtoSchema`].
+ * Opaque handle to a table's protobuf schema: its serialized descriptor plus a
+ * prepared encoder. C code only ever holds a pointer to it; the backing
+ * allocation is owned by the SDK and released by zerobus_proto_schema_free.
  */
 typedef struct CZerobusProtoSchema {
   uint8_t _private[0];
@@ -514,7 +515,11 @@ struct CZerobusProtoSchema *zerobus_proto_schema_from_uc_json(const char *uc_tab
 
 /**
  * Borrow the serialized descriptor bytes. Valid until `zerobus_proto_schema_free`.
- * Pass directly to `zerobus_sdk_create_stream`. Returns NULL on null handle.
+ * Pass directly to `zerobus_sdk_create_stream`.
+ *
+ * `out_len` is required: the bytes are not null-terminated, so the caller needs
+ * the length to read them. Returns NULL without touching `out_len` if it is
+ * NULL, and NULL with `*out_len` set to 0 on a null handle.
  */
 const uint8_t *zerobus_proto_schema_descriptor_bytes(const struct CZerobusProtoSchema *schema,
                                                      uintptr_t *out_len);
@@ -531,7 +536,11 @@ const uint8_t *zerobus_proto_schema_descriptor_bytes(const struct CZerobusProtoS
  * - LONG/BIGINT above 2^53: pass as a JSON string, else the value loses
  *   precision as a JSON number.
  *
- * Non-nullable columns are proto2 `required`; a record missing one fails.
+ * Presence is enforced only for top-level non-nullable scalar and struct
+ * columns (proto2 `required`); a record omitting one fails. Non-nullable
+ * ARRAY/MAP columns map to `repeated`, which has no presence, so an omitted one
+ * encodes as empty rather than failing; required fields nested inside a STRUCT
+ * are likewise not presence-checked.
  * Returns true on success; caller must free buffer with `zerobus_free_proto_bytes`.
  * On failure `*out_data` is set to NULL and `*out_len` to 0.
  */
@@ -547,7 +556,10 @@ bool zerobus_proto_schema_encode_json(const struct CZerobusProtoSchema *schema,
 void zerobus_free_proto_bytes(uint8_t *data, uintptr_t len);
 
 /**
- * Free a handle from `zerobus_proto_schema_from_uc_json`.
+ * Free a handle from `zerobus_proto_schema_from_uc_json`. Call exactly once,
+ * after every other call using this handle has returned. The handle may be
+ * shared by concurrent readers (`descriptor_bytes`, `encode_json`), but `free`
+ * must not race any of them.
  */
 void zerobus_proto_schema_free(struct CZerobusProtoSchema *schema);
 
