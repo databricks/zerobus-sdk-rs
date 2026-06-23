@@ -15,7 +15,8 @@ use crate::arrow::{ArrowStreamConfigurationOptions, AsyncZerobusArrowStream};
 use crate::auth::HeadersProviderWrapper;
 use crate::common::{
     apply_grpc_options, encoded_record_to_pybytes, extract_record_payload, extract_record_payloads,
-    map_error, StreamConfigurationOptions, TableProperties, SDK_IDENTIFIER_PREFIX,
+    map_error, normalize_application_name, StreamConfigurationOptions, TableProperties,
+    SDK_IDENTIFIER_PREFIX,
 };
 
 // =============================================================================
@@ -268,11 +269,14 @@ pub struct ZerobusSdk {
 #[pymethods]
 impl ZerobusSdk {
     #[new]
+    #[pyo3(signature = (host, unity_catalog_url, application_name = None))]
     fn new(
         host: String,
         unity_catalog_url: String,
         application_name: Option<String>,
     ) -> PyResult<Self> {
+        let application_name = normalize_application_name(application_name)?;
+
         let py_version = env!("CARGO_PKG_VERSION");
         let sdk_identifier = format!("{}/{}", SDK_IDENTIFIER_PREFIX, py_version);
 

@@ -227,6 +227,19 @@ class TestApplicationName(unittest.TestCase):
         self.assertIsNotNone(SyncSdk(self.HOST, self.UC_URL, "my-app/1.0"))
         self.assertIsNotNone(AsyncSdk(self.HOST, self.UC_URL, "my-app/1.0"))
 
+    def test_application_name_blank_is_treated_as_unset(self):
+        """A blank/whitespace-only application_name is accepted (treated as unset)."""
+        self.assertIsNotNone(SyncSdk(self.HOST, self.UC_URL, application_name="   "))
+        self.assertIsNotNone(AsyncSdk(self.HOST, self.UC_URL, application_name=""))
+
+    def test_application_name_rejects_control_characters(self):
+        """Control characters (newline, carriage return, tab) are rejected."""
+        for bad in ("my-app\n1.0", "my-app\r1.0", "my\tapp"):
+            with self.assertRaises(ZerobusException):
+                SyncSdk(self.HOST, self.UC_URL, application_name=bad)
+            with self.assertRaises(ZerobusException):
+                AsyncSdk(self.HOST, self.UC_URL, application_name=bad)
+
 
 class TestStreamConfigurationDefaults(unittest.TestCase):
     """Test StreamConfigurationOptions defaults."""

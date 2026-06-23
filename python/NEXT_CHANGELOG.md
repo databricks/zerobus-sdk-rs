@@ -8,10 +8,13 @@
 
 - **`ZerobusSdk(application_name=...)`**: Both the sync and async `ZerobusSdk`
   constructors accept an optional `application_name` argument. When set, it is
-  appended to the HTTP `user-agent` header sent on every request, so callers
-  can be identified in server-side telemetry. The SDK prefix is preserved, so
-  the wire value becomes `zerobus-sdk-py/<version> <application_name>`. By
-  convention use `<product>/<version>` (e.g. `"my-app/1.0"`).
+  appended to the HTTP `user-agent` header on gRPC requests to the Zerobus
+  server (it is not sent on the requests to the login service that mint the
+  OAuth token), so callers can be identified in server-side telemetry. The SDK
+  prefix is preserved, so the wire value becomes
+  `zerobus-sdk-py/<version> <application_name>`. By convention use
+  `<product>/<version>` (e.g. `"my-app/1.0"`). The value is trimmed; blank
+  values are ignored and control characters are rejected.
 
 ### Bug Fixes
 

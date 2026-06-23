@@ -7,7 +7,7 @@ use pyo3::prelude::*;
 use pyo3::types::{PyBytes, PyDict, PyList, PyTuple};
 
 use databricks_zerobus_ingest_sdk::{
-    AckCallback as RustAckCallback, EncodedRecord, OffsetId, StreamBuilder,
+    AckCallback as RustAckCallback, EncodedRecord, OffsetId, StreamBuilder, ZerobusError,
 };
 
 /// User-agent prefix emitted by this wrapper SDK. Combined with the wrapper
@@ -494,6 +494,31 @@ pub(crate) fn apply_grpc_options<'a>(
     }
 
     Ok(b)
+}
+
+/// Validate and normalize a caller-supplied `application_name`.
+///
+/// Trims surrounding whitespace and treats a blank result as unset (`None`),
+/// consistent with how the core builder ignores an empty identifier. Rejects
+/// values containing control characters (e.g. `\r`, `\n`) with an
+/// `InvalidArgument` error naming the parameter.
+pub(crate) fn normalize_application_name(
+    application_name: Option<String>,
+) -> PyResult<Option<String>> {
+    let name = match application_name {
+        Some(name) => name,
+        None => return Ok(None),
+    };
+    let trimmed = name.trim();
+    if trimmed.is_empty() {
+        return Ok(None);
+    }
+    if trimmed.chars().any(char::is_control) {
+        return Err(map_error(ZerobusError::InvalidArgument(
+            "application_name must not contain control characters".to_string(),
+        )));
+    }
+    Ok(Some(trimmed.to_string()))
 }
 
 // =============================================================================

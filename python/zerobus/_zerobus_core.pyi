@@ -311,7 +311,9 @@ class sync:
             Args:
                 host: Zerobus server endpoint
                 unity_catalog_url: Unity Catalog / workspace URL
-                application_name: Optional app identifier appended to the ``user-agent``
+                application_name: Optional caller identifier (conventionally
+                    "<product>/<version>") appended to the HTTP user-agent header on
+                    gRPC requests toward the Zerobus server.
             """
             ...
 
@@ -462,7 +464,9 @@ class aio:
             Args:
                 host: Zerobus server endpoint
                 unity_catalog_url: Unity Catalog / workspace URL
-                application_name: Optional app identifier appended to the ``user-agent``
+                application_name: Optional caller identifier (conventionally
+                    "<product>/<version>") appended to the HTTP user-agent header on
+                    gRPC requests toward the Zerobus server.
             """
             ...
 

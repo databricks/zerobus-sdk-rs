@@ -12,7 +12,8 @@ Example:
     >>> async def main():
     ...     sdk = ZerobusSdk(
     ...         host="https://your-shard-id.zerobus.region.cloud.databricks.com",
-    ...         unity_catalog_url="https://your-workspace.cloud.databricks.com"
+    ...         unity_catalog_url="https://your-workspace.cloud.databricks.com",
+    ...         application_name="my-app/1.0",  # optional
     ...     )
     ...
     ...     props = TableProperties("catalog.schema.table")
@@ -221,6 +222,17 @@ class ZerobusSdk:
     """Python wrapper around Rust ZerobusSdk that returns wrapped streams."""
 
     def __init__(self, host: str, unity_catalog_url: str, application_name: Optional[str] = None):
+        """
+        Create a Zerobus SDK instance.
+
+        Args:
+            host: Zerobus endpoint URL
+                (e.g. "https://<workspace>.zerobus.<region>.cloud.databricks.com").
+            unity_catalog_url: Unity Catalog URL used for OAuth.
+            application_name: Optional caller identifier (conventionally
+                "<product>/<version>") appended to the HTTP user-agent header on
+                gRPC requests toward the Zerobus server.
+        """
         self._inner = _core.aio.ZerobusSdk(host, unity_catalog_url, application_name)
 
     async def create_arrow_stream(

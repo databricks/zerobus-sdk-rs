@@ -14,7 +14,8 @@ Example (Sync):
     >>>
     >>> sdk = ZerobusSdk(
     ...     host="https://your-shard-id.zerobus.region.cloud.databricks.com",
-    ...     unity_catalog_url="https://your-workspace.cloud.databricks.com"
+    ...     unity_catalog_url="https://your-workspace.cloud.databricks.com",
+    ...     application_name="my-app/1.0",  # optional
     ... )
     >>>
     >>> props = TableProperties("catalog.schema.table")
