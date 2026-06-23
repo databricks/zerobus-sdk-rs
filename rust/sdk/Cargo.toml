@@ -38,6 +38,7 @@ hyper-util.workspace = true
 smallvec.workspace = true
 bytes.workspace = true
 self_cell = { version = "1.2", optional = true }
+prost-reflect = { workspace = true, features = ["serde"] }
 
 # Arrow Flight dependencies
 arrow-flight = { workspace = true, optional = true }
@@ -51,7 +52,6 @@ tracing-subscriber.workspace = true
 # zeroparser e2e + bench dev-deps
 criterion = { version = "0.5", default-features = false, features = ["html_reports"] }
 plotters = { version = "0.3", default-features = false, features = ["svg_backend"] }
-prost-reflect = { workspace = true, features = ["serde"] }
 rstest = "0.24"
 strum = { version = "0.27", features = ["derive"] }
 

@@ -2407,6 +2407,7 @@ dependencies = [
  "databricks-zerobus-ingest-sdk",
  "prost",
  "prost-reflect",
+ "serde_json",
  "tokio",
 ]
 

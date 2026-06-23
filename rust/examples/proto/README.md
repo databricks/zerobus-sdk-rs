@@ -28,6 +28,7 @@ Protocol Buffers examples provide type safety and better performance. **No schem
 **Available examples:**
 - **`single.rs`** - Ingest records one at a time using `ingest_record_offset()` / `ingest_record()`
 - **`batch.rs`** - Ingest multiple records at once using `ingest_records_offset()` / `ingest_records()`
+- **`dynamic.rs`** - Ingest on the proto path with **no compiled `.proto`**: the descriptor is fetched from Unity Catalog (or built in code)
 
 ## Three Ways to Pass Data
 
@@ -176,6 +177,48 @@ if let Some(offset) = stream.ingest_records_offset(batch).await? {
 - **All-or-nothing**: The entire batch succeeds or fails as a unit
 - **Single acknowledgment**: One offset ID for the whole batch
 - **Empty batches**: Returns `None` (no-op)
+
+## Dynamic Example (no compiled `.proto`)
+
+`dynamic.rs` ingests on the efficient proto path without authoring a `.proto`
+file or generating Rust types. The descriptor is obtained at runtime and records
+are supplied as JSON, encoded to protobuf bytes client-side by the stream's
+`encoder()`.
+
+### Running the Example
+
+1. Configure credentials in `dynamic.rs` (see [Prerequisites](../README.md#prerequisites))
+
+2. Run the example:
+   ```bash
+   cargo run -p rust-examples-proto --example proto_dynamic
+   ```
+
+### Code Highlights
+
+```rust
+// Fetch the descriptor from Unity Catalog at stream creation — no .proto needed.
+let mut stream = sdk
+    .stream_builder()
+    .table(TABLE_NAME)
+    .oauth(DATABRICKS_CLIENT_ID, DATABRICKS_CLIENT_SECRET)
+    .proto_from_uc()
+    .build()
+    .await?;
+
+// Build the encoder once, then encode JSON records against the descriptor.
+let encoder = stream.encoder()?;
+let offset = stream
+    .ingest_record_offset(encoder.encode(r#"{"id": 1, "customer_name": "Alice"}"#)?)
+    .await?;
+stream.wait_for_offset(offset).await?;
+```
+
+When there is no Unity Catalog metadata, build the descriptor in code with
+`schema::TableDescriptorBuilder` and pass it to `.compiled_proto(...)` instead;
+the encoding step is identical. A few Databricks column types need shaping in the
+JSON you supply (`DATE`/`TIMESTAMP` as integers, `BINARY` as base64, `DECIMAL` as
+a string) — see the SDK's `dynamic` module docs.
 
 ## Adapting for Your Custom Table
 

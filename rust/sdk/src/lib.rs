@@ -45,6 +45,7 @@ mod builder;
 mod callbacks;
 mod client_warnings;
 mod default_token_factory;
+pub mod dynamic;
 mod errors;
 mod headers_provider;
 mod landing_zone;
@@ -68,6 +69,7 @@ pub use arrow_stream::{ArrowSchema, DataType, Field, RecordBatch, TimeUnit, Zero
 pub use builder::{StreamBuilder, ZerobusSdkBuilder};
 pub use callbacks::AckCallback;
 pub use default_token_factory::DefaultTokenFactory;
+pub use dynamic::DynamicProtoEncoder;
 pub use errors::ZerobusError;
 #[cfg(feature = "testing")]
 pub use headers_provider::NoAuthHeadersProvider;

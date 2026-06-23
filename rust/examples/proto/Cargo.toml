@@ -12,9 +12,14 @@ path = "batch.rs"
 name = "proto_single"
 path = "single.rs"
 
+[[example]]
+name = "proto_dynamic"
+path = "dynamic.rs"
+
 [dependencies]
 databricks-zerobus-ingest-sdk = { path = "../../sdk" }
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
 chrono.workspace = true
 prost.workspace = true
 prost-reflect.workspace = true
+serde_json.workspace = true

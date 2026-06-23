@@ -87,6 +87,8 @@ use serde::Deserialize;
 use serde_json::Value as JsonValue;
 use thiserror::Error;
 
+use crate::{ZerobusError, ZerobusResult};
+
 /// A single column from a Unity Catalog table.
 ///
 /// Field names mirror the Unity Catalog REST API response so the struct can be
@@ -208,6 +210,206 @@ pub fn descriptor_from_uc_columns(
 pub fn descriptor_from_uc_schema(schema: &UcTableSchema) -> Result<DescriptorProto, SchemaError> {
     let message_name = sanitize_message_name(&format!("{}_{}", schema.schema_name, schema.name));
     descriptor_from_uc_columns(&schema.columns, &message_name)
+}
+
+impl From<SchemaError> for ZerobusError {
+    /// A schema-conversion failure is a malformed-input condition (bad column
+    /// name, unsupported type, invalid `type_json`), so it surfaces as a
+    /// non-retryable [`ZerobusError::InvalidArgument`].
+    fn from(err: SchemaError) -> Self {
+        ZerobusError::InvalidArgument(err.to_string())
+    }
+}
+
+// ---------------------------------------------------------------------------
+// In-code descriptor construction (no Unity Catalog, no `.proto`)
+// ---------------------------------------------------------------------------
+
+/// Fluent builder for a [`DescriptorProto`] assembled in code.
+///
+/// This is the descriptor source to use when the schema is known at compile time
+/// but you would rather not author and compile a `.proto` file, and there is no
+/// Unity Catalog metadata to fetch. Columns are described with the same
+/// Databricks type names Unity Catalog uses (`"BIGINT"`, `"STRING"`, `"STRUCT"`,
+/// …), so the generated descriptor is identical to the one
+/// [`descriptor_from_uc_columns`] would produce. Field numbers are assigned from
+/// the order columns are added (first column → field 1).
+///
+/// Pair the result with [`DynamicProtoEncoder`](crate::dynamic::DynamicProtoEncoder)
+/// to encode JSON records, or pass it to
+/// [`StreamBuilder::compiled_proto`](crate::StreamBuilder::compiled_proto).
+///
+/// # Example
+///
+/// ```
+/// use databricks_zerobus_ingest_sdk::schema::TableDescriptorBuilder;
+///
+/// let descriptor = TableDescriptorBuilder::new("orders")
+///     .column("id", "BIGINT", false)
+///     .column("customer_name", "STRING", true)
+///     .complex_column(
+///         "tags",
+///         "ARRAY",
+///         r#"{"type":"array","elementType":"string","containsNull":true}"#,
+///         true,
+///     )
+///     .build()
+///     .unwrap();
+/// assert_eq!(descriptor.name(), "orders");
+/// ```
+#[derive(Debug, Clone)]
+pub struct TableDescriptorBuilder {
+    message_name: String,
+    columns: Vec<UcColumn>,
+}
+
+impl TableDescriptorBuilder {
+    /// Start a builder whose generated message is named `message_name`.
+    pub fn new(message_name: impl Into<String>) -> Self {
+        Self {
+            message_name: message_name.into(),
+            columns: Vec::new(),
+        }
+    }
+
+    /// Add a simple (non-complex) column by its Databricks type name, e.g.
+    /// `"BIGINT"`, `"STRING"`, `"DOUBLE"`, `"TIMESTAMP"`, `"DATE"`, `"BINARY"`.
+    ///
+    /// For `STRUCT`, `ARRAY`, and `MAP` columns use
+    /// [`complex_column`](Self::complex_column).
+    pub fn column(
+        mut self,
+        name: impl Into<String>,
+        databricks_type: impl Into<String>,
+        nullable: bool,
+    ) -> Self {
+        let position = self.columns.len() as i32;
+        self.columns.push(UcColumn {
+            name: name.into(),
+            type_name: databricks_type.into(),
+            type_text: String::new(),
+            type_json: String::new(),
+            nullable,
+            position,
+        });
+        self
+    }
+
+    /// Add a complex column (`STRUCT`, `ARRAY`, or `MAP`).
+    ///
+    /// `type_json` is the Unity Catalog JSON representation of the type (the same
+    /// shape the UC REST API returns), e.g.
+    /// `{"type":"array","elementType":"string","containsNull":true}`.
+    pub fn complex_column(
+        mut self,
+        name: impl Into<String>,
+        databricks_type: impl Into<String>,
+        type_json: impl Into<String>,
+        nullable: bool,
+    ) -> Self {
+        let position = self.columns.len() as i32;
+        self.columns.push(UcColumn {
+            name: name.into(),
+            type_name: databricks_type.into(),
+            type_text: String::new(),
+            type_json: type_json.into(),
+            nullable,
+            position,
+        });
+        self
+    }
+
+    /// Build the [`DescriptorProto`].
+    ///
+    /// # Errors
+    ///
+    /// [`SchemaError`] if any column has an invalid name, an unsupported type, or
+    /// malformed `type_json`.
+    pub fn build(self) -> Result<DescriptorProto, SchemaError> {
+        descriptor_from_uc_columns(&self.columns, &self.message_name)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Fetch a table's schema from Unity Catalog over the REST API
+// ---------------------------------------------------------------------------
+
+/// Fetch a Unity Catalog table's schema via the REST API.
+///
+/// Issues `GET {unity_catalog_url}/api/2.1/unity-catalog/tables/{table_name}`
+/// with `Authorization: Bearer {token}`. `table_name` is the fully-qualified
+/// `catalog.schema.table`, and `token` must be a workspace-API token with
+/// `SELECT` on the table (the Zerobus write token minted for ingestion is *not*
+/// sufficient for the REST API).
+///
+/// Prefer [`StreamBuilder::proto_from_uc`](crate::StreamBuilder::proto_from_uc),
+/// which performs this fetch automatically at stream creation; use this directly
+/// only when you need the schema outside of stream creation.
+///
+/// # Errors
+///
+/// - [`ZerobusError::TokenFetchError`] on network failures or UC `5xx` (retryable).
+/// - [`ZerobusError::InvalidArgument`] on UC `4xx` (e.g. table not found, denied)
+///   or an unparseable response body.
+pub async fn fetch_uc_table_schema(
+    unity_catalog_url: &str,
+    table_name: &str,
+    token: &str,
+) -> ZerobusResult<UcTableSchema> {
+    let url = format!(
+        "{}/api/2.1/unity-catalog/tables/{}",
+        unity_catalog_url.trim_end_matches('/'),
+        table_name
+    );
+
+    let response = reqwest::Client::new()
+        .get(&url)
+        .bearer_auth(token)
+        .send()
+        .await
+        .map_err(|e| {
+            // Network/connect/timeout errors are transient; a status-bearing
+            // error is classified below.
+            if e.is_timeout() || e.is_connect() {
+                ZerobusError::TokenFetchError(format!("Failed to reach Unity Catalog: {e}"))
+            } else {
+                ZerobusError::InvalidArgument(format!("Unity Catalog request failed: {e}"))
+            }
+        })?;
+
+    let status = response.status();
+    if !status.is_success() {
+        let code = status.as_u16();
+        let body = response
+            .text()
+            .await
+            .unwrap_or_else(|_| "Failed to read error body".to_string());
+        return Err(if code >= 500 {
+            ZerobusError::TokenFetchError(format!("Unity Catalog server error ({code}): {body}"))
+        } else {
+            ZerobusError::InvalidArgument(format!(
+                "Failed to fetch Unity Catalog table '{table_name}' ({code}): {body}"
+            ))
+        });
+    }
+
+    response.json::<UcTableSchema>().await.map_err(|e| {
+        ZerobusError::InvalidArgument(format!("Failed to parse Unity Catalog table schema: {e}"))
+    })
+}
+
+/// Fetch a Unity Catalog table's schema and build a protobuf [`DescriptorProto`]
+/// for it, with no local `.proto`.
+///
+/// Combines [`fetch_uc_table_schema`] and [`descriptor_from_uc_schema`]. See
+/// [`fetch_uc_table_schema`] for the token requirement and error semantics.
+pub async fn descriptor_from_uc(
+    unity_catalog_url: &str,
+    table_name: &str,
+    token: &str,
+) -> ZerobusResult<DescriptorProto> {
+    let schema = fetch_uc_table_schema(unity_catalog_url, table_name, token).await?;
+    Ok(descriptor_from_uc_schema(&schema)?)
 }
 
 fn is_complex(type_name: &str) -> bool {
@@ -1165,6 +1367,73 @@ mod tests {
         assert_eq!(col.name, "id");
         assert_eq!(col.type_name, "INT");
         assert!(!col.nullable);
+    }
+
+    mod builder {
+        use super::*;
+
+        #[test]
+        fn builds_scalar_descriptor_with_positional_field_numbers() {
+            let d = TableDescriptorBuilder::new("orders")
+                .column("id", "BIGINT", false)
+                .column("name", "STRING", true)
+                .build()
+                .unwrap();
+            assert_eq!(d.name(), "orders");
+            assert_eq!(field(&d, "id").r#type(), ProtoType::Int64);
+            assert_eq!(field(&d, "id").label(), Label::Required);
+            assert_eq!(field(&d, "id").number(), 1);
+            assert_eq!(field(&d, "name").label(), Label::Optional);
+            assert_eq!(field(&d, "name").number(), 2);
+        }
+
+        #[test]
+        fn matches_descriptor_from_uc_columns() {
+            // The builder is a thin front-end over descriptor_from_uc_columns;
+            // the two must produce identical descriptors.
+            let built = TableDescriptorBuilder::new("m")
+                .column("a", "STRING", true)
+                .column("b", "BIGINT", false)
+                .build()
+                .unwrap();
+            let direct = descriptor_from_uc_columns(
+                &[col("a", "STRING", true, 0), col("b", "BIGINT", false, 1)],
+                "m",
+            )
+            .unwrap();
+            assert_eq!(built, direct);
+        }
+
+        #[test]
+        fn builds_complex_columns() {
+            let d = TableDescriptorBuilder::new("evt")
+                .column("id", "BIGINT", true)
+                .complex_column(
+                    "tags",
+                    "ARRAY",
+                    r#"{"type":"array","elementType":"string","containsNull":true}"#,
+                    true,
+                )
+                .build()
+                .unwrap();
+            assert_eq!(field(&d, "tags").label(), Label::Repeated);
+            assert_eq!(field(&d, "tags").r#type(), ProtoType::String);
+        }
+
+        #[test]
+        fn propagates_invalid_field_name() {
+            let err = TableDescriptorBuilder::new("m")
+                .column("1bad", "STRING", true)
+                .build()
+                .unwrap_err();
+            assert!(matches!(err, SchemaError::InvalidFieldName { .. }));
+        }
+
+        #[test]
+        fn schema_error_converts_to_invalid_argument() {
+            let err: ZerobusError = SchemaError::UnsupportedType("WIDGET".into()).into();
+            assert!(matches!(err, ZerobusError::InvalidArgument(_)));
+        }
     }
 
     #[cfg(feature = "arrow-flight")]

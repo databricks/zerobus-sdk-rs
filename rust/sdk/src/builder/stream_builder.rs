@@ -23,6 +23,7 @@ use std::sync::Arc;
 
 use crate::callbacks::AckCallback;
 use crate::databricks::zerobus::RecordType;
+use crate::default_token_factory::DefaultTokenFactory;
 #[cfg(feature = "testing")]
 use crate::headers_provider::NoAuthHeadersProvider;
 use crate::headers_provider::{HeadersProvider, OAuthHeadersProvider};
@@ -49,6 +50,7 @@ enum AuthConfig {
 enum FormatConfig {
     Json,
     CompiledProto(Box<prost_types::DescriptorProto>),
+    ProtoFromUc,
     #[cfg(feature = "arrow-flight")]
     Arrow(Arc<ArrowSchema>),
 }
@@ -114,6 +116,7 @@ impl fmt::Debug for StreamBuilder<'_> {
         let format_kind = match &self.format {
             Some(FormatConfig::Json) => "Json",
             Some(FormatConfig::CompiledProto(_)) => "CompiledProto",
+            Some(FormatConfig::ProtoFromUc) => "ProtoFromUc",
             #[cfg(feature = "arrow-flight")]
             Some(FormatConfig::Arrow(_)) => "Arrow",
             None => "None",
@@ -189,8 +192,50 @@ impl<'a> StreamBuilder<'a> {
     }
 
     /// Select compiled protobuf record format.
+    ///
+    /// Use this when you already hold a [`prost_types::DescriptorProto`] — from a
+    /// compiled `.proto`, from
+    /// [`schema::TableDescriptorBuilder`](crate::schema::TableDescriptorBuilder),
+    /// or from [`schema::descriptor_from_uc`](crate::schema::descriptor_from_uc).
+    /// To ingest without a compiled `.proto`, obtain a
+    /// [`DynamicProtoEncoder`](crate::DynamicProtoEncoder) via
+    /// [`ZerobusStream::encoder`](crate::ZerobusStream::encoder).
     pub fn compiled_proto(mut self, descriptor: prost_types::DescriptorProto) -> Self {
         self.format = Some(FormatConfig::CompiledProto(Box::new(descriptor)));
+        self
+    }
+
+    /// Select dynamic protobuf, fetching the table's descriptor from Unity
+    /// Catalog at `build()` time.
+    ///
+    /// No compiled `.proto` is required: the SDK fetches the table's schema from
+    /// Unity Catalog, derives a protobuf descriptor, and opens a proto stream
+    /// with it. Supply records as JSON and encode them with the stream's
+    /// [`encoder`](crate::ZerobusStream::encoder), which is bound to the same
+    /// descriptor.
+    ///
+    /// The fetch uses an `all-apis` token: with [`oauth`](Self::oauth) the SDK
+    /// mints one from the client credentials; with
+    /// [`headers_provider`](Self::headers_provider) it reuses the provider's
+    /// `authorization` header. The principal needs `SELECT` on the table.
+    ///
+    /// # Example
+    ///
+    /// ```rust,ignore
+    /// let stream = sdk
+    ///     .stream_builder()
+    ///     .table("catalog.schema.table")
+    ///     .oauth("client-id", "client-secret")
+    ///     .proto_from_uc()
+    ///     .build()
+    ///     .await?;
+    /// let encoder = stream.encoder()?;
+    /// let offset = stream
+    ///     .ingest_record_offset(encoder.encode(r#"{"id": 1}"#)?)
+    ///     .await?;
+    /// ```
+    pub fn proto_from_uc(mut self) -> Self {
+        self.format = Some(FormatConfig::ProtoFromUc);
         self
     }
 
@@ -358,10 +403,52 @@ impl<'a> StreamBuilder<'a> {
         }
         if self.format.is_none() {
             return Err(ZerobusError::InvalidArgument(
-                "record format is required: call .json(), .compiled_proto(), or .arrow()".into(),
+                "record format is required: call .json(), .compiled_proto(), .proto_from_uc(), \
+                 or .arrow()"
+                    .into(),
             ));
         }
         Ok(())
+    }
+
+    /// Resolve an `all-apis` token for the Unity Catalog REST API used by
+    /// [`proto_from_uc`](Self::proto_from_uc) to fetch the table schema.
+    ///
+    /// With OAuth credentials the SDK mints a workspace token (the Zerobus
+    /// write token is not accepted by the REST API). With a custom headers
+    /// provider it reuses the `authorization` header that provider supplies.
+    async fn resolve_uc_api_token(&self) -> ZerobusResult<String> {
+        match self.auth.as_ref() {
+            Some(AuthConfig::OAuth {
+                client_id,
+                client_secret,
+            }) => {
+                DefaultTokenFactory::get_workspace_token(
+                    &self.sdk.unity_catalog_url,
+                    client_id,
+                    client_secret,
+                )
+                .await
+            }
+            Some(AuthConfig::HeadersProvider(provider)) => {
+                let headers = provider.get_headers().await?;
+                let auth = headers.get("authorization").ok_or_else(|| {
+                    ZerobusError::InvalidArgument(
+                        "headers provider did not supply an 'authorization' header required to \
+                         fetch the Unity Catalog schema for proto_from_uc()"
+                            .to_string(),
+                    )
+                })?;
+                Ok(auth.strip_prefix("Bearer ").unwrap_or(auth).to_string())
+            }
+            // No credentials in the no-auth testing path; the (mock) Unity
+            // Catalog endpoint is expected not to require authorization.
+            #[cfg(feature = "testing")]
+            Some(AuthConfig::NoAuth) => Ok(String::new()),
+            None => Err(ZerobusError::InvalidArgument(
+                "authentication is required: call .oauth() or .headers_provider()".into(),
+            )),
+        }
     }
 
     /// Resolve the headers provider from the stored auth config.
@@ -393,9 +480,22 @@ impl<'a> StreamBuilder<'a> {
         self.validate()?;
         let headers_provider = self.resolve_headers_provider()?;
 
-        let (record_type, descriptor_proto) = match self.format {
+        // Take the format out so the `proto_from_uc` arm can borrow `&self`
+        // (for the UC fetch) without tripping a partial-move of `self.format`.
+        let format = self.format.take();
+        let (record_type, descriptor_proto) = match format {
             Some(FormatConfig::Json) => (RecordType::Json, None),
             Some(FormatConfig::CompiledProto(desc)) => (RecordType::Proto, Some(*desc)),
+            Some(FormatConfig::ProtoFromUc) => {
+                let token = self.resolve_uc_api_token().await?;
+                let descriptor = crate::schema::descriptor_from_uc(
+                    &self.sdk.unity_catalog_url,
+                    &self.table_name,
+                    &token,
+                )
+                .await?;
+                (RecordType::Proto, Some(descriptor))
+            }
             #[cfg(feature = "arrow-flight")]
             Some(FormatConfig::Arrow(_)) => {
                 return Err(ZerobusError::InvalidArgument(
@@ -404,7 +504,8 @@ impl<'a> StreamBuilder<'a> {
             }
             None => {
                 return Err(ZerobusError::InvalidArgument(
-                    "record format is required: call .json() or .compiled_proto() before .build()"
+                    "record format is required: call .json(), .compiled_proto(), or \
+                     .proto_from_uc() before .build()"
                         .into(),
                 ));
             }
@@ -526,6 +627,21 @@ mod tests {
             .table("catalog.schema.table")
             .headers_provider(provider)
             .compiled_proto(prost_types::DescriptorProto::default());
+    }
+
+    #[test]
+    fn proto_from_uc_builder() {
+        let sdk = test_sdk();
+        let builder = sdk
+            .stream_builder()
+            .table("catalog.schema.table")
+            .oauth("cid", "csec")
+            .proto_from_uc()
+            .max_inflight_requests(100);
+        // Validation passes (table + auth + format all set) without opening a stream.
+        builder.validate().unwrap();
+        let debug_str = format!("{:?}", builder);
+        assert!(debug_str.contains("ProtoFromUc"));
     }
 
     #[test]

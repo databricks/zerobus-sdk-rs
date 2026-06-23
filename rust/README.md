@@ -218,7 +218,7 @@ zerobus_rust_sdk/
 |                  |                   |
 |      +-----------+-----------+       |
 |      v                       v       |
-| +----------+          +----------+   | 
+| +----------+          +----------+   |
 | |  Sender  |          | Receiver |   | Parallel tasks
 | |  Task    |          |  Task    |   |
 | +----------+          +----------+   |
@@ -328,7 +328,7 @@ For JSON-based ingestion, you can skip the schema generation step and directly p
 ### 1. Generate Protocol Buffer Schema (Protocol Buffers approach only)
 
 > **Important Note**: The schema generation tool and examples are **only available in the GitHub repository**. The crate published on [crates.io](https://crates.io/crates/databricks-zerobus-ingest-sdk) contains only the core Zerobus ingestion SDK logic. To generate protobuf schemas or see working examples, clone the repository:
-> 
+>
 > ```bash
 > git clone https://github.com/databricks/zerobus-sdk.git
 > cd zerobus-sdk/rust
@@ -491,6 +491,38 @@ let mut stream = sdk
 ```
 
 Setters can be called in any order. The builder validates at `build()` time that both authentication and format have been configured.
+
+#### Dynamic Protocol Buffers Stream (no compiled `.proto`)
+
+Use the proto path without a `.proto` file or generated types: the SDK fetches the descriptor at runtime and encodes **JSON** records to protobuf bytes client-side.
+
+```rust
+let mut stream = sdk
+    .stream_builder().table("catalog.schema.orders")
+    .oauth(client_id, client_secret)
+    .proto_from_uc()            // fetch the descriptor from Unity Catalog
+    .build()
+    .await?;
+
+let encoder = stream.encoder()?;    // build once, reuse
+let offset = stream
+    .ingest_record_offset(encoder.encode(r#"{"id": 1, "customer_name": "Alice"}"#)?)
+    .await?;
+stream.wait_for_offset(offset).await?;
+```
+
+Or build the descriptor in code when there is no Unity Catalog metadata, and pass it to `.compiled_proto(descriptor)` instead. Encoding is identical.
+
+```rust
+use databricks_zerobus_ingest_sdk::schema::TableDescriptorBuilder;
+
+let descriptor = TableDescriptorBuilder::new("orders")
+    .column("id", "BIGINT", false)
+    .column("customer_name", "STRING", true)
+    .build()?;
+```
+
+`encoder` also takes a `serde_json::Value` (`encode_value`) or any `serde::Serialize` (`encode_record`). Some Databricks types need shaping in the JSON (`DATE`/`TIMESTAMP` as integers, `BINARY` as base64, `DECIMAL` as a string) — see the `dynamic` module docs.
 
 ### 5. Ingest Data
 
@@ -690,12 +722,12 @@ match stream.close().await {
         let unacked = stream.get_unacked_records().await?;
         let total_records = unacked.count();
         println!("Failed to ack {} records", total_records);
-        
+
         // Option 2: Get records grouped by batch (preserves batch structure)
         let unacked_batches = stream.get_unacked_batches().await?;
         let total_records: usize = unacked_batches.iter().map(|batch| batch.get_record_count()).sum();
         println!("Failed to ack {} records in {} batches", total_records, unacked_batches.len());
-        
+
         // Retry with a new stream
     }
     Ok(_) => println!("Stream closed successfully"),

@@ -84,6 +84,53 @@ impl DefaultTokenFactory {
         .map(|fetched| fetched.token)
     }
 
+    /// Obtains an OAuth 2.0 access token for calling Databricks workspace REST
+    /// APIs (such as the Unity Catalog tables endpoint).
+    ///
+    /// Unlike [`get_token`](Self::get_token), this token is *not* downscoped to
+    /// the Zerobus direct-write API — it is a plain `all-apis` client-credentials
+    /// token, which is what the Unity Catalog REST API requires. Used by the
+    /// dynamic-protobuf path to fetch a table's schema at stream creation.
+    ///
+    /// # Errors
+    ///
+    /// * [`ZerobusError::TokenFetchError`] on network or `5xx` errors (retryable).
+    /// * [`ZerobusError::InvalidUCTokenError`] on `4xx` or an unparseable response.
+    pub async fn get_workspace_token(
+        uc_endpoint: &str,
+        client_id: &str,
+        client_secret: &str,
+    ) -> ZerobusResult<String> {
+        let client = reqwest::Client::new();
+        let params = [("grant_type", "client_credentials"), ("scope", "all-apis")];
+        let token_endpoint = format!("{}/oidc/v1/token", uc_endpoint);
+        let resp = client
+            .post(&token_endpoint)
+            .basic_auth(client_id, Some(client_secret))
+            .form(&params)
+            .send()
+            .await
+            .map_err(Self::handle_http_error)?;
+
+        if !resp.status().is_success() {
+            let status_code = resp.status().as_u16();
+            let error_body = resp
+                .text()
+                .await
+                .unwrap_or_else(|_| "Failed to read error body".to_string());
+            return Err(Self::classify_status_code(status_code, error_body));
+        }
+
+        let body: serde_json::Value = resp.json().await.map_err(|e| {
+            ZerobusError::InvalidUCTokenError(format!("Parse failed with error: {}", e))
+        })?;
+
+        body["access_token"]
+            .as_str()
+            .ok_or_else(|| ZerobusError::InvalidUCTokenError("access_token missing".to_string()))
+            .map(|s| s.to_string())
+    }
+
     /// Obtains an OAuth 2.0 access token along with its reported lifetime.
     ///
     /// This is the caching-aware variant of [`get_token`](Self::get_token): in
