@@ -22,6 +22,16 @@ cargo build -p zerobus-ffi --release
 rustup target add aarch64-unknown-linux-gnu
 cargo build -p zerobus-ffi --release --target aarch64-unknown-linux-gnu
 
+# Linux musl (Alpine), x86_64 and ARM64 — cross-compiled with cargo-zigbuild.
+# Built with -C target-feature=-crt-static so the libs link musl dynamically,
+# which is correct for dynamically-linked Alpine hosts.
+cargo install cargo-zigbuild
+rustup target add x86_64-unknown-linux-musl aarch64-unknown-linux-musl
+RUSTFLAGS="-C target-feature=-crt-static" \
+  cargo zigbuild -p zerobus-ffi --release --target x86_64-unknown-linux-musl
+RUSTFLAGS="-C target-feature=-crt-static" \
+  cargo zigbuild -p zerobus-ffi --release --target aarch64-unknown-linux-musl
+
 # macOS ARM64 (Apple Silicon)
 rustup target add aarch64-apple-darwin
 cargo build -p zerobus-ffi --release --target aarch64-apple-darwin

@@ -22,6 +22,20 @@ jobs:
             dynamic_lib: libzerobus_ffi.so
             artifact_dir: linux-aarch64
             cross: true
+          - runner: { group: databricks-protected-runner-group, labels: linux-ubuntu-latest }
+            target: x86_64-unknown-linux-musl
+            static_lib: libzerobus_ffi.a
+            dynamic_lib: libzerobus_ffi.so
+            artifact_dir: linux-musl-x86_64
+            cross: false
+            zigbuild: true
+          - runner: { group: databricks-protected-runner-group, labels: linux-ubuntu-latest }
+            target: aarch64-unknown-linux-musl
+            static_lib: libzerobus_ffi.a
+            dynamic_lib: libzerobus_ffi.so
+            artifact_dir: linux-musl-aarch64
+            cross: false
+            zigbuild: true
           - runner: { group: databricks-protected-runner-group, labels: windows-server-latest }
             target: x86_64-pc-windows-msvc
             static_lib: zerobus_ffi.lib
@@ -69,8 +83,25 @@ jobs:
         with:
           targets: ${{ matrix.target }}
 
+      - name: Install Zig (musl cross-builds)
+        if: matrix.zigbuild
+        uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2.2.1
+        with:
+          version: 0.13.0
+
+      - name: Install cargo-zigbuild (musl cross-builds)
+        if: matrix.zigbuild
+        run: cargo install cargo-zigbuild --locked --version 0.19.8
+
       - name: Build FFI library
+        if: '!matrix.zigbuild'
         run: cargo build --release -p zerobus-ffi --target ${{ matrix.target }}
+
+      - name: Build FFI library (zigbuild)
+        if: matrix.zigbuild
+        env:
+          RUSTFLAGS: -C target-feature=-crt-static
+        run: cargo zigbuild --release -p zerobus-ffi --target ${{ matrix.target }}
 
       - name: Prepare artifacts
         shell: bash
