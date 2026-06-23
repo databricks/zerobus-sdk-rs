@@ -38,6 +38,8 @@ TEST(HeadersCallback, MarshalsHeaders) {
 
   std::map<std::string, std::string> got;
   for (std::size_t i = 0; i < out.count; ++i) {
+    ASSERT_NE(out.headers[i].key, nullptr);
+    ASSERT_NE(out.headers[i].value, nullptr);
     got[out.headers[i].key] = out.headers[i].value;
   }
   EXPECT_EQ(got["Authorization"], "Bearer abc");

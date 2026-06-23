@@ -33,6 +33,17 @@ CHeaders make_error(const std::string& message) {
   return headers;
 }
 
+void free_marshaled_headers(CHeader* headers, std::size_t count) {
+  if (headers == nullptr) {
+    return;
+  }
+  for (std::size_t i = 0; i < count; ++i) {
+    std::free(headers[i].key);
+    std::free(headers[i].value);
+  }
+  std::free(headers);
+}
+
 }  // namespace
 
 extern "C" CHeaders zerobus_cpp_headers_trampoline(void* user_data) {
@@ -60,7 +71,7 @@ extern "C" CHeaders zerobus_cpp_headers_trampoline(void* user_data) {
   }
 
   auto* arr =
-      static_cast<CHeader*>(std::malloc(sizeof(CHeader) * headers.size()));
+      static_cast<CHeader*>(std::calloc(headers.size(), sizeof(CHeader)));
   if (arr == nullptr) {
     return make_error("out of memory marshalling headers");
   }
@@ -69,6 +80,10 @@ extern "C" CHeaders zerobus_cpp_headers_trampoline(void* user_data) {
   for (const auto& kv : headers) {
     arr[i].key = dup_cstring(kv.first);
     arr[i].value = dup_cstring(kv.second);
+    if (arr[i].key == nullptr || arr[i].value == nullptr) {
+      free_marshaled_headers(arr, i + 1);
+      return make_error("out of memory marshalling headers");
+    }
     ++i;
   }
 

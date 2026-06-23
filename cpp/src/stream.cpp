@@ -9,6 +9,11 @@ namespace zerobus {
 
 namespace {
 
+const std::uint8_t* ptr_or_sentinel(const std::vector<std::uint8_t>& bytes) {
+  static const std::uint8_t kEmptyPayloadSentinel = 0;
+  return bytes.empty() ? &kEmptyPayloadSentinel : bytes.data();
+}
+
 // Build the parallel pointer/length arrays the batch FFI entry points expect.
 struct ProtoBatchView {
   std::vector<const std::uint8_t*> ptrs;
@@ -21,7 +26,7 @@ ProtoBatchView make_proto_batch(
   v.ptrs.reserve(records.size());
   v.lens.reserve(records.size());
   for (const auto& r : records) {
-    v.ptrs.push_back(r.data());
+    v.ptrs.push_back(ptr_or_sentinel(r));
     v.lens.push_back(r.size());
   }
   return v;
@@ -82,7 +87,7 @@ std::int64_t Stream::ingest_proto_record(const std::uint8_t* data,
 
 std::int64_t Stream::ingest_proto_record(
     const std::vector<std::uint8_t>& data) {
-  return ingest_proto_record(data.data(), data.size());
+  return ingest_proto_record(ptr_or_sentinel(data), data.size());
 }
 
 std::int64_t Stream::ingest_json_record(const std::string& json) {
@@ -121,7 +126,7 @@ void Stream::ingest_proto_record_nowait(const std::uint8_t* data,
 }
 
 void Stream::ingest_proto_record_nowait(const std::vector<std::uint8_t>& data) {
-  ingest_proto_record_nowait(data.data(), data.size());
+  ingest_proto_record_nowait(ptr_or_sentinel(data), data.size());
 }
 
 void Stream::ingest_json_record_nowait(const std::string& json) {

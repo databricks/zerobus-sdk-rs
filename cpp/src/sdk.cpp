@@ -16,6 +16,13 @@ const std::uint8_t* descriptor_ptr(const std::vector<std::uint8_t>& d) {
   return d.empty() ? nullptr : d.data();
 }
 
+const std::uint8_t* non_empty_ptr(const std::vector<std::uint8_t>& bytes) {
+  if (bytes.empty()) {
+    return nullptr;
+  }
+  return bytes.data();
+}
+
 }  // namespace
 
 // ---------------------------------------------------------------------------
@@ -154,6 +161,9 @@ Stream Sdk::create_stream(const TableProperties& table,
 Stream Sdk::create_stream(const TableProperties& table,
                           std::shared_ptr<HeadersProvider> headers_provider,
                           const StreamOptions& options) {
+  if (headers_provider == nullptr) {
+    throw ZerobusException("headers_provider must not be null", false);
+  }
   detail::ResultGuard guard;
   CStreamConfigurationOptions copts = detail::to_c(options);
   // The trampoline receives the raw provider pointer; the Stream keeps the
@@ -174,10 +184,14 @@ ArrowStream Sdk::create_arrow_stream(
     const std::vector<std::uint8_t>& schema_ipc_bytes,
     const std::string& client_id, const std::string& client_secret,
     const ArrowStreamOptions& options) {
+  if (schema_ipc_bytes.empty()) {
+    throw ZerobusException("schema_ipc_bytes must not be empty", false);
+  }
   detail::ResultGuard guard;
   CArrowStreamConfigurationOptions copts = detail::to_c(options);
+  const std::uint8_t* schema_ptr = non_empty_ptr(schema_ipc_bytes);
   CArrowStream* stream = zerobus_sdk_create_arrow_stream(
-      handle_, table_name.c_str(), schema_ipc_bytes.data(),
+      handle_, table_name.c_str(), schema_ptr,
       schema_ipc_bytes.size(), client_id.c_str(), client_secret.c_str(), &copts,
       guard.ptr());
   if (stream == nullptr) {
@@ -192,10 +206,17 @@ ArrowStream Sdk::create_arrow_stream(
     const std::vector<std::uint8_t>& schema_ipc_bytes,
     std::shared_ptr<HeadersProvider> headers_provider,
     const ArrowStreamOptions& options) {
+  if (headers_provider == nullptr) {
+    throw ZerobusException("headers_provider must not be null", false);
+  }
+  if (schema_ipc_bytes.empty()) {
+    throw ZerobusException("schema_ipc_bytes must not be empty", false);
+  }
   detail::ResultGuard guard;
   CArrowStreamConfigurationOptions copts = detail::to_c(options);
+  const std::uint8_t* schema_ptr = non_empty_ptr(schema_ipc_bytes);
   CArrowStream* stream = zerobus_sdk_create_arrow_stream_with_headers_provider(
-      handle_, table_name.c_str(), schema_ipc_bytes.data(),
+      handle_, table_name.c_str(), schema_ptr,
       schema_ipc_bytes.size(), detail::zerobus_cpp_headers_trampoline,
       headers_provider.get(), &copts, guard.ptr());
   if (stream == nullptr) {
