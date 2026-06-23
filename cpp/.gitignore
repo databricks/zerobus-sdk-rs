@@ -1,0 +1,14 @@
+# CMake build artifacts
+build/
+cmake-build-*/
+
+# Vendored / prebuilt FFI libraries are committed only at release time.
+lib/*/
+
+# OS files
+.DS_Store
+
+# IDE
+.idea/
+.vscode/
+compile_commands.json

@@ -11,7 +11,7 @@ jobs:
     runs-on:
       group: databricks-protected-runner-group
       labels: linux-ubuntu-latest
-    needs: [changes, rust, java, typescript, python, go]
+    needs: [changes, rust, java, typescript, python, go, cpp]
     if: always()
     steps:
       - run: |
@@ -20,7 +20,8 @@ jobs:
             "${{ needs.java.result }}" \
             "${{ needs.typescript.result }}" \
             "${{ needs.python.result }}" \
-            "${{ needs.go.result }}"; do
+            "${{ needs.go.result }}" \
+            "${{ needs.cpp.result }}"; do
             if [[ "$result" != "success" && "$result" != "skipped" ]]; then
               echo "Job failed or was cancelled: $result"
               exit 1
@@ -37,6 +38,7 @@ jobs:
       typescript: ${{ steps.filter.outputs.typescript }}
       python: ${{ steps.filter.outputs.python }}
       go: ${{ steps.filter.outputs.go }}
+      cpp: ${{ steps.filter.outputs.cpp }}
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
       - uses: dorny/paths-filter@de90cc6fb38fc0963ad72b210f1f284cd68cea36 # v3
@@ -58,6 +60,9 @@ jobs:
             go:
               - 'go/**'
               - '.github/workflows/ci-go.yml'
+            cpp:
+              - 'cpp/**'
+              - '.github/workflows/ci-cpp.yml'
 
   # Blocking jobs — required for merge
   rust:
@@ -100,6 +105,14 @@ jobs:
       contents: read
     uses: ./.github/workflows/ci-go.yml
 
+  cpp:
+    needs: changes
+    if: needs.changes.outputs.cpp == 'true'
+    permissions:
+      id-token: write
+      contents: read
+    uses: ./.github/workflows/ci-cpp.yml
+
   # Non-blocking cross-SDK jobs — run all SDK tests against the local Rust
   # source when rust/** changes, to catch breakage before a new FFI release.
   # These are intentionally excluded from `gate` so they don't block merging.
@@ -110,6 +123,16 @@ jobs:
       id-token: write
       contents: read
     uses: ./.github/workflows/ci-go.yml
+    with:
+      use_local_sdk: true
+
+  cross-sdk-cpp:
+    needs: changes
+    if: needs.changes.outputs.rust == 'true'
+    permissions:
+      id-token: write
+      contents: read
+    uses: ./.github/workflows/ci-cpp.yml
     with:
       use_local_sdk: true
 
