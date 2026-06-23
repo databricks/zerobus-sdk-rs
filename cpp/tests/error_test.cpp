@@ -1,8 +1,8 @@
 #include "zerobus/error.hpp"
 
-#include <gtest/gtest.h>
-
 #include <string>
+
+#include "test_harness.hpp"
 
 using zerobus::ZerobusException;
 

@@ -1,11 +1,10 @@
 #include "detail/headers_callback.hpp"
 
-#include <gtest/gtest.h>
-
 #include <map>
 #include <stdexcept>
 #include <string>
 
+#include "test_harness.hpp"
 #include "zerobus/headers_provider.hpp"
 
 using namespace zerobus;

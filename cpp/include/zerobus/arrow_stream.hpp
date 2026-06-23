@@ -18,6 +18,12 @@ class Sdk;
 /// Created via `Sdk::create_arrow_stream`. Move-only; the destructor closes and
 /// frees the stream. The API is stabilising but may still change before GA.
 ///
+/// As with `Stream`, prefer calling `close()` explicitly: it surfaces close
+/// errors (the destructor swallows them) and flushes synchronously, which can
+/// block up to `flush_timeout_ms` (default 5 minutes) if the server is
+/// unresponsive. Letting the object fall out of scope drags that blocking close
+/// into the destructor.
+///
 /// Thread safety: not safe for concurrent use from multiple threads.
 class ArrowStream {
  public:

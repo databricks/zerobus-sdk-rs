@@ -19,8 +19,9 @@
   IPC bytes, optional LZ4/ZSTD compression, and unacked-batch recovery.
 - `zerobus::ProtoSchema`: build a protobuf descriptor and encode JSON records
   straight from Unity Catalog table metadata (no `.proto` / protoc required).
-- CMake build that compiles the Rust FFI from local source by default, with
-  `GTest`-based tests and runnable examples.
+- CMake build that compiles the Rust FFI from local source by default, with a
+  hermetic in-repo test harness (no external test framework) and runnable
+  examples.
 
 ### Bug Fixes
 

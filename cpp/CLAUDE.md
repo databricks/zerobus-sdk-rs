@@ -23,7 +23,7 @@ cpp/
 │   ├── sdk.cpp / stream.cpp / arrow_stream.cpp / proto_schema.cpp
 │   ├── headers_callback.cpp  # extern "C" trampoline for HeadersProvider
 │   └── detail/           # Internal: ffi_util, config_convert, headers_callback
-├── tests/                # GoogleTest unit tests (no network required)
+├── tests/                # Unit tests + tiny in-repo harness (test_harness.hpp)
 ├── examples/             # Runnable usage examples
 ├── cmake/BuildRustFfi.cmake  # Builds libzerobus_ffi from local Rust source
 ├── CMakeLists.txt
@@ -150,4 +150,12 @@ Public API is everything under `include/zerobus/`:
 - C++17 compiler (GCC, Clang, or MSVC)
 - CMake >= 3.16
 - Rust toolchain required for building the FFI from source
-- Tests use GoogleTest (fetched via CMake `FetchContent`, or a system `GTest`)
+- Tests use a **tiny in-repo harness** (`tests/test_harness.hpp`, ~80 lines)
+  rather than an external framework, so the build is hermetic — no vendored
+  framework, no package manager, no network. CI works on locked-down runners as
+  a result. The harness implements the slice of the GoogleTest API the tests use
+  (`TEST`, `EXPECT_*`/`ASSERT_*`, `EXPECT_THROW`, `FAIL`, `SUCCEED`), so tests
+  read like GoogleTest tests. The whole suite is one CTest entry (`zerobus_tests`)
+  that exits non-zero on any failure. If real third-party C++ dependencies are
+  ever added, that's the point to adopt a package manager (Conan via a JFrog
+  mirror) and a richer framework — not before.

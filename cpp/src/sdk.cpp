@@ -191,9 +191,8 @@ ArrowStream Sdk::create_arrow_stream(
   CArrowStreamConfigurationOptions copts = detail::to_c(options);
   const std::uint8_t* schema_ptr = non_empty_ptr(schema_ipc_bytes);
   CArrowStream* stream = zerobus_sdk_create_arrow_stream(
-      handle_, table_name.c_str(), schema_ptr,
-      schema_ipc_bytes.size(), client_id.c_str(), client_secret.c_str(), &copts,
-      guard.ptr());
+      handle_, table_name.c_str(), schema_ptr, schema_ipc_bytes.size(),
+      client_id.c_str(), client_secret.c_str(), &copts, guard.ptr());
   if (stream == nullptr) {
     guard.throw_if_error();
     throw ZerobusException("failed to create Arrow stream", false);
@@ -216,9 +215,9 @@ ArrowStream Sdk::create_arrow_stream(
   CArrowStreamConfigurationOptions copts = detail::to_c(options);
   const std::uint8_t* schema_ptr = non_empty_ptr(schema_ipc_bytes);
   CArrowStream* stream = zerobus_sdk_create_arrow_stream_with_headers_provider(
-      handle_, table_name.c_str(), schema_ptr,
-      schema_ipc_bytes.size(), detail::zerobus_cpp_headers_trampoline,
-      headers_provider.get(), &copts, guard.ptr());
+      handle_, table_name.c_str(), schema_ptr, schema_ipc_bytes.size(),
+      detail::zerobus_cpp_headers_trampoline, headers_provider.get(), &copts,
+      guard.ptr());
   if (stream == nullptr) {
     guard.throw_if_error();
     throw ZerobusException("failed to create Arrow stream", false);

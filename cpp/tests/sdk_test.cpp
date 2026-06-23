@@ -1,10 +1,9 @@
 #include "zerobus/sdk.hpp"
 
-#include <gtest/gtest.h>
-
 #include <string>
 #include <vector>
 
+#include "test_harness.hpp"
 #include "zerobus/error.hpp"
 #include "zerobus/version.hpp"
 
@@ -44,7 +43,8 @@ TEST(Sdk, CreateStreamRejectsNullHeadersProvider) {
   table.table_name = "main.analytics.events";
 
   std::shared_ptr<zerobus::HeadersProvider> provider;
-  EXPECT_THROW((void)sdk.create_stream(table, provider), zerobus::ZerobusException);
+  EXPECT_THROW((void)sdk.create_stream(table, provider),
+               zerobus::ZerobusException);
 }
 
 TEST(Sdk, CreateArrowStreamRejectsEmptySchema) {
@@ -53,9 +53,10 @@ TEST(Sdk, CreateArrowStreamRejectsEmptySchema) {
                          .disable_tls()
                          .build();
   std::vector<std::uint8_t> empty_schema;
-  EXPECT_THROW((void)sdk.create_arrow_stream("main.analytics.events", empty_schema,
-                                             "client-id", "client-secret"),
-               zerobus::ZerobusException);
+  EXPECT_THROW(
+      (void)sdk.create_arrow_stream("main.analytics.events", empty_schema,
+                                    "client-id", "client-secret"),
+      zerobus::ZerobusException);
 }
 
 TEST(Sdk, CreateArrowStreamRejectsNullHeadersProvider) {

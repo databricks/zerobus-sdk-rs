@@ -166,6 +166,18 @@ They read connection settings from environment variables (`ZEROBUS_SERVER_ENDPOI
 `DATABRICKS_WORKSPACE_URL`, `DATABRICKS_CLIENT_ID`, `DATABRICKS_CLIENT_SECRET`,
 `ZEROBUS_TABLE_NAME`); see each file's header for specifics.
 
+## Resource management
+
+Wrapper objects are move-only and free themselves (RAII). For streams, **prefer
+calling `close()` explicitly** rather than relying on the destructor:
+
+- `close()` flushes pending records and throws on failure; the destructor
+  swallows any error.
+- Closing flushes synchronously and can block up to the stream's
+  `flush_timeout_ms` (default 5 minutes) if the server is unresponsive. Letting
+  a `Stream` fall out of scope drags that blocking close into the destructor at
+  an unpredictable point, so close at a controlled point in your code.
+
 ## Thread safety
 
 A `Stream`/`ArrowStream` is **not** safe for concurrent use — serialize access

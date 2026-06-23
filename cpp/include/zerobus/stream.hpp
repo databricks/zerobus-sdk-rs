@@ -18,7 +18,15 @@ class Sdk;
 ///
 /// Created via `Sdk::create_stream`. Move-only; the destructor closes the
 /// stream gracefully (best effort) and frees the underlying FFI resources.
-/// Call `close()` explicitly when you need to observe close errors.
+///
+/// Prefer calling `close()` explicitly rather than relying on the destructor:
+/// - `close()` flushes pending records and surfaces any error by throwing,
+///   whereas the destructor swallows it.
+/// - Closing flushes synchronously and can block up to the stream's
+///   `flush_timeout_ms` (default 5 minutes) if the server is unresponsive. A
+///   `Stream` that falls out of scope therefore drags that blocking close into
+///   the destructor at an unpredictable point. Call `close()` at a controlled
+///   point in your code instead.
 ///
 /// Thread safety: not safe for concurrent use from multiple threads. Serialize
 /// access externally, matching the Java and Rust core contracts.
@@ -73,6 +81,11 @@ class Stream {
 
   /// Gracefully close the stream, flushing pending records first. Idempotent:
   /// safe to call more than once. After this returns the stream is unusable.
+  ///
+  /// Blocks until the flush completes or the stream's `flush_timeout_ms`
+  /// elapses (default 5 minutes), so call it at a controlled point rather than
+  /// leaving it to the destructor. Throws `ZerobusException` if the close
+  /// fails.
   void close();
 
   /// Whether `close()` has already been called (locally observed).

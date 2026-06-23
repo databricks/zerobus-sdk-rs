@@ -1,8 +1,7 @@
-#include <gtest/gtest.h>
-
 #include <cstdint>
 
 #include "detail/config_convert.hpp"
+#include "test_harness.hpp"
 
 using namespace zerobus;
 

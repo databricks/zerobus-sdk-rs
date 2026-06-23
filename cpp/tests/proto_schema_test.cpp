@@ -1,10 +1,9 @@
 #include "zerobus/proto_schema.hpp"
 
-#include <gtest/gtest.h>
-
 #include <string>
 #include <utility>
 
+#include "test_harness.hpp"
 #include "zerobus/error.hpp"
 
 using zerobus::ProtoSchema;
