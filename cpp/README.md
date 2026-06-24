@@ -50,14 +50,40 @@ cmake -S . -B build \
 
 ## Using the SDK in your project
 
-With CMake `add_subdirectory` (or `FetchContent`):
+### With CMake `add_subdirectory` (or `FetchContent`)
 
 ```cmake
 add_subdirectory(path/to/zerobus-sdk/cpp)
 target_link_libraries(your_app PRIVATE zerobus::zerobus)
 ```
 
-Then include the umbrella header:
+### With an installed package (`find_package`)
+
+After `cmake --install`, the SDK ships a CMake package config so a separate
+project can consume it without knowing its internals. The bundled Rust C FFI
+archive is installed alongside and wired up automatically:
+
+```cmake
+find_package(zerobus REQUIRED)
+target_link_libraries(your_app PRIVATE zerobus::zerobus)
+```
+
+### With Conan (preview)
+
+A `conanfile.py` is provided. Packaging is not yet published to a registry, so
+for now build the package locally from a monorepo checkout (requires a Rust
+toolchain):
+
+```bash
+conan create cpp/    # run from the repository root
+```
+
+Then depend on `zerobus-sdk/<version>` from your own `conanfile`. A public
+distribution path is in progress.
+
+### Including the SDK
+
+However you link it, include the umbrella header:
 
 ```cpp
 #include "zerobus/zerobus.hpp"
