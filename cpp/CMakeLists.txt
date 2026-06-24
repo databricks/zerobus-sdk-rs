@@ -91,6 +91,14 @@ set_target_properties(zerobus_cpp PROPERTIES
     EXPORT_NAME zerobus)
 
 # ---------------------------------------------------------------------------
+# Tests and examples
+# ---------------------------------------------------------------------------
+if(ZEROBUS_BUILD_TESTS)
+  enable_testing()
+  add_subdirectory(tests)
+endif()
+
+# ---------------------------------------------------------------------------
 # Install
 # ---------------------------------------------------------------------------
 include(GNUInstallDirs)

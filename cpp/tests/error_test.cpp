@@ -1,0 +1,31 @@
+// Unit tests for ZerobusException: it carries the message and the is_retryable
+// flag, and is catchable as a std::exception.
+#include "zerobus/error.hpp"
+
+#include <string>
+
+#include "test_harness.hpp"
+
+using zerobus::ZerobusException;
+
+TEST(ZerobusException, CarriesMessageAndRetryableTrue) {
+  ZerobusException e("transient failure", true);
+  EXPECT_STREQ(e.what(), "transient failure");
+  EXPECT_TRUE(e.is_retryable());
+}
+
+TEST(ZerobusException, CarriesRetryableFalse) {
+  ZerobusException e("permanent failure", false);
+  EXPECT_STREQ(e.what(), "permanent failure");
+  EXPECT_FALSE(e.is_retryable());
+}
+
+TEST(ZerobusException, IsCatchableAsStdException) {
+  try {
+    throw ZerobusException("boom", false);
+  } catch (const std::exception& e) {
+    EXPECT_STREQ(e.what(), "boom");
+    return;
+  }
+  FAIL() << "expected to catch as std::exception";
+}
