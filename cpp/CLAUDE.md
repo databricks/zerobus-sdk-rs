@@ -25,11 +25,9 @@ cpp/
 │   └── detail/           # Internal: ffi_util, config_convert, headers_callback
 ├── tests/                # Unit tests + tiny in-repo harness (test_harness.hpp)
 ├── examples/             # Runnable usage examples
-├── test_package/         # Conan post-build smoke test (find_package + link + run)
 ├── cmake/
 │   ├── BuildRustFfi.cmake       # Builds libzerobus_ffi from local Rust source
 │   └── zerobus-config.cmake.in  # find_package(zerobus) package-config template
-├── conanfile.py          # Conan recipe (version read from version.hpp)
 ├── CMakeLists.txt
 └── Makefile              # Convenience wrappers (build/test/lint/fmt)
 ```
@@ -140,9 +138,18 @@ Public API is everything under `include/zerobus/`:
 
 ## Release
 
+Distribution is CMake + GitHub Releases only — no package manager (no Conan,
+vcpkg, etc.), mirroring the C FFI. Consumers either build from source via CMake
+(`add_subdirectory` / `FetchContent` / `find_package` against an install tree)
+or download a prebuilt per-platform archive attached to the GitHub Release. Each
+archive is a `cmake --install` tree: headers, the `libzerobus_cpp` static
+library, the bundled `libzerobus_ffi` archive, and the `find_package(zerobus)`
+package config.
+
 - Version source: `cpp/include/zerobus/version.hpp` (`ZEROBUS_CPP_VERSION`) and
   the `project(... VERSION ...)` line in `cpp/CMakeLists.txt` — keep them in sync.
-- Tag: `cpp/v<semver>` → triggers the C++ release workflow.
+- Tag: `cpp/v<semver>` → triggers the C++ release workflow, which builds the
+  per-platform archives and publishes a GitHub Release.
 - The C++ SDK links the FFI static library. If Rust FFI code changed, an FFI
   release (`ffi/v*`) must happen first; for source builds the workspace must be
   present.

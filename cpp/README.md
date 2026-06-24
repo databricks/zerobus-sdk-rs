@@ -68,18 +68,20 @@ find_package(zerobus REQUIRED)
 target_link_libraries(your_app PRIVATE zerobus::zerobus)
 ```
 
-### With Conan (preview)
+### From a prebuilt release (GitHub Releases)
 
-A `conanfile.py` is provided. Packaging is not yet published to a registry, so
-for now build the package locally from a monorepo checkout (requires a Rust
-toolchain):
+Tagged releases (`cpp/v*`) attach a prebuilt archive per platform, each
+containing the headers, the static libraries (`libzerobus_cpp` and the bundled
+`libzerobus_ffi`), and the CMake package config produced by `cmake --install`.
+Download the archive for your platform, extract it, and point CMake at it —
+no Rust toolchain or source build required:
 
 ```bash
-conan create cpp/    # run from the repository root
+cmake -S . -B build -DCMAKE_PREFIX_PATH=/path/to/extracted/zerobus
 ```
 
-Then depend on `zerobus-sdk/<version>` from your own `conanfile`. A public
-distribution path is in progress.
+then `find_package(zerobus REQUIRED)` as above. This is the distribution model;
+the first release is pending (see the changelog).
 
 ### Including the SDK
 
