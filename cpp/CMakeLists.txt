@@ -98,6 +98,10 @@ if(ZEROBUS_BUILD_TESTS)
   add_subdirectory(tests)
 endif()
 
+if(ZEROBUS_BUILD_EXAMPLES)
+  add_subdirectory(examples)
+endif()
+
 # ---------------------------------------------------------------------------
 # Install
 # ---------------------------------------------------------------------------
