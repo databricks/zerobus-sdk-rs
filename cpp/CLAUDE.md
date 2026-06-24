@@ -46,6 +46,13 @@ Run from `cpp/`:
 - `make lint` — Formatting check + compiler warnings (`-Wall -Wextra`)
 - `make fmt` — Format all sources with clang-format (Google style)
 - `make clean` — Remove the build directory
+- `make test SANITIZE=address` — Build + run the suite under a sanitizer
+  (`address`, `thread`, or `undefined`; CMake option `-DZEROBUS_SANITIZE=`). Off
+  by default. Targets the memory/lifetime bugs this FFI wrapper is prone to
+  (use-after-free, double-free) with no added dependency. The `sanitize` job in
+  `ci-cpp.yml` runs the AddressSanitizer pass with `ASAN_OPTIONS=detect_leaks=0`
+  (the core's global tokio runtime is intentionally never freed, so leak
+  detection would false-positive).
 
 CMake builds the FFI library from local Rust source by default
 (`cargo build --release` in `rust/ffi`). To link a prebuilt/vendored library
@@ -167,6 +174,6 @@ package config.
   a result. The harness implements the slice of the GoogleTest API the tests use
   (`TEST`, `EXPECT_*`/`ASSERT_*`, `EXPECT_THROW`, `FAIL`, `SUCCEED`), so tests
   read like GoogleTest tests. The whole suite is one CTest entry (`zerobus_tests`)
-  that exits non-zero on any failure. If real third-party C++ dependencies are
-  ever added, that's the point to adopt a package manager (Conan via a JFrog
-  mirror) and a richer framework — not before.
+  that exits non-zero on any failure. If real third-party C++ test dependencies
+  are ever needed, that's the point to revisit the tooling (a richer test
+  framework, and whatever dependency mechanism fits) — not before.

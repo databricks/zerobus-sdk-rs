@@ -23,6 +23,29 @@ if(NOT CMAKE_BUILD_TYPE AND NOT CMAKE_CONFIGURATION_TYPES)
   set(CMAKE_BUILD_TYPE Release CACHE STRING "Build type" FORCE)
 endif()
 
+# ---------------------------------------------------------------------------
+# Sanitizers (off by default)
+# ---------------------------------------------------------------------------
+# Build the SDK, tests, and examples with a runtime sanitizer so the existing
+# test suite also catches the memory/threading bugs a thin FFI wrapper is prone
+# to (use-after-free, double-free, leaks, data races). No extra dependencies —
+# the sanitizers ship with GCC/Clang. Enable with e.g. -DZEROBUS_SANITIZE=address
+# (others: thread, undefined). The flags must apply to compiling AND linking and
+# to every target, so they are set globally here, before any target is defined.
+set(ZEROBUS_SANITIZE "" CACHE STRING
+    "Runtime sanitizer to build with: address, thread, undefined (empty = none)")
+
+if(ZEROBUS_SANITIZE)
+  if(NOT (CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang"))
+    message(FATAL_ERROR
+        "ZEROBUS_SANITIZE requires GCC or Clang (got ${CMAKE_CXX_COMPILER_ID})")
+  endif()
+  message(STATUS "Zerobus: building with -fsanitize=${ZEROBUS_SANITIZE}")
+  # -fno-omit-frame-pointer + -g give readable stack traces in reports.
+  add_compile_options(-fsanitize=${ZEROBUS_SANITIZE} -fno-omit-frame-pointer -g)
+  add_link_options(-fsanitize=${ZEROBUS_SANITIZE})
+endif()
+
 list(APPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/cmake")
 include(BuildRustFfi)
 

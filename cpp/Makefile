@@ -7,6 +7,11 @@ BUILD_DIR ?= build
 BUILD_TYPE ?= Release
 JOBS ?= 4
 
+# Optional runtime sanitizer, e.g. `make test SANITIZE=address` (or thread,
+# undefined). Empty by default, so normal builds are unaffected.
+SANITIZE ?=
+SANITIZE_FLAG := $(if $(SANITIZE),-DZEROBUS_SANITIZE=$(SANITIZE),)
+
 # All hand-written C++ sources (excludes the CMake build tree and fetched deps).
 SOURCES := $(shell find include src tests examples -name '*.cpp' -o -name '*.hpp' 2>/dev/null)
 
@@ -23,9 +28,12 @@ help:
 	@echo "  make lint       - Run lint checks (formatting + compiler warnings)"
 	@echo "  make check      - Run fmt-check and lint"
 	@echo "  make clean      - Remove the build directory"
+	@echo ""
+	@echo "  Add SANITIZE=address (or thread/undefined) to build+test with a sanitizer,"
+	@echo "  e.g. 'make test SANITIZE=address'."
 
 configure:
-	cmake -S . -B $(BUILD_DIR) -DCMAKE_BUILD_TYPE=$(BUILD_TYPE) -DCMAKE_EXPORT_COMPILE_COMMANDS=ON
+	cmake -S . -B $(BUILD_DIR) -DCMAKE_BUILD_TYPE=$(BUILD_TYPE) -DCMAKE_EXPORT_COMPILE_COMMANDS=ON $(SANITIZE_FLAG)
 
 build: configure
 	cmake --build $(BUILD_DIR) -j $(JOBS)
