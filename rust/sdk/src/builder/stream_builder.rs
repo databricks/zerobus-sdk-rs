@@ -23,6 +23,8 @@ use std::sync::Arc;
 
 use crate::callbacks::AckCallback;
 use crate::databricks::zerobus::RecordType;
+#[cfg(feature = "testing")]
+use crate::headers_provider::NoAuthHeadersProvider;
 use crate::headers_provider::{HeadersProvider, OAuthHeadersProvider};
 use crate::stream_configuration::StreamConfigurationOptions;
 use crate::{TableProperties, ZerobusError, ZerobusResult, ZerobusSdk, ZerobusStream};
@@ -39,6 +41,8 @@ enum AuthConfig {
         client_secret: String,
     },
     HeadersProvider(Arc<dyn HeadersProvider>),
+    #[cfg(feature = "testing")]
+    NoAuth,
 }
 
 /// Which record format was selected.
@@ -103,6 +107,8 @@ impl fmt::Debug for StreamBuilder<'_> {
         let auth_kind = match &self.auth {
             Some(AuthConfig::OAuth { .. }) => "OAuth",
             Some(AuthConfig::HeadersProvider(_)) => "HeadersProvider",
+            #[cfg(feature = "testing")]
+            Some(AuthConfig::NoAuth) => "NoAuth",
             None => "None",
         };
         let format_kind = match &self.format {
@@ -117,6 +123,17 @@ impl fmt::Debug for StreamBuilder<'_> {
             .field("auth", &auth_kind)
             .field("format", &format_kind)
             .finish_non_exhaustive()
+    }
+}
+
+const fn missing_auth_error() -> &'static str {
+    #[cfg(feature = "testing")]
+    {
+        "authentication is required: call .oauth(), .headers_provider(), or .no_auth()"
+    }
+    #[cfg(not(feature = "testing"))]
+    {
+        "authentication is required: call .oauth() or .headers_provider()"
     }
 }
 
@@ -152,6 +169,16 @@ impl<'a> StreamBuilder<'a> {
     /// Authenticate with a custom headers provider.
     pub fn headers_provider(mut self, provider: Arc<dyn HeadersProvider>) -> Self {
         self.auth = Some(AuthConfig::HeadersProvider(provider));
+        self
+    }
+
+    /// Use a no-op headers provider that sends no authentication credentials.
+    ///
+    /// Intended only for local testing against a Zerobus endpoint that does not
+    /// enforce authentication. Available behind the `testing` feature flag.
+    #[cfg(feature = "testing")]
+    pub fn no_auth(mut self) -> Self {
+        self.auth = Some(AuthConfig::NoAuth);
         self
     }
 
@@ -310,9 +337,7 @@ impl<'a> StreamBuilder<'a> {
             ));
         }
         if self.auth.is_none() {
-            return Err(ZerobusError::InvalidArgument(
-                "authentication is required: call .oauth() or .headers_provider()".into(),
-            ));
+            return Err(ZerobusError::InvalidArgument(missing_auth_error().into()));
         }
         if self.format.is_none() {
             return Err(ZerobusError::InvalidArgument(
@@ -337,9 +362,9 @@ impl<'a> StreamBuilder<'a> {
                 Arc::clone(&self.sdk.token_cache),
             ))),
             Some(AuthConfig::HeadersProvider(p)) => Ok(Arc::clone(p)),
-            None => Err(ZerobusError::InvalidArgument(
-                "authentication is required: call .oauth() or .headers_provider()".into(),
-            )),
+            #[cfg(feature = "testing")]
+            Some(AuthConfig::NoAuth) => Ok(Arc::new(NoAuthHeadersProvider)),
+            None => Err(ZerobusError::InvalidArgument(missing_auth_error().into())),
         }
     }
 
@@ -601,6 +626,39 @@ mod tests {
         let provider = builder.resolve_headers_provider().unwrap();
         let headers = provider.get_headers().await.unwrap();
         assert_eq!(headers.get("x-test").unwrap(), "value");
+    }
+
+    #[cfg(feature = "testing")]
+    #[tokio::test]
+    async fn no_auth_resolves_to_no_auth_provider() {
+        let sdk = test_sdk();
+        let builder = sdk
+            .stream_builder()
+            .table("catalog.schema.table")
+            .no_auth()
+            .json();
+        let provider = builder.resolve_headers_provider().unwrap();
+        let headers = provider.get_headers().await.unwrap();
+        assert!(headers.is_empty());
+    }
+
+    #[cfg(feature = "testing")]
+    #[tokio::test]
+    async fn no_auth_plus_no_tls_chain() {
+        let sdk = crate::ZerobusSdkBuilder::new()
+            .endpoint("http://localhost:1234")
+            .no_tls()
+            .build()
+            .expect("sdk should build with no_tls");
+        let builder = sdk
+            .stream_builder()
+            .table("catalog.schema.table")
+            .no_auth()
+            .json();
+        builder.validate().expect("validation should succeed");
+        let provider = builder.resolve_headers_provider().unwrap();
+        let headers = provider.get_headers().await.unwrap();
+        assert!(headers.is_empty());
     }
 
     #[tokio::test]

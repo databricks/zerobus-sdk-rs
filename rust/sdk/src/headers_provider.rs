@@ -151,3 +151,29 @@ impl HeadersProvider for OAuthHeadersProvider {
             .await;
     }
 }
+
+/// A headers provider that returns no headers.
+///
+/// Intended only for local testing against a Zerobus endpoint not enforcing authentication.
+///
+/// # Examples
+///
+/// ```no_run
+/// # #[cfg(feature = "testing")] {
+/// use databricks_zerobus_ingest_sdk::NoAuthHeadersProvider;
+/// use std::sync::Arc;
+///
+/// // Pass directly to `headers_provider()`, or use the `.no_auth()` shorthand on `StreamBuilder`.
+/// let _provider: Arc<NoAuthHeadersProvider> = Arc::new(NoAuthHeadersProvider);
+/// # }
+/// ```
+#[cfg(feature = "testing")]
+pub struct NoAuthHeadersProvider;
+
+#[cfg(feature = "testing")]
+#[async_trait]
+impl HeadersProvider for NoAuthHeadersProvider {
+    async fn get_headers(&self) -> ZerobusResult<HashMap<&'static str, String>> {
+        Ok(HashMap::new())
+    }
+}
