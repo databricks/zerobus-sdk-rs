@@ -1,3 +1,12 @@
+// The extern "C" trampoline that lets the Rust core call back into a C++
+// HeadersProvider (declared in detail/headers_callback.hpp).
+//
+// The core invokes get_headers() through this function and the result is
+// marshalled into a CHeaders whose buffers are allocated so the core's
+// zerobus_free_headers can release them: the array via calloc and each
+// key/value via a malloc'd C string, matching the Go wrapper's contract (see
+// zerobus_free_headers in rust/ffi/src/arrow.rs). Exceptions never cross the
+// boundary — they are caught and reported as CHeaders.error_message.
 #include "detail/headers_callback.hpp"
 
 #include <cstdlib>

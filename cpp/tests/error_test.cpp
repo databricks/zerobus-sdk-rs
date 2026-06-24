@@ -1,3 +1,5 @@
+// Unit tests for ZerobusException: it carries the message and the is_retryable
+// flag, and is catchable as a std::exception.
 #include "zerobus/error.hpp"
 
 #include <string>

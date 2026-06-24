@@ -1,3 +1,7 @@
+// Unit tests for ProtoSchema. Using an in-line Unity Catalog table metadata
+// fixture (no network), they exercise the descriptor + JSON-encode round trip,
+// move semantics, and the error paths (invalid UC JSON, and a record missing a
+// required column).
 #include "zerobus/proto_schema.hpp"
 
 #include <string>

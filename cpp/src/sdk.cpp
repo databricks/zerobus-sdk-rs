@@ -1,3 +1,12 @@
+// Implementation of Sdk and SdkBuilder (declared in zerobus/sdk.hpp).
+//
+// Each method forwards to the C FFI (zerobus.h): the builder accumulates
+// configuration on an opaque CZerobusSdkBuilder and build() consumes it into a
+// CZerobusSdk, while create_stream / create_arrow_stream hand the configured
+// options across the boundary. Every fallible call routes its CResult through
+// detail::ResultGuard, which converts failure into a ZerobusException and frees
+// the C error string. Public API documentation lives on the declarations in the
+// header; comments here cover only implementation details.
 #include "zerobus/sdk.hpp"
 
 #include <utility>
@@ -16,6 +25,8 @@ const std::uint8_t* descriptor_ptr(const std::vector<std::uint8_t>& d) {
   return d.empty() ? nullptr : d.data();
 }
 
+// Pointer to the bytes, or null when empty. Used for the Arrow schema, whose
+// emptiness is validated separately before this is called.
 const std::uint8_t* non_empty_ptr(const std::vector<std::uint8_t>& bytes) {
   if (bytes.empty()) {
     return nullptr;

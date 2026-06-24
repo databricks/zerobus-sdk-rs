@@ -1,3 +1,7 @@
+// Unit tests for Sdk and SdkBuilder. They build an SDK against a local endpoint
+// that is never contacted (construction performs no network I/O), and check the
+// version accessor, move semantics (no double-free), and the
+// argument-validation guards on create_stream / create_arrow_stream.
 #include "zerobus/sdk.hpp"
 
 #include <string>

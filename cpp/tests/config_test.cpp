@@ -1,3 +1,7 @@
+// Unit tests for detail::to_c, the StreamOptions / ArrowStreamOptions -> C
+// config conversion. They pin the documented defaults, confirm recovery=false
+// is written explicitly (no zero-value ambiguity, unlike the Go wrapper), and
+// check the optional (has_* flag) and -1-sentinel field encodings.
 #include <cstdint>
 
 #include "detail/config_convert.hpp"

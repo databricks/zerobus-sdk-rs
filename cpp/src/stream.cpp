@@ -1,3 +1,11 @@
+// Implementation of Stream (declared in zerobus/stream.hpp).
+//
+// A thin forwarding layer over the zerobus_stream_* C FFI entry points. The
+// file-local helpers build the small parallel pointer/length arrays the batch
+// entry points expect, and every fallible call routes its CResult through
+// detail::ResultGuard. The destructor and move-assignment close best-effort
+// (swallowing errors), whereas close() surfaces them. Public API documentation
+// lives on the header; comments here cover only implementation details.
 #include "zerobus/stream.hpp"
 
 #include <cstddef>
@@ -9,6 +17,9 @@ namespace zerobus {
 
 namespace {
 
+// An empty payload still needs a valid, non-null pointer to pass across the FFI
+// (paired with length 0); hand out the address of a static sentinel byte rather
+// than nullptr or a dangling data() result.
 const std::uint8_t* ptr_or_sentinel(const std::vector<std::uint8_t>& bytes) {
   static const std::uint8_t kEmptyPayloadSentinel = 0;
   return bytes.empty() ? &kEmptyPayloadSentinel : bytes.data();

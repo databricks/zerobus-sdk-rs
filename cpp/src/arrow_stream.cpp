@@ -1,3 +1,11 @@
+// Implementation of ArrowStream (declared in zerobus/arrow_stream.hpp), the
+// Beta Arrow Flight ingestion path.
+//
+// Each method forwards to the zerobus_arrow_stream_* C FFI entry points and
+// routes failures through detail::ResultGuard. get_unacked_batches copies the
+// FFI-owned batch payloads out before freeing the returned array. The
+// destructor closes best-effort (swallowing errors); close() surfaces them.
+// Public API documentation lives on the header.
 #include "zerobus/arrow_stream.hpp"
 
 #include <cstddef>

@@ -1,3 +1,10 @@
+// Implementation of ProtoSchema (declared in zerobus/proto_schema.hpp).
+//
+// Wraps the zerobus_proto_schema_* C FFI: from_uc_json builds the schema handle
+// from Unity Catalog table metadata, descriptor_bytes copies out the borrowed
+// descriptor bytes, and encode_json copies out (then frees, via
+// zerobus_free_proto_bytes) the FFI-allocated protobuf buffer. Public API
+// documentation lives on the header.
 #include "zerobus/proto_schema.hpp"
 
 #include <utility>

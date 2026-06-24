@@ -1,3 +1,9 @@
+// Unit tests for the headers-provider trampoline
+// (detail::zerobus_cpp_headers_trampoline): a provider's map is marshalled into
+// CHeaders, the empty case yields a null array, and a throwing provider or a
+// null user_data become a CHeaders.error_message rather than crossing the FFI
+// boundary. Each result is freed with the Rust core's zerobus_free_headers,
+// exactly as it would be in production.
 #include "detail/headers_callback.hpp"
 
 #include <map>
