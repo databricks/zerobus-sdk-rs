@@ -2,8 +2,10 @@
 // client credentials. Implement get_headers() to supply (and refresh) whatever
 // authorization headers your environment requires.
 //
-// See json_single.cpp for the connection environment variables (the client
-// id/secret are not used on this path).
+// Required environment variables:
+//   DATABRICKS_TOKEN          bearer token supplied via the HeadersProvider
+// See json_single.cpp for the remaining connection environment variables (the
+// client id/secret are not used on this path).
 
 #include <cstdlib>
 #include <iostream>

@@ -25,7 +25,11 @@ cpp/
 │   └── detail/           # Internal: ffi_util, config_convert, headers_callback
 ├── tests/                # Unit tests + tiny in-repo harness (test_harness.hpp)
 ├── examples/             # Runnable usage examples
-├── cmake/BuildRustFfi.cmake  # Builds libzerobus_ffi from local Rust source
+├── test_package/         # Conan post-build smoke test (find_package + link + run)
+├── cmake/
+│   ├── BuildRustFfi.cmake       # Builds libzerobus_ffi from local Rust source
+│   └── zerobus-config.cmake.in  # find_package(zerobus) package-config template
+├── conanfile.py          # Conan recipe (version read from version.hpp)
 ├── CMakeLists.txt
 └── Makefile              # Convenience wrappers (build/test/lint/fmt)
 ```

@@ -70,7 +70,7 @@ class Sdk {
   /// Start building an `Sdk`. Preferred over `create()`.
   static SdkBuilder builder();
 
-  /// Convenience constructor mirroring the legacy `zerobus_sdk_new` path: TLS
+  /// Convenience constructor mirroring the simpler `zerobus_sdk_new` path: TLS
   /// on, default user agent. Prefer `builder()` for full control.
   static Sdk create(const std::string& endpoint,
                     const std::string& unity_catalog_url);

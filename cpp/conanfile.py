@@ -1,8 +1,10 @@
 import os
+import re
 
 from conan import ConanFile
+from conan.errors import ConanException
 from conan.tools.cmake import CMake, CMakeToolchain, cmake_layout
-from conan.tools.files import copy, rmdir
+from conan.tools.files import copy, load, rmdir
 
 
 class ZerobusSdkConan(ConanFile):
@@ -28,6 +30,15 @@ class ZerobusSdkConan(ConanFile):
     settings = "os", "arch", "compiler", "build_type"
     options = {"fPIC": [True, False]}
     default_options = {"fPIC": True}
+
+    def set_version(self):
+        # Single source of truth: parse ZEROBUS_CPP_VERSION from version.hpp so
+        # the package version stays in lockstep with the header and CMakeLists.
+        header = os.path.join(self.recipe_folder, "include", "zerobus", "version.hpp")
+        match = re.search(r'#define\s+ZEROBUS_CPP_VERSION\s+"([^"]+)"', load(self, header))
+        if not match:
+            raise ConanException("Could not parse ZEROBUS_CPP_VERSION from version.hpp")
+        self.version = match.group(1)
 
     def export_sources(self):
         # The recipe lives in cpp/, but cmake/BuildRustFfi.cmake builds the FFI
