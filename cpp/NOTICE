@@ -1,0 +1,44 @@
+Copyright (2025) Databricks, Inc.
+
+This Software includes software developed at Databricks (https://www.databricks.com/) and its use is subject to the included LICENSE file.
+
+---
+
+This Software includes the following components:
+
+## Rust Dependencies (via FFI)
+
+This Go SDK wraps the Zerobus Rust SDK via C FFI. The compiled native library includes the following open source components:
+
+### MIT License
+
+- **tokio**: Copyright (c) 2019 Tokio Contributors (https://github.com/tokio-rs/tokio)
+- **tokio-stream**: Copyright (c) 2019 Tokio Contributors (https://github.com/tokio-rs/tokio)
+- **tokio-util**: Copyright (c) 2019 Tokio Contributors (https://github.com/tokio-rs/tokio)
+- **tonic**: Copyright (c) 2019 Lucio Franco (https://github.com/hyperium/tonic)
+- **tracing**: Copyright (c) 2019 Tokio Contributors (https://github.com/tokio-rs/tracing)
+- **async-trait**: Copyright (c) 2019 David Tolnay (https://github.com/dtolnay/async-trait)
+- **thiserror**: Copyright (c) 2019 David Tolnay (https://github.com/dtolnay/thiserror)
+- **serde**: Copyright (c) 2014 David Tolnay (https://github.com/serde-rs/serde)
+- **serde_json**: Copyright (c) 2014 David Tolnay (https://github.com/serde-rs/json)
+- **bytes**: Copyright (c) 2018 Carl Lerche (https://github.com/tokio-rs/bytes)
+- **smallvec**: Copyright (c) 2018 The Servo Project Developers (https://github.com/servo/rust-smallvec)
+- **once_cell**: Copyright (c) 2018 Aleksey Kladov (https://github.com/matklad/once_cell)
+
+### Apache License 2.0
+
+- **prost**: Copyright (c) 2017 Dan Burkert (https://github.com/tokio-rs/prost)
+- **prost-types**: Copyright (c) 2017 Dan Burkert (https://github.com/tokio-rs/prost)
+- **tokio-retry**: Copyright (c) 2018 Sam Rijs (https://github.com/srijs/rust-tokio-retry)
+- **reqwest**: Copyright (c) 2016 Sean McArthur (https://github.com/seanmonstar/reqwest)
+- **hyper-http-proxy**: Copyright (c) 2019 Trent Mick (https://github.com/tafia/hyper-http-proxy)
+- **hyper-util**: Copyright (c) 2023 Sean McArthur (https://github.com/hyperium/hyper-util)
+- **arrow-ipc**: Copyright (c) 2020 Apache Arrow contributors (https://github.com/apache/arrow-rs)
+
+## Go Dependencies
+
+The Go SDK itself has no external Go runtime dependencies. The Go standard library and CGO are used for the FFI bridge:
+
+- **Go Programming Language**: Copyright (c) 2009 The Go Authors (https://golang.org/) — BSD-style license
+
+For a complete list of Rust dependencies and their licenses, see the `../rust/sdk/Cargo.toml` and `../rust/ffi/Cargo.toml` files.
