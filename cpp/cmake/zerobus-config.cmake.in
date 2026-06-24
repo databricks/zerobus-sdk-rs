@@ -1,0 +1,48 @@
+# Config file loaded by find_package(zerobus). configure_package_config_file()
+# expands @PACKAGE_INIT@ into a small preamble that defines PACKAGE_PREFIX_DIR
+# (the directory this package was installed into).
+@PACKAGE_INIT@
+
+include(CMakeFindDependencyMacro)
+
+# The C++ SDK statically links the Rust C FFI archive (libzerobus_ffi.a). That
+# archive is bundled in this package, but the imported target that the SDK links
+# against (zerobus::ffi) only existed in the SDK's own build tree. Recreate it
+# here so the exported zerobus::zerobus target can resolve its FFI symbols, and
+# re-apply the system libraries the Rust static library needs at link time.
+if(NOT TARGET zerobus::ffi)
+  add_library(zerobus::ffi STATIC IMPORTED)
+
+  find_library(ZEROBUS_FFI_LIBRARY
+      NAMES zerobus_ffi
+      HINTS "${PACKAGE_PREFIX_DIR}/@CMAKE_INSTALL_LIBDIR@"
+      NO_DEFAULT_PATH)
+  if(NOT ZEROBUS_FFI_LIBRARY)
+    set(zerobus_FOUND FALSE)
+    set(zerobus_NOT_FOUND_MESSAGE
+        "Zerobus FFI archive not found under ${PACKAGE_PREFIX_DIR}/@CMAKE_INSTALL_LIBDIR@")
+    return()
+  endif()
+  set_target_properties(zerobus::ffi PROPERTIES
+      IMPORTED_LOCATION "${ZEROBUS_FFI_LIBRARY}")
+
+  # Mirror BuildRustFfi.cmake: the Rust static library pulls in these platform
+  # system libraries at link time.
+  if(APPLE)
+    set_property(TARGET zerobus::ffi APPEND PROPERTY INTERFACE_LINK_LIBRARIES
+        "-framework CoreFoundation" "-framework Security" iconv)
+  elseif(WIN32)
+    set_property(TARGET zerobus::ffi APPEND PROPERTY INTERFACE_LINK_LIBRARIES
+        ws2_32 userenv bcrypt ntdll)
+  else()  # Linux / other Unix
+    find_dependency(Threads)
+    set_property(TARGET zerobus::ffi APPEND PROPERTY INTERFACE_LINK_LIBRARIES
+        Threads::Threads ${CMAKE_DL_LIBS} m resolv)
+  endif()
+endif()
+
+# Recreate the zerobus::zerobus target itself (declares the installed library +
+# headers). This references zerobus::ffi defined above.
+include("${CMAKE_CURRENT_LIST_DIR}/zerobus-targets.cmake")
+
+check_required_components(zerobus)

@@ -60,7 +60,12 @@ endif()
 
 set_target_properties(zerobus_cpp PROPERTIES
     OUTPUT_NAME zerobus_cpp
-    POSITION_INDEPENDENT_CODE ON)
+    POSITION_INDEPENDENT_CODE ON
+    # Export under the same name as the in-build alias (zerobus::zerobus) so
+    # consumers link the same target whether they use the build tree or the
+    # installed package. Without this the export namespace would prepend to the
+    # real target name, yielding zerobus::zerobus_cpp.
+    EXPORT_NAME zerobus)
 
 # ---------------------------------------------------------------------------
 # Tests and examples
@@ -78,9 +83,41 @@ endif()
 # Install
 # ---------------------------------------------------------------------------
 include(GNUInstallDirs)
+include(CMakePackageConfigHelpers)
+
+# Copy the compiled library and headers into the standard install layout, and
+# record zerobus_cpp as a member of the "zerobus-targets" export set.
 install(TARGETS zerobus_cpp
     EXPORT zerobus-targets
     ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR}
     LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}
     RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
 install(DIRECTORY include/ DESTINATION ${CMAKE_INSTALL_INCLUDEDIR})
+
+# Bundle the Rust C FFI archive that zerobus_cpp statically links. Without it a
+# consumer could locate the C++ library but would have no symbols to satisfy its
+# FFI calls. zerobus-config.cmake recreates the zerobus::ffi target from this.
+get_target_property(_zerobus_ffi_location zerobus_ffi IMPORTED_LOCATION)
+install(FILES "${_zerobus_ffi_location}" DESTINATION ${CMAKE_INSTALL_LIBDIR})
+
+# Piece #1a: write zerobus-targets.cmake, which recreates the zerobus::zerobus
+# target (library path, include dir, dependencies) in a consumer's build.
+install(EXPORT zerobus-targets
+    NAMESPACE zerobus::
+    FILE zerobus-targets.cmake
+    DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/zerobus)
+
+# Piece #1b: generate the entry-point file find_package(zerobus) looks for,
+# plus a version file so consumers can request a compatible version.
+configure_package_config_file(
+    "${CMAKE_CURRENT_SOURCE_DIR}/cmake/zerobus-config.cmake.in"
+    "${CMAKE_CURRENT_BINARY_DIR}/zerobus-config.cmake"
+    INSTALL_DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/zerobus)
+write_basic_package_version_file(
+    "${CMAKE_CURRENT_BINARY_DIR}/zerobus-config-version.cmake"
+    VERSION ${PROJECT_VERSION}
+    COMPATIBILITY SameMajorVersion)
+install(FILES
+    "${CMAKE_CURRENT_BINARY_DIR}/zerobus-config.cmake"
+    "${CMAKE_CURRENT_BINARY_DIR}/zerobus-config-version.cmake"
+    DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/zerobus)
