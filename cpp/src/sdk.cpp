@@ -40,13 +40,16 @@ const std::uint8_t* non_empty_ptr(const std::vector<std::uint8_t>& bytes) {
 // SdkBuilder
 // ---------------------------------------------------------------------------
 
+// Allocate a fresh FFI builder and stamp the default user-agent prefix. The
+// builder handle is declared as a plain void* in the header (see sdk.hpp), so
+// every use casts it back to the opaque CZerobusSdkBuilder* from zerobus.h.
 SdkBuilder::SdkBuilder() : builder_(zerobus_sdk_builder_new()) {
-  // Identify this wrapper in the user-agent by default.
   auto* b = static_cast<CZerobusSdkBuilder*>(builder_);
   std::string id = std::string("zerobus-sdk-cpp/") + ZEROBUS_CPP_VERSION;
   zerobus_sdk_builder_sdk_identifier(b, id.c_str());
 }
 
+// Free the builder unless it was already consumed by build() (which nulls it).
 SdkBuilder::~SdkBuilder() {
   if (builder_ != nullptr) {
     zerobus_sdk_builder_free(static_cast<CZerobusSdkBuilder*>(builder_));
@@ -54,12 +57,15 @@ SdkBuilder::~SdkBuilder() {
   }
 }
 
+// Move steals the opaque pointer and nulls the source, so the FFI handle is
+// owned — and ultimately freed — by exactly one SdkBuilder.
 SdkBuilder::SdkBuilder(SdkBuilder&& other) noexcept : builder_(other.builder_) {
   other.builder_ = nullptr;
 }
 
 SdkBuilder& SdkBuilder::operator=(SdkBuilder&& other) noexcept {
   if (this != &other) {
+    // Free any builder we already hold before taking over other's.
     if (builder_ != nullptr) {
       zerobus_sdk_builder_free(static_cast<CZerobusSdkBuilder*>(builder_));
     }
@@ -69,6 +75,10 @@ SdkBuilder& SdkBuilder::operator=(SdkBuilder&& other) noexcept {
   return *this;
 }
 
+// The configuration setters below each forward their value to the matching
+// zerobus_sdk_builder_* FFI call and return *this so calls can be chained. They
+// are infallible at this layer; an invalid value (e.g. a malformed endpoint)
+// surfaces later, when build() is called.
 SdkBuilder& SdkBuilder::endpoint(const std::string& value) {
   zerobus_sdk_builder_endpoint(static_cast<CZerobusSdkBuilder*>(builder_),
                                value.c_str());
@@ -98,13 +108,16 @@ SdkBuilder& SdkBuilder::disable_tls() {
   return *this;
 }
 
+// Consume the builder into an Sdk. The FFI takes ownership of the builder and
+// frees it on both the success and failure paths, so we null builder_ up front
+// to keep the destructor from double-freeing it.
 Sdk SdkBuilder::build() {
   detail::ResultGuard guard;
-  // zerobus_sdk_builder_build consumes (frees) the builder on both paths.
   CZerobusSdk* sdk = zerobus_sdk_builder_build(
       static_cast<CZerobusSdkBuilder*>(builder_), guard.ptr());
   builder_ = nullptr;
   if (sdk == nullptr) {
+    // A null handle means failure: throw the FFI's error if it set one.
     guard.throw_if_error();
     // Fallback if the FFI returned null without an error message.
     throw ZerobusException("failed to build Zerobus SDK", false);
@@ -118,6 +131,8 @@ Sdk SdkBuilder::build() {
 
 SdkBuilder Sdk::builder() { return SdkBuilder(); }
 
+// Convenience path equivalent to building with only endpoint + UC URL set. Like
+// build(), a null handle signals failure.
 Sdk Sdk::create(const std::string& endpoint,
                 const std::string& unity_catalog_url) {
   detail::ResultGuard guard;
@@ -130,6 +145,8 @@ Sdk Sdk::create(const std::string& endpoint,
   return Sdk(sdk);
 }
 
+// Release the Rust-owned SDK handle. Streams hold their own handles, so an Sdk
+// may be destroyed independently of the streams it created.
 Sdk::~Sdk() {
   if (handle_ != nullptr) {
     zerobus_sdk_free(handle_);
@@ -137,6 +154,8 @@ Sdk::~Sdk() {
   }
 }
 
+// Same handle-stealing move contract as SdkBuilder: the source is nulled so the
+// handle is freed exactly once.
 Sdk::Sdk(Sdk&& other) noexcept : handle_(other.handle_) {
   other.handle_ = nullptr;
 }
@@ -152,6 +171,10 @@ Sdk& Sdk::operator=(Sdk&& other) noexcept {
   return *this;
 }
 
+// Create an OAuth-authenticated proto/JSON stream. The descriptor pointer is
+// null for a JSON stream (descriptor_ptr() maps an empty vector to null), and
+// the StreamOptions are converted to the C struct just for this call. The
+// resulting Stream owns no headers provider, hence the null second argument.
 Stream Sdk::create_stream(const TableProperties& table,
                           const std::string& client_id,
                           const std::string& client_secret,
@@ -169,6 +192,11 @@ Stream Sdk::create_stream(const TableProperties& table,
   return Stream(stream, nullptr);
 }
 
+// Same as above but authenticated by a custom headers provider. We validate the
+// pointer here (the FFI would otherwise receive a null callback target), pass
+// the raw provider pointer as the trampoline's user_data, and hand the
+// shared_ptr to the Stream so the provider outlives every callback the core
+// makes through it.
 Stream Sdk::create_stream(const TableProperties& table,
                           std::shared_ptr<HeadersProvider> headers_provider,
                           const StreamOptions& options) {
@@ -177,8 +205,6 @@ Stream Sdk::create_stream(const TableProperties& table,
   }
   detail::ResultGuard guard;
   CStreamConfigurationOptions copts = detail::to_c(options);
-  // The trampoline receives the raw provider pointer; the Stream keeps the
-  // shared_ptr alive for as long as the stream exists.
   CZerobusStream* stream = zerobus_sdk_create_stream_with_headers_provider(
       handle_, table.table_name.c_str(), descriptor_ptr(table.descriptor_proto),
       table.descriptor_proto.size(), detail::zerobus_cpp_headers_trampoline,
@@ -190,6 +216,10 @@ Stream Sdk::create_stream(const TableProperties& table,
   return Stream(stream, std::move(headers_provider));
 }
 
+// Create an OAuth-authenticated Arrow Flight stream (Beta). The schema IPC
+// bytes are required (an Arrow stream has no JSON fallback), so reject an empty
+// schema before crossing the FFI rather than letting the core fail less
+// clearly.
 ArrowStream Sdk::create_arrow_stream(
     const std::string& table_name,
     const std::vector<std::uint8_t>& schema_ipc_bytes,
@@ -211,6 +241,10 @@ ArrowStream Sdk::create_arrow_stream(
   return ArrowStream(stream, nullptr);
 }
 
+// Arrow Flight stream (Beta) authenticated by a custom headers provider. Both
+// the provider and the schema bytes are validated up front; as with the proto
+// path, the Stream keeps the provider's shared_ptr alive for the callback's
+// lifetime.
 ArrowStream Sdk::create_arrow_stream(
     const std::string& table_name,
     const std::vector<std::uint8_t>& schema_ipc_bytes,

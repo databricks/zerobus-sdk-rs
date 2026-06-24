@@ -13,6 +13,8 @@
 
 namespace zerobus {
 
+// Build the schema handle from Unity Catalog table metadata JSON. A null handle
+// signals failure; throw the FFI's error if it set one, else a generic message.
 ProtoSchema ProtoSchema::from_uc_json(const std::string& uc_table_json) {
   detail::ResultGuard guard;
   CZerobusProtoSchema* handle =
@@ -24,6 +26,7 @@ ProtoSchema ProtoSchema::from_uc_json(const std::string& uc_table_json) {
   return ProtoSchema(handle);
 }
 
+// Free the Rust-owned schema handle.
 ProtoSchema::~ProtoSchema() {
   if (handle_ != nullptr) {
     zerobus_proto_schema_free(handle_);
@@ -31,6 +34,7 @@ ProtoSchema::~ProtoSchema() {
   }
 }
 
+// Handle-stealing move; the source is nulled so the handle is freed once.
 ProtoSchema::ProtoSchema(ProtoSchema&& other) noexcept
     : handle_(other.handle_) {
   other.handle_ = nullptr;
@@ -47,6 +51,10 @@ ProtoSchema& ProtoSchema::operator=(ProtoSchema&& other) noexcept {
   return *this;
 }
 
+// Return the table's serialized DescriptorProto. The FFI hands back a pointer
+// borrowed from the schema (not a fresh allocation), so this copies it into an
+// owned vector and there is nothing to free. An empty/absent descriptor yields
+// an empty vector. Const and safe to call from concurrent readers.
 std::vector<std::uint8_t> ProtoSchema::descriptor_bytes() const {
   std::uintptr_t len = 0;
   const std::uint8_t* bytes =
@@ -58,6 +66,11 @@ std::vector<std::uint8_t> ProtoSchema::descriptor_bytes() const {
   return std::vector<std::uint8_t>(bytes, bytes + len);
 }
 
+// Encode one JSON record to protobuf bytes using this schema. Unlike
+// descriptor_bytes(), the FFI allocates the output buffer and transfers
+// ownership, so we copy it out and then release it with
+// zerobus_free_proto_bytes (even on the empty-result path). A false return
+// means encoding failed.
 std::vector<std::uint8_t> ProtoSchema::encode_json(
     const std::string& record_json) const {
   detail::ResultGuard guard;

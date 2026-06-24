@@ -43,6 +43,8 @@ ProtoBatchView make_proto_batch(
   return v;
 }
 
+// JSON records cross the FFI as an array of NUL-terminated C strings, so unlike
+// the proto path there is no parallel length array — only the pointers.
 struct JsonBatchView {
   std::vector<const char*> ptrs;
 };
@@ -68,6 +70,8 @@ Stream::~Stream() {
   }
 }
 
+// Move transfers both the handle and the headers-provider that must outlive it,
+// nulling the source handle so only one Stream ever closes/frees it.
 Stream::Stream(Stream&& other) noexcept
     : handle_(other.handle_), provider_(std::move(other.provider_)) {
   other.handle_ = nullptr;
@@ -75,6 +79,8 @@ Stream::Stream(Stream&& other) noexcept
 
 Stream& Stream::operator=(Stream&& other) noexcept {
   if (this != &other) {
+    // Close + free any stream we currently hold before adopting other's; the
+    // close is best-effort here since assignment cannot throw usefully.
     if (handle_ != nullptr) {
       detail::ResultGuard guard;
       zerobus_stream_close(handle_, guard.ptr());
@@ -87,6 +93,11 @@ Stream& Stream::operator=(Stream&& other) noexcept {
   return *this;
 }
 
+// The ingest methods below share one shape: route a CResult through a
+// ResultGuard, call the matching zerobus_stream_* entry point, then
+// throw_if_error(). The blocking variants return the server-assigned offset;
+// the _nowait variants return void and only report argument-validation errors.
+
 std::int64_t Stream::ingest_proto_record(const std::uint8_t* data,
                                          std::size_t len) {
   detail::ResultGuard guard;
@@ -96,6 +107,8 @@ std::int64_t Stream::ingest_proto_record(const std::uint8_t* data,
   return offset;
 }
 
+// Vector overload: adapt to the (pointer, length) form, substituting the
+// sentinel so an empty record still passes a non-null pointer.
 std::int64_t Stream::ingest_proto_record(
     const std::vector<std::uint8_t>& data) {
   return ingest_proto_record(ptr_or_sentinel(data), data.size());
@@ -176,6 +189,9 @@ void Stream::flush() {
   guard.throw_if_error();
 }
 
+// Copy each record out of the FFI-owned array into owning UnackedRecords, then
+// free the array — the borrowed buffers are only valid until that free, so the
+// copy must happen first.
 std::vector<UnackedRecord> Stream::get_unacked_records() {
   detail::ResultGuard guard;
   CRecordArray array = zerobus_stream_get_unacked_records(handle_, guard.ptr());
@@ -198,6 +214,9 @@ std::vector<UnackedRecord> Stream::get_unacked_records() {
   return out;
 }
 
+// Explicit close: unlike the destructor, this surfaces a failed flush/close by
+// throwing. Idempotent via the null-handle guard. The handle is freed whether
+// or not the close succeeds, so it is captured and nulled before the FFI call.
 void Stream::close() {
   if (handle_ == nullptr) {
     return;

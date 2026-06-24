@@ -15,6 +15,8 @@
 
 namespace zerobus {
 
+// Best-effort graceful close in the destructor (errors are swallowed — a
+// destructor must not throw), then free the Rust-owned handle.
 ArrowStream::~ArrowStream() {
   if (handle_ != nullptr) {
     detail::ResultGuard guard;
@@ -24,6 +26,8 @@ ArrowStream::~ArrowStream() {
   }
 }
 
+// Move carries the handle and the headers-provider together, nulling the source
+// so the handle is closed/freed exactly once.
 ArrowStream::ArrowStream(ArrowStream&& other) noexcept
     : handle_(other.handle_), provider_(std::move(other.provider_)) {
   other.handle_ = nullptr;
@@ -31,6 +35,7 @@ ArrowStream::ArrowStream(ArrowStream&& other) noexcept
 
 ArrowStream& ArrowStream::operator=(ArrowStream&& other) noexcept {
   if (this != &other) {
+    // Close + free any stream we already hold before adopting other's.
     if (handle_ != nullptr) {
       detail::ResultGuard guard;
       zerobus_arrow_stream_close(handle_, guard.ptr());
@@ -43,6 +48,8 @@ ArrowStream& ArrowStream::operator=(ArrowStream&& other) noexcept {
   return *this;
 }
 
+// Ingest one batch (schema + records as Arrow IPC bytes); returns the assigned
+// offset. Like the Stream ingest path, failure comes back via the ResultGuard.
 std::int64_t ArrowStream::ingest_batch(const std::uint8_t* ipc_bytes,
                                        std::size_t len) {
   detail::ResultGuard guard;
@@ -52,6 +59,7 @@ std::int64_t ArrowStream::ingest_batch(const std::uint8_t* ipc_bytes,
   return offset;
 }
 
+// Vector overload forwarding to the (pointer, length) form.
 std::int64_t ArrowStream::ingest_batch(
     const std::vector<std::uint8_t>& ipc_bytes) {
   return ingest_batch(ipc_bytes.data(), ipc_bytes.size());
@@ -69,6 +77,9 @@ void ArrowStream::flush() {
   guard.throw_if_error();
 }
 
+// Copy each unacked batch out of the FFI-owned array (parallel batches/lengths
+// arrays) into owning vectors, then free the array — the borrowed bytes are
+// only valid until that free.
 std::vector<std::vector<std::uint8_t>> ArrowStream::get_unacked_batches() {
   detail::ResultGuard guard;
   CArrowBatchArray array =
@@ -92,6 +103,9 @@ std::vector<std::vector<std::uint8_t>> ArrowStream::get_unacked_batches() {
   return out;
 }
 
+// Explicit close: surfaces a failed flush/close by throwing (the destructor
+// does not). Idempotent; the handle is captured and nulled before the FFI call
+// so it is freed exactly once whether or not the close succeeds.
 void ArrowStream::close() {
   if (handle_ == nullptr) {
     return;
@@ -106,6 +120,8 @@ void ArrowStream::close() {
   }
 }
 
+// Once close()/destruction has nulled the handle the stream is closed; while it
+// is still live, defer to the core's own closed state via the FFI.
 bool ArrowStream::is_closed() const noexcept {
   if (handle_ == nullptr) {
     return true;
