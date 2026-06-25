@@ -81,8 +81,13 @@ jobs:
       # any dependency. Debug build for readable stack traces.
       - name: Build + test with AddressSanitizer
         env:
-          # The Rust core's global tokio runtime is intentionally never torn
-          # down, so the leak detector would flag it as a false positive.
-          # Disable leak detection; keep the use-after-free/double-free checks.
-          ASAN_OPTIONS: detect_leaks=0
+          # Keep LeakSanitizer on so wrapper leaks (a missed
+          # zerobus_free_error_message, a leaked CHeader array or proto-bytes
+          # buffer) are caught alongside the use-after-free/double-free checks —
+          # that is the whole point of this job. The Rust core's global tokio
+          # runtime and header-key cache are intentionally never torn down, so
+          # they are suppressed narrowly via the file below rather than by
+          # disabling leak detection wholesale.
+          ASAN_OPTIONS: detect_leaks=1
+          LSAN_OPTIONS: suppressions=${{ github.workspace }}/cpp/lsan_suppressions.txt
         run: make test SANITIZE=address BUILD_TYPE=Debug

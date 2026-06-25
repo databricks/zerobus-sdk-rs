@@ -22,6 +22,13 @@ namespace zerobus {
 /// Lifetime: a provider passed to `Sdk::create_stream` must remain alive for as
 /// long as the resulting `Stream`. The `Stream` holds a `shared_ptr` to it, so
 /// passing a `shared_ptr` is sufficient.
+///
+/// WARNING — this lifetime guarantee does not extend to the `Stream`'s
+/// fire-and-forget (`_nowait`) ingestion APIs. Those spawn detached background
+/// tasks that the core does not join on `close()` or destruction, so a task may
+/// invoke `get_headers()` after the `Stream` has dropped its `shared_ptr` and
+/// destroyed this provider. Do not combine a `HeadersProvider` with the
+/// `_nowait` APIs; use the blocking ingest variants instead.
 class HeadersProvider {
  public:
   virtual ~HeadersProvider() = default;
