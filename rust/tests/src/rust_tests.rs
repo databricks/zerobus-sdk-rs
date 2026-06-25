@@ -985,6 +985,133 @@ mod schema_tests {
     }
 
     #[tokio::test]
+    async fn test_ingest_record_too_large_fails() -> Result<(), Box<dyn std::error::Error>> {
+        setup_tracing();
+        info!("Starting test_ingest_record_too_large_fails");
+
+        let (_mock_server, server_url) = start_mock_server().await?;
+        let sdk = ZerobusSdk::builder()
+            .endpoint(server_url.clone())
+            .unity_catalog_url("https://mock-uc.com")
+            .tls_config(Arc::new(NoTlsConfig))
+            .build()?;
+
+        let limit = 1024;
+        let stream = sdk
+            .stream_builder()
+            .table(TABLE_NAME)
+            .headers_provider(Arc::new(TestHeadersProvider::default()))
+            .compiled_proto(Default::default())
+            .max_ingest_payload_bytes(limit)
+            .build()
+            .await?;
+
+        let oversized = vec![0u8; limit + 1];
+        let result = stream.ingest_record_offset(oversized).await;
+
+        assert!(matches!(result, Err(ZerobusError::InvalidArgument(_))));
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_ingest_record_at_limit_succeeds() -> Result<(), Box<dyn std::error::Error>> {
+        setup_tracing();
+        info!("Starting test_ingest_record_at_limit_succeeds");
+
+        let (_mock_server, server_url) = start_mock_server().await?;
+        let sdk = ZerobusSdk::builder()
+            .endpoint(server_url.clone())
+            .unity_catalog_url("https://mock-uc.com")
+            .tls_config(Arc::new(NoTlsConfig))
+            .build()?;
+
+        let limit = 1024;
+        let stream = sdk
+            .stream_builder()
+            .table(TABLE_NAME)
+            .headers_provider(Arc::new(TestHeadersProvider::default()))
+            .compiled_proto(Default::default())
+            .max_ingest_payload_bytes(limit)
+            .build()
+            .await?;
+
+        // A payload of exactly max_ingest_payload_bytes must pass the client-side check.
+        let exact = vec![0u8; limit];
+        let result = stream.ingest_record_offset(exact).await;
+
+        assert!(
+            result.is_ok(),
+            "payload of exactly the limit should be accepted, got {result:?}"
+        );
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_ingest_record_default_limit_below_server_limit(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        setup_tracing();
+        info!("Starting test_ingest_record_default_limit_below_server_limit");
+
+        let (_mock_server, server_url) = start_mock_server().await?;
+        let sdk = ZerobusSdk::builder()
+            .endpoint(server_url.clone())
+            .unity_catalog_url("https://mock-uc.com")
+            .tls_config(Arc::new(NoTlsConfig))
+            .build()?;
+
+        let stream = sdk
+            .stream_builder()
+            .table(TABLE_NAME)
+            .headers_provider(Arc::new(TestHeadersProvider::default()))
+            .compiled_proto(Default::default())
+            .build()
+            .await?;
+
+        // The default limit is set below the 10 MiB server limit to leave headroom
+        // for the request envelope, so a full 10 MiB raw payload is rejected
+        // client-side rather than failing later at the server transport layer.
+        let server_limit = vec![0u8; 10 * 1024 * 1024];
+        let result = stream.ingest_record_offset(server_limit).await;
+
+        assert!(matches!(result, Err(ZerobusError::InvalidArgument(_))));
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_ingest_records_too_large_fails() -> Result<(), Box<dyn std::error::Error>> {
+        setup_tracing();
+        info!("Starting test_ingest_records_too_large_fails");
+
+        let (_mock_server, server_url) = start_mock_server().await?;
+        let sdk = ZerobusSdk::builder()
+            .endpoint(server_url.clone())
+            .unity_catalog_url("https://mock-uc.com")
+            .tls_config(Arc::new(NoTlsConfig))
+            .build()?;
+
+        let limit = 1024;
+        let stream = sdk
+            .stream_builder()
+            .table(TABLE_NAME)
+            .headers_provider(Arc::new(TestHeadersProvider::default()))
+            .compiled_proto(Default::default())
+            .max_ingest_payload_bytes(limit)
+            .build()
+            .await?;
+
+        // The combined size of the records passed to ingest_records_offset exceeds the limit.
+        let records = vec![vec![0u8; 600], vec![0u8; 500]];
+        let result = stream.ingest_records_offset(records).await;
+
+        assert!(matches!(result, Err(ZerobusError::InvalidArgument(_))));
+
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn test_json_stream_creation_with_descriptor_warns(
     ) -> Result<(), Box<dyn std::error::Error>> {
         setup_tracing();

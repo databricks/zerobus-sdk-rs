@@ -264,6 +264,14 @@ impl EncodedBatch {
     pub fn is_empty(&self) -> bool {
         self.get_record_count() == 0
     }
+
+    /// Returns the total encoded byte size of all records in this batch.
+    pub fn total_byte_size(&self) -> usize {
+        match self {
+            EncodedBatch::Proto(records) => records.iter().map(|r| r.len()).sum(),
+            EncodedBatch::Json(records) => records.iter().map(|s| s.len()).sum(),
+        }
+    }
 }
 
 impl IntoIterator for EncodedBatch {
@@ -658,6 +666,24 @@ mod tests {
 
             let empty_batch = EncodedBatch::Proto(smallvec![]);
             assert_eq!(empty_batch.get_record_count(), 0);
+        }
+
+        #[test]
+        fn test_total_byte_size_proto() {
+            let batch = EncodedBatch::Proto(smallvec![vec![1, 2, 3], vec![4, 5]]);
+            assert_eq!(batch.total_byte_size(), 5);
+        }
+
+        #[test]
+        fn test_total_byte_size_json() {
+            let batch = EncodedBatch::Json(smallvec!["hello".to_string(), "world!".to_string()]);
+            assert_eq!(batch.total_byte_size(), 11);
+        }
+
+        #[test]
+        fn test_total_byte_size_empty() {
+            let batch = EncodedBatch::Proto(smallvec![]);
+            assert_eq!(batch.total_byte_size(), 0);
         }
 
         #[test]

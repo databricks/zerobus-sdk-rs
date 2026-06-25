@@ -1166,6 +1166,14 @@ impl ZerobusStream {
 
     /// Internal unified method for ingesting records and batches
     async fn ingest_internal_v2(&self, encoded_batch: EncodedBatch) -> ZerobusResult<OffsetId> {
+        let byte_size = encoded_batch.total_byte_size();
+        let max_payload_bytes = self.options.max_ingest_payload_bytes;
+        if byte_size > max_payload_bytes {
+            return Err(ZerobusError::InvalidArgument(format!(
+                "Ingest payload too large: {byte_size} bytes exceeds the configured limit of {max_payload_bytes} bytes"
+            )));
+        }
+
         if self.is_closed.load(Ordering::Relaxed) {
             error!(table_name = %self.table_properties.table_name, "Stream closed");
             return Err(ZerobusError::StreamClosedError(tonic::Status::internal(
