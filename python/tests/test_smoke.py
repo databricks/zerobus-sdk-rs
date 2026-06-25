@@ -192,6 +192,42 @@ class TestRecordTypeConstants(unittest.TestCase):
         self.assertNotEqual(proto1, json_type)
 
 
+class TestApplicationName(unittest.TestCase):
+    """Test the optional application_name SDK construction parameter.
+
+    SDK construction validates the endpoint and extracts the workspace ID but
+    does not open a network connection, so these tests run offline.
+    """
+
+    HOST = "https://test-workspace.zerobus.region.cloud.databricks.com"
+    UC_URL = "https://test-workspace.cloud.databricks.com"
+
+    def test_sync_sdk_constructs_with_application_name(self):
+        """Sync SDK accepts application_name without error."""
+        sdk = SyncSdk(self.HOST, self.UC_URL, application_name="my-app/1.0")
+        self.assertIsNotNone(sdk)
+
+    def test_async_sdk_constructs_with_application_name(self):
+        """Async SDK accepts application_name without error."""
+        sdk = AsyncSdk(self.HOST, self.UC_URL, application_name="my-app/1.0")
+        self.assertIsNotNone(sdk)
+
+    def test_sync_sdk_constructs_without_application_name(self):
+        """application_name is optional; sync SDK still constructs by default."""
+        sdk = SyncSdk(self.HOST, self.UC_URL)
+        self.assertIsNotNone(sdk)
+
+    def test_async_sdk_constructs_without_application_name(self):
+        """application_name is optional; async SDK still constructs by default."""
+        sdk = AsyncSdk(self.HOST, self.UC_URL)
+        self.assertIsNotNone(sdk)
+
+    def test_application_name_accepts_positional(self):
+        """application_name may also be passed positionally."""
+        self.assertIsNotNone(SyncSdk(self.HOST, self.UC_URL, "my-app/1.0"))
+        self.assertIsNotNone(AsyncSdk(self.HOST, self.UC_URL, "my-app/1.0"))
+
+
 class TestStreamConfigurationDefaults(unittest.TestCase):
     """Test StreamConfigurationOptions defaults."""
 
