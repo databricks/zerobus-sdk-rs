@@ -61,6 +61,10 @@ TEST(ProtoSchema, EncodeInvalidRecordThrows) {
 TEST(ProtoSchema, MoveLeavesSourceUsable) {
   ProtoSchema schema = ProtoSchema::from_uc_json(kUcTableJson);
   ProtoSchema moved = std::move(schema);
-  // The moved-to schema still works.
+  // The moved-to schema owns the descriptor and still works.
   EXPECT_FALSE(moved.descriptor_bytes().empty());
+  // The moved-from schema is left with a null handle but must stay safe to
+  // use (the FFI null-handle contract): descriptor_bytes() returns empty
+  // rather than crashing.
+  EXPECT_TRUE(schema.descriptor_bytes().empty());
 }
