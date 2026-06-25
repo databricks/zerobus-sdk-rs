@@ -35,7 +35,7 @@ Example (Async):
     >>> from zerobus.sdk.aio import ZerobusSdk, TableProperties
     >>>
     >>> async def main():
-    ...     sdk = ZerobusSdk(host, unity_catalog_url)
+    ...     sdk = ZerobusSdk(host, unity_catalog_url, application_name="my-app/1.0")
     ...     stream = await sdk.create_stream(props, client_id, client_secret)
     ...     offset = await stream.ingest_record_offset(b"data")
     ...     await stream.flush()

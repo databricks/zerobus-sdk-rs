@@ -368,7 +368,7 @@ Main entry point. Sync: `from zerobus.sdk.sync import ZerobusSdk` / Async: `from
 sdk = ZerobusSdk(server_endpoint: str, unity_catalog_endpoint: str, application_name: Optional[str] = None)
 ```
 
-`application_name` is optional; when set it is appended to the `user-agent` header on gRPC requests to the Zerobus server (not on the OAuth token requests to the login service). It follows the `"<product>/<version>"` convention (e.g. `my-app/1.0`). The value is trimmed; blank is ignored and control characters are rejected.
+`application_name` is optional; when set it is appended to the `user-agent` header on gRPC requests to the Zerobus server (not on the OAuth token requests to the login service). It follows the `"<product>/<version>"` convention (e.g. `my-app/1.0`).
 
 ```python
 # Sync

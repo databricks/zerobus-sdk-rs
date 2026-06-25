@@ -14,8 +14,7 @@ use crate::arrow::{ArrowStreamConfigurationOptions, ZerobusArrowStream};
 use crate::auth::HeadersProviderWrapper;
 use crate::common::{
     apply_grpc_options, encoded_record_to_pybytes, extract_record_payload, extract_record_payloads,
-    map_error, normalize_application_name, StreamConfigurationOptions, TableProperties,
-    SDK_IDENTIFIER_PREFIX,
+    map_error, StreamConfigurationOptions, TableProperties, SDK_IDENTIFIER_PREFIX,
 };
 
 // =============================================================================
@@ -290,8 +289,6 @@ impl ZerobusSdk {
         unity_catalog_url: String,
         application_name: Option<String>,
     ) -> PyResult<Self> {
-        let application_name = normalize_application_name(application_name)?;
-
         let runtime = Arc::new(
             tokio::runtime::Builder::new_multi_thread()
                 .enable_all()
