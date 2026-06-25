@@ -15,37 +15,6 @@ import org.apache.arrow.vector.types.pojo.Schema;
  * #arrow(Schema)}. Each sub-builder exposes a {@code build()} that returns the matching stream
  * type.
  *
- * <h3>Example Usage</h3>
- *
- * <pre>{@code
- * // JSON stream
- * ZerobusJsonStream jsonStream = sdk.streamBuilder()
- *     .table("catalog.schema.table")
- *     .oauth(clientId, clientSecret)
- *     .recovery(true)
- *     .maxInflightRecords(100)
- *     .json()
- *     .build()
- *     .join();
- *
- * // Protocol Buffer stream
- * ZerobusProtoStream protoStream = sdk.streamBuilder()
- *     .table("catalog.schema.table")
- *     .oauth(clientId, clientSecret)
- *     .compiledProto(MyProto.getDescriptor().toProto())
- *     .build()
- *     .join();
- *
- * // Arrow Flight stream (Beta)
- * ZerobusArrowStream arrowStream = sdk.streamBuilder()
- *     .table("catalog.schema.table")
- *     .oauth(clientId, clientSecret)
- *     .arrow(schema)
- *     .ipcCompression(IPCCompressionType.ZSTD)
- *     .build()
- *     .join();
- * }</pre>
- *
  * <h3>Thread Safety</h3>
  *
  * <p>A {@code StreamBuilder} is not thread-safe and is intended to be configured and built from a
