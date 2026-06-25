@@ -124,6 +124,11 @@ impl ZerobusSdkBuilder {
     /// replaces the SDK prefix but this value is still appended — the wire
     /// value becomes `<sdk_identifier> <application_name>`.
     ///
+    /// The value is trimmed of surrounding whitespace; a blank value is ignored
+    /// and the default identifier is used. Values containing control characters
+    /// are rejected by [`build`](Self::build) with
+    /// [`ZerobusError::InvalidArgument`](crate::ZerobusError::InvalidArgument).
+    ///
     /// # Arguments
     ///
     /// * `name` - Application identifier, conventionally `<product>/<version>`
@@ -194,6 +199,7 @@ impl ZerobusSdkBuilder {
     /// Returns an error if:
     /// - The endpoint is not set
     /// - The workspace ID cannot be extracted from the endpoint
+    /// - The `application_name` contains control characters
     #[allow(clippy::result_large_err)]
     pub fn build(self) -> ZerobusResult<ZerobusSdk> {
         let zerobus_endpoint = self
@@ -225,13 +231,30 @@ impl ZerobusSdkBuilder {
             .tls_config
             .unwrap_or_else(|| Arc::new(SecureTlsConfig::new()));
 
+        // Normalize the optional application name.
+        let application_name = match self.application_name.as_deref() {
+            Some(name) => {
+                let trimmed = name.trim();
+                if trimmed.is_empty() {
+                    None
+                } else if trimmed.chars().any(char::is_control) {
+                    return Err(ZerobusError::InvalidArgument(
+                        "application_name must not contain control characters".to_string(),
+                    ));
+                } else {
+                    Some(trimmed)
+                }
+            }
+            None => None,
+        };
+
         let sdk_prefix: &str = match self.sdk_identifier_override.as_deref() {
             Some(override_id) if !override_id.is_empty() => override_id,
             _ => DEFAULT_SDK_IDENTIFIER,
         };
-        let sdk_identifier: Arc<str> = match self.application_name.as_deref() {
-            Some(app) if !app.is_empty() => Arc::from(format!("{} {}", sdk_prefix, app)),
-            _ => Arc::from(sdk_prefix),
+        let sdk_identifier: Arc<str> = match application_name {
+            Some(app) => Arc::from(format!("{} {}", sdk_prefix, app)),
+            None => Arc::from(sdk_prefix),
         };
 
         Ok(ZerobusSdk::new_with_config(
@@ -369,6 +392,48 @@ mod tests {
             .expect("should build");
 
         assert_eq!(&*sdk.sdk_identifier, crate::DEFAULT_SDK_IDENTIFIER);
+    }
+
+    #[test]
+    fn test_sdk_identifier_trims_application_name() {
+        let sdk = ZerobusSdkBuilder::new()
+            .endpoint("https://workspace.zerobus.databricks.com")
+            .application_name("  my-app/1.0  ")
+            .build()
+            .expect("should build");
+
+        let expected = format!("{} my-app/1.0", crate::DEFAULT_SDK_IDENTIFIER);
+        assert_eq!(&*sdk.sdk_identifier, expected);
+    }
+
+    #[test]
+    fn test_sdk_identifier_blank_application_name_falls_back_to_default() {
+        let sdk = ZerobusSdkBuilder::new()
+            .endpoint("https://workspace.zerobus.databricks.com")
+            .application_name("   ")
+            .build()
+            .expect("should build");
+
+        assert_eq!(&*sdk.sdk_identifier, crate::DEFAULT_SDK_IDENTIFIER);
+    }
+
+    #[test]
+    fn test_application_name_with_control_characters_is_rejected() {
+        for bad in ["my-app\n1.0", "my-app\r1.0", "my\tapp"] {
+            let result = ZerobusSdkBuilder::new()
+                .endpoint("https://workspace.zerobus.databricks.com")
+                .application_name(bad)
+                .build();
+
+            assert!(
+                matches!(
+                    result,
+                    Err(ZerobusError::InvalidArgument(ref msg)) if msg.contains("application_name")
+                ),
+                "expected InvalidArgument for {:?}",
+                bad
+            );
+        }
     }
 
     #[test]
