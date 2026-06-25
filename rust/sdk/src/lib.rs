@@ -48,6 +48,8 @@ mod default_token_factory;
 mod errors;
 mod headers_provider;
 mod landing_zone;
+#[cfg(feature = "testing")]
+mod multiplexed_stream;
 mod offset_generator;
 mod proxy;
 mod record_types;
@@ -96,6 +98,8 @@ pub use errors::ZerobusError;
 #[cfg(feature = "testing")]
 pub use headers_provider::NoAuthHeadersProvider;
 pub use headers_provider::{HeadersProvider, OAuthHeadersProvider};
+#[cfg(feature = "testing")]
+pub use multiplexed_stream::{MessageId, MultiplexedStream};
 pub use offset_generator::{OffsetId, OffsetIdGenerator};
 pub use proxy::{ConnectorFactory, ProxyConnector};
 pub use record_types::{
@@ -1511,12 +1515,18 @@ impl ZerobusStream {
         error: &ZerobusError,
         callback_tx: &Option<tokio::sync::mpsc::UnboundedSender<CallbackMessage>>,
     ) {
-        let mut failed_payloads = Vec::with_capacity(landing_zone.len());
+        // Hold the `failed_records` lock across the landing-zone drain so this
+        // serializes with `get_unacked_batches` (which drains the zone under
+        // the same lock): whichever runs first gets the records, and the other
+        // sees them in `failed_records`. Extend rather than overwrite for the
+        // same reason.
+        let mut failed = failed_records.write().await;
+        failed.reserve(landing_zone.len());
         let records = landing_zone.remove_all();
         let mut map = oneshot_map.lock().await;
         let error_message = error.to_string();
         for record in records {
-            failed_payloads.push(record.payload);
+            failed.push(record.payload);
             if let Some(sender) = map.remove(&record.offset_id) {
                 let _ = sender.send(Err(error.clone()));
             }
@@ -1527,7 +1537,6 @@ impl ZerobusStream {
                 ));
             }
         }
-        *failed_records.write().await = failed_payloads;
     }
 
     /// Internal method to wait for a specific offset to be acknowledged.
@@ -1886,8 +1895,20 @@ impl ZerobusStream {
     /// A vector of `EncodedBatch` items. Records are grouped by their original ingestion call.
     pub async fn get_unacked_batches(&self) -> ZerobusResult<Vec<EncodedBatch>> {
         if self.is_closed.load(Ordering::Relaxed) {
-            let failed = self.failed_records.read().await.clone();
-            return Ok(failed);
+            // The supervisor only moves landing-zone records into
+            // `failed_records` on a stream failure. A stream torn down without
+            // one (flush timed out during `close`, or `signal_shutdown` from a
+            // poisoned MultiplexedStream) can still hold unacked records in the
+            // landing zone; drain them here so they are reported too and so
+            // repeat calls return the same result.
+            let mut failed = self.failed_records.write().await;
+            failed.extend(
+                self.landing_zone
+                    .remove_all()
+                    .into_iter()
+                    .map(|request| request.payload),
+            );
+            return Ok(failed.clone());
         }
         if let Some(stream_id) = self.stream_id.as_deref() {
             error!(stream_id = %stream_id, "Cannot get unacked records from an active stream. Stream must be closed first.");
@@ -1900,6 +1921,22 @@ impl ZerobusStream {
             "Cannot get unacked records from an active stream. Stream must be closed first."
                 .to_string(),
         ))
+    }
+
+    #[cfg(feature = "testing")]
+    pub(crate) fn has_capacity(&self) -> bool {
+        self.landing_zone.len() < self.options.max_inflight_requests
+    }
+
+    // Signal the stream to stop accepting work and tear down its background
+    // tasks. Unlike `close`, this only needs `&self` — it relies on the
+    // cancellation token and `is_closed` flag, both of which are already
+    // interior-mutable. The `JoinHandle`s aren't reaped here; that happens in
+    // `close` or `Drop`.
+    #[cfg(feature = "testing")]
+    pub(crate) fn signal_shutdown(&self) {
+        self.is_closed.store(true, Ordering::Relaxed);
+        self.cancellation_token.cancel();
     }
 }
 

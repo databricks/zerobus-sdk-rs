@@ -17,7 +17,6 @@
   endpoints. Gated behind the `testing` feature flag.
 
 ### Bug Fixes
-
 - Redacted the OAuth authorization token from an error log and error message on the gRPC stream-setup path; a malformed token value is no longer written to logs.
 - A UC token that cannot be encoded as an HTTP `authorization` header value is now rejected at mint time rather than cached, so it cannot poison the cache and fail every stream creation until its refresh window.
 - Arrow Flight stream errors now preserve the server's gRPC status code instead of flattening it to `Unknown`. Previously a `FlightError` was wrapped via `tonic::Status::from_error`, which dropped the inner code, so non-retryable rejections (for example `PermissionDenied`) were misclassified as retryable and auth-rejection detection did not fire on the Arrow path.
@@ -26,6 +25,12 @@
 ### Documentation
 
 ### Internal Changes
+
+- Added `ZerobusStream::signal_shutdown` (crate-private), a `&self`-callable
+  helper that flips `is_closed` and cancels the cancellation token. Lets
+  `MultiplexedStream` tear down sub-stream background tasks from its poison
+  path and `Drop` without needing `&mut`. JoinHandle reaping still happens in
+  `close` or the existing `Drop` impl.
 
 ### Breaking Changes
 
