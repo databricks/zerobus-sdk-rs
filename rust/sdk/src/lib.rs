@@ -83,7 +83,7 @@ use databricks::zerobus::{
     CloseStreamSignal, CreateIngestStreamRequest, EphemeralStreamRequest, EphemeralStreamResponse,
     IngestRecordResponse, RecordType,
 };
-use landing_zone::LandingZone;
+use landing_zone::{Countable, LandingZone};
 
 /// **Beta**: Arrow Flight ingestion is in Beta. The API is stabilising but may
 /// still change before reaching GA.
@@ -153,6 +153,12 @@ pub type ZerobusResult<T> = Result<T, ZerobusError>;
 struct IngestRequest {
     payload: EncodedBatch,
     offset_id: OffsetId,
+}
+
+impl Countable for IngestRequest {
+    fn count(&self) -> usize {
+        self.payload.get_record_count()
+    }
 }
 
 /// Map of logical offset to oneshot sender used to send acknowledgments back to the client.
@@ -684,7 +690,8 @@ impl ZerobusStream {
 
             if !initial_stream_creation {
                 info!(
-                    pending_records = landing_zone.len(),
+                    pending_batches = landing_zone.len(),
+                    pending_records = landing_zone.total_count(),
                     "Stream lost; starting recovery"
                 );
             }
@@ -748,6 +755,13 @@ impl ZerobusStream {
                         }
                     } else {
                         is_closed.store(true, Ordering::Relaxed);
+                        error!(
+                            attempts = attempt.load(Ordering::Relaxed),
+                            max_attempts = options.recovery_retries + 1,
+                            table_name = %table_properties.table_name,
+                            "Recovery failed; giving up stream re-creation: {}",
+                            e
+                        );
                         Self::fail_all_pending_records(
                             landing_zone.clone(),
                             oneshot_map.clone(),
@@ -772,11 +786,15 @@ impl ZerobusStream {
             }
 
             // 2. Reset landing zone.
-            let resent_records = landing_zone_recovery.reset_observe();
-            if resent_records > 0 {
+            let resent_records = landing_zone_recovery.observed_count();
+            let resent_batches = landing_zone_recovery.reset_observe();
+            if resent_batches > 0 {
                 info!(
                     stream_id = %stream_id,
+                    resent_batches,
                     resent_records,
+                    pending_batches = landing_zone_recovery.len(),
+                    pending_records = landing_zone_recovery.total_count(),
                     "Recovered stream; re-sending unacknowledged records"
                 );
             }
@@ -1561,10 +1579,13 @@ impl ZerobusStream {
         failed.reserve(landing_zone.len());
         let records = landing_zone.remove_all();
         if !records.is_empty() {
+            let unacked_records: usize = records.iter().map(|r| r.payload.get_record_count()).sum();
             error!(
-                unacked_records = records.len(),
-                "Stream failed; {} records left unacknowledged and retained for retrieval via get_unacked_records/get_unacked_batches: {}",
+                unacked_batches = records.len(),
+                unacked_records,
+                "Stream failed; {} batches ({} records) left unacknowledged and retained for retrieval via get_unacked_records/get_unacked_batches: {}",
                 records.len(),
+                unacked_records,
                 error
             );
         }
