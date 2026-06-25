@@ -157,6 +157,18 @@ pub struct StreamConfigurationOptions {
     ///
     /// Default: `Some(5000)` (wait 5 seconds)
     pub callback_max_wait_time_ms: Option<u64>,
+
+    /// Maximum total encoded record byte size allowed per ingest call.
+    ///
+    /// This is the sum of all record bytes passed to a single
+    /// `ingest_record()` / `ingest_records()` (and their `_offset` variants) call.
+    /// Calls exceeding this limit fail fast with
+    /// [`ZerobusError::InvalidArgument`](crate::ZerobusError::InvalidArgument)
+    /// before any network I/O, matching the server-side limit.
+    ///
+    /// Default: 10 MiB minus envelope headroom (see
+    /// [`defaults::MAX_INGEST_PAYLOAD_BYTES`](crate::stream_options::defaults::MAX_INGEST_PAYLOAD_BYTES)).
+    pub max_ingest_payload_bytes: usize,
 }
 
 impl Default for StreamConfigurationOptions {
@@ -173,6 +185,7 @@ impl Default for StreamConfigurationOptions {
             stream_paused_max_wait_time_ms: None,
             ack_callback: None,
             callback_max_wait_time_ms: Some(defaults::CALLBACK_MAX_WAIT_TIME_MS),
+            max_ingest_payload_bytes: defaults::MAX_INGEST_PAYLOAD_BYTES,
         }
     }
 }

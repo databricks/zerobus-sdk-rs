@@ -765,10 +765,36 @@ Auto-recovered if `recovery` is enabled:
 Require manual intervention:
 - `InvalidUCTokenError` - Invalid OAuth credentials
 - `InvalidTableName` - Table doesn't exist or invalid format
-- `InvalidArgument` - Invalid parameters or schema mismatch
+- `InvalidArgument` - Invalid parameters, schema mismatch, or payload too large (see [Payload Size Limit](#payload-size-limit))
 - `Code::Unauthenticated` - Authentication failure
 - `Code::PermissionDenied` - Insufficient table permissions
 - `ChannelCreationError` - Failed to establish TLS connection
+
+### Payload Size Limit
+
+The Zerobus server applies a **10 MiB limit** to the raw record bytes of an ingest call, and *additionally* enforces a transport-layer limit on the full serialized request (record bytes plus protobuf framing and stream metadata). The SDK enforces a limit client-side so you get an immediate `InvalidArgument` error rather than a server rejection:
+
+```rust
+// This will immediately return Err(ZerobusError::InvalidArgument(...))
+let oversized = vec![0u8; 11 * 1024 * 1024];
+let result = stream.ingest_record_offset(oversized).await;
+// Err: Ingest payload too large: 11534336 bytes exceeds the configured limit of 10420224 bytes
+```
+
+The limit applies to the total encoded size of the call — the sum of all record bytes passed to `ingest_record_offset` or `ingest_records_offset`. Split large payloads across multiple calls to stay within the limit.
+
+The default limit is set **slightly below 10 MiB** to leave headroom for the request envelope, so that a payload accepted client-side isn't later rejected by the server's transport layer. It is configurable per stream via the builder (gRPC JSON/proto streams only — Arrow Flight streams do not enforce this limit, and setting it before `build_arrow()` logs a warning):
+
+```rust
+let stream = sdk
+    .stream_builder()
+    .table("catalog.schema.table")
+    .oauth("client-id", "client-secret")
+    .json()
+    .max_ingest_payload_bytes(5 * 1024 * 1024) // 5 MiB
+    .build()
+    .await?;
+```
 
 **Check if an error is retryable:**
 
