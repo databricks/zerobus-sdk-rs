@@ -231,7 +231,7 @@ impl ZerobusSdkBuilder {
             .tls_config
             .unwrap_or_else(|| Arc::new(SecureTlsConfig::new()));
 
-        // Normalize the optional application name.
+        // Normalize and validate (with reasonable effort) the application name.
         let application_name = match self.application_name.as_deref() {
             Some(name) => {
                 let trimmed = name.trim();
