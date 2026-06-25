@@ -8,7 +8,7 @@ This Software includes the following components:
 
 ## Rust Dependencies (via FFI)
 
-This Go SDK wraps the Zerobus Rust SDK via C FFI. The compiled native library includes the following open source components:
+This C++ SDK wraps the Zerobus Rust SDK via C FFI. The compiled native library includes the following open source components:
 
 ### MIT License
 
@@ -35,10 +35,8 @@ This Go SDK wraps the Zerobus Rust SDK via C FFI. The compiled native library in
 - **hyper-util**: Copyright (c) 2023 Sean McArthur (https://github.com/hyperium/hyper-util)
 - **arrow-ipc**: Copyright (c) 2020 Apache Arrow contributors (https://github.com/apache/arrow-rs)
 
-## Go Dependencies
+## C++ Dependencies
 
-The Go SDK itself has no external Go runtime dependencies. The Go standard library and CGO are used for the FFI bridge:
-
-- **Go Programming Language**: Copyright (c) 2009 The Go Authors (https://golang.org/) — BSD-style license
+The C++ SDK itself has no external C++ runtime dependencies. It links the prebuilt Zerobus FFI library (`rust/ffi/`) through its C header and depends only on the C++ standard library.
 
 For a complete list of Rust dependencies and their licenses, see the `../rust/sdk/Cargo.toml` and `../rust/ffi/Cargo.toml` files.
