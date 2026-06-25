@@ -45,7 +45,7 @@ mod sender;
 mod supervisor;
 mod types;
 
-use types::{IngestRequest, OneshotMap};
+use types::{IngestRequest, OneshotMap, RecordLandingZone};
 
 /// Maximum time to wait for the receiver/sender tasks to finish during stream
 /// teardown.
@@ -101,7 +101,7 @@ pub struct ZerobusStream {
     // `stream/grpc/`) per Rust's visibility rules. That is what we want — no
     // external crate or other module should reach into stream internals.
     /// Logical landing zone that stores records the user has submitted but the sender task has not yet placed on the wire.
-    landing_zone: Arc<LandingZone<Box<IngestRequest>>>,
+    landing_zone: RecordLandingZone,
     /// Map of logical offset to oneshot sender.
     oneshot_map: Arc<tokio::sync::Mutex<OneshotMap>>,
     /// Supervisor task that manages the stream lifecycle such as stream creation, recovery, etc.
