@@ -34,6 +34,7 @@
   `MultiplexedStream` tear down sub-stream background tasks from its poison
   path and `Drop` without needing `&mut`. JoinHandle reaping still happens in
   `close` or the existing `Drop` impl.
+- Split `sdk/src/lib.rs` into per-concern modules (`sdk.rs`, `stream/grpc/`). No public API change — all `pub use` re-exports preserved. The new layout separates transport-agnostic logic (ingestion, ack tracking, teardown, callback dispatch) from gRPC-specific code (connection setup, sender/receiver tasks, supervisor) and places the gRPC transport under `stream/grpc/`, leaving room for `stream/arrow/` and a shared `stream/` core in follow-ups.
 
 ### Breaking Changes
 
