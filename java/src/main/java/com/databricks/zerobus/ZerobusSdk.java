@@ -113,16 +113,7 @@ public class ZerobusSdk implements AutoCloseable {
    * Returns a fluent {@link StreamBuilder} for creating a stream on this SDK.
    *
    * <p>This is the recommended way to create streams. It supports JSON, Protocol Buffer, and Arrow
-   * Flight streams via a single chainable API:
-   *
-   * <pre>{@code
-   * ZerobusJsonStream stream = sdk.streamBuilder()
-   *     .table("catalog.schema.table")
-   *     .oauth(clientId, clientSecret)
-   *     .json()
-   *     .build()
-   *     .join();
-   * }</pre>
+   * Flight streams via a single chainable API.
    *
    * @return a new stream builder bound to this SDK
    * @see StreamBuilder

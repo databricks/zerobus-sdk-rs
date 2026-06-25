@@ -983,8 +983,6 @@ StreamBuilder streamBuilder()
 ```
 Returns a fluent [`StreamBuilder`](#streambuilder) for creating JSON, Protocol Buffer, or Arrow Flight streams. This is the recommended way to create streams.
 
-> The `createStream`, `createJsonStream`, `createProtoStream`, and `createArrowStream` methods below are deprecated in favor of `streamBuilder()` and will be removed in the next major release.
-
 ```java
 <RecordType extends Message> CompletableFuture<ZerobusStream<RecordType>> createStream(
     TableProperties<RecordType> tableProperties,
@@ -1146,7 +1144,7 @@ Returns unacknowledged records grouped by batch.
 
 ### ZerobusJsonStream
 
-Stream for JSON ingestion with method-level generics. Use `ZerobusSdk.streamBuilder()` to create instances.
+Stream for JSON ingestion with method-level generics. Use `ZerobusSdk.streamBuilder().json()` to create instances.
 
 **Single Record Methods:**
 
@@ -1197,7 +1195,7 @@ Returns unacknowledged records grouped by batch.
 
 > **Beta.** Arrow Flight ingestion is in Beta. The API is stabilising but may still change before reaching GA.
 
-Stream for Apache Arrow Flight ingestion of `VectorSchemaRoot` batches. Use `ZerobusSdk.streamBuilder()` to create instances. Requires `arrow-vector` + `arrow-memory-netty` on the classpath and JDK 9+ `--add-opens` flags (see [Dependencies](#dependencies)).
+Stream for Apache Arrow Flight ingestion of `VectorSchemaRoot` batches. Use `ZerobusSdk.streamBuilder().arrow()` to create instances. Requires `arrow-vector` + `arrow-memory-netty` on the classpath and JDK 9+ `--add-opens` flags (see [Dependencies](#dependencies)).
 
 **Batch Ingestion:**
 
