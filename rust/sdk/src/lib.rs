@@ -48,7 +48,6 @@ mod default_token_factory;
 mod errors;
 mod headers_provider;
 mod landing_zone;
-#[cfg(feature = "testing")]
 mod multiplexed_stream;
 mod offset_generator;
 mod proxy;
@@ -91,14 +90,13 @@ use landing_zone::{Countable, LandingZone};
 pub use arrow_configuration::ArrowStreamConfigurationOptions;
 #[cfg(feature = "arrow-flight")]
 pub use arrow_stream::{ArrowSchema, DataType, Field, RecordBatch, TimeUnit, ZerobusArrowStream};
-pub use builder::{StreamBuilder, ZerobusSdkBuilder};
+pub use builder::{MultiplexedStreamBuilder, StreamBuilder, ZerobusSdkBuilder};
 pub use callbacks::AckCallback;
 pub use default_token_factory::DefaultTokenFactory;
 pub use errors::ZerobusError;
 #[cfg(feature = "testing")]
 pub use headers_provider::NoAuthHeadersProvider;
 pub use headers_provider::{HeadersProvider, OAuthHeadersProvider};
-#[cfg(feature = "testing")]
 pub use multiplexed_stream::{MessageId, MultiplexedStream};
 pub use offset_generator::{OffsetId, OffsetIdGenerator};
 pub use proxy::{ConnectorFactory, ProxyConnector};
@@ -1989,7 +1987,6 @@ impl ZerobusStream {
         ))
     }
 
-    #[cfg(feature = "testing")]
     pub(crate) fn has_capacity(&self) -> bool {
         self.landing_zone.len() < self.options.max_inflight_requests
     }
@@ -1999,7 +1996,6 @@ impl ZerobusStream {
     // cancellation token and `is_closed` flag, both of which are already
     // interior-mutable. The `JoinHandle`s aren't reaped here; that happens in
     // `close` or `Drop`.
-    #[cfg(feature = "testing")]
     pub(crate) fn signal_shutdown(&self) {
         self.is_closed.store(true, Ordering::Relaxed);
         self.cancellation_token.cancel();

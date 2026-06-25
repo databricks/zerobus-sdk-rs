@@ -12,6 +12,9 @@ This directory contains examples demonstrating Protocol Buffers-based data inges
 - [Batch Example](#batch-example)
   - [Running the Example](#running-the-example-1)
   - [Code Highlights](#code-highlights-1)
+- [Multiplexed Example](#multiplexed-example)
+  - [Running the Example](#running-the-example-2)
+  - [Code Highlights](#code-highlights-2)
 - [Adapting for Your Custom Table](#adapting-for-your-custom-table)
   - [Generate Schema Files](#generate-schema-files)
   - [Update main.rs](#update-mainrs)
@@ -28,6 +31,7 @@ Protocol Buffers examples provide type safety and better performance. **No schem
 **Available examples:**
 - **`single.rs`** - Ingest records one at a time using `ingest_record_offset()` / `ingest_record()`
 - **`batch.rs`** - Ingest multiple records at once using `ingest_records_offset()` / `ingest_records()`
+- **`multiplexed.rs`** - Ingest across multiple protobuf streams using `.multiplexed(n)` when global ordering is not required
 
 ## Three Ways to Pass Data
 
@@ -177,6 +181,61 @@ if let Some(offset) = stream.ingest_records_offset(batch).await? {
 - **Single acknowledgment**: One offset ID for the whole batch
 - **Empty batches**: Returns `None` (no-op)
 
+## Multiplexed Example
+
+Use multiplexing when the workload does not require global record ordering and
+you want to distribute ingestion across multiple protobuf gRPC sub-streams.
+
+### Running the Example
+
+1. Configure credentials in `multiplexed.rs` (see [Prerequisites](../README.md#prerequisites))
+
+2. Run the example:
+   ```bash
+   cargo run -p rust-examples-proto --example proto_multiplexed
+   ```
+
+**Expected output:**
+```
+=== Message ID-based API (Multiplexed) ===
+[Auto-encoding] Record sent with message ID: MessageId(stream=0, offset=0)
+[Auto-encoding] Record acknowledged with message ID: MessageId(stream=0, offset=0)
+[Pre-encoded] Record sent with message ID: MessageId(stream=1, offset=0)
+[Pre-encoded] Record acknowledged with message ID: MessageId(stream=1, offset=0)
+[Backward-compatible] Record sent with message ID: MessageId(stream=2, offset=0)
+[Backward-compatible] Record acknowledged with message ID: MessageId(stream=2, offset=0)
+All records flushed
+Stream closed successfully
+```
+
+### Code Highlights
+
+```rust
+let descriptor_proto = load_descriptor_proto(
+    "output/orders.descriptor",
+    "orders.proto",
+    "table_Orders"
+);
+
+let mut stream = sdk
+    .stream_builder()
+    .table(TABLE_NAME)
+    .oauth(DATABRICKS_CLIENT_ID, DATABRICKS_CLIENT_SECRET)
+    .compiled_proto(descriptor_proto)
+    .multiplexed(4)
+    .build()
+    .await?;
+
+let message_id = stream.ingest_record(ProtoMessage(order)).await?;
+stream.wait_for_message_id(message_id).await?;
+stream.close().await?;
+```
+
+`MultiplexedStream` returns `MessageId` values instead of `OffsetId` values
+because records may be queued on different sub-streams. Per-sub-stream ordering
+is preserved, but message ids are not globally ordered across the multiplexed
+stream.
+
 ## Adapting for Your Custom Table
 
 To use your own table, you need to generate schema files and update the example code.
@@ -196,7 +255,7 @@ cargo run -- \
   --output-dir "../../examples/proto/output"
 ```
 
-Both `single.rs` and `batch.rs` share the same `output/` directory, so the generated schema files only need to be produced once.
+`single.rs`, `batch.rs`, and `multiplexed.rs` share the same `output/` directory, so the generated schema files only need to be produced once.
 
 This generates:
 - `output/<your_table>.proto` - Protocol Buffer schema definition

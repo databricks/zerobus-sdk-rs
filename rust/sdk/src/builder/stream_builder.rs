@@ -27,7 +27,9 @@ use crate::databricks::zerobus::RecordType;
 use crate::headers_provider::NoAuthHeadersProvider;
 use crate::headers_provider::{HeadersProvider, OAuthHeadersProvider};
 use crate::stream_configuration::StreamConfigurationOptions;
-use crate::{TableProperties, ZerobusError, ZerobusResult, ZerobusSdk, ZerobusStream};
+use crate::{
+    MultiplexedStream, TableProperties, ZerobusError, ZerobusResult, ZerobusSdk, ZerobusStream,
+};
 
 #[cfg(feature = "arrow-flight")]
 use crate::arrow_configuration::ArrowStreamConfigurationOptions;
@@ -35,6 +37,7 @@ use crate::arrow_configuration::ArrowStreamConfigurationOptions;
 use crate::arrow_stream::{ArrowSchema, ArrowTableProperties, ZerobusArrowStream};
 
 /// Internal representation of the authentication configuration.
+#[derive(Clone)]
 enum AuthConfig {
     OAuth {
         client_id: String,
@@ -46,6 +49,7 @@ enum AuthConfig {
 }
 
 /// Which record format was selected.
+#[derive(Clone)]
 enum FormatConfig {
     Json,
     CompiledProto(Box<prost_types::DescriptorProto>),
@@ -102,6 +106,31 @@ pub struct StreamBuilder<'a> {
     arrow_config: ArrowStreamConfigurationOptions,
 }
 
+/// Fluent builder for creating a [`MultiplexedStream`].
+///
+/// Created by calling [`StreamBuilder::multiplexed`]. It preserves the same
+/// table, authentication, format, and stream options configured on the source
+/// [`StreamBuilder`], then opens the requested number of protobuf/JSON gRPC
+/// sub-streams when [`build`](Self::build) is called.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// let stream = sdk
+///     .stream_builder()
+///     .table("catalog.schema.table")
+///     .oauth("client-id", "client-secret")
+///     .compiled_proto(descriptor_proto)
+///     .multiplexed(4)
+///     .build()
+///     .await?;
+/// ```
+#[must_use = "a MultiplexedStreamBuilder does nothing until `.build()` is called"]
+pub struct MultiplexedStreamBuilder<'a> {
+    inner: StreamBuilder<'a>,
+    stream_count: usize,
+}
+
 impl fmt::Debug for StreamBuilder<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let auth_kind = match &self.auth {
@@ -123,6 +152,15 @@ impl fmt::Debug for StreamBuilder<'_> {
             .field("auth", &auth_kind)
             .field("format", &format_kind)
             .finish_non_exhaustive()
+    }
+}
+
+impl fmt::Debug for MultiplexedStreamBuilder<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("MultiplexedStreamBuilder")
+            .field("inner", &self.inner)
+            .field("stream_count", &self.stream_count)
+            .finish()
     }
 }
 
@@ -199,6 +237,23 @@ impl<'a> StreamBuilder<'a> {
     pub fn arrow(mut self, schema: Arc<ArrowSchema>) -> Self {
         self.format = Some(FormatConfig::Arrow(schema));
         self
+    }
+
+    /// Build multiple protobuf/JSON gRPC streams and expose them as one
+    /// round-robin [`MultiplexedStream`].
+    ///
+    /// Use this for near-linear throughput scaling when the caller does not
+    /// require global record ordering. All sub-streams use the same table,
+    /// authentication, format, and stream options configured on this builder.
+    /// `stream_count` must be between 1 and [`MultiplexedStream::MAX_STREAMS`].
+    ///
+    /// Arrow Flight streams are not multiplexed by this API; use
+    /// `build_arrow()` for Arrow ingestion.
+    pub fn multiplexed(self, stream_count: usize) -> MultiplexedStreamBuilder<'a> {
+        MultiplexedStreamBuilder {
+            inner: self,
+            stream_count,
+        }
     }
 
     /// Enable or disable automatic stream recovery.
@@ -385,47 +440,53 @@ impl<'a> StreamBuilder<'a> {
         }
     }
 
-    /// Build and open a gRPC ingestion stream (JSON or compiled protobuf).
-    ///
-    /// Returns an error if table name, authentication, or format has not been set,
-    /// or if an Arrow format was selected (use `build_arrow()` instead).
-    pub async fn build(mut self) -> ZerobusResult<ZerobusStream> {
-        self.validate()?;
-        let headers_provider = self.resolve_headers_provider()?;
-
-        let (record_type, descriptor_proto) = match self.format {
-            Some(FormatConfig::Json) => (RecordType::Json, None),
-            Some(FormatConfig::CompiledProto(desc)) => (RecordType::Proto, Some(*desc)),
+    fn grpc_record_config(
+        &self,
+        _arrow_format_error: &'static str,
+    ) -> ZerobusResult<(RecordType, Option<prost_types::DescriptorProto>)> {
+        match self.format.as_ref() {
+            Some(FormatConfig::Json) => Ok((RecordType::Json, None)),
+            Some(FormatConfig::CompiledProto(desc)) => {
+                Ok((RecordType::Proto, Some((**desc).clone())))
+            }
             #[cfg(feature = "arrow-flight")]
             Some(FormatConfig::Arrow(_)) => {
-                return Err(ZerobusError::InvalidArgument(
-                    "Arrow format requires .build_arrow() instead of .build()".into(),
-                ));
+                Err(ZerobusError::InvalidArgument(_arrow_format_error.into()))
             }
-            None => {
-                return Err(ZerobusError::InvalidArgument(
-                    "record format is required: call .json() or .compiled_proto() before .build()"
-                        .into(),
-                ));
-            }
-        };
+            None => Err(ZerobusError::InvalidArgument(
+                "record format is required: call .json() or .compiled_proto() before .build()"
+                    .into(),
+            )),
+        }
+    }
 
-        self.grpc_config.record_type = record_type;
+    async fn build_grpc_stream(&self) -> ZerobusResult<ZerobusStream> {
+        self.validate()?;
+        let headers_provider = self.resolve_headers_provider()?;
+        let (record_type, descriptor_proto) =
+            self.grpc_record_config("Arrow format requires .build_arrow() instead of .build()")?;
+
+        let mut grpc_config = self.grpc_config.clone();
+        grpc_config.record_type = record_type;
         let table_properties = TableProperties {
-            table_name: self.table_name,
+            table_name: self.table_name.clone(),
             descriptor_proto,
         };
 
         let channel = self.sdk.get_or_create_channel_zerobus_client().await?;
-        let stream = ZerobusStream::new_stream(
-            channel,
-            table_properties,
-            headers_provider,
-            self.grpc_config,
-        )
-        .await?;
+        let stream =
+            ZerobusStream::new_stream(channel, table_properties, headers_provider, grpc_config)
+                .await?;
         crate::client_warnings::record_stream_creation(stream.table_properties.table_name.as_str());
         Ok(stream)
+    }
+
+    /// Build and open a gRPC ingestion stream (JSON or compiled protobuf).
+    ///
+    /// Returns an error if table name, authentication, or format has not been set,
+    /// or if an Arrow format was selected (use `build_arrow()` instead).
+    pub async fn build(self) -> ZerobusResult<ZerobusStream> {
+        self.build_grpc_stream().await
     }
 
     /// Build and open an Arrow Flight ingestion stream.
@@ -477,6 +538,53 @@ impl<'a> StreamBuilder<'a> {
         .await?;
         crate::client_warnings::record_stream_creation(&table_name);
         Ok(stream)
+    }
+}
+
+impl<'a> MultiplexedStreamBuilder<'a> {
+    fn validate_stream_count(&self) -> ZerobusResult<()> {
+        if self.stream_count == 0 {
+            return Err(ZerobusError::InvalidArgument(
+                "multiplexed stream count must be at least 1".into(),
+            ));
+        }
+        if self.stream_count > MultiplexedStream::MAX_STREAMS {
+            return Err(ZerobusError::InvalidArgument(format!(
+                "multiplexed stream count must be at most {}",
+                MultiplexedStream::MAX_STREAMS
+            )));
+        }
+        Ok(())
+    }
+
+    /// Validate that the multiplexed stream builder has all required fields.
+    ///
+    /// Returns `Ok(())` when the wrapped stream builder is valid, the selected
+    /// format is protobuf/JSON gRPC, and the stream count is within the
+    /// supported range.
+    pub fn validate(&self) -> ZerobusResult<()> {
+        self.validate_stream_count()?;
+        self.inner.validate()?;
+        self.inner.grpc_record_config(
+            "Arrow format is not supported by .multiplexed(); use .build_arrow() for Arrow ingestion",
+        )?;
+        Ok(())
+    }
+
+    /// Build and open a multiplexed protobuf/JSON gRPC ingestion stream.
+    ///
+    /// Each sub-stream is created with the same table, authentication, format,
+    /// and stream options configured before [`StreamBuilder::multiplexed`] was
+    /// called.
+    pub async fn build(self) -> ZerobusResult<MultiplexedStream> {
+        self.validate()?;
+
+        let mut streams = Vec::with_capacity(self.stream_count);
+        for _ in 0..self.stream_count {
+            streams.push(self.inner.build_grpc_stream().await?);
+        }
+
+        Ok(MultiplexedStream::new(streams))
     }
 }
 
@@ -596,6 +704,89 @@ mod tests {
             builder.grpc_config.max_ingest_payload_bytes,
             5 * 1024 * 1024
         );
+    }
+
+    #[test]
+    fn multiplexed_builder_validates_json() {
+        let sdk = test_sdk();
+        let builder = sdk
+            .stream_builder()
+            .table("catalog.schema.table")
+            .oauth("a", "b")
+            .json()
+            .multiplexed(4);
+
+        builder.validate().expect("valid multiplexed builder");
+        let debug_str = format!("{:?}", builder);
+        assert!(debug_str.contains("MultiplexedStreamBuilder"));
+        assert!(debug_str.contains("stream_count"));
+    }
+
+    #[test]
+    fn multiplexed_builder_validates_compiled_proto() {
+        let sdk = test_sdk();
+        let builder = sdk
+            .stream_builder()
+            .table("catalog.schema.table")
+            .oauth("a", "b")
+            .compiled_proto(prost_types::DescriptorProto::default())
+            .multiplexed(2);
+
+        builder.validate().expect("valid multiplexed proto builder");
+    }
+
+    #[test]
+    fn multiplexed_builder_rejects_invalid_stream_count() {
+        let sdk = test_sdk();
+
+        let zero = sdk
+            .stream_builder()
+            .table("catalog.schema.table")
+            .oauth("a", "b")
+            .json()
+            .multiplexed(0)
+            .validate();
+        assert!(matches!(
+            zero,
+            Err(ZerobusError::InvalidArgument(msg)) if msg.contains("at least 1")
+        ));
+
+        let too_many = sdk
+            .stream_builder()
+            .table("catalog.schema.table")
+            .oauth("a", "b")
+            .json()
+            .multiplexed(MultiplexedStream::MAX_STREAMS + 1)
+            .validate();
+        assert!(matches!(
+            too_many,
+            Err(ZerobusError::InvalidArgument(msg)) if msg.contains("at most")
+        ));
+    }
+
+    #[cfg(feature = "arrow-flight")]
+    #[test]
+    fn multiplexed_builder_rejects_arrow() {
+        use arrow_schema::{DataType, Field, Schema as ArrowSchema};
+
+        let sdk = test_sdk();
+        let schema = Arc::new(ArrowSchema::new(vec![Field::new(
+            "id",
+            DataType::Int32,
+            false,
+        )]));
+        let result = sdk
+            .stream_builder()
+            .table("catalog.schema.table")
+            .oauth("a", "b")
+            .arrow(schema)
+            .multiplexed(2)
+            .validate();
+
+        assert!(matches!(
+            result,
+            Err(ZerobusError::InvalidArgument(msg)) if msg.contains("not supported by .multiplexed()")
+        ));
     }
 
     #[tokio::test]

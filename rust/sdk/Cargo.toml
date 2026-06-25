@@ -44,7 +44,7 @@ arrow-flight = { workspace = true, optional = true }
 arrow-array = { workspace = true, optional = true }
 arrow-schema = { workspace = true, optional = true }
 arrow-ipc = { workspace = true, optional = true, features = ["lz4", "zstd"] }
-futures = { workspace = true, optional = true }
+futures.workspace = true
 
 [dev-dependencies]
 tracing-subscriber.workspace = true
@@ -63,10 +63,10 @@ prost-build = { version = "0.14", optional = true }
 [features]
 default = []
 # Arrow Flight is in Beta
-arrow-flight = ["dep:arrow-flight", "dep:arrow-array", "dep:arrow-schema", "dep:arrow-ipc", "dep:futures"]
+arrow-flight = ["dep:arrow-flight", "dep:arrow-array", "dep:arrow-schema", "dep:arrow-ipc"]
 # Zero-copy protobuf parser.
 zeroparser = ["dep:self_cell", "dep:prost-build"]
-testing = ["dep:futures"]
+testing = []
 
 [[test]]
 name = "zeroparser_e2e"

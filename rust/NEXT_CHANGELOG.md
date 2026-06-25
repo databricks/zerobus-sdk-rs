@@ -16,6 +16,7 @@
   `.tls_config(Arc::new(NoTlsConfig))` when connecting to plaintext `http://`
   endpoints. Gated behind the `testing` feature flag.
 - Added a configurable payload size limit per `ingest_record_offset` / `ingest_records_offset` call. Attempts to ingest more than the limit of encoded record data in a single call now return `ZerobusError::InvalidArgument` immediately, before any network I/O. The default is set slightly below the 10 MiB server limit to leave headroom for the request envelope (protobuf framing/stream metadata), so payloads accepted client-side are not later rejected by the server's transport layer. The limit is tunable per stream via `StreamBuilder::max_ingest_payload_bytes` (gRPC JSON/proto streams only; Arrow Flight streams do not enforce it and log a warning if it is set before `build_arrow()`).
+- Added stream multiplexing through `StreamBuilder::multiplexed(stream_count).build()`. The builder opens multiple gRPC sub-streams behind one `MultiplexedStream` for near-linear throughput scaling when global record ordering is not required. Multiplexed ingest calls return `MessageId` values, which can be acknowledged with `wait_for_message_id` if needed.
 - Added stream lifecycle logging to make recovery observable. The SDK now logs (at `info`) when recovery starts and how many records are pending, and when a recovered stream re-sends unacknowledged records and how many. Each failed stream-creation attempt is logged (at `warn`) with its attempt number and retryability, and a non-retryable failure logs (at `error`) how many records were left unacknowledged (these are retained for retrieval via `get_unacked_records`/`get_unacked_batches`). These counts now distinguish in-flight batches from the true record count they carry (a single `ingest_records` can be one batch but many records), and a terminal recovery failure now always emits a single `error` even when no records remain pending.
 
 ### Bug Fixes
@@ -25,6 +26,8 @@
 - Fixed Arrow Flight streams over-splitting batches that were deserialized from Arrow IPC bytes. The zero-copy IPC reader makes every column buffer report its whole allocation size, so the Flight encoder's `split_batch_for_grpc_response` over-estimated batch size and split it into many small `FlightData` messages — inflating message counts and rendering IPC compression ineffective. The encoder now sizes batches with a slice-aware calculation (`ArrayData::get_slice_memory_size`) so already-sliced/IPC-decoded batches are measured accurately, with no extra data copy. Shipped via a vendored `arrow-flight` (`58.3.0`) referenced as a workspace `path` dependency (see `rust/third_party/arrow-flight`); fixes [arrow-rs#9388](https://github.com/apache/arrow-rs/issues/9388) / [#5352](https://github.com/apache/arrow-rs/issues/5352).
 
 ### Documentation
+
+- Added Rust README and protobuf example coverage for multiplexed stream ingestion.
 
 ### Internal Changes
 
@@ -43,3 +46,4 @@
 - Added `ZerobusSdkBuilder::token_cache_enabled(bool)` to enable or disable OAuth token caching (default enabled).
 - Added `ZerobusSdkBuilder::token_refresh_buffer(Duration)` to configure how long before a cached token's expiry it is refreshed (default 5 minutes).
 - Added `HeadersProvider::invalidate` with a default no-op implementation; the SDK calls it when the server rejects the supplied credentials so a provider can drop cached auth state. Existing trait implementations are unaffected.
+- Added `StreamBuilder::multiplexed(usize) -> MultiplexedStreamBuilder` and made `MultiplexedStream` / `MessageId` part of the normal public Rust API instead of `testing`-only exports.

@@ -1,10 +1,10 @@
 //! Fan-out wrapper that distributes ingestion across multiple [`ZerobusStream`]s.
 //!
-//! A single `ZerobusStream` is throughput-limited by its in-flight window;
 //! `MultiplexedStream` routes records round-robin across a fixed set of
-//! sub-streams to raise aggregate throughput. When the chosen sub-stream is at
-//! capacity the call awaits drain rather than rerouting, so per-sub-stream
-//! ordering is preserved.
+//! sub-streams for near-linear throughput scaling when the caller does not
+//! require global record ordering. When the chosen sub-stream is at capacity
+//! the call awaits drain rather than rerouting, so per-sub-stream ordering is
+//! preserved.
 //!
 //! Each ingest returns an opaque [`MessageId`] that packs the sub-stream index
 //! and its offset into a single `i64` (6 bits of stream index → up to 64
@@ -83,8 +83,8 @@ impl MessageId {
 
 /// Distributes ingestion round-robin across a fixed set of [`ZerobusStream`]s.
 ///
-/// See the [module-level documentation](self) for routing, `MessageId`, and
-/// poisoning semantics.
+/// See the crate documentation for routing, `MessageId`, and poisoning
+/// semantics.
 pub struct MultiplexedStream {
     streams: Vec<ZerobusStream>,
     round_robin_counter: AtomicUsize,
@@ -92,6 +92,9 @@ pub struct MultiplexedStream {
 }
 
 impl MultiplexedStream {
+    /// Maximum number of sub-streams supported by a multiplexed stream.
+    pub const MAX_STREAMS: usize = 1 << STREAM_BITS;
+
     /// Creates a multiplexed stream over the given sub-streams.
     ///
     /// # Panics
@@ -103,9 +106,9 @@ impl MultiplexedStream {
             "MultiplexedStream requires at least one sub-stream"
         );
         assert!(
-            streams.len() <= (1 << STREAM_BITS),
+            streams.len() <= Self::MAX_STREAMS,
             "MultiplexedStream supports at most {} sub-streams",
-            1 << STREAM_BITS
+            Self::MAX_STREAMS
         );
         Self {
             streams,

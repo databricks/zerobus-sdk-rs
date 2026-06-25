@@ -42,6 +42,7 @@ The Zerobus Rust SDK provides a robust, async-first interface for ingesting larg
 - **Built-in Recovery** - Automatic retry and reconnection for transient failures
 - **High Throughput** - Configurable inflight record limits for optimal performance
 - **Batch Ingestion** - Ingest multiple records at once with all-or-nothing semantics for maximum throughput
+- **Stream Multiplexing** - Distribute protobuf/JSON records across multiple sub-streams for near-linear throughput scaling when global ordering is not required
 - **Flexible Serialization** - Support for both JSON (simple) and Protocol Buffers (type-safe) data formats
 - **Type Safety** - Protocol Buffers ensure schema validation at compile time
 - **Schema Generation** - CLI tool to generate protobuf schemas from Unity Catalog tables
@@ -118,6 +119,7 @@ zerobus_rust_sdk/
 │   │   ├── stream_options.rs           # Shared stream configuration
 │   │   ├── tls_config.rs               # TLS configuration strategies
 │   │   ├── landing_zone.rs             # Inflight record buffer
+│   │   ├── multiplexed_stream.rs       # JSON/proto stream fan-out
 │   │   ├── offset_generator.rs         # Logical offset tracking
 │   │   ├── proxy.rs                    # HTTP proxy support
 │   │   ├── arrow_stream.rs             # Arrow Flight stream (feature: arrow-flight)
@@ -162,6 +164,7 @@ zerobus_rust_sdk/
 │   │   ├── Cargo.toml
 │   │   ├── single.rs                   # Protocol Buffers single-record example
 │   │   ├── batch.rs                    # Protocol Buffers batch ingestion example
+│   │   ├── multiplexed.rs              # Multiplexed Protocol Buffers example
 │   │   └── output/                     # Generated schema files (shared)
 │   └── arrow/                          # Arrow Flight example (feature: arrow-flight, Beta)
 │       ├── README.md
@@ -173,6 +176,7 @@ zerobus_rust_sdk/
 │   │   ├── mock_grpc.rs                # Mock Zerobus gRPC server
 │   │   ├── mock_arrow_flight.rs        # Mock Arrow Flight server
 │   │   ├── rust_tests.rs               # Core SDK test suite
+│   │   ├── multiplexed_stream_tests.rs # Multiplexed stream test suite
 │   │   ├── proxy_tests.rs              # HTTP proxy tests
 │   │   ├── arrow_tests.rs              # Arrow Flight test suite
 │   │   └── utils.rs                    # Shared test utilities
@@ -490,7 +494,42 @@ let mut stream = sdk
     .await?;
 ```
 
-Setters can be called in any order. The builder validates at `build()` time that both authentication and format have been configured.
+#### Multiplexed Stream
+
+Use `.multiplexed(stream_count)` before `.build()` to open multiple
+gRPC sub-streams behind one handle. This can provide near-linear throughput
+scaling when your workload does not require global record ordering.
+
+```rust
+use databricks_zerobus_ingest_sdk::ProtoMessage;
+
+let descriptor_proto = load_descriptor_proto(
+    "output/orders.descriptor",
+    "orders.proto",
+    "table_Orders",
+);
+
+let mut stream = sdk
+    .stream_builder()
+    .table("catalog.schema.orders")
+    .oauth(client_id, client_secret)
+    .compiled_proto(descriptor_proto)
+    .max_inflight_requests(10_000)
+    .multiplexed(4)
+    .build()
+    .await?;
+
+let message_id = stream.ingest_record(ProtoMessage(order)).await?;
+stream.wait_for_message_id(message_id).await?;
+stream.close().await?;
+```
+
+`MultiplexedStream` returns `MessageId` values instead of `OffsetId` values
+because each id records which sub-stream accepted the record. Per-sub-stream
+ordering is preserved, but message ids are not globally ordered across the
+multiplexed stream. Arrow Flight streams are not multiplexed by this API.
+
+Setters can be called in any order before `.multiplexed(...)` or `.build()`. The builder validates at `build()` time that both authentication and format have been configured.
 
 ### 5. Ingest Data
 
@@ -553,6 +592,34 @@ for i in 0..100_000 {
     }
 }
 stream.flush().await?;
+```
+
+#### Multiplexed High Throughput Pattern
+
+When global ordering is not required, a multiplexed stream distributes records
+round-robin across multiple protobuf gRPC sub-streams:
+
+```rust
+let descriptor_proto = load_descriptor_proto(
+    "output/orders.descriptor",
+    "orders.proto",
+    "table_Orders",
+);
+
+let mut stream = sdk
+    .stream_builder()
+    .table("catalog.schema.orders")
+    .oauth(client_id, client_secret)
+    .compiled_proto(descriptor_proto)
+    .multiplexed(4)
+    .build()
+    .await?;
+
+let message_id = stream.ingest_record(ProtoMessage(record)).await?;
+stream.wait_for_message_id(message_id).await?;
+
+stream.flush().await?;
+stream.close().await?;
 ```
 
 See [`examples/`](https://github.com/databricks/zerobus-sdk/tree/main/rust/examples) for complete working examples with all wrapper types, serialization formats, and ingestion patterns.
@@ -817,7 +884,7 @@ match stream.ingest_record_offset(payload).await {
 
 ### Complete Working Examples
 
-The `examples/` directory contains four working examples covering different serialization formats and ingestion patterns:
+The `examples/` directory contains working examples covering different serialization formats and ingestion patterns:
 
 | Example | Serialization | Ingestion | Run with |
 |---------|--------------|-----------|----------|
@@ -825,6 +892,7 @@ The `examples/` directory contains four working examples covering different seri
 | `json/batch.rs` | JSON | Batch | `cargo run -p rust-examples-json --example json_batch` |
 | `proto/single.rs` | Protocol Buffers | Single-record | `cargo run -p rust-examples-proto --example proto_single` |
 | `proto/batch.rs` | Protocol Buffers | Batch | `cargo run -p rust-examples-proto --example proto_batch` |
+| `proto/multiplexed.rs` | Protocol Buffers | Multiplexed | `cargo run -p rust-examples-proto --example proto_multiplexed` |
 
 
 Check [`examples/README.md`](https://github.com/databricks/zerobus-sdk/blob/main/rust/examples/README.md) for setup instructions and detailed comparisons.
@@ -876,12 +944,13 @@ cargo test -p tests -- --nocapture
    - Use `ingest_record_offset()` when processing records individually
    - Both return offsets directly; use `wait_for_offset()` to explicitly wait for acknowledgments
 4. **Tune Inflight Limits** - Adjust `max_inflight_requests` based on memory and throughput needs
-5. **Enable Recovery** - Always set `recovery: true` in production environments
-6. **Handle Ack Futures** - Use `tokio::spawn` for fire-and-forget or batch-wait for verification
-7. **Monitor Errors** - Log and alert on non-retryable errors
-8. **Validate Schemas** - Use the schema generation tool to ensure type safety (for Protocol Buffers)
-9. **Secure Credentials** - Never hardcode secrets; use environment variables or secret managers
-10. **Test Recovery** - Simulate failures to verify your error handling logic
+5. **Use Multiplexing Only Without Global Ordering Requirements** - `.multiplexed(n)` distributes records across sub-streams and returns `MessageId` values, not globally ordered offsets
+6. **Enable Recovery** - Always set `recovery: true` in production environments
+7. **Handle Ack Futures** - Use `tokio::spawn` for fire-and-forget or batch-wait for verification
+8. **Monitor Errors** - Log and alert on non-retryable errors
+9. **Validate Schemas** - Use the schema generation tool to ensure type safety (for Protocol Buffers)
+10. **Secure Credentials** - Never hardcode secrets; use environment variables or secret managers
+11. **Test Recovery** - Simulate failures to verify your error handling logic
 
 ## API Reference
 
@@ -963,9 +1032,71 @@ Returns unacknowledged records grouped by batch, preserving the original batch s
 
 Only call after stream failure.
 
+### `MultiplexedStream`
+
+Represents multiple protobuf/JSON gRPC streams behind one round-robin ingestion
+handle. Use it when you want higher throughput and do not require global record
+ordering.
+
+**Builder:**
+```rust
+let descriptor_proto = load_descriptor_proto(
+    "output/orders.descriptor",
+    "orders.proto",
+    "table_Orders",
+);
+
+let stream = sdk
+    .stream_builder()
+    .table("catalog.schema.table")
+    .oauth(client_id, client_secret)
+    .compiled_proto(descriptor_proto)
+    .multiplexed(4)
+    .build()
+    .await?;
+```
+
+**Methods:**
+```rust
+pub async fn ingest_record(
+    &self,
+    payload: impl Into<EncodedRecord>
+) -> ZerobusResult<MessageId>
+```
+Queues a single record on the next sub-stream and returns a `MessageId`.
+
+```rust
+pub async fn ingest_records<I, T>(
+    &self,
+    payload: I
+) -> ZerobusResult<Option<MessageId>>
+where
+    I: IntoIterator<Item = T>,
+    T: Into<EncodedRecord>
+```
+Queues a batch on one sub-stream and returns one `MessageId` for the batch, or
+`None` for an empty batch.
+
+```rust
+pub async fn wait_for_message_id(&self, message_id: MessageId) -> ZerobusResult<()>
+```
+Waits for acknowledgment of the record or batch identified by the `MessageId`.
+
+```rust
+pub async fn flush(&self) -> ZerobusResult<()>
+pub async fn close(&mut self) -> ZerobusResult<()>
+```
+Flushes or closes every sub-stream.
+
 ### `StreamBuilder`
 
 Configure stream parameters via fluent setters; all configuration goes through the builder. See [Create a Stream](#4-create-a-stream) for usage and [Configuration Options](#configuration-options) for the full list of available setters and their defaults.
+
+```rust
+pub fn multiplexed(self, stream_count: usize) -> MultiplexedStreamBuilder<'_>
+```
+Configures the builder to create a `MultiplexedStream` from `stream_count`
+protobuf/JSON gRPC sub-streams. `stream_count` must be between 1 and 64.
 
 ### `AckCallback`
 

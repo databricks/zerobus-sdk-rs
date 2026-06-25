@@ -12,6 +12,10 @@ path = "batch.rs"
 name = "proto_single"
 path = "single.rs"
 
+[[example]]
+name = "proto_multiplexed"
+path = "multiplexed.rs"
+
 [dependencies]
 databricks-zerobus-ingest-sdk = { path = "../../sdk" }
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }

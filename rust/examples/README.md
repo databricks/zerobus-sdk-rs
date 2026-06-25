@@ -30,6 +30,7 @@ The SDK supports two serialization formats and two ingestion methods:
 **Ingestion Methods:**
 - **Single-record** (`ingest_record_offset`) - Ingest records one at a time (JSON / Protocol Buffers)
 - **Batch** (`ingest_records_offset`) - Ingest multiple records at once with all-or-nothing semantics (JSON / Protocol Buffers)
+- **Multiplexed** (`multiplexed(n)`) - Distribute protobuf records across multiple sub-streams when global ordering is not required
 - **Arrow batch** (`ingest_batch` / `ingest_ipc_batch`) - Ingest an Arrow `RecordBatch` (one or many rows) over Arrow Flight
 
 **Available Examples:**
@@ -40,6 +41,7 @@ The SDK supports two serialization formats and two ingestion methods:
 | [JSON Batch](json/README.md#batch-example) | JSON | Batch | `cargo run -p rust-examples-json --example json_batch` |
 | [Proto Single](proto/README.md#single-record-example) | Protocol Buffers | Single-record | `cargo run -p rust-examples-proto --example proto_single` |
 | [Proto Batch](proto/README.md#batch-example) | Protocol Buffers | Batch | `cargo run -p rust-examples-proto --example proto_batch` |
+| [Proto Multiplexed](proto/README.md#multiplexed-example) | Protocol Buffers | Multiplexed | `cargo run -p rust-examples-proto --example proto_multiplexed` |
 | [Arrow](arrow/README.md) | Arrow Flight (Beta) | `RecordBatch` | `cargo run -p example_arrow` |
 
 ## Prerequisites
@@ -75,7 +77,7 @@ Replace `catalog.schema.orders` with your actual catalog, schema, and table name
 
 ### 3. Configure Credentials
 
-Edit the source file (`batch.rs` or `single.rs`) for your chosen example and update these constants:
+Edit the source file (`batch.rs`, `single.rs`, or `multiplexed.rs`) for your chosen example and update these constants:
 
 ```rust
 const DATABRICKS_WORKSPACE_URL: &str = "https://your-workspace.cloud.databricks.com";
@@ -133,6 +135,25 @@ let mut stream = sdk
     .oauth(DATABRICKS_CLIENT_ID, DATABRICKS_CLIENT_SECRET)
     .compiled_proto(descriptor_proto)
     .max_inflight_requests(100)
+    .build()
+    .await?;
+```
+
+**Multiplexed Protocol Buffers:**
+```rust
+let descriptor_proto = load_descriptor_proto(
+    "output/orders.descriptor",
+    "orders.proto",
+    "table_Orders"
+);
+
+let mut stream = sdk
+    .stream_builder()
+    .table(TABLE_NAME)
+    .oauth(DATABRICKS_CLIENT_ID, DATABRICKS_CLIENT_SECRET)
+    .compiled_proto(descriptor_proto)
+    .max_inflight_requests(100)
+    .multiplexed(4)
     .build()
     .await?;
 ```

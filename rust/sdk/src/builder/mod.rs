@@ -33,4 +33,4 @@ mod sdk_builder;
 mod stream_builder;
 
 pub use sdk_builder::ZerobusSdkBuilder;
-pub use stream_builder::StreamBuilder;
+pub use stream_builder::{MultiplexedStreamBuilder, StreamBuilder};
