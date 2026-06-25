@@ -578,7 +578,7 @@ ZerobusArrowStream arrowStream = sdk.streamBuilder()
     .join();
 ```
 
-Stream configuration is set directly on the builder (for example `.maxInflightRecords(100)`,
+Stream configuration is set directly on the builder (for example `.maxInflightRecords(50000)`,
 `.recovery(true)`, `.recoveryRetries(5)`). Arrow-specific options such as `.maxInflightBatches(...)`
 and `.ipcCompression(...)` are available after calling `.arrow(...)`.
 
@@ -649,8 +649,12 @@ Schema schema = new Schema(Arrays.asList(
     Field.nullable("device_name", ArrowType.LargeUtf8.INSTANCE),
     Field.nullable("temp", new ArrowType.Int(32, true))));
 
-ZerobusArrowStream stream = sdk.createArrowStream(
-    tableName, schema, clientId, clientSecret).join();
+ZerobusArrowStream stream = sdk.streamBuilder()
+    .table(tableName)
+    .oauth(clientId, clientSecret)
+    .arrow(schema)
+    .build()
+    .join();
 
 try (VectorSchemaRoot batch = VectorSchemaRoot.create(schema, allocator)) {
     // populate batch...
@@ -680,9 +684,12 @@ The SDK provides two ingestion styles:
 Use `ZerobusProtoStream` or `ZerobusJsonStream` for all new code. They use offset-based returns that avoid `CompletableFuture` allocation overhead:
 
 ```java
-ZerobusProtoStream stream = sdk.createProtoStream(
-    tableName, AirQuality.getDescriptor().toProto(), clientId, clientSecret
-).join();
+ZerobusProtoStream stream = sdk.streamBuilder()
+    .table(tableName)
+    .oauth(clientId, clientSecret)
+    .compiledProto(AirQuality.getDescriptor().toProto())
+    .build()
+    .join();
 
 try {
     long lastOffset = -1;
@@ -756,15 +763,16 @@ batchOffset.ifPresent(o -> { try { stream.waitForOffset(o); } catch (Exception e
 
 ### JSON Streams (Recommended for JSON)
 
-Use `createJsonStream()` for a clean API that doesn't require Protocol Buffer types:
+Use the stream builder for a clean API that doesn't require Protocol Buffer types:
 
 ```java
 // Create JSON stream - no proto types needed!
-ZerobusJsonStream stream = sdk.createJsonStream(
-    "catalog.schema.table",
-    clientId,
-    clientSecret
-).join();
+ZerobusJsonStream stream = sdk.streamBuilder()
+    .table("catalog.schema.table")
+    .oauth(clientId, clientSecret)
+    .json()
+    .build()
+    .join();
 
 try {
     // Ingest JSON string directly
@@ -789,16 +797,16 @@ try {
 }
 ```
 
-With custom options:
+With custom configuration set directly on the builder:
 
 ```java
-StreamConfigurationOptions options = StreamConfigurationOptions.builder()
-    .setMaxInflightRecords(10000)
-    .build();
-
-ZerobusJsonStream stream = sdk.createJsonStream(
-    tableName, clientId, clientSecret, options
-).join();
+ZerobusJsonStream stream = sdk.streamBuilder()
+    .table(tableName)
+    .oauth(clientId, clientSecret)
+    .maxInflightRecords(50000)
+    .json()
+    .build()
+    .join();
 ```
 
 ## Configuration
