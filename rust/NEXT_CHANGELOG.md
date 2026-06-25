@@ -15,9 +15,10 @@
 - Add `ZerobusSdkBuilder::no_tls()` convenience method as a shortcut for
   `.tls_config(Arc::new(NoTlsConfig))` when connecting to plaintext `http://`
   endpoints. Gated behind the `testing` feature flag.
+- Added a configurable payload size limit per `ingest_record_offset` / `ingest_records_offset` call. Attempts to ingest more than the limit of encoded record data in a single call now return `ZerobusError::InvalidArgument` immediately, before any network I/O. The default is set slightly below the 10 MiB server limit to leave headroom for the request envelope (protobuf framing/stream metadata), so payloads accepted client-side are not later rejected by the server's transport layer. The limit is tunable per stream via `StreamBuilder::max_ingest_payload_bytes` (gRPC JSON/proto streams only; Arrow Flight streams do not enforce it and log a warning if it is set before `build_arrow()`).
+- Added stream lifecycle logging to make recovery observable. The SDK now logs (at `info`) when recovery starts and how many records are pending, and when a recovered stream re-sends unacknowledged records and how many. Each failed stream-creation attempt is logged (at `warn`) with its attempt number and retryability, and a non-retryable failure logs (at `error`) how many records were left unacknowledged (these are retained for retrieval via `get_unacked_records`/`get_unacked_batches`). These counts now distinguish in-flight batches from the true record count they carry (a single `ingest_records` can be one batch but many records), and a terminal recovery failure now always emits a single `error` even when no records remain pending.
 
 ### Bug Fixes
-
 - Redacted the OAuth authorization token from an error log and error message on the gRPC stream-setup path; a malformed token value is no longer written to logs.
 - A UC token that cannot be encoded as an HTTP `authorization` header value is now rejected at mint time rather than cached, so it cannot poison the cache and fail every stream creation until its refresh window.
 - Arrow Flight stream errors now preserve the server's gRPC status code instead of flattening it to `Unknown`. Previously a `FlightError` was wrapped via `tonic::Status::from_error`, which dropped the inner code, so non-retryable rejections (for example `PermissionDenied`) were misclassified as retryable and auth-rejection detection did not fire on the Arrow path.
@@ -26,6 +27,12 @@
 ### Documentation
 
 ### Internal Changes
+
+- Added `ZerobusStream::signal_shutdown` (crate-private), a `&self`-callable
+  helper that flips `is_closed` and cancels the cancellation token. Lets
+  `MultiplexedStream` tear down sub-stream background tasks from its poison
+  path and `Drop` without needing `&mut`. JoinHandle reaping still happens in
+  `close` or the existing `Drop` impl.
 
 ### Breaking Changes
 

@@ -158,11 +158,18 @@ impl<T: Clone> LandingZone<T> {
     ///
     /// This is used during stream recovery to re-send items that were observed but
     /// not yet acknowledged by the server.
-    pub fn reset_observe(&self) {
+    ///
+    /// # Returns
+    ///
+    /// The number of items moved back to the queue.
+    pub fn reset_observe(&self) -> usize {
         let mut state = self.state.lock().expect("Lock poisoned");
+        let mut moved = 0;
         while let Some(observed_item) = state.observed_items.pop_back() {
             state.queue.push_front(observed_item);
+            moved += 1;
         }
+        moved
     }
 
     /// Checks if there are no observed items waiting for acknowledgement.
@@ -182,13 +189,47 @@ impl<T: Clone> LandingZone<T> {
     }
 }
 
+/// An item that can report an inner element count.
+///
+/// The landing zone stays agnostic to what the count means; callers attach the
+/// meaning by implementing this trait.
+pub trait Countable {
+    /// Returns this item's inner element count.
+    fn count(&self) -> usize;
+}
+
+impl<T: Countable + ?Sized> Countable for Box<T> {
+    fn count(&self) -> usize {
+        (**self).count()
+    }
+}
+
+impl<T: Clone + Countable> LandingZone<T> {
+    /// Sums [`Countable::count`] over all in-flight items (observed and not).
+    pub fn total_count(&self) -> usize {
+        let state = self.state.lock().expect("Lock poisoned");
+        state
+            .queue
+            .iter()
+            .chain(state.observed_items.iter())
+            .map(Countable::count)
+            .sum()
+    }
+
+    /// Sums [`Countable::count`] over only the observed items.
+    pub fn observed_count(&self) -> usize {
+        let state = self.state.lock().expect("Lock poisoned");
+        state.observed_items.iter().map(Countable::count).sum()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
 
     use tokio::time::{timeout, Duration};
 
-    use super::{LandingZone, LandingZoneError};
+    use super::{Countable, LandingZone, LandingZoneError};
 
     #[tokio::test]
     async fn test_add_and_observe() {
@@ -382,6 +423,50 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_reset_observe_returns_observed_count() {
+        let lz = Arc::new(LandingZone::new(10));
+
+        const N: usize = 5;
+        for i in 0..N {
+            lz.add(format!("item{}", i)).await;
+        }
+        for _ in 0..N {
+            lz.observe().await;
+        }
+
+        // reset_observe() moves all observed items back and reports the count.
+        assert_eq!(lz.reset_observe(), N);
+        // Nothing observed remains; total inflight is unchanged.
+        assert!(lz.is_observed_empty());
+        assert_eq!(lz.len(), N);
+    }
+
+    #[tokio::test]
+    async fn test_reset_observe_queue_only_returns_zero() {
+        let lz = Arc::new(LandingZone::new(10));
+
+        // Items present but never observed.
+        lz.add("item1".to_string()).await;
+        lz.add("item2".to_string()).await;
+
+        assert_eq!(lz.reset_observe(), 0);
+        assert_eq!(lz.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn test_reset_observe_counts_batches_not_records() {
+        let lz = Arc::new(LandingZone::new(10));
+        lz.add(vec!["r0", "r1", "r2"]).await;
+        lz.add(vec!["r3", "r4", "r5", "r6"]).await;
+
+        lz.observe().await;
+        lz.observe().await;
+
+        assert_eq!(lz.reset_observe(), 2);
+        assert_eq!(lz.len(), 2);
+    }
+
+    #[tokio::test]
     async fn test_concurrent_operations() {
         let lz = Arc::new(LandingZone::new(100));
 
@@ -416,5 +501,58 @@ mod tests {
 
         // All 10 items should have been observed
         assert_eq!(observed_items.len(), 10);
+    }
+
+    #[derive(Clone)]
+    struct Batch(usize);
+
+    impl Countable for Batch {
+        fn count(&self) -> usize {
+            self.0
+        }
+    }
+
+    #[tokio::test]
+    async fn test_total_count_sums_over_both_queues() {
+        let lz = Arc::new(LandingZone::new(10));
+
+        lz.add(Batch(3)).await;
+        lz.add(Batch(2)).await;
+        lz.add(Batch(1)).await;
+
+        lz.observe().await;
+
+        assert_eq!(lz.len(), 3);
+        assert_eq!(lz.total_count(), 6);
+
+        let empty = Arc::new(LandingZone::<Batch>::new(10));
+        assert_eq!(empty.total_count(), 0);
+    }
+
+    #[tokio::test]
+    async fn test_observed_count_covers_only_observed() {
+        let lz = Arc::new(LandingZone::new(10));
+
+        lz.add(Batch(3)).await;
+        lz.add(Batch(2)).await;
+        lz.add(Batch(1)).await;
+
+        lz.observe().await;
+        lz.observe().await;
+
+        assert_eq!(lz.observed_count(), 5);
+        assert_eq!(lz.total_count(), 6);
+
+        lz.reset_observe();
+        assert_eq!(lz.observed_count(), 0);
+        assert_eq!(lz.total_count(), 6);
+    }
+
+    #[tokio::test]
+    async fn test_count_through_box() {
+        let lz = Arc::new(LandingZone::new(10));
+        lz.add(Box::new(Batch(4))).await;
+        lz.add(Box::new(Batch(1))).await;
+        assert_eq!(lz.total_count(), 5);
     }
 }

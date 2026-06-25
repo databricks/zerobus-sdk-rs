@@ -304,7 +304,19 @@ class sync:
     class ZerobusSdk:
         """Main entry point for synchronous Zerobus ingestion."""
 
-        def __init__(self, host: str, unity_catalog_url: str) -> None: ...
+        def __init__(self, host: str, unity_catalog_url: str, application_name: Optional[str] = None) -> None:
+            """
+            Create a synchronous Zerobus SDK instance.
+
+            Args:
+                host: Zerobus server endpoint
+                unity_catalog_url: Unity Catalog / workspace URL
+                application_name: Optional caller identifier (conventionally
+                    "<product>/<version>") appended to the HTTP user-agent header on
+                    gRPC requests toward the Zerobus server.
+            """
+            ...
+
         def set_use_tls(self, use_tls: bool) -> None:
             """
             Set whether to use TLS for connections (default: True).
@@ -445,7 +457,19 @@ class aio:
     class ZerobusSdk:
         """Main entry point for asynchronous Zerobus ingestion."""
 
-        def __init__(self, host: str, unity_catalog_url: str) -> None: ...
+        def __init__(self, host: str, unity_catalog_url: str, application_name: Optional[str] = None) -> None:
+            """
+            Create an asynchronous Zerobus SDK instance.
+
+            Args:
+                host: Zerobus server endpoint
+                unity_catalog_url: Unity Catalog / workspace URL
+                application_name: Optional caller identifier (conventionally
+                    "<product>/<version>") appended to the HTTP user-agent header on
+                    gRPC requests toward the Zerobus server.
+            """
+            ...
+
         async def set_use_tls(self, use_tls: bool) -> None:
             """
             Set whether to use TLS for connections (default: True).

@@ -13,6 +13,10 @@ name = "proxy_tests"
 path = "src/proxy_tests.rs"
 
 [[test]]
+name = "multiplexed_stream_tests"
+path = "src/multiplexed_stream_tests.rs"
+
+[[test]]
 name = "arrow_tests"
 path = "src/arrow_tests.rs"
 
