@@ -55,6 +55,7 @@ include(BuildRustFfi)
 add_library(zerobus_cpp
     src/sdk.cpp
     src/stream.cpp
+    src/arrow_stream.cpp
     src/proto_schema.cpp
     src/headers_callback.cpp)
 add_library(zerobus::zerobus ALIAS zerobus_cpp)

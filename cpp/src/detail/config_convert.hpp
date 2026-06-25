@@ -38,6 +38,26 @@ inline CStreamConfigurationOptions to_c(const StreamOptions& opts) {
   return c;
 }
 
+/// Build the C Arrow stream-config struct from `ArrowStreamOptions`.
+inline CArrowStreamConfigurationOptions to_c(const ArrowStreamOptions& opts) {
+  CArrowStreamConfigurationOptions c = zerobus_arrow_get_default_config();
+  c.max_inflight_batches = opts.max_inflight_batches;
+  c.recovery = opts.recovery;
+  c.recovery_timeout_ms = opts.recovery_timeout_ms;
+  c.recovery_backoff_ms = opts.recovery_backoff_ms;
+  c.recovery_retries = opts.recovery_retries;
+  c.server_lack_of_ack_timeout_ms = opts.server_lack_of_ack_timeout_ms;
+  c.flush_timeout_ms = opts.flush_timeout_ms;
+  c.connection_timeout_ms = opts.connection_timeout_ms;
+  c.ipc_compression = static_cast<std::int32_t>(opts.ipc_compression);
+  // -1 sentinel = "wait full server duration" (no explicit cap).
+  c.stream_paused_max_wait_time_ms =
+      opts.stream_paused_max_wait_time_ms.has_value()
+          ? *opts.stream_paused_max_wait_time_ms
+          : -1;
+  return c;
+}
+
 }  // namespace detail
 }  // namespace zerobus
 
