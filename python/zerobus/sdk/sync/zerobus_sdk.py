@@ -10,7 +10,8 @@ Example:
     >>>
     >>> sdk = ZerobusSdk(
     ...     host="https://your-shard-id.zerobus.region.cloud.databricks.com",
-    ...     unity_catalog_url="https://your-workspace.cloud.databricks.com"
+    ...     unity_catalog_url="https://your-workspace.cloud.databricks.com",
+    ...     application_name="my-app/1.0",  # optional
     ... )
     >>>
     >>> props = TableProperties("catalog.schema.table")
@@ -38,7 +39,7 @@ Example:
     >>> offset = ack.wait_for_ack(timeout_sec=30)
 """
 
-from typing import Iterator
+from typing import Iterator, Optional
 
 # Import Rust-backed implementations
 import zerobus._zerobus_core as _core
@@ -197,8 +198,19 @@ class ZerobusArrowStream:
 class ZerobusSdk:
     """Python wrapper around Rust ZerobusSdk that provides unified create_stream API."""
 
-    def __init__(self, host: str, unity_catalog_url: str):
-        self._inner = _RustZerobusSdk(host, unity_catalog_url)
+    def __init__(self, host: str, unity_catalog_url: str, application_name: Optional[str] = None):
+        """
+        Create a Zerobus SDK instance.
+
+        Args:
+            host: Zerobus endpoint URL
+                (e.g. "https://<workspace>.zerobus.<region>.cloud.databricks.com").
+            unity_catalog_url: Unity Catalog URL used for OAuth.
+            application_name: Optional caller identifier (conventionally
+                "<product>/<version>") appended to the HTTP user-agent header on
+                gRPC requests toward the Zerobus server.
+        """
+        self._inner = _RustZerobusSdk(host, unity_catalog_url, application_name)
 
     def create_arrow_stream(
         self, table_name: str, schema, client_id: str, client_secret: str, options=None

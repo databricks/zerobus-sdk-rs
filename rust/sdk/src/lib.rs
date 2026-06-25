@@ -62,7 +62,7 @@ mod token_cache;
 use std::collections::HashMap;
 use std::fmt::Debug;
 use std::future::Future;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
 
 use prost::Message;
@@ -83,7 +83,7 @@ use databricks::zerobus::{
     CloseStreamSignal, CreateIngestStreamRequest, EphemeralStreamRequest, EphemeralStreamResponse,
     IngestRecordResponse, RecordType,
 };
-use landing_zone::LandingZone;
+use landing_zone::{Countable, LandingZone};
 
 /// **Beta**: Arrow Flight ingestion is in Beta. The API is stabilising but may
 /// still change before reaching GA.
@@ -153,6 +153,12 @@ pub type ZerobusResult<T> = Result<T, ZerobusError>;
 struct IngestRequest {
     payload: EncodedBatch,
     offset_id: OffsetId,
+}
+
+impl Countable for IngestRequest {
+    fn count(&self) -> usize {
+        self.payload.get_record_count()
+    }
 }
 
 /// Map of logical offset to oneshot sender used to send acknowledgments back to the client.
@@ -682,6 +688,14 @@ impl ZerobusStream {
                 return Ok(());
             }
 
+            if !initial_stream_creation {
+                info!(
+                    pending_batches = landing_zone.len(),
+                    pending_records = landing_zone.total_count(),
+                    "Stream lost; starting recovery"
+                );
+            }
+
             let landing_zone_sender = Arc::clone(&landing_zone);
             let landing_zone_receiver = Arc::clone(&landing_zone);
             let landing_zone_recovery = Arc::clone(&landing_zone);
@@ -690,14 +704,17 @@ impl ZerobusStream {
             let strategy = FixedInterval::from_millis(options.recovery_backoff_ms)
                 .take(options.recovery_retries as usize);
 
+            let attempt = AtomicUsize::new(0);
             let create_attempt = || {
                 let channel = channel.clone();
                 let table_properties = table_properties.clone();
                 let headers_provider = Arc::clone(&headers_provider);
                 let record_type = options.record_type;
+                let attempt = &attempt;
 
                 async move {
-                    tokio::time::timeout(
+                    let attempt_no = attempt.fetch_add(1, Ordering::Relaxed) + 1;
+                    let result = tokio::time::timeout(
                         Duration::from_millis(options.recovery_timeout_ms),
                         Self::create_stream_connection(
                             channel,
@@ -711,7 +728,19 @@ impl ZerobusStream {
                         ZerobusError::CreateStreamError(tonic::Status::deadline_exceeded(
                             "Stream creation timed out",
                         ))
-                    })?
+                    })
+                    .and_then(|res| res);
+                    if let Err(ref e) = result {
+                        warn!(
+                            attempt = attempt_no,
+                            max_attempts = options.recovery_retries + 1,
+                            retryable = e.is_retryable(),
+                            backoff_ms = options.recovery_backoff_ms,
+                            "Stream creation attempt failed: {}",
+                            e
+                        );
+                    }
+                    result
                 }
             };
             let should_retry = |e: &ZerobusError| options.recovery && e.is_retryable();
@@ -726,6 +755,13 @@ impl ZerobusStream {
                         }
                     } else {
                         is_closed.store(true, Ordering::Relaxed);
+                        error!(
+                            attempts = attempt.load(Ordering::Relaxed),
+                            max_attempts = options.recovery_retries + 1,
+                            table_name = %table_properties.table_name,
+                            "Recovery failed; giving up stream re-creation: {}",
+                            e
+                        );
                         Self::fail_all_pending_records(
                             landing_zone.clone(),
                             oneshot_map.clone(),
@@ -750,7 +786,18 @@ impl ZerobusStream {
             }
 
             // 2. Reset landing zone.
-            landing_zone_recovery.reset_observe();
+            let resent_records = landing_zone_recovery.observed_count();
+            let resent_batches = landing_zone_recovery.reset_observe();
+            if resent_batches > 0 {
+                info!(
+                    stream_id = %stream_id,
+                    resent_batches,
+                    resent_records,
+                    pending_batches = landing_zone_recovery.len(),
+                    pending_records = landing_zone_recovery.total_count(),
+                    "Recovered stream; re-sending unacknowledged records"
+                );
+            }
 
             // 3. Spawn receiver and sender task.
             let is_paused = Arc::new(AtomicBool::new(false));
@@ -1166,6 +1213,14 @@ impl ZerobusStream {
 
     /// Internal unified method for ingesting records and batches
     async fn ingest_internal_v2(&self, encoded_batch: EncodedBatch) -> ZerobusResult<OffsetId> {
+        let byte_size = encoded_batch.total_byte_size();
+        let max_payload_bytes = self.options.max_ingest_payload_bytes;
+        if byte_size > max_payload_bytes {
+            return Err(ZerobusError::InvalidArgument(format!(
+                "Ingest payload too large: {byte_size} bytes exceeds the configured limit of {max_payload_bytes} bytes"
+            )));
+        }
+
         if self.is_closed.load(Ordering::Relaxed) {
             error!(table_name = %self.table_properties.table_name, "Stream closed");
             return Err(ZerobusError::StreamClosedError(tonic::Status::internal(
@@ -1523,6 +1578,17 @@ impl ZerobusStream {
         let mut failed = failed_records.write().await;
         failed.reserve(landing_zone.len());
         let records = landing_zone.remove_all();
+        if !records.is_empty() {
+            let unacked_records: usize = records.iter().map(|r| r.payload.get_record_count()).sum();
+            error!(
+                unacked_batches = records.len(),
+                unacked_records,
+                "Stream failed; {} batches ({} records) left unacknowledged and retained for retrieval via get_unacked_records/get_unacked_batches: {}",
+                records.len(),
+                unacked_records,
+                error
+            );
+        }
         let mut map = oneshot_map.lock().await;
         let error_message = error.to_string();
         for record in records {

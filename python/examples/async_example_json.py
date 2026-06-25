@@ -142,7 +142,7 @@ async def main():
 
     try:
         # Step 1: Initialize the SDK
-        sdk = ZerobusSdk(SERVER_ENDPOINT, UNITY_CATALOG_ENDPOINT)
+        sdk = ZerobusSdk(SERVER_ENDPOINT, UNITY_CATALOG_ENDPOINT, application_name="my-app/1.0")
         logger.info("✓ SDK initialized")
 
         # Step 2: Configure stream options with JSON record type and ack callback
