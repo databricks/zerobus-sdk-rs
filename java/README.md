@@ -552,19 +552,19 @@ examples/
 API for all stream types and mirrors the Rust SDK's `stream_builder()`:
 
 ```java
-// JSON
-ZerobusJsonStream jsonStream = sdk.streamBuilder()
-    .table("catalog.schema.table")
-    .oauth(clientId, clientSecret)
-    .json()
-    .build()
-    .join();
-
 // Protocol Buffer
 ZerobusProtoStream protoStream = sdk.streamBuilder()
     .table("catalog.schema.table")
     .oauth(clientId, clientSecret)
     .compiledProto(MyProto.getDescriptor().toProto())
+    .build()
+    .join();
+
+// JSON
+ZerobusJsonStream jsonStream = sdk.streamBuilder()
+    .table("catalog.schema.table")
+    .oauth(clientId, clientSecret)
+    .json()
     .build()
     .join();
 

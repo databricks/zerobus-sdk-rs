@@ -43,16 +43,6 @@ import org.slf4j.LoggerFactory;
  *         "https://server-endpoint.databricks.com",
  *         "https://workspace.databricks.com")) {
  *
- *     // For JSON ingestion:
- *     try (ZerobusJsonStream jsonStream = sdk.streamBuilder()
- *             .table("catalog.schema.table")
- *             .oauth(clientId, clientSecret)
- *             .json()
- *             .build()
- *             .join()) {
- *         jsonStream.ingestRecordOffset(myObject, gson::toJson);
- *     }
- *
  *     // For Protocol Buffer ingestion:
  *     try (ZerobusProtoStream protoStream = sdk.streamBuilder()
  *             .table("catalog.schema.table")
@@ -61,6 +51,16 @@ import org.slf4j.LoggerFactory;
  *             .build()
  *             .join()) {
  *         protoStream.ingestRecordOffset(myProtoMessage);
+ *     }
+ *
+ *     // For JSON ingestion:
+ *     try (ZerobusJsonStream jsonStream = sdk.streamBuilder()
+ *             .table("catalog.schema.table")
+ *             .oauth(clientId, clientSecret)
+ *             .json()
+ *             .build()
+ *             .join()) {
+ *         jsonStream.ingestRecordOffset(myObject, gson::toJson);
  *     }
  * }
  * }</pre>
