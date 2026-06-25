@@ -41,6 +41,7 @@ examples/
 | `proto/BatchIngestionExample` | `ZerobusProtoStream` | Batch ingestion |
 | `json/SingleRecordExample` | `ZerobusJsonStream` | Single record ingestion (Object + String) |
 | `json/BatchIngestionExample` | `ZerobusJsonStream` | Batch ingestion |
+| `json/StreamBuilderExample` | `ZerobusJsonStream` | Stream creation via the recommended `streamBuilder()` fluent API |
 | `arrow/ArrowIngestionExample` | `ZerobusArrowStream` | Three streams demonstrating each IPC compression codec (NONE, LZ4_FRAME, ZSTD); 10 batches per stream, waitForOffset + flush + close (Beta) |
 | `legacy/LegacyStreamExample` | `ZerobusStream` | Legacy Future-based API |
 
@@ -51,12 +52,12 @@ Each example demonstrates: single ingestion + wait, batch ingestion + wait for l
 ### ZerobusProtoStream (Recommended for Protocol Buffers)
 
 ```java
-ZerobusProtoStream stream = sdk.createProtoStream(
-    tableName,
-    MyProto.getDescriptor().toProto(),
-    clientId,
-    clientSecret
-).join();
+ZerobusProtoStream stream = sdk.streamBuilder()
+    .table(tableName)
+    .oauth(clientId, clientSecret)
+    .compiledProto(MyProto.getDescriptor().toProto())
+    .build()
+    .join();
 
 // Method-level generics - flexible typing
 stream.ingestRecordOffset(myProtoMessage);        // Message
@@ -68,11 +69,12 @@ stream.ingestRecordsOffset(listOfByteArrays);     // batch
 ### ZerobusJsonStream (Recommended for JSON)
 
 ```java
-ZerobusJsonStream stream = sdk.createJsonStream(
-    tableName,
-    clientId,
-    clientSecret
-).join();
+ZerobusJsonStream stream = sdk.streamBuilder()
+    .table(tableName)
+    .oauth(clientId, clientSecret)
+    .json()
+    .build()
+    .join();
 
 // Method-level generics - flexible typing
 stream.ingestRecordOffset(object, gson::toJson);  // Object + serializer

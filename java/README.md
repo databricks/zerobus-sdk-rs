@@ -546,6 +546,45 @@ examples/
     └── LegacyStreamExample.java
 ```
 
+### Creating Streams (Stream Builder)
+
+`ZerobusSdk.streamBuilder()` is the recommended way to create a stream. It exposes a single fluent
+API for all stream types and mirrors the Rust SDK's `stream_builder()`:
+
+```java
+// JSON
+ZerobusJsonStream jsonStream = sdk.streamBuilder()
+    .table("catalog.schema.table")
+    .oauth(clientId, clientSecret)
+    .json()
+    .build()
+    .join();
+
+// Protocol Buffer
+ZerobusProtoStream protoStream = sdk.streamBuilder()
+    .table("catalog.schema.table")
+    .oauth(clientId, clientSecret)
+    .compiledProto(MyProto.getDescriptor().toProto())
+    .build()
+    .join();
+
+// Arrow Flight (Beta)
+ZerobusArrowStream arrowStream = sdk.streamBuilder()
+    .table("catalog.schema.table")
+    .oauth(clientId, clientSecret)
+    .arrow(schema)
+    .ipcCompression(IPCCompressionType.ZSTD)
+    .build()
+    .join();
+```
+
+Stream configuration is set directly on the builder (for example `.maxInflightRecords(100)`,
+`.recovery(true)`, `.recoveryRetries(5)`). Arrow-specific options such as `.maxInflightBatches(...)`
+and `.ipcCompression(...)` are available after calling `.arrow(...)`.
+
+> **Note:** `createJsonStream`, `createProtoStream`, and `createArrowStream` are deprecated in favor
+> of `streamBuilder()` and will be removed in the next major release.
+
 ### Protocol Buffers Examples
 
 Best for production systems with type safety and schema validation:
@@ -574,11 +613,16 @@ java -cp "../../target/zerobus-ingest-sdk-*-jar-with-dependencies.jar:." \
   com.databricks.zerobus.examples.json.SingleRecordExample
 ```
 
-**Clean JSON API** - use `createJsonStream()` for a simplified experience:
+**Clean JSON API** - use the stream builder for a simplified experience:
 
 ```java
 // No proto types or configuration needed!
-ZerobusJsonStream stream = sdk.createJsonStream(tableName, clientId, clientSecret).join();
+ZerobusJsonStream stream = sdk.streamBuilder()
+    .table(tableName)
+    .oauth(clientId, clientSecret)
+    .json()
+    .build()
+    .join();
 stream.ingestRecordOffset("{\"field\": \"value\"}");
 ```
 
@@ -935,6 +979,13 @@ ZerobusSdk(String serverEndpoint, String unityCatalogEndpoint)
 **Methods:**
 
 ```java
+StreamBuilder streamBuilder()
+```
+Returns a fluent [`StreamBuilder`](#streambuilder) for creating JSON, Protocol Buffer, or Arrow Flight streams. This is the recommended way to create streams.
+
+> The `createStream`, `createJsonStream`, `createProtoStream`, and `createArrowStream` methods below are deprecated in favor of `streamBuilder()` and will be removed in the next major release.
+
+```java
 <RecordType extends Message> CompletableFuture<ZerobusStream<RecordType>> createStream(
     TableProperties<RecordType> tableProperties,
     String clientId,
@@ -1010,9 +1061,43 @@ CompletableFuture<ZerobusArrowStream> recreateArrowStream(ZerobusArrowStream clo
 
 ---
 
+### StreamBuilder
+
+Fluent builder for creating streams, returned by [`ZerobusSdk.streamBuilder()`](#zerobussdk). Set the table, OAuth credentials, and stream configuration, then select a record format to obtain a typed sub-builder whose `build()` returns the matching stream type.
+
+```java
+StreamBuilder table(String tableName)
+StreamBuilder oauth(String clientId, String clientSecret)
+StreamBuilder recovery(boolean recovery)
+StreamBuilder recoveryTimeoutMs(int ms)
+StreamBuilder recoveryBackoffMs(int ms)
+StreamBuilder recoveryRetries(int n)
+StreamBuilder serverLackOfAckTimeoutMs(int ms)
+StreamBuilder flushTimeoutMs(int ms)
+StreamBuilder maxInflightRecords(int n)          // JSON/proto only
+StreamBuilder ackCallback(AckCallback callback)  // JSON/proto only
+
+// Format selection -> typed sub-builder:
+JsonStreamBuilder  json()
+ProtoStreamBuilder compiledProto(DescriptorProto descriptorProto)
+ArrowStreamBuilder arrow(Schema schema)          // Beta
+```
+
+Each sub-builder exposes `build()`:
+
+```java
+CompletableFuture<ZerobusJsonStream>  StreamBuilder.JsonStreamBuilder.build()
+CompletableFuture<ZerobusProtoStream> StreamBuilder.ProtoStreamBuilder.build()
+CompletableFuture<ZerobusArrowStream> StreamBuilder.ArrowStreamBuilder.build()   // Beta
+```
+
+`ArrowStreamBuilder` additionally supports `maxInflightBatches(int)`, `connectionTimeoutMs(long)`, `ipcCompression(IPCCompressionType)`, and `streamPausedMaxWaitTimeMs(long)`.
+
+---
+
 ### ZerobusProtoStream
 
-Stream for Protocol Buffer ingestion with method-level generics. Use `ZerobusSdk.createProtoStream()` to create instances.
+Stream for Protocol Buffer ingestion with method-level generics. Use `ZerobusSdk.streamBuilder()` to create instances.
 
 **Single Record Methods:**
 
@@ -1061,7 +1146,7 @@ Returns unacknowledged records grouped by batch.
 
 ### ZerobusJsonStream
 
-Stream for JSON ingestion with method-level generics. Use `ZerobusSdk.createJsonStream()` to create instances.
+Stream for JSON ingestion with method-level generics. Use `ZerobusSdk.streamBuilder()` to create instances.
 
 **Single Record Methods:**
 
@@ -1112,7 +1197,7 @@ Returns unacknowledged records grouped by batch.
 
 > **Beta.** Arrow Flight ingestion is in Beta. The API is stabilising but may still change before reaching GA.
 
-Stream for Apache Arrow Flight ingestion of `VectorSchemaRoot` batches. Use `ZerobusSdk.createArrowStream()` to create instances. Requires `arrow-vector` + `arrow-memory-netty` on the classpath and JDK 9+ `--add-opens` flags (see [Dependencies](#dependencies)).
+Stream for Apache Arrow Flight ingestion of `VectorSchemaRoot` batches. Use `ZerobusSdk.streamBuilder()` to create instances. Requires `arrow-vector` + `arrow-memory-netty` on the classpath and JDK 9+ `--add-opens` flags (see [Dependencies](#dependencies)).
 
 **Batch Ingestion:**
 
