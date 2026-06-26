@@ -1,6 +1,7 @@
 #ifndef ZEROBUS_CONFIG_HPP
 #define ZEROBUS_CONFIG_HPP
 
+#include <cstddef>
 #include <cstdint>
 #include <optional>
 

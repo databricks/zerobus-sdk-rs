@@ -28,12 +28,13 @@ inline CStreamConfigurationOptions to_c(const StreamOptions& opts) {
     c.has_stream_paused_max_wait_time_ms = false;
     c.stream_paused_max_wait_time_ms = 0;
   }
+  // Only override when set. On nullopt we deliberately leave the presence flag
+  // and value seeded from zerobus_get_default_config() untouched, so the FFI
+  // default stays in place (as the header documents). Clearing the flag here
+  // would instead force Rust to interpret it as None (wait indefinitely).
   if (opts.callback_max_wait_time_ms.has_value()) {
     c.has_callback_max_wait_time_ms = true;
     c.callback_max_wait_time_ms = *opts.callback_max_wait_time_ms;
-  } else {
-    c.has_callback_max_wait_time_ms = false;
-    c.callback_max_wait_time_ms = 0;
   }
   return c;
 }

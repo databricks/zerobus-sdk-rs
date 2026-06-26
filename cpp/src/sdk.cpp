@@ -31,19 +31,16 @@ const std::uint8_t* descriptor_ptr(const std::vector<std::uint8_t>& d) {
 // SdkBuilder
 // ---------------------------------------------------------------------------
 
-// Allocate a fresh FFI builder and stamp the default user-agent prefix. The
-// builder handle is declared as a plain void* in the header (see sdk.hpp), so
-// every use casts it back to the opaque CZerobusSdkBuilder* from zerobus.h.
+// Allocate a fresh FFI builder and stamp the default user-agent prefix.
 SdkBuilder::SdkBuilder() : builder_(zerobus_sdk_builder_new()) {
-  auto* b = static_cast<CZerobusSdkBuilder*>(builder_);
   std::string id = std::string("zerobus-sdk-cpp/") + ZEROBUS_CPP_VERSION;
-  zerobus_sdk_builder_sdk_identifier(b, id.c_str());
+  zerobus_sdk_builder_sdk_identifier(builder_, id.c_str());
 }
 
 // Free the builder unless it was already consumed by build() (which nulls it).
 SdkBuilder::~SdkBuilder() {
   if (builder_ != nullptr) {
-    zerobus_sdk_builder_free(static_cast<CZerobusSdkBuilder*>(builder_));
+    zerobus_sdk_builder_free(builder_);
     builder_ = nullptr;
   }
 }
@@ -58,7 +55,7 @@ SdkBuilder& SdkBuilder::operator=(SdkBuilder&& other) noexcept {
   if (this != &other) {
     // Free any builder we already hold before taking over other's.
     if (builder_ != nullptr) {
-      zerobus_sdk_builder_free(static_cast<CZerobusSdkBuilder*>(builder_));
+      zerobus_sdk_builder_free(builder_);
     }
     builder_ = other.builder_;
     other.builder_ = nullptr;
@@ -71,31 +68,27 @@ SdkBuilder& SdkBuilder::operator=(SdkBuilder&& other) noexcept {
 // are infallible at this layer; an invalid value (e.g. a malformed endpoint)
 // surfaces later, when build() is called.
 SdkBuilder& SdkBuilder::endpoint(const std::string& value) {
-  zerobus_sdk_builder_endpoint(static_cast<CZerobusSdkBuilder*>(builder_),
-                               value.c_str());
+  zerobus_sdk_builder_endpoint(builder_, value.c_str());
   return *this;
 }
 
 SdkBuilder& SdkBuilder::unity_catalog_url(const std::string& value) {
-  zerobus_sdk_builder_unity_catalog_url(
-      static_cast<CZerobusSdkBuilder*>(builder_), value.c_str());
+  zerobus_sdk_builder_unity_catalog_url(builder_, value.c_str());
   return *this;
 }
 
 SdkBuilder& SdkBuilder::sdk_identifier(const std::string& value) {
-  zerobus_sdk_builder_sdk_identifier(static_cast<CZerobusSdkBuilder*>(builder_),
-                                     value.c_str());
+  zerobus_sdk_builder_sdk_identifier(builder_, value.c_str());
   return *this;
 }
 
 SdkBuilder& SdkBuilder::application_name(const std::string& value) {
-  zerobus_sdk_builder_application_name(
-      static_cast<CZerobusSdkBuilder*>(builder_), value.c_str());
+  zerobus_sdk_builder_application_name(builder_, value.c_str());
   return *this;
 }
 
 SdkBuilder& SdkBuilder::disable_tls() {
-  zerobus_sdk_builder_disable_tls(static_cast<CZerobusSdkBuilder*>(builder_));
+  zerobus_sdk_builder_disable_tls(builder_);
   return *this;
 }
 
@@ -104,8 +97,7 @@ SdkBuilder& SdkBuilder::disable_tls() {
 // to keep the destructor from double-freeing it.
 Sdk SdkBuilder::build() {
   detail::ResultGuard guard;
-  CZerobusSdk* sdk = zerobus_sdk_builder_build(
-      static_cast<CZerobusSdkBuilder*>(builder_), guard.ptr());
+  CZerobusSdk* sdk = zerobus_sdk_builder_build(builder_, guard.ptr());
   builder_ = nullptr;
   if (sdk == nullptr) {
     // A null handle means failure: throw the FFI's error if it set one.
@@ -122,18 +114,16 @@ Sdk SdkBuilder::build() {
 
 SdkBuilder Sdk::builder() { return SdkBuilder(); }
 
-// Convenience path equivalent to building with only endpoint + UC URL set. Like
-// build(), a null handle signals failure.
+// Convenience path equivalent to building with only endpoint + UC URL set.
+// Routes through the builder (rather than zerobus_sdk_new) so the user-agent
+// carries the C++ SDK identifier; zerobus_sdk_new would leave the Rust default
+// (zerobus-sdk-rs/<version>), mis-attributing C++ traffic as Rust.
 Sdk Sdk::create(const std::string& endpoint,
                 const std::string& unity_catalog_url) {
-  detail::ResultGuard guard;
-  CZerobusSdk* sdk =
-      zerobus_sdk_new(endpoint.c_str(), unity_catalog_url.c_str(), guard.ptr());
-  if (sdk == nullptr) {
-    guard.throw_if_error();
-    throw ZerobusException("failed to create Zerobus SDK", false);
-  }
-  return Sdk(sdk);
+  return builder()
+      .endpoint(endpoint)
+      .unity_catalog_url(unity_catalog_url)
+      .build();
 }
 
 // Release the Rust-owned SDK handle. Streams hold their own handles, so an Sdk

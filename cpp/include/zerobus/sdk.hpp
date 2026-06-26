@@ -12,7 +12,8 @@
 
 namespace zerobus {
 
-struct CZerobusSdk;  // opaque FFI handle (defined in zerobus.h)
+struct CZerobusSdk;         // opaque FFI handle (defined in zerobus.h)
+struct CZerobusSdkBuilder;  // opaque FFI handle (defined in zerobus.h)
 
 /// Identifies the target table and (for proto streams) its schema.
 struct TableProperties {
@@ -56,7 +57,7 @@ class SdkBuilder {
   Sdk build();
 
  private:
-  void* builder_;  // CZerobusSdkBuilder* (opaque)
+  CZerobusSdkBuilder* builder_;  // opaque FFI handle
 };
 
 /// Entry point to the Zerobus SDK: an authenticated connection factory that
