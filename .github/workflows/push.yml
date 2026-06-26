@@ -126,6 +126,9 @@ jobs:
     with:
       use_local_sdk: true
 
+  # The C++ build always compiles the Rust core from local source, so this job
+  # inherently tests against local Rust when rust/** changes — no use_local_sdk
+  # toggle needed (ci-cpp.yml has no such input).
   cross-sdk-cpp:
     needs: changes
     if: needs.changes.outputs.rust == 'true'
@@ -133,8 +136,6 @@ jobs:
       id-token: write
       contents: read
     uses: ./.github/workflows/ci-cpp.yml
-    with:
-      use_local_sdk: true
 
   cross-sdk-python:
     needs: changes

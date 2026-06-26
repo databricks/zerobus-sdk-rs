@@ -5,6 +5,18 @@ project(zerobus_cpp
     DESCRIPTION "Zerobus C++ SDK (wrapper over the Zerobus C FFI)"
     LANGUAGES CXX)
 
+# The version lives in two places: this file (package metadata) and
+# include/zerobus/version.hpp (the runtime/user-agent string). There is no
+# generation step, so guard against drift by failing configuration if they
+# disagree.
+file(READ "${CMAKE_CURRENT_SOURCE_DIR}/include/zerobus/version.hpp" _zb_version_hpp)
+if(NOT _zb_version_hpp MATCHES "#define ZEROBUS_CPP_VERSION \"${PROJECT_VERSION}\"")
+  message(FATAL_ERROR
+      "Version mismatch: CMakeLists.txt declares ${PROJECT_VERSION}, but "
+      "include/zerobus/version.hpp defines a different ZEROBUS_CPP_VERSION. "
+      "Update both so they match.")
+endif()
+
 # Detect whether we are the top-level project (controls test/example defaults).
 if(CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR)
   set(ZEROBUS_IS_TOP_LEVEL ON)
@@ -131,3 +143,19 @@ install(FILES
     "${CMAKE_CURRENT_BINARY_DIR}/zerobus-config.cmake"
     "${CMAKE_CURRENT_BINARY_DIR}/zerobus-config-version.cmake"
     DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/zerobus)
+
+# ---------------------------------------------------------------------------
+# Tests and examples
+# ---------------------------------------------------------------------------
+# Gate the tests/examples subdirectories on their options. The EXISTS guard
+# keeps configuration working before those directories land (they arrive in
+# follow-up PRs): once tests/CMakeLists.txt or examples/CMakeLists.txt exists,
+# the corresponding option takes effect with no further changes here.
+if(ZEROBUS_BUILD_TESTS AND EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/tests/CMakeLists.txt")
+  enable_testing()
+  add_subdirectory(tests)
+endif()
+
+if(ZEROBUS_BUILD_EXAMPLES AND EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/examples/CMakeLists.txt")
+  add_subdirectory(examples)
+endif()

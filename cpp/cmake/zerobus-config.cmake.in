@@ -7,11 +7,18 @@ include(CMakeFindDependencyMacro)
 
 # The C++ SDK statically links the Rust C FFI archive (libzerobus_ffi.a). That
 # archive is bundled in this package, but the imported target that the SDK links
-# against (zerobus::ffi) only existed in the SDK's own build tree. Recreate it
-# here so the exported zerobus::zerobus target can resolve its FFI symbols, and
-# re-apply the system libraries the Rust static library needs at link time.
-if(NOT TARGET zerobus::ffi)
-  add_library(zerobus::ffi STATIC IMPORTED)
+# against only existed in the SDK's own build tree. Recreate it here so the
+# exported zerobus::zerobus target can resolve its FFI symbols, and re-apply the
+# system libraries the Rust static library needs at link time.
+#
+# The target MUST be named `zerobus_ffi` (not the `zerobus::ffi` alias): the
+# in-build target is `zerobus_ffi` with a `zerobus::ffi` ALIAS, and CMake stores
+# the *de-aliased* name in zerobus-targets.cmake's INTERFACE_LINK_LIBRARIES. A
+# consumer therefore needs a `zerobus_ffi` target to exist, or the link
+# degrades to a bare `-lzerobus_ffi` and fails. We add the `zerobus::ffi` alias
+# too, for consumers that reference the namespaced form directly.
+if(NOT TARGET zerobus_ffi)
+  add_library(zerobus_ffi STATIC IMPORTED GLOBAL)
 
   find_library(ZEROBUS_FFI_LIBRARY
       NAMES zerobus_ffi
@@ -23,21 +30,25 @@ if(NOT TARGET zerobus::ffi)
         "Zerobus FFI archive not found under ${PACKAGE_PREFIX_DIR}/@CMAKE_INSTALL_LIBDIR@")
     return()
   endif()
-  set_target_properties(zerobus::ffi PROPERTIES
+  set_target_properties(zerobus_ffi PROPERTIES
       IMPORTED_LOCATION "${ZEROBUS_FFI_LIBRARY}")
 
   # Mirror BuildRustFfi.cmake: the Rust static library pulls in these platform
   # system libraries at link time.
   if(APPLE)
-    set_property(TARGET zerobus::ffi APPEND PROPERTY INTERFACE_LINK_LIBRARIES
+    set_property(TARGET zerobus_ffi APPEND PROPERTY INTERFACE_LINK_LIBRARIES
         "-framework CoreFoundation" "-framework Security" iconv)
   elseif(WIN32)
-    set_property(TARGET zerobus::ffi APPEND PROPERTY INTERFACE_LINK_LIBRARIES
+    set_property(TARGET zerobus_ffi APPEND PROPERTY INTERFACE_LINK_LIBRARIES
         ws2_32 userenv bcrypt ntdll)
   else()  # Linux / other Unix
     find_dependency(Threads)
-    set_property(TARGET zerobus::ffi APPEND PROPERTY INTERFACE_LINK_LIBRARIES
+    set_property(TARGET zerobus_ffi APPEND PROPERTY INTERFACE_LINK_LIBRARIES
         Threads::Threads ${CMAKE_DL_LIBS} m resolv)
+  endif()
+
+  if(NOT TARGET zerobus::ffi)
+    add_library(zerobus::ffi ALIAS zerobus_ffi)
   endif()
 endif()
 

@@ -39,9 +39,23 @@ else()
 
   set(_zb_ffi_lib "${ZEROBUS_RUST_TARGET_DIR}/release/${_zb_ffi_lib_name}")
 
+  # Track the Rust sources the archive is built from so editing rust/ffi or
+  # rust/sdk re-invokes cargo. Without DEPENDS, CMake treats the archive as
+  # up-to-date once it exists and links stale Rust. CONFIGURE_DEPENDS re-globs
+  # at build time so newly added .rs files are picked up too. (cargo itself is
+  # incremental, so the rebuild is cheap when nothing changed.)
+  file(GLOB_RECURSE _zb_ffi_rust_sources CONFIGURE_DEPENDS
+      "${ZEROBUS_FFI_CRATE_DIR}/src/*.rs"
+      "${ZEROBUS_REPO_ROOT}/rust/sdk/src/*.rs")
+  list(APPEND _zb_ffi_rust_sources
+      "${ZEROBUS_FFI_CRATE_DIR}/Cargo.toml"
+      "${ZEROBUS_REPO_ROOT}/rust/sdk/Cargo.toml"
+      "${ZEROBUS_REPO_ROOT}/rust/Cargo.toml")
+
   add_custom_command(
       OUTPUT "${_zb_ffi_lib}"
       COMMAND "${CARGO_EXECUTABLE}" build --release
+      DEPENDS ${_zb_ffi_rust_sources}
       WORKING_DIRECTORY "${ZEROBUS_FFI_CRATE_DIR}"
       COMMENT "Building Zerobus C FFI (cargo build --release)"
       VERBATIM)

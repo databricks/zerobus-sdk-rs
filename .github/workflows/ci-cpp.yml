@@ -1,12 +1,11 @@
 name: C++ CI
 
 on:
+  # No use_local_sdk input: the C++ build always compiles the Rust core from
+  # local source (BuildRustFfi.cmake runs `cargo build` in ../rust/ffi, which
+  # depends on ../rust/sdk by path), so there is no released-vs-local mode to
+  # toggle and no crates.io dependency to patch.
   workflow_call:
-    inputs:
-      use_local_sdk:
-        description: 'Override databricks-zerobus-ingest-sdk with the local path dep (for integration testing unreleased Rust changes)'
-        type: boolean
-        default: false
 
 jobs:
   fmt:
@@ -42,10 +41,6 @@ jobs:
 
       - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
 
-      - name: Patch Rust workspace to use local SDK
-        if: inputs.use_local_sdk
-        run: printf '\n[patch.crates-io]\ndatabricks-zerobus-ingest-sdk = { path = "sdk" }\n' >> ../rust/Cargo.toml
-
       - name: Build (SDK, tests, examples)
         run: make build
 
@@ -70,10 +65,6 @@ jobs:
         run: bash "$GITHUB_WORKSPACE/.github/scripts/configure-cargo.sh"
 
       - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
-
-      - name: Patch Rust workspace to use local SDK
-        if: inputs.use_local_sdk
-        run: printf '\n[patch.crates-io]\ndatabricks-zerobus-ingest-sdk = { path = "sdk" }\n' >> ../rust/Cargo.toml
 
       # Build the SDK, tests, and examples with AddressSanitizer and run the
       # existing suite under it. This catches the memory bugs a thin FFI wrapper
