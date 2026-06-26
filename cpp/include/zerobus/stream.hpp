@@ -1,9 +1,11 @@
 #ifndef ZEROBUS_STREAM_HPP
 #define ZEROBUS_STREAM_HPP
 
+#include <cstddef>
 #include <cstdint>
 #include <memory>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include "zerobus/headers_provider.hpp"
@@ -49,11 +51,13 @@ class Stream {
 
   /// Ingest a batch of protobuf records. Returns the offset of the last record
   /// in the batch. Prefer batch APIs over per-record calls in hot paths — each
-  /// FFI crossing has a fixed cost.
+  /// FFI crossing has a fixed cost. Throws `ZerobusException` if `records` is
+  /// empty (an empty batch has no offset to return).
   std::int64_t ingest_proto_records(
       const std::vector<std::vector<std::uint8_t>>& records);
 
   /// Ingest a batch of JSON records. Returns the offset of the last record.
+  /// Throws `ZerobusException` if `records` is empty.
   std::int64_t ingest_json_records(const std::vector<std::string>& records);
 
   /// Fire-and-forget single-record ingestion. Returns immediately; only
@@ -73,7 +77,8 @@ class Stream {
   void ingest_json_record_nowait(const std::string& json);
 
   /// Fire-and-forget batch ingestion. Copies the payloads before returning, so
-  /// the caller's buffers may be released immediately.
+  /// the caller's buffers may be released immediately. An empty batch is a
+  /// no-op.
   void ingest_proto_records_nowait(
       const std::vector<std::vector<std::uint8_t>>& records);
   void ingest_json_records_nowait(const std::vector<std::string>& records);
@@ -85,16 +90,22 @@ class Stream {
   void flush();
 
   /// Return all unacknowledged records from a closed or failed stream, for the
-  /// caller to re-ingest on a fresh stream.
+  /// caller to re-ingest on a fresh stream. Remains callable after a failed
+  /// `close()` (which keeps the handle alive precisely so recovery is
+  /// possible).
   std::vector<UnackedRecord> get_unacked_records();
 
   /// Gracefully close the stream, flushing pending records first. Idempotent:
-  /// safe to call more than once. After this returns the stream is unusable.
+  /// safe to call more than once.
   ///
   /// Blocks until the flush completes or the stream's `flush_timeout_ms`
   /// elapses (default 5 minutes), so call it at a controlled point rather than
-  /// leaving it to the destructor. Throws `ZerobusException` if the close
-  /// fails.
+  /// leaving it to the destructor.
+  ///
+  /// On success the stream becomes unusable. If the close fails it throws
+  /// `ZerobusException` but keeps the stream handle alive, so the caller can
+  /// still recover buffered data via `get_unacked_records()` and/or retry
+  /// `close()`; the destructor frees the handle as a last resort.
   void close();
 
   /// Whether `close()` has already been called (locally observed).

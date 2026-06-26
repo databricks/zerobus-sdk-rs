@@ -39,6 +39,17 @@ CHeaders make_error(const std::string& message) {
   headers.headers = nullptr;
   headers.count = 0;
   headers.error_message = dup_cstring(message);
+  if (headers.error_message == nullptr) {
+    // Allocating the message failed (OOM). Fall back to a minimal non-null,
+    // heap-allocated marker: the Rust core treats a null error_message as
+    // "success with no headers", so without this the original error would be
+    // swallowed and the request would proceed unauthenticated. The text is
+    // lost, but the error is still signalled. (free'd by zerobus_free_headers.)
+    headers.error_message = static_cast<char*>(std::malloc(1));
+    if (headers.error_message != nullptr) {
+      headers.error_message[0] = '\0';
+    }
+  }
   return headers;
 }
 
@@ -87,6 +98,15 @@ extern "C" CHeaders zerobus_cpp_headers_trampoline(void* user_data) {
 
   std::size_t i = 0;
   for (const auto& kv : headers) {
+    // Header keys/values cross the FFI as NUL-terminated C strings. A string
+    // containing an embedded NUL would be silently truncated at the first NUL
+    // on the Rust side, so reject it explicitly rather than send corrupt
+    // metadata. (arr[0..i) are already populated; free those.)
+    if (kv.first.find('\0') != std::string::npos ||
+        kv.second.find('\0') != std::string::npos) {
+      free_marshaled_headers(arr, i);
+      return make_error("header key or value contains an embedded NUL byte");
+    }
     arr[i].key = dup_cstring(kv.first);
     arr[i].value = dup_cstring(kv.second);
     if (arr[i].key == nullptr || arr[i].value == nullptr) {

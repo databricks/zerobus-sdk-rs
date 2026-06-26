@@ -124,6 +124,13 @@ std::int64_t Stream::ingest_json_record(const std::string& json) {
 
 std::int64_t Stream::ingest_proto_records(
     const std::vector<std::vector<std::uint8_t>>& records) {
+  // Reject empty batches explicitly. An empty vector yields a (possibly null)
+  // data() pointer, which the FFI either rejects as "Invalid records pointer"
+  // or accepts and answers with its internal -2 sentinel — neither is a real
+  // offset. Fail clearly here instead of returning a misleading value.
+  if (records.empty()) {
+    throw ZerobusException("cannot ingest an empty record batch", false);
+  }
   ProtoBatchView v = make_proto_batch(records);
   detail::ResultGuard guard;
   std::int64_t offset = zerobus_stream_ingest_proto_records(
@@ -134,6 +141,11 @@ std::int64_t Stream::ingest_proto_records(
 
 std::int64_t Stream::ingest_json_records(
     const std::vector<std::string>& records) {
+  // See ingest_proto_records: reject empty batches rather than returning the
+  // FFI's -2 empty-batch sentinel as if it were a real offset.
+  if (records.empty()) {
+    throw ZerobusException("cannot ingest an empty record batch", false);
+  }
   JsonBatchView v = make_json_batch(records);
   detail::ResultGuard guard;
   std::int64_t offset = zerobus_stream_ingest_json_records(
@@ -161,6 +173,10 @@ void Stream::ingest_json_record_nowait(const std::string& json) {
 
 void Stream::ingest_proto_records_nowait(
     const std::vector<std::vector<std::uint8_t>>& records) {
+  // Nothing to enqueue; skip the FFI call (and its null-pointer ambiguity).
+  if (records.empty()) {
+    return;
+  }
   ProtoBatchView v = make_proto_batch(records);
   detail::ResultGuard guard;
   zerobus_stream_ingest_proto_records_nowait(
@@ -170,6 +186,10 @@ void Stream::ingest_proto_records_nowait(
 
 void Stream::ingest_json_records_nowait(
     const std::vector<std::string>& records) {
+  // Nothing to enqueue; skip the FFI call (and its null-pointer ambiguity).
+  if (records.empty()) {
+    return;
+  }
   JsonBatchView v = make_json_batch(records);
   detail::ResultGuard guard;
   zerobus_stream_ingest_json_records_nowait(handle_, v.ptrs.data(),
@@ -215,20 +235,26 @@ std::vector<UnackedRecord> Stream::get_unacked_records() {
 }
 
 // Explicit close: unlike the destructor, this surfaces a failed flush/close by
-// throwing. Idempotent via the null-handle guard. The handle is freed whether
-// or not the close succeeds, so it is captured and nulled before the FFI call.
+// throwing. Idempotent via the null-handle guard.
+//
+// On failure the handle is deliberately *kept* (not freed, handle_ left
+// non-null) so the caller can still recover buffered data via
+// get_unacked_records() and retry close(); the destructor frees it as a last
+// resort. Only a successful close frees the handle and marks the stream closed.
 void Stream::close() {
   if (handle_ == nullptr) {
     return;
   }
-  CZerobusStream* h = handle_;
-  handle_ = nullptr;  // Mark closed up front; the handle is freed regardless.
   detail::ResultGuard guard;
-  bool ok = zerobus_stream_close(h, guard.ptr());
-  zerobus_stream_free(h);
+  bool ok = zerobus_stream_close(handle_, guard.ptr());
   if (!ok) {
+    // Keep handle_ alive for recovery, then surface the error.
     guard.throw_if_error();
+    // Fallback if close reported failure without setting an error message.
+    throw ZerobusException("failed to close stream", false);
   }
+  zerobus_stream_free(handle_);
+  handle_ = nullptr;
 }
 
 }  // namespace zerobus
