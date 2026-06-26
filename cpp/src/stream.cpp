@@ -141,7 +141,8 @@ std::int64_t Stream::ingest_proto_records(
 
 std::int64_t Stream::ingest_json_records(
     const std::vector<std::string>& records) {
-  // See ingest_proto_records: an empty batch is a no-op returning -1, not a throw.
+  // See ingest_proto_records: an empty batch is a no-op returning -1, not a
+  // throw.
   if (records.empty()) {
     return -1;
   }

@@ -50,8 +50,8 @@ class Stream {
   std::int64_t ingest_json_record(const std::string& json);
 
   /// Ingest a batch of protobuf records. Returns the offset of the last record
-  /// in the batch, or -1 if `records` is empty (a no-op). Prefer batch APIs over
-  /// per-record calls in hot paths — each FFI crossing has a fixed cost.
+  /// in the batch, or -1 if `records` is empty (a no-op). Prefer batch APIs
+  /// over per-record calls in hot paths — each FFI crossing has a fixed cost.
   std::int64_t ingest_proto_records(
       const std::vector<std::vector<std::uint8_t>>& records);
 
