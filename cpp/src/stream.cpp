@@ -17,6 +17,22 @@ namespace zerobus {
 
 namespace {
 
+// Validate a server-assigned offset returned by an FFI ingest call. A real
+// offset is non-negative; the FFI uses negative values only as sentinels (-1
+// error, -2 empty batch) that should always travel with a failed CResult. Once
+// throw_if_error() has cleared the failure path, a negative offset would mean
+// the FFI handed back a sentinel with success set — never a usable offset, and
+// dangerous if passed on to wait_for_offset(). Reject it, mirroring Go's
+// explicit `offset < 0` guard. (The batch APIs short-circuit the empty case to
+// -1 before the FFI call, so that path never reaches here.)
+std::int64_t checked_offset(std::int64_t offset) {
+  if (offset < 0) {
+    throw ZerobusException("unexpected negative offset from Zerobus FFI",
+                           false);
+  }
+  return offset;
+}
+
 // An empty payload still needs a valid, non-null pointer to pass across the FFI
 // (paired with length 0); hand out the address of a static sentinel byte rather
 // than nullptr or a dangling data() result.
@@ -104,7 +120,7 @@ std::int64_t Stream::ingest_proto_record(const std::uint8_t* data,
   std::int64_t offset =
       zerobus_stream_ingest_proto_record(handle_, data, len, guard.ptr());
   guard.throw_if_error();
-  return offset;
+  return checked_offset(offset);
 }
 
 // Vector overload: adapt to the (pointer, length) form, substituting the
@@ -119,7 +135,7 @@ std::int64_t Stream::ingest_json_record(const std::string& json) {
   std::int64_t offset =
       zerobus_stream_ingest_json_record(handle_, json.c_str(), guard.ptr());
   guard.throw_if_error();
-  return offset;
+  return checked_offset(offset);
 }
 
 std::int64_t Stream::ingest_proto_records(
@@ -136,7 +152,7 @@ std::int64_t Stream::ingest_proto_records(
   std::int64_t offset = zerobus_stream_ingest_proto_records(
       handle_, v.ptrs.data(), v.lens.data(), v.ptrs.size(), guard.ptr());
   guard.throw_if_error();
-  return offset;
+  return checked_offset(offset);
 }
 
 std::int64_t Stream::ingest_json_records(
@@ -151,7 +167,7 @@ std::int64_t Stream::ingest_json_records(
   std::int64_t offset = zerobus_stream_ingest_json_records(
       handle_, v.ptrs.data(), v.ptrs.size(), guard.ptr());
   guard.throw_if_error();
-  return offset;
+  return checked_offset(offset);
 }
 
 void Stream::ingest_proto_record_nowait(const std::uint8_t* data,
