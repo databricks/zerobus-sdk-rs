@@ -6,9 +6,11 @@ use databricks_zerobus_ingest_sdk::{
     HeadersProvider, ZerobusError, ZerobusResult, ZerobusSdk, ZerobusStream,
 };
 use once_cell::sync::Lazy;
+use std::any::Any;
 use std::collections::{HashMap, HashSet};
 use std::ffi::{CStr, CString};
 use std::os::raw::c_char;
+use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::ptr;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
@@ -49,7 +51,16 @@ static HEADER_KEY_CACHE: Lazy<Mutex<HashSet<&'static str>>> =
 /// Intern a header key string to prevent memory leaks
 /// Only leaks memory for unique keys, not on every call
 pub(crate) fn intern_header_key(key: String) -> &'static str {
-    let mut cache = HEADER_KEY_CACHE.lock().unwrap();
+    // Recover from a poisoned lock rather than re-panicking. Since `ffi_guard`
+    // now catches panics at the FFI boundary instead of aborting, a panic that
+    // happened while this lock was held would otherwise poison it for the rest
+    // of the process — and every subsequent `.unwrap()` here would re-panic,
+    // permanently breaking header interning for all custom-headers-provider
+    // streams. The cache holds only interned `&'static str` keys, which stay
+    // valid across a panic, so recovering the inner `HashSet` is sound.
+    let mut cache = HEADER_KEY_CACHE
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
 
     // Check if we already have this key
     if let Some(&existing) = cache.iter().find(|&&k| k == key.as_str()) {
@@ -301,5 +312,83 @@ pub(crate) fn write_success_result(result: *mut CResult) {
         unsafe {
             *result = CResult::success();
         }
+    }
+}
+
+/// Extract a human-readable message from a caught panic payload. Rust panics
+/// carry either a `&'static str` (from `panic!("literal")`) or a `String` (from
+/// `panic!("{}", fmt)`); anything else is reported generically.
+fn panic_message(payload: &(dyn Any + Send)) -> String {
+    if let Some(s) = payload.downcast_ref::<&'static str>() {
+        format!("Rust panic caught at FFI boundary: {s}")
+    } else if let Some(s) = payload.downcast_ref::<String>() {
+        format!("Rust panic caught at FFI boundary: {s}")
+    } else {
+        "Rust panic caught at FFI boundary".to_string()
+    }
+}
+
+/// Run an FFI entry point's body under [`catch_unwind`] so a panic is converted
+/// into the function's normal failure channel instead of unwinding across the
+/// `extern "C"` boundary into the C/Go/Java caller — which is undefined
+/// behavior (at best an abort, at worst memory corruption).
+///
+/// On a caught panic this writes a non-retryable error into `result` (a no-op
+/// when `result` is null) and returns `sentinel`, the per-signature failure
+/// value the C contract already uses elsewhere: `ptr::null_mut()` / `ptr::null()`
+/// for pointer returns, `false` for `bool`, `-1` for the `i64` offset functions,
+/// an empty array struct for the `get_unacked_*` functions, and `()` for the
+/// `void` finalizers. Pass `ptr::null_mut()` as `result` for functions that
+/// have no `CResult` out-parameter; the panic is then reported only via the
+/// returned sentinel (matching those functions' existing best-effort contract).
+///
+/// The body is wrapped in [`AssertUnwindSafe`]. FFI bodies operate on raw
+/// pointers and the process-global [`RUNTIME`]/header caches, none of which
+/// carry the compiler's `UnwindSafe` bound, but raw pointers are unwind-safe and
+/// a caught panic here abandons the operation and returns an error rather than
+/// resuming use of any partially-updated state, so asserting unwind safety is
+/// sound. The one shared-state caveat is a `Mutex` poisoned by a panic taken
+/// under its lock: the global header-key cache guards against this by recovering
+/// the poisoned guard (see `intern_header_key`) so interning keeps working
+/// rather than re-panicking on every later call.
+pub(crate) fn ffi_guard<R>(result: *mut CResult, sentinel: R, body: impl FnOnce() -> R) -> R {
+    match catch_unwind(AssertUnwindSafe(body)) {
+        Ok(value) => value,
+        Err(payload) => {
+            write_error_result(result, &panic_message(payload.as_ref()), false);
+            sentinel
+        }
+    }
+}
+
+#[cfg(test)]
+mod common_tests {
+    use super::*;
+
+    /// Once `ffi_guard` catches panics instead of aborting, a panic taken while
+    /// the header-key cache lock is held poisons it for the rest of the process.
+    /// `intern_header_key` must recover from that poison rather than re-panic on
+    /// every later call (which would permanently break header interning). This
+    /// test lives here because it pokes the private `HEADER_KEY_CACHE` static.
+    #[test]
+    fn test_intern_header_key_recovers_from_poisoned_lock() {
+        // Poison the global mutex: lock it and panic while holding the guard.
+        let poisoned = std::thread::spawn(|| {
+            let _guard = HEADER_KEY_CACHE.lock().unwrap();
+            panic!("poison HEADER_KEY_CACHE on purpose");
+        })
+        .join();
+        assert!(poisoned.is_err(), "the spawned thread should have panicked");
+        assert!(
+            HEADER_KEY_CACHE.lock().is_err(),
+            "the lock should now be poisoned"
+        );
+
+        // Interning must still work despite the poison — no panic, correct value,
+        // and still interned (same pointer on a second call).
+        let k1 = intern_header_key("X-Poison-Recovery-Test".to_string());
+        assert_eq!(k1, "X-Poison-Recovery-Test");
+        let k2 = intern_header_key("X-Poison-Recovery-Test".to_string());
+        assert_eq!(k1.as_ptr(), k2.as_ptr());
     }
 }

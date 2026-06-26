@@ -10,6 +10,8 @@
 
 ### Bug Fixes
 
+- Every `#[no_mangle] extern "C"` entry point now runs its body inside a `catch_unwind` panic guard (`ffi_guard`). Previously a panic anywhere in an FFI function body (a dependency `unwrap`/`expect`, an allocation failure, a slicing/bounds error, or a panicking callback) would unwind across the `extern "C"` boundary into the C/Go/Java caller — undefined behavior, and at minimum a process abort with no recoverable error. A caught panic is now converted into the function's normal failure channel: a non-retryable error is written to the `CResult` out-parameter (when present) and the per-signature failure sentinel is returned (`NULL` for pointer returns, `false` for `bool`, `-1` for the `i64` offset functions, an empty array struct for the `get_unacked_*` functions). No signatures changed and `zerobus.h` is byte-identical, so this is ABI-compatible for existing Go/Java consumers.
+
 ### Documentation
 
 ### Internal Changes
