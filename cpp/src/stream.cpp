@@ -156,6 +156,10 @@ std::int64_t Stream::ingest_json_records(
 
 void Stream::ingest_proto_record_nowait(const std::uint8_t* data,
                                         std::size_t len) {
+  if (provider_ != nullptr) {
+    throw ZerobusException(
+        "_nowait APIs cannot be used with a custom HeadersProvider", false);
+  }
   detail::ResultGuard guard;
   zerobus_stream_ingest_proto_record_nowait(handle_, data, len, guard.ptr());
   guard.throw_if_error();
@@ -166,6 +170,10 @@ void Stream::ingest_proto_record_nowait(const std::vector<std::uint8_t>& data) {
 }
 
 void Stream::ingest_json_record_nowait(const std::string& json) {
+  if (provider_ != nullptr) {
+    throw ZerobusException(
+        "_nowait APIs cannot be used with a custom HeadersProvider", false);
+  }
   detail::ResultGuard guard;
   zerobus_stream_ingest_json_record_nowait(handle_, json.c_str(), guard.ptr());
   guard.throw_if_error();
@@ -173,6 +181,10 @@ void Stream::ingest_json_record_nowait(const std::string& json) {
 
 void Stream::ingest_proto_records_nowait(
     const std::vector<std::vector<std::uint8_t>>& records) {
+  if (provider_ != nullptr) {
+    throw ZerobusException(
+        "_nowait APIs cannot be used with a custom HeadersProvider", false);
+  }
   // Nothing to enqueue; skip the FFI call (and its null-pointer ambiguity).
   if (records.empty()) {
     return;
@@ -186,6 +198,10 @@ void Stream::ingest_proto_records_nowait(
 
 void Stream::ingest_json_records_nowait(
     const std::vector<std::string>& records) {
+  if (provider_ != nullptr) {
+    throw ZerobusException(
+        "_nowait APIs cannot be used with a custom HeadersProvider", false);
+  }
   // Nothing to enqueue; skip the FFI call (and its null-pointer ambiguity).
   if (records.empty()) {
     return;
