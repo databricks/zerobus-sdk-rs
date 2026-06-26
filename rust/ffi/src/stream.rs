@@ -866,10 +866,8 @@ pub extern "C" fn zerobus_free_error_message(message: *mut c_char) {
 }
 
 /// Get default stream configuration options
-//
-// Not wrapped in `ffi_guard`: the body only constructs a `#[repr(C)]` struct
-// from compile-time constants, so it has no operation that can panic and no
-// `CResult` error channel to report one through.
+// Not wrapped in `ffi_guard`: builds a `#[repr(C)]` struct from constants, so
+// nothing here can panic.
 #[no_mangle]
 pub extern "C" fn zerobus_get_default_config() -> CStreamConfigurationOptions {
     use databricks_zerobus_ingest_sdk::stream_options::defaults;

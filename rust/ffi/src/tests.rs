@@ -1074,8 +1074,9 @@ mod tests {
     // `ffi_guard`, so these tests exercise the shared mechanism that protects
     // the whole crate: a panic inside the body must be caught at the boundary
     // and turned into (failure sentinel + populated CResult) rather than
-    // unwinding into the C/Go/Java caller (which is undefined behavior). They
-    // cover each return-signature shape and the no-CResult path.
+    // escaping across the `extern "C"` boundary (which aborts the process on
+    // current Rust toolchains, and was undefined behavior on pre-1.81 ones).
+    // They cover each return-signature shape and the no-CResult path.
 
     // Read a CResult, free its message, and return (success, is_retryable, msg).
     fn drain_result(result: &mut CResult) -> (bool, bool, String) {

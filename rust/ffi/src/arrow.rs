@@ -620,9 +620,8 @@ pub extern "C" fn zerobus_arrow_free_batch_array(array: CArrowBatchArray) {
 /// Returns whether the Arrow stream has been closed.
 #[no_mangle]
 pub extern "C" fn zerobus_arrow_stream_is_closed(stream: *mut CArrowStream) -> bool {
-    // No CResult out-param. On a caught panic, report the stream as closed
-    // (`true`) — the same conservative answer this function gives for an invalid
-    // handle — so callers stop using it.
+    // No CResult out-param; on a caught panic return `true` (treat as closed),
+    // matching the answer for an invalid handle.
     ffi_guard(
         ptr::null_mut(),
         true,
@@ -634,10 +633,8 @@ pub extern "C" fn zerobus_arrow_stream_is_closed(stream: *mut CArrowStream) -> b
 }
 
 /// Returns the default Arrow stream configuration options.
-//
-// Not wrapped in `ffi_guard`: the body only constructs a `#[repr(C)]` struct
-// from compile-time constants, so it has no operation that can panic and no
-// `CResult` error channel to report one through.
+// Not wrapped in `ffi_guard`: builds a `#[repr(C)]` struct from constants, so
+// nothing here can panic.
 #[no_mangle]
 pub extern "C" fn zerobus_arrow_get_default_config() -> CArrowStreamConfigurationOptions {
     use databricks_zerobus_ingest_sdk::stream_options::defaults;
