@@ -4,8 +4,10 @@ use crate::common::*;
 use databricks_zerobus_ingest_sdk::schema::{descriptor_from_uc_schema, UcTableSchema};
 use prost::Message;
 use prost_reflect::{
-    Cardinality, DescriptorPool, DeserializeOptions, DynamicMessage, MessageDescriptor,
+    Cardinality, DescriptorPool, DeserializeOptions, DynamicMessage, Kind, MapKey,
+    MessageDescriptor, ReflectMessage, Value,
 };
+use std::fmt::Write;
 use std::os::raw::c_char;
 use std::ptr;
 
@@ -139,6 +141,110 @@ pub extern "C" fn zerobus_proto_schema_descriptor_bytes(
     schema_ref.descriptor_bytes.as_ptr()
 }
 
+/// Recursively collect the paths of `Required` (proto2) fields absent from
+/// `message`, descending into present message-typed values.
+///
+/// prost-reflect does not enforce `required` presence on encode, and walking
+/// only top-level fields misses required fields nested inside a `STRUCT`, inside
+/// each element of an `ARRAY<STRUCT>`, or inside a `MAP` value. Paths use dotted
+/// field names with `[i]` / `[key]` segments for list elements and map values
+/// (e.g. `addr.zip`, `items[2].id`, `props[home].zip`).
+///
+/// `path` is a scratch buffer reused across the whole walk: each frame appends
+/// its segment, recurses, then truncates back. This keeps the hot path (a valid
+/// record) allocation-free — a heap `String` is produced only when a missing
+/// field is actually recorded (`path.clone()`), not once per field visited.
+///
+/// Recursion depth is bounded by the descriptor depth, itself capped at
+/// schema-build time (`MAX_NESTING_DEPTH` in `type_json` parsing), so a
+/// pathological record cannot blow the stack here.
+fn collect_missing_required_fields(
+    message: &DynamicMessage,
+    path: &mut String,
+    missing: &mut Vec<String>,
+) {
+    for field in message.descriptor().fields() {
+        // Append `.<field>` (or just `<field>` at the root), remembering where to
+        // cut back to so the buffer is restored for the next sibling.
+        let base = path.len();
+        if !path.is_empty() {
+            path.push('.');
+        }
+        path.push_str(field.name());
+
+        if matches!(field.cardinality(), Cardinality::Required) && !message.has_field(&field) {
+            // Absent required field: record it; there is nothing to descend into.
+            missing.push(path.clone());
+        } else if matches!(field.kind(), Kind::Message(_)) && message.has_field(&field) {
+            // Descend into present message-typed values — singular structs, array
+            // elements, and map values — to validate their required fields too.
+            // Scalar fields (including arrays/maps of scalars) have no nested
+            // requirements, and an absent message field imposes none.
+            let value = message.get_field(&field);
+            descend_into_messages(&value, path, missing);
+        }
+
+        path.truncate(base);
+    }
+}
+
+/// Recurse into every [`DynamicMessage`] reachable from `value` — itself, list
+/// elements, or map values — accumulating missing required-field paths. Index
+/// (`[i]`) and map-key (`[key]`) segments are appended to and truncated from the
+/// shared `path` buffer, mirroring [`collect_missing_required_fields`].
+fn descend_into_messages(value: &Value, path: &mut String, missing: &mut Vec<String>) {
+    match value {
+        Value::Message(m) => collect_missing_required_fields(m, path, missing),
+        Value::List(items) => {
+            for (i, item) in items.iter().enumerate() {
+                if let Value::Message(m) = item {
+                    let base = path.len();
+                    // Write straight into the buffer; avoids a throwaway String.
+                    let _ = write!(path, "[{i}]");
+                    collect_missing_required_fields(m, path, missing);
+                    path.truncate(base);
+                }
+            }
+        }
+        Value::Map(entries) => {
+            for (key, val) in entries {
+                if let Value::Message(m) = val {
+                    let base = path.len();
+                    path.push('[');
+                    append_map_key(path, key);
+                    path.push(']');
+                    collect_missing_required_fields(m, path, missing);
+                    path.truncate(base);
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
+/// Append a protobuf map key to a missing-field path, in place (no allocation
+/// for the common string-key case).
+fn append_map_key(path: &mut String, key: &MapKey) {
+    match key {
+        MapKey::String(s) => path.push_str(s),
+        MapKey::Bool(b) => {
+            let _ = write!(path, "{b}");
+        }
+        MapKey::I32(i) => {
+            let _ = write!(path, "{i}");
+        }
+        MapKey::I64(i) => {
+            let _ = write!(path, "{i}");
+        }
+        MapKey::U32(i) => {
+            let _ = write!(path, "{i}");
+        }
+        MapKey::U64(i) => {
+            let _ = write!(path, "{i}");
+        }
+    }
+}
+
 /// Encode JSON record to protobuf bytes. Unknown keys are ignored.
 ///
 /// Values follow protobuf's JSON mapping; a few column types need shaping:
@@ -150,11 +256,12 @@ pub extern "C" fn zerobus_proto_schema_descriptor_bytes(
 /// - LONG/BIGINT above 2^53: pass as a JSON string, else the value loses
 ///   precision as a JSON number.
 ///
-/// Presence is enforced only for top-level non-nullable scalar and struct
-/// columns (proto2 `required`); a record omitting one fails. Non-nullable
-/// ARRAY/MAP columns map to `repeated`, which has no presence, so an omitted one
-/// encodes as empty rather than failing; required fields nested inside a STRUCT
-/// are likewise not presence-checked.
+/// Presence is enforced for every non-nullable scalar and struct field (proto2
+/// `required`), at any depth: a record that omits one fails. The check descends
+/// into nested STRUCTs, each element of an ARRAY<STRUCT>, and MAP values, so a
+/// required field missing inside a struct is rejected locally rather than by the
+/// server after a round-trip. Non-nullable ARRAY/MAP columns map to `repeated`,
+/// which has no presence, so an omitted one encodes as empty rather than failing.
 /// Returns true on success; caller must free buffer with `zerobus_free_proto_bytes`.
 /// On failure `*out_data` is set to NULL and `*out_len` to 0.
 #[no_mangle]
@@ -217,16 +324,15 @@ pub extern "C" fn zerobus_proto_schema_encode_json(
         return false;
     }
 
-    // Top-level non-nullable scalar/struct columns are proto2 `required`, but
-    // prost-reflect doesn't enforce presence on encode — reject a missing one
-    // here rather than emit wire bytes the server rejects. (ARRAY/MAP are
-    // `repeated`, which has no presence, and nested struct fields aren't walked.)
-    let missing: Vec<String> = schema_ref
-        .message
-        .fields()
-        .filter(|f| matches!(f.cardinality(), Cardinality::Required) && !message.has_field(f))
-        .map(|f| f.name().to_string())
-        .collect();
+    // Non-nullable scalar/struct columns are proto2 `required`, but prost-reflect
+    // doesn't enforce presence on encode — reject a missing one here rather than
+    // emit wire bytes the server rejects after a round-trip. The walk descends
+    // into nested structs, array elements, and map values so a required field
+    // missing at any depth is caught locally. (ARRAY/MAP themselves are
+    // `repeated`, which has no presence.)
+    let mut missing: Vec<String> = Vec::new();
+    let mut path = String::new();
+    collect_missing_required_fields(&message, &mut path, &mut missing);
     if !missing.is_empty() {
         write_error_result(
             result,

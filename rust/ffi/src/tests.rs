@@ -1065,4 +1065,177 @@ mod tests {
         }
         zerobus_proto_schema_free(schema);
     }
+
+    // Build a schema from `table_json`, attempt to encode `record_json`, and
+    // return the error message. Asserts the encode failed, the error is
+    // non-retryable (a missing required field is a caller error), and the output
+    // pointers were cleared.
+    fn encode_expecting_error(table_json: &CString, record_json: &str) -> String {
+        let mut build = unwritten_result();
+        let schema =
+            zerobus_proto_schema_from_uc_json(table_json.as_ptr(), &mut build as *mut CResult);
+        assert!(!schema.is_null(), "schema build failed");
+
+        let record = CString::new(record_json).unwrap();
+        let mut out_data: *mut u8 = ptr::null_mut();
+        let mut out_len: usize = 0;
+        let mut enc = presumed_success_result();
+        let ok = zerobus_proto_schema_encode_json(
+            schema,
+            record.as_ptr(),
+            &mut out_data as *mut *mut u8,
+            &mut out_len as *mut usize,
+            &mut enc as *mut CResult,
+        );
+        assert!(!ok, "expected encode to fail");
+        assert!(!enc.success);
+        assert!(
+            !enc.is_retryable,
+            "a missing required field is a caller error"
+        );
+        assert!(out_data.is_null(), "no buffer should be allocated on error");
+        assert_eq!(out_len, 0, "length must be cleared on error");
+        assert!(!enc.error_message.is_null());
+        let msg = unsafe { CStr::from_ptr(enc.error_message) }
+            .to_string_lossy()
+            .into_owned();
+        zerobus_free_error_message(enc.error_message);
+        zerobus_proto_schema_free(schema);
+        msg
+    }
+
+    #[test]
+    fn test_proto_schema_encode_missing_required_field_in_struct_errors() {
+        // `addr.zip` is non-nullable; a record that supplies `addr` but omits
+        // `zip` must fail locally rather than encode bytes the server rejects.
+        let table = CString::new(
+            r#"{
+                "name": "t", "catalog_name": "c", "schema_name": "s",
+                "columns": [
+                    {"name": "k", "type_name": "BIGINT", "type_text": "bigint", "nullable": false, "position": 0},
+                    {"name": "addr", "type_name": "STRUCT", "type_text": "struct", "nullable": false, "position": 1,
+                     "type_json": "{\"type\":\"struct\",\"fields\":[{\"name\":\"zip\",\"type\":\"integer\",\"nullable\":false,\"metadata\":{}},{\"name\":\"city\",\"type\":\"string\",\"nullable\":true,\"metadata\":{}}]}"}
+                ]
+            }"#,
+        )
+        .unwrap();
+        let msg = encode_expecting_error(&table, r#"{"k": 1, "addr": {"city": "boston"}}"#);
+        assert!(
+            msg.contains("addr.zip"),
+            "error should name the nested path, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn test_proto_schema_encode_missing_required_field_in_array_struct_errors() {
+        // Each ARRAY<STRUCT> element is validated independently: element [1]
+        // omits the required `id` while element [0] is complete.
+        let table = CString::new(
+            r#"{
+                "name": "t", "catalog_name": "c", "schema_name": "s",
+                "columns": [
+                    {"name": "k", "type_name": "BIGINT", "type_text": "bigint", "nullable": false, "position": 0},
+                    {"name": "items", "type_name": "ARRAY", "type_text": "array", "nullable": true, "position": 1,
+                     "type_json": "{\"type\":\"array\",\"elementType\":{\"type\":\"struct\",\"fields\":[{\"name\":\"id\",\"type\":\"long\",\"nullable\":false,\"metadata\":{}},{\"name\":\"label\",\"type\":\"string\",\"nullable\":true,\"metadata\":{}}]},\"containsNull\":false}"}
+                ]
+            }"#,
+        )
+        .unwrap();
+        let msg =
+            encode_expecting_error(&table, r#"{"k": 1, "items": [{"id": 5}, {"label": "x"}]}"#);
+        assert!(
+            msg.contains("items[1].id"),
+            "error should name the element path, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn test_proto_schema_encode_missing_required_field_in_map_value_errors() {
+        // MAP<K, STRUCT> values are validated: the value at key `work` omits the
+        // required `v` while the value at `home` is complete.
+        let table = CString::new(
+            r#"{
+                "name": "t", "catalog_name": "c", "schema_name": "s",
+                "columns": [
+                    {"name": "k", "type_name": "BIGINT", "type_text": "bigint", "nullable": false, "position": 0},
+                    {"name": "lookup", "type_name": "MAP", "type_text": "map", "nullable": true, "position": 1,
+                     "type_json": "{\"type\":\"map\",\"keyType\":\"string\",\"valueType\":{\"type\":\"struct\",\"fields\":[{\"name\":\"v\",\"type\":\"long\",\"nullable\":false,\"metadata\":{}}]},\"valueContainsNull\":false}"}
+                ]
+            }"#,
+        )
+        .unwrap();
+        let msg = encode_expecting_error(
+            &table,
+            r#"{"k": 1, "lookup": {"home": {"v": 2}, "work": {}}}"#,
+        );
+        assert!(
+            msg.contains("lookup[work].v"),
+            "error should name the map-value path, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn test_proto_schema_encode_nested_required_fields_present_succeeds() {
+        // All nested required fields present across STRUCT / ARRAY<STRUCT> / MAP
+        // value: the recursive presence walk must accept the record and the
+        // nested required values must round-trip.
+        let table = CString::new(
+            r#"{
+                "name": "t", "catalog_name": "c", "schema_name": "s",
+                "columns": [
+                    {"name": "k", "type_name": "BIGINT", "type_text": "bigint", "nullable": false, "position": 0},
+                    {"name": "addr", "type_name": "STRUCT", "type_text": "struct", "nullable": false, "position": 1,
+                     "type_json": "{\"type\":\"struct\",\"fields\":[{\"name\":\"zip\",\"type\":\"integer\",\"nullable\":false,\"metadata\":{}}]}"},
+                    {"name": "items", "type_name": "ARRAY", "type_text": "array", "nullable": true, "position": 2,
+                     "type_json": "{\"type\":\"array\",\"elementType\":{\"type\":\"struct\",\"fields\":[{\"name\":\"id\",\"type\":\"long\",\"nullable\":false,\"metadata\":{}}]},\"containsNull\":false}"},
+                    {"name": "lookup", "type_name": "MAP", "type_text": "map", "nullable": true, "position": 3,
+                     "type_json": "{\"type\":\"map\",\"keyType\":\"string\",\"valueType\":{\"type\":\"struct\",\"fields\":[{\"name\":\"v\",\"type\":\"long\",\"nullable\":false,\"metadata\":{}}]},\"valueContainsNull\":false}"}
+                ]
+            }"#,
+        )
+        .unwrap();
+        let decoded = encode_and_decode(
+            &table,
+            r#"{"k": 1, "addr": {"zip": 90210}, "items": [{"id": 7}], "lookup": {"home": {"v": 3}}}"#,
+        );
+        let addr = decoded.get_field_by_name("addr").unwrap();
+        assert_eq!(
+            addr.as_message()
+                .unwrap()
+                .get_field_by_name("zip")
+                .unwrap()
+                .as_i32(),
+            Some(90210)
+        );
+    }
+
+    #[test]
+    fn test_proto_schema_encode_missing_required_field_deeply_nested_errors() {
+        // The presence walk recurses to arbitrary depth, not just one level: a
+        // required field three message-levels down (`addr.geo.lat`) and one
+        // reached through an ARRAY<STRUCT> element's nested struct
+        // (`items[0].inner.id`) must both be reported.
+        let table = CString::new(
+            r#"{
+                "name": "t", "catalog_name": "c", "schema_name": "s",
+                "columns": [
+                    {"name": "addr", "type_name": "STRUCT", "type_text": "struct", "nullable": false, "position": 0,
+                     "type_json": "{\"type\":\"struct\",\"fields\":[{\"name\":\"geo\",\"type\":{\"type\":\"struct\",\"fields\":[{\"name\":\"lat\",\"type\":\"double\",\"nullable\":false,\"metadata\":{}}]},\"nullable\":false,\"metadata\":{}}]}"},
+                    {"name": "items", "type_name": "ARRAY", "type_text": "array", "nullable": true, "position": 1,
+                     "type_json": "{\"type\":\"array\",\"elementType\":{\"type\":\"struct\",\"fields\":[{\"name\":\"inner\",\"type\":{\"type\":\"struct\",\"fields\":[{\"name\":\"id\",\"type\":\"long\",\"nullable\":false,\"metadata\":{}}]},\"nullable\":false,\"metadata\":{}}]},\"containsNull\":false}"}
+                ]
+            }"#,
+        )
+        .unwrap();
+        let msg =
+            encode_expecting_error(&table, r#"{"addr": {"geo": {}}, "items": [{"inner": {}}]}"#);
+        assert!(
+            msg.contains("addr.geo.lat"),
+            "should report the 3-level-deep path, got: {msg}"
+        );
+        assert!(
+            msg.contains("items[0].inner.id"),
+            "should report the path through an array element's nested struct, got: {msg}"
+        );
+    }
 }
