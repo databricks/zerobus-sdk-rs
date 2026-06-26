@@ -124,12 +124,12 @@ std::int64_t Stream::ingest_json_record(const std::string& json) {
 
 std::int64_t Stream::ingest_proto_records(
     const std::vector<std::vector<std::uint8_t>>& records) {
-  // Reject empty batches explicitly. An empty vector yields a (possibly null)
-  // data() pointer, which the FFI either rejects as "Invalid records pointer"
-  // or accepts and answers with its internal -2 sentinel — neither is a real
-  // offset. Fail clearly here instead of returning a misleading value.
+  // An empty batch is a no-op, not an error: there are no records to ingest and
+  // no last-record offset to return. Match the other SDKs (Rust core returns
+  // Ok(None); the FFI returns its -2 sentinel; Go returns -1) by returning -1
+  // without crossing the FFI, rather than throwing.
   if (records.empty()) {
-    throw ZerobusException("cannot ingest an empty record batch", false);
+    return -1;
   }
   ProtoBatchView v = make_proto_batch(records);
   detail::ResultGuard guard;
@@ -141,10 +141,9 @@ std::int64_t Stream::ingest_proto_records(
 
 std::int64_t Stream::ingest_json_records(
     const std::vector<std::string>& records) {
-  // See ingest_proto_records: reject empty batches rather than returning the
-  // FFI's -2 empty-batch sentinel as if it were a real offset.
+  // See ingest_proto_records: an empty batch is a no-op returning -1, not a throw.
   if (records.empty()) {
-    throw ZerobusException("cannot ingest an empty record batch", false);
+    return -1;
   }
   JsonBatchView v = make_json_batch(records);
   detail::ResultGuard guard;
