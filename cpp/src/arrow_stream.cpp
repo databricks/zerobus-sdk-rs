@@ -104,20 +104,27 @@ std::vector<std::vector<std::uint8_t>> ArrowStream::get_unacked_batches() {
 }
 
 // Explicit close: surfaces a failed flush/close by throwing (the destructor
-// does not). Idempotent; the handle is captured and nulled before the FFI call
-// so it is freed exactly once whether or not the close succeeds.
+// does not). Idempotent via the null-handle guard.
+//
+// On failure the handle is deliberately kept (not freed, handle_ left non-null)
+// so the caller can still recover buffered batches via get_unacked_batches()
+// and retry close(); the destructor frees it as a last resort. Only a
+// successful close frees the handle and marks the stream closed. (Mirrors
+// Stream::close().)
 void ArrowStream::close() {
   if (handle_ == nullptr) {
     return;
   }
-  CArrowStream* h = handle_;
-  handle_ = nullptr;
   detail::ResultGuard guard;
-  bool ok = zerobus_arrow_stream_close(h, guard.ptr());
-  zerobus_arrow_stream_free(h);
+  bool ok = zerobus_arrow_stream_close(handle_, guard.ptr());
   if (!ok) {
+    // Keep handle_ alive for recovery, then surface the error.
     guard.throw_if_error();
+    // Fallback if close reported failure without setting an error message.
+    throw ZerobusException("failed to close Arrow stream", false);
   }
+  zerobus_arrow_stream_free(handle_);
+  handle_ = nullptr;
 }
 
 // Once close()/destruction has nulled the handle the stream is closed; while it

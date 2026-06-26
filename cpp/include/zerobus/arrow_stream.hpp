@@ -1,8 +1,10 @@
 #ifndef ZEROBUS_ARROW_STREAM_HPP
 #define ZEROBUS_ARROW_STREAM_HPP
 
+#include <cstddef>
 #include <cstdint>
 #include <memory>
+#include <utility>
 #include <vector>
 
 #include "zerobus/headers_provider.hpp"
@@ -47,10 +49,17 @@ class ArrowStream {
   void flush();
 
   /// Return all unacknowledged batches from a closed or failed stream, each as
-  /// a self-contained Arrow IPC stream (schema + one batch).
+  /// a self-contained Arrow IPC stream (schema + one batch). Remains callable
+  /// after a failed `close()`, which keeps the handle alive so recovery is
+  /// possible.
   std::vector<std::vector<std::uint8_t>> get_unacked_batches();
 
   /// Gracefully close the stream, flushing pending batches first. Idempotent.
+  ///
+  /// On success the stream becomes unusable. If the close fails it throws
+  /// `ZerobusException` but keeps the handle alive, so the caller can still
+  /// recover buffered batches via `get_unacked_batches()` and/or retry
+  /// `close()`; the destructor frees the handle as a last resort.
   void close();
 
   /// Whether the stream has been closed (queried from the FFI when live).
