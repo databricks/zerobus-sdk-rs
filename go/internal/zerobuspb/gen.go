@@ -7,10 +7,13 @@
 //
 // To regenerate after editing zerobus_service.proto, run `go generate ./...`
 // from the go/ module root. This requires protoc on PATH plus the
-// protoc-gen-go and protoc-gen-go-grpc plugins:
+// protoc-gen-go and protoc-gen-go-grpc plugins. Pin these to the versions that
+// produced the committed bindings so regeneration is deterministic (a newer
+// plugin can emit a different file and create a spurious diff):
 //
-//	go install google.golang.org/protobuf/cmd/protoc-gen-go@latest
-//	go install google.golang.org/grpc/cmd/protoc-gen-go-grpc@latest
+//	# expects protoc v6.33.0
+//	go install google.golang.org/protobuf/cmd/protoc-gen-go@v1.36.11
+//	go install google.golang.org/grpc/cmd/protoc-gen-go-grpc@v1.6.2
 //
 // google/protobuf/duration.proto is vendored under third_party/ so generation
 // does not depend on a system-wide protobuf include directory; its import is
