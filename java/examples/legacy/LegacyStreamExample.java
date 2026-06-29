@@ -11,6 +11,10 @@ import com.databricks.zerobus.examples.proto.AirQualityProto.AirQuality;
  *
  * <p>Note: New code should use {@link ZerobusProtoStream} or {@link ZerobusJsonStream} instead.
  *
+ * <p>With the deprecated future-based API, keep the last future and {@code .join()} once after
+ * the loop to confirm durability, as shown below. (Joining after every record limits throughput
+ * to one record per round-trip.)
+ *
  * <p>Run with: {@code java -cp <classpath> com.databricks.zerobus.examples.legacy.LegacyStreamExample}
  */
 public class LegacyStreamExample {
@@ -105,17 +109,24 @@ public class LegacyStreamExample {
         ZerobusStream<AirQuality> newStream = sdk.recreateStream(stream).join();
         System.out.println("  New stream created successfully");
 
-        // Ingest a few more records on the new stream
+        // Ingest a few more records on the new stream.
+        // Idiomatic flow: keep the last future and join once after the loop to confirm
+        // durability. New code should prefer the offset-based ZerobusProtoStream /
+        // ZerobusJsonStream APIs.
         int newRecords = 0;
         try {
+            java.util.concurrent.CompletableFuture<Void> lastFuture = null;
             for (int i = 0; i < 3; i++) {
                 AirQuality record = AirQuality.newBuilder()
                     .setDeviceName("legacy-recreate-" + i)
                     .setTemp(40 + i)
                     .setHumidity(70 + i)
                     .build();
-                newStream.ingestRecord(record).join();
+                lastFuture = newStream.ingestRecord(record); // returns immediately
                 newRecords++;
+            }
+            if (lastFuture != null) {
+                lastFuture.join(); // confirm durability once
             }
             System.out.println("  " + newRecords + " new records ingested on recreated stream");
         } finally {

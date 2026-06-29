@@ -180,6 +180,8 @@ async def main():
         try:
             # ========================================================================
             # Method 1: ingest_record_offset() - Get offset for each record
+            # Idiomatic flow: ingest in a loop, then await flush() once (or use an
+            # AckCallback) to confirm everything is durably committed.
             # ========================================================================
             logger.info("\n1. Using ingest_record_offset() - individual offsets")
             for i in range(min(10, NUM_RECORDS)):

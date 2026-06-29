@@ -68,7 +68,9 @@ Stream closed successfully
 
 ### Code Highlights
 
-The example demonstrates all three data-passing approaches:
+The example demonstrates all three data-passing approaches. Each `ingest_record_offset()`
+returns as soon as the record is queued; we ingest all of them and `flush()` once at the end
+rather than waiting per record (waiting per record forces a server round-trip each time):
 
 ```rust
 use databricks_zerobus_ingest_sdk::{ProtoMessage, ProtoBytes};
@@ -81,18 +83,18 @@ let order = TableOrders {
 };
 
 // 1. Auto-encoding: pass message directly
-let offset = stream.ingest_record_offset(ProtoMessage(order.clone())).await?;
-stream.wait_for_offset(offset).await?;
+let _offset = stream.ingest_record_offset(ProtoMessage(order.clone())).await?;
 
 // 2. Pre-encoded: pass bytes with wrapper
 let bytes = order.encode_to_vec();
-let offset = stream.ingest_record_offset(ProtoBytes(bytes)).await?;
-stream.wait_for_offset(offset).await?;
+let _offset = stream.ingest_record_offset(ProtoBytes(bytes)).await?;
 
 // 3. Backward-compatible: pass raw bytes (no wrapper)
 let bytes = order.encode_to_vec();
-let offset = stream.ingest_record_offset(bytes).await?;
-stream.wait_for_offset(offset).await?;
+let _offset = stream.ingest_record_offset(bytes).await?;
+
+// Confirm all queued records at once.
+stream.flush().await?;
 ```
 
 **Building a Protocol Buffers stream:**
