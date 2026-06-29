@@ -197,13 +197,10 @@ you want to distribute ingestion across multiple protobuf gRPC sub-streams.
 
 **Expected output:**
 ```
-=== Message ID-based API (Multiplexed) ===
+=== Multiplexed Protocol Buffers ingestion ===
 [Auto-encoding] Record sent with message ID: MessageId(stream=0, offset=0)
-[Auto-encoding] Record acknowledged with message ID: MessageId(stream=0, offset=0)
 [Pre-encoded] Record sent with message ID: MessageId(stream=1, offset=0)
-[Pre-encoded] Record acknowledged with message ID: MessageId(stream=1, offset=0)
 [Backward-compatible] Record sent with message ID: MessageId(stream=2, offset=0)
-[Backward-compatible] Record acknowledged with message ID: MessageId(stream=2, offset=0)
 All records flushed
 Stream closed successfully
 ```
@@ -227,14 +224,28 @@ let mut stream = sdk
     .await?;
 
 let message_id = stream.ingest_record(ProtoMessage(order)).await?;
-stream.wait_for_message_id(message_id).await?;
+
+// As a replacement for waiting on every message ID, call flush()
+// occasionally to confirm everything queued so far has been acknowledged.
+// If you need to confirm one specific record, wait for its message ID
+// instead.
+// stream.wait_for_message_id(message_id).await?;
+
+stream.flush().await?;
 stream.close().await?;
 ```
 
 `MultiplexedStream` returns `MessageId` values instead of `OffsetId` values
-because records may be queued on different sub-streams. Per-sub-stream ordering
-is preserved, but message ids are not globally ordered across the multiplexed
-stream.
+because records are queued on different sub-streams. A `MessageId` identifies
+the sub-stream and the offset within that sub-stream, for example
+`MessageId(stream=1, offset=42)`. Message IDs are not globally ordered: two
+different sub-streams can both have offset `42`.
+
+Single records are assigned to sub-streams round-robin. `ingest_records()`
+places the whole batch on one sub-stream and returns one `MessageId` for that
+batch. Use `flush()` to wait for all records already queued on all sub-streams.
+Use `wait_for_message_id()` only when you need to confirm one specific record
+or batch.
 
 ## Adapting for Your Custom Table
 

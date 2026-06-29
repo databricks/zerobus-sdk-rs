@@ -520,14 +520,21 @@ let mut stream = sdk
     .await?;
 
 let message_id = stream.ingest_record(ProtoMessage(order)).await?;
-stream.wait_for_message_id(message_id).await?;
+
+// As a replacement for waiting on every message ID, call flush()
+// occasionally to confirm everything queued so far has been acknowledged.
+// If you need to confirm one specific record, wait for its message ID instead.
+// stream.wait_for_message_id(message_id).await?;
+
+stream.flush().await?;
 stream.close().await?;
 ```
 
 `MultiplexedStream` returns `MessageId` values instead of `OffsetId` values
-because each id records which sub-stream accepted the record. Per-sub-stream
-ordering is preserved, but message ids are not globally ordered across the
-multiplexed stream. Arrow Flight streams are not multiplexed by this API.
+because each id records which sub-stream accepted the record and the offset
+within that sub-stream. Per-sub-stream ordering is preserved, but message ids
+are not globally ordered across the multiplexed stream. Arrow Flight streams
+are not multiplexed by this API.
 
 Setters can be called in any order before `.multiplexed(...)` or `.build()`. The builder validates at `build()` time that both authentication and format have been configured.
 
@@ -616,9 +623,10 @@ let mut stream = sdk
     .await?;
 
 let message_id = stream.ingest_record(ProtoMessage(record)).await?;
-stream.wait_for_message_id(message_id).await?;
 
+// For periodic confirmation, flush records that have already been queued.
 stream.flush().await?;
+
 stream.close().await?;
 ```
 

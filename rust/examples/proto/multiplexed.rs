@@ -45,7 +45,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
         .build()
         .await?;
 
-    ingest_with_message_id_api(&stream).await?;
+    ingest_multiplexed(&stream).await?;
 
     stream.close().await?;
     println!("Stream closed successfully");
@@ -53,9 +53,8 @@ async fn main() -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
-/// Multiplexed API: returns a message ID after queuing on a sub-stream.
-async fn ingest_with_message_id_api(stream: &MultiplexedStream) -> Result<(), Box<dyn Error>> {
-    println!("=== Message ID-based API (Multiplexed) ===");
+async fn ingest_multiplexed(stream: &MultiplexedStream) -> Result<(), Box<dyn Error>> {
+    println!("=== Multiplexed Protocol Buffers ingestion ===");
 
     // Delta TIMESTAMP is int64 microseconds since epoch UTC.
     let now = chrono::Utc::now().timestamp_micros();
@@ -77,11 +76,12 @@ async fn ingest_with_message_id_api(stream: &MultiplexedStream) -> Result<(), Bo
         "[Auto-encoding] Record sent with message ID: {}",
         message_id
     );
-    stream.wait_for_message_id(message_id).await?;
-    println!(
-        "[Auto-encoding] Record acknowledged with message ID: {}",
-        message_id
-    );
+
+    // As a replacement for waiting on every message ID, call flush()
+    // occasionally to confirm everything queued so far has been acknowledged.
+    // If you need to confirm one specific record, wait for its message ID
+    // instead.
+    // stream.wait_for_message_id(message_id).await?;
 
     // 2. Pre-encoded: ProtoBytes - pass bytes with explicit wrapper.
     let order = TableOrders {
@@ -98,11 +98,6 @@ async fn ingest_with_message_id_api(stream: &MultiplexedStream) -> Result<(), Bo
         .ingest_record(ProtoBytes(order.encode_to_vec()))
         .await?;
     println!("[Pre-encoded] Record sent with message ID: {}", message_id);
-    stream.wait_for_message_id(message_id).await?;
-    println!(
-        "[Pre-encoded] Record acknowledged with message ID: {}",
-        message_id
-    );
 
     // 3. Backward-compatible: raw Vec<u8> - no wrapper needed, works the same as ProtoBytes.
     let order = TableOrders {
@@ -118,11 +113,6 @@ async fn ingest_with_message_id_api(stream: &MultiplexedStream) -> Result<(), Bo
     let message_id = stream.ingest_record(order.encode_to_vec()).await?;
     println!(
         "[Backward-compatible] Record sent with message ID: {}",
-        message_id
-    );
-    stream.wait_for_message_id(message_id).await?;
-    println!(
-        "[Backward-compatible] Record acknowledged with message ID: {}",
         message_id
     );
 
