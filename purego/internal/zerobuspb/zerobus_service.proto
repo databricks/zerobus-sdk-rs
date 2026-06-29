@@ -5,9 +5,9 @@ import "google/protobuf/duration.proto";
 package databricks.zerobus;
 
 // Internal to the pure-Go SDK. The generated Go bindings live in
-// github.com/databricks/zerobus-sdk/go/internal/zerobuspb and are not part of
-// the SDK's public API surface (enforced by Go's internal/ package rule).
-option go_package = "github.com/databricks/zerobus-sdk/go/internal/zerobuspb";
+// github.com/databricks/zerobus-sdk/purego/internal/zerobuspb and are not part
+// of the SDK's public API surface (enforced by Go's internal/ package rule).
+option go_package = "github.com/databricks/zerobus-sdk/purego/internal/zerobuspb";
 
 service Zerobus {
   rpc EphemeralStream(stream EphemeralStreamRequest) returns (stream EphemeralStreamResponse);
