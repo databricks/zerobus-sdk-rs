@@ -62,11 +62,6 @@ class Stream {
   /// Fire-and-forget single-record ingestion. Returns immediately; only
   /// argument-validation errors are reported (as exceptions). Ingestion errors
   /// are silently dropped. The stream must outlive the background work.
-  ///
-  /// These APIs are intentionally incompatible with a custom `HeadersProvider`.
-  /// If the stream was created with `HeadersProvider` auth, each `_nowait` call
-  /// throws `ZerobusException`. This prevents a detached background task from
-  /// calling back into a provider after stream/provider teardown.
   void ingest_proto_record_nowait(const std::uint8_t* data, std::size_t len);
   void ingest_proto_record_nowait(const std::vector<std::uint8_t>& data);
   void ingest_json_record_nowait(const std::string& json);
