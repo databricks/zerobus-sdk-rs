@@ -16,7 +16,7 @@ The Databricks Zerobus Ingest SDK for Java provides a high-performance client fo
   - [Arrow Flight Examples (Beta)](#arrow-flight-examples-beta)
 - [API Styles](#api-styles)
   - [Offset-Based API (Recommended)](#offset-based-api-recommended)
-  - [Future-Based API](#future-based-api)
+  - [Future-Based API (Deprecated)](#future-based-api-deprecated)
 - [Configuration](#configuration)
 - [Logging](#logging)
 - [Error Handling](#error-handling)

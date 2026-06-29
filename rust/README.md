@@ -11,7 +11,7 @@ A high-performance Rust client for streaming data ingestion into Databricks Delt
 - [Repository Structure](#repository-structure)
 - [How It Works](#how-it-works)
 - [Usage Guide](#usage-guide)
-  - [1. Generate Protocol Buffer Schema](#1-generate-protocol-buffer-schema)
+  - [1. Generate Protocol Buffer Schema](#1-generate-protocol-buffer-schema-protocol-buffers-approach-only)
   - [2. Initialize the SDK](#2-initialize-the-sdk)
   - [3. Configure Authentication](#3-configure-authentication)
   - [4. Create a Stream](#4-create-a-stream)
