@@ -1,6 +1,6 @@
 module zerobus-examples/arrow
 
-go 1.24.0
+go 1.25.0
 
 require (
 	github.com/apache/arrow-go/v18 v18.0.0
@@ -17,7 +17,7 @@ require (
 	golang.org/x/exp v0.0.0-20240909161429-701f63a606c0 // indirect
 	golang.org/x/mod v0.21.0 // indirect
 	golang.org/x/sync v0.8.0 // indirect
-	golang.org/x/sys v0.26.0 // indirect
+	golang.org/x/sys v0.42.0 // indirect
 	golang.org/x/tools v0.26.0 // indirect
 	golang.org/x/xerrors v0.0.0-20231012003039-104605ab7028 // indirect
 )
