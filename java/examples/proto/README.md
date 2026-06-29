@@ -42,12 +42,12 @@ java -cp ".:../target/classes:$(cd .. && mvn dependency:build-classpath -q -Dinc
 ### Creating a Proto Stream
 
 ```java
-ZerobusProtoStream stream = sdk.createProtoStream(
-    tableName,
-    AirQuality.getDescriptor().toProto(),
-    clientId,
-    clientSecret
-).join();
+ZerobusProtoStream stream = sdk.streamBuilder()
+    .table(tableName)
+    .oauth(clientId, clientSecret)
+    .compiledProto(AirQuality.getDescriptor().toProto())
+    .build()
+    .join();
 ```
 
 ### Single Record Ingestion

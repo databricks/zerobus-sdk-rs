@@ -90,9 +90,12 @@ Schema schema = new Schema(Arrays.asList(
     Field.nullable("temp", new ArrowType.Int(32, true))
 ));
 
-ZerobusArrowStream stream = sdk.createArrowStream(
-    tableName, schema, clientId, clientSecret
-).join();
+ZerobusArrowStream stream = sdk.streamBuilder()
+    .table(tableName)
+    .oauth(clientId, clientSecret)
+    .arrow(schema)
+    .build()
+    .join();
 
 // Columnar batch ingestion
 Optional<Long> offset = stream.ingestBatch(vectorSchemaRoot);

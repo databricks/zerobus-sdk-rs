@@ -41,11 +41,12 @@ java -cp ".:../target/classes:$(cd .. && mvn dependency:build-classpath -q -Dinc
 ### Creating a JSON Stream
 
 ```java
-ZerobusJsonStream stream = sdk.createJsonStream(
-    tableName,
-    clientId,
-    clientSecret
-).join();
+ZerobusJsonStream stream = sdk.streamBuilder()
+    .table(tableName)
+    .oauth(clientId, clientSecret)
+    .json()
+    .build()
+    .join();
 ```
 
 ### Single Record Ingestion

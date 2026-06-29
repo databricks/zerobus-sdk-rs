@@ -1,22 +1,51 @@
 package com.databricks.zerobus;
 
 import static org.junit.jupiter.api.Assertions.*;
+import static org.junit.jupiter.api.Assumptions.assumeTrue;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.verify;
 
+import com.google.protobuf.DescriptorProtos.DescriptorProto;
 import java.util.Collections;
 import org.apache.arrow.vector.types.pojo.Schema;
 import org.junit.jupiter.api.Test;
+import org.mockito.ArgumentCaptor;
 
 /**
  * Unit tests for {@link StreamBuilder}.
  *
- * <p>These tests verify required-field validation and configuration accumulation without requiring
+ * <p>Most tests verify required-field validation and configuration accumulation without requiring
  * the native library. They exercise the builder up to (but not including) {@code build()}, which is
  * the only operation that touches native code, so a {@code null} SDK reference is sufficient.
+ *
+ * <p>The routing tests ({@code *RoutesTo*}) additionally verify that each terminal {@code build()}
+ * dispatches to the correct {@code ZerobusSdk.create*StreamInternal} method with the right table,
+ * credentials, and options. They use a mocked SDK and are skipped when the native library is
+ * unavailable, because instantiating (or mocking) {@link ZerobusSdk} triggers its static
+ * initializer, which loads the native library.
  */
 public class StreamBuilderTest {
 
   private static StreamBuilder builder() {
     return new StreamBuilder(null);
+  }
+
+  /**
+   * Skips a test unless the native library is loadable. Mocking {@link ZerobusSdk} initializes the
+   * class, which calls {@code NativeLoader.ensureLoaded()} in its static block.
+   */
+  private static void assumeNativeLibrary() {
+    boolean available;
+    try {
+      NativeLoader.ensureLoaded();
+      available = true;
+    } catch (UnsatisfiedLinkError | ExceptionInInitializerError e) {
+      available = false;
+    }
+    assumeTrue(available, "Native library required to mock ZerobusSdk");
   }
 
   // ==================== Validation ====================
@@ -36,6 +65,13 @@ public class StreamBuilderTest {
   }
 
   @Test
+  void validateRequiredThrowsWithoutClientSecret() {
+    StreamBuilder b = builder().table("catalog.schema.table").oauth("client-id", null);
+    IllegalStateException ex = assertThrows(IllegalStateException.class, b::validateRequired);
+    assertTrue(ex.getMessage().contains("authentication is required"));
+  }
+
+  @Test
   void validateRequiredPassesWithTableAndOauth() {
     StreamBuilder b = builder().table("catalog.schema.table").oauth("client-id", "client-secret");
     assertDoesNotThrow(b::validateRequired);
@@ -49,6 +85,44 @@ public class StreamBuilderTest {
   @Test
   void arrowRejectsNullSchema() {
     assertThrows(NullPointerException.class, () -> builder().arrow(null));
+  }
+
+  // ==================== Numeric setter validation ====================
+  //
+  // These values are cast to unsigned Rust integers across JNI, so a negative would silently
+  // become a huge positive value. Limits and timeouts must be positive; retry counts and backoff
+  // delays must be non-negative; the Arrow streamPausedMaxWaitTimeMs negative is intentional.
+
+  @Test
+  void maxInflightRecordsRejectsNonPositive() {
+    assertThrows(IllegalArgumentException.class, () -> builder().maxInflightRecords(0));
+    assertThrows(IllegalArgumentException.class, () -> builder().maxInflightRecords(-1));
+  }
+
+  @Test
+  void timeoutSettersRejectNonPositive() {
+    assertThrows(IllegalArgumentException.class, () -> builder().recoveryTimeoutMs(0));
+    assertThrows(IllegalArgumentException.class, () -> builder().flushTimeoutMs(-5));
+    assertThrows(IllegalArgumentException.class, () -> builder().serverLackOfAckTimeoutMs(0));
+  }
+
+  @Test
+  void retryAndBackoffSettersRejectNegativeButAllowZero() {
+    assertThrows(IllegalArgumentException.class, () -> builder().recoveryRetries(-1));
+    assertThrows(IllegalArgumentException.class, () -> builder().recoveryBackoffMs(-1));
+    // Zero is meaningful: no retries / no backoff delay.
+    assertDoesNotThrow(() -> builder().recoveryRetries(0).recoveryBackoffMs(0));
+  }
+
+  @Test
+  void arrowSettersRejectNonPositiveExceptStreamPausedWait() {
+    assertThrows(
+        IllegalArgumentException.class, () -> builder().arrow(emptySchema()).maxInflightBatches(0));
+    assertThrows(
+        IllegalArgumentException.class,
+        () -> builder().arrow(emptySchema()).connectionTimeoutMs(-1L));
+    // A negative streamPausedMaxWaitTimeMs means "wait the full server-specified duration".
+    assertDoesNotThrow(() -> builder().arrow(emptySchema()).streamPausedMaxWaitTimeMs(-1L));
   }
 
   // ==================== gRPC option accumulation ====================
@@ -163,5 +237,84 @@ public class StreamBuilderTest {
     assertEquals(
         ArrowStreamConfigurationOptions.getDefault().maxInflightBatches(),
         options.maxInflightBatches());
+  }
+
+  // ==================== Terminal build() routing ====================
+  //
+  // Verify that each sub-builder's build() dispatches to the matching create*StreamInternal method
+  // with the configured table, credentials, and options — and never to the other two.
+
+  @Test
+  void jsonBuildRoutesToCreateJsonStreamInternal() {
+    assumeNativeLibrary();
+    ZerobusSdk sdk = mock(ZerobusSdk.class);
+
+    new StreamBuilder(sdk)
+        .table("cat.sch.json")
+        .oauth("json-id", "json-secret")
+        .maxInflightRecords(4242)
+        .json()
+        .build();
+
+    ArgumentCaptor<StreamConfigurationOptions> opts =
+        ArgumentCaptor.forClass(StreamConfigurationOptions.class);
+    verify(sdk)
+        .createJsonStreamInternal(
+            eq("cat.sch.json"), eq("json-id"), eq("json-secret"), opts.capture());
+    assertEquals(4242, opts.getValue().maxInflightRecords());
+    verify(sdk, never()).createProtoStreamInternal(any(), any(), any(), any(), any());
+    verify(sdk, never()).createArrowStreamInternal(any(), any(), any(), any(), any());
+  }
+
+  @Test
+  void compiledProtoBuildRoutesToCreateProtoStreamInternal() {
+    assumeNativeLibrary();
+    ZerobusSdk sdk = mock(ZerobusSdk.class);
+    DescriptorProto descriptor = DescriptorProto.newBuilder().setName("Rec").build();
+
+    new StreamBuilder(sdk)
+        .table("cat.sch.proto")
+        .oauth("proto-id", "proto-secret")
+        .recoveryRetries(9)
+        .compiledProto(descriptor)
+        .build();
+
+    ArgumentCaptor<StreamConfigurationOptions> opts =
+        ArgumentCaptor.forClass(StreamConfigurationOptions.class);
+    verify(sdk)
+        .createProtoStreamInternal(
+            eq("cat.sch.proto"),
+            eq(descriptor),
+            eq("proto-id"),
+            eq("proto-secret"),
+            opts.capture());
+    assertEquals(9, opts.getValue().recoveryRetries());
+    verify(sdk, never()).createJsonStreamInternal(any(), any(), any(), any());
+    verify(sdk, never()).createArrowStreamInternal(any(), any(), any(), any(), any());
+  }
+
+  @Test
+  void arrowBuildRoutesToCreateArrowStreamInternal() {
+    assumeNativeLibrary();
+    ZerobusSdk sdk = mock(ZerobusSdk.class);
+    Schema schema = emptySchema();
+
+    new StreamBuilder(sdk)
+        .table("cat.sch.arrow")
+        .oauth("arrow-id", "arrow-secret")
+        .recovery(false)
+        .arrow(schema)
+        .maxInflightBatches(11)
+        .build();
+
+    ArgumentCaptor<ArrowStreamConfigurationOptions> opts =
+        ArgumentCaptor.forClass(ArrowStreamConfigurationOptions.class);
+    verify(sdk)
+        .createArrowStreamInternal(
+            eq("cat.sch.arrow"), eq(schema), eq("arrow-id"), eq("arrow-secret"), opts.capture());
+    assertEquals(11, opts.getValue().maxInflightBatches());
+    assertFalse(opts.getValue().recovery());
+    verify(sdk, never()).createJsonStreamInternal(any(), any(), any(), any());
+    verify(sdk, never()).createProtoStreamInternal(any(), any(), any(), any(), any());
   }
 }

@@ -24,7 +24,7 @@ import org.slf4j.LoggerFactory;
  * protocol. Data is sent as Arrow {@link VectorSchemaRoot} batches, which are automatically
  * serialized to Arrow IPC format for transmission over the wire.
  *
- * <p>Create instances using {@link ZerobusSdk#createArrowStream}:
+ * <p>Create instances using {@link ZerobusSdk#streamBuilder()}:
  *
  * <pre>{@code
  * Schema schema = new Schema(Arrays.asList(
@@ -32,12 +32,12 @@ import org.slf4j.LoggerFactory;
  *     Field.nullable("age", new ArrowType.Int(32, true))
  * ));
  *
- * ZerobusArrowStream stream = sdk.createArrowStream(
- *     "catalog.schema.table",
- *     schema,
- *     clientId,
- *     clientSecret
- * ).join();
+ * ZerobusArrowStream stream = sdk.streamBuilder()
+ *     .table("catalog.schema.table")
+ *     .oauth(clientId, clientSecret)
+ *     .arrow(schema)
+ *     .build()
+ *     .join();
  *
  * // Create and populate a VectorSchemaRoot, then ingest
  * long offset = stream.ingestBatch(batch);
@@ -62,7 +62,7 @@ import org.slf4j.LoggerFactory;
  * a memory allocator implementation (e.g., {@code arrow-memory-netty}) to your project
  * dependencies.
  *
- * @see ZerobusSdk#createArrowStream(String, Schema, String, String)
+ * @see ZerobusSdk#streamBuilder()
  * @see ArrowStreamConfigurationOptions
  */
 public class ZerobusArrowStream implements AutoCloseable {
@@ -89,7 +89,7 @@ public class ZerobusArrowStream implements AutoCloseable {
   // Cached unacked batches (populated on close for use in recreateArrowStream).
   private volatile List<byte[]> cachedUnackedBatches;
 
-  /** Package-private constructor. Use {@link ZerobusSdk#createArrowStream} to create instances. */
+  /** Package-private constructor. Use {@link ZerobusSdk#streamBuilder()} to create instances. */
   ZerobusArrowStream(
       long nativeHandle,
       String tableName,
@@ -268,7 +268,7 @@ public class ZerobusArrowStream implements AutoCloseable {
   /**
    * Serializes an Arrow schema to IPC stream format.
    *
-   * <p>Package-private for use by {@link ZerobusSdk#createArrowStream}.
+   * <p>Package-private for use by {@link ZerobusSdk#createArrowStreamInternal}.
    */
   /** Shared allocator for schema serialization — lightweight, only used for empty roots. */
   private static final BufferAllocator SCHEMA_ALLOCATOR = new RootAllocator(1024 * 1024);

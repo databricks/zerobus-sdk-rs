@@ -92,9 +92,10 @@ public final class StreamBuilder {
    *
    * @param recoveryTimeoutMs the recovery timeout in milliseconds
    * @return this builder for method chaining
+   * @throws IllegalArgumentException if {@code recoveryTimeoutMs} is not positive
    */
   public StreamBuilder recoveryTimeoutMs(int recoveryTimeoutMs) {
-    this.recoveryTimeoutMs = recoveryTimeoutMs;
+    this.recoveryTimeoutMs = requirePositive(recoveryTimeoutMs, "recoveryTimeoutMs");
     return this;
   }
 
@@ -103,9 +104,10 @@ public final class StreamBuilder {
    *
    * @param recoveryBackoffMs the recovery backoff delay in milliseconds
    * @return this builder for method chaining
+   * @throws IllegalArgumentException if {@code recoveryBackoffMs} is negative
    */
   public StreamBuilder recoveryBackoffMs(int recoveryBackoffMs) {
-    this.recoveryBackoffMs = recoveryBackoffMs;
+    this.recoveryBackoffMs = requireNonNegative(recoveryBackoffMs, "recoveryBackoffMs");
     return this;
   }
 
@@ -114,9 +116,10 @@ public final class StreamBuilder {
    *
    * @param recoveryRetries the maximum number of recovery attempts
    * @return this builder for method chaining
+   * @throws IllegalArgumentException if {@code recoveryRetries} is negative
    */
   public StreamBuilder recoveryRetries(int recoveryRetries) {
-    this.recoveryRetries = recoveryRetries;
+    this.recoveryRetries = requireNonNegative(recoveryRetries, "recoveryRetries");
     return this;
   }
 
@@ -125,9 +128,11 @@ public final class StreamBuilder {
    *
    * @param serverLackOfAckTimeoutMs the server acknowledgment timeout in milliseconds
    * @return this builder for method chaining
+   * @throws IllegalArgumentException if {@code serverLackOfAckTimeoutMs} is not positive
    */
   public StreamBuilder serverLackOfAckTimeoutMs(int serverLackOfAckTimeoutMs) {
-    this.serverLackOfAckTimeoutMs = serverLackOfAckTimeoutMs;
+    this.serverLackOfAckTimeoutMs =
+        requirePositive(serverLackOfAckTimeoutMs, "serverLackOfAckTimeoutMs");
     return this;
   }
 
@@ -136,9 +141,10 @@ public final class StreamBuilder {
    *
    * @param flushTimeoutMs the flush timeout in milliseconds
    * @return this builder for method chaining
+   * @throws IllegalArgumentException if {@code flushTimeoutMs} is not positive
    */
   public StreamBuilder flushTimeoutMs(int flushTimeoutMs) {
-    this.flushTimeoutMs = flushTimeoutMs;
+    this.flushTimeoutMs = requirePositive(flushTimeoutMs, "flushTimeoutMs");
     return this;
   }
 
@@ -150,9 +156,10 @@ public final class StreamBuilder {
    *
    * @param maxInflightRecords the maximum number of in-flight records
    * @return this builder for method chaining
+   * @throws IllegalArgumentException if {@code maxInflightRecords} is not positive
    */
   public StreamBuilder maxInflightRecords(int maxInflightRecords) {
-    this.maxInflightRecords = maxInflightRecords;
+    this.maxInflightRecords = requirePositive(maxInflightRecords, "maxInflightRecords");
     return this;
   }
 
@@ -210,9 +217,36 @@ public final class StreamBuilder {
     if (tableName == null || tableName.isEmpty()) {
       throw new IllegalStateException("table name is required: call table()");
     }
-    if (clientId == null) {
+    if (clientId == null || clientSecret == null) {
       throw new IllegalStateException("authentication is required: call oauth()");
     }
+  }
+
+  // Numeric setters cross the JNI boundary and are cast to unsigned Rust integers (usize / u64 /
+  // u32). A negative value would silently become an enormous positive limit or timeout, so reject
+  // out-of-range values here rather than letting them through. {@code streamPausedMaxWaitTimeMs} is
+  // the one knob where a negative value is meaningful (it means "wait the full server-specified
+  // duration") and is handled separately on the Arrow sub-builder.
+
+  private static int requirePositive(int value, String name) {
+    if (value <= 0) {
+      throw new IllegalArgumentException(name + " must be positive, got: " + value);
+    }
+    return value;
+  }
+
+  private static long requirePositive(long value, String name) {
+    if (value <= 0) {
+      throw new IllegalArgumentException(name + " must be positive, got: " + value);
+    }
+    return value;
+  }
+
+  private static int requireNonNegative(int value, String name) {
+    if (value < 0) {
+      throw new IllegalArgumentException(name + " must not be negative, got: " + value);
+    }
+    return value;
   }
 
   /** Builds the gRPC stream options, applying only the values that were explicitly set. */
@@ -320,9 +354,10 @@ public final class StreamBuilder {
      *
      * @param maxInflightBatches the maximum number of in-flight batches
      * @return this builder for method chaining
+     * @throws IllegalArgumentException if {@code maxInflightBatches} is not positive
      */
     public ArrowStreamBuilder maxInflightBatches(int maxInflightBatches) {
-      this.maxInflightBatches = maxInflightBatches;
+      this.maxInflightBatches = requirePositive(maxInflightBatches, "maxInflightBatches");
       return this;
     }
 
@@ -331,9 +366,10 @@ public final class StreamBuilder {
      *
      * @param connectionTimeoutMs the connection timeout in milliseconds
      * @return this builder for method chaining
+     * @throws IllegalArgumentException if {@code connectionTimeoutMs} is not positive
      */
     public ArrowStreamBuilder connectionTimeoutMs(long connectionTimeoutMs) {
-      this.connectionTimeoutMs = connectionTimeoutMs;
+      this.connectionTimeoutMs = requirePositive(connectionTimeoutMs, "connectionTimeoutMs");
       return this;
     }
 

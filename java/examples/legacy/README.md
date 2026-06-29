@@ -74,12 +74,12 @@ stream.ingestRecord(record).join();
 ### After (ZerobusProtoStream)
 
 ```java
-ZerobusProtoStream stream = sdk.createProtoStream(
-    tableName,
-    AirQuality.getDescriptor().toProto(),
-    clientId,
-    clientSecret
-).join();
+ZerobusProtoStream stream = sdk.streamBuilder()
+    .table(tableName)
+    .oauth(clientId, clientSecret)
+    .compiledProto(AirQuality.getDescriptor().toProto())
+    .build()
+    .join();
 
 // Non-blocking, returns offset
 long offset = stream.ingestRecordOffset(record);

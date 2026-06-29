@@ -89,9 +89,12 @@ Schema schema = new Schema(Arrays.asList(
     Field.nullable("humidity", new ArrowType.Int(64, true))
 ));
 
-ZerobusArrowStream stream = sdk.createArrowStream(
-    tableName, schema, clientId, clientSecret
-).join();
+ZerobusArrowStream stream = sdk.streamBuilder()
+    .table(tableName)
+    .oauth(clientId, clientSecret)
+    .arrow(schema)
+    .build()
+    .join();
 ```
 
 ### Ingesting Batches
@@ -108,19 +111,23 @@ try (VectorSchemaRoot batch = VectorSchemaRoot.create(schema, allocator)) {
 
 ### Custom Options
 
-```java
-ArrowStreamConfigurationOptions options = ArrowStreamConfigurationOptions.builder()
-    .setMaxInflightBatches(2000)
-    .setFlushTimeoutMs(600000)
-    .setRecovery(true)
-    .setRecoveryRetries(5)
-    .setIpcCompression(IPCCompressionType.ZSTD)
-    .setStreamPausedMaxWaitTimeMs(5000)
-    .build();
+Set shared and Arrow-specific options directly on the builder. Arrow-specific knobs
+(`maxInflightBatches`, `ipcCompression`, `streamPausedMaxWaitTimeMs`, ...) are available after
+calling `.arrow(...)`:
 
-ZerobusArrowStream stream = sdk.createArrowStream(
-    tableName, schema, clientId, clientSecret, options
-).join();
+```java
+ZerobusArrowStream stream = sdk.streamBuilder()
+    .table(tableName)
+    .oauth(clientId, clientSecret)
+    .flushTimeoutMs(600000)
+    .recovery(true)
+    .recoveryRetries(5)
+    .arrow(schema)
+    .maxInflightBatches(2000)
+    .ipcCompression(IPCCompressionType.ZSTD)
+    .streamPausedMaxWaitTimeMs(5000)
+    .build()
+    .join();
 ```
 
 ### Recovering Unacknowledged Batches

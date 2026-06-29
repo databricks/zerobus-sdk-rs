@@ -441,21 +441,17 @@ public class ZerobusClient {
         // Initialize SDK
         ZerobusSdk sdk = new ZerobusSdk(serverEndpoint, workspaceUrl);
 
-        // Configure table properties
-        TableProperties<AirQuality> tableProperties = new TableProperties<>(
-            tableName,
-            AirQuality.getDefaultInstance()
-        );
-
         // Create stream
-        ZerobusStream<AirQuality> stream = sdk.createStream(
-            tableProperties,
-            clientId,
-            clientSecret
-        ).join();
+        ZerobusProtoStream stream = sdk.streamBuilder()
+            .table(tableName)
+            .oauth(clientId, clientSecret)
+            .compiledProto(AirQuality.getDescriptor().toProto())
+            .build()
+            .join();
 
         try {
             // Ingest records
+            long lastOffset = -1;
             for (int i = 0; i < 100; i++) {
                 AirQuality record = AirQuality.newBuilder()
                     .setDeviceName("sensor-" + (i % 10))
@@ -463,11 +459,12 @@ public class ZerobusClient {
                     .setHumidity(50 + (i % 40))
                     .build();
 
-                stream.ingestRecord(record).join(); // Wait for durability
+                lastOffset = stream.ingestRecordOffset(record); // Non-blocking enqueue
 
                 System.out.println("Ingested record " + (i + 1));
             }
 
+            stream.waitForOffset(lastOffset); // Wait for durability
             System.out.println("Successfully ingested 100 records!");
         } finally {
             stream.close();
@@ -999,7 +996,7 @@ Returns a fluent [`StreamBuilder`](#streambuilder) for creating JSON, Protocol B
     StreamConfigurationOptions options
 )
 ```
-Creates a new Protocol Buffer ingestion stream with custom configuration. Returns a CompletableFuture that completes when the stream is ready.
+Creates a new Protocol Buffer ingestion stream with custom configuration. Returns a CompletableFuture that completes when the stream is ready. _Deprecated — use [`streamBuilder()`](#streambuilder)._
 
 ```java
 <RecordType extends Message> CompletableFuture<ZerobusStream<RecordType>> createStream(
@@ -1008,7 +1005,7 @@ Creates a new Protocol Buffer ingestion stream with custom configuration. Return
     String clientSecret
 )
 ```
-Creates a new Protocol Buffer ingestion stream with default configuration. Returns a CompletableFuture that completes when the stream is ready.
+Creates a new Protocol Buffer ingestion stream with default configuration. Returns a CompletableFuture that completes when the stream is ready. _Deprecated — use [`streamBuilder()`](#streambuilder)._
 
 ```java
 CompletableFuture<ZerobusJsonStream> createJsonStream(
@@ -1017,7 +1014,7 @@ CompletableFuture<ZerobusJsonStream> createJsonStream(
     String clientSecret
 )
 ```
-Creates a new JSON ingestion stream with default configuration. No Protocol Buffer types required.
+Creates a new JSON ingestion stream with default configuration. No Protocol Buffer types required. _Deprecated — use [`streamBuilder()`](#streambuilder)._
 
 ```java
 CompletableFuture<ZerobusJsonStream> createJsonStream(
@@ -1027,7 +1024,7 @@ CompletableFuture<ZerobusJsonStream> createJsonStream(
     StreamConfigurationOptions options
 )
 ```
-Creates a new JSON ingestion stream with custom configuration. No Protocol Buffer types required.
+Creates a new JSON ingestion stream with custom configuration. No Protocol Buffer types required. _Deprecated — use [`streamBuilder()`](#streambuilder)._
 
 ```java
 CompletableFuture<ZerobusProtoStream> recreateStream(ZerobusProtoStream closedStream)
@@ -1047,7 +1044,7 @@ CompletableFuture<ZerobusArrowStream> createArrowStream(
     String clientSecret
 )
 ```
-**Beta.** Creates a new Arrow Flight ingestion stream with default configuration. Requires `arrow-vector` + `arrow-memory-netty` on the classpath.
+**Beta.** Creates a new Arrow Flight ingestion stream with default configuration. Requires `arrow-vector` + `arrow-memory-netty` on the classpath. _Deprecated — use [`streamBuilder()`](#streambuilder)._
 
 ```java
 CompletableFuture<ZerobusArrowStream> createArrowStream(
@@ -1058,7 +1055,7 @@ CompletableFuture<ZerobusArrowStream> createArrowStream(
     ArrowStreamConfigurationOptions options
 )
 ```
-**Beta.** Same as above with custom configuration.
+**Beta.** Same as above with custom configuration. _Deprecated — use [`streamBuilder()`](#streambuilder)._
 
 ```java
 CompletableFuture<ZerobusArrowStream> recreateArrowStream(ZerobusArrowStream closedStream)
