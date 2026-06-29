@@ -543,6 +543,7 @@ let records: Vec<ProtoMessage<YourMessage>> = vec![
 // Returns Some(offset) for non-empty batches, None for empty batches.
 // Queue many batches this way; flush() once when done.
 let _offset = stream.ingest_records_offset(records).await?;
+stream.flush().await?;
 ```
 
 #### Per-record confirmation

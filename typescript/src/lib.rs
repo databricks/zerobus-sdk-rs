@@ -420,12 +420,12 @@ impl ZerobusStream {
     ///
     /// ```typescript
     /// // High-throughput pattern: ingest in a loop, wait once at the end.
-    /// let lastOffset;
+    /// let lastOffset: bigint | null = null;
     /// for (const record of records) {
     ///   lastOffset = await stream.ingestRecordOffset(record); // resolves on queue, no round-trip
     /// }
     /// // The ack watermark is monotonic: waiting on the last offset confirms all prior records.
-    /// await stream.waitForOffset(lastOffset);
+    /// if (lastOffset !== null) await stream.waitForOffset(lastOffset);
     /// // Or simply: await stream.flush();
     /// ```
     #[napi(ts_return_type = "Promise<bigint>")]
@@ -549,12 +549,12 @@ impl ZerobusStream {
     /// # Example
     ///
     /// ```typescript
-    /// let lastOffset;
+    /// let lastOffset: bigint | null = null;
     /// for (const record of records) {
     ///   lastOffset = await stream.ingestRecordOffset(record); // no per-record wait
     /// }
     /// // Wait for the last offset only (implies all previous are also acknowledged).
-    /// await stream.waitForOffset(lastOffset);
+    /// if (lastOffset !== null) await stream.waitForOffset(lastOffset);
     /// ```
     #[napi(ts_return_type = "Promise<void>")]
     pub fn wait_for_offset(&self, env: Env, offset_id: BigInt) -> Result<JsObject> {

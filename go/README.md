@@ -531,7 +531,9 @@ if err != nil {
 }
 log.Printf("Batch queued with offset: %d", batchOffset)
 // ... ingest more batches ...
-stream.Flush() // wait for everything at the end
+if err := stream.Flush(); err != nil { // wait for everything at the end
+    log.Fatal(err)
+}
 ```
 
 **Single record with explicit confirmation:**
@@ -940,9 +942,9 @@ The test suite includes:
 7. **Use Batch Ingestion** - For high throughput, ingest many records before calling `Flush()`
 8. **Monitor Errors** - Log and alert on non-retryable errors
 9. **Use Protocol Buffers for Production** - More efficient than JSON for high-volume scenarios
-9. **Secure Credentials** - Never hardcode secrets; use environment variables or secret managers
-10. **Test Recovery** - Simulate failures to verify your error handling logic
-11. **One Stream Per Goroutine** - Don't share streams across goroutines; create separate streams for concurrent ingestion
+10. **Secure Credentials** - Never hardcode secrets; use environment variables or secret managers
+11. **Test Recovery** - Simulate failures to verify your error handling logic
+12. **One Stream Per Goroutine** - Don't share streams across goroutines; create separate streams for concurrent ingestion
 
 ## Migration Guide
 

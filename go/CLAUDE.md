@@ -5,9 +5,9 @@ Go wrapper around the Rust core via cgo and the C FFI library.
 ## Client code patterns (performance)
 
 When writing or reviewing client/example code, follow the idiomatic async flow.
-`IngestRecordOffset()` (and `IngestRecordsOffset()` / `IngestBatch()`) return as
-soon as the record is queued; the SDK sends it and tracks its acknowledgment in
-the background.
+`IngestRecordOffset()` and `IngestRecordsOffset()` (on `ZerobusStream`), as well as
+`IngestBatch()` (on `ZerobusArrowStream`), return as soon as the record is queued;
+the SDK sends it and tracks its acknowledgment in the background.
 
 - Ingest in a loop, then call `Flush()` to confirm durability — once for a
   bounded batch, or periodically for a long-running stream.

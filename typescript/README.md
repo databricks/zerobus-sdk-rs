@@ -182,7 +182,9 @@ The SDK supports two serialization formats. **Protocol Buffers is the default** 
 
 > **Note:** If you don't specify `recordType`, the SDK will use Protocol Buffers by default. To use JSON, explicitly set `recordType: RecordType.Json`.
 
-> **Acknowledgments and throughput.** Ingestion is asynchronous. `ingestRecordOffset()` (and `ingestRecordsOffset()`) resolves as soon as the record is queued; the SDK sends it and tracks its acknowledgment in the background. To confirm records are durably committed, call `flush()` — it resolves once everything queued so far is acknowledged. The idiomatic flow is **ingest in a loop, then `flush()`** (once for a bounded batch, or periodically for a long-running stream). Each ingest also returns the record's offset, and `waitForOffset(offset)` resolves when that offset is acknowledged — handy when a specific record must be confirmed before continuing (acks are ordered, so waiting on the last offset confirms the whole run). Just avoid calling `waitForOffset()` after every record in a tight loop, since that limits throughput to one record per round-trip. The examples below follow this pattern.
+### Acknowledgments and throughput
+
+Ingestion is asynchronous. `ingestRecordOffset()` (and `ingestRecordsOffset()`) resolves as soon as the record is queued; the SDK sends it and tracks its acknowledgment in the background. To confirm records are durably committed, call `flush()` — it resolves once everything queued so far is acknowledged. The idiomatic flow is **ingest in a loop, then `flush()`** (once for a bounded batch, or periodically for a long-running stream). Each ingest also returns the record's offset, and `waitForOffset(offset)` resolves when that offset is acknowledged — handy when a specific record must be confirmed before continuing (acks are ordered, so waiting on the last offset confirms the whole run). Just avoid calling `waitForOffset()` after every record in a tight loop, since that limits throughput to one record per round-trip. The examples below follow this pattern.
 
 ### Option 1: Using JSON (Quick Start)
 
@@ -881,10 +883,12 @@ async ingestRecordOffset(payload: Buffer | string | object): Promise<bigint>
 
 ```typescript
 // Idiomatic flow: ingest in a loop, then flush once
-const offset1 = await stream.ingestRecordOffset(record1);  // Resolves immediately
-const offset2 = await stream.ingestRecordOffset(record2);  // Resolves immediately
+let lastOffset: bigint | null = null;
+for (const record of records) {
+  lastOffset = await stream.ingestRecordOffset(record);  // Resolves immediately
+}
 await stream.flush();  // Resolves once everything queued so far is acknowledged
-// (Or, to confirm a specific record: await stream.waitForOffset(offset2))
+// (Or, to confirm a specific record: if (lastOffset !== null) await stream.waitForOffset(lastOffset))
 ```
 
 ---
@@ -1118,7 +1122,7 @@ enum RecordType {
 5. **Use Protocol Buffers for production**: Protocol Buffers (the default) provides better performance and schema validation. Use JSON only when you need schema flexibility or for quick prototyping.
 6. **Store credentials securely**: Use environment variables, never hardcode credentials
 7. **Use batch ingestion**: For high-throughput scenarios, use `ingestRecordsOffset()` instead of individual `ingestRecordOffset()` calls
-8. **Ingest in a loop, then `flush()`**: `ingestRecordOffset()` / `ingestRecordsOffset()` resolve as soon as the record is queued; the SDK sends and tracks acknowledgment in the background. Confirm durability with a single `flush()` (once for a bounded batch, or periodically for a long-running stream). Each ingest returns an offset, and `waitForOffset(offset)` confirms a specific record when you need it (acks are ordered, so the last offset confirms the whole run). Just avoid calling `waitForOffset()` after every record in a tight loop, since that limits throughput to one record per round-trip.
+8. **Ingest in a loop, then `flush()`**: See [Acknowledgments and throughput](#acknowledgments-and-throughput) above for the full explanation.
 
 ## Platform Support
 

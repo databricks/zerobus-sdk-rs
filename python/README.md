@@ -12,9 +12,9 @@ A high-performance Python client for streaming data ingestion into Databricks De
 - [Features](#features)
 - [Installation](#installation)
 - [Quick Start](#quick-start)
-  - [JSON (Simplest)](#option-1-json-simplest)
+  - [Protocol Buffers (Recommended)](#option-1-protocol-buffers-recommended)
+  - [JSON (Simplest)](#option-2-json-simplest)
   - [Acknowledgments and throughput](#acknowledgments-and-throughput)
-  - [Protocol Buffers](#option-2-protocol-buffers)
 - [Configuration](#configuration)
 - [Error Handling](#error-handling)
 - [Handling Stream Failures](#handling-stream-failures)
@@ -94,8 +94,8 @@ All core ingestion functionality (gRPC, OAuth, stream management) is handled by 
 
 ### Choose Your Serialization Format
 
-1. **JSON** - Simple, no schema compilation needed. Good for getting started.
-2. **Protocol Buffers** - Strongly-typed schemas, more efficient over the wire.
+1. **Protocol Buffers** (Recommended) - Strongly-typed schemas with compact binary encoding. More efficient over the wire and the best choice for production and high-throughput workloads.
+2. **JSON** - Simple, no schema compilation needed. Good for getting started or quick prototyping, but each record carries higher per-record overhead (text serialization plus UTF-8 validation), so it is slower than Protocol Buffers for high-volume ingestion.
 
 ### Option 1: JSON (Simplest)
 
@@ -386,16 +386,16 @@ throughput to one record per round-trip, so save it for confirming a specific re
 
 ```python
 for record in records:
-    stream.ingest_record_offset(record)   # queues immediately, no round-trip
-stream.flush()                            # one wait for everything
+    await stream.ingest_record_offset(record)   # queues immediately, no round-trip
+await stream.flush()                            # one wait for everything
 ```
 
 **Confirming a specific record** (waiting on the last offset confirms all prior records):
 
 ```python
 for record in records:
-    offset = stream.ingest_record_offset(record)
-stream.wait_for_offset(offset)            # confirm the run before continuing
+    offset = await stream.ingest_record_offset(record)
+await stream.wait_for_offset(offset)            # confirm the run before continuing
 ```
 
 ## API Reference
