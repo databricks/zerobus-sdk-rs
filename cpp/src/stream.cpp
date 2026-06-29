@@ -17,6 +17,20 @@ namespace zerobus {
 
 namespace {
 
+// Reject operations on a stream whose handle has already been released — after
+// a successful close() (which nulls handle_) or on a moved-from Stream. Without
+// this, the null handle reaches the FFI and bubbles back as the low-level
+// "Stream pointer is null"; checking here instead surfaces the same clear
+// "Stream has been closed" message that Go (and, modulo wording, Java's
+// ensureOpen()) report. get_unacked_records() is deliberately *not* blocked
+// after a failed close(), which keeps handle_ alive precisely so recovery
+// stays possible.
+void ensure_open(const CZerobusStream* handle) {
+  if (handle == nullptr) {
+    throw ZerobusException("Stream has been closed", false);
+  }
+}
+
 // Validate a server-assigned offset returned by an FFI ingest call. A real
 // offset is non-negative; the FFI uses negative values only as sentinels (-1
 // error, -2 empty batch) that should always travel with a failed CResult. Once
@@ -116,6 +130,7 @@ Stream& Stream::operator=(Stream&& other) noexcept {
 
 std::int64_t Stream::ingest_proto_record(const std::uint8_t* data,
                                          std::size_t len) {
+  ensure_open(handle_);
   detail::ResultGuard guard;
   std::int64_t offset =
       zerobus_stream_ingest_proto_record(handle_, data, len, guard.ptr());
@@ -131,6 +146,7 @@ std::int64_t Stream::ingest_proto_record(
 }
 
 std::int64_t Stream::ingest_json_record(const std::string& json) {
+  ensure_open(handle_);
   detail::ResultGuard guard;
   std::int64_t offset =
       zerobus_stream_ingest_json_record(handle_, json.c_str(), guard.ptr());
@@ -140,6 +156,7 @@ std::int64_t Stream::ingest_json_record(const std::string& json) {
 
 std::int64_t Stream::ingest_proto_records(
     const std::vector<std::vector<std::uint8_t>>& records) {
+  ensure_open(handle_);
   // An empty batch is a no-op, not an error: there are no records to ingest and
   // no last-record offset to return. Match the other SDKs (Rust core returns
   // Ok(None); the FFI returns its -2 sentinel; Go returns -1) by returning -1
@@ -157,6 +174,7 @@ std::int64_t Stream::ingest_proto_records(
 
 std::int64_t Stream::ingest_json_records(
     const std::vector<std::string>& records) {
+  ensure_open(handle_);
   // See ingest_proto_records: an empty batch is a no-op returning -1, not a
   // throw.
   if (records.empty()) {
@@ -172,6 +190,7 @@ std::int64_t Stream::ingest_json_records(
 
 void Stream::ingest_proto_record_nowait(const std::uint8_t* data,
                                         std::size_t len) {
+  ensure_open(handle_);
   if (provider_ != nullptr) {
     throw ZerobusException(
         "_nowait APIs cannot be used with a custom HeadersProvider", false);
@@ -186,6 +205,7 @@ void Stream::ingest_proto_record_nowait(const std::vector<std::uint8_t>& data) {
 }
 
 void Stream::ingest_json_record_nowait(const std::string& json) {
+  ensure_open(handle_);
   if (provider_ != nullptr) {
     throw ZerobusException(
         "_nowait APIs cannot be used with a custom HeadersProvider", false);
@@ -197,6 +217,7 @@ void Stream::ingest_json_record_nowait(const std::string& json) {
 
 void Stream::ingest_proto_records_nowait(
     const std::vector<std::vector<std::uint8_t>>& records) {
+  ensure_open(handle_);
   if (provider_ != nullptr) {
     throw ZerobusException(
         "_nowait APIs cannot be used with a custom HeadersProvider", false);
@@ -214,6 +235,7 @@ void Stream::ingest_proto_records_nowait(
 
 void Stream::ingest_json_records_nowait(
     const std::vector<std::string>& records) {
+  ensure_open(handle_);
   if (provider_ != nullptr) {
     throw ZerobusException(
         "_nowait APIs cannot be used with a custom HeadersProvider", false);
@@ -230,12 +252,14 @@ void Stream::ingest_json_records_nowait(
 }
 
 void Stream::wait_for_offset(std::int64_t offset) {
+  ensure_open(handle_);
   detail::ResultGuard guard;
   zerobus_stream_wait_for_offset(handle_, offset, guard.ptr());
   guard.throw_if_error();
 }
 
 void Stream::flush() {
+  ensure_open(handle_);
   detail::ResultGuard guard;
   zerobus_stream_flush(handle_, guard.ptr());
   guard.throw_if_error();
@@ -245,6 +269,10 @@ void Stream::flush() {
 // free the array — the borrowed buffers are only valid until that free, so the
 // copy must happen first.
 std::vector<UnackedRecord> Stream::get_unacked_records() {
+  // A failed close() keeps handle_ alive, so recovery still passes this guard;
+  // only a successful close (or moved-from stream) is rejected, where there is
+  // nothing left to recover.
+  ensure_open(handle_);
   detail::ResultGuard guard;
   CRecordArray array = zerobus_stream_get_unacked_records(handle_, guard.ptr());
   // On error the array is empty; surface the error first.
