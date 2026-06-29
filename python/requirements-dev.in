@@ -20,7 +20,7 @@ pytest-xdist>=3.6.1,<4.0
 pytest-asyncio>=0.21,<1.0
 pyarrow>=14.0.0,<20.0
 
-importlib-metadata<8.2
+importlib-metadata<9.1
 tomli
 exceptiongroup
 colorama
