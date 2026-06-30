@@ -185,6 +185,53 @@ impl MessageRegistry {
         }
     }
 
+    /// Build a registry from a root descriptor plus the other top-level message
+    /// descriptors in the same `FileDescriptorSet`, each paired with its proto
+    /// package so it is registered under its TRUE fully-qualified name.
+    ///
+    /// `from_descriptor` only recurses `nested_type`, so it registers the root
+    /// and its nested children but NOT sibling or imported top-level messages
+    /// from other files in the set (e.g. `google.protobuf.StringValue` from
+    /// `google/protobuf/wrappers.proto`). A `root` field typed
+    /// `.google.protobuf.StringValue` then misses on lookup and decode fails
+    /// with `UnknownTypeName`. This constructor closes that gap.
+    ///
+    /// `others` is a slice of `(package, descriptor)` pairs — one per top-level
+    /// message reachable from the set. `package` is the proto `package` of the
+    /// file the message came from (may be empty for the unnamed package). Each
+    /// message and its nested types are inserted under their package-prefixed
+    /// FQN with a leading dot, e.g. package `google.protobuf` + message
+    /// `StringValue` → key `.google.protobuf.StringValue`, matching the
+    /// `type_name` form on message-typed `FieldDescriptorProto`s.
+    ///
+    /// `root` remains the parse root (`root_descriptor`); the existing
+    /// `from_descriptor` API is unchanged.
+    #[inline(always)]
+    pub fn from_descriptors(root: &DescriptorProto, others: &[(String, &DescriptorProto)]) -> Self {
+        let mut messages = HashMap::new();
+
+        // Register the root (and its nested types) at the root prefix, exactly
+        // as `from_descriptor` does, so root-relative lookups are unchanged.
+        Self::collect_messages(root, &mut messages);
+
+        // Register every other top-level message under its package-qualified FQN.
+        for (package, desc) in others {
+            let prefix = if package.is_empty() {
+                ROOT_PREFIX.to_string()
+            } else {
+                format!(".{package}")
+            };
+            Self::collect_messages_with_prefix(desc, prefix, &mut messages);
+        }
+
+        let root_descriptor = DescriptorWithFieldCache::from_descriptor(root);
+
+        MessageRegistry {
+            messages,
+            root_descriptor,
+        }
+    }
+
     /// Iteratively collect all message descriptors using an explicit stack.
     /// This avoids stack overflow for deeply nested message types.
     #[inline(always)]
@@ -192,8 +239,21 @@ impl MessageRegistry {
         root: &DescriptorProto,
         acc: &mut HashMap<String, DescriptorWithFieldCache>,
     ) {
+        Self::collect_messages_with_prefix(root, ROOT_PREFIX.to_string(), acc);
+    }
+
+    /// Collect `root` and all of its nested types into `acc`, threading
+    /// `initial_prefix` as the enclosing namespace. An empty prefix yields
+    /// `.Name` (root behaviour); a package prefix like `.google.protobuf`
+    /// yields `.google.protobuf.Name`.
+    #[inline(always)]
+    fn collect_messages_with_prefix(
+        root: &DescriptorProto,
+        initial_prefix: String,
+        acc: &mut HashMap<String, DescriptorWithFieldCache>,
+    ) {
         // Use an explicit stack: (descriptor, prefix)
-        let mut stack: Vec<(&DescriptorProto, String)> = vec![(root, ROOT_PREFIX.to_string())];
+        let mut stack: Vec<(&DescriptorProto, String)> = vec![(root, initial_prefix)];
 
         while let Some((desc, current_prefix)) = stack.pop() {
             let name = desc.name.as_deref().unwrap_or("");
@@ -354,5 +414,91 @@ pub mod tests {
         assert_eq!(registry.get_field_type_name(1), None);
         assert_eq!(registry.get_field_type_name(2), Some(".Level1.Level2"));
         assert_eq!(registry.get_field_type_name(99), None);
+    }
+
+    #[test]
+    fn message_registry_from_descriptors_registers_siblings() {
+        // Root message references an imported well-known type by its FQN.
+        let root = make_descriptor(
+            "Bet",
+            vec![
+                make_field(1, "id", field_descriptor_proto::Type::String, false, None),
+                make_field(
+                    2,
+                    "note",
+                    field_descriptor_proto::Type::Message,
+                    false,
+                    Some(".google.protobuf.StringValue"),
+                ),
+            ],
+        );
+
+        // A sibling/imported top-level message from another file + package.
+        let string_value = make_descriptor(
+            "StringValue",
+            vec![make_field(
+                1,
+                "value",
+                field_descriptor_proto::Type::String,
+                false,
+                None,
+            )],
+        );
+
+        // `from_descriptor` alone never registers the sibling: lookup misses.
+        let root_only = MessageRegistry::from_descriptor(&root);
+        assert!(root_only.get(".google.protobuf.StringValue").is_none());
+
+        // `from_descriptors` registers it under its true package-qualified FQN.
+        let registry = MessageRegistry::from_descriptors(
+            &root,
+            &[("google.protobuf".to_string(), &string_value)],
+        );
+
+        assert!(registry.get(".Bet").is_some());
+        let wrapper = registry
+            .get(".google.protobuf.StringValue")
+            .expect("sibling well-known type must be registered");
+        assert_eq!(&*wrapper.get_field(1).unwrap().name, "value");
+
+        // Root remains the parse root, and the field still resolves to the FQN.
+        assert_eq!(
+            registry.get_field_type_name(2),
+            Some(".google.protobuf.StringValue")
+        );
+    }
+
+    #[test]
+    fn message_registry_from_descriptors_empty_package_and_nesting() {
+        // Empty-package sibling registers at the root prefix (`.Name`), and its
+        // nested types are collected too.
+        let mut sibling = make_descriptor(
+            "Sibling",
+            vec![make_field(
+                1,
+                "inner",
+                field_descriptor_proto::Type::Message,
+                false,
+                Some(".Sibling.Inner"),
+            )],
+        );
+        sibling.nested_type.push(make_descriptor(
+            "Inner",
+            vec![make_field(
+                1,
+                "x",
+                field_descriptor_proto::Type::Int32,
+                false,
+                None,
+            )],
+        ));
+
+        let root = make_descriptor("Root", vec![]);
+        let registry =
+            MessageRegistry::from_descriptors(&root, &[(String::new(), &sibling)]);
+
+        assert!(registry.get(".Root").is_some());
+        assert!(registry.get(".Sibling").is_some());
+        assert!(registry.get(".Sibling.Inner").is_some());
     }
 }
