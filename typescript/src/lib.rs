@@ -748,11 +748,6 @@ impl StaticHeadersProvider {
             ));
         }
 
-        // Add TS user agent if not provided
-        if !map.contains_key("user-agent") {
-            map.insert("user-agent", TS_SDK_USER_AGENT.to_string());
-        }
-
         Ok(Self { headers: map })
     }
 }
@@ -837,7 +832,6 @@ impl RustHeadersProvider for TsOAuthHeadersProvider {
         let mut headers = HashMap::new();
         headers.insert("authorization", format!("Bearer {}", token));
         headers.insert("x-databricks-zerobus-table-name", self.table_name.clone());
-        headers.insert("user-agent", TS_SDK_USER_AGENT.to_string());
         Ok(headers)
     }
 }
@@ -851,7 +845,8 @@ impl RustHeadersProvider for TsOAuthHeadersProvider {
 /// ```typescript
 /// const sdk = new ZerobusSdk(
 ///   "https://workspace-id.zerobus.region.cloud.databricks.com",
-///   "https://workspace.cloud.databricks.com"
+///   "https://workspace.cloud.databricks.com",
+///   "my-app/1.0"
 /// );
 ///
 /// const stream = await sdk.createStream(
@@ -879,13 +874,21 @@ impl ZerobusSdk {
     ///   (e.g., "https://workspace-id.zerobus.region.cloud.databricks.com")
     /// * `unity_catalog_url` - The Unity Catalog endpoint URL
     ///   (e.g., "https://workspace.cloud.databricks.com")
+    /// * `application_name` - Optional application identifier appended to the
+    ///   HTTP `user-agent` header, conventionally `"<product>/<version>"`.
+    ///   The SDK prefix `zerobus-sdk-ts/<version>` is always present; this
+    ///   value is appended after it (e.g. `"zerobus-sdk-ts/1.2.0 my-app/1.0"`).
     ///
     /// # Errors
     ///
     /// - Invalid endpoint URLs
     /// - Failed to extract workspace ID from the endpoint
     #[napi(constructor)]
-    pub fn new(zerobus_endpoint: String, unity_catalog_url: String) -> Result<Self> {
+    pub fn new(
+        zerobus_endpoint: String,
+        unity_catalog_url: String,
+        application_name: Option<String>,
+    ) -> Result<Self> {
         let workspace_id = zerobus_endpoint
             .strip_prefix("https://")
             .or_else(|| zerobus_endpoint.strip_prefix("http://"))
@@ -897,9 +900,15 @@ impl ZerobusSdk {
                 )
             })?;
 
-        let inner = RustZerobusSdk::builder()
+        let builder = RustZerobusSdk::builder()
             .endpoint(&zerobus_endpoint)
             .unity_catalog_url(&unity_catalog_url)
+            .sdk_identifier(TS_SDK_USER_AGENT);
+        let builder = match application_name {
+            Some(name) => builder.application_name(name),
+            None => builder,
+        };
+        let inner = builder
             .build()
             .map_err(|e| Error::from_reason(format!("Failed to create SDK: {}", e)))?;
 
