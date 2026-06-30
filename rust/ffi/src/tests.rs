@@ -1228,6 +1228,55 @@ mod tests {
         assert!(msg.contains("Rust panic caught at FFI boundary"));
     }
 
+    // Guard-coverage check: every `#[no_mangle] pub extern "C"` entry point must
+    // run its body through `ffi_guard`. Scanning the source (rather than the live
+    // symbols) is what lets this fail when a *new* entry point is added later
+    // without the guard — the regression the panic tests above can't catch on
+    // their own. A module gaining entry points must be added to `modules` below.
+    #[test]
+    fn test_every_extern_c_entry_point_is_guarded() {
+        let modules = [
+            ("sdk.rs", include_str!("sdk.rs")),
+            ("stream.rs", include_str!("stream.rs")),
+            ("builder.rs", include_str!("builder.rs")),
+            ("proto_schema.rs", include_str!("proto_schema.rs")),
+            ("arrow.rs", include_str!("arrow.rs")),
+            ("common.rs", include_str!("common.rs")),
+        ];
+        // Entry points whose body builds a `#[repr(C)]` struct from compile-time
+        // constants or does nothing — no panic-capable operation, so the guard is
+        // intentionally omitted (documented at each definition).
+        let allowed_unguarded = [
+            "zerobus_get_default_config",
+            "zerobus_arrow_get_default_config",
+            "zerobus_sdk_set_use_tls",
+        ];
+
+        let mut offenders = Vec::new();
+        for (module, src) in modules {
+            // Each chunk after the marker spans one entry point's text up to the
+            // next one (or EOF), so a guard call cannot leak across functions.
+            for chunk in src.split("pub extern \"C\" fn ").skip(1) {
+                let name: String = chunk
+                    .chars()
+                    .take_while(|c| c.is_alphanumeric() || *c == '_')
+                    .collect();
+                if allowed_unguarded.contains(&name.as_str()) {
+                    continue;
+                }
+                if !chunk.contains("ffi_guard(") {
+                    offenders.push(format!("{module}::{name}"));
+                }
+            }
+        }
+        assert!(
+            offenders.is_empty(),
+            "these `extern \"C\"` entry points don't run their body through \
+             ffi_guard (wrap them, or add to allowed_unguarded if intentionally \
+             panic-free): {offenders:?}"
+        );
+    }
+
     // Encode `record_json` against `table_json`, asserting the encode fails
     // cleanly (non-retryable, output pointers cleared) and returning the error.
     fn encode_expecting_error(table_json: &CString, record_json: &str) -> String {
