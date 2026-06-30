@@ -160,8 +160,11 @@ let mut stream = sdk
 ### 3. Ingest and Acknowledge
 
 ```rust
-let offset = stream.ingest_record_offset(data).await?;
-stream.wait_for_offset(offset).await?;
+for record in records {
+    // Returns once queued — do NOT wait on this offset inside the loop.
+    let _offset = stream.ingest_record_offset(record).await?;
+}
+stream.flush().await?; // Confirm all pending records at once.
 ```
 
 ### 4. Close Stream
@@ -172,13 +175,20 @@ stream.close().await?;
 
 ## Ingestion API
 
+> ⚡ **Do not call `wait_for_offset()` after every record.** `ingest_record_offset` queues the
+> record and returns immediately; the round-trip happens in the background. Waiting per record
+> serializes the pipeline into one round-trip per record and collapses throughput. Ingest in a
+> loop, then call `flush()` once (or wait on only the last offset).
+
 ```rust
-let offset = stream.ingest_record_offset(data).await?;
-// Do other work, then wait when needed.
-stream.wait_for_offset(offset).await?;
+for record in records {
+    let _offset = stream.ingest_record_offset(record).await?;
+}
+// Confirm everything at once.
+stream.flush().await?;
 ```
 
-`ingest_record_offset` returns the assigned `OffsetId` immediately after the record is queued. Call `wait_for_offset(offset)` to block until the record is durably acknowledged by the server.
+`ingest_record_offset` returns the assigned `OffsetId` immediately after the record is queued. To confirm durability, call `flush()` after a run of records, or `wait_for_offset(offset)` on a single offset only when you must confirm that specific record before continuing (low volume).
 
 ## Single-Record vs Batch Ingestion
 

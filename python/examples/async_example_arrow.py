@@ -151,7 +151,10 @@ async def main():
             logger.info(f"\nAll batches submitted in {submit_duration:.2f} seconds")
 
             # ========================================================================
-            # Wait for the last offset to be acknowledged
+            # Wait for the last offset to be acknowledged.
+            # Acks are ordered, so awaiting once on the LAST offset here (or just calling
+            # flush()) confirms every prior batch too — no need to wait per batch in the
+            # loop above.
             # ========================================================================
             logger.info(f"Waiting for offset {offsets[-1]} to be acknowledged...")
             await stream.wait_for_offset(offsets[-1])

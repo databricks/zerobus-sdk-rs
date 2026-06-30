@@ -1,3 +1,11 @@
+//! Single-record protobuf ingestion, demonstrating each record wrapper type.
+//!
+//! Note on throughput: `ingest_record_offset()` returns as soon as the record is queued.
+//! This example ingests several records and then calls `flush()` ONCE to confirm them.
+//! Do not call `wait_for_offset()` after every record in a real workload — that forces a
+//! server round-trip per record and collapses throughput. For high volume, prefer the
+//! batch API in `batch.rs`.
+
 use std::error::Error;
 use std::fs;
 
@@ -71,11 +79,10 @@ async fn ingest_with_offset_api(stream: &mut ZerobusStream) -> Result<(), Box<dy
         updated_at: Some(now),
     };
 
+    // Queue the record; the call returns immediately without waiting for the ack.
     let offset_id = stream.ingest_record_offset(ProtoMessage(order)).await?;
-    println!("[Auto-encoding] Record sent with offset ID: {}", offset_id);
-    stream.wait_for_offset(offset_id).await?;
     println!(
-        "[Auto-encoding] Record acknowledged with offset ID: {}",
+        "[Auto-encoding] Record queued with offset ID: {}",
         offset_id
     );
 
@@ -93,12 +100,7 @@ async fn ingest_with_offset_api(stream: &mut ZerobusStream) -> Result<(), Box<dy
     let bytes = order.encode_to_vec();
 
     let offset_id = stream.ingest_record_offset(ProtoBytes(bytes)).await?;
-    println!("[Pre-encoded] Record sent with offset ID: {}", offset_id);
-    stream.wait_for_offset(offset_id).await?;
-    println!(
-        "[Pre-encoded] Record acknowledged with offset ID: {}",
-        offset_id
-    );
+    println!("[Pre-encoded] Record queued with offset ID: {}", offset_id);
 
     // 3. Backward-compatible: raw Vec<u8> - no wrapper needed, works the same as ProtoBytes.
     let order = TableOrders {
@@ -115,14 +117,14 @@ async fn ingest_with_offset_api(stream: &mut ZerobusStream) -> Result<(), Box<dy
 
     let offset_id = stream.ingest_record_offset(raw_bytes).await?;
     println!(
-        "[Backward-compatible] Record sent with offset ID: {}",
+        "[Backward-compatible] Record queued with offset ID: {}",
         offset_id
     );
-    stream.wait_for_offset(offset_id).await?;
-    println!(
-        "[Backward-compatible] Record acknowledged with offset ID: {}",
-        offset_id
-    );
+
+    // Confirm all queued records at once. flush() waits for every pending acknowledgment;
+    // this is the right place to wait, not after each individual ingest above.
+    stream.flush().await?;
+    println!("All records acknowledged");
 
     Ok(())
 }
