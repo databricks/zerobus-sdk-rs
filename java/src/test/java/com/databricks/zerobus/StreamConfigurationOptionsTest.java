@@ -21,7 +21,7 @@ public class StreamConfigurationOptionsTest {
     assertTrue(options.recovery());
     assertEquals(15000, options.recoveryTimeoutMs());
     assertEquals(2000, options.recoveryBackoffMs());
-    assertEquals(3, options.recoveryRetries());
+    assertEquals(4, options.recoveryRetries());
     assertEquals(300000, options.flushTimeoutMs());
     assertEquals(60000, options.serverLackOfAckTimeoutMs());
     assertFalse(options.ackCallback().isPresent());

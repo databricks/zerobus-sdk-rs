@@ -327,7 +327,7 @@ impl Default for StreamConfigurationOptions {
             recovery: true,
             recovery_timeout_ms: 15_000,
             recovery_backoff_ms: 2_000,
-            recovery_retries: 3,
+            recovery_retries: 4,
             server_lack_of_ack_timeout_ms: 60_000,
             flush_timeout_ms: 300_000,
             record_type: RecordType { value: 1 }, // PROTO
