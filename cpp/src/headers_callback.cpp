@@ -2,15 +2,18 @@
 // HeadersProvider (declared in detail/headers_callback.hpp).
 //
 // The core invokes get_headers() through this function and the result is
-// marshalled into a CHeaders whose buffers are allocated so the core's
-// zerobus_free_headers can release them: the array via calloc and each
-// key/value via a malloc'd C string, matching the Go wrapper's contract (see
-// zerobus_free_headers in rust/ffi/src/arrow.rs). Exceptions never cross the
-// boundary — they are caught and reported as CHeaders.error_message.
+// marshalled into a CHeaders. Its buffers are allocated through the Rust core
+// (zerobus_alloc_header_array for the array, zerobus_alloc_cstring for each
+// key/value/error string) rather than the C++ allocator, so the allocate and
+// the matching zerobus_free_headers happen in the same library. This avoids a
+// cross-allocator free: on Windows this statically linked library and the C++
+// translation units can resolve to different CRT heaps, and freeing a
+// C++-malloc'd pointer through Rust's allocator would corrupt the heap.
+// Exceptions never cross the boundary — they are caught and reported as
+// CHeaders.error_message.
 #include "detail/headers_callback.hpp"
 
-#include <cstdlib>
-#include <cstring>
+#include <cstdint>
 #include <map>
 #include <string>
 
@@ -21,47 +24,39 @@ namespace detail {
 
 namespace {
 
-// Duplicate a std::string into a NUL-terminated, malloc-allocated C string.
-// The Rust core frees these via the C string allocator (its default global
-// allocator delegates to malloc/free), matching the Go wrapper's C.CString use.
-char* dup_cstring(const std::string& s) {
-  char* out = static_cast<char*>(std::malloc(s.size() + 1));
-  if (out == nullptr) {
-    return nullptr;
-  }
-  std::memcpy(out, s.data(), s.size());
-  out[s.size()] = '\0';
-  return out;
+// Allocate a Rust-owned C string copy of `s` via the FFI, so
+// zerobus_free_headers frees it with the matching allocator. Returns null on
+// OOM or interior NUL.
+char* alloc_cstring(const std::string& s) {
+  return zerobus_alloc_cstring(reinterpret_cast<const std::uint8_t*>(s.data()),
+                               s.size());
 }
 
 CHeaders make_error(const std::string& message) {
   CHeaders headers{};
   headers.headers = nullptr;
   headers.count = 0;
-  headers.error_message = dup_cstring(message);
+  headers.error_message = alloc_cstring(message);
   if (headers.error_message == nullptr) {
-    // Allocating the message failed (OOM). Fall back to a minimal non-null,
-    // heap-allocated marker: the Rust core treats a null error_message as
+    // Allocating the message failed (OOM) or it held an interior NUL. Fall back
+    // to a non-null empty marker: the Rust core treats a null error_message as
     // "success with no headers", so without this the original error would be
     // swallowed and the request would proceed unauthenticated. The text is
     // lost, but the error is still signalled. (free'd by zerobus_free_headers.)
-    headers.error_message = static_cast<char*>(std::malloc(1));
-    if (headers.error_message != nullptr) {
-      headers.error_message[0] = '\0';
-    }
+    headers.error_message = zerobus_alloc_cstring(nullptr, 0);
   }
   return headers;
 }
 
-void free_marshaled_headers(CHeader* headers, std::size_t count) {
-  if (headers == nullptr) {
-    return;
-  }
-  for (std::size_t i = 0; i < count; ++i) {
-    std::free(headers[i].key);
-    std::free(headers[i].value);
-  }
-  std::free(headers);
+// Free a partially populated header array via the Rust core, matching how it
+// was allocated. The array is zero-initialised, so any key/value not yet filled
+// in is null and skipped; `count` need only cover the entries touched so far.
+void free_partial_headers(CHeader* headers, std::size_t count) {
+  CHeaders wrapper{};
+  wrapper.headers = headers;
+  wrapper.count = count;
+  wrapper.error_message = nullptr;
+  zerobus_free_headers(wrapper);
 }
 
 }  // namespace
@@ -90,8 +85,7 @@ extern "C" CHeaders zerobus_cpp_headers_trampoline(void* user_data) {
     return result;
   }
 
-  auto* arr =
-      static_cast<CHeader*>(std::calloc(headers.size(), sizeof(CHeader)));
+  CHeader* arr = zerobus_alloc_header_array(headers.size());
   if (arr == nullptr) {
     return make_error("out of memory marshalling headers");
   }
@@ -104,13 +98,13 @@ extern "C" CHeaders zerobus_cpp_headers_trampoline(void* user_data) {
     // metadata. (arr[0..i) are already populated; free those.)
     if (kv.first.find('\0') != std::string::npos ||
         kv.second.find('\0') != std::string::npos) {
-      free_marshaled_headers(arr, i);
+      free_partial_headers(arr, i);
       return make_error("header key or value contains an embedded NUL byte");
     }
-    arr[i].key = dup_cstring(kv.first);
-    arr[i].value = dup_cstring(kv.second);
+    arr[i].key = alloc_cstring(kv.first);
+    arr[i].value = alloc_cstring(kv.second);
     if (arr[i].key == nullptr || arr[i].value == nullptr) {
-      free_marshaled_headers(arr, i + 1);
+      free_partial_headers(arr, i + 1);
       return make_error("out of memory marshalling headers");
     }
     ++i;
