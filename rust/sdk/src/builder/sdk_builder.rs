@@ -124,6 +124,13 @@ impl ZerobusSdkBuilder {
     /// replaces the SDK prefix but this value is still appended — the wire
     /// value becomes `<sdk_identifier> <application_name>`.
     ///
+    /// The value is trimmed of surrounding whitespace; a blank value is ignored
+    /// and the default identifier is used. A value that is not a valid
+    /// `user-agent` header value (it contains a byte other than a horizontal tab
+    /// or a printable character — e.g. a newline or other control byte) is
+    /// rejected by [`build`](Self::build) with
+    /// [`ZerobusError::InvalidArgument`](crate::ZerobusError::InvalidArgument).
+    ///
     /// # Arguments
     ///
     /// * `name` - Application identifier, conventionally `<product>/<version>`
@@ -194,6 +201,7 @@ impl ZerobusSdkBuilder {
     /// Returns an error if:
     /// - The endpoint is not set
     /// - The workspace ID cannot be extracted from the endpoint
+    /// - The `application_name` is not a valid `user-agent` header value
     #[allow(clippy::result_large_err)]
     pub fn build(self) -> ZerobusResult<ZerobusSdk> {
         let zerobus_endpoint = self
@@ -225,13 +233,35 @@ impl ZerobusSdkBuilder {
             .tls_config
             .unwrap_or_else(|| Arc::new(SecureTlsConfig::new()));
 
+        // Trim, treat blank as unset, and reject anything tonic's
+        // `Endpoint::user_agent` would reject. The byte rule mirrors
+        // `http::HeaderValue`: valid iff a horizontal tab or >= 0x20 and not DEL.
+        let application_name = match self.application_name.as_deref() {
+            Some(name) => {
+                let trimmed = name.trim();
+                if trimmed.is_empty() {
+                    None
+                } else if !trimmed
+                    .bytes()
+                    .all(|b| b == b'\t' || (b >= 0x20 && b != 0x7f))
+                {
+                    return Err(ZerobusError::InvalidArgument(
+                        "application_name is not a valid user-agent header value".to_string(),
+                    ));
+                } else {
+                    Some(trimmed)
+                }
+            }
+            None => None,
+        };
+
         let sdk_prefix: &str = match self.sdk_identifier_override.as_deref() {
             Some(override_id) if !override_id.is_empty() => override_id,
             _ => DEFAULT_SDK_IDENTIFIER,
         };
-        let sdk_identifier: Arc<str> = match self.application_name.as_deref() {
-            Some(app) if !app.is_empty() => Arc::from(format!("{} {}", sdk_prefix, app)),
-            _ => Arc::from(sdk_prefix),
+        let sdk_identifier: Arc<str> = match application_name {
+            Some(app) => Arc::from(format!("{} {}", sdk_prefix, app)),
+            None => Arc::from(sdk_prefix),
         };
 
         Ok(ZerobusSdk::new_with_config(
@@ -369,6 +399,67 @@ mod tests {
             .expect("should build");
 
         assert_eq!(&*sdk.sdk_identifier, crate::DEFAULT_SDK_IDENTIFIER);
+    }
+
+    #[test]
+    fn test_sdk_identifier_trims_application_name() {
+        let sdk = ZerobusSdkBuilder::new()
+            .endpoint("https://workspace.zerobus.databricks.com")
+            .application_name("  my-app/1.0  ")
+            .build()
+            .expect("should build");
+
+        let expected = format!("{} my-app/1.0", crate::DEFAULT_SDK_IDENTIFIER);
+        assert_eq!(&*sdk.sdk_identifier, expected);
+    }
+
+    #[test]
+    fn test_sdk_identifier_blank_application_name_falls_back_to_default() {
+        let sdk = ZerobusSdkBuilder::new()
+            .endpoint("https://workspace.zerobus.databricks.com")
+            .application_name("   ")
+            .build()
+            .expect("should build");
+
+        assert_eq!(&*sdk.sdk_identifier, crate::DEFAULT_SDK_IDENTIFIER);
+    }
+
+    #[test]
+    fn test_application_name_with_invalid_header_bytes_is_rejected() {
+        // Control bytes that tonic's `user-agent` header rejects.
+        for bad in [
+            "my-app\n1.0",
+            "my-app\r1.0",
+            "my-app\u{0}1.0",
+            "my-app\u{7f}1.0",
+        ] {
+            let result = ZerobusSdkBuilder::new()
+                .endpoint("https://workspace.zerobus.databricks.com")
+                .application_name(bad)
+                .build();
+
+            assert!(
+                matches!(
+                    result,
+                    Err(ZerobusError::InvalidArgument(ref msg)) if msg.contains("application_name")
+                ),
+                "expected InvalidArgument for {:?}",
+                bad
+            );
+        }
+    }
+
+    #[test]
+    fn test_application_name_with_tab_is_accepted() {
+        // Tab is a valid header byte; tonic accepts it, so we must too.
+        let sdk = ZerobusSdkBuilder::new()
+            .endpoint("https://workspace.zerobus.databricks.com")
+            .application_name("my\tapp/1.0")
+            .build()
+            .expect("should build");
+
+        let expected = format!("{} my\tapp/1.0", crate::DEFAULT_SDK_IDENTIFIER);
+        assert_eq!(&*sdk.sdk_identifier, expected);
     }
 
     #[test]

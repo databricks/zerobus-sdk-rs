@@ -181,17 +181,29 @@ fn make_ipc_write_options(
 /// ```no_run
 /// # use databricks_zerobus_ingest_sdk::*;
 /// # use arrow_array::RecordBatch;
-/// # async fn example(mut stream: ZerobusArrowStream, batch: RecordBatch) -> Result<(), ZerobusError> {
-/// // Ingest a single RecordBatch
-/// let offset = stream.ingest_batch(batch).await?;
-/// println!("Batch queued at offset: {}", offset);
-///
-/// // Wait for acknowledgment
-/// stream.wait_for_offset(offset).await?;
-/// println!("Batch acknowledged at offset: {}", offset);
+/// # async fn example(mut stream: ZerobusArrowStream, batches: Vec<RecordBatch>) -> Result<(), ZerobusError> {
+/// // Idiomatic flow: ingest each batch (which only queues it), then flush() once.
+/// for batch in batches {
+///     stream.ingest_batch(batch).await?;
+/// }
+/// stream.flush().await?; // Returns once every queued batch is acknowledged.
 ///
 /// // Close the stream gracefully
 /// stream.close().await?;
+/// # Ok(())
+/// # }
+/// ```
+///
+/// For low-volume cases where you must confirm one specific batch is durable
+/// before continuing, wait on its offset:
+///
+/// ```no_run
+/// # use databricks_zerobus_ingest_sdk::*;
+/// # use arrow_array::RecordBatch;
+/// # async fn example(mut stream: ZerobusArrowStream, batch: RecordBatch) -> Result<(), ZerobusError> {
+/// let offset = stream.ingest_batch(batch).await?;
+/// stream.wait_for_offset(offset).await?;
+/// println!("Batch acknowledged at offset: {}", offset);
 /// # Ok(())
 /// # }
 /// ```
@@ -1213,13 +1225,12 @@ impl ZerobusArrowStream {
     /// ```no_run
     /// # use databricks_zerobus_ingest_sdk::*;
     /// # use arrow_array::RecordBatch;
-    /// # async fn example(stream: ZerobusArrowStream, batch: RecordBatch) -> Result<(), ZerobusError> {
-    /// // Ingest and get offset immediately
-    /// let offset = stream.ingest_batch(batch).await?;
-    ///
-    /// // Later, wait for acknowledgment
-    /// stream.wait_for_offset(offset).await?;
-    /// println!("Batch at offset {} has been acknowledged", offset);
+    /// # async fn example(stream: ZerobusArrowStream, batches: Vec<RecordBatch>) -> Result<(), ZerobusError> {
+    /// // Ingest in a loop (each call only queues the batch), then flush() once.
+    /// for batch in batches {
+    ///     stream.ingest_batch(batch).await?;
+    /// }
+    /// stream.flush().await?;
     /// # Ok(())
     /// # }
     /// ```

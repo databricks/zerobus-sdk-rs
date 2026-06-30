@@ -63,8 +63,12 @@ func main() {
 	}
 	defer stream.Close()
 
+	// Ingest records in a loop. IngestRecordOffset returns as soon as the record
+	// is queued; the SDK sends it and tracks its acknowledgment in the background.
+	// We collect the last offset and confirm everything below — keeping the ingest
+	// loop free of per-record waits is what sustains throughput.
 	log.Println("Ingesting records...")
-	var offsets []int64
+	var lastOffset int64 = -1
 	for i := 0; i < 5; i++ {
 		// Create a message using the generated struct.
 		// Change this message to match the schema of your table.
@@ -90,16 +94,17 @@ func main() {
 
 		log.Printf("Ingested record %d at offset %d (temp=%d, humidity=%d)",
 			i, offset, *message.Temp, *message.Humidity)
-		offsets = append(offsets, offset)
+		lastOffset = offset
 	}
 
-	// Wait for specific offsets to be acknowledged.
-	log.Println("Waiting for acknowledgments...")
-	for _, offset := range offsets {
-		if err := stream.WaitForOffset(offset); err != nil {
-			log.Fatalf("Failed to wait for offset %d: %v", offset, err)
+	// Wait once on the LAST offset. The ack watermark is monotonic, so confirming
+	// the last offset confirms all prior records too. (Equivalently, call
+	// stream.Flush() to wait for all pending records.)
+	if lastOffset >= 0 {
+		log.Println("Waiting for acknowledgments...")
+		if err := stream.WaitForOffset(lastOffset); err != nil {
+			log.Fatalf("Failed to wait for offset %d: %v", lastOffset, err)
 		}
-		log.Printf("Record at offset %d acknowledged", offset)
 	}
 
 	log.Println("All records successfully ingested and acknowledged!")

@@ -16,7 +16,7 @@ The Databricks Zerobus Ingest SDK for Java provides a high-performance client fo
   - [Arrow Flight Examples (Beta)](#arrow-flight-examples-beta)
 - [API Styles](#api-styles)
   - [Offset-Based API (Recommended)](#offset-based-api-recommended)
-  - [Future-Based API](#future-based-api)
+  - [Future-Based API (Deprecated)](#future-based-api-deprecated)
 - [Configuration](#configuration)
 - [Logging](#logging)
 - [Error Handling](#error-handling)
@@ -421,6 +421,10 @@ For detailed documentation and examples, see [tools/README.md](https://github.co
 
 #### 4. Write Your Client Code
 
+> The idiomatic flow is **ingest in a loop, then `flush()`** once at the end. See
+> [Acknowledgments and throughput](#acknowledgments-and-throughput) below the example for
+> how acknowledgment works and when to use `waitForOffset()` or an `AckCallback`.
+
 Create `src/main/java/com/example/ZerobusClient.java`:
 
 ```java
@@ -441,7 +445,7 @@ public class ZerobusClient {
         // Initialize SDK
         ZerobusSdk sdk = new ZerobusSdk(serverEndpoint, workspaceUrl);
 
-        // Create stream
+        // Create stream (recommended offset-based proto stream)
         ZerobusProtoStream stream = sdk.streamBuilder()
             .table(tableName)
             .oauth(clientId, clientSecret)
@@ -450,8 +454,10 @@ public class ZerobusClient {
             .join();
 
         try {
-            // Ingest records
             long lastOffset = -1;
+
+            // Ingest in a loop. ingestRecordOffset() returns as soon as the record is
+            // queued; the SDK sends it and tracks its acknowledgment in the background.
             for (int i = 0; i < 100; i++) {
                 AirQuality record = AirQuality.newBuilder()
                     .setDeviceName("sensor-" + (i % 10))
@@ -459,12 +465,13 @@ public class ZerobusClient {
                     .setHumidity(50 + (i % 40))
                     .build();
 
-                lastOffset = stream.ingestRecordOffset(record); // Non-blocking enqueue
-
-                System.out.println("Ingested record " + (i + 1));
+                lastOffset = stream.ingestRecordOffset(record); // returns immediately
             }
 
-            stream.waitForOffset(lastOffset); // Wait for durability
+            // Confirm everything is durably committed. flush() does the same;
+            // waiting on the last offset works because acks are ordered.
+            stream.waitForOffset(lastOffset);
+
             System.out.println("Successfully ingested 100 records!");
         } finally {
             stream.close();
@@ -515,11 +522,23 @@ java -cp "lib/*:out" com.example.ZerobusClient
 
 You should see output like:
 ```
-Ingested record 1
-Ingested record 2
-...
 Successfully ingested 100 records!
 ```
+
+### Acknowledgments and throughput
+
+Ingestion is asynchronous. `ingestRecordOffset()` returns as soon as the record is queued;
+the SDK sends it and tracks its acknowledgment in the background. To confirm records are
+durably committed, call `flush()` — it returns once everything queued so far is
+acknowledged. The idiomatic flow is **ingest in a loop, then `flush()`** (once for a
+bounded batch, or periodically for a long-running stream); or register an
+[`AckCallback`](#ackcallback-interface) to be notified as records commit.
+
+Each ingest also returns the record's offset, and `waitForOffset(offset)` blocks until that
+offset is acknowledged — handy when a specific record must be confirmed before continuing
+(acks are ordered, so waiting on the last offset confirms the whole run). Just avoid calling
+`waitForOffset()` (or `.join()` on the deprecated per-record future) after every record in a
+tight loop, since that limits throughput to one record per round-trip.
 
 ## Usage Examples
 
@@ -680,7 +699,13 @@ The SDK provides two ingestion styles:
 
 ### Offset-Based API (Recommended)
 
-Use `ZerobusProtoStream` or `ZerobusJsonStream` for all new code. They use offset-based returns that avoid `CompletableFuture` allocation overhead:
+Use `ZerobusProtoStream` or `ZerobusJsonStream` for all new code. They use offset-based returns that avoid `CompletableFuture` allocation overhead.
+
+> Each `ingestRecordOffset()` call returns as soon as the record is queued; the SDK sends
+> it and tracks its acknowledgment in the background. The idiomatic flow is to ingest in a
+> loop, then confirm durability **once** — with `flush()`, or by passing the last offset to
+> `waitForOffset()` (acks are ordered, so the last offset confirms every prior record). See
+> [Acknowledgments and throughput](#acknowledgments-and-throughput) for the full picture.
 
 ```java
 ZerobusProtoStream stream = sdk.streamBuilder()
@@ -693,7 +718,7 @@ ZerobusProtoStream stream = sdk.streamBuilder()
 try {
     long lastOffset = -1;
 
-    // Ingest records as fast as possible
+    // Ingest in a loop
     for (int i = 0; i < 1000000; i++) {
         AirQuality record = AirQuality.newBuilder()
             .setDeviceName("sensor-" + (i % 100))
@@ -701,11 +726,11 @@ try {
             .setHumidity(50 + i % 40)
             .build();
 
-        // Returns immediately after queuing (non-blocking)
+        // Returns immediately after queuing
         lastOffset = stream.ingestRecordOffset(record);
     }
 
-    // Wait for all records to be acknowledged
+    // Confirm all records are acknowledged
     stream.waitForOffset(lastOffset);
 } finally {
     stream.close();
@@ -720,15 +745,21 @@ try {
 The future-based API is still available for backward compatibility but will be removed in a future release:
 
 ```java
-// DEPRECATED - use ingestRecordOffset() instead
+// DEPRECATED - use ingestRecordOffset() instead.
+// Each ingestRecord() returns immediately; keep the last future and join once after
+// the loop to confirm durability (joining after every record limits throughput).
 try {
+    CompletableFuture<Void> lastFuture = null;
     for (int i = 0; i < 1000; i++) {
         AirQuality record = AirQuality.newBuilder()
             .setDeviceName("sensor-" + i)
             .setTemp(20 + i % 15)
             .build();
 
-        stream.ingestRecord(record).join();  // Deprecated
+        lastFuture = stream.ingestRecord(record);  // Deprecated; non-blocking
+    }
+    if (lastFuture != null) {
+        lastFuture.join();  // wait once, after the loop
     }
 } finally {
     stream.close();
@@ -1505,20 +1536,55 @@ void onError(long offsetId, String errorMessage)
 ```
 Called when an error occurs for records at or after `offsetId`.
 
+**Track durability progress without blocking.** Register an `AckCallback` to observe
+acknowledgments as they arrive on a background thread while you keep ingesting — a natural
+fit for high-throughput or long-running streams where you want progress notifications
+rather than blocking on `flush()` or `waitForOffset()`:
+
+```java
+AckCallback callback = new AckCallback() {
+    @Override public void onAck(long offsetId) {
+        // records up to offsetId are durable (watermark is monotonic)
+    }
+    @Override public void onError(long offsetId, String errorMessage) {
+        System.err.println("Error at offset " + offsetId + ": " + errorMessage);
+    }
+};
+
+ZerobusProtoStream stream = sdk.streamBuilder()
+    .table(tableName)
+    .oauth(clientId, clientSecret)
+    .ackCallback(callback)
+    .compiledProto(descriptor)
+    .build()
+    .join();
+
+// Ingest without blocking; the callback fires as acks arrive.
+for (AirQuality record : records) {
+    stream.ingestRecordOffset(record);
+}
+stream.flush(); // drain remaining acks before close
+```
+
+Implementations must be thread-safe and lightweight (callbacks run on internal
+processing threads).
+
 ## Best Practices
 
 1. **Reuse SDK instances**: Create one `ZerobusSdk` instance per application
 2. **Stream lifecycle**: Always close streams in a `finally` block or use try-with-resources
 3. **Use offset-based API for high throughput**: `ingestRecordOffset()` avoids `CompletableFuture` overhead
-4. **Batch records when possible**: Use `ingestRecordsOffset()` for multiple records
-5. **Configure `maxInflightRecords`**: Adjust based on your throughput and memory requirements
-6. **Implement proper error handling**: Distinguish between retriable and non-retriable errors
-7. **Use `AckCallback` for monitoring**: Track acknowledgment progress without blocking
-8. **Proto generation**: Use the built-in `GenerateProto` tool to generate proto files from table schemas
-9. **Choose the right API**:
-   - `ingestRecord()` → Simple use cases, moderate throughput (deprecated)
-   - `ingestRecordOffset()` + `waitForOffset()` → High throughput, fine-grained control (recommended)
-10. **Recovery pattern**: Use `sdk.recreateStream(closedStream)` to automatically re-ingest unacknowledged records, or manually use `getUnackedBatches()` after stream close
+4. **Ingest in a loop, then `flush()`**: Confirm durability once after a batch with `flush()` (or `waitForOffset()` on the last offset, since acks are ordered). Use per-record waits only when a specific record must be confirmed before continuing.
+5. **Batch records when possible**: Use `ingestRecordsOffset()` for multiple records
+6. **Configure `maxInflightRecords`**: Adjust based on your throughput and memory requirements
+7. **Implement proper error handling**: Distinguish between retriable and non-retriable errors
+8. **Use `AckCallback` for monitoring**: Track acknowledgment progress without blocking the ingest loop
+9. **Proto generation**: Use the built-in `GenerateProto` tool to generate proto files from table schemas
+10. **Choose the right API**:
+    - `ingestRecordOffset()` + final `flush()` / `waitForOffset(lastOffset)` → High throughput (recommended)
+    - `ingestRecordOffset()` + `waitForOffset()` per record → When a specific record must be confirmed before continuing
+    - `ingestRecord().join()` → Deprecated; prefer the offset-based API
+11. **Recovery pattern**: Use `sdk.recreateStream(closedStream)` to automatically re-ingest unacknowledged records, or manually use `getUnackedBatches()` after stream close
 
 ## Community and Contributing
 
