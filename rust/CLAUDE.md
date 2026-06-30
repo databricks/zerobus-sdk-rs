@@ -2,6 +2,15 @@
 
 This is the core implementation. All other SDKs depend on it.
 
+## Client code patterns (examples, doc comments, generated code)
+
+See the root `CLAUDE.md` "Writing SDK client code — performance rules" for the cross-SDK rule. In Rust specifically:
+
+- `ingest_record_offset()` / `ingest_records_offset()` return the `OffsetId` once the record is **queued**; the network round-trip is async. **Never call `wait_for_offset()` after every ingest in a loop** — it forces one server round-trip per record.
+- Correct pattern: ingest in a loop, then `flush()` once (or periodically for unbounded streams). Or wait on only the **last** offset — the ack watermark is monotonic, so acking the last offset implies all prior are acked (`wait_for_offset_internal` waits for `last_received_offset >= target`).
+- Register an `ack_callback` for async ack/error tracking instead of blocking.
+- Any new example, `///` doc example, or test must show the loop-then-`flush()` pattern first; reserve per-record `wait_for_offset()` for clearly-labeled low-volume cases.
+
 ## Structure
 
 ```

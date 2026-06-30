@@ -133,11 +133,13 @@ Two precision pitfalls worth calling out:
 - **`DATE`/`TIMESTAMP*` unit mismatches** are silent: writing milliseconds where
   microseconds are expected shifts every row by 10³.
 
-Top-level non-nullable scalar and struct columns become proto2 `required`
-fields; a record missing one is rejected rather than encoded. Non-nullable
-`ARRAY`/`MAP` columns map to `repeated`, which has no presence, so an omitted one
-encodes as empty rather than being rejected; required fields nested inside a
-`STRUCT` are likewise not presence-checked.
+Non-nullable scalar and struct columns become proto2 `required` fields; a record
+missing one is rejected rather than encoded. Presence is checked recursively, so
+a required field missing inside a `STRUCT`, inside an `ARRAY<STRUCT>` element, or
+inside a `MAP` value is also rejected (the error names the full path, e.g.
+`addr.zip`, `items[2].id`, `props[home].zip`). Non-nullable `ARRAY`/`MAP` columns
+map to `repeated`, which has no presence, so an omitted one encodes as empty
+rather than being rejected.
 
 A handle may be shared by concurrent readers: worker threads may call
 `zerobus_proto_schema_encode_json` and `zerobus_proto_schema_descriptor_bytes`
