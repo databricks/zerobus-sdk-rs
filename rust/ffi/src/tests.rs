@@ -1066,10 +1066,8 @@ mod tests {
         zerobus_proto_schema_free(schema);
     }
 
-    // Build a schema from `table_json`, attempt to encode `record_json`, and
-    // return the error message. Asserts the encode failed, the error is
-    // non-retryable (a missing required field is a caller error), and the output
-    // pointers were cleared.
+    // Encode `record_json` against `table_json`, asserting the encode fails
+    // cleanly (non-retryable, output pointers cleared) and returning the error.
     fn encode_expecting_error(table_json: &CString, record_json: &str) -> String {
         let mut build = unwritten_result();
         let schema =
@@ -1176,9 +1174,8 @@ mod tests {
 
     #[test]
     fn test_proto_schema_encode_nested_required_fields_present_succeeds() {
-        // All nested required fields present across STRUCT / ARRAY<STRUCT> / MAP
-        // value: the recursive presence walk must accept the record and the
-        // nested required values must round-trip.
+        // With all nested required fields present, the record is accepted and
+        // the nested values round-trip.
         let table = CString::new(
             r#"{
                 "name": "t", "catalog_name": "c", "schema_name": "s",
@@ -1211,9 +1208,8 @@ mod tests {
 
     #[test]
     fn test_proto_schema_encode_missing_required_field_deeply_nested_errors() {
-        // The presence walk recurses to arbitrary depth, not just one level: a
-        // required field three message-levels down (`addr.geo.lat`) and one
-        // reached through an ARRAY<STRUCT> element's nested struct
+        // The walk recurses to arbitrary depth: a required field three levels
+        // down (`addr.geo.lat`) and one through an array element's nested struct
         // (`items[0].inner.id`) must both be reported.
         let table = CString::new(
             r#"{
