@@ -1,11 +1,6 @@
 # Builds the Zerobus C FFI static library from the local Rust source and exposes
 # it as an imported target `zerobus::ffi`.
 #
-# Mirrors go/build_rust.sh: invokes `cargo build --release` in `rust/ffi`, which
-# produces `rust/target/release/libzerobus_ffi.a` and regenerates `zerobus.h`
-# (via the crate's cbindgen build script). The header directory is added to the
-# imported target's interface includes.
-#
 # Override the prebuilt library and header instead of building from source by
 # setting -DZEROBUS_FFI_LIBRARY=<path-to-.a> and -DZEROBUS_FFI_HEADER_DIR=<dir>.
 
