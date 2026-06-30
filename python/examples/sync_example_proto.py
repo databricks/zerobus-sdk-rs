@@ -156,6 +156,8 @@ def main():
         try:
             # ========================================================================
             # Method 1: ingest_record_offset() - RECOMMENDED for single records
+            # Idiomatic flow: ingest in a loop, then flush() once at the end (see below)
+            # to confirm everything is durably committed.
             # ========================================================================
             logger.info("\n1. Using ingest_record_offset() - optimized API")
             for i in range(min(10, NUM_RECORDS)):

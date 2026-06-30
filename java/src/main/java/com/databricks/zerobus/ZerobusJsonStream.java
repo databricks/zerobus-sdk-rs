@@ -137,6 +137,10 @@ public class ZerobusJsonStream extends BaseZerobusStream {
    * <p>This is the main method for JSON ingestion. The object is serialized using the provided
    * serializer function.
    *
+   * <p>Returns as soon as the record is queued; the SDK sends it and tracks its acknowledgment in
+   * the background. The idiomatic flow is to call this in a loop, then confirm durability once via
+   * {@link #flush()} (or {@link #waitForOffset(long)} on the last returned offset).
+   *
    * <p>Example with Gson:
    *
    * <pre>{@code
@@ -178,6 +182,10 @@ public class ZerobusJsonStream extends BaseZerobusStream {
    *
    * <p>This is the main method for batch JSON ingestion. Each object is serialized using the
    * provided serializer function.
+   *
+   * <p>Returns as soon as the batch is queued. The idiomatic flow is to ingest your batches in a
+   * loop, then confirm durability once via {@link #flush()} (or {@link #waitForOffset(long)} on the
+   * last offset).
    *
    * @param objects the objects to serialize and ingest
    * @param serializer a function that converts each object to a JSON string

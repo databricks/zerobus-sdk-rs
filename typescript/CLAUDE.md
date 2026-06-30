@@ -2,6 +2,21 @@
 
 Node.js wrapper around the Rust core via NAPI-RS.
 
+## Client code patterns
+
+When writing or reviewing client code that uses this SDK, prefer the idiomatic
+ingest-then-flush flow. `ingestRecordOffset()` (and `ingestRecordsOffset()`) resolves as
+soon as the record is queued — the SDK sends it and tracks its acknowledgment in the
+background. Ingest in a loop, then call `flush()` once to confirm durability (once for a
+bounded batch, or periodically for a long-running stream).
+
+Each ingest returns the record's offset, and `waitForOffset(offset)` confirms a specific
+record when one must be acknowledged before continuing (acks are ordered, so the last
+offset confirms the whole run); prefer `flush()` for bulk. Note that ack callbacks are NOT
+part of the TypeScript API — the async confirmation tools are `flush()` and `waitForOffset()`.
+The one thing to avoid is calling `waitForOffset()` after every record in a tight loop,
+since that limits throughput to one record per round-trip.
+
 ## Structure
 
 ```
