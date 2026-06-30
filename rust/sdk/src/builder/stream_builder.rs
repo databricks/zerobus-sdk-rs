@@ -217,7 +217,10 @@ impl<'a> StreamBuilder<'a> {
     /// The fetch uses an `all-apis` token: with [`oauth`](Self::oauth) the SDK
     /// mints one from the client credentials; with
     /// [`headers_provider`](Self::headers_provider) it reuses the provider's
-    /// `authorization` header. The principal needs `SELECT` on the table.
+    /// `authorization` header, which must therefore be a token the Unity Catalog
+    /// REST API accepts (a workspace `all-apis` token, not a Zerobus
+    /// write-scoped one) or the schema fetch fails. The principal needs `SELECT`
+    /// on the table.
     ///
     /// Each `build()` performs these UC calls fresh and uncached (a workspace-token
     /// mint plus the schema fetch), on top of the cached write token. For workloads
@@ -795,6 +798,53 @@ mod tests {
         let provider = builder.resolve_headers_provider().unwrap();
         let headers = provider.get_headers().await.unwrap();
         assert_eq!(headers.get("x-test").unwrap(), "value");
+    }
+
+    #[tokio::test]
+    async fn resolve_uc_api_token_from_headers_provider() {
+        // A provider whose `authorization` header is configurable (or absent).
+        struct AuthProvider(Option<&'static str>);
+        #[async_trait::async_trait]
+        impl HeadersProvider for AuthProvider {
+            async fn get_headers(&self) -> crate::ZerobusResult<HashMap<&'static str, String>> {
+                let mut h = HashMap::new();
+                if let Some(v) = self.0 {
+                    h.insert("authorization", v.to_string());
+                }
+                Ok(h)
+            }
+        }
+
+        let sdk = test_sdk();
+
+        // `Bearer ` prefix is stripped.
+        let token = sdk
+            .stream_builder()
+            .table("c.s.t")
+            .headers_provider(Arc::new(AuthProvider(Some("Bearer abc"))))
+            .resolve_uc_api_token()
+            .await
+            .unwrap();
+        assert_eq!(token, "abc");
+
+        // A bare token is returned as-is.
+        let token = sdk
+            .stream_builder()
+            .table("c.s.t")
+            .headers_provider(Arc::new(AuthProvider(Some("rawtoken"))))
+            .resolve_uc_api_token()
+            .await
+            .unwrap();
+        assert_eq!(token, "rawtoken");
+
+        // A provider with no `authorization` header is an error.
+        let err = sdk
+            .stream_builder()
+            .table("c.s.t")
+            .headers_provider(Arc::new(AuthProvider(None)))
+            .resolve_uc_api_token()
+            .await;
+        assert!(matches!(err, Err(ZerobusError::InvalidArgument(_))));
     }
 
     #[cfg(feature = "testing")]

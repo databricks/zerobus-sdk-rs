@@ -323,19 +323,19 @@ impl TableDescriptorBuilder {
 /// which does this automatically at stream creation. Returns
 /// [`ZerobusError::TokenFetchError`] on network/`5xx` (retryable) and
 /// [`ZerobusError::InvalidArgument`] on `4xx` or an unparseable body.
+///
+/// The table name is sent percent-encoded as a single path segment, so names
+/// containing URL-significant characters are served correctly and cannot inject
+/// extra path segments, a query, or a fragment.
 pub async fn fetch_uc_table_schema(
     unity_catalog_url: &str,
     table_name: &str,
     token: &str,
 ) -> ZerobusResult<UcTableSchema> {
-    let url = format!(
-        "{}/api/2.1/unity-catalog/tables/{}",
-        unity_catalog_url.trim_end_matches('/'),
-        table_name
-    );
+    let url = uc_table_url(unity_catalog_url, table_name)?;
 
     let response = reqwest::Client::new()
-        .get(&url)
+        .get(url)
         .bearer_auth(token)
         .send()
         .await
@@ -382,6 +382,27 @@ pub async fn descriptor_from_uc(
 ) -> ZerobusResult<DescriptorProto> {
     let schema = fetch_uc_table_schema(unity_catalog_url, table_name, token).await?;
     Ok(descriptor_from_uc_schema(&schema)?)
+}
+
+/// Build the UC "get table" URL, appending `table_name` as a single
+/// percent-encoded path segment so URL-significant characters can't inject path
+/// segments, a query, or a fragment. The `.` separators stay intact and a
+/// trailing slash on the base URL is normalized.
+fn uc_table_url(unity_catalog_url: &str, table_name: &str) -> ZerobusResult<reqwest::Url> {
+    let mut url = reqwest::Url::parse(unity_catalog_url).map_err(|e| {
+        ZerobusError::InvalidUCEndpointError(format!(
+            "invalid Unity Catalog URL '{unity_catalog_url}': {e}"
+        ))
+    })?;
+    url.path_segments_mut()
+        .map_err(|()| {
+            ZerobusError::InvalidUCEndpointError(format!(
+                "Unity Catalog URL '{unity_catalog_url}' cannot be a base"
+            ))
+        })?
+        .pop_if_empty()
+        .extend(["api", "2.1", "unity-catalog", "tables", table_name]);
+    Ok(url)
 }
 
 fn is_complex(type_name: &str) -> bool {
@@ -1381,6 +1402,48 @@ mod tests {
         fn schema_error_converts_to_invalid_argument() {
             let err: ZerobusError = SchemaError::UnsupportedType("WIDGET".into()).into();
             assert!(matches!(err, ZerobusError::InvalidArgument(_)));
+        }
+    }
+
+    mod uc_url {
+        use super::*;
+
+        #[test]
+        fn builds_path_and_normalizes_trailing_slash() {
+            // A trailing slash on the base does not double up; the dotted table
+            // name is preserved verbatim.
+            for base in ["https://host", "https://host/"] {
+                let url = uc_table_url(base, "main.default.my_table").unwrap();
+                assert_eq!(
+                    url.as_str(),
+                    "https://host/api/2.1/unity-catalog/tables/main.default.my_table"
+                );
+            }
+        }
+
+        #[test]
+        fn percent_encodes_name_and_neutralizes_injection() {
+            // URL-significant characters in the name must not reshape the URL:
+            // no injected query/fragment, still exactly one trailing segment.
+            let url = uc_table_url("https://host", "cat.sch.weird/name?x#y").unwrap();
+            assert!(url.query().is_none(), "name must not start a query");
+            assert!(url.fragment().is_none(), "name must not start a fragment");
+            let segments: Vec<&str> = url.path_segments().unwrap().collect();
+            assert_eq!(segments.len(), 5, "no extra path segments injected");
+            assert_eq!(segments[3], "tables");
+            assert!(
+                !segments[4].contains(['/', '?', '#']),
+                "special chars are encoded, got {}",
+                segments[4]
+            );
+        }
+
+        #[test]
+        fn rejects_non_base_url() {
+            assert!(matches!(
+                uc_table_url("not a url", "c.s.t"),
+                Err(ZerobusError::InvalidUCEndpointError(_))
+            ));
         }
     }
 

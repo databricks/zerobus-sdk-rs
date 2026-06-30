@@ -288,6 +288,55 @@ mod tests {
     }
 
     #[test]
+    fn encoder_output_matches_compiled_prost_message() {
+        // The wire output must byte-match a compiled prost message with the same
+        // schema — the core "bytes match what the server validates" guarantee,
+        // checked against an independent encoder (prost codegen, not our pool).
+        #[derive(Clone, PartialEq, prost::Message)]
+        struct AirQuality {
+            #[prost(string, optional, tag = "1")]
+            device_name: Option<String>,
+            #[prost(int32, optional, tag = "2")]
+            temp: Option<i32>,
+            #[prost(int32, optional, tag = "3")]
+            humidity: Option<i32>,
+        }
+
+        let encoder = DynamicProtoEncoder::new(&air_quality_descriptor()).unwrap();
+        let dynamic = encoder
+            .encode(r#"{"device_name": "s", "temp": 22, "humidity": 65}"#)
+            .unwrap();
+        let compiled = AirQuality {
+            device_name: Some("s".into()),
+            temp: Some(22),
+            humidity: Some(65),
+        }
+        .encode_to_vec();
+        assert_eq!(dynamic, compiled);
+    }
+
+    #[test]
+    fn nested_required_field_is_not_validated_client_side() {
+        // finish() enforces presence only for top-level required columns; a
+        // required field nested in a STRUCT is delegated to the server. This pins
+        // that documented boundary: `addr` is present but its required child
+        // `zip` is omitted, and the record still encodes here.
+        let descriptor = TableDescriptorBuilder::new("m")
+            .complex_column(
+                "addr",
+                "STRUCT",
+                r#"{"type":"struct","fields":[
+                    {"name":"zip","type":"integer","nullable":false,"metadata":{}}
+                ]}"#,
+                true,
+            )
+            .build()
+            .unwrap();
+        let encoder = DynamicProtoEncoder::new(&descriptor).unwrap();
+        assert!(encoder.encode(r#"{"addr": {}}"#).is_ok());
+    }
+
+    #[test]
     fn encodes_repeated_and_struct_via_json() {
         // ARRAY<long> -> repeated; STRUCT -> nested message. Both arrive as JSON.
         let descriptor = TableDescriptorBuilder::new("evt")
