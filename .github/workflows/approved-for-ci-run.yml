@@ -1,0 +1,154 @@
+name: Handle `approved-for-ci-run` label
+# This workflow helps to run the CI pipeline for PRs made by external
+# contributors (from forks).
+
+on:
+  pull_request_target:
+    branches:
+      - main
+    types:
+      # Default types that trigger a workflow:
+      # https://docs.github.com/en/actions/using-workflows/events-that-trigger-workflows#pull_request
+      - opened
+      - synchronize
+      - reopened
+      # Handled in addition to keep labels tidy:
+      - closed
+      # Actual magic happens here:
+      - labeled
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number }}
+  cancel-in-progress: false
+
+env:
+  GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+  PR_NUMBER: ${{ github.event.pull_request.number }}
+  BRANCH: "ci-run/pr-${{ github.event.pull_request.number }}"
+
+# No permissions for GITHUB_TOKEN by default; the **minimal required** set is granted per job.
+permissions: {}
+
+defaults:
+  run:
+    shell: bash -euo pipefail {0}
+
+jobs:
+  remove-label:
+    # Remove `approved-for-ci-run` whenever the PR code changes (or it is closed).
+    # Re-approval requires a human to review and re-apply the label.
+
+    permissions:
+      pull-requests: write # for `gh pr edit`
+
+    if: |
+      contains(fromJSON('["opened", "synchronize", "reopened", "closed"]'), github.event.action) &&
+      contains(github.event.pull_request.labels.*.name, 'approved-for-ci-run')
+
+    runs-on:
+      group: databricks-protected-runner-group
+      labels: linux-ubuntu-latest
+
+    steps:
+      - run: gh pr --repo "${GITHUB_REPOSITORY}" edit "${PR_NUMBER}" --remove-label "approved-for-ci-run"
+
+  create-or-update-pr-for-ci-run:
+    # Create local PR for an `approved-for-ci-run` labelled PR to run CI pipeline in it.
+
+    permissions:
+      pull-requests: write # for `gh pr edit` 
+      # For `git push` and `gh pr create` we use CI_ACCESS_TOKEN
+
+
+    if: |
+      github.event.action == 'labeled' &&
+      contains(github.event.pull_request.labels.*.name, 'approved-for-ci-run')
+
+    runs-on:
+      group: databricks-protected-runner-group
+      labels: linux-ubuntu-latest
+
+    steps:
+      - name: Generate a GitHub App installation token
+        id: app-token
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          app-id: ${{ secrets.CI_APP_ID }}
+          private-key: ${{ secrets.CI_APP_PRIVATE_KEY }}
+
+      - name: Authorize — only users with write access may trigger fork CI
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          ACTOR: ${{ github.event.sender.login }}
+        run: |
+          # The `.permission` field collapses roles to admin/write/read/none
+          # (maintain reports as "write"), which matches "can approve CI runs".
+          PERM="$(gh api "repos/${GITHUB_REPOSITORY}/collaborators/${ACTOR}/permission" --jq '.permission')"
+          echo "Actor '${ACTOR}' has permission: ${PERM}"
+          if [ "${PERM}" != "admin" ] && [ "${PERM}" != "write" ]; then
+            echo "::error::Only users with write access may approve CI runs for fork PRs (actor '${ACTOR}' has '${PERM}')."
+            gh pr --repo "${GITHUB_REPOSITORY}" edit "${PR_NUMBER}" --remove-label "approved-for-ci-run" || true
+            exit 1
+          fi
+
+      - run: gh pr --repo "${GITHUB_REPOSITORY}" edit "${PR_NUMBER}" --remove-label "approved-for-ci-run"
+
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          token: ${{ steps.app-token.outputs.token }}
+
+      - name: Look for existing mirror PR
+        id: get-pr
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+        run: |
+          ALREADY_CREATED="$(gh pr --repo "${GITHUB_REPOSITORY}" list --head "${BRANCH}" --base main --json number --jq '.[].number')"
+          echo "ALREADY_CREATED=${ALREADY_CREATED}" >> "${GITHUB_OUTPUT}"
+
+      - run: git checkout -b "${BRANCH}"
+
+      - run: git push --force origin "${BRANCH}"
+
+      - name: Create a Pull Request for the CI run (if required)
+        if: steps.get-pr.outputs.ALREADY_CREATED == ''
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+        run: |
+          cat << EOF > body.md
+          This Pull Request was created automatically to run the CI pipeline for #${PR_NUMBER}.
+
+          Please do not alter or merge/close it.
+
+          Feel free to review/comment/discuss the original PR #${PR_NUMBER}.
+          EOF
+
+          gh pr --repo "${GITHUB_REPOSITORY}" create \
+            --title "CI run for PR #${PR_NUMBER}" \
+            --body-file "body.md" \
+            --head "${BRANCH}" \
+            --base "main" \
+            --draft
+
+  cleanup:
+    # Close the CI-run PR and delete its branch when the original fork PR is closed.
+
+    permissions:
+      contents: write # for `--delete-branch` in `gh pr close`
+      pull-requests: write # for `gh pr close`
+
+    if: |
+      github.event.action == 'closed' &&
+      github.event.pull_request.head.repo.full_name != github.repository
+
+    runs-on:
+      group: databricks-protected-runner-group
+      labels: linux-ubuntu-latest
+
+    steps:
+      - name: Close CI-run PR and delete the `ci-run/pr-${{ env.PR_NUMBER }}` branch
+        run: |
+          CLOSED="$(gh pr --repo "${GITHUB_REPOSITORY}" list --head "${BRANCH}" --json 'closed' --jq '.[].closed')"
+          if [ "${CLOSED}" == "false" ]; then
+            gh pr --repo "${GITHUB_REPOSITORY}" close "${BRANCH}" --delete-branch
+          fi
