@@ -88,6 +88,16 @@ JsonBatchView make_json_batch(const std::vector<std::string>& records) {
   return v;
 }
 
+// Releases the FFI-owned CRecordArray on scope exit, so the array is freed even
+// if copying the records into owning UnackedRecords throws (e.g. std::bad_alloc
+// while growing the output vector) — not only on the straight-line return.
+struct RecordArrayGuard {
+  CRecordArray array;
+  ~RecordArrayGuard() { zerobus_free_record_array(array); }
+  RecordArrayGuard(const RecordArrayGuard&) = delete;
+  RecordArrayGuard& operator=(const RecordArrayGuard&) = delete;
+};
+
 }  // namespace
 
 Stream::~Stream() {
@@ -261,6 +271,8 @@ std::vector<UnackedRecord> Stream::get_unacked_records() {
   CRecordArray array = zerobus_stream_get_unacked_records(handle_, guard.ptr());
   // On error the array is empty; surface the error first.
   guard.throw_if_error();
+  // Own the array before the copy, so it is freed even if a copy below throws.
+  RecordArrayGuard array_guard{array};
 
   std::vector<UnackedRecord> out;
   if (array.records != nullptr && array.len > 0) {
@@ -274,7 +286,6 @@ std::vector<UnackedRecord> Stream::get_unacked_records() {
       out.emplace_back(rec.is_json, std::move(data));
     }
   }
-  zerobus_free_record_array(array);
   return out;
 }
 

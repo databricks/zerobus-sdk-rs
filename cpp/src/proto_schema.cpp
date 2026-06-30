@@ -13,6 +13,22 @@
 
 namespace zerobus {
 
+namespace {
+
+// Releases the proto-bytes buffer that zerobus_proto_schema_encode_json
+// transfers to us, on scope exit. This guarantees the FFI allocation is freed
+// on every path — including if copying the bytes into the result vector throws
+// (e.g. std::bad_alloc) — rather than only on the straight-line return.
+struct ProtoBytesGuard {
+  std::uint8_t* data;
+  std::uintptr_t len;
+  ~ProtoBytesGuard() { zerobus_free_proto_bytes(data, len); }
+  ProtoBytesGuard(const ProtoBytesGuard&) = delete;
+  ProtoBytesGuard& operator=(const ProtoBytesGuard&) = delete;
+};
+
+}  // namespace
+
 // Build the schema handle from Unity Catalog table metadata JSON. A null handle
 // signals failure; throw the FFI's error if it set one, else a generic message.
 ProtoSchema ProtoSchema::from_uc_json(const std::string& uc_table_json) {
@@ -82,11 +98,14 @@ std::vector<std::uint8_t> ProtoSchema::encode_json(
     guard.throw_if_error();
     throw ZerobusException("failed to encode JSON record", false);
   }
+  // Own the transferred buffer before the copy, so it is freed even if assign
+  // throws. Frees on the empty-result path too (zerobus_free_proto_bytes
+  // tolerates a null pointer / zero length).
+  ProtoBytesGuard bytes_guard{out_data, out_len};
   std::vector<std::uint8_t> result;
   if (out_data != nullptr && out_len > 0) {
     result.assign(out_data, out_data + out_len);
   }
-  zerobus_free_proto_bytes(out_data, out_len);
   return result;
 }
 
