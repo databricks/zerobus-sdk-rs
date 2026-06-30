@@ -103,7 +103,7 @@ impl DefaultTokenFactory {
     ) -> ZerobusResult<String> {
         let client = reqwest::Client::new();
         let params = [("grant_type", "client_credentials"), ("scope", "all-apis")];
-        let token_endpoint = format!("{}/oidc/v1/token", uc_endpoint);
+        let token_endpoint = format!("{}/oidc/v1/token", uc_endpoint.trim_end_matches('/'));
         let resp = client
             .post(&token_endpoint)
             .basic_auth(client_id, Some(client_secret))

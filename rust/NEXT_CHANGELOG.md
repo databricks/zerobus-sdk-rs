@@ -12,7 +12,7 @@
 - Dynamic protobuf ingestion: ingest on the efficient proto path without a compiled `.proto` or generated Rust types. The canonical record contract is a **JSON value encoded against the descriptor** (consistent with the C/FFI encode path), turned into protobuf wire bytes client-side. Three pieces ship together:
   - `StreamBuilder::proto_from_uc()` — fetches the table's schema from Unity Catalog at stream creation and derives the protobuf descriptor (no local `.proto`).
   - `schema::TableDescriptorBuilder` — build a descriptor in code from Databricks column types when there is no Unity Catalog metadata.
-  - `DynamicProtoEncoder` (via `ZerobusStream::encoder()`) — encode JSON records (string, `serde_json::Value`, or any `serde::Serialize`) into protobuf bytes against the stream's descriptor, then ingest them through the existing `ingest_record_offset` / `ingest_records_offset` API.
+  - `DynamicProtoEncoder` (via `ZerobusStream::encoder()`) — encode JSON records (a string or `serde_json::Value`) into protobuf bytes against the stream's descriptor, then ingest them through the existing `ingest_record_offset` / `ingest_records_offset` API.
 
 ### Bug Fixes
 
@@ -31,7 +31,7 @@
 - Added `HeadersProvider::invalidate` with a default no-op implementation; the SDK calls it when the server rejects the supplied credentials so a provider can drop cached auth state. Existing trait implementations are unaffected.
 - Added `StreamBuilder::proto_from_uc()` to create a proto stream whose descriptor is fetched from Unity Catalog at `build()` time.
 - Added `ZerobusStream::encoder()`, returning a `DynamicProtoEncoder` bound to the stream's descriptor.
-- Added `DynamicProtoEncoder` (module `dynamic`) with `new`, `encode`, `encode_value`, `encode_record`, `descriptor`, and `descriptor_bytes`.
+- Added `DynamicProtoEncoder` (module `dynamic`) with `new`, `encode`, and `encode_value`.
 - Added `schema::TableDescriptorBuilder` for constructing a `DescriptorProto` in code, plus `schema::fetch_uc_table_schema` and `schema::descriptor_from_uc` for fetching a table's schema/descriptor from the Unity Catalog REST API.
 - Added `DefaultTokenFactory::get_workspace_token` to mint an `all-apis` token for Unity Catalog REST calls.
 - `prost-reflect` is now a regular dependency of the SDK crate (previously a dev-dependency).

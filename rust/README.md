@@ -522,7 +522,7 @@ let descriptor = TableDescriptorBuilder::new("orders")
     .build()?;
 ```
 
-`encoder` also takes a `serde_json::Value` (`encode_value`) or any `serde::Serialize` (`encode_record`). Some Databricks types need shaping in the JSON (`DATE`/`TIMESTAMP` as integers, `BINARY` as base64, `DECIMAL` as a string) — see the `dynamic` module docs.
+`encoder.encode` takes a JSON string and `encode_value` a `serde_json::Value`. Some Databricks types need shaping in the JSON (`DATE`/`TIMESTAMP` as integers, `BINARY` as base64, `DECIMAL` as a string) — see the `dynamic` module docs.
 
 ### 5. Ingest Data
 

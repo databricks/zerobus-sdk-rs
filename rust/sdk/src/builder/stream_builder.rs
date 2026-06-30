@@ -219,6 +219,13 @@ impl<'a> StreamBuilder<'a> {
     /// [`headers_provider`](Self::headers_provider) it reuses the provider's
     /// `authorization` header. The principal needs `SELECT` on the table.
     ///
+    /// Each `build()` performs these UC calls fresh and uncached (a workspace-token
+    /// mint plus the schema fetch), on top of the cached write token. For workloads
+    /// that churn many short-lived streams to the same table, fetch the descriptor
+    /// once with [`schema::descriptor_from_uc`](crate::schema::descriptor_from_uc),
+    /// reuse it via [`compiled_proto`](Self::compiled_proto), and obtain the encoder
+    /// from each resulting stream.
+    ///
     /// # Example
     ///
     /// ```rust,ignore
