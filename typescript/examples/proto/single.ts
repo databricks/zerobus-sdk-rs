@@ -103,6 +103,11 @@ async function main() {
     async function ingestWithOffsetApi() {
         console.log('\n=== Offset-based API (Recommended) ===');
 
+        // NOTE: Examples 1 and 2 below confirm each record with waitForOffset(), which is
+        // handy when a specific record must be confirmed before continuing (and fine for
+        // this single-record demo). For high volume, the idiomatic flow is to ingest in a
+        // loop and flush() once at the end — see example 3 below.
+
         // 1. Auto-encoding: Message object - SDK handles encoding
         const record1 = AirQuality.create({
             device_name: 'sensor-001',

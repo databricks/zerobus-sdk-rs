@@ -20,9 +20,11 @@
 //!     .build()
 //!     .await?;
 //!
-//! // Ingest a record and wait for acknowledgment
-//! let offset = stream.ingest_record_offset(JsonValue(my_record)).await?;
-//! stream.wait_for_offset(offset).await?;
+//! // Idiomatic flow: ingest in a loop, then flush() once to confirm the batch.
+//! for my_record in records {
+//!     stream.ingest_record_offset(JsonValue(my_record)).await?;
+//! }
+//! stream.flush().await?; // Returns once every queued record is acknowledged.
 //!
 //! stream.close().await?;
 //! ```
