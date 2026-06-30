@@ -656,7 +656,9 @@ ZerobusArrowStream stream = sdk.streamBuilder()
 try (VectorSchemaRoot batch = VectorSchemaRoot.create(schema, allocator)) {
     // populate batch...
     Optional<Long> offset = stream.ingestBatch(batch);
-    offset.ifPresent(stream::waitForOffset);
+    if (offset.isPresent()) {
+        stream.waitForOffset(offset.get());
+    }
 }
 stream.close();
 ```
@@ -778,7 +780,9 @@ try {
 
     // Or use objects with a serializer (Gson, Jackson, etc.)
     Gson gson = new Gson();
-    Map<String, Object> data = Map.of("device_name", "sensor-2", "temp", 26);
+    Map<String, Object> data = new HashMap<>();
+    data.put("device_name", "sensor-2");
+    data.put("temp", 26);
     offset = stream.ingestRecordOffset(data, gson::toJson);
 
     // Batch ingestion
@@ -787,7 +791,9 @@ try {
         "{\"device_name\": \"sensor-2\", \"temp\": 26}"
     );
     Optional<Long> batchOffset = stream.ingestRecordsOffset(batch);
-    batchOffset.ifPresent(stream::waitForOffset);
+    if (batchOffset.isPresent()) {
+        stream.waitForOffset(batchOffset.get());
+    }
 } finally {
     stream.close();
     sdk.close();

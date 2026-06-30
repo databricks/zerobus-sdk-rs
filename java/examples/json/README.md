@@ -78,7 +78,9 @@ Optional<Long> offset = stream.ingestRecordsOffset(jsonBatch);
 List<Map<String, Object>> objectBatch = ...;
 offset = stream.ingestRecordsOffset(objectBatch, gson::toJson);
 
-offset.ifPresent(stream::waitForOffset);
+if (offset.isPresent()) {
+    stream.waitForOffset(offset.get());
+}
 ```
 
 ### Getting Unacknowledged Records

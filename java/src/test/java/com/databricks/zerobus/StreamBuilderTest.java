@@ -65,16 +65,24 @@ public class StreamBuilderTest {
   }
 
   @Test
-  void validateRequiredThrowsWithoutClientSecret() {
-    StreamBuilder b = builder().table("catalog.schema.table").oauth("client-id", null);
-    IllegalStateException ex = assertThrows(IllegalStateException.class, b::validateRequired);
-    assertTrue(ex.getMessage().contains("authentication is required"));
-  }
-
-  @Test
   void validateRequiredPassesWithTableAndOauth() {
     StreamBuilder b = builder().table("catalog.schema.table").oauth("client-id", "client-secret");
     assertDoesNotThrow(b::validateRequired);
+  }
+
+  @Test
+  void tableRejectsNullAndBlankNames() {
+    assertThrows(NullPointerException.class, () -> builder().table(null));
+    assertThrows(IllegalArgumentException.class, () -> builder().table(""));
+    assertThrows(IllegalArgumentException.class, () -> builder().table("   "));
+  }
+
+  @Test
+  void oauthRejectsNullAndBlankCredentials() {
+    assertThrows(NullPointerException.class, () -> builder().oauth(null, "client-secret"));
+    assertThrows(NullPointerException.class, () -> builder().oauth("client-id", null));
+    assertThrows(IllegalArgumentException.class, () -> builder().oauth("", "client-secret"));
+    assertThrows(IllegalArgumentException.class, () -> builder().oauth("client-id", "   "));
   }
 
   @Test
@@ -85,6 +93,11 @@ public class StreamBuilderTest {
   @Test
   void arrowRejectsNullSchema() {
     assertThrows(NullPointerException.class, () -> builder().arrow(null));
+  }
+
+  @Test
+  void ackCallbackRejectsNullCallback() {
+    assertThrows(NullPointerException.class, () -> builder().ackCallback(null));
   }
 
   // ==================== Numeric setter validation ====================

@@ -11,6 +11,9 @@
 
 ### Bug Fixes
 
+- `StreamBuilder` now rejects null or blank table names and OAuth credentials before opening a
+  stream.
+
 ### Documentation
 
 ### Internal Changes

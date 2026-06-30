@@ -79,7 +79,9 @@ Optional<Long> offset = stream.ingestRecordsOffset(messages);
 List<byte[]> encodedRecords = Arrays.asList(bytes1, bytes2, bytes3);
 offset = stream.ingestRecordsOffset(encodedRecords);
 
-offset.ifPresent(stream::waitForOffset);
+if (offset.isPresent()) {
+    stream.waitForOffset(offset.get());
+}
 ```
 
 ### Getting Unacknowledged Records

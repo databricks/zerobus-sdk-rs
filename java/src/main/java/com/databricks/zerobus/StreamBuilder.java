@@ -9,11 +9,11 @@ import org.apache.arrow.vector.types.pojo.Schema;
  * Fluent builder for creating Zerobus ingestion streams.
  *
  * <p>This is the recommended way to create a stream. It mirrors the {@code stream_builder()} API of
- * the Rust SDK. Setters may be called in any order. Because Java cannot return different stream
- * types from a single {@code build()}, the record format is selected with a terminal method that
- * returns a typed sub-builder: {@link #json()}, {@link #compiledProto(DescriptorProto)}, or {@link
- * #arrow(Schema)}. Each sub-builder exposes a {@code build()} that returns the matching stream
- * type.
+ * the Rust SDK. Shared setters may be called in any order before selecting a record format. Because
+ * Java cannot return different stream types from a single {@code build()}, the record format is
+ * selected with a terminal method that returns a typed sub-builder: {@link #json()}, {@link
+ * #compiledProto(DescriptorProto)}, or {@link #arrow(Schema)}. Each sub-builder exposes a {@code
+ * build()} that returns the matching stream type.
  *
  * <h3>Thread Safety</h3>
  *
@@ -59,7 +59,7 @@ public final class StreamBuilder {
    * @return this builder for method chaining
    */
   public StreamBuilder table(String tableName) {
-    this.tableName = tableName;
+    this.tableName = requireNonBlank(tableName, "tableName");
     return this;
   }
 
@@ -71,8 +71,8 @@ public final class StreamBuilder {
    * @return this builder for method chaining
    */
   public StreamBuilder oauth(String clientId, String clientSecret) {
-    this.clientId = clientId;
-    this.clientSecret = clientSecret;
+    this.clientId = requireNonBlank(clientId, "clientId");
+    this.clientSecret = requireNonBlank(clientSecret, "clientSecret");
     return this;
   }
 
@@ -172,7 +172,7 @@ public final class StreamBuilder {
    * @return this builder for method chaining
    */
   public StreamBuilder ackCallback(AckCallback ackCallback) {
-    this.ackCallback = ackCallback;
+    this.ackCallback = Objects.requireNonNull(ackCallback, "ackCallback");
     return this;
   }
 
@@ -214,10 +214,10 @@ public final class StreamBuilder {
 
   /** Validates that the required table name and authentication have been configured. */
   void validateRequired() {
-    if (tableName == null || tableName.isEmpty()) {
+    if (isBlank(tableName)) {
       throw new IllegalStateException("table name is required: call table()");
     }
-    if (clientId == null || clientSecret == null) {
+    if (isBlank(clientId) || isBlank(clientSecret)) {
       throw new IllegalStateException("authentication is required: call oauth()");
     }
   }
@@ -247,6 +247,18 @@ public final class StreamBuilder {
       throw new IllegalArgumentException(name + " must not be negative, got: " + value);
     }
     return value;
+  }
+
+  private static String requireNonBlank(String value, String name) {
+    Objects.requireNonNull(value, name);
+    if (isBlank(value)) {
+      throw new IllegalArgumentException(name + " must not be blank");
+    }
+    return value;
+  }
+
+  private static boolean isBlank(String value) {
+    return value == null || value.trim().isEmpty();
   }
 
   /** Builds the gRPC stream options, applying only the values that were explicitly set. */

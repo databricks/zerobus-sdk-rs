@@ -40,8 +40,10 @@ import org.slf4j.LoggerFactory;
  *     .join();
  *
  * // Create and populate a VectorSchemaRoot, then ingest
- * long offset = stream.ingestBatch(batch);
- * stream.waitForOffset(offset);
+ * Optional<Long> offset = stream.ingestBatch(batch);
+ * if (offset.isPresent()) {
+ *     stream.waitForOffset(offset.get());
+ * }
  * stream.close();
  * }</pre>
  *

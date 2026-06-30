@@ -130,12 +130,12 @@ public class ZerobusSdk implements AutoCloseable {
    * <p>Example usage:
    *
    * <pre>{@code
-   * ZerobusProtoStream stream = sdk.createProtoStream(
-   *     "catalog.schema.table",
-   *     MyProto.getDescriptor().toProto(),
-   *     clientId,
-   *     clientSecret
-   * ).join();
+   * ZerobusProtoStream stream = sdk.streamBuilder()
+   *     .table("catalog.schema.table")
+   *     .oauth(clientId, clientSecret)
+   *     .compiledProto(MyProto.getDescriptor().toProto())
+   *     .build()
+   *     .join();
    *
    * long offset = stream.ingestRecordOffset(myProtoMessage);
    * stream.waitForOffset(offset);
@@ -153,7 +153,7 @@ public class ZerobusSdk implements AutoCloseable {
    *     clientSecret).compiledProto(descriptorProto).build()}. This method will be removed in the
    *     next major release.
    */
-  @Deprecated(since = "1.3.0", forRemoval = true)
+  @Deprecated
   public CompletableFuture<ZerobusProtoStream> createProtoStream(
       String tableName,
       com.google.protobuf.DescriptorProtos.DescriptorProto descriptorProto,
@@ -179,7 +179,7 @@ public class ZerobusSdk implements AutoCloseable {
    *     clientSecret).compiledProto(descriptorProto).build()}. This method will be removed in the
    *     next major release.
    */
-  @Deprecated(since = "1.3.0", forRemoval = true)
+  @Deprecated
   public CompletableFuture<ZerobusProtoStream> createProtoStream(
       String tableName,
       com.google.protobuf.DescriptorProtos.DescriptorProto descriptorProto,
@@ -236,11 +236,12 @@ public class ZerobusSdk implements AutoCloseable {
    * <p>Example usage:
    *
    * <pre>{@code
-   * ZerobusJsonStream stream = sdk.createJsonStream(
-   *     "catalog.schema.table",
-   *     clientId,
-   *     clientSecret
-   * ).join();
+   * ZerobusJsonStream stream = sdk.streamBuilder()
+   *     .table("catalog.schema.table")
+   *     .oauth(clientId, clientSecret)
+   *     .json()
+   *     .build()
+   *     .join();
    *
    * // Main: Ingest objects with a serializer
    * Gson gson = new Gson();
@@ -261,7 +262,7 @@ public class ZerobusSdk implements AutoCloseable {
    *     sdk.streamBuilder().table(tableName).oauth(clientId, clientSecret).json().build()}. This
    *     method will be removed in the next major release.
    */
-  @Deprecated(since = "1.3.0", forRemoval = true)
+  @Deprecated
   public CompletableFuture<ZerobusJsonStream> createJsonStream(
       String tableName, String clientId, String clientSecret) {
     return createJsonStreamInternal(tableName, clientId, clientSecret, DEFAULT_OPTIONS);
@@ -279,7 +280,7 @@ public class ZerobusSdk implements AutoCloseable {
    *     sdk.streamBuilder().table(tableName).oauth(clientId, clientSecret).json().build()}. This
    *     method will be removed in the next major release.
    */
-  @Deprecated(since = "1.3.0", forRemoval = true)
+  @Deprecated
   public CompletableFuture<ZerobusJsonStream> createJsonStream(
       String tableName, String clientId, String clientSecret, StreamConfigurationOptions options) {
     return createJsonStreamInternal(tableName, clientId, clientSecret, options);
@@ -394,7 +395,7 @@ public class ZerobusSdk implements AutoCloseable {
    *     sdk.streamBuilder().table(tableName).oauth(clientId, clientSecret).arrow(schema).build()}.
    *     This method will be removed in the next major release.
    */
-  @Deprecated(since = "1.3.0", forRemoval = true)
+  @Deprecated
   public CompletableFuture<ZerobusArrowStream> createArrowStream(
       String tableName, Schema schema, String clientId, String clientSecret) {
     return createArrowStreamInternal(
@@ -416,7 +417,7 @@ public class ZerobusSdk implements AutoCloseable {
    *     sdk.streamBuilder().table(tableName).oauth(clientId, clientSecret).arrow(schema).build()}.
    *     This method will be removed in the next major release.
    */
-  @Deprecated(since = "1.3.0", forRemoval = true)
+  @Deprecated
   public CompletableFuture<ZerobusArrowStream> createArrowStream(
       String tableName,
       Schema schema,

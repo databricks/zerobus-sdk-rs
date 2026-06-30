@@ -99,7 +99,9 @@ ZerobusArrowStream stream = sdk.streamBuilder()
 
 // Columnar batch ingestion
 Optional<Long> offset = stream.ingestBatch(vectorSchemaRoot);
-offset.ifPresent(stream::waitForOffset);
+if (offset.isPresent()) {
+    stream.waitForOffset(offset.get());
+}
 ```
 
 ### ZerobusStream (Deprecated)
