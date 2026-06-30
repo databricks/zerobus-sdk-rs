@@ -536,11 +536,11 @@ const uint8_t *zerobus_proto_schema_descriptor_bytes(const struct CZerobusProtoS
  * - LONG/BIGINT above 2^53: pass as a JSON string, else the value loses
  *   precision as a JSON number.
  *
- * Presence is enforced only for top-level non-nullable scalar and struct
- * columns (proto2 `required`); a record omitting one fails. Non-nullable
+ * Non-nullable scalar and struct fields (proto2 `required`) are presence-checked
+ * at any depth — nested STRUCTs, ARRAY<STRUCT> elements, and MAP values — so a
+ * record omitting one fails locally rather than at the server. Non-nullable
  * ARRAY/MAP columns map to `repeated`, which has no presence, so an omitted one
- * encodes as empty rather than failing; required fields nested inside a STRUCT
- * are likewise not presence-checked.
+ * encodes as empty rather than failing.
  * Returns true on success; caller must free buffer with `zerobus_free_proto_bytes`.
  * On failure `*out_data` is set to NULL and `*out_len` to 0.
  */
