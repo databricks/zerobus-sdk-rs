@@ -2,6 +2,22 @@
 
 Python wrapper around the Rust core via PyO3 and maturin.
 
+## Client code patterns
+
+When writing or reviewing client code that uses this SDK, follow the cross-SDK
+performance flow from the root `CLAUDE.md`:
+
+- **Idiomatic flow:** ingest in a loop (`ingest_record_offset()` or
+  `ingest_record_nowait()`), then call `flush()` once to confirm durability.
+  `ingest_record_offset()` returns as soon as the record is queued; the SDK sends it and
+  tracks its acknowledgment in the background.
+- In async code, an `AckCallback` is a good way to track durability without blocking.
+- `wait_for_offset()` blocks until a specific offset is acknowledged — use it to confirm
+  a specific record before continuing. Acks are ordered, so waiting on the LAST offset
+  confirms all prior records. Avoid calling it after every record in a tight loop, since
+  that limits throughput to one record per round-trip.
+- `ingest_record()` is **deprecated** — prefer the offset-based APIs.
+
 ## Structure
 
 ```

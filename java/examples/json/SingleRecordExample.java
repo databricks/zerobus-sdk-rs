@@ -52,16 +52,19 @@ public class SingleRecordExample {
             totalRecords++;
             System.out.println("  1 record ingested and acknowledged (offset: " + offset + ")");
 
+            // Idiomatic flow: ingest in a loop, then confirm durability once on the last
+            // offset. Acks are ordered, so waiting on the last offset confirms every prior
+            // record.
             long lastOffset = -1;
             for (int i = 0; i < 10; i++) {
                 Map<String, Object> data = new HashMap<>();
                 data.put("device_name", "json-main-loop-" + i);
                 data.put("temp", 21 + i);
                 data.put("humidity", 51 + i);
-                lastOffset = stream.ingestRecordOffset(data, SingleRecordExample::toJson);
+                lastOffset = stream.ingestRecordOffset(data, SingleRecordExample::toJson); // returns immediately
                 totalRecords++;
             }
-            stream.waitForOffset(lastOffset);
+            stream.waitForOffset(lastOffset); // confirm durability once
             System.out.println("  10 records ingested, last acknowledged (offset: " + lastOffset + ")");
 
             // === Pre-serialized: Raw JSON string ===

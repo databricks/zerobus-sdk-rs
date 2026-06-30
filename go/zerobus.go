@@ -366,7 +366,15 @@ func (st *ZerobusStream) IngestRecord(payload interface{}) (*RecordAck, error) {
 
 // IngestRecordOffset ingests a record into the stream and returns the offset directly.
 // This is the preferred API for ingesting records.
-// This method blocks until the record is queued and returns the offset.
+// This method returns as soon as the record is queued; the SDK sends it and
+// tracks its acknowledgment in the background.
+//
+// The idiomatic flow is to ingest in a loop and call Flush() to confirm
+// durability. Use WaitForOffset() with the returned offset when you need to
+// confirm a specific record before continuing (acks are ordered, so the last
+// offset confirms the whole group); prefer Flush() for bulk durability. Avoid
+// calling WaitForOffset() after every record in a tight loop, since that limits
+// throughput to one record per round-trip.
 //
 // The payload parameter accepts either:
 //   - []byte for Protocol Buffer encoded records
@@ -380,17 +388,15 @@ func (st *ZerobusStream) IngestRecord(payload interface{}) (*RecordAck, error) {
 //
 // Examples:
 //
-//	// Ingest records and get offsets directly
-//	offset1, err := stream.IngestRecordOffset(`{"field": "value1"}`)
-//	if err != nil {
+//	// High throughput: ingest in a loop without waiting, then flush once.
+//	for _, r := range records {
+//	    if _, err := stream.IngestRecordOffset(r); err != nil {
+//	        log.Fatal(err)
+//	    }
+//	}
+//	if err := stream.Flush(); err != nil {
 //	    log.Fatal(err)
 //	}
-//
-//	// For concurrent ingestion, use goroutines
-//	go func() {
-//	    offset, err := stream.IngestRecordOffset(data)
-//	    // handle result
-//	}()
 func (st *ZerobusStream) IngestRecordOffset(payload interface{}) (int64, error) {
 	if st.ptr == nil {
 		return -1, &ZerobusError{Message: "Stream has been closed", IsRetryable: false}
@@ -508,7 +514,16 @@ func (st *ZerobusStream) IngestRecordsNowait(records []interface{}) error {
 
 // IngestRecordsOffset ingests a batch of records into the stream and returns one offset for the entire batch.
 // This is an optimized API for ingesting multiple records at once.
-// This method blocks until all records are queued and returns the batch offset.
+// This method returns as soon as the batch is queued; the server round-trip
+// happens in the background.
+//
+// Prefer this batch API over single-record calls in hot paths. The idiomatic
+// flow is to ingest your batches in a loop and call Flush() to confirm
+// durability. Use WaitForOffset() with a returned offset when you need to
+// confirm a specific batch before continuing (acks are ordered, so the last
+// offset confirms the whole group); prefer Flush() for bulk durability. Avoid
+// calling WaitForOffset() after every batch in a tight loop, since that limits
+// throughput to one batch per round-trip.
 //
 // The records parameter accepts a slice where each element is either:
 //   - []byte for Protocol Buffer encoded records
@@ -587,15 +602,25 @@ func (st *ZerobusStream) IngestRecordsOffset(records []interface{}) (int64, erro
 // WaitForOffset blocks until the server acknowledges the record at the specified offset.
 // This allows explicit control over when to wait for acknowledgments.
 //
-// Use this with offsets returned from IngestRecordOffset() to wait for specific records
-// to be durably written without waiting for all pending records (unlike Flush).
+// Use this with offsets returned from IngestRecordOffset() to confirm a specific
+// record before continuing, without waiting for all pending records (unlike Flush).
+// Acks are ordered, so waiting on the last offset of a group confirms all prior
+// offsets too.
+//
+// Use this when you need to confirm a specific record; prefer Flush() for bulk
+// durability (ingest in a loop, then Flush() once). Avoid calling WaitForOffset()
+// after every record in a tight loop, since that limits throughput to one record
+// per round-trip.
 //
 // Example:
 //
-//	offset, _ := stream.IngestRecordOffset(data)
-//	// Do other work...
-//	if err := stream.WaitForOffset(offset); err != nil {
-//	    log.Printf("Record at offset %d failed: %v", offset, err)
+//	// Confirm a group of records with a single wait on the last offset.
+//	var last int64
+//	for _, r := range records {
+//	    last, _ = stream.IngestRecordOffset(r)
+//	}
+//	if err := stream.WaitForOffset(last); err != nil { // confirms all prior offsets too
+//	    log.Printf("Record at offset %d failed: %v", last, err)
 //	}
 func (st *ZerobusStream) WaitForOffset(offset int64) error {
 	if st.ptr == nil {
@@ -643,12 +668,20 @@ func (st *ZerobusStream) GetUnackedRecords() ([]interface{}, error) {
 // Flush blocks until all pending records have been acknowledged by the server.
 // This ensures durability guarantees before proceeding.
 //
+// This is the idiomatic way to confirm durability for high-throughput ingestion:
+// ingest many records via IngestRecordOffset()/IngestRecordsOffset() in a loop,
+// then call Flush() once. Use WaitForOffset() instead when you only need to
+// confirm a specific record rather than everything queued so far.
+//
 // Returns an error if:
 //   - Flush timeout is exceeded
 //   - Any record fails with a non-retryable error
 //
 // Example:
 //
+//	for _, r := range records {
+//	    stream.IngestRecordOffset(r)
+//	}
 //	if err := stream.Flush(); err != nil {
 //	    log.Printf("Flush failed: %v", err)
 //	}

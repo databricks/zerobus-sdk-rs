@@ -100,11 +100,21 @@ class ZerobusStream:
 
     # Forward all other methods to the inner Rust stream
     async def ingest_record_offset(self, payload: Any):
-        """Submit record and return offset immediately (no waiting)."""
+        """Submit record and return offset immediately (no waiting).
+
+        Resolves as soon as the record is queued; the SDK sends it and tracks its
+        acknowledgment in the background. The idiomatic flow is to ingest in a loop and
+        ``await flush()`` once to confirm durability (or use an ``AckCallback``).
+        """
         return await self._inner.ingest_record_offset(payload)
 
     def ingest_record_nowait(self, payload: Any):
-        """Submit record without waiting (fire-and-forget)."""
+        """Submit record without waiting (fire-and-forget).
+
+        Highest-throughput single-record API: returns no offset and is not awaited.
+        Use when you do not need per-record offsets; track durability with an
+        ``AckCallback`` and ``await flush()`` before close.
+        """
         return self._inner.ingest_record_nowait(payload)
 
     async def ingest_records_offset(self, payloads):
@@ -116,11 +126,21 @@ class ZerobusStream:
         return self._inner.ingest_records_nowait(payloads)
 
     async def wait_for_offset(self, offset: int):
-        """Wait for a specific offset to be acknowledged."""
+        """Block until a specific offset is acknowledged.
+
+        Use when you need to confirm a specific record before continuing; acks are
+        ordered, so waiting on the last offset returned confirms all prior records too.
+        For bulk durability, prefer ingesting in a loop and ``await flush()`` once (or an
+        ``AckCallback``).
+        """
         return await self._inner.wait_for_offset(offset)
 
     async def flush(self):
-        """Flush all pending records."""
+        """Flush all pending records, awaiting until they are acknowledged.
+
+        The idiomatic way to confirm durability: ingest in a loop, then ``await flush()``
+        once to confirm everything queued so far is committed.
+        """
         return await self._inner.flush()
 
     async def close(self):
@@ -184,11 +204,20 @@ class ZerobusArrowStream:
         return await self._inner.ingest_batch(ipc_bytes)
 
     async def wait_for_offset(self, offset: int):
-        """Wait for a specific offset to be acknowledged."""
+        """Block until a specific offset is acknowledged.
+
+        Use when you need to confirm a specific batch before continuing; acks are
+        ordered, so waiting on the last offset returned confirms all prior batches too.
+        For bulk durability, prefer ingesting batches in a loop and ``await flush()``.
+        """
         return await self._inner.wait_for_offset(offset)
 
     async def flush(self):
-        """Flush all pending batches, waiting for acknowledgment."""
+        """Flush all pending batches, awaiting until they are acknowledged.
+
+        The idiomatic way to confirm durability: ingest batches in a loop, then
+        ``await flush()`` once to confirm everything queued so far is committed.
+        """
         return await self._inner.flush()
 
     async def close(self):

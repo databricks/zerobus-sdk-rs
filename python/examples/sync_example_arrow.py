@@ -143,7 +143,10 @@ def main():
             logger.info(f"  Table ingested: {table.num_rows} rows, offset: {offset}")
 
             # ========================================================================
-            # Wait for a specific offset to be acknowledged
+            # Wait for a specific offset to be acknowledged.
+            # Acks are ordered, so waiting once on the LAST offset here (or just calling
+            # flush()) confirms every prior batch too — no need to wait per batch in the
+            # loop above.
             # ========================================================================
             logger.info(f"\nWaiting for offset {offset} to be acknowledged...")
             stream.wait_for_offset(offset)

@@ -182,6 +182,10 @@ The SDK supports two serialization formats. **Protocol Buffers is the default** 
 
 > **Note:** If you don't specify `recordType`, the SDK will use Protocol Buffers by default. To use JSON, explicitly set `recordType: RecordType.Json`.
 
+### Acknowledgments and throughput
+
+Ingestion is asynchronous. `ingestRecordOffset()` (and `ingestRecordsOffset()`) resolves as soon as the record is queued; the SDK sends it and tracks its acknowledgment in the background. To confirm records are durably committed, call `flush()` — it resolves once everything queued so far is acknowledged. The idiomatic flow is **ingest in a loop, then `flush()`** (once for a bounded batch, or periodically for a long-running stream). Each ingest also returns the record's offset, and `waitForOffset(offset)` resolves when that offset is acknowledged — handy when a specific record must be confirmed before continuing (acks are ordered, so waiting on the last offset confirms the whole run). Just avoid calling `waitForOffset()` after every record in a tight loop, since that limits throughput to one record per round-trip. The examples below follow this pattern.
+
 ### Option 1: Using JSON (Quick Start)
 
 JSON mode is the simplest way to get started. You don't need to define or compile protobuf schemas, but you must explicitly specify `RecordType.Json`.
@@ -875,13 +879,16 @@ Represents an active ingestion stream.
 async ingestRecordOffset(payload: Buffer | string | object): Promise<bigint>
 ```
 
-**(Recommended)** Ingests a single record. The Promise resolves immediately after the record is queued (before server acknowledgment). Use `waitForOffset()` to wait for acknowledgment when needed.
+**(Recommended)** Ingests a single record. The Promise resolves immediately after the record is queued (before server acknowledgment); the round-trip happens in the background. The idiomatic flow is to ingest in a loop and then `flush()` once to confirm everything queued so far. The returned offset, together with `waitForOffset()`, lets you confirm a specific record when needed — prefer that for bulk over waiting after each record, since per-record waiting limits throughput to one round-trip per record.
 
 ```typescript
-// High-throughput pattern: send many, wait once
-const offset1 = await stream.ingestRecordOffset(record1);  // Resolves immediately
-const offset2 = await stream.ingestRecordOffset(record2);  // Resolves immediately
-await stream.waitForOffset(offset2);  // Waits for server to acknowledge all records up to offset2
+// Idiomatic flow: ingest in a loop, then flush once
+let lastOffset: bigint | null = null;
+for (const record of records) {
+  lastOffset = await stream.ingestRecordOffset(record);  // Resolves immediately
+}
+await stream.flush();  // Resolves once everything queued so far is acknowledged
+// (Or, to confirm a specific record: if (lastOffset !== null) await stream.waitForOffset(lastOffset))
 ```
 
 ---
@@ -890,7 +897,7 @@ await stream.waitForOffset(offset2);  // Waits for server to acknowledge all rec
 async ingestRecordsOffset(payloads: Array<Buffer | string | object>): Promise<bigint | null>
 ```
 
-**(Recommended)** Ingests multiple records as a batch. The Promise resolves immediately after the batch is queued (before server acknowledgment). Returns `null` for empty batches.
+**(Recommended)** Ingests multiple records as a batch. The Promise resolves immediately after the batch is queued (before server acknowledgment); the round-trip happens in the background. Returns `null` for empty batches. As with `ingestRecordOffset()`, the idiomatic flow is to ingest in a loop and `flush()` once to confirm; reach for `waitForOffset()` when a specific batch must be confirmed before continuing.
 
 ---
 
@@ -898,7 +905,7 @@ async ingestRecordsOffset(payloads: Array<Buffer | string | object>): Promise<bi
 async waitForOffset(offsetId: bigint): Promise<void>
 ```
 
-Waits for the server to acknowledge all records up to and including the specified offset ID.
+Waits for the server to acknowledge all records up to and including the specified offset ID. Acks are ordered, so waiting on the **last** offset confirms every prior record too. Use this when a specific record must be confirmed before continuing; for confirming a bulk run, `flush()` is usually simpler. Avoid calling it after every record in a tight loop, since that limits throughput to one record per round-trip.
 
 ---
 
@@ -998,7 +1005,7 @@ await stream.ingestRecords(buffers);
 async flush(): Promise<void>
 ```
 
-Flushes all pending records and waits for acknowledgments.
+Flushes all pending records and waits for acknowledgments. This is the recommended way to confirm a batch of `ingestRecordOffset()` / `ingestRecordsOffset()` calls: ingest in a loop without waiting, then `flush()` once at the end instead of calling `waitForOffset()` after every record.
 
 ```typescript
 async close(): Promise<void>
@@ -1115,6 +1122,7 @@ enum RecordType {
 5. **Use Protocol Buffers for production**: Protocol Buffers (the default) provides better performance and schema validation. Use JSON only when you need schema flexibility or for quick prototyping.
 6. **Store credentials securely**: Use environment variables, never hardcode credentials
 7. **Use batch ingestion**: For high-throughput scenarios, use `ingestRecordsOffset()` instead of individual `ingestRecordOffset()` calls
+8. **Ingest in a loop, then `flush()`**: See [Acknowledgments and throughput](#acknowledgments-and-throughput) above for the full explanation.
 
 ## Platform Support
 
