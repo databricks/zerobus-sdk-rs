@@ -11,6 +11,7 @@
 ### Bug Fixes
 
 - Every `#[no_mangle] extern "C"` entry point now runs its body inside a `catch_unwind` panic guard (`ffi_guard`). Previously a panic anywhere in an FFI function body (a dependency `unwrap`/`expect`, an allocation failure, a slicing/bounds error, or a panicking callback) would escape across the `extern "C"` boundary, aborting the host process (on current Rust toolchains; it was undefined behavior on pre-1.81 ones) with no recoverable error returned to the C/Go/Java caller. A caught panic is now converted into the function's normal failure channel: a non-retryable error is written to the `CResult` out-parameter (when present) and the per-signature failure sentinel is returned (`NULL` for pointer returns, `false` for `bool`, `-1` for the `i64` offset functions, an empty array struct for the `get_unacked_*` functions). The guard relies on the default `panic = "unwind"` strategy. No signatures changed and `zerobus.h` is byte-identical, so this is ABI-compatible for existing Go/Java consumers.
+- `zerobus_proto_schema_encode_json` now enforces proto2 `required` presence recursively instead of only on top-level columns. A record that omits a non-nullable field nested inside a `STRUCT`, inside an `ARRAY<STRUCT>` element, or inside a `MAP` value is now rejected locally at encode time (with the full field path, e.g. `addr.zip`, `items[2].id`, `props[home].zip`) rather than encoding successfully and being rejected by the server after a network round-trip.
 
 ### Documentation
 
