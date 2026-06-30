@@ -41,48 +41,102 @@ class Stream {
   Stream(const Stream&) = delete;
   Stream& operator=(const Stream&) = delete;
 
-  /// Ingest a single protobuf-encoded record. Returns the logical offset
-  /// assigned to the record. Throws `ZerobusException` on failure.
+  /// Ingest a single protobuf-encoded record, blocking until it is queued.
+  ///
+  /// @param data Pointer to the protobuf-encoded record bytes.
+  /// @param len Number of bytes in @p data.
+  /// @return The logical offset assigned to the record.
+  /// @throws ZerobusException if the stream is closed or ingestion fails.
   std::int64_t ingest_proto_record(const std::uint8_t* data, std::size_t len);
+
+  /// @overload
+  /// @param data The protobuf-encoded record bytes.
   std::int64_t ingest_proto_record(const std::vector<std::uint8_t>& data);
 
-  /// Ingest a single JSON record. Returns the assigned logical offset.
+  /// Ingest a single JSON record, blocking until it is queued.
+  ///
+  /// @param json The record as a UTF-8 JSON string.
+  /// @return The logical offset assigned to the record.
+  /// @throws ZerobusException if the stream is closed or ingestion fails.
   std::int64_t ingest_json_record(const std::string& json);
 
-  /// Ingest a batch of protobuf records. Returns the offset of the last record
-  /// in the batch, or -1 if `records` is empty (a no-op). Prefer batch APIs
-  /// over per-record calls in hot paths — each FFI crossing has a fixed cost.
+  /// Ingest a batch of protobuf records, blocking until they are queued.
+  ///
+  /// Prefer the batch APIs over per-record calls in hot paths: each FFI
+  /// crossing has a fixed cost that batching amortizes.
+  ///
+  /// @param records The protobuf-encoded records to ingest.
+  /// @return The logical offset of the last record in the batch, or -1 if
+  ///         @p records is empty (a no-op).
+  /// @throws ZerobusException if the stream is closed or ingestion fails.
   std::int64_t ingest_proto_records(
       const std::vector<std::vector<std::uint8_t>>& records);
 
-  /// Ingest a batch of JSON records. Returns the offset of the last record,
-  /// or -1 if `records` is empty (a no-op).
+  /// Ingest a batch of JSON records, blocking until they are queued.
+  ///
+  /// @param records The records, each a UTF-8 JSON string.
+  /// @return The logical offset of the last record in the batch, or -1 if
+  ///         @p records is empty (a no-op).
+  /// @throws ZerobusException if the stream is closed or ingestion fails.
   std::int64_t ingest_json_records(const std::vector<std::string>& records);
 
-  /// Fire-and-forget single-record ingestion. Returns immediately; only
-  /// argument-validation errors are reported (as exceptions). Ingestion errors
-  /// are silently dropped. The stream must outlive the background work.
+  /// Fire-and-forget single-record ingestion: queues the record on a background
+  /// task and returns immediately, without waiting for it to be sent.
+  ///
+  /// Only argument-validation errors are reported; errors during the background
+  /// ingestion itself are silently dropped. The stream must outlive the
+  /// background work.
+  ///
+  /// @param data Pointer to the protobuf-encoded record bytes.
+  /// @param len Number of bytes in @p data.
+  /// @throws ZerobusException on a closed stream or invalid argument.
   void ingest_proto_record_nowait(const std::uint8_t* data, std::size_t len);
+
+  /// @overload
+  /// @param data The protobuf-encoded record bytes.
   void ingest_proto_record_nowait(const std::vector<std::uint8_t>& data);
+
+  /// Fire-and-forget single JSON-record ingestion. See
+  /// ingest_proto_record_nowait() for the fire-and-forget semantics.
+  ///
+  /// @param json The record as a UTF-8 JSON string.
+  /// @throws ZerobusException on a closed stream or invalid argument.
   void ingest_json_record_nowait(const std::string& json);
 
-  /// Fire-and-forget batch ingestion. Copies the payloads before returning, so
-  /// the caller's buffers may be released immediately. An empty batch is a
-  /// no-op.
+  /// Fire-and-forget batch ingestion: queues the records on a background task
+  /// and returns immediately. The payloads are copied before returning, so the
+  /// caller's buffers may be released right away. An empty batch is a no-op.
+  ///
+  /// @param records The protobuf-encoded records to ingest.
+  /// @throws ZerobusException on a closed stream or invalid argument.
   void ingest_proto_records_nowait(
       const std::vector<std::vector<std::uint8_t>>& records);
+
+  /// Fire-and-forget batch ingestion of JSON records. See
+  /// ingest_proto_records_nowait() for the fire-and-forget semantics.
+  ///
+  /// @param records The records, each a UTF-8 JSON string.
+  /// @throws ZerobusException on a closed stream or invalid argument.
   void ingest_json_records_nowait(const std::vector<std::string>& records);
 
-  /// Block until the record at `offset` has been acknowledged by the server.
+  /// Block until the record at @p offset has been acknowledged by the server.
+  ///
+  /// @param offset A logical offset returned by an ingest call.
+  /// @throws ZerobusException if the stream is closed or the wait fails.
   void wait_for_offset(std::int64_t offset);
 
-  /// Flush all pending records and wait for their acknowledgment.
+  /// Flush all pending records and block until they are acknowledged.
+  ///
+  /// @throws ZerobusException if the stream is closed or the flush fails.
   void flush();
 
   /// Return all unacknowledged records from a closed or failed stream, for the
   /// caller to re-ingest on a fresh stream. Remains callable after a failed
   /// `close()` (which keeps the handle alive precisely so recovery is
   /// possible).
+  ///
+  /// @return The records that were ingested but not acknowledged.
+  /// @throws ZerobusException if the records cannot be retrieved.
   std::vector<UnackedRecord> get_unacked_records();
 
   /// Gracefully close the stream, flushing pending records first. Idempotent:
@@ -92,10 +146,13 @@ class Stream {
   /// elapses (default 5 minutes), so call it at a controlled point rather than
   /// leaving it to the destructor.
   ///
-  /// On success the stream becomes unusable. If the close fails it throws
-  /// `ZerobusException` but keeps the stream handle alive, so the caller can
-  /// still recover buffered data via `get_unacked_records()` and/or retry
-  /// `close()`; the destructor frees the handle as a last resort.
+  /// On success the stream becomes unusable. If the close fails it keeps the
+  /// stream handle alive, so the caller can still recover buffered data via
+  /// `get_unacked_records()` and/or retry `close()`; the destructor frees the
+  /// handle as a last resort.
+  ///
+  /// @throws ZerobusException if the flush or close fails. The handle is kept
+  ///         alive for recovery (see above).
   void close();
 
   /// Whether `close()` has already been called (locally observed).
