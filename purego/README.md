@@ -1,7 +1,7 @@
 # Zerobus pure-Go SDK (work in progress)
 
 A native, pure-Go implementation of the Zerobus ingestion SDK that talks to the
-Zerobus gRPC service directly — **no cgo and no Rust FFI**.
+Zerobus gRPC service directly.
 
 It lives in its own top-level module (`github.com/databricks/zerobus-sdk/purego`)
 so it is fully isolated from the existing cgo-based SDK under `go/` while it is
