@@ -1070,13 +1070,12 @@ mod tests {
     // Panic guard (ffi_guard) tests
     // ========================================================================
     //
-    // Every `#[no_mangle] extern "C"` entry point runs its body through
-    // `ffi_guard`, so these tests exercise the shared mechanism that protects
-    // the whole crate: a panic inside the body must be caught at the boundary
-    // and turned into (failure sentinel + populated CResult) rather than
-    // escaping across the `extern "C"` boundary (which aborts the process on
-    // current Rust toolchains, and was undefined behavior on pre-1.81 ones).
-    // They cover each return-signature shape and the no-CResult path.
+    // `ffi_guard` is the shared wrapper each `#[no_mangle] extern "C"` entry
+    // point runs its body through: a panic inside the body must be caught and
+    // turned into (failure sentinel + populated CResult) instead of crossing the
+    // `extern "C"` boundary (which aborts the process). These cover each
+    // return-signature shape, the no-CResult path, and a panic driven through an
+    // `extern "C"` function built like the real entry points.
 
     // Read a CResult, free its message, and return (success, is_retryable, msg).
     fn drain_result(result: &mut CResult) -> (bool, bool, String) {
@@ -1202,5 +1201,30 @@ mod tests {
         let (success, _, msg) = drain_result(&mut result);
         assert!(!success);
         assert!(msg.contains("formatted: dynamic detail 123"));
+    }
+
+    // A pointer-returning `extern "C"` entry point built exactly like the real
+    // ones: its whole body runs inside `ffi_guard`. Driving it into a panic
+    // exercises the guard across the actual C ABI, not just the helper in
+    // isolation.
+    extern "C" fn panicking_entry_point(result: *mut CResult) -> *mut u8 {
+        ffi_guard(result, ptr::null_mut(), || {
+            // Stand in for an unexpected panic from deep in a dependency.
+            let v: Vec<u8> = Vec::new();
+            ptr::null_mut::<u8>().wrapping_add(v[0] as usize)
+        })
+    }
+
+    #[test]
+    fn test_ffi_guard_catches_panic_through_extern_c_entry_point() {
+        let mut result = unwritten_result();
+        // Invoke through the C ABI exactly as a C/Go/Java caller would.
+        let entry: extern "C" fn(*mut CResult) -> *mut u8 = panicking_entry_point;
+        let out = entry(&mut result as *mut CResult);
+        assert!(out.is_null());
+        let (success, is_retryable, msg) = drain_result(&mut result);
+        assert!(!success);
+        assert!(!is_retryable);
+        assert!(msg.contains("Rust panic caught at FFI boundary"));
     }
 }

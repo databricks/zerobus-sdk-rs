@@ -11,6 +11,14 @@ members = [
 ]
 resolver = "2"
 
+# The FFI crate catches panics at the `extern "C"` boundary via `catch_unwind`,
+# which only works under the unwinding panic strategy; `panic = "abort"` would
+# turn those guards into process aborts. Pin unwind so a release build can't
+# silently disable them. Cargo only honors profiles at the workspace root, so
+# this must live here rather than in ffi/Cargo.toml.
+[profile.release]
+panic = "unwind"
+
 [workspace.dependencies]
 # Protobuf / gRPC
 prost = "0.14"
