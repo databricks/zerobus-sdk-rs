@@ -14,4 +14,6 @@
 
 ### Internal Changes
 
+- The integration-test protobuf bindings (`go/tests/pb`) and the pure-Go SDK bindings (`purego/internal/zerobuspb`) are now generated from the single canonical `rust/sdk/zerobus_service.proto`, instead of local per-module copies. Regenerate with `go/tests/generate_proto.sh` or `go generate ./...` in the purego package. No behavior change — the committed generated code is unchanged.
+
 ### API Changes

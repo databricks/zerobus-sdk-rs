@@ -18,6 +18,8 @@
 
 ### Internal Changes
 
+- The Java SDK now generates its protobuf classes from the canonical `rust/sdk/zerobus_service.proto` instead of a local copy under `src/main/proto/`. This reconciles schema drift: the generated classes now include the batch-ingest messages (`JsonRecordBatch`, `ProtoEncodedRecordBatch`, `IngestRecordBatchRequest`) that the canonical schema already defined. Purely additive — no change to the hand-written `com.databricks.zerobus` public API, and batch ingestion (`ingestRecordsOffset`) already worked via the JNI boundary.
+
 ### Breaking Changes
 
 ### Deprecations
