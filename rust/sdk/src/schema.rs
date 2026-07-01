@@ -213,8 +213,7 @@ pub fn descriptor_from_uc_schema(schema: &UcTableSchema) -> Result<DescriptorPro
 }
 
 impl From<SchemaError> for ZerobusError {
-    /// A schema-conversion failure is a malformed-input condition (bad column
-    /// name, unsupported type, invalid `type_json`), so it surfaces as a
+    /// A schema-conversion failure is malformed input, so it maps to the
     /// non-retryable [`ZerobusError::InvalidArgument`].
     fn from(err: SchemaError) -> Self {
         ZerobusError::InvalidArgument(err.to_string())
@@ -226,12 +225,9 @@ impl From<SchemaError> for ZerobusError {
 // ---------------------------------------------------------------------------
 
 /// Fluent builder for a [`DescriptorProto`] assembled in code, for when the
-/// schema is known but there is no `.proto` to compile and no Unity Catalog
-/// metadata to fetch. Columns use the same Databricks type names Unity Catalog
-/// uses, so the output matches [`descriptor_from_uc_columns`]; field numbers
-/// follow the order columns are added (first column → field 1). Pair the result
-/// with [`DynamicProtoEncoder`](crate::dynamic::DynamicProtoEncoder) or
-/// [`StreamBuilder::compiled_proto`](crate::StreamBuilder::compiled_proto).
+/// schema is known but there is no `.proto` and no Unity Catalog metadata. Columns
+/// use Databricks type names (output matches [`descriptor_from_uc_columns`]) and
+/// field numbers follow insertion order.
 ///
 /// ```
 /// use databricks_zerobus_ingest_sdk::schema::TableDescriptorBuilder;
@@ -314,19 +310,15 @@ impl TableDescriptorBuilder {
 // ---------------------------------------------------------------------------
 
 /// Fetch a Unity Catalog table's schema via
-/// `GET {unity_catalog_url}/api/2.1/unity-catalog/tables/{table_name}` with
-/// `Authorization: Bearer {token}`. `table_name` is the fully-qualified
-/// `catalog.schema.table`; `token` must be a workspace-API token with `SELECT` on
-/// the table (the Zerobus write token is *not* accepted by the REST API).
+/// `GET {unity_catalog_url}/api/2.1/unity-catalog/tables/{table_name}` with a
+/// `Bearer` token. `table_name` is the fully-qualified `catalog.schema.table`;
+/// `token` must be a workspace-API token with `SELECT` on the table (the Zerobus
+/// write token is *not* accepted by the REST API).
 ///
 /// Prefer [`StreamBuilder::proto_from_uc`](crate::StreamBuilder::proto_from_uc),
-/// which does this automatically at stream creation. Returns
-/// [`ZerobusError::TokenFetchError`] on network/`5xx` (retryable) and
+/// which does this at stream creation. Returns
+/// [`ZerobusError::TokenFetchError`] on network/`5xx` and
 /// [`ZerobusError::InvalidArgument`] on `4xx` or an unparseable body.
-///
-/// The table name is sent percent-encoded as a single path segment, so names
-/// containing URL-significant characters are served correctly and cannot inject
-/// extra path segments, a query, or a fragment.
 pub async fn fetch_uc_table_schema(
     unity_catalog_url: &str,
     table_name: &str,
@@ -340,8 +332,7 @@ pub async fn fetch_uc_table_schema(
         .send()
         .await
         .map_err(|e| {
-            // Network/connect/timeout errors are transient; a status-bearing
-            // error is classified below.
+            // Transient transport errors; status errors are classified below.
             if e.is_timeout() || e.is_connect() {
                 ZerobusError::TokenFetchError(format!("Failed to reach Unity Catalog: {e}"))
             } else {

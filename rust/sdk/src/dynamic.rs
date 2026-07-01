@@ -1,30 +1,21 @@
 //! Dynamic protobuf encoding: turn JSON records into protobuf wire bytes against
-//! a descriptor obtained at runtime, with no compiled `.proto` types.
+//! a runtime descriptor, with no compiled `.proto`. The descriptor comes from
+//! Unity Catalog ([`descriptor_from_uc`](crate::schema::descriptor_from_uc)) or is
+//! built in code ([`TableDescriptorBuilder`](crate::schema::TableDescriptorBuilder));
+//! records are supplied as JSON. This is the canonical dynamic-record contract
+//! across the Zerobus SDKs.
 //!
-//! Build a [`DescriptorProto`] from Unity Catalog (see
-//! [`schema::descriptor_from_uc`](crate::schema::descriptor_from_uc)) or in code
-//! (see [`schema::TableDescriptorBuilder`](crate::schema::TableDescriptorBuilder)),
-//! then encode records supplied as JSON and ingest them on the proto path. This
-//! is the canonical dynamic-record contract across the Zerobus SDKs: a JSON value
-//! encoded against the descriptor, turned into protobuf bytes client-side.
-//!
-//! Records follow protobuf's JSON mapping; a few Databricks column types need
-//! shaping in the JSON you supply: `DATE`/`TIMESTAMP`/`TIMESTAMP_NTZ` as integers
-//! (days / micros since epoch), `BINARY` as base64, `DECIMAL` as a string,
-//! `VARIANT` as a JSON-encoded string, and `LONG` above 2^53 as a string. Unknown
-//! keys are ignored; a missing non-nullable top-level column (proto2 `required`)
-//! is rejected.
+//! A few Databricks types need shaping in the JSON: `DATE`/`TIMESTAMP`(`_NTZ`) as
+//! integers (days / micros since epoch), `BINARY` as base64, `DECIMAL` and `LONG`
+//! above 2^53 as strings, `VARIANT` as a JSON-encoded string. Unknown keys are
+//! ignored; a missing non-nullable top-level column is rejected.
 //!
 //! ```no_run
-//! use databricks_zerobus_ingest_sdk::dynamic::DynamicProtoEncoder;
-//! use databricks_zerobus_ingest_sdk::schema::TableDescriptorBuilder;
+//! # use databricks_zerobus_ingest_sdk::dynamic::DynamicProtoEncoder;
+//! # use databricks_zerobus_ingest_sdk::schema::TableDescriptorBuilder;
 //! # fn main() -> Result<(), databricks_zerobus_ingest_sdk::ZerobusError> {
-//! let descriptor = TableDescriptorBuilder::new("orders")
-//!     .column("id", "BIGINT", false)
-//!     .column("name", "STRING", true)
-//!     .build()?;
-//! let encoder = DynamicProtoEncoder::new(&descriptor)?;
-//! let bytes = encoder.encode(r#"{"id": 1, "name": "Alice"}"#)?;
+//! let descriptor = TableDescriptorBuilder::new("orders").column("id", "BIGINT", false).build()?;
+//! let bytes = DynamicProtoEncoder::new(&descriptor)?.encode(r#"{"id": 1}"#)?;
 //! # Ok(())
 //! # }
 //! ```
@@ -64,8 +55,7 @@ impl DynamicProtoEncoder {
                 "descriptor has no message name".to_string(),
             ));
         }
-        // Wrap the message in a synthetic, package-less file so its
-        // fully-qualified name is just the bare message name.
+        // Package-less file so the message's fully-qualified name is its bare name.
         let file = prost_types::FileDescriptorProto {
             name: Some("zerobus_dynamic.proto".to_string()),
             message_type: vec![descriptor.clone()],
@@ -117,9 +107,8 @@ impl DynamicProtoEncoder {
             .map_err(|e| ZerobusError::InvalidArgument(format!("failed to encode record: {e}")))
     }
 
-    /// Enforce proto2 `required` presence (prost-reflect does not on encode) then
-    /// serialize. `repeated` columns (`ARRAY`/`MAP`) have no presence and nested
-    /// struct fields are not walked.
+    /// Enforce top-level proto2 `required` presence (prost-reflect skips it on
+    /// encode), then serialize. Nested fields are not walked.
     fn finish(&self, message: DynamicMessage) -> ZerobusResult<Vec<u8>> {
         let missing: Vec<String> = self
             .message
@@ -138,11 +127,8 @@ impl DynamicProtoEncoder {
 }
 
 impl ZerobusStream {
-    /// Build a [`DynamicProtoEncoder`] bound to this stream's protobuf descriptor
-    /// — whether supplied via [`compiled_proto`](crate::StreamBuilder::compiled_proto)
-    /// or fetched via [`proto_from_uc`](crate::StreamBuilder::proto_from_uc) — so
-    /// encoded records are guaranteed to match what the server validates. Build it
-    /// once and reuse.
+    /// Build a [`DynamicProtoEncoder`] bound to this stream's descriptor, so
+    /// encoded records match what the server validates. Build once and reuse.
     ///
     /// # Errors
     ///
@@ -289,9 +275,7 @@ mod tests {
 
     #[test]
     fn encoder_output_matches_compiled_prost_message() {
-        // The wire output must byte-match a compiled prost message with the same
-        // schema — the core "bytes match what the server validates" guarantee,
-        // checked against an independent encoder (prost codegen, not our pool).
+        // Output must byte-match a compiled prost message (an independent encoder).
         #[derive(Clone, PartialEq, prost::Message)]
         struct AirQuality {
             #[prost(string, optional, tag = "1")]
@@ -317,10 +301,8 @@ mod tests {
 
     #[test]
     fn nested_required_field_is_not_validated_client_side() {
-        // finish() enforces presence only for top-level required columns; a
-        // required field nested in a STRUCT is delegated to the server. This pins
-        // that documented boundary: `addr` is present but its required child
-        // `zip` is omitted, and the record still encodes here.
+        // Nested required fields aren't validated client-side (only top-level):
+        // `addr` is present but its required child `zip` is omitted → still encodes.
         let descriptor = TableDescriptorBuilder::new("m")
             .complex_column(
                 "addr",

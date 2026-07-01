@@ -205,45 +205,14 @@ impl<'a> StreamBuilder<'a> {
         self
     }
 
-    /// Select dynamic protobuf, fetching the table's descriptor from Unity
-    /// Catalog at `build()` time.
+    /// Select dynamic protobuf: the descriptor is fetched from Unity Catalog at
+    /// `build()` time (no compiled `.proto`); supply records as JSON via the
+    /// stream's [`encoder`](crate::ZerobusStream::encoder).
     ///
-    /// No compiled `.proto` is required: the SDK fetches the table's schema from
-    /// Unity Catalog, derives a protobuf descriptor, and opens a proto stream
-    /// with it. Supply records as JSON and encode them with the stream's
-    /// [`encoder`](crate::ZerobusStream::encoder), which is bound to the same
-    /// descriptor.
-    ///
-    /// The fetch uses an `all-apis` token: with [`oauth`](Self::oauth) the SDK
-    /// mints one from the client credentials; with
-    /// [`headers_provider`](Self::headers_provider) it reuses the provider's
-    /// `authorization` header, which must therefore be a token the Unity Catalog
-    /// REST API accepts (a workspace `all-apis` token, not a Zerobus
-    /// write-scoped one) or the schema fetch fails. The principal needs `SELECT`
-    /// on the table.
-    ///
-    /// Each `build()` performs these UC calls fresh and uncached (a workspace-token
-    /// mint plus the schema fetch), on top of the cached write token. For workloads
-    /// that churn many short-lived streams to the same table, fetch the descriptor
-    /// once with [`schema::descriptor_from_uc`](crate::schema::descriptor_from_uc),
-    /// reuse it via [`compiled_proto`](Self::compiled_proto), and obtain the encoder
-    /// from each resulting stream.
-    ///
-    /// # Example
-    ///
-    /// ```rust,ignore
-    /// let stream = sdk
-    ///     .stream_builder()
-    ///     .table("catalog.schema.table")
-    ///     .oauth("client-id", "client-secret")
-    ///     .proto_from_uc()
-    ///     .build()
-    ///     .await?;
-    /// let encoder = stream.encoder()?;
-    /// let offset = stream
-    ///     .ingest_record_offset(encoder.encode(r#"{"id": 1}"#)?)
-    ///     .await?;
-    /// ```
+    /// The fetch is uncached and needs an `all-apis` token with `SELECT` — minted
+    /// from [`oauth`](Self::oauth), or taken from a
+    /// [`headers_provider`](Self::headers_provider)'s `authorization` header (which
+    /// must then be UC-REST-scoped, not Zerobus-write-scoped).
     pub fn proto_from_uc(mut self) -> Self {
         self.format = Some(FormatConfig::ProtoFromUc);
         self
@@ -421,12 +390,8 @@ impl<'a> StreamBuilder<'a> {
         Ok(())
     }
 
-    /// Resolve an `all-apis` token for the Unity Catalog REST API used by
-    /// [`proto_from_uc`](Self::proto_from_uc) to fetch the table schema.
-    ///
-    /// With OAuth credentials the SDK mints a workspace token (the Zerobus
-    /// write token is not accepted by the REST API). With a custom headers
-    /// provider it reuses the `authorization` header that provider supplies.
+    /// Resolve an `all-apis` token for the UC REST schema fetch: mint one from
+    /// OAuth credentials, or reuse the headers provider's `authorization` header.
     async fn resolve_uc_api_token(&self) -> ZerobusResult<String> {
         match self.auth.as_ref() {
             Some(AuthConfig::OAuth {
@@ -490,8 +455,7 @@ impl<'a> StreamBuilder<'a> {
         self.validate()?;
         let headers_provider = self.resolve_headers_provider()?;
 
-        // Take the format out so the `proto_from_uc` arm can borrow `&self`
-        // (for the UC fetch) without tripping a partial-move of `self.format`.
+        // Take the format out so the `proto_from_uc` arm can borrow `&self`.
         let format = self.format.take();
         let (record_type, descriptor_proto) = match format {
             Some(FormatConfig::Json) => (RecordType::Json, None),

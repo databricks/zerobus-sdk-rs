@@ -84,13 +84,10 @@ impl DefaultTokenFactory {
         .map(|fetched| fetched.token)
     }
 
-    /// Obtains an OAuth 2.0 access token for calling Databricks workspace REST
-    /// APIs (such as the Unity Catalog tables endpoint).
-    ///
-    /// Unlike [`get_token`](Self::get_token), this token is *not* downscoped to
-    /// the Zerobus direct-write API — it is a plain `all-apis` client-credentials
-    /// token, which is what the Unity Catalog REST API requires. Used by the
-    /// dynamic-protobuf path to fetch a table's schema at stream creation.
+    /// Mint a plain `all-apis` client-credentials token for Databricks workspace
+    /// REST APIs (e.g. the Unity Catalog tables endpoint) — unlike
+    /// [`get_token`](Self::get_token), it is not downscoped to the Zerobus
+    /// write API. Used by the dynamic-protobuf path to fetch a table's schema.
     ///
     /// # Errors
     ///
