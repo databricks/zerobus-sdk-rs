@@ -6,7 +6,7 @@
 // details, not part of the SDK's public API.
 //
 // To regenerate after editing zerobus_service.proto, run `go generate ./...`
-// from the go/ module root. This requires protoc on PATH plus the
+// from the purego/ module root. This requires protoc on PATH plus the
 // protoc-gen-go and protoc-gen-go-grpc plugins. Pin these to the versions that
 // produced the committed bindings so regeneration is deterministic (a newer
 // plugin can emit a different file and create a spurious diff):
