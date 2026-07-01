@@ -3,22 +3,18 @@ package transport
 import (
 	"context"
 	"fmt"
-	"io"
 	"strings"
-	"sync"
 
-	"google.golang.org/grpc"
 	"google.golang.org/grpc/metadata"
 	"google.golang.org/protobuf/proto"
 
 	"github.com/databricks/zerobus-sdk/purego/internal/zerobuspb"
 )
 
-// gRPC metadata keys the Zerobus service expects on the EphemeralStream RPC.
-const (
-	mdTableName     = "x-databricks-zerobus-table-name"
-	mdAuthorization = "authorization"
-)
+// mdTableName is the gRPC metadata key naming the target table on the
+// EphemeralStream RPC. It is specific to the proto/JSON path; the authorization
+// header (see auth.go) is shared across protocols.
+const mdTableName = "x-databricks-zerobus-table-name"
 
 // StreamParams describes the stream to open: which table to ingest into, how
 // records are encoded, and which auth credential to send.
@@ -36,15 +32,18 @@ type StreamParams struct {
 	Token string
 }
 
-// Stream is an open ephemeral ingestion stream, already past the create-stream
-// handshake. It exposes send/receive operations over the bidirectional RPC.
-// Higher layers construct requests and interpret responses. A Stream is not
-// safe for concurrent Send and should use a single writer goroutine.
+// Stream is an open ephemeral ingestion stream over the proto/JSON
+// EphemeralStream RPC, already past the create-stream handshake. It is a thin
+// pipe: higher layers construct requests and interpret responses.
+//
+// The generic send/receive plumbing and concurrency contract live in the
+// embedded rawStream; this type adds only the EphemeralStream handshake and its
+// wire types. The Arrow path will mirror it over Flight with the same
+// rawStream, so the two share everything but framing and handshake. As with the
+// embedded rawStream, a Stream is not safe for concurrent Send and should use a
+// single writer goroutine.
 type Stream struct {
-	rpc    grpc.BidiStreamingClient[zerobuspb.EphemeralStreamRequest, zerobuspb.EphemeralStreamResponse]
-	id     string
-	cancel context.CancelFunc
-	once   sync.Once
+	rawStream[zerobuspb.EphemeralStreamRequest, zerobuspb.EphemeralStreamResponse]
 }
 
 // Open starts an EphemeralStream, performs the create-stream handshake, and
@@ -70,12 +69,9 @@ func (c *Conn) Open(ctx context.Context, p StreamParams) (*Stream, error) {
 		return nil, fmt.Errorf("transport: open %q: descriptor proto required for PROTO records", p.TableName)
 	}
 
-	md := []string{mdTableName, p.TableName}
-	if auth := authHeaderValue(p.Token); auth != "" {
-		md = append(md, mdAuthorization, auth)
-	}
-
-	ctx, cancel := context.WithCancel(metadata.AppendToOutgoingContext(ctx, md...))
+	ctx = metadata.AppendToOutgoingContext(ctx, mdTableName, p.TableName)
+	ctx = withAuth(ctx, p.Token)
+	ctx, cancel := context.WithCancel(ctx)
 
 	stream, err := c.open(ctx, p)
 	if err != nil {
@@ -87,13 +83,32 @@ func (c *Conn) Open(ctx context.Context, p StreamParams) (*Stream, error) {
 }
 
 // open runs the handshake on an already-prepared context. On any error the
-// caller (Open) cancels the context.
+// caller (Open) cancels the context. The generic send/await/validate flow lives
+// in rawStream.handshake; open supplies only the two proto-specific hooks.
 func (c *Conn) open(ctx context.Context, p StreamParams) (*Stream, error) {
 	rpc, err := c.client.EphemeralStream(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("transport: open %q: %w", p.TableName, err)
 	}
 
+	s := &Stream{}
+	s.rpc = rpc
+	if err := s.handshake(
+		func(rpc bidiRPC[zerobuspb.EphemeralStreamRequest, zerobuspb.EphemeralStreamResponse]) error {
+			return sendCreateStream(rpc, p)
+		},
+		func(resp *zerobuspb.EphemeralStreamResponse) (string, error) {
+			return confirmCreateStream(resp, p.TableName)
+		},
+	); err != nil {
+		return nil, err
+	}
+	return s, nil
+}
+
+// sendCreateStream writes the create-stream request that opens a proto/JSON
+// ingestion stream. It is the proto path's handshake setup hook.
+func sendCreateStream(rpc bidiRPC[zerobuspb.EphemeralStreamRequest, zerobuspb.EphemeralStreamResponse], p StreamParams) error {
 	create := &zerobuspb.CreateIngestStreamRequest{
 		TableName:  proto.String(p.TableName),
 		RecordType: p.RecordType.Enum(),
@@ -105,79 +120,42 @@ func (c *Conn) open(ctx context.Context, p StreamParams) (*Stream, error) {
 		Payload: &zerobuspb.EphemeralStreamRequest_CreateStream{CreateStream: create},
 	}
 	if err := rpc.Send(req); err != nil {
-		return nil, fmt.Errorf("transport: open %q: send create-stream: %w", p.TableName, err)
-	}
-
-	resp, err := rpc.Recv()
-	if err != nil {
-		return nil, fmt.Errorf("transport: open %q: await create-stream response: %w", p.TableName, err)
-	}
-	created := resp.GetCreateStreamResponse()
-	if created == nil {
-		return nil, fmt.Errorf("transport: open %q: unexpected first response %T", p.TableName, resp.GetPayload())
-	}
-	id := created.GetStreamId()
-	if id == "" {
-		return nil, fmt.Errorf("transport: open %q: server returned an empty stream ID", p.TableName)
-	}
-
-	return &Stream{rpc: rpc, id: id}, nil
-}
-
-// ID returns the server-assigned stream identifier from the handshake.
-func (s *Stream) ID() string { return s.id }
-
-// Send writes one request to the server. It is not safe for concurrent use.
-func (s *Stream) Send(req *zerobuspb.EphemeralStreamRequest) error {
-	if err := s.rpc.Send(req); err != nil {
-		return fmt.Errorf("transport: send on stream %s: %w", s.id, err)
+		return fmt.Errorf("transport: open %q: send create-stream: %w", p.TableName, err)
 	}
 	return nil
 }
 
+// confirmCreateStream validates the create-stream response and returns the
+// server-assigned stream ID. It is the proto path's handshake readiness hook.
+func confirmCreateStream(resp *zerobuspb.EphemeralStreamResponse, tableName string) (string, error) {
+	created := resp.GetCreateStreamResponse()
+	if created == nil {
+		return "", fmt.Errorf("transport: open %q: unexpected first response %T", tableName, resp.GetPayload())
+	}
+	id := created.GetStreamId()
+	if id == "" {
+		return "", fmt.Errorf("transport: open %q: server returned an empty stream ID", tableName)
+	}
+	return id, nil
+}
+
+// ID returns the server-assigned stream identifier from the handshake.
+func (s *Stream) ID() string { return s.name }
+
+// Send writes one request to the server. It is not safe for concurrent use.
+func (s *Stream) Send(req *zerobuspb.EphemeralStreamRequest) error { return s.send(req) }
+
 // Recv blocks for the next response. It returns io.EOF unwrapped once the
 // server closes the stream cleanly, so callers can compare against it directly.
-func (s *Stream) Recv() (*zerobuspb.EphemeralStreamResponse, error) {
-	resp, err := s.rpc.Recv()
-	switch {
-	case err == io.EOF:
-		return nil, io.EOF
-	case err != nil:
-		return nil, fmt.Errorf("transport: recv on stream %s: %w", s.id, err)
-	}
-	return resp, nil
-}
+func (s *Stream) Recv() (*zerobuspb.EphemeralStreamResponse, error) { return s.recv() }
 
 // CloseSend signals that no more requests will be sent, half-closing the stream
 // while leaving Recv open to drain remaining responses. For a graceful shutdown,
 // call CloseSend, read until io.EOF, then Close.
-func (s *Stream) CloseSend() error {
-	if err := s.rpc.CloseSend(); err != nil {
-		return fmt.Errorf("transport: close-send on stream %s: %w", s.id, err)
-	}
-	return nil
-}
+func (s *Stream) CloseSend() error { return s.closeSend() }
 
 // Close aborts the stream and releases its resources. It is idempotent and safe
 // to call after a graceful CloseSend/drain. Unlike CloseSend it does not wait
 // for the server: any in-flight Send or Recv is unblocked with a cancellation
 // error.
-func (s *Stream) Close() {
-	s.once.Do(func() {
-		if s.cancel != nil {
-			s.cancel()
-		}
-	})
-}
-
-func authHeaderValue(token string) string {
-	token = strings.TrimSpace(token)
-	if token == "" {
-		return ""
-	}
-	// If the caller already supplied a scheme (for example "Bearer ..."), keep it.
-	if strings.Contains(token, " ") {
-		return token
-	}
-	return "Bearer " + token
-}
+func (s *Stream) Close() { s.close() }
