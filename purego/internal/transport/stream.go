@@ -31,9 +31,7 @@ type StreamParams struct {
 // pipe: higher layers construct requests and interpret responses.
 //
 // The send/receive plumbing, teardown, and handshake flow live in the embedded
-// rawStream; this type adds only the EphemeralStream wire types and the two
-// handshake hooks. The Arrow path will embed the same rawStream over Flight, so
-// the two share everything but their record framing and their setup/readiness
+// rawStream; this type adds EphemeralStream wire types and the two handshake
 // hooks. As with the embedded rawStream, a Stream is not safe for concurrent
 // Send and should use a single writer goroutine.
 type Stream struct {
@@ -85,6 +83,7 @@ func (c *Conn) open(ctx context.Context, p StreamParams) (*Stream, error) {
 
 	s := &Stream{}
 	s.rpc = rpc
+	s.name = "ephemeral-stream"
 	if err := s.handshake(
 		func(rpc bidiRPC[zerobuspb.EphemeralStreamRequest, zerobuspb.EphemeralStreamResponse]) error {
 			return sendCreateStream(rpc, p)

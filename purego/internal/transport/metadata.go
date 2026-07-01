@@ -7,18 +7,16 @@ import (
 	"google.golang.org/grpc/metadata"
 )
 
-// gRPC metadata keys attached to every ingestion stream. Both are
-// protocol-agnostic — the proto/JSON path uses them today and the Arrow path
-// will use the same keys — so the metadata setup below is shared.
+// gRPC metadata keys attached to ingestion streams. They are protocol-agnostic,
+// so metadata setup is shared.
 const (
 	mdTableName     = "x-databricks-zerobus-table-name"
 	mdAuthorization = "authorization"
 )
 
-// streamContext builds the outgoing context an ingestion stream needs: the
-// table-name and authorization headers, wrapped in a cancelable child whose
-// cancel func tears the stream down. It is protocol-agnostic, so the proto path
-// (and the Arrow path, once added) present identical metadata to the service.
+// streamContext builds the outgoing context an ingestion stream needs: table
+// name and authorization headers, wrapped in a cancelable child whose cancel
+// func tears the stream down.
 func streamContext(ctx context.Context, tableName, token string) (context.Context, context.CancelFunc) {
 	ctx = metadata.AppendToOutgoingContext(ctx, mdTableName, tableName)
 	ctx = withAuth(ctx, token)
