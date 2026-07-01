@@ -98,9 +98,24 @@ public class ZerobusSdk implements AutoCloseable {
    * @throws ZerobusException if the SDK cannot be initialized
    */
   public ZerobusSdk(String serverEndpoint, String unityCatalogEndpoint) {
+    this(serverEndpoint, unityCatalogEndpoint, null);
+  }
+
+  /**
+   * Creates a new ZerobusSdk instance with an optional application identifier.
+   *
+   * @param serverEndpoint The gRPC endpoint URL for the Zerobus service.
+   * @param unityCatalogEndpoint The Unity Catalog endpoint URL.
+   * @param applicationName Optional application identifier appended to the HTTP {@code user-agent}
+   *     header, conventionally {@code "<product>/<version>"} (e.g. {@code "my-app/1.0"}). When set,
+   *     the header becomes {@code "zerobus-sdk-java/<version> <applicationName>"}. Pass {@code
+   *     null} to omit.
+   * @throws ZerobusException if the SDK cannot be initialized
+   */
+  public ZerobusSdk(String serverEndpoint, String unityCatalogEndpoint, String applicationName) {
     this.serverEndpoint = serverEndpoint;
     this.unityCatalogEndpoint = unityCatalogEndpoint;
-    this.nativeHandle = nativeCreate(serverEndpoint, unityCatalogEndpoint);
+    this.nativeHandle = nativeCreate(serverEndpoint, unityCatalogEndpoint, applicationName);
     if (this.nativeHandle == 0) {
       throw new RuntimeException("Failed to create native SDK instance");
     }
@@ -759,7 +774,8 @@ public class ZerobusSdk implements AutoCloseable {
 
   // Native methods implemented in Rust
 
-  private static native long nativeCreate(String serverEndpoint, String unityCatalogEndpoint);
+  private static native long nativeCreate(
+      String serverEndpoint, String unityCatalogEndpoint, String applicationName);
 
   private static native void nativeDestroy(long handle);
 
