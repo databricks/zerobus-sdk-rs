@@ -5,16 +5,10 @@ import (
 	"fmt"
 	"strings"
 
-	"google.golang.org/grpc/metadata"
 	"google.golang.org/protobuf/proto"
 
 	"github.com/databricks/zerobus-sdk/purego/internal/zerobuspb"
 )
-
-// mdTableName is the gRPC metadata key naming the target table on the
-// EphemeralStream RPC. It is specific to the proto/JSON path; the authorization
-// header (see auth.go) is shared across protocols.
-const mdTableName = "x-databricks-zerobus-table-name"
 
 // StreamParams describes the stream to open: which table to ingest into, how
 // records are encoded, and which auth credential to send.
@@ -36,12 +30,12 @@ type StreamParams struct {
 // EphemeralStream RPC, already past the create-stream handshake. It is a thin
 // pipe: higher layers construct requests and interpret responses.
 //
-// The generic send/receive plumbing and concurrency contract live in the
-// embedded rawStream; this type adds only the EphemeralStream handshake and its
-// wire types. The Arrow path will mirror it over Flight with the same
-// rawStream, so the two share everything but framing and handshake. As with the
-// embedded rawStream, a Stream is not safe for concurrent Send and should use a
-// single writer goroutine.
+// The send/receive plumbing, teardown, and handshake flow live in the embedded
+// rawStream; this type adds only the EphemeralStream wire types and the two
+// handshake hooks. The Arrow path will embed the same rawStream over Flight, so
+// the two share everything but their record framing and their setup/readiness
+// hooks. As with the embedded rawStream, a Stream is not safe for concurrent
+// Send and should use a single writer goroutine.
 type Stream struct {
 	rawStream[zerobuspb.EphemeralStreamRequest, zerobuspb.EphemeralStreamResponse]
 }
@@ -69,10 +63,7 @@ func (c *Conn) Open(ctx context.Context, p StreamParams) (*Stream, error) {
 		return nil, fmt.Errorf("transport: open %q: descriptor proto required for PROTO records", p.TableName)
 	}
 
-	ctx = metadata.AppendToOutgoingContext(ctx, mdTableName, p.TableName)
-	ctx = withAuth(ctx, p.Token)
-	ctx, cancel := context.WithCancel(ctx)
-
+	ctx, cancel := streamContext(ctx, p.TableName, p.Token)
 	stream, err := c.open(ctx, p)
 	if err != nil {
 		cancel()
@@ -82,9 +73,10 @@ func (c *Conn) Open(ctx context.Context, p StreamParams) (*Stream, error) {
 	return stream, nil
 }
 
-// open runs the handshake on an already-prepared context. On any error the
-// caller (Open) cancels the context. The generic send/await/validate flow lives
-// in rawStream.handshake; open supplies only the two proto-specific hooks.
+// open opens the RPC and runs the handshake on an already-prepared context. On
+// any error the caller (Open) cancels the context. The generic send/await/
+// validate flow lives in rawStream.handshake; open supplies only the two
+// proto-specific hooks and annotates their concise errors with the operation.
 func (c *Conn) open(ctx context.Context, p StreamParams) (*Stream, error) {
 	rpc, err := c.client.EphemeralStream(ctx)
 	if err != nil {
@@ -97,11 +89,9 @@ func (c *Conn) open(ctx context.Context, p StreamParams) (*Stream, error) {
 		func(rpc bidiRPC[zerobuspb.EphemeralStreamRequest, zerobuspb.EphemeralStreamResponse]) error {
 			return sendCreateStream(rpc, p)
 		},
-		func(resp *zerobuspb.EphemeralStreamResponse) (string, error) {
-			return confirmCreateStream(resp, p.TableName)
-		},
+		confirmCreateStream,
 	); err != nil {
-		return nil, err
+		return nil, fmt.Errorf("transport: open %q: %w", p.TableName, err)
 	}
 	return s, nil
 }
@@ -120,21 +110,21 @@ func sendCreateStream(rpc bidiRPC[zerobuspb.EphemeralStreamRequest, zerobuspb.Ep
 		Payload: &zerobuspb.EphemeralStreamRequest_CreateStream{CreateStream: create},
 	}
 	if err := rpc.Send(req); err != nil {
-		return fmt.Errorf("transport: open %q: send create-stream: %w", p.TableName, err)
+		return fmt.Errorf("send create-stream: %w", err)
 	}
 	return nil
 }
 
 // confirmCreateStream validates the create-stream response and returns the
 // server-assigned stream ID. It is the proto path's handshake readiness hook.
-func confirmCreateStream(resp *zerobuspb.EphemeralStreamResponse, tableName string) (string, error) {
+func confirmCreateStream(resp *zerobuspb.EphemeralStreamResponse) (string, error) {
 	created := resp.GetCreateStreamResponse()
 	if created == nil {
-		return "", fmt.Errorf("transport: open %q: unexpected first response %T", tableName, resp.GetPayload())
+		return "", fmt.Errorf("unexpected first response %T", resp.GetPayload())
 	}
 	id := created.GetStreamId()
 	if id == "" {
-		return "", fmt.Errorf("transport: open %q: server returned an empty stream ID", tableName)
+		return "", fmt.Errorf("server returned an empty stream ID")
 	}
 	return id, nil
 }

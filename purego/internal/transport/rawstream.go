@@ -8,9 +8,10 @@ import (
 )
 
 // bidiRPC is the subset of a generated gRPC bidirectional streaming client that
-// rawStream needs. Both the Zerobus EphemeralStream client and the Arrow Flight
-// DoPut client satisfy it, which is what lets the two ingestion protocols share
-// the plumbing below instead of duplicating it.
+// rawStream needs. The Zerobus EphemeralStream client satisfies it today, and
+// the Arrow Flight DoPut client (which also exposes Send/Recv/CloseSend) will
+// satisfy it too — which is what lets the two ingestion protocols share the
+// plumbing below instead of duplicating it.
 type bidiRPC[Req, Resp any] interface {
 	Send(*Req) error
 	Recv() (*Resp, error)
@@ -18,12 +19,12 @@ type bidiRPC[Req, Resp any] interface {
 }
 
 // rawStream is the protocol-agnostic half of an open ingestion stream: the
-// send/receive plumbing, error wrapping, and teardown over a bidirectional RPC.
-// It knows nothing about how records are framed or how the stream was opened —
-// concrete streams embed it and layer their own handshake and wire types on
-// top. Today Stream (proto/JSON over EphemeralStream) is the only implementer;
-// the Arrow path will embed the same rawStream over Flight's DoPut, so only its
-// framing and handshake differ.
+// send/receive plumbing, teardown, and the handshake flow over a bidirectional
+// RPC. It knows nothing about how records are framed or which setup message
+// opens the stream — concrete streams embed it and supply those via wire types
+// and handshake hooks. Today Stream (proto/JSON over EphemeralStream) is the
+// only implementer; the Arrow path will embed the same rawStream over Flight's
+// DoPut, so only its record framing and its setup/readiness hooks differ.
 //
 // Like the underlying gRPC stream, a rawStream is not safe for concurrent send;
 // pair it with a single writer goroutine. Calling send and recv from separate
@@ -87,6 +88,9 @@ func (s *rawStream[Req, Resp]) close() {
 // don't assign one, such as Arrow's ready sentinel). The send/await/validate
 // flow, and recording the identifier for error messages, are shared. On success
 // the stream is live for data.
+//
+// Errors carry a concise cause (from a hook, or the await step); the caller is
+// expected to annotate them with its operation context (e.g. the table name).
 func (s *rawStream[Req, Resp]) handshake(
 	sendSetup func(rpc bidiRPC[Req, Resp]) error,
 	confirmReady func(resp *Resp) (id string, err error),
@@ -96,7 +100,7 @@ func (s *rawStream[Req, Resp]) handshake(
 	}
 	resp, err := s.rpc.Recv()
 	if err != nil {
-		return fmt.Errorf("transport: handshake: await ready response: %w", err)
+		return fmt.Errorf("await ready response: %w", err)
 	}
 	id, err := confirmReady(resp)
 	if err != nil {
