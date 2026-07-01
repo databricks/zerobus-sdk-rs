@@ -528,34 +528,33 @@ pub extern "C" fn zerobus_arrow_stream_get_unacked_batches(
                     }
 
                     let count = batches.len();
-                    let mut batch_ptrs: Vec<*mut u8> = Vec::with_capacity(count);
-                    let mut batch_lens: Vec<usize> = Vec::with_capacity(count);
 
+                    // Convert to owning boxes first. If `record_batch_to_ipc_bytes`
+                    // returns an error — or panics and `ffi_guard` unwinds — every
+                    // already-converted batch is freed automatically when `owned`
+                    // drops. (A `Vec<*mut u8>` of raw pointers would not: dropping it
+                    // leaks the slices those pointers own.)
+                    let mut owned: Vec<Box<[u8]>> = Vec::with_capacity(count);
                     for batch in &batches {
                         match record_batch_to_ipc_bytes(batch) {
-                            Ok(bytes) => {
-                                let len = bytes.len();
-                                let ptr = Box::into_raw(bytes.into_boxed_slice()) as *mut u8;
-                                batch_ptrs.push(ptr);
-                                batch_lens.push(len);
-                            }
+                            Ok(bytes) => owned.push(bytes.into_boxed_slice()),
                             Err(e) => {
-                                // Free already-allocated batches before returning error.
-                                for (&ptr, &len) in batch_ptrs.iter().zip(batch_lens.iter()) {
-                                    if !ptr.is_null() && len > 0 {
-                                        // Safe: ptr came from Box::into_raw(bytes.into_boxed_slice()),
-                                        // so capacity == len.
-                                        unsafe {
-                                            let _ = Box::from_raw(
-                                                std::ptr::slice_from_raw_parts_mut(ptr, len),
-                                            );
-                                        }
-                                    }
-                                }
+                                // `owned` drops here, freeing already-converted batches.
                                 write_error_result(result, &e.to_string(), false);
                                 return empty;
                             }
                         }
+                    }
+
+                    // The fallible/panic-prone work is done. Everything below is
+                    // infallible — pre-sized pushes, `Box::into_raw`, and
+                    // `into_boxed_slice` on len==capacity vecs never panic — so no
+                    // batch can leak between taking raw ownership and returning.
+                    let mut batch_ptrs: Vec<*mut u8> = Vec::with_capacity(count);
+                    let mut batch_lens: Vec<usize> = Vec::with_capacity(count);
+                    for bytes in owned {
+                        batch_lens.push(bytes.len());
+                        batch_ptrs.push(Box::into_raw(bytes) as *mut u8);
                     }
 
                     // into_boxed_slice() shrinks to fit, guaranteeing capacity == len

@@ -28,7 +28,15 @@ pub struct CZerobusSdkBuilder {
 type SdkBuilderAlloc = ZerobusSdkBuilder;
 
 /// SAFETY: `b` must be a valid pointer from `_new` that hasn't been consumed
-/// or freed. `mem::take` keeps the slot valid even if `f` panics.
+/// or freed.
+///
+/// `mem::take` keeps the slot valid (never dangling) even if `f` panics, so a
+/// caught panic can't cause a use-after-free. But `taken` is moved into `f`, so
+/// a panic inside `f` drops the in-flight configuration and leaves the slot
+/// holding a default builder. These setters return `void`, so the caller cannot
+/// observe this — a builder that has survived a caught setter panic must be
+/// treated as invalidated (its accumulated config is lost) and discarded via
+/// `_free`, not reused.
 unsafe fn with_builder<F>(b: *mut CZerobusSdkBuilder, f: F)
 where
     F: FnOnce(ZerobusSdkBuilder) -> ZerobusSdkBuilder,

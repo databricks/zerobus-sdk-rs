@@ -290,6 +290,14 @@ pub(crate) fn validate_stream_ptr_mut<'a>(
 pub(crate) fn write_error_result(result: *mut CResult, message: &str, is_retryable: bool) {
     if !result.is_null() {
         unsafe {
+            // Free any message left by a prior write before overwriting. This closes a
+            // leak on the panic path: a guarded body can populate `result` via
+            // `write_error_result` and then panic, after which `ffi_guard`'s panic arm
+            // writes again. Callers pass a zero-initialized `CResult` (error_message
+            // NULL), so the first write frees nothing.
+            if !(*result).error_message.is_null() {
+                drop(CString::from_raw((*result).error_message));
+            }
             *result = CResult {
                 success: false,
                 error_message: CString::new(message)
