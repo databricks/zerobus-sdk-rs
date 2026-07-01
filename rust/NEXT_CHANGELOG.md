@@ -19,6 +19,7 @@
   `wait_for_offset` / `flush` as `InvalidSchema` — letting callers rebuild the
   stream without downtime — rather than being retried until the recovery budget
   drains and reported as a generic failure.
+- Added dynamic protobuf support: build and ingest records against a descriptor known only at runtime (for example one fetched from Unity Catalog or built with `schema::descriptor_from_uc_columns`), with no compiled `prost::Message` type. Select the format with `StreamBuilder::dynamic_proto()`, obtain the resolved `MessageDescriptor` from `ZerobusStream::message_descriptor()` (or the standalone `dynamic::message_descriptor()`), and fill records field-by-field with `dynamic::DynamicRecord`. See the new `proto_dynamic` example.
 
 ### Bug Fixes
 
@@ -47,3 +48,7 @@
 ### Deprecations
 
 ### API Changes
+
+- Added `StreamBuilder::dynamic_proto()`, `ZerobusStream::message_descriptor()`, and `ZerobusStream::new_record()`.
+- Added the `dynamic` module: `DynamicRecord`, the `IntoDynamicValue` conversion trait, the `message_descriptor()` resolver, and re-exports of `prost_reflect::{DynamicMessage, MessageDescriptor, Value}`.
+- `EncodedRecord` now converts from `dynamic::DynamicRecord` and `prost_reflect::DynamicMessage` (added `From` impls).

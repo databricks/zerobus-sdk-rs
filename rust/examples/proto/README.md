@@ -12,6 +12,9 @@ This directory contains examples demonstrating Protocol Buffers-based data inges
 - [Batch Example](#batch-example)
   - [Running the Example](#running-the-example-1)
   - [Code Highlights](#code-highlights-1)
+- [Dynamic Schema Example](#dynamic-schema-example)
+  - [Running the Example](#running-the-example-2)
+  - [Code Highlights](#code-highlights-2)
 - [Adapting for Your Custom Table](#adapting-for-your-custom-table)
   - [Generate Schema Files](#generate-schema-files)
   - [Update main.rs](#update-mainrs)
@@ -28,6 +31,7 @@ Protocol Buffers examples provide type safety and better performance. **No schem
 **Available examples:**
 - **`single.rs`** - Ingest records one at a time using `ingest_record_offset()` / `ingest_record()`
 - **`batch.rs`** - Ingest multiple records at once using `ingest_records_offset()` / `ingest_records()`
+- **`dynamic.rs`** - Build the schema at runtime (no compiled `.proto`) and fill records field-by-field with `DynamicRecord`
 
 ## Three Ways to Pass Data
 
@@ -178,6 +182,60 @@ if let Some(offset) = stream.ingest_records_offset(batch).await? {
 - **All-or-nothing**: The entire batch succeeds or fails as a unit
 - **Single acknowledgment**: One offset ID for the whole batch
 - **Empty batches**: Returns `None` (no-op)
+
+## Dynamic Schema Example
+
+`dynamic.rs` covers the case where the table's schema is known only at runtime and
+there is no compiled `prost::Message` type. It builds a `DescriptorProto` in code
+with `schema::descriptor_from_uc_columns` (you could equally fetch one from Unity
+Catalog), selects it with `.dynamic_proto(...)`, and fills each record
+field-by-field with `DynamicRecord`.
+
+### Running the Example
+
+1. Configure credentials in `dynamic.rs` (see [Prerequisites](../README.md#prerequisites))
+
+2. Run the example:
+   ```bash
+   cargo run -p rust-examples-proto --example proto_dynamic
+   ```
+
+### Code Highlights
+
+```rust
+use databricks_zerobus_ingest_sdk::schema::{descriptor_from_uc_columns, UcColumn};
+
+// Build the descriptor at runtime — no `.proto` file, no generated structs.
+// A column's protobuf field number is its `position + 1`.
+let columns = vec![
+    col("id", "BIGINT", 0),
+    col("customer_name", "STRING", 1),
+    col("quantity", "INT", 2),
+    col("price", "DOUBLE", 3),
+];
+let descriptor = descriptor_from_uc_columns(&columns, "table_Orders")?;
+
+let mut stream = sdk
+    .stream_builder()
+    .table(TABLE_NAME)
+    .oauth(DATABRICKS_CLIENT_ID, DATABRICKS_CLIENT_SECRET)
+    .dynamic_proto(descriptor)
+    .build()
+    .await?;
+
+// Fill records field-by-field. The value passed to `set()` must match the
+// field's proto type (a BIGINT column takes an i64, an INT column an i32).
+for i in 0..1_000i64 {
+    let mut record = stream.new_record()?; // bound to the stream's schema
+    record
+        .set("id", i)?
+        .set("customer_name", "Alice Smith")?
+        .set("quantity", 2i32)?
+        .set("price", 25.99f64)?;
+    stream.ingest_record_offset(record).await?; // queue only — do NOT wait here
+}
+stream.flush().await?; // wait once for all pending acks
+```
 
 ## Adapting for Your Custom Table
 

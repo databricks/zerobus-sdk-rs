@@ -9,6 +9,10 @@ name = "proto_batch"
 path = "batch.rs"
 
 [[example]]
+name = "proto_dynamic"
+path = "dynamic.rs"
+
+[[example]]
 name = "proto_single"
 path = "single.rs"
 

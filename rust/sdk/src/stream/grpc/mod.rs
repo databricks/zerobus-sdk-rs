@@ -21,7 +21,7 @@
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 use tokio::sync::RwLock;
 use tokio_util::sync::CancellationToken;
@@ -29,6 +29,7 @@ use tonic::transport::Channel;
 use tracing::instrument;
 
 use crate::databricks::zerobus::zerobus_client::ZerobusClient;
+use crate::dynamic::{DynamicRecord, MessageDescriptor};
 use crate::landing_zone::LandingZone;
 use crate::{
     HeadersProvider, OffsetId, OffsetIdGenerator, StreamConfigurationOptions, StreamType,
@@ -128,6 +129,9 @@ pub struct ZerobusStream {
     cancellation_token: CancellationToken,
     /// Callback handler task that executes callbacks in a separate thread.
     callback_handler_task: Option<tokio::task::JoinHandle<()>>,
+    /// Message descriptor for dynamic-proto records, resolved and cached on first
+    /// [`Self::message_descriptor`] call so ingest loops don't rebuild the pool.
+    dynamic_message_descriptor: OnceLock<MessageDescriptor>,
 }
 
 impl ZerobusStream {
@@ -207,9 +211,44 @@ impl ZerobusStream {
             server_error_rx,
             cancellation_token,
             callback_handler_task,
+            dynamic_message_descriptor: OnceLock::new(),
         };
 
         Ok(stream)
+    }
+
+    /// Resolve the [`MessageDescriptor`] for this stream's table, for building
+    /// records with [`crate::dynamic::DynamicRecord`]. Cached after the first
+    /// call, so it's cheap to call per record (the descriptor is Arc-backed).
+    ///
+    /// # Errors
+    ///
+    /// [`ZerobusError::InvalidArgument`] if this isn't a proto stream (e.g. JSON)
+    /// or the descriptor can't be resolved.
+    pub fn message_descriptor(&self) -> ZerobusResult<MessageDescriptor> {
+        if let Some(descriptor) = self.dynamic_message_descriptor.get() {
+            return Ok(descriptor.clone());
+        }
+        let descriptor_proto =
+            self.table_properties
+                .descriptor_proto
+                .as_ref()
+                .ok_or_else(|| {
+                    ZerobusError::InvalidArgument(
+                        "stream has no protobuf descriptor: build it with .compiled_proto() or .dynamic_proto()".into(),
+                    )
+                })?;
+        let descriptor = crate::dynamic::message_descriptor(descriptor_proto)?;
+        // A lost race just means another thread resolved it first — fine.
+        let _ = self.dynamic_message_descriptor.set(descriptor.clone());
+        Ok(descriptor)
+    }
+
+    /// Create an empty [`DynamicRecord`] bound to this stream's schema.
+    ///
+    /// Convenience over [`message_descriptor`](Self::message_descriptor); same errors.
+    pub fn new_record(&self) -> ZerobusResult<DynamicRecord> {
+        Ok(DynamicRecord::new(self.message_descriptor()?))
     }
 }
 

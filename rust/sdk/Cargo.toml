@@ -21,6 +21,7 @@ all-features = true
 async-trait.workspace = true
 prost.workspace = true
 prost-types.workspace = true
+prost-reflect = { workspace = true, features = ["serde"] }
 reqwest.workspace = true
 serde.workspace = true
 serde_json.workspace = true
@@ -53,7 +54,6 @@ tracing-subscriber.workspace = true
 # zeroparser e2e + bench dev-deps
 criterion = { version = "0.5", default-features = false, features = ["html_reports"] }
 plotters = { version = "0.3", default-features = false, features = ["svg_backend"] }
-prost-reflect = { workspace = true, features = ["serde"] }
 rstest = "0.24"
 strum = { version = "0.27", features = ["derive"] }
 

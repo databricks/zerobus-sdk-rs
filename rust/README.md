@@ -533,6 +533,35 @@ let mut stream = sdk
     .await?;
 ```
 
+#### Dynamic Protobuf Stream
+
+When the table's schema is known only at runtime — for example a descriptor fetched from Unity Catalog or built in code with `schema::descriptor_from_uc_columns` — there is no compiled `prost::Message` type. Select `.dynamic_proto(descriptor)` and fill records field-by-field with `DynamicRecord`:
+
+```rust
+use databricks_zerobus_ingest_sdk::schema::{descriptor_from_uc_columns, UcColumn};
+
+// Build the descriptor at runtime (a column's proto field number is `position + 1`).
+let descriptor = descriptor_from_uc_columns(&columns, "table_Orders")?;
+
+let mut stream = sdk
+    .stream_builder().table("catalog.schema.orders")
+    .oauth(client_id, client_secret)
+    .dynamic_proto(descriptor)
+    .build()
+    .await?;
+
+// Fill records field-by-field; `set()` validates the field name and type. The
+// value must match the field's proto type (a BIGINT column takes an i64).
+for i in 0..100_000i64 {
+    let mut record = stream.new_record()?; // bound to the stream's schema
+    record.set("id", i)?.set("customer_name", "Alice Smith")?;
+    let _offset = stream.ingest_record_offset(record).await?; // queue only — do NOT wait here
+}
+stream.flush().await?; // wait once for all pending acknowledgments
+```
+
+On the wire this is identical to `.compiled_proto(...)`; the difference is that records are built dynamically rather than from a generated struct. See the [`dynamic`](https://docs.rs/databricks-zerobus-ingest-sdk/latest/databricks_zerobus_ingest_sdk/dynamic/) module and the `proto_dynamic` example for details.
+
 Setters can be called in any order. The builder validates at `build()` time that both authentication and format have been configured.
 
 ### 5. Ingest Data
@@ -544,6 +573,7 @@ The SDK provides flexible ways to ingest data with different levels of abstracti
 | `ProtoMessage<T>` | Proto | Auto-encoding: pass structs, SDK handles encoding |
 | `ProtoBytes` | Proto | Pre-encoded: pass bytes with explicit wrapper |
 | `Vec<u8>` | Proto | Backward-compatible: raw bytes without wrapper |
+| `DynamicRecord` | Proto | Dynamic: build fields at runtime against a descriptor ([`dynamic_proto`](#dynamic-protobuf-stream)) |
 | `JsonValue<T>` | JSON | Auto-serializing: pass structs, SDK handles JSON conversion |
 | `JsonString` | JSON | Pre-serialized: pass JSON strings with explicit wrapper |
 | `String` | JSON | Backward-compatible: raw strings without wrapper |

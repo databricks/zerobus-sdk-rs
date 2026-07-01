@@ -1290,6 +1290,57 @@ mod schema_tests {
     }
 
     #[tokio::test]
+    async fn test_dynamic_proto_record_ingestion() -> Result<(), Box<dyn std::error::Error>> {
+        setup_tracing();
+        info!("Starting test_dynamic_proto_record_ingestion");
+
+        let (mock_server, server_url) = start_mock_server().await?;
+
+        mock_server
+            .inject_responses(
+                TABLE_NAME,
+                vec![
+                    MockResponse::CreateStream {
+                        stream_id: "test_stream_dynamic_proto".to_string(),
+                        delay_ms: 0,
+                    },
+                    MockResponse::RecordAck {
+                        ack_up_to_offset: 0,
+                        delay_ms: 50,
+                    },
+                ],
+            )
+            .await;
+
+        let sdk = ZerobusSdk::builder()
+            .endpoint(server_url.clone())
+            .unity_catalog_url("https://mock-uc.com")
+            .tls_config(Arc::new(NoTlsConfig))
+            .build()?;
+
+        let stream = sdk
+            .stream_builder()
+            .table(TABLE_NAME)
+            .headers_provider(Arc::new(TestHeadersProvider::default()))
+            .dynamic_proto(create_test_descriptor_proto().unwrap_or_default())
+            .max_inflight_requests(100)
+            .recovery(false)
+            .build()
+            .await?;
+
+        let mut record = stream.new_record()?;
+        record.set("id", 1i64)?.set("message", "hello")?;
+
+        let offset = stream.ingest_record_offset(record).await?;
+        stream.flush().await?;
+
+        assert_eq!(offset, 0);
+        assert_eq!(mock_server.get_write_count().await, 1);
+
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn test_json_batch_ingestion() -> Result<(), Box<dyn std::error::Error>> {
         setup_tracing();
         info!("Starting test_json_batch_ingestion");
