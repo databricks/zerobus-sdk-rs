@@ -17,6 +17,8 @@
 
 ### Bug Fixes
 
+- Fixed the default `recovery_retries`, which was `3` instead of the `4` used by the Rust core and every other SDK (Go, TypeScript, C++). A stream left with the default now makes 4 recovery attempts on transient failures instead of 3, matching the documented cross-SDK behavior. Callers that pass `recovery_retries` explicitly are unaffected. (#438)
+
 ### Documentation
 
 - README: documented the `application_name` constructor argument.
