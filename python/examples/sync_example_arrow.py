@@ -98,7 +98,7 @@ def main():
             recovery=True,
             recovery_timeout_ms=15000,
             recovery_backoff_ms=2000,
-            recovery_retries=3,
+            recovery_retries=4,
         )
         logger.info("Arrow stream configuration created")
 
