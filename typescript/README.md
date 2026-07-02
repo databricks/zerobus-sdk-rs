@@ -808,13 +808,14 @@ Main entry point for the SDK.
 **Constructor:**
 
 ```typescript
-new ZerobusSdk(zerobusEndpoint: string, unityCatalogUrl: string, applicationName?: string)
+new ZerobusSdk(zerobusEndpoint: string, unityCatalogUrl: string, options?: ZerobusSdkOptions)
 ```
 
 **Parameters:**
 - `zerobusEndpoint` (string) - The Zerobus gRPC endpoint (e.g., `https://<workspace-id>.zerobus.<region>.cloud.databricks.com` for AWS, or `https://<workspace-id>.zerobus.<region>.azuredatabricks.net` for Azure)
 - `unityCatalogUrl` (string) - The Unity Catalog endpoint (your workspace URL)
-- `applicationName` (string, optional) - Application identifier appended to the HTTP `user-agent` header, conventionally `"<product>/<version>"` (e.g. `"my-app/1.0"`).
+- `options` (ZerobusSdkOptions, optional) - Additional SDK configuration:
+  - `applicationName` (string, optional) - Application identifier appended to the HTTP `user-agent` header, conventionally `"<product>/<version>"` (e.g. `"my-app/1.0"`). The header becomes `zerobus-sdk-ts/<version> <applicationName>`, enabling server-side attribution.
 
 **Methods:**
 

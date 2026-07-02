@@ -6,8 +6,9 @@
 
 ### New Features and Improvements
 
-- `ZerobusSdk` constructor now accepts an optional `applicationName` parameter.
-  When set, it is appended to the HTTP `user-agent` header sent on every request
+- `ZerobusSdk` constructor now accepts an optional `options` object
+  (`ZerobusSdkOptions`) as its third argument. Its `applicationName` field is
+  appended to the HTTP `user-agent` header sent on every request
   (e.g. `zerobus-sdk-ts/1.2.0 my-app/1.0`), enabling server-side attribution.
   The SDK now also correctly identifies itself as `zerobus-sdk-ts` rather than
   falling back to the underlying `zerobus-sdk-rs` identifier.

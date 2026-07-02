@@ -836,6 +836,13 @@ impl RustHeadersProvider for TsOAuthHeadersProvider {
     }
 }
 
+#[napi(object)]
+#[derive(Default)]
+pub struct ZerobusSdkOptions {
+    /// Identifier appended to the `user-agent` header
+    pub application_name: Option<String>,
+}
+
 /// The main SDK for interacting with the Databricks Zerobus service.
 ///
 /// This is the entry point for creating ingestion streams to Delta tables.
@@ -846,7 +853,7 @@ impl RustHeadersProvider for TsOAuthHeadersProvider {
 /// const sdk = new ZerobusSdk(
 ///   "https://workspace-id.zerobus.region.cloud.databricks.com",
 ///   "https://workspace.cloud.databricks.com",
-///   "my-app/1.0"
+///   { applicationName: "my-app/1.0" }
 /// );
 ///
 /// const stream = await sdk.createStream(
@@ -874,10 +881,8 @@ impl ZerobusSdk {
     ///   (e.g., "https://workspace-id.zerobus.region.cloud.databricks.com")
     /// * `unity_catalog_url` - The Unity Catalog endpoint URL
     ///   (e.g., "https://workspace.cloud.databricks.com")
-    /// * `application_name` - Optional application identifier appended to the
-    ///   HTTP `user-agent` header, conventionally `"<product>/<version>"`.
-    ///   The SDK prefix `zerobus-sdk-ts/<version>` is always present; this
-    ///   value is appended after it (e.g. `"zerobus-sdk-ts/1.2.0 my-app/1.0"`).
+    /// * `options` - Optional SDK configuration (see `ZerobusSdkOptions`),
+    ///   including `applicationName` for server-side attribution.
     ///
     /// # Errors
     ///
@@ -887,7 +892,7 @@ impl ZerobusSdk {
     pub fn new(
         zerobus_endpoint: String,
         unity_catalog_url: String,
-        application_name: Option<String>,
+        options: Option<ZerobusSdkOptions>,
     ) -> Result<Self> {
         let workspace_id = zerobus_endpoint
             .strip_prefix("https://")
@@ -900,11 +905,13 @@ impl ZerobusSdk {
                 )
             })?;
 
+        let options = options.unwrap_or_default();
+
         let builder = RustZerobusSdk::builder()
             .endpoint(&zerobus_endpoint)
             .unity_catalog_url(&unity_catalog_url)
             .sdk_identifier(TS_SDK_USER_AGENT);
-        let builder = match application_name {
+        let builder = match options.application_name {
             Some(name) => builder.application_name(name),
             None => builder,
         };
@@ -983,19 +990,19 @@ impl ZerobusSdk {
         // Decode the optional protobuf descriptor up-front so we can hand it
         // to the builder's `.compiled_proto()` setter; the builder constructs
         // the (now-private) `TableProperties` itself.
-        let descriptor_proto: Option<prost_types::DescriptorProto> =
-            if let Some(ref desc_str) = table_properties.descriptor_proto {
-                let bytes = base64_decode(desc_str).map_err(|e| {
-                    Error::from_reason(format!("Failed to decode descriptor: {}", e))
+        let descriptor_proto: Option<prost_types::DescriptorProto> = if let Some(ref desc_str) =
+            table_properties.descriptor_proto
+        {
+            let bytes = base64_decode(desc_str)
+                .map_err(|e| Error::from_reason(format!("Failed to decode descriptor: {}", e)))?;
+            let dp: prost_types::DescriptorProto =
+                prost::Message::decode(&bytes[..]).map_err(|e| {
+                    Error::from_reason(format!("Failed to parse descriptor proto: {}", e))
                 })?;
-                let dp: prost_types::DescriptorProto = prost::Message::decode(&bytes[..])
-                    .map_err(|e| {
-                        Error::from_reason(format!("Failed to parse descriptor proto: {}", e))
-                    })?;
-                Some(dp)
-            } else {
-                None
-            };
+            Some(dp)
+        } else {
+            None
+        };
 
         let opts = options.unwrap_or(StreamConfigurationOptions {
             max_inflight_requests: None,
@@ -1474,9 +1481,7 @@ impl ZerobusArrowStream {
                 stream_ref
                     .ingest_ipc_batch(Bytes::from(buffer_vec))
                     .await
-                    .map_err(|e| {
-                        napi::Error::from_reason(format!("Failed to ingest batch: {}", e))
-                    })
+                    .map_err(|e| napi::Error::from_reason(format!("Failed to ingest batch: {}", e)))
             },
             |env, offset_id| {
                 let global: JsGlobal = env.get_global()?;
