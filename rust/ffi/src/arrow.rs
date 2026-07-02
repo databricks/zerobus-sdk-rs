@@ -664,6 +664,8 @@ pub extern "C" fn zerobus_arrow_get_default_config() -> CArrowStreamConfiguratio
 /// Zero-initialised so a partially populated array is safe to pass to
 /// `zerobus_free_headers` (unset key/value pointers are null and skipped).
 /// Returns null if `count` is 0 or the allocation fails.
+// Not wrapped in `ffi_guard`: a pure `calloc` that returns null on failure,
+// with no panic-capable operation.
 #[no_mangle]
 pub extern "C" fn zerobus_alloc_header_array(count: usize) -> *mut CHeader {
     if count == 0 {
@@ -682,6 +684,9 @@ pub extern "C" fn zerobus_alloc_header_array(count: usize) -> *mut CHeader {
 /// why that matters). `len` of 0 yields an empty string (a valid non-null
 /// pointer). Returns null on allocation failure or if the input contains an
 /// interior NUL byte (which a C string cannot represent).
+// Not wrapped in `ffi_guard`: null-checks its input and returns null on any
+// failure (`CString::new` reports interior NULs as `Err`), with no
+// panic-capable operation.
 #[no_mangle]
 pub extern "C" fn zerobus_alloc_cstring(data: *const u8, len: usize) -> *mut c_char {
     let bytes: &[u8] = if len == 0 {
