@@ -10,14 +10,15 @@ import java.util.Optional;
  *
  * <p>This class provides a clean API for JSON ingestion that doesn't require Protocol Buffer types.
  *
- * <p>Create instances using {@link ZerobusSdk#createJsonStream}:
+ * <p>Create instances using {@link ZerobusSdk#streamBuilder()}:
  *
  * <pre>{@code
- * ZerobusJsonStream stream = sdk.createJsonStream(
- *     "catalog.schema.table",
- *     clientId,
- *     clientSecret
- * ).join();
+ * ZerobusJsonStream stream = sdk.streamBuilder()
+ *     .table("catalog.schema.table")
+ *     .oauth(clientId, clientSecret)
+ *     .json()
+ *     .build()
+ *     .join();
  *
  * // Main: Ingest objects with a serializer
  * Gson gson = new Gson();
@@ -34,7 +35,7 @@ import java.util.Optional;
  * stream.close();
  * }</pre>
  *
- * @see ZerobusSdk#createJsonStream(String, String, String)
+ * @see ZerobusSdk#streamBuilder()
  */
 public class ZerobusJsonStream extends BaseZerobusStream {
 
@@ -107,7 +108,7 @@ public class ZerobusJsonStream extends BaseZerobusStream {
   private final String clientId;
   private final String clientSecret;
 
-  /** Package-private constructor. Use {@link ZerobusSdk#createJsonStream} to create instances. */
+  /** Package-private constructor. Use {@link ZerobusSdk#streamBuilder()} to create instances. */
   ZerobusJsonStream(
       long nativeHandle,
       String tableName,

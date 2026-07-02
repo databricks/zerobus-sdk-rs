@@ -42,12 +42,12 @@ java -cp ".:../target/classes:$(cd .. && mvn dependency:build-classpath -q -Dinc
 ### Creating a Proto Stream
 
 ```java
-ZerobusProtoStream stream = sdk.createProtoStream(
-    tableName,
-    AirQuality.getDescriptor().toProto(),
-    clientId,
-    clientSecret
-).join();
+ZerobusProtoStream stream = sdk.streamBuilder()
+    .table(tableName)
+    .oauth(clientId, clientSecret)
+    .compiledProto(AirQuality.getDescriptor().toProto())
+    .build()
+    .join();
 ```
 
 ### Single Record Ingestion
@@ -79,7 +79,9 @@ Optional<Long> offset = stream.ingestRecordsOffset(messages);
 List<byte[]> encodedRecords = Arrays.asList(bytes1, bytes2, bytes3);
 offset = stream.ingestRecordsOffset(encodedRecords);
 
-offset.ifPresent(stream::waitForOffset);
+if (offset.isPresent()) {
+    stream.waitForOffset(offset.get());
+}
 ```
 
 ### Getting Unacknowledged Records
