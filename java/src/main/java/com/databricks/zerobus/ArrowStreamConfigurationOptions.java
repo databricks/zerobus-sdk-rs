@@ -20,7 +20,7 @@ package com.databricks.zerobus;
  * }</pre>
  *
  * @see ZerobusArrowStream
- * @see ZerobusSdk#createArrowStream
+ * @see ZerobusSdk#streamBuilder()
  */
 public class ArrowStreamConfigurationOptions {
 
