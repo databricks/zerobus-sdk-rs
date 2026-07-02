@@ -35,7 +35,12 @@ public class SingleRecordExample {
         System.out.println("=== JSON Single Record Example ===\n");
 
         ZerobusSdk sdk = new ZerobusSdk(serverEndpoint, workspaceUrl);
-        ZerobusJsonStream stream = sdk.createJsonStream(tableName, clientId, clientSecret).join();
+        ZerobusJsonStream stream = sdk.streamBuilder()
+                .table(tableName)
+                .oauth(clientId, clientSecret)
+                .json()
+                .build()
+                .join();
 
         int totalRecords = 0;
 

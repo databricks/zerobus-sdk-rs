@@ -13,15 +13,15 @@ import java.util.Optional;
  * <p>This class provides a flexible API for Protocol Buffer ingestion with method-level generics,
  * allowing different message types to be ingested through the same stream.
  *
- * <p>Create instances using {@link ZerobusSdk#createProtoStream}:
+ * <p>Create instances using {@link ZerobusSdk#streamBuilder()}:
  *
  * <pre>{@code
- * ZerobusProtoStream stream = sdk.createProtoStream(
- *     "catalog.schema.table",
- *     MyProto.getDescriptor().toProto(),
- *     clientId,
- *     clientSecret
- * ).join();
+ * ZerobusProtoStream stream = sdk.streamBuilder()
+ *     .table("catalog.schema.table")
+ *     .oauth(clientId, clientSecret)
+ *     .compiledProto(MyProto.getDescriptor().toProto())
+ *     .build()
+ *     .join();
  *
  * // Ingest proto messages
  * long offset = stream.ingestRecordOffset(myProtoMessage);
@@ -37,8 +37,7 @@ import java.util.Optional;
  * stream.close();
  * }</pre>
  *
- * @see ZerobusSdk#createProtoStream(String, com.google.protobuf.DescriptorProtos.DescriptorProto,
- *     String, String)
+ * @see ZerobusSdk#streamBuilder()
  */
 public class ZerobusProtoStream extends BaseZerobusStream {
 
@@ -47,7 +46,7 @@ public class ZerobusProtoStream extends BaseZerobusStream {
   private final String clientId;
   private final String clientSecret;
 
-  /** Package-private constructor. Use {@link ZerobusSdk#createProtoStream} to create instances. */
+  /** Package-private constructor. Use {@link ZerobusSdk#streamBuilder()} to create instances. */
   ZerobusProtoStream(
       long nativeHandle,
       String tableName,
