@@ -3,7 +3,7 @@
 use async_trait::async_trait;
 use databricks_zerobus_ingest_sdk::databricks::zerobus::RecordType;
 use databricks_zerobus_ingest_sdk::{
-    HeadersProvider, ZerobusError, ZerobusResult, ZerobusSdk, ZerobusStream,
+    AckCallback, HeadersProvider, OffsetId, ZerobusError, ZerobusResult, ZerobusSdk, ZerobusStream,
 };
 use once_cell::sync::Lazy;
 use std::any::Any;
@@ -140,6 +140,22 @@ pub struct CStreamConfigurationOptions {
     pub has_stream_paused_max_wait_time_ms: bool,
     pub callback_max_wait_time_ms: u64,
     pub has_callback_max_wait_time_ms: bool,
+    /// Optional ack callback. When either pointer is non-null, acks/errors are
+    /// delivered asynchronously instead of only via wait_for_offset / flush.
+    /// ack_user_data is passed to each call and must outlive the stream.
+    /// For ack_on_error, error_message is valid only during the call (copy to keep).
+    /// Callback implementations must not unwind across the C boundary.
+    // Signatures are written inline rather than via the AckOn*Callback aliases
+    // so cbindgen emits nullable C function pointers instead of an opaque struct.
+    pub ack_on_ack: Option<extern "C" fn(offset_id: i64, user_data: *mut std::ffi::c_void)>,
+    pub ack_on_error: Option<
+        extern "C" fn(
+            offset_id: i64,
+            error_message: *const c_char,
+            user_data: *mut std::ffi::c_void,
+        ),
+    >,
+    pub ack_user_data: *mut std::ffi::c_void,
 }
 
 // Helper to convert C string to Rust String
@@ -254,6 +270,64 @@ impl HeadersProvider for CallbackHeadersProvider {
 
         crate::zerobus_free_headers(c_headers);
         Ok(headers)
+    }
+}
+
+/// Function pointer type for the ack-success callback.
+/// Called with the acknowledged offset and the caller's user_data.
+/// Invoked from a background task, so it must be thread-safe.
+pub type AckOnAckCallback = extern "C" fn(offset_id: i64, user_data: *mut std::ffi::c_void);
+
+/// Function pointer type for the ack-error callback.
+/// The error_message is only valid for the duration of the call; copy it to retain it.
+/// Invoked from a background task, so it must be thread-safe.
+pub type AckOnErrorCallback =
+    extern "C" fn(offset_id: i64, error_message: *const c_char, user_data: *mut std::ffi::c_void);
+
+/// Rust struct that wraps C callbacks and implements the core AckCallback trait.
+/// The caller must keep user_data alive until the stream is closed and freed.
+pub(crate) struct CallbackAckCallback {
+    on_ack: Option<AckOnAckCallback>,
+    on_error: Option<AckOnErrorCallback>,
+    user_data: *mut std::ffi::c_void,
+}
+
+impl CallbackAckCallback {
+    pub(crate) fn new(
+        on_ack: Option<AckOnAckCallback>,
+        on_error: Option<AckOnErrorCallback>,
+        user_data: *mut std::ffi::c_void,
+    ) -> Self {
+        Self {
+            on_ack,
+            on_error,
+            user_data,
+        }
+    }
+}
+
+// Safety: We assume the caller's callback and user_data are thread-safe.
+unsafe impl Send for CallbackAckCallback {}
+unsafe impl Sync for CallbackAckCallback {}
+
+impl AckCallback for CallbackAckCallback {
+    fn on_ack(&self, offset_id: OffsetId) {
+        if let Some(cb) = self.on_ack {
+            // Contain panics: unwinding across the FFI boundary is UB.
+            let _ = catch_unwind(AssertUnwindSafe(|| cb(offset_id, self.user_data)));
+        }
+    }
+
+    fn on_error(&self, offset_id: OffsetId, error_message: &str) {
+        if let Some(cb) = self.on_error {
+            // NUL-terminated copy valid for the call; fall back on interior NUL.
+            let c_message = CString::new(error_message)
+                .unwrap_or_else(|_| CString::new("error message contained NUL byte").unwrap());
+            // Contain panics: unwinding across the FFI boundary is UB.
+            let _ = catch_unwind(AssertUnwindSafe(|| {
+                cb(offset_id, c_message.as_ptr(), self.user_data)
+            }));
+        }
     }
 }
 

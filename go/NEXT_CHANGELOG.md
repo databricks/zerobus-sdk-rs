@@ -14,4 +14,6 @@
 
 ### Internal Changes
 
+- Added the new ack-callback fields (`ack_on_ack`, `ack_on_error`, `ack_user_data`) to the cgo `CStreamConfigurationOptions` mirror to keep it byte-identical with the C FFI struct. The Go SDK has no ack-callback API yet and leaves these null, so behavior is unchanged.
+
 ### API Changes

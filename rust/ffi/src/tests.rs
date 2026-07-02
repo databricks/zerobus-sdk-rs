@@ -443,6 +443,78 @@ mod tests {
     }
 
     // ========================================================================
+    // Ack callback bridge tests
+    // ========================================================================
+
+    use crate::CallbackAckCallback;
+    use databricks_zerobus_ingest_sdk::AckCallback as _AckCallbackTrait;
+    use std::os::raw::c_char;
+    use std::sync::atomic::{AtomicI64, Ordering as AtomicOrdering};
+
+    // extern "C" callbacks can't capture, so they record into these statics.
+    // Tests reset the slots before use.
+    static LAST_ACK_OFFSET: AtomicI64 = AtomicI64::new(-1);
+    static LAST_ERROR_OFFSET: AtomicI64 = AtomicI64::new(-1);
+    static ACK_CALL_COUNT: AtomicI64 = AtomicI64::new(0);
+
+    extern "C" fn record_ack(offset_id: i64, _user_data: *mut std::ffi::c_void) {
+        LAST_ACK_OFFSET.store(offset_id, AtomicOrdering::SeqCst);
+        ACK_CALL_COUNT.fetch_add(1, AtomicOrdering::SeqCst);
+    }
+
+    extern "C" fn record_error(
+        offset_id: i64,
+        error_message: *const c_char,
+        _user_data: *mut std::ffi::c_void,
+    ) {
+        LAST_ERROR_OFFSET.store(offset_id, AtomicOrdering::SeqCst);
+        // The message must be a valid NUL-terminated string for the call's duration.
+        assert!(!error_message.is_null());
+        let msg = unsafe { CStr::from_ptr(error_message) }
+            .to_str()
+            .expect("error message must be valid UTF-8");
+        assert_eq!(msg, "boom");
+    }
+
+    #[test]
+    fn test_callback_ack_bridge_on_ack() {
+        LAST_ACK_OFFSET.store(-1, AtomicOrdering::SeqCst);
+        ACK_CALL_COUNT.store(0, AtomicOrdering::SeqCst);
+
+        let cb = CallbackAckCallback::new(Some(record_ack), None, ptr::null_mut());
+        cb.on_ack(42);
+
+        assert_eq!(LAST_ACK_OFFSET.load(AtomicOrdering::SeqCst), 42);
+        assert_eq!(ACK_CALL_COUNT.load(AtomicOrdering::SeqCst), 1);
+    }
+
+    #[test]
+    fn test_callback_ack_bridge_on_error_marshals_message() {
+        LAST_ERROR_OFFSET.store(-1, AtomicOrdering::SeqCst);
+
+        let cb = CallbackAckCallback::new(None, Some(record_error), ptr::null_mut());
+        cb.on_error(7, "boom");
+
+        assert_eq!(LAST_ERROR_OFFSET.load(AtomicOrdering::SeqCst), 7);
+    }
+
+    #[test]
+    fn test_callback_ack_bridge_null_callbacks_are_noops() {
+        // Neither pointer set: invoking both entry points must not panic.
+        let cb = CallbackAckCallback::new(None, None, ptr::null_mut());
+        cb.on_ack(1);
+        cb.on_error(2, "ignored");
+    }
+
+    #[test]
+    fn test_default_config_has_no_ack_callback() {
+        let config = zerobus_get_default_config();
+        assert!(config.ack_on_ack.is_none());
+        assert!(config.ack_on_error.is_none());
+        assert!(config.ack_user_data.is_null());
+    }
+
+    // ========================================================================
     // Dynamic protobuf schema tests
     // ========================================================================
 
