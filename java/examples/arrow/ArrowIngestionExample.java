@@ -100,11 +100,14 @@ public class ArrowIngestionExample {
       throws Exception {
     System.out.println("--- Stream with ipcCompression=" + codecLabel + " ---");
 
-    ArrowStreamConfigurationOptions options =
-        ArrowStreamConfigurationOptions.builder().setIpcCompression(codec).build();
-
     ZerobusArrowStream stream =
-        sdk.createArrowStream(tableName, schema, clientId, clientSecret, options).join();
+        sdk.streamBuilder()
+            .table(tableName)
+            .oauth(clientId, clientSecret)
+            .arrow(schema)
+            .ipcCompression(codec)
+            .build()
+            .join();
 
     try {
       long lastOffset = -1L;

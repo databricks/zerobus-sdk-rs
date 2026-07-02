@@ -6,9 +6,11 @@ use databricks_zerobus_ingest_sdk::{
     HeadersProvider, ZerobusError, ZerobusResult, ZerobusSdk, ZerobusStream,
 };
 use once_cell::sync::Lazy;
+use std::any::Any;
 use std::collections::{HashMap, HashSet};
 use std::ffi::{CStr, CString};
 use std::os::raw::c_char;
+use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::ptr;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
@@ -49,7 +51,11 @@ static HEADER_KEY_CACHE: Lazy<Mutex<HashSet<&'static str>>> =
 /// Intern a header key string to prevent memory leaks
 /// Only leaks memory for unique keys, not on every call
 pub(crate) fn intern_header_key(key: String) -> &'static str {
-    let mut cache = HEADER_KEY_CACHE.lock().unwrap();
+    // Recover from a poisoned lock instead of propagating the panic: the
+    // interned keys remain valid, so reusing the set after a panic is safe.
+    let mut cache = HEADER_KEY_CACHE
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
 
     // Check if we already have this key
     if let Some(&existing) = cache.iter().find(|&&k| k == key.as_str()) {
@@ -284,6 +290,14 @@ pub(crate) fn validate_stream_ptr_mut<'a>(
 pub(crate) fn write_error_result(result: *mut CResult, message: &str, is_retryable: bool) {
     if !result.is_null() {
         unsafe {
+            // Free any message left by a prior write before overwriting. This closes a
+            // leak on the panic path: a guarded body can populate `result` via
+            // `write_error_result` and then panic, after which `ffi_guard`'s panic arm
+            // writes again. Callers pass a zero-initialized `CResult` (error_message
+            // NULL), so the first write frees nothing.
+            if !(*result).error_message.is_null() {
+                drop(CString::from_raw((*result).error_message));
+            }
             *result = CResult {
                 success: false,
                 error_message: CString::new(message)
@@ -301,5 +315,61 @@ pub(crate) fn write_success_result(result: *mut CResult) {
         unsafe {
             *result = CResult::success();
         }
+    }
+}
+
+/// Best-effort human-readable message extracted from a caught panic payload.
+fn panic_message(payload: &(dyn Any + Send)) -> String {
+    if let Some(s) = payload.downcast_ref::<&'static str>() {
+        format!("Rust panic caught at FFI boundary: {s}")
+    } else if let Some(s) = payload.downcast_ref::<String>() {
+        format!("Rust panic caught at FFI boundary: {s}")
+    } else {
+        "Rust panic caught at FFI boundary".to_string()
+    }
+}
+
+/// Runs an FFI entry point's body, catching any panic so it cannot cross the
+/// `extern "C"` boundary. On a caught panic it writes a non-retryable error to
+/// `result` and returns `sentinel`, the function's normal failure value. Pass a
+/// null `result` for entry points that have no `CResult` out-parameter.
+pub(crate) fn ffi_guard<R>(result: *mut CResult, sentinel: R, body: impl FnOnce() -> R) -> R {
+    // AssertUnwindSafe is sound here: on a caught panic the call is abandoned
+    // and the sentinel returned, so partially-updated state is never observed.
+    match catch_unwind(AssertUnwindSafe(body)) {
+        Ok(value) => value,
+        Err(payload) => {
+            write_error_result(result, &panic_message(payload.as_ref()), false);
+            sentinel
+        }
+    }
+}
+
+#[cfg(test)]
+mod common_tests {
+    use super::*;
+
+    /// `intern_header_key` must keep working after its lock is poisoned by a
+    /// panic. Lives here to reach the private `HEADER_KEY_CACHE`.
+    #[test]
+    fn test_intern_header_key_recovers_from_poisoned_lock() {
+        // Poison the global mutex: lock it and panic while holding the guard.
+        let poisoned = std::thread::spawn(|| {
+            let _guard = HEADER_KEY_CACHE.lock().unwrap();
+            panic!("poison HEADER_KEY_CACHE on purpose");
+        })
+        .join();
+        assert!(poisoned.is_err(), "the spawned thread should have panicked");
+        assert!(
+            HEADER_KEY_CACHE.lock().is_err(),
+            "the lock should now be poisoned"
+        );
+
+        // Interning must still work despite the poison — no panic, correct value,
+        // and still interned (same pointer on a second call).
+        let k1 = intern_header_key("X-Poison-Recovery-Test".to_string());
+        assert_eq!(k1, "X-Poison-Recovery-Test");
+        let k2 = intern_header_key("X-Poison-Recovery-Test".to_string());
+        assert_eq!(k1.as_ptr(), k2.as_ptr());
     }
 }

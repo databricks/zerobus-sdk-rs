@@ -21,7 +21,12 @@ import org.slf4j.LoggerFactory;
  * try-with-resources for automatic cleanup:
  *
  * <pre>{@code
- * try (ZerobusJsonStream stream = sdk.createJsonStream(...).join()) {
+ * try (ZerobusJsonStream stream = sdk.streamBuilder()
+ *         .table("catalog.schema.table")
+ *         .oauth(clientId, clientSecret)
+ *         .json()
+ *         .build()
+ *         .join()) {
  *     stream.ingestRecordOffset(record);
  * }
  * }</pre>

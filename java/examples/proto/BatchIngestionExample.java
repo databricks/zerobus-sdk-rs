@@ -39,12 +39,12 @@ public class BatchIngestionExample {
         System.out.println("=== Proto Batch Ingestion Example ===\n");
 
         ZerobusSdk sdk = new ZerobusSdk(serverEndpoint, workspaceUrl);
-        ZerobusProtoStream stream = sdk.createProtoStream(
-            tableName,
-            AirQuality.getDescriptor().toProto(),
-            clientId,
-            clientSecret
-        ).join();
+        ZerobusProtoStream stream = sdk.streamBuilder()
+            .table(tableName)
+            .oauth(clientId, clientSecret)
+            .compiledProto(AirQuality.getDescriptor().toProto())
+            .build()
+            .join();
 
         int totalRecords = 0;
 

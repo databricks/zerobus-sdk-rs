@@ -1,12 +1,12 @@
 #[cfg(test)]
 mod tests {
     use crate::{
-        c_record_type, intern_header_key, validate_sdk_ptr, validate_stream_ptr,
+        c_record_type, ffi_guard, intern_header_key, validate_sdk_ptr, validate_stream_ptr,
         write_error_result, write_success_result, zerobus_free_error_message,
         zerobus_get_default_config, zerobus_sdk_builder_application_name,
         zerobus_sdk_builder_build, zerobus_sdk_builder_disable_tls, zerobus_sdk_builder_endpoint,
         zerobus_sdk_builder_free, zerobus_sdk_builder_new, zerobus_sdk_builder_sdk_identifier,
-        zerobus_sdk_builder_unity_catalog_url, zerobus_sdk_free, CHeaders, CResult,
+        zerobus_sdk_builder_unity_catalog_url, zerobus_sdk_free, CHeaders, CRecordArray, CResult,
         CallbackHeadersProvider, RecordType, ZerobusError,
     };
     use databricks_zerobus_ingest_sdk::HeadersProvider;
@@ -1064,6 +1064,217 @@ mod tests {
             w.join().unwrap();
         }
         zerobus_proto_schema_free(schema);
+    }
+
+    // ========================================================================
+    // Panic guard (ffi_guard) tests
+    // ========================================================================
+    //
+    // `ffi_guard` is the shared wrapper each `#[no_mangle] extern "C"` entry
+    // point runs its body through: a panic inside the body must be caught and
+    // turned into (failure sentinel + populated CResult) instead of crossing the
+    // `extern "C"` boundary (which aborts the process). These cover each
+    // return-signature shape, the no-CResult path, and a panic driven through an
+    // `extern "C"` function built like the real entry points.
+
+    // Read a CResult, free its message, and return (success, is_retryable, msg).
+    fn drain_result(result: &mut CResult) -> (bool, bool, String) {
+        let msg = if result.error_message.is_null() {
+            String::new()
+        } else {
+            let s = unsafe { CStr::from_ptr(result.error_message) }
+                .to_string_lossy()
+                .into_owned();
+            unsafe {
+                let _ = CString::from_raw(result.error_message);
+            }
+            result.error_message = ptr::null_mut();
+            s
+        };
+        (result.success, result.is_retryable, msg)
+    }
+
+    #[test]
+    fn test_ffi_guard_passes_value_through_on_success() {
+        let mut result = unwritten_result();
+        let rp = &mut result as *mut CResult;
+        let out = ffi_guard(rp, -1, || {
+            write_success_result(rp);
+            42_i64
+        });
+        assert_eq!(out, 42);
+        let (success, _, msg) = drain_result(&mut result);
+        // The body's own success result is preserved; the guard does not touch
+        // CResult on the happy path.
+        assert!(success);
+        assert!(msg.is_empty());
+    }
+
+    #[test]
+    fn test_ffi_guard_pointer_sentinel_on_panic() {
+        let mut result = unwritten_result();
+        let out: *mut u8 = ffi_guard(&mut result as *mut CResult, ptr::null_mut(), || {
+            panic!("boom from a pointer-returning fn");
+        });
+        assert!(out.is_null());
+        let (success, is_retryable, msg) = drain_result(&mut result);
+        assert!(!success);
+        // Panics are never automatically retryable.
+        assert!(!is_retryable);
+        assert!(msg.contains("Rust panic caught at FFI boundary"));
+        assert!(msg.contains("boom from a pointer-returning fn"));
+    }
+
+    #[test]
+    fn test_ffi_guard_bool_sentinel_on_panic() {
+        let mut result = unwritten_result();
+        let out = ffi_guard(&mut result as *mut CResult, false, || -> bool {
+            panic!("boom");
+        });
+        assert!(!out);
+        let (success, is_retryable, msg) = drain_result(&mut result);
+        assert!(!success);
+        assert!(!is_retryable);
+        assert!(msg.contains("Rust panic caught at FFI boundary"));
+    }
+
+    #[test]
+    fn test_ffi_guard_offset_sentinel_on_panic() {
+        let mut result = unwritten_result();
+        // Mirrors the i64 ingest functions: -1 is their error sentinel.
+        let out = ffi_guard(&mut result as *mut CResult, -1_i64, || -> i64 {
+            let v: Vec<u8> = Vec::new();
+            // Index out of bounds: a panic from deep in library/std code, not an
+            // explicit panic!.
+            v[5] as i64
+        });
+        assert_eq!(out, -1);
+        let (success, _, msg) = drain_result(&mut result);
+        assert!(!success);
+        assert!(msg.contains("Rust panic caught at FFI boundary"));
+    }
+
+    #[test]
+    fn test_ffi_guard_struct_sentinel_on_panic() {
+        let mut result = unwritten_result();
+        // Mirrors zerobus_stream_get_unacked_records: the sentinel is an empty
+        // array struct, which must be returned (not unwound) on panic.
+        let out = ffi_guard(
+            &mut result as *mut CResult,
+            CRecordArray {
+                records: ptr::null_mut(),
+                len: 0,
+            },
+            || -> CRecordArray {
+                panic!("boom while building the record array");
+            },
+        );
+        assert!(out.records.is_null());
+        assert_eq!(out.len, 0);
+        let (success, _, msg) = drain_result(&mut result);
+        assert!(!success);
+        assert!(msg.contains("Rust panic caught at FFI boundary"));
+    }
+
+    #[test]
+    fn test_ffi_guard_null_result_pointer_is_safe_on_panic() {
+        // Functions without a CResult out-parameter pass a null result pointer;
+        // a panic must still be swallowed and the sentinel returned (here the
+        // is_closed-style `true`), never aborting.
+        let out = ffi_guard(ptr::null_mut(), true, || -> bool {
+            panic!("boom with nowhere to report");
+        });
+        assert!(out);
+    }
+
+    #[test]
+    fn test_ffi_guard_reports_string_payload_panic() {
+        // A `panic!("{}", ..)` carries a String payload (vs. the &'static str of
+        // a literal panic). Both must be surfaced in the CResult message; this
+        // covers the String arm of panic_message.
+        let mut result = unwritten_result();
+        let detail = "dynamic detail 123".to_string();
+        let out = ffi_guard(&mut result as *mut CResult, false, move || -> bool {
+            panic!("formatted: {detail}");
+        });
+        assert!(!out);
+        let (success, _, msg) = drain_result(&mut result);
+        assert!(!success);
+        assert!(msg.contains("formatted: dynamic detail 123"));
+    }
+
+    // A pointer-returning `extern "C"` entry point built exactly like the real
+    // ones: its whole body runs inside `ffi_guard`. Driving it into a panic
+    // exercises the guard across the actual C ABI, not just the helper in
+    // isolation.
+    extern "C" fn panicking_entry_point(result: *mut CResult) -> *mut u8 {
+        ffi_guard(result, ptr::null_mut(), || {
+            // Stand in for an unexpected panic from deep in a dependency.
+            let v: Vec<u8> = Vec::new();
+            ptr::null_mut::<u8>().wrapping_add(v[0] as usize)
+        })
+    }
+
+    #[test]
+    fn test_ffi_guard_catches_panic_through_extern_c_entry_point() {
+        let mut result = unwritten_result();
+        // Invoke through the C ABI exactly as a C/Go/Java caller would.
+        let entry: extern "C" fn(*mut CResult) -> *mut u8 = panicking_entry_point;
+        let out = entry(&mut result as *mut CResult);
+        assert!(out.is_null());
+        let (success, is_retryable, msg) = drain_result(&mut result);
+        assert!(!success);
+        assert!(!is_retryable);
+        assert!(msg.contains("Rust panic caught at FFI boundary"));
+    }
+
+    // Guard-coverage check: every `#[no_mangle] pub extern "C"` entry point must
+    // run its body through `ffi_guard`. Scanning the source (rather than the live
+    // symbols) is what lets this fail when a *new* entry point is added later
+    // without the guard — the regression the panic tests above can't catch on
+    // their own. A module gaining entry points must be added to `modules` below.
+    #[test]
+    fn test_every_extern_c_entry_point_is_guarded() {
+        let modules = [
+            ("sdk.rs", include_str!("sdk.rs")),
+            ("stream.rs", include_str!("stream.rs")),
+            ("builder.rs", include_str!("builder.rs")),
+            ("proto_schema.rs", include_str!("proto_schema.rs")),
+            ("arrow.rs", include_str!("arrow.rs")),
+            ("common.rs", include_str!("common.rs")),
+        ];
+        // Entry points whose body builds a `#[repr(C)]` struct from compile-time
+        // constants or does nothing — no panic-capable operation, so the guard is
+        // intentionally omitted (documented at each definition).
+        let allowed_unguarded = [
+            "zerobus_get_default_config",
+            "zerobus_arrow_get_default_config",
+            "zerobus_sdk_set_use_tls",
+        ];
+
+        let mut offenders = Vec::new();
+        for (module, src) in modules {
+            // Each chunk after the marker spans one entry point's text up to the
+            // next one (or EOF), so a guard call cannot leak across functions.
+            for chunk in src.split("pub extern \"C\" fn ").skip(1) {
+                let name: String = chunk
+                    .chars()
+                    .take_while(|c| c.is_alphanumeric() || *c == '_')
+                    .collect();
+                if allowed_unguarded.contains(&name.as_str()) {
+                    continue;
+                }
+                if !chunk.contains("ffi_guard(") {
+                    offenders.push(format!("{module}::{name}"));
+                }
+            }
+        }
+        assert!(
+            offenders.is_empty(),
+            "these `extern \"C\"` entry points don't run their body through \
+             ffi_guard (wrap them, or add to allowed_unguarded if intentionally \
+             panic-free): {offenders:?}"
+        );
     }
 
     // Encode `record_json` against `table_json`, asserting the encode fails
