@@ -1,0 +1,6 @@
+# Generated protobuf/gRPC bindings: collapse in PR diffs and exclude from
+# GitHub language statistics. Regenerate with `go generate ./...`.
+internal/zerobuspb/*.pb.go linguist-generated=true
+
+# Vendored third-party protos (verbatim upstream copies).
+internal/zerobuspb/third_party/** linguist-vendored=true

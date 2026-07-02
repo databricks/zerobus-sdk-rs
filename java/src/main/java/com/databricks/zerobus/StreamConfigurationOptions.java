@@ -32,7 +32,7 @@ public class StreamConfigurationOptions {
   private boolean recovery = true;
   private int recoveryTimeoutMs = 15000;
   private int recoveryBackoffMs = 2000;
-  private int recoveryRetries = 3;
+  private int recoveryRetries = 4;
   private int flushTimeoutMs = 300000;
   private int serverLackOfAckTimeoutMs = 60000;
   private Optional<Consumer<IngestRecordResponse>> ackCallback = Optional.empty();
@@ -182,7 +182,7 @@ public class StreamConfigurationOptions {
    *   <li>recovery: true
    *   <li>recoveryTimeoutMs: 15000
    *   <li>recoveryBackoffMs: 2000
-   *   <li>recoveryRetries: 3
+   *   <li>recoveryRetries: 4
    *   <li>flushTimeoutMs: 300000
    *   <li>serverLackOfAckTimeoutMs: 60000
    *   <li>ackCallback: empty
