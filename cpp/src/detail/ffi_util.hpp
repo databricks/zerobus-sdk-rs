@@ -13,6 +13,19 @@
 namespace zerobus {
 namespace detail {
 
+/// Returns `s.c_str()`, but throws if `s` holds an embedded NUL — which Rust's
+/// `CStr::from_ptr` would silently truncate at. `what` names the argument in
+/// the error. Same guard the headers trampoline applies to header keys/values.
+inline const char* checked_c_str(const std::string& s, const char* what) {
+  if (s.find('\0') != std::string::npos) {
+    throw ZerobusException(std::string(what) +
+                               " contains an embedded NUL byte, which cannot "
+                               "cross the C FFI boundary",
+                           false);
+  }
+  return s.c_str();
+}
+
 /// Owns a `CResult` for the duration of one FFI call and converts failure into
 /// a `ZerobusException`. The error string allocated by the Rust core is always
 /// freed (via `zerobus_free_error_message`) before throwing.

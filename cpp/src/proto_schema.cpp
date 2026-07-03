@@ -33,8 +33,8 @@ struct ProtoBytesGuard {
 // signals failure; throw the FFI's error if it set one, else a generic message.
 ProtoSchema ProtoSchema::from_uc_json(const std::string& uc_table_json) {
   detail::ResultGuard guard;
-  CZerobusProtoSchema* handle =
-      zerobus_proto_schema_from_uc_json(uc_table_json.c_str(), guard.ptr());
+  CZerobusProtoSchema* handle = zerobus_proto_schema_from_uc_json(
+      detail::checked_c_str(uc_table_json, "UC table JSON"), guard.ptr());
   if (handle == nullptr) {
     guard.throw_if_error();
     throw ZerobusException("failed to build proto schema from UC JSON", false);
@@ -92,8 +92,9 @@ std::vector<std::uint8_t> ProtoSchema::encode_json(
   detail::ResultGuard guard;
   std::uint8_t* out_data = nullptr;
   std::uintptr_t out_len = 0;
-  bool ok = zerobus_proto_schema_encode_json(handle_, record_json.c_str(),
-                                             &out_data, &out_len, guard.ptr());
+  bool ok = zerobus_proto_schema_encode_json(
+      handle_, detail::checked_c_str(record_json, "JSON record"), &out_data,
+      &out_len, guard.ptr());
   if (!ok) {
     guard.throw_if_error();
     throw ZerobusException("failed to encode JSON record", false);

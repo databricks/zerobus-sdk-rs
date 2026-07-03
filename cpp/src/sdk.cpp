@@ -68,22 +68,26 @@ SdkBuilder& SdkBuilder::operator=(SdkBuilder&& other) noexcept {
 // are infallible at this layer; an invalid value (e.g. a malformed endpoint)
 // surfaces later, when build() is called.
 SdkBuilder& SdkBuilder::endpoint(const std::string& value) {
-  zerobus_sdk_builder_endpoint(builder_, value.c_str());
+  zerobus_sdk_builder_endpoint(builder_,
+                               detail::checked_c_str(value, "endpoint"));
   return *this;
 }
 
 SdkBuilder& SdkBuilder::unity_catalog_url(const std::string& value) {
-  zerobus_sdk_builder_unity_catalog_url(builder_, value.c_str());
+  zerobus_sdk_builder_unity_catalog_url(
+      builder_, detail::checked_c_str(value, "unity_catalog_url"));
   return *this;
 }
 
 SdkBuilder& SdkBuilder::sdk_identifier(const std::string& value) {
-  zerobus_sdk_builder_sdk_identifier(builder_, value.c_str());
+  zerobus_sdk_builder_sdk_identifier(
+      builder_, detail::checked_c_str(value, "sdk_identifier"));
   return *this;
 }
 
 SdkBuilder& SdkBuilder::application_name(const std::string& value) {
-  zerobus_sdk_builder_application_name(builder_, value.c_str());
+  zerobus_sdk_builder_application_name(
+      builder_, detail::checked_c_str(value, "application_name"));
   return *this;
 }
 
@@ -163,9 +167,11 @@ Stream Sdk::create_stream(const TableProperties& table,
   detail::ResultGuard guard;
   CStreamConfigurationOptions copts = detail::to_c(options);
   CZerobusStream* stream = zerobus_sdk_create_stream(
-      handle_, table.table_name.c_str(), descriptor_ptr(table.descriptor_proto),
-      table.descriptor_proto.size(), client_id.c_str(), client_secret.c_str(),
-      &copts, guard.ptr());
+      handle_, detail::checked_c_str(table.table_name, "table_name"),
+      descriptor_ptr(table.descriptor_proto), table.descriptor_proto.size(),
+      detail::checked_c_str(client_id, "client_id"),
+      detail::checked_c_str(client_secret, "client_secret"), &copts,
+      guard.ptr());
   if (stream == nullptr) {
     guard.throw_if_error();
     throw ZerobusException("failed to create stream", false);
@@ -187,9 +193,10 @@ Stream Sdk::create_stream(const TableProperties& table,
   detail::ResultGuard guard;
   CStreamConfigurationOptions copts = detail::to_c(options);
   CZerobusStream* stream = zerobus_sdk_create_stream_with_headers_provider(
-      handle_, table.table_name.c_str(), descriptor_ptr(table.descriptor_proto),
-      table.descriptor_proto.size(), detail::zerobus_cpp_headers_trampoline,
-      headers_provider.get(), &copts, guard.ptr());
+      handle_, detail::checked_c_str(table.table_name, "table_name"),
+      descriptor_ptr(table.descriptor_proto), table.descriptor_proto.size(),
+      detail::zerobus_cpp_headers_trampoline, headers_provider.get(), &copts,
+      guard.ptr());
   if (stream == nullptr) {
     guard.throw_if_error();
     throw ZerobusException("failed to create stream", false);

@@ -83,7 +83,8 @@ JsonBatchView make_json_batch(const std::vector<std::string>& records) {
   JsonBatchView v;
   v.ptrs.reserve(records.size());
   for (const auto& r : records) {
-    v.ptrs.push_back(r.c_str());
+    // Whole batch fails fast if any record has an embedded NUL.
+    v.ptrs.push_back(detail::checked_c_str(r, "JSON record"));
   }
   return v;
 }
@@ -158,8 +159,8 @@ std::int64_t Stream::ingest_proto_record(
 std::int64_t Stream::ingest_json_record(const std::string& json) {
   ensure_open(handle_);
   detail::ResultGuard guard;
-  std::int64_t offset =
-      zerobus_stream_ingest_json_record(handle_, json.c_str(), guard.ptr());
+  std::int64_t offset = zerobus_stream_ingest_json_record(
+      handle_, detail::checked_c_str(json, "JSON record"), guard.ptr());
   guard.throw_if_error();
   return checked_offset(offset);
 }
@@ -213,7 +214,8 @@ void Stream::ingest_proto_record_nowait(const std::vector<std::uint8_t>& data) {
 void Stream::ingest_json_record_nowait(const std::string& json) {
   ensure_open(handle_);
   detail::ResultGuard guard;
-  zerobus_stream_ingest_json_record_nowait(handle_, json.c_str(), guard.ptr());
+  zerobus_stream_ingest_json_record_nowait(
+      handle_, detail::checked_c_str(json, "JSON record"), guard.ptr());
   guard.throw_if_error();
 }
 
