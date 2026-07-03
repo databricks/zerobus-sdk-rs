@@ -7,10 +7,12 @@
 namespace zerobus {
 namespace detail {
 
-/// Build the C stream-config struct. Seeds from the live FFI defaults (so any
-/// field this wrapper doesn't know about keeps its default) then overrides each
-/// known field. Unlike the Go wrapper there is no zero-value ambiguity for
-/// `recovery`: it is always written explicitly.
+/// Build the C stream-config struct. Seeds from the live FFI defaults, then
+/// overrides each known field. The seed only survives for unknown future fields
+/// and for `callback_max_wait_time_ms` when left unset (below) — every scalar
+/// is overwritten unconditionally (guarded by `config_defaults_test`). Unlike
+/// the Go wrapper, `recovery` has no zero-value ambiguity: always written
+/// explicitly.
 inline CStreamConfigurationOptions to_c(const StreamOptions& opts) {
   CStreamConfigurationOptions c = zerobus_get_default_config();
   c.max_inflight_requests = opts.max_inflight_requests;

@@ -16,10 +16,9 @@ enum class RecordType : std::int32_t {
 
 /// Configuration for an ingestion stream.
 ///
-/// Defaults mirror the Rust core's `zerobus_get_default_config()`. The actual
-/// C struct passed to the FFI is seeded from the live FFI defaults and then
-/// overridden field-by-field with the values below, so unknown future fields
-/// keep their FFI defaults.
+/// The scalar defaults below are hand-kept in sync with the Rust core and sent
+/// to the FFI verbatim (see `to_c()`). `config_defaults_test` fails the build
+/// if they drift from `zerobus_get_default_config()`.
 struct StreamOptions {
   /// Maximum number of in-flight (unacknowledged) requests.
   std::size_t max_inflight_requests = 1'000'000;
