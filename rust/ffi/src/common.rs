@@ -142,9 +142,15 @@ pub struct CStreamConfigurationOptions {
     pub has_callback_max_wait_time_ms: bool,
     /// Optional ack callback. When either pointer is non-null, acks/errors are
     /// delivered asynchronously instead of only via wait_for_offset / flush.
-    /// ack_user_data is passed to each call and must outlive the stream.
-    /// For ack_on_error, error_message is valid only during the call (copy to keep).
-    /// Callback implementations must not unwind across the C boundary.
+    /// Fired on a background task, serialized (never concurrent), so keep them
+    /// lightweight; ack_user_data and any shared state need their own sync.
+    /// ack_on_ack: once per record, in order; acks are monotonic (offset N => all <= N).
+    /// ack_on_error: relays the core error text as-is (no retryability); the same
+    /// failure may also surface from ingest / flush.
+    /// Callbacks may fire during close() but never after it returns; keep both
+    /// pointers and ack_user_data alive until close() returns.
+    /// error_message is valid only during the call (copy to keep). Callbacks must
+    /// not unwind across the C boundary (panics are contained and logged).
     // Signatures are written inline rather than via the AckOn*Callback aliases
     // so cbindgen emits nullable C function pointers instead of an opaque struct.
     pub ack_on_ack: Option<extern "C" fn(offset_id: i64, user_data: *mut std::ffi::c_void)>,
@@ -306,15 +312,23 @@ impl CallbackAckCallback {
     }
 }
 
-// Safety: We assume the caller's callback and user_data are thread-safe.
+// Safety: the callback handler is a single sequential task, so on_ack/on_error
+// are never re-entered concurrently. user_data thread-safety is the caller's
+// contract (see the field docs); the raw pointer is only shared, not derefed here.
 unsafe impl Send for CallbackAckCallback {}
 unsafe impl Sync for CallbackAckCallback {}
 
 impl AckCallback for CallbackAckCallback {
     fn on_ack(&self, offset_id: OffsetId) {
         if let Some(cb) = self.on_ack {
-            // Contain panics: unwinding across the FFI boundary is UB.
-            let _ = catch_unwind(AssertUnwindSafe(|| cb(offset_id, self.user_data)));
+            // Contain panics: unwinding across the FFI boundary is UB. Log rather
+            // than silently discard a panicking user callback.
+            if catch_unwind(AssertUnwindSafe(|| cb(offset_id, self.user_data))).is_err() {
+                tracing::error!(
+                    offset_id,
+                    "ack on_ack callback panicked; contained at FFI boundary"
+                );
+            }
         }
     }
 
@@ -323,10 +337,17 @@ impl AckCallback for CallbackAckCallback {
             // NUL-terminated copy valid for the call; fall back on interior NUL.
             let c_message = CString::new(error_message)
                 .unwrap_or_else(|_| CString::new("error message contained NUL byte").unwrap());
-            // Contain panics: unwinding across the FFI boundary is UB.
-            let _ = catch_unwind(AssertUnwindSafe(|| {
+            // Contain panics: unwinding across the FFI boundary is UB. Log rather
+            // than silently discard a panicking user callback.
+            let result = catch_unwind(AssertUnwindSafe(|| {
                 cb(offset_id, c_message.as_ptr(), self.user_data)
             }));
+            if result.is_err() {
+                tracing::error!(
+                    offset_id,
+                    "ack on_error callback panicked; contained at FFI boundary"
+                );
+            }
         }
     }
 }
