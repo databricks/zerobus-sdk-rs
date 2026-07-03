@@ -50,6 +50,7 @@ jobs:
               - '.github/workflows/ci-rust.yml'
             java:
               - 'java/**'
+              - 'rust/sdk/zerobus_service.proto'
               - '.github/workflows/ci-java.yml'
             typescript:
               - 'typescript/**'
@@ -59,6 +60,7 @@ jobs:
               - '.github/workflows/ci-python.yml'
             go:
               - 'go/**'
+              - 'rust/sdk/zerobus_service.proto'
               - '.github/workflows/ci-go.yml'
             cpp:
               - 'cpp/**'

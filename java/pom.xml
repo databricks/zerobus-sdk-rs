@@ -110,6 +110,14 @@
             <goals>
               <goal>compile</goal>
             </goals>
+            <configuration>
+              <!-- Canonical schema owned by the Rust core (single source of truth). -->
+              <protoSourceRoot>${project.basedir}/../rust/sdk</protoSourceRoot>
+              <!-- rust/sdk contains other .proto files under src/; compile only the service schema. -->
+              <includes>
+                <include>zerobus_service.proto</include>
+              </includes>
+            </configuration>
           </execution>
           <execution>
             <id>test-compile-protobuf</id>
