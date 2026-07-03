@@ -8,6 +8,12 @@
 
 - Added native library support for Linux musl (Alpine) on x86_64 and aarch64. The libc flavor is detected automatically at runtime; override with `-Dzerobus.libc=musl|glibc`.
 - Added `ZerobusSdk.streamBuilder()`, a fluent builder for creating streams that mirrors the Rust SDK's `stream_builder()`. It supports JSON, Protocol Buffer, and Arrow Flight streams through a single chainable API and is now the recommended way to create streams. See `StreamBuilder`.
+- `ZerobusSdk` now has a three-argument constructor accepting an optional `applicationName`
+  parameter. When set, it is appended to the HTTP `user-agent` header on gRPC requests to the
+  Zerobus service (it is not sent on requests to the login service that mint the OAuth token),
+  so callers can be identified in server-side telemetry. The wire value becomes
+  `zerobus-sdk-java/<version> <applicationName>` (e.g. `zerobus-sdk-java/1.3.0 my-app/1.0`).
+  The existing two-argument constructor is unchanged.
 
 ### Bug Fixes
 
@@ -35,3 +41,6 @@
 - Added `StreamBuilder` and its typed sub-builders (`StreamBuilder.JsonStreamBuilder`,
   `StreamBuilder.ProtoStreamBuilder`, `StreamBuilder.ArrowStreamBuilder`), returned by
   `ZerobusSdk.streamBuilder()`.
+- Added a three-argument `ZerobusSdk(String serverEndpoint, String unityCatalogEndpoint, String
+  applicationName)` constructor. The existing two-argument constructor delegates to it with a
+  `null` application name.
