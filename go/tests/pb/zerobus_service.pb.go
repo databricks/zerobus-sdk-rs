@@ -7,13 +7,12 @@
 package pb
 
 import (
-	reflect "reflect"
-	sync "sync"
-	unsafe "unsafe"
-
 	duration "github.com/golang/protobuf/ptypes/duration"
 	protoreflect "google.golang.org/protobuf/reflect/protoreflect"
 	protoimpl "google.golang.org/protobuf/runtime/protoimpl"
+	reflect "reflect"
+	sync "sync"
+	unsafe "unsafe"
 )
 
 const (
@@ -23,6 +22,9 @@ const (
 	_ = protoimpl.EnforceVersion(protoimpl.MaxVersion - 20)
 )
 
+// Record type that will be accepted in the stream.
+//
+// Defaults to RECORD_TYPE_UNSPECIFIED, which returns an error on stream creation.
 type RecordType int32
 
 const (
@@ -82,9 +84,14 @@ func (RecordType) EnumDescriptor() ([]byte, []int) {
 	return file_zerobus_service_proto_rawDescGZIP(), []int{0}
 }
 
+// Batch of JSON-encoded records.
+//
+// This message contains multiple JSON records that will be ingested together.
+// Each string in the array represents a complete JSON object.
 type JsonRecordBatch struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	Records       []string               `protobuf:"bytes,1,rep,name=records" json:"records,omitempty"`
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// Array of JSON-encoded records.
+	Records       []string `protobuf:"bytes,1,rep,name=records" json:"records,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -126,9 +133,15 @@ func (x *JsonRecordBatch) GetRecords() []string {
 	return nil
 }
 
+// Batch of protobuf-encoded records.
+//
+// This message contains multiple protobuf-encoded records that will be ingested together.
+// Each record must be serialized according to the protobuf descriptor provided in the
+// CreateIngestStreamRequest.
 type ProtoEncodedRecordBatch struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	Records       [][]byte               `protobuf:"bytes,1,rep,name=records" json:"records,omitempty"`
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// Array of protobuf-encoded records.
+	Records       [][]byte `protobuf:"bytes,1,rep,name=records" json:"records,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -170,13 +183,28 @@ func (x *ProtoEncodedRecordBatch) GetRecords() [][]byte {
 	return nil
 }
 
+// Request to create a new ephemeral ingestion stream.
+//
+// This message initiates the streaming session and must be the first message
+// sent by the client in the EphemeralStream RPC.
 type CreateIngestStreamRequest struct {
-	state           protoimpl.MessageState `protogen:"open.v1"`
-	TableName       *string                `protobuf:"bytes,1,opt,name=table_name,json=tableName" json:"table_name,omitempty"`
-	DescriptorProto []byte                 `protobuf:"bytes,3,opt,name=descriptor_proto,json=descriptorProto" json:"descriptor_proto,omitempty"`
-	RecordType      *RecordType            `protobuf:"varint,4,opt,name=record_type,json=recordType,enum=databricks.zerobus.RecordType" json:"record_type,omitempty"`
-	unknownFields   protoimpl.UnknownFields
-	sizeCache       protoimpl.SizeCache
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// Three part name of the target destination table for data ingestion.
+	//
+	// This is a required field for all stream creation requests.
+	TableName *string `protobuf:"bytes,1,opt,name=table_name,json=tableName" json:"table_name,omitempty"`
+	// Protocol buffer descriptor for record serialization/deserialization.
+	//
+	// This descriptor defines the structure of the records being ingested.
+	// It must be compatible with the target table's schema.
+	//
+	// This is a required field for all stream creation requests.
+	DescriptorProto []byte `protobuf:"bytes,3,opt,name=descriptor_proto,json=descriptorProto" json:"descriptor_proto,omitempty"`
+	// Record type that will be accepted in the stream.
+	// Defaults to PROTO for backwards compatibility.
+	RecordType    *RecordType `protobuf:"varint,4,opt,name=record_type,json=recordType,enum=databricks.zerobus.RecordType" json:"record_type,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
 }
 
 func (x *CreateIngestStreamRequest) Reset() {
@@ -230,9 +258,14 @@ func (x *CreateIngestStreamRequest) GetRecordType() RecordType {
 	return RecordType_RECORD_TYPE_UNSPECIFIED
 }
 
+// Response confirming the creation of an ephemeral ingestion stream.
+//
+// This message is sent by the server in response to a CreateIngestStreamRequest
+// and contains the stream identifier and initial offset information.
 type CreateIngestStreamResponse struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	StreamId      *string                `protobuf:"bytes,1,opt,name=stream_id,json=streamId" json:"stream_id,omitempty"`
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// Unique identifier assigned to this ephemeral ingestion stream.
+	StreamId      *string `protobuf:"bytes,1,opt,name=stream_id,json=streamId" json:"stream_id,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -274,9 +307,16 @@ func (x *CreateIngestStreamResponse) GetStreamId() string {
 	return ""
 }
 
+// Request to ingest a single record into the stream.
+//
+// This message is sent by the client after the initial CreateIngestStreamRequest
+// to stream individual records for ingestion.
 type IngestRecordRequest struct {
-	state    protoimpl.MessageState `protogen:"open.v1"`
-	OffsetId *int64                 `protobuf:"varint,1,opt,name=offset_id,json=offsetId" json:"offset_id,omitempty"`
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// Unique identifier for this record within the stream.
+	OffsetId *int64 `protobuf:"varint,1,opt,name=offset_id,json=offsetId" json:"offset_id,omitempty"`
+	// Serialized record data.
+	//
 	// Types that are valid to be assigned to Record:
 	//
 	//	*IngestRecordRequest_ProtoEncodedRecord
@@ -353,6 +393,8 @@ type isIngestRecordRequest_Record interface {
 }
 
 type IngestRecordRequest_ProtoEncodedRecord struct {
+	// The proto encoded record must be serialized according to the protobuf descriptor
+	// provided in the CreateIngestStreamRequest.
 	ProtoEncodedRecord []byte `protobuf:"bytes,2,opt,name=proto_encoded_record,json=protoEncodedRecord,oneof"`
 }
 
@@ -364,9 +406,17 @@ func (*IngestRecordRequest_ProtoEncodedRecord) isIngestRecordRequest_Record() {}
 
 func (*IngestRecordRequest_JsonRecord) isIngestRecordRequest_Record() {}
 
+// Request to ingest a batch of records into the stream.
+//
+// This message is sent by the client after the initial CreateIngestStreamRequest
+// to stream batches of records for ingestion.
 type IngestRecordBatchRequest struct {
-	state    protoimpl.MessageState `protogen:"open.v1"`
-	OffsetId *int64                 `protobuf:"varint,1,opt,name=offset_id,json=offsetId" json:"offset_id,omitempty"`
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// Unique identifier for this batch within the stream.
+	OffsetId *int64 `protobuf:"varint,1,opt,name=offset_id,json=offsetId" json:"offset_id,omitempty"`
+	// Batch of serialized records.
+	// The batch can contain multiple records encoded as either protobuf or JSON.
+	//
 	// Types that are valid to be assigned to Batch:
 	//
 	//	*IngestRecordBatchRequest_ProtoEncodedBatch
@@ -443,10 +493,13 @@ type isIngestRecordBatchRequest_Batch interface {
 }
 
 type IngestRecordBatchRequest_ProtoEncodedBatch struct {
+	// Batch of protobuf-encoded records. Each record must be serialized according to
+	// the protobuf descriptor provided in the CreateIngestStreamRequest.
 	ProtoEncodedBatch *ProtoEncodedRecordBatch `protobuf:"bytes,2,opt,name=proto_encoded_batch,json=protoEncodedBatch,oneof"`
 }
 
 type IngestRecordBatchRequest_JsonBatch struct {
+	// Batch of JSON-encoded records.
 	JsonBatch *JsonRecordBatch `protobuf:"bytes,3,opt,name=json_batch,json=jsonBatch,oneof"`
 }
 
@@ -454,6 +507,10 @@ func (*IngestRecordBatchRequest_ProtoEncodedBatch) isIngestRecordBatchRequest_Ba
 
 func (*IngestRecordBatchRequest_JsonBatch) isIngestRecordBatchRequest_Batch() {}
 
+// A message in the EphemeralStream bidirectional stream.
+//
+// This message type allows the client to send either stream creation requests
+// or record ingestion requests (individual or batched) through the same stream.
 type EphemeralStreamRequest struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	// Types that are valid to be assigned to Payload:
@@ -535,14 +592,23 @@ type isEphemeralStreamRequest_Payload interface {
 }
 
 type EphemeralStreamRequest_CreateStream struct {
+	// Initial request to create an ephemeral stream.
+	// Must be the first message in the stream.
+	// All subsequent messages should be ingest_record or ingest_record_batch.
 	CreateStream *CreateIngestStreamRequest `protobuf:"bytes,1,opt,name=create_stream,json=createStream,oneof"`
 }
 
 type EphemeralStreamRequest_IngestRecord struct {
+	// Request to ingest a record.
+	// Can only be sent after a successful create_stream request.
+	// Multiple ingest_record messages can be sent in sequence.
 	IngestRecord *IngestRecordRequest `protobuf:"bytes,2,opt,name=ingest_record,json=ingestRecord,oneof"`
 }
 
 type EphemeralStreamRequest_IngestRecordBatch struct {
+	// Request to ingest a batch of records.
+	// Can only be sent after a successful create_stream request.
+	// Multiple ingest_record_batch messages can be sent in sequence.
 	IngestRecordBatch *IngestRecordBatchRequest `protobuf:"bytes,3,opt,name=ingest_record_batch,json=ingestRecordBatch,oneof"`
 }
 
@@ -552,9 +618,17 @@ func (*EphemeralStreamRequest_IngestRecord) isEphemeralStreamRequest_Payload() {
 
 func (*EphemeralStreamRequest_IngestRecordBatch) isEphemeralStreamRequest_Payload() {}
 
+// Acknowledgment for all records up to the specified offset.
+//
+// This message is sent by the server to confirm that records have been
+// successfully ingested and are durable.
 type IngestRecordResponse struct {
-	state                   protoimpl.MessageState `protogen:"open.v1"`
-	DurabilityAckUpToOffset *int64                 `protobuf:"varint,1,opt,name=durability_ack_up_to_offset,json=durabilityAckUpToOffset" json:"durability_ack_up_to_offset,omitempty"`
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// Highest offset that has been durably acknowledged.
+	//
+	// This offset indicates that all records with
+	// offset_id <= durability_ack_up_to_offset have been made durable.
+	DurabilityAckUpToOffset *int64 `protobuf:"varint,1,opt,name=durability_ack_up_to_offset,json=durabilityAckUpToOffset" json:"durability_ack_up_to_offset,omitempty"`
 	unknownFields           protoimpl.UnknownFields
 	sizeCache               protoimpl.SizeCache
 }
@@ -596,9 +670,11 @@ func (x *IngestRecordResponse) GetDurabilityAckUpToOffset() int64 {
 	return 0
 }
 
+// Signal that the server will close the stream after the specified duration.
 type CloseStreamSignal struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	Duration      *duration.Duration     `protobuf:"bytes,1,opt,name=duration" json:"duration,omitempty"`
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// Duration after which the server will close the stream.
+	Duration      *duration.Duration `protobuf:"bytes,1,opt,name=duration" json:"duration,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -640,6 +716,10 @@ func (x *CloseStreamSignal) GetDuration() *duration.Duration {
 	return nil
 }
 
+// A message in the EphemeralStream response stream.
+//
+// This message type allows the server to send either stream creation responses
+// or record ingestion responses through the same stream.
 type EphemeralStreamResponse struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	// Types that are valid to be assigned to Payload:
@@ -721,14 +801,17 @@ type isEphemeralStreamResponse_Payload interface {
 }
 
 type EphemeralStreamResponse_CreateStreamResponse struct {
+	// Response to a create_stream request.
 	CreateStreamResponse *CreateIngestStreamResponse `protobuf:"bytes,1,opt,name=create_stream_response,json=createStreamResponse,oneof"`
 }
 
 type EphemeralStreamResponse_IngestRecordResponse struct {
+	// Response to ingest_record requests.
 	IngestRecordResponse *IngestRecordResponse `protobuf:"bytes,2,opt,name=ingest_record_response,json=ingestRecordResponse,oneof"`
 }
 
 type EphemeralStreamResponse_CloseStreamSignal struct {
+	// Signal that the server will close the stream after the specified duration.
 	CloseStreamSignal *CloseStreamSignal `protobuf:"bytes,3,opt,name=close_stream_signal,json=closeStreamSignal,oneof"`
 }
 
@@ -787,7 +870,8 @@ const file_zerobus_service_proto_rawDesc = "" +
 	"\x05PROTO\x10\x01\x12\b\n" +
 	"\x04JSON\x10\x022y\n" +
 	"\aZerobus\x12n\n" +
-	"\x0fEphemeralStream\x12*.databricks.zerobus.EphemeralStreamRequest\x1a+.databricks.zerobus.EphemeralStreamResponse(\x010\x01B2Z0github.com/databricks/zerobus-sdk/go/testutil/pb"
+	"\x0fEphemeralStream\x12*.databricks.zerobus.EphemeralStreamRequest\x1a+.databricks.zerobus.EphemeralStreamResponse(\x010\x01B(\n" +
+	"\x16com.databricks.zerobusB\fZerobusProtoP\x01"
 
 var (
 	file_zerobus_service_proto_rawDescOnce sync.Once

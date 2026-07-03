@@ -14,6 +14,8 @@
 
 ### Internal Changes
 
+- Established `rust/sdk/zerobus_service.proto` as the single canonical gRPC schema, now referenced directly by the cgo Go SDK tests and the Java SDK build instead of their own duplicated (and drifted) copies. No schema or behavior change for the Rust core — the file stays where it was.
+
 ### Breaking Changes
 
 ### Deprecations
