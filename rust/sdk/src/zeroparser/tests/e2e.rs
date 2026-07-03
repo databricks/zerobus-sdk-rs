@@ -2925,13 +2925,10 @@ fn test_invalid_utf8_various_errors(#[case] version: ProtoVersion) {
 #[rstest]
 #[case(ProtoVersion::Proto2)]
 #[case(ProtoVersion::Proto3)]
-fn test_google_protobuf_types_not_in_registry(#[case] version: ProtoVersion) {
+fn test_google_protobuf_types_decode_success(#[case] version: ProtoVersion) {
     use prost_types::{Duration, Timestamp};
 
-    let registry = create_registry_for_version(version, "GoogleProtobufTypesMessage");
-
-    // Test google.protobuf types (Timestamp/Duration)
-    let (buf_timestamp, _) = match version {
+    let (buf, registry) = match version {
         ProtoVersion::Proto2 => {
             let msg = proto2::GoogleProtobufTypesMessage {
                 timestamp: Some(Timestamp {
@@ -2942,6 +2939,15 @@ fn test_google_protobuf_types_not_in_registry(#[case] version: ProtoVersion) {
                     seconds: 3600,
                     nanos: 500000000,
                 }),
+                string_value: Some("wrapped_string".to_string()),
+                int32_value: Some(-42),
+                int64_value: Some(-4242),
+                uint32_value: Some(42),
+                uint64_value: Some(4242),
+                float_value: Some(3.5),
+                double_value: Some(7.25),
+                bool_value: Some(true),
+                bytes_value: Some(b"wrapped_bytes".to_vec()),
                 timestamps: vec![
                     Timestamp {
                         seconds: 1000000000,
@@ -2952,7 +2958,6 @@ fn test_google_protobuf_types_not_in_registry(#[case] version: ProtoVersion) {
                         nanos: 999999999,
                     },
                 ],
-                ..Default::default()
             };
             encode_message_for_version(version, &msg, "GoogleProtobufTypesMessage")
         }
@@ -2966,6 +2971,15 @@ fn test_google_protobuf_types_not_in_registry(#[case] version: ProtoVersion) {
                     seconds: 3600,
                     nanos: 500000000,
                 }),
+                string_value: Some("wrapped_string".to_string()),
+                int32_value: Some(-42),
+                int64_value: Some(-4242),
+                uint32_value: Some(42),
+                uint64_value: Some(4242),
+                float_value: Some(3.5),
+                double_value: Some(7.25),
+                bool_value: Some(true),
+                bytes_value: Some(b"wrapped_bytes".to_vec()),
                 timestamps: vec![
                     Timestamp {
                         seconds: 1000000000,
@@ -2976,37 +2990,81 @@ fn test_google_protobuf_types_not_in_registry(#[case] version: ProtoVersion) {
                         nanos: 999999999,
                     },
                 ],
-                ..Default::default()
             };
             encode_message_for_version(version, &msg, "GoogleProtobufTypesMessage")
         }
     };
 
-    let result = ParsedMessage::parse(&buf_timestamp, &registry);
-    assert!(
-        matches!(result, Err(ParseError::UnknownTypeName { .. })),
-        "Expected UnknownTypeName error for google.protobuf.Timestamp, got {:?}",
-        result
+    let parsed = ParsedMessage::parse(&buf, &registry).unwrap();
+
+    let timestamp = parsed.get_message(1).unwrap();
+    assert_eq!(
+        timestamp.get_scalar(1),
+        Some(&FieldValueRef::Int64(1234567890))
+    );
+    assert_eq!(
+        timestamp.get_scalar(2),
+        Some(&FieldValueRef::Int32(123456789))
     );
 
-    // Test wrapper types (manually encoded)
-    let mut buf_wrappers = Vec::new();
+    let duration = parsed.get_message(2).unwrap();
+    assert_eq!(duration.get_scalar(1), Some(&FieldValueRef::Int64(3600)));
+    assert_eq!(
+        duration.get_scalar(2),
+        Some(&FieldValueRef::Int32(500000000))
+    );
 
-    // StringValue (field 3) - message with field 1 = string
-    let mut string_value_buf = Vec::new();
-    prost::encoding::string::encode(1, &"wrapped_string".to_string(), &mut string_value_buf);
-    prost::encoding::message::encode(3, &string_value_buf, &mut buf_wrappers);
+    assert_eq!(
+        parsed.get_message(3).unwrap().get_scalar(1),
+        Some(&FieldValueRef::String("wrapped_string"))
+    );
+    assert_eq!(
+        parsed.get_message(4).unwrap().get_scalar(1),
+        Some(&FieldValueRef::Int32(-42))
+    );
+    assert_eq!(
+        parsed.get_message(5).unwrap().get_scalar(1),
+        Some(&FieldValueRef::Int64(-4242))
+    );
+    assert_eq!(
+        parsed.get_message(6).unwrap().get_scalar(1),
+        Some(&FieldValueRef::UInt32(42))
+    );
+    assert_eq!(
+        parsed.get_message(7).unwrap().get_scalar(1),
+        Some(&FieldValueRef::UInt64(4242))
+    );
+    assert_eq!(
+        parsed.get_message(8).unwrap().get_scalar(1),
+        Some(&FieldValueRef::Float(3.5))
+    );
+    assert_eq!(
+        parsed.get_message(9).unwrap().get_scalar(1),
+        Some(&FieldValueRef::Double(7.25))
+    );
+    assert_eq!(
+        parsed.get_message(10).unwrap().get_scalar(1),
+        Some(&FieldValueRef::Bool(true))
+    );
+    assert_eq!(
+        parsed.get_message(11).unwrap().get_scalar(1),
+        Some(&FieldValueRef::Bytes(b"wrapped_bytes"))
+    );
 
-    // Int32Value (field 4) - message with field 1 = int32
-    let mut int32_value_buf = Vec::new();
-    prost::encoding::int32::encode(1, &-42, &mut int32_value_buf);
-    prost::encoding::message::encode(4, &int32_value_buf, &mut buf_wrappers);
-
-    let result = ParsedMessage::parse(&buf_wrappers, &registry);
-    assert!(
-        matches!(result, Err(ParseError::UnknownTypeName { .. })),
-        "Expected UnknownTypeName error for google.protobuf wrapper types, got {:?}",
-        result
+    let timestamps = parsed.get_repeated_messages(12);
+    assert_eq!(timestamps.len(), 2);
+    assert_eq!(
+        timestamps[0].get_scalar(1),
+        Some(&FieldValueRef::Int64(1000000000))
+    );
+    assert_eq!(timestamps[0].get_scalar(2), None);
+    assert_eq!(
+        timestamps[1].get_scalar(1),
+        Some(&FieldValueRef::Int64(2000000000))
+    );
+    assert_eq!(
+        timestamps[1].get_scalar(2),
+        Some(&FieldValueRef::Int32(999999999))
     );
 }
 

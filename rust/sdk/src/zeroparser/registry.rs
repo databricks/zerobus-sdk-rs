@@ -185,29 +185,12 @@ impl MessageRegistry {
         }
     }
 
-    /// Build a registry from a root descriptor plus the other top-level message
-    /// descriptors in the same `FileDescriptorSet`, each paired with its proto
-    /// package so it is registered under its TRUE fully-qualified name.
+    /// Build a registry from the parse root plus additional top-level messages.
     ///
-    /// `from_descriptor` only recurses `nested_type`, so it registers the root
-    /// and its nested children but NOT sibling or imported top-level messages
-    /// from other files in the set (e.g. `google.protobuf.StringValue` from
-    /// `google/protobuf/wrappers.proto`). A `root` field typed
-    /// `.google.protobuf.StringValue` then misses on lookup and decode fails
-    /// with `UnknownTypeName`. This constructor closes that gap.
-    ///
-    /// `others` is a slice of `(package, descriptor)` pairs — one per top-level
-    /// message reachable from the set. `package` is the proto `package` of the
-    /// file the message came from (may be empty for the unnamed package). Each
-    /// message and its nested types are inserted under their package-prefixed
-    /// FQN with a leading dot, e.g. package `google.protobuf` + message
-    /// `StringValue` → key `.google.protobuf.StringValue`, matching the
-    /// `type_name` form on message-typed `FieldDescriptorProto`s.
-    ///
-    /// `root` remains the parse root (`root_descriptor`); the existing
-    /// `from_descriptor` API is unchanged.
+    /// Use this when root fields reference sibling/imported messages that are
+    /// not nested under `root`.
     #[inline(always)]
-    pub fn from_descriptors(root: &DescriptorProto, others: &[(String, &DescriptorProto)]) -> Self {
+    pub fn from_descriptors(root: &DescriptorProto, others: &[(&str, &DescriptorProto)]) -> Self {
         let mut messages = HashMap::new();
 
         // Register the root (and its nested types) at the root prefix, exactly
@@ -450,10 +433,8 @@ pub mod tests {
         assert!(root_only.get(".google.protobuf.StringValue").is_none());
 
         // `from_descriptors` registers it under its true package-qualified FQN.
-        let registry = MessageRegistry::from_descriptors(
-            &root,
-            &[("google.protobuf".to_string(), &string_value)],
-        );
+        let registry =
+            MessageRegistry::from_descriptors(&root, &[("google.protobuf", &string_value)]);
 
         assert!(registry.get(".Bet").is_some());
         let wrapper = registry
@@ -494,8 +475,7 @@ pub mod tests {
         ));
 
         let root = make_descriptor("Root", vec![]);
-        let registry =
-            MessageRegistry::from_descriptors(&root, &[(String::new(), &sibling)]);
+        let registry = MessageRegistry::from_descriptors(&root, &[("", &sibling)]);
 
         assert!(registry.get(".Root").is_some());
         assert!(registry.get(".Sibling").is_some());
