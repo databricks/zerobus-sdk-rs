@@ -3,7 +3,9 @@ mod utils;
 
 use std::sync::Arc;
 
-use databricks_zerobus_ingest_sdk::{NoTlsConfig, StreamType, ZerobusError, ZerobusSdk};
+use databricks_zerobus_ingest_sdk::{
+    NoTlsConfig, ProtoBytes, StreamType, ZerobusError, ZerobusSdk,
+};
 use mock_grpc::{start_mock_server, MockResponse};
 use tracing::info;
 use utils::{
@@ -1331,7 +1333,9 @@ mod schema_tests {
         let mut record = stream.new_record()?;
         record.set("id", 1i64)?.set("message", "hello")?;
 
-        let offset = stream.ingest_record_offset(record).await?;
+        let offset = stream
+            .ingest_record_offset(ProtoBytes(record.encode()?))
+            .await?;
         stream.flush().await?;
 
         assert_eq!(offset, 0);

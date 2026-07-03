@@ -12,23 +12,24 @@
 //! Ingest in a loop, then `flush()` once — never wait per record.
 //!
 //! ```no_run
-//! # use databricks_zerobus_ingest_sdk::{ZerobusStream, dynamic::DynamicRecord};
+//! # use databricks_zerobus_ingest_sdk::{ProtoBytes, ZerobusStream, dynamic::DynamicRecord};
 //! # async fn example(stream: &ZerobusStream) -> Result<(), Box<dyn std::error::Error>> {
 //! let descriptor = stream.message_descriptor()?;
 //! for i in 0..1_000i64 {
 //!     let mut record = DynamicRecord::new(descriptor.clone());
 //!     record.set("id", i)?.set("name", "widget")?;
-//!     stream.ingest_record_offset(record).await?; // queue only — do NOT wait here
+//!     stream.ingest_record_offset(ProtoBytes(record.encode()?)).await?; // queue only — do NOT wait here
 //! }
 //! stream.flush().await?; // wait once for all pending acks
 //! # Ok(())
 //! # }
 //! ```
 
-use prost::Message as _;
-use prost_reflect::DescriptorPool;
+use std::fmt::Write as _;
 
-use crate::record_types::EncodedRecord;
+use prost::Message as _;
+use prost_reflect::{Cardinality, DescriptorPool, Kind, MapKey, ReflectMessage as _};
+
 use crate::{ZerobusError, ZerobusResult};
 
 pub use prost_reflect::{DynamicMessage, MessageDescriptor, Value};
@@ -73,6 +74,95 @@ pub fn message_descriptor(
             "message '{message_name}' not found in descriptor pool"
         ))
     })
+}
+
+/// Full paths of any proto2 `required` fields absent from `message`, descending
+/// into nested messages, list elements, and map values. Empty if none are
+/// missing. `prost-reflect` follows proto3 semantics and does not enforce this
+/// on encode, so callers check it before sending records the server would reject.
+pub fn missing_required_fields(message: &DynamicMessage) -> Vec<String> {
+    let mut missing = Vec::new();
+    let mut path = String::new();
+    collect_missing_required_fields(message, &mut path, &mut missing);
+    missing
+}
+
+/// Recurse over `message`'s fields, appending each field's segment to `path`
+/// (truncated on return) and recording any missing required field.
+fn collect_missing_required_fields(
+    message: &DynamicMessage,
+    path: &mut String,
+    missing: &mut Vec<String>,
+) {
+    for field in message.descriptor().fields() {
+        let base_len = path.len();
+        if !path.is_empty() {
+            path.push('.');
+        }
+        path.push_str(field.name());
+
+        if matches!(field.cardinality(), Cardinality::Required) && !message.has_field(&field) {
+            missing.push(path.clone());
+        } else if matches!(field.kind(), Kind::Message(_)) && message.has_field(&field) {
+            let value = message.get_field(&field);
+            descend_into_messages(&value, path, missing);
+        }
+
+        path.truncate(base_len);
+    }
+}
+
+/// Recurse into every [`DynamicMessage`] reachable from `value` — itself, list
+/// elements, or map values — appending `[i]` / `[key]` path segments.
+fn descend_into_messages(value: &Value, path: &mut String, missing: &mut Vec<String>) {
+    match value {
+        Value::Message(m) => collect_missing_required_fields(m, path, missing),
+        Value::List(items) => {
+            for (i, item) in items.iter().enumerate() {
+                if let Value::Message(m) = item {
+                    let base_len = path.len();
+                    let _ = write!(path, "[{i}]");
+                    collect_missing_required_fields(m, path, missing);
+                    path.truncate(base_len);
+                }
+            }
+        }
+        Value::Map(entries) => {
+            for (key, val) in entries {
+                if let Value::Message(m) = val {
+                    let base_len = path.len();
+                    path.push('[');
+                    append_map_key(path, key);
+                    path.push(']');
+                    collect_missing_required_fields(m, path, missing);
+                    path.truncate(base_len);
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
+/// Append a protobuf map key to a missing-field path in place.
+fn append_map_key(path: &mut String, key: &MapKey) {
+    match key {
+        MapKey::String(s) => path.push_str(s),
+        MapKey::Bool(b) => {
+            let _ = write!(path, "{b}");
+        }
+        MapKey::I32(i) => {
+            let _ = write!(path, "{i}");
+        }
+        MapKey::I64(i) => {
+            let _ = write!(path, "{i}");
+        }
+        MapKey::U32(i) => {
+            let _ = write!(path, "{i}");
+        }
+        MapKey::U64(i) => {
+            let _ = write!(path, "{i}");
+        }
+    }
 }
 
 /// Converts a Rust type into a protobuf [`Value`] for [`DynamicRecord::set`].
@@ -126,15 +216,15 @@ impl IntoDynamicValue for Vec<u8> {
 }
 
 /// A protobuf record built field-by-field against a runtime [`MessageDescriptor`],
-/// then ingested (encoded to wire bytes automatically).
+/// then [`encode`](Self::encode)d to wire bytes and ingested.
 ///
 /// ```no_run
-/// # use databricks_zerobus_ingest_sdk::{ZerobusStream, dynamic::DynamicRecord};
+/// # use databricks_zerobus_ingest_sdk::{ProtoBytes, ZerobusStream, dynamic::DynamicRecord};
 /// # async fn example(stream: &ZerobusStream) -> Result<(), Box<dyn std::error::Error>> {
 /// let descriptor = stream.message_descriptor()?;
 /// let mut record = DynamicRecord::new(descriptor);
 /// record.set("id", 42i64)?.set("name", "widget")?;
-/// let _offset = stream.ingest_record_offset(record).await?; // queue only
+/// let _offset = stream.ingest_record_offset(ProtoBytes(record.encode()?)).await?; // queue only
 /// stream.flush().await?; // wait once for all pending acks
 /// # Ok(())
 /// # }
@@ -170,17 +260,25 @@ impl DynamicRecord {
             })?;
         Ok(self)
     }
-}
 
-impl From<DynamicRecord> for EncodedRecord {
-    fn from(record: DynamicRecord) -> Self {
-        EncodedRecord::Proto(record.message.encode_to_vec())
-    }
-}
-
-impl From<DynamicMessage> for EncodedRecord {
-    fn from(message: DynamicMessage) -> Self {
-        EncodedRecord::Proto(message.encode_to_vec())
+    /// Encode the record to protobuf wire bytes, ready to ingest as
+    /// [`ProtoBytes`](crate::ProtoBytes).
+    ///
+    /// # Errors
+    ///
+    /// [`ZerobusError::InvalidArgument`] if any proto2 `required` field is unset
+    /// (`prost-reflect` does not enforce this on encode). The message is
+    /// otherwise valid by construction, since [`set`](Self::set) type-checks each
+    /// field.
+    pub fn encode(&self) -> ZerobusResult<Vec<u8>> {
+        let missing = missing_required_fields(&self.message);
+        if !missing.is_empty() {
+            return Err(ZerobusError::InvalidArgument(format!(
+                "record missing required field(s): {}",
+                missing.join(", ")
+            )));
+        }
+        Ok(self.message.encode_to_vec())
     }
 }
 
@@ -238,14 +336,42 @@ mod tests {
             .set("name", "widget")
             .unwrap();
 
-        let EncodedRecord::Proto(bytes) = record.into() else {
-            panic!("expected Proto variant");
-        };
+        let bytes = record.encode().unwrap();
         let decoded = DynamicMessage::decode(md, bytes.as_slice()).unwrap();
         assert_eq!(decoded.get_field_by_name("id").unwrap().as_i64(), Some(7));
         assert_eq!(
             decoded.get_field_by_name("name").unwrap().as_str(),
             Some("widget")
         );
+    }
+
+    #[test]
+    fn encode_rejects_missing_required_field() {
+        use prost_types::field_descriptor_proto::Label;
+
+        // `id` is proto2 `required`; leaving it unset must fail encode.
+        let descriptor = DescriptorProto {
+            name: Some("Order".to_string()),
+            field: vec![FieldDescriptorProto {
+                name: Some("id".to_string()),
+                number: Some(1),
+                label: Some(Label::Required as i32),
+                r#type: Some(Type::Int64 as i32),
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let md = message_descriptor(&descriptor).unwrap();
+
+        let err = DynamicRecord::new(md.clone()).encode().unwrap_err();
+        match err {
+            ZerobusError::InvalidArgument(msg) => assert!(msg.contains("id")),
+            other => panic!("expected InvalidArgument, got {other:?}"),
+        }
+
+        // Setting it makes encode succeed.
+        let mut record = DynamicRecord::new(md);
+        record.set("id", 1i64).unwrap();
+        assert!(record.encode().is_ok());
     }
 }

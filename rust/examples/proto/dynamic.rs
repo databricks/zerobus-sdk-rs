@@ -10,7 +10,7 @@
 use std::error::Error;
 
 use databricks_zerobus_ingest_sdk::schema::{descriptor_from_uc_columns, UcColumn};
-use databricks_zerobus_ingest_sdk::{ZerobusSdk, ZerobusStream};
+use databricks_zerobus_ingest_sdk::{ProtoBytes, ZerobusSdk, ZerobusStream};
 
 // Change constants to match your data.
 const TABLE_NAME: &str = "<your_table_name>";
@@ -78,8 +78,10 @@ async fn ingest_dynamic_records(stream: &mut ZerobusStream) -> Result<(), Box<dy
             .set("quantity", *quantity)?
             .set("price", *price)?;
 
-        // Queues without waiting for the ack.
-        let offset_id = stream.ingest_record_offset(record).await?;
+        // encode() enforces proto2 required fields; queues without waiting for the ack.
+        let offset_id = stream
+            .ingest_record_offset(ProtoBytes(record.encode()?))
+            .await?;
         println!("Record {i} queued with offset ID: {offset_id}");
     }
 

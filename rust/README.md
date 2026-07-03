@@ -550,12 +550,14 @@ let mut stream = sdk
     .build()
     .await?;
 
-// Fill records field-by-field; `set()` validates the field name and type. The
-// value must match the field's proto type (a BIGINT column takes an i64).
+// Fill records field-by-field; `set()` validates the field name and type (the
+// value must match the field's proto type, e.g. a BIGINT column takes an i64).
+// `encode()` then checks proto2 required fields before producing the bytes.
+use databricks_zerobus_ingest_sdk::ProtoBytes;
 for i in 0..100_000i64 {
     let mut record = stream.new_record()?; // bound to the stream's schema
     record.set("id", i)?.set("customer_name", "Alice Smith")?;
-    let _offset = stream.ingest_record_offset(record).await?; // queue only — do NOT wait here
+    let _offset = stream.ingest_record_offset(ProtoBytes(record.encode()?)).await?; // queue only — do NOT wait here
 }
 stream.flush().await?; // wait once for all pending acknowledgments
 ```

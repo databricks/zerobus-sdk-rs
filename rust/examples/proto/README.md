@@ -225,6 +225,7 @@ let mut stream = sdk
 
 // Fill records field-by-field. The value passed to `set()` must match the
 // field's proto type (a BIGINT column takes an i64, an INT column an i32).
+// `encode()` checks proto2 required fields before producing the bytes.
 for i in 0..1_000i64 {
     let mut record = stream.new_record()?; // bound to the stream's schema
     record
@@ -232,7 +233,7 @@ for i in 0..1_000i64 {
         .set("customer_name", "Alice Smith")?
         .set("quantity", 2i32)?
         .set("price", 25.99f64)?;
-    stream.ingest_record_offset(record).await?; // queue only — do NOT wait here
+    stream.ingest_record_offset(ProtoBytes(record.encode()?)).await?; // queue only — do NOT wait here
 }
 stream.flush().await?; // wait once for all pending acks
 ```

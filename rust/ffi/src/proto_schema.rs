@@ -3,11 +3,7 @@
 use crate::common::*;
 use databricks_zerobus_ingest_sdk::schema::{descriptor_from_uc_schema, UcTableSchema};
 use prost::Message;
-use prost_reflect::{
-    Cardinality, DescriptorPool, DeserializeOptions, DynamicMessage, Kind, MapKey,
-    MessageDescriptor, ReflectMessage, Value,
-};
-use std::fmt::Write;
+use prost_reflect::{DescriptorPool, DeserializeOptions, DynamicMessage, MessageDescriptor};
 use std::os::raw::c_char;
 use std::ptr;
 
@@ -146,87 +142,6 @@ pub extern "C" fn zerobus_proto_schema_descriptor_bytes(
     })
 }
 
-/// Recursively collect full paths of absent proto2 `required` fields in
-/// `message`, descending into nested structs, list elements, and map values.
-/// `path` is a scratch buffer; each frame appends its segment and truncates on
-/// return.
-fn collect_missing_required_fields(
-    message: &DynamicMessage,
-    path: &mut String,
-    missing: &mut Vec<String>,
-) {
-    for field in message.descriptor().fields() {
-        // Save position so we can restore the buffer after this field.
-        let base_len = path.len();
-        if !path.is_empty() {
-            path.push('.');
-        }
-        path.push_str(field.name());
-
-        if matches!(field.cardinality(), Cardinality::Required) && !message.has_field(&field) {
-            missing.push(path.clone());
-        } else if matches!(field.kind(), Kind::Message(_)) && message.has_field(&field) {
-            let value = message.get_field(&field);
-            descend_into_messages(&value, path, missing);
-        }
-
-        path.truncate(base_len);
-    }
-}
-
-/// Recurse into every [`DynamicMessage`] reachable from `value` — itself, list
-/// elements, or map values — appending `[i]` / `[key]` path segments.
-fn descend_into_messages(value: &Value, path: &mut String, missing: &mut Vec<String>) {
-    match value {
-        Value::Message(m) => collect_missing_required_fields(m, path, missing),
-        Value::List(items) => {
-            for (i, item) in items.iter().enumerate() {
-                if let Value::Message(m) = item {
-                    let base_len = path.len();
-                    let _ = write!(path, "[{i}]");
-                    collect_missing_required_fields(m, path, missing);
-                    path.truncate(base_len);
-                }
-            }
-        }
-        Value::Map(entries) => {
-            for (key, val) in entries {
-                if let Value::Message(m) = val {
-                    let base_len = path.len();
-                    path.push('[');
-                    append_map_key(path, key);
-                    path.push(']');
-                    collect_missing_required_fields(m, path, missing);
-                    path.truncate(base_len);
-                }
-            }
-        }
-        _ => {}
-    }
-}
-
-/// Append a protobuf map key to a missing-field path in place.
-fn append_map_key(path: &mut String, key: &MapKey) {
-    match key {
-        MapKey::String(s) => path.push_str(s),
-        MapKey::Bool(b) => {
-            let _ = write!(path, "{b}");
-        }
-        MapKey::I32(i) => {
-            let _ = write!(path, "{i}");
-        }
-        MapKey::I64(i) => {
-            let _ = write!(path, "{i}");
-        }
-        MapKey::U32(i) => {
-            let _ = write!(path, "{i}");
-        }
-        MapKey::U64(i) => {
-            let _ = write!(path, "{i}");
-        }
-    }
-}
-
 /// Encode JSON record to protobuf bytes. Unknown keys are ignored.
 ///
 /// Values follow protobuf's JSON mapping; a few column types need shaping:
@@ -308,11 +223,7 @@ pub extern "C" fn zerobus_proto_schema_encode_json(
 
         // prost-reflect doesn't enforce proto2 `required` presence on encode, so
         // reject a record missing one here rather than emit bytes the server rejects.
-        // Checks recursively (nested STRUCT, ARRAY<STRUCT> elements, MAP values), so
-        // the reported path may be nested, e.g. `addr.zip` or `items[2].id`.
-        let mut missing: Vec<String> = Vec::new();
-        let mut path = String::new();
-        collect_missing_required_fields(&message, &mut path, &mut missing);
+        let missing = databricks_zerobus_ingest_sdk::dynamic::missing_required_fields(&message);
         if !missing.is_empty() {
             write_error_result(
                 result,
