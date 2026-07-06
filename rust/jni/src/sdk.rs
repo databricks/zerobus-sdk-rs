@@ -51,7 +51,7 @@ impl NativeSdkHandle {
 ///
 /// # JNI Signature
 /// ```java
-/// private static native long nativeCreate(String serverEndpoint, String unityCatalogEndpoint);
+/// private static native long nativeCreate(String serverEndpoint, String unityCatalogEndpoint, String applicationName);
 /// ```
 #[no_mangle]
 pub extern "system" fn Java_com_databricks_zerobus_ZerobusSdk_nativeCreate<'local>(
@@ -59,6 +59,7 @@ pub extern "system" fn Java_com_databricks_zerobus_ZerobusSdk_nativeCreate<'loca
     _class: JClass<'local>,
     server_endpoint: JString<'local>,
     unity_catalog_endpoint: JString<'local>,
+    application_name: JString<'local>,
 ) -> jlong {
     // Extract the endpoint strings
     let server_endpoint: String = match env.get_string(&server_endpoint) {
@@ -77,14 +78,29 @@ pub extern "system" fn Java_com_databricks_zerobus_ZerobusSdk_nativeCreate<'loca
         }
     };
 
+    let application_name: Option<String> = if application_name.is_null() {
+        None
+    } else {
+        match env.get_string(&application_name) {
+            Ok(s) => Some(s.into()),
+            Err(e) => {
+                throw_zerobus_exception(&mut env, &format!("Invalid application name: {}", e));
+                return 0;
+            }
+        }
+    };
+
     // Create the SDK
     let sdk_identifier = format!("zerobus-sdk-java/{}", env!("CARGO_PKG_VERSION"));
-    match ZerobusSdk::builder()
+    let builder = ZerobusSdk::builder()
         .endpoint(server_endpoint)
         .unity_catalog_url(unity_catalog_endpoint)
-        .sdk_identifier(sdk_identifier)
-        .build()
-    {
+        .sdk_identifier(sdk_identifier);
+    let builder = match application_name {
+        Some(name) => builder.application_name(name),
+        None => builder,
+    };
+    match builder.build() {
         Ok(sdk) => NativeSdkHandle::new(sdk).into_raw(),
         Err(e) => {
             throw_from_zerobus_error(&mut env, &e);
