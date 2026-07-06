@@ -6,6 +6,7 @@
 #include <string>
 #include <vector>
 
+#include "zerobus/arrow_stream.hpp"
 #include "zerobus/config.hpp"
 #include "zerobus/headers_provider.hpp"
 #include "zerobus/stream.hpp"
@@ -92,6 +93,23 @@ class Sdk {
   Stream create_stream(const TableProperties& table,
                        std::shared_ptr<HeadersProvider> headers_provider,
                        const StreamOptions& options = {});
+
+  /// Create an Arrow Flight stream (Beta) authenticated with OAuth client
+  /// credentials. `schema_ipc_bytes` is an Arrow IPC stream encoding only the
+  /// schema (an empty IPC stream with just the schema message).
+  ArrowStream create_arrow_stream(
+      const std::string& table_name,
+      const std::vector<std::uint8_t>& schema_ipc_bytes,
+      const std::string& client_id, const std::string& client_secret,
+      const ArrowStreamOptions& options = {});
+
+  /// Create an Arrow Flight stream (Beta) authenticated with a custom headers
+  /// provider.
+  ArrowStream create_arrow_stream(
+      const std::string& table_name,
+      const std::vector<std::uint8_t>& schema_ipc_bytes,
+      std::shared_ptr<HeadersProvider> headers_provider,
+      const ArrowStreamOptions& options = {});
 
  private:
   friend class SdkBuilder;

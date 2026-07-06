@@ -2,8 +2,8 @@
 //
 // Each method forwards to the C FFI (zerobus.h): the builder accumulates
 // configuration on an opaque CZerobusSdkBuilder and build() consumes it into a
-// CZerobusSdk, while create_stream hands the configured options across the
-// boundary. Every fallible call routes its CResult through
+// CZerobusSdk, while create_stream / create_arrow_stream hand the configured
+// options across the boundary. Every fallible call routes its CResult through
 // detail::ResultGuard, which converts failure into a ZerobusException and frees
 // the C error string. Public API documentation lives on the declarations in the
 // header; comments here cover only implementation details.
@@ -23,6 +23,15 @@ namespace {
 // Pointer to the descriptor bytes, or null for a JSON stream.
 const std::uint8_t* descriptor_ptr(const std::vector<std::uint8_t>& d) {
   return d.empty() ? nullptr : d.data();
+}
+
+// Pointer to the bytes, or null when empty. Used for the Arrow schema, whose
+// emptiness is validated separately before this is called.
+const std::uint8_t* non_empty_ptr(const std::vector<std::uint8_t>& bytes) {
+  if (bytes.empty()) {
+    return nullptr;
+  }
+  return bytes.data();
 }
 
 }  // namespace
@@ -202,6 +211,62 @@ Stream Sdk::create_stream(const TableProperties& table,
     throw ZerobusException("failed to create stream", false);
   }
   return Stream(stream, std::move(headers_provider));
+}
+
+// Create an OAuth-authenticated Arrow Flight stream (Beta). The schema IPC
+// bytes are required (an Arrow stream has no JSON fallback), so reject an empty
+// schema before crossing the FFI rather than letting the core fail less
+// clearly.
+ArrowStream Sdk::create_arrow_stream(
+    const std::string& table_name,
+    const std::vector<std::uint8_t>& schema_ipc_bytes,
+    const std::string& client_id, const std::string& client_secret,
+    const ArrowStreamOptions& options) {
+  if (schema_ipc_bytes.empty()) {
+    throw ZerobusException("schema_ipc_bytes must not be empty", false);
+  }
+  detail::ResultGuard guard;
+  CArrowStreamConfigurationOptions copts = detail::to_c(options);
+  const std::uint8_t* schema_ptr = non_empty_ptr(schema_ipc_bytes);
+  CArrowStream* stream = zerobus_sdk_create_arrow_stream(
+      handle_, detail::checked_c_str(table_name, "table_name"), schema_ptr,
+      schema_ipc_bytes.size(), detail::checked_c_str(client_id, "client_id"),
+      detail::checked_c_str(client_secret, "client_secret"), &copts,
+      guard.ptr());
+  if (stream == nullptr) {
+    guard.throw_if_error();
+    throw ZerobusException("failed to create Arrow stream", false);
+  }
+  return ArrowStream(stream, nullptr);
+}
+
+// Arrow Flight stream (Beta) authenticated by a custom headers provider. Both
+// the provider and the schema bytes are validated up front; as with the proto
+// path, the Stream keeps the provider's shared_ptr alive for the callback's
+// lifetime.
+ArrowStream Sdk::create_arrow_stream(
+    const std::string& table_name,
+    const std::vector<std::uint8_t>& schema_ipc_bytes,
+    std::shared_ptr<HeadersProvider> headers_provider,
+    const ArrowStreamOptions& options) {
+  if (headers_provider == nullptr) {
+    throw ZerobusException("headers_provider must not be null", false);
+  }
+  if (schema_ipc_bytes.empty()) {
+    throw ZerobusException("schema_ipc_bytes must not be empty", false);
+  }
+  detail::ResultGuard guard;
+  CArrowStreamConfigurationOptions copts = detail::to_c(options);
+  const std::uint8_t* schema_ptr = non_empty_ptr(schema_ipc_bytes);
+  CArrowStream* stream = zerobus_sdk_create_arrow_stream_with_headers_provider(
+      handle_, detail::checked_c_str(table_name, "table_name"), schema_ptr,
+      schema_ipc_bytes.size(), detail::zerobus_cpp_headers_trampoline,
+      headers_provider.get(), &copts, guard.ptr());
+  if (stream == nullptr) {
+    guard.throw_if_error();
+    throw ZerobusException("failed to create Arrow stream", false);
+  }
+  return ArrowStream(stream, std::move(headers_provider));
 }
 
 }  // namespace zerobus
