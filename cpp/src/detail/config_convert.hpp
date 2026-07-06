@@ -1,6 +1,9 @@
 #ifndef ZEROBUS_DETAIL_CONFIG_CONVERT_HPP
 #define ZEROBUS_DETAIL_CONFIG_CONVERT_HPP
 
+#include <cstdint>
+#include <limits>
+
 #include "detail/ffi_util.hpp"
 #include "zerobus/config.hpp"
 
@@ -53,12 +56,21 @@ inline CArrowStreamConfigurationOptions to_c(const ArrowStreamOptions& opts) {
   c.flush_timeout_ms = opts.flush_timeout_ms;
   c.connection_timeout_ms = opts.connection_timeout_ms;
   c.ipc_compression = static_cast<std::int32_t>(opts.ipc_compression);
-  // `nullopt` maps to the signed field's -1 sentinel ("full server duration").
-  // Cast explicitly so the ternary doesn't fold both branches to unsigned.
-  c.stream_paused_max_wait_time_ms =
-      opts.stream_paused_max_wait_time_ms.has_value()
-          ? static_cast<std::int64_t>(*opts.stream_paused_max_wait_time_ms)
-          : -1;
+  // `nullopt` maps to the -1 sentinel ("full server duration"). Reject values
+  // above INT64_MAX so they can't wrap to a negative int64 and be misread as
+  // -1.
+  if (opts.stream_paused_max_wait_time_ms.has_value()) {
+    std::uint64_t v = *opts.stream_paused_max_wait_time_ms;
+    if (v >
+        static_cast<std::uint64_t>(std::numeric_limits<std::int64_t>::max())) {
+      throw ZerobusException(
+          "stream_paused_max_wait_time_ms exceeds the maximum supported value",
+          false);
+    }
+    c.stream_paused_max_wait_time_ms = static_cast<std::int64_t>(v);
+  } else {
+    c.stream_paused_max_wait_time_ms = -1;
+  }
   return c;
 }
 

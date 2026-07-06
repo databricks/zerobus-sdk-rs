@@ -27,6 +27,10 @@ class Sdk;
 /// into the destructor.
 ///
 /// Thread safety: not safe for concurrent use from multiple threads.
+///
+/// Only the IPC-bytes ingest path is wrapped. The FFI's
+/// `zerobus_arrow_stream_ingest_batch_via_record_batch` takes an opaque
+/// `RecordBatch*` no C++ caller can construct, so it is intentionally omitted.
 class ArrowStream {
  public:
   ~ArrowStream();
@@ -36,13 +40,25 @@ class ArrowStream {
   ArrowStream(const ArrowStream&) = delete;
   ArrowStream& operator=(const ArrowStream&) = delete;
 
-  /// Ingest one Arrow RecordBatch supplied as Arrow IPC stream bytes (a
-  /// self-contained IPC stream: schema message + one record batch message).
-  /// Returns the logical offset assigned to the batch.
+  /// Ingest one Arrow RecordBatch as a self-contained Arrow IPC stream (schema
+  /// message + one record batch message). Returns the assigned logical offset.
+  ///
+  /// Asynchronous: this only queues the batch. Queue many, then `flush()` once;
+  /// do not call `wait_for_offset` per batch (one round-trip each kills
+  /// throughput). The offset is a handle to wait on later, not a cue to wait.
+  ///
+  /// @code
+  ///   for (const auto& batch : batches) {
+  ///     stream.ingest_batch(batch);  // queue only — do NOT wait here
+  ///   }
+  ///   stream.flush();                // wait once for all pending acks
+  /// @endcode
   std::int64_t ingest_batch(const std::uint8_t* ipc_bytes, std::size_t len);
   std::int64_t ingest_batch(const std::vector<std::uint8_t>& ipc_bytes);
 
-  /// Block until the batch at `offset` has been acknowledged.
+  /// Block until the batch at `offset` has been acknowledged. Reserve for
+  /// low-volume cases; in hot paths `flush()` once instead (see
+  /// `ingest_batch`).
   void wait_for_offset(std::int64_t offset);
 
   /// Flush all pending batches and wait for their acknowledgment.
@@ -62,7 +78,10 @@ class ArrowStream {
   /// `close()`; the destructor frees the handle as a last resort.
   void close();
 
-  /// Whether the stream has been closed (queried from the FFI when live).
+  /// Whether the stream has been closed. Unlike `Stream::is_closed()` (a pure
+  /// `handle == nullptr` check), while the handle is live this also queries the
+  /// core, so it can report `true` for a stream the core closed on its own. The
+  /// query is conservative: it reports `true` if it cannot answer.
   bool is_closed() const noexcept;
 
  private:

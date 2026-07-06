@@ -25,15 +25,6 @@ const std::uint8_t* descriptor_ptr(const std::vector<std::uint8_t>& d) {
   return d.empty() ? nullptr : d.data();
 }
 
-// Pointer to the bytes, or null when empty. Used for the Arrow schema, whose
-// emptiness is validated separately before this is called.
-const std::uint8_t* non_empty_ptr(const std::vector<std::uint8_t>& bytes) {
-  if (bytes.empty()) {
-    return nullptr;
-  }
-  return bytes.data();
-}
-
 }  // namespace
 
 // ---------------------------------------------------------------------------
@@ -227,10 +218,11 @@ ArrowStream Sdk::create_arrow_stream(
   }
   detail::ResultGuard guard;
   CArrowStreamConfigurationOptions copts = detail::to_c(options);
-  const std::uint8_t* schema_ptr = non_empty_ptr(schema_ipc_bytes);
+  // Non-empty checked above, so data() is non-null.
   CArrowStream* stream = zerobus_sdk_create_arrow_stream(
-      handle_, detail::checked_c_str(table_name, "table_name"), schema_ptr,
-      schema_ipc_bytes.size(), detail::checked_c_str(client_id, "client_id"),
+      handle_, detail::checked_c_str(table_name, "table_name"),
+      schema_ipc_bytes.data(), schema_ipc_bytes.size(),
+      detail::checked_c_str(client_id, "client_id"),
       detail::checked_c_str(client_secret, "client_secret"), &copts,
       guard.ptr());
   if (stream == nullptr) {
@@ -257,11 +249,12 @@ ArrowStream Sdk::create_arrow_stream(
   }
   detail::ResultGuard guard;
   CArrowStreamConfigurationOptions copts = detail::to_c(options);
-  const std::uint8_t* schema_ptr = non_empty_ptr(schema_ipc_bytes);
+  // Non-empty checked above, so data() is non-null.
   CArrowStream* stream = zerobus_sdk_create_arrow_stream_with_headers_provider(
-      handle_, detail::checked_c_str(table_name, "table_name"), schema_ptr,
-      schema_ipc_bytes.size(), detail::zerobus_cpp_headers_trampoline,
-      headers_provider.get(), &copts, guard.ptr());
+      handle_, detail::checked_c_str(table_name, "table_name"),
+      schema_ipc_bytes.data(), schema_ipc_bytes.size(),
+      detail::zerobus_cpp_headers_trampoline, headers_provider.get(), &copts,
+      guard.ptr());
   if (stream == nullptr) {
     guard.throw_if_error();
     throw ZerobusException("failed to create Arrow stream", false);

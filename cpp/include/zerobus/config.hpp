@@ -46,17 +46,21 @@ struct StreamOptions {
 };
 
 /// Arrow IPC compression codec. Matches the `ipc_compression` field encoding
-/// in `CArrowStreamConfigurationOptions` (-1 = None, 0 = LZ4_FRAME, 1 = ZSTD).
+/// in `CArrowStreamConfigurationOptions` (-1 = none, 0 = LZ4_FRAME, 1 = ZSTD).
+///
+/// Named `NoCompression`, not `None`, to avoid X11's `#define None 0L`, which
+/// the preprocessor expands even inside an `enum class`.
 enum class IpcCompression : std::int32_t {
-  None = -1,
+  NoCompression = -1,
   Lz4Frame = 0,
   Zstd = 1,
 };
 
 /// Configuration for an Arrow Flight ingestion stream (Beta).
 ///
-/// Defaults mirror `zerobus_arrow_get_default_config()`; keep them in sync by
-/// hand (not yet pinned by `config_defaults_test`).
+/// The scalar defaults below are hand-kept in sync with the Rust core and sent
+/// to the FFI verbatim (see `to_c()`). `arrow_config_defaults_test` fails the
+/// build if they drift from `zerobus_arrow_get_default_config()`.
 struct ArrowStreamOptions {
   /// Maximum number of in-flight (unacknowledged) batches.
   std::size_t max_inflight_batches = 1'000;
@@ -75,7 +79,7 @@ struct ArrowStreamOptions {
   /// Connection establishment timeout.
   std::uint64_t connection_timeout_ms = 30'000;
   /// Arrow IPC compression codec.
-  IpcCompression ipc_compression = IpcCompression::None;
+  IpcCompression ipc_compression = IpcCompression::NoCompression;
   /// Max wait during a server-initiated pause before recovering. `nullopt` =
   /// full server duration; `0` = recover immediately; `x` = min(x, server).
   std::optional<std::uint64_t> stream_paused_max_wait_time_ms;
