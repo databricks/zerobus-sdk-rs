@@ -121,8 +121,11 @@ class Stream {
 
   /// Block until the record at @p offset has been acknowledged by the server.
   ///
-  /// @param offset A logical offset returned by an ingest call.
-  /// @throws ZerobusException if the stream is closed or the wait fails.
+  /// @param offset A logical offset returned by an ingest call. Must be
+  ///        non-negative; the -1 returned by an empty ingest_*_records() batch
+  ///        is rejected rather than forwarded to the server.
+  /// @throws ZerobusException if @p offset is negative, the stream is closed,
+  ///         or the wait fails.
   void wait_for_offset(std::int64_t offset);
 
   /// Flush all pending records and block until they are acknowledged.

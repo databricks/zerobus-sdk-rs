@@ -249,6 +249,11 @@ void Stream::ingest_json_records_nowait(
 
 void Stream::wait_for_offset(std::int64_t offset) {
   ensure_open(handle_);
+  // Reject negative offsets (e.g. the -1 from an empty batch) before the FFI.
+  if (offset < 0) {
+    throw ZerobusException("wait_for_offset called with a negative offset",
+                           false);
+  }
   detail::ResultGuard guard;
   zerobus_stream_wait_for_offset(handle_, offset, guard.ptr());
   guard.throw_if_error();
