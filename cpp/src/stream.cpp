@@ -55,6 +55,13 @@ const std::uint8_t* ptr_or_sentinel(const std::vector<std::uint8_t>& bytes) {
   return bytes.empty() ? &kEmptyPayloadSentinel : bytes.data();
 }
 
+// Same sentinel for the raw (pointer, length) form, so {nullptr, 0} is a valid
+// empty record instead of a null-pointer error.
+const std::uint8_t* ptr_or_sentinel(const std::uint8_t* data, std::size_t len) {
+  static const std::uint8_t kEmptyPayloadSentinel = 0;
+  return len == 0 ? &kEmptyPayloadSentinel : data;
+}
+
 // Build the parallel pointer/length arrays the batch FFI entry points expect.
 struct ProtoBatchView {
   std::vector<const std::uint8_t*> ptrs;
@@ -143,8 +150,8 @@ std::int64_t Stream::ingest_proto_record(const std::uint8_t* data,
                                          std::size_t len) {
   ensure_open(handle_);
   detail::ResultGuard guard;
-  std::int64_t offset =
-      zerobus_stream_ingest_proto_record(handle_, data, len, guard.ptr());
+  std::int64_t offset = zerobus_stream_ingest_proto_record(
+      handle_, ptr_or_sentinel(data, len), len, guard.ptr());
   guard.throw_if_error();
   return checked_offset(offset);
 }
@@ -203,7 +210,8 @@ void Stream::ingest_proto_record_nowait(const std::uint8_t* data,
                                         std::size_t len) {
   ensure_open(handle_);
   detail::ResultGuard guard;
-  zerobus_stream_ingest_proto_record_nowait(handle_, data, len, guard.ptr());
+  zerobus_stream_ingest_proto_record_nowait(handle_, ptr_or_sentinel(data, len),
+                                            len, guard.ptr());
   guard.throw_if_error();
 }
 

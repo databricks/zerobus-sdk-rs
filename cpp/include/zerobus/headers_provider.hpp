@@ -19,9 +19,11 @@ namespace zerobus {
 /// Implementations should therefore be thread-safe with respect to their own
 /// state.
 ///
-/// Lifetime: a provider passed to `Sdk::create_stream` must remain alive for as
-/// long as the resulting `Stream`. The `Stream` holds a `shared_ptr` to it, so
-/// passing a `shared_ptr` is sufficient.
+/// Lifetime: the provider must outlive the `Stream`, which holds a `shared_ptr`
+/// to it. This is necessary but not always sufficient: a `get_headers()` call
+/// still running when `close()` times out (~1s) can be invoked on a freed
+/// provider. Keep `get_headers()` well under that budget, or keep the provider
+/// alive past the `Stream`.
 class HeadersProvider {
  public:
   virtual ~HeadersProvider() = default;
