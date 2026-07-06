@@ -31,9 +31,9 @@ type bidiRPC[Req, Resp any] interface {
 // and receiving from separate goroutines is fine.
 type rawStream[Req, Resp any] struct {
 	rpc bidiRPC[Req, Resp]
-	// id is the error-message label, set to the server stream ID by the
-	// handshake. Read by send/recv/closeSend/ID while recovery may reassign it
-	// on reconnect, so it is atomic. Nil means unset.
+	// id is the error-message label, set once by the handshake and read by
+	// send/recv/closeSend/ID. Atomic so the label read never races the write,
+	// without coupling every accessor to a mutex. Nil means unset.
 	id     atomic.Pointer[string]
 	cancel context.CancelFunc
 	once   sync.Once
@@ -49,7 +49,7 @@ func (s *rawStream[Req, Resp]) name() string {
 }
 
 // setID records the stream identifier. Safe to call while send/recv/ID read the
-// label concurrently, as recovery does when it reassigns the ID on reconnect.
+// label concurrently.
 func (s *rawStream[Req, Resp]) setID(id string) {
 	s.id.Store(&id)
 }
