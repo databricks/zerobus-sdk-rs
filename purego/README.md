@@ -19,7 +19,7 @@ Implemented packages:
   bidirectional stream. It validates stream-open inputs (`TableName`,
   `RecordType`, descriptor requirement for `PROTO`) and sets auth metadata from
   `StreamParams.Token` (`"Bearer <token>"` for bare tokens, verbatim when a
-  scheme is already present).
+  known scheme — `Bearer`, `Basic`, or `DPoP` — is already present).
 
 Planned layers: OAuth/auth, ingest/ack state management, recovery, and the
 public API.

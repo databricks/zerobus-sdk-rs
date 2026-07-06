@@ -23,7 +23,16 @@ type observed struct {
 	auth       string
 	recordType zerobuspb.RecordType
 	descriptor []byte
+	// tableNameCount and authCount are how many values the server received for
+	// the Zerobus-owned metadata keys, used to assert exactly one reaches it.
+	tableNameCount int
+	authCount      int
+	// userMD is an unrelated caller-set metadata value, used to assert stream
+	// setup preserves metadata it does not own.
+	userMD string
 }
+
+const mdUserKey = "x-user-key"
 
 // fakeServer is an in-memory ZerobusServer that completes the create-stream
 // handshake with a fixed stream ID, then echoes each ingest record back as a
@@ -35,6 +44,10 @@ type fakeServer struct {
 	// badHandshake makes the server reply to the create request with an
 	// unexpected message instead of a CreateStreamResponse.
 	badHandshake bool
+	// hangHandshake makes the server accept the create request but never reply,
+	// blocking until the stream context is cancelled. Used to exercise the
+	// handshake deadline.
+	hangHandshake bool
 }
 
 func (f *fakeServer) EphemeralStream(stream zerobuspb.Zerobus_EphemeralStreamServer) error {
@@ -49,10 +62,18 @@ func (f *fakeServer) EphemeralStream(stream zerobuspb.Zerobus_EphemeralStreamSer
 
 	md, _ := metadata.FromIncomingContext(stream.Context())
 	f.seen <- observed{
-		tableName:  firstMD(md, "x-databricks-zerobus-table-name"),
-		auth:       firstMD(md, "authorization"),
-		recordType: create.GetRecordType(),
-		descriptor: create.GetDescriptorProto(),
+		tableName:      firstMD(md, "x-databricks-zerobus-table-name"),
+		auth:           firstMD(md, "authorization"),
+		recordType:     create.GetRecordType(),
+		descriptor:     create.GetDescriptorProto(),
+		tableNameCount: len(md.Get("x-databricks-zerobus-table-name")),
+		authCount:      len(md.Get("authorization")),
+		userMD:         firstMD(md, mdUserKey),
+	}
+
+	if f.hangHandshake {
+		<-stream.Context().Done()
+		return stream.Context().Err()
 	}
 
 	var resp *zerobuspb.EphemeralStreamResponse
@@ -171,20 +192,41 @@ func TestOpenHandshake(t *testing.T) {
 	}
 }
 
-func TestOpenPreservesExplicitAuthScheme(t *testing.T) {
+func TestOpenPreservesKnownAuthScheme(t *testing.T) {
+	for _, tok := range []string{"Bearer tok", "basic dXNlcg==", "DPoP proof"} {
+		srv := &fakeServer{streamID: "s", seen: make(chan observed, 1)}
+		conn := dialFake(t, srv)
+
+		_, err := conn.Open(context.Background(), transport.StreamParams{
+			TableName:  "c.s.t",
+			RecordType: zerobuspb.RecordType_JSON,
+			Token:      tok,
+		})
+		if err != nil {
+			t.Fatalf("Open %q: %v", tok, err)
+		}
+		if got := <-srv.seen; got.auth != tok {
+			t.Errorf("token %q: server saw authorization %q, want it verbatim", tok, got.auth)
+		}
+	}
+}
+
+func TestOpenPrefixesUnknownScheme(t *testing.T) {
 	srv := &fakeServer{streamID: "s", seen: make(chan observed, 1)}
 	conn := dialFake(t, srv)
 
+	// A value whose first word is not a known scheme is a bare token and gets
+	// prefixed, rather than being sent unprefixed.
 	_, err := conn.Open(context.Background(), transport.StreamParams{
 		TableName:  "c.s.t",
 		RecordType: zerobuspb.RecordType_JSON,
-		Token:      "Custom tok",
+		Token:      "my token",
 	})
 	if err != nil {
 		t.Fatalf("Open: %v", err)
 	}
-	if got := <-srv.seen; got.auth != "Custom tok" {
-		t.Errorf("server saw authorization %q, want %q", got.auth, "Custom tok")
+	if got := <-srv.seen; got.auth != "Bearer my token" {
+		t.Errorf("server saw authorization %q, want %q", got.auth, "Bearer my token")
 	}
 }
 
@@ -334,4 +376,156 @@ func TestStreamCloseAbortsRecv(t *testing.T) {
 	if _, err := stream.Recv(); err == nil {
 		t.Fatal("Recv after Close: got nil error, want cancellation")
 	}
+}
+
+// TestOpenReplacesInheritedMetadata verifies that when the caller's context
+// already carries the Zerobus-owned keys, the server receives exactly one
+// intended value for each rather than a duplicate that first-value-wins could
+// mis-route — while unrelated caller metadata is preserved.
+func TestOpenReplacesInheritedMetadata(t *testing.T) {
+	srv := &fakeServer{streamID: "s", seen: make(chan observed, 1)}
+	conn := dialFake(t, srv)
+
+	ctx := metadata.AppendToOutgoingContext(context.Background(),
+		"x-databricks-zerobus-table-name", "stale.table",
+		"authorization", "Bearer stale-token",
+		mdUserKey, "keep-me",
+	)
+
+	_, err := conn.Open(ctx, transport.StreamParams{
+		TableName:  "c.s.t",
+		RecordType: zerobuspb.RecordType_JSON,
+		Token:      "fresh-token",
+	})
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+
+	got := <-srv.seen
+	if got.tableNameCount != 1 || got.tableName != "c.s.t" {
+		t.Errorf("table name: count=%d value=%q, want count=1 value=%q", got.tableNameCount, got.tableName, "c.s.t")
+	}
+	if got.authCount != 1 || got.auth != "Bearer fresh-token" {
+		t.Errorf("authorization: count=%d value=%q, want count=1 value=%q", got.authCount, got.auth, "Bearer fresh-token")
+	}
+	if got.userMD != "keep-me" {
+		t.Errorf("unrelated caller metadata = %q, want it preserved as %q", got.userMD, "keep-me")
+	}
+}
+
+// TestOpenReplacesInheritedAuthWhenTokenEmpty verifies that a stale inherited
+// authorization value is dropped, not forwarded, when no token is supplied.
+func TestOpenReplacesInheritedAuthWhenTokenEmpty(t *testing.T) {
+	srv := &fakeServer{streamID: "s", seen: make(chan observed, 1)}
+	conn := dialFake(t, srv)
+
+	ctx := metadata.AppendToOutgoingContext(context.Background(),
+		"authorization", "Bearer stale-token")
+
+	_, err := conn.Open(ctx, transport.StreamParams{
+		TableName:  "c.s.t",
+		RecordType: zerobuspb.RecordType_JSON, // no token
+	})
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	if got := <-srv.seen; got.authCount != 0 {
+		t.Errorf("authorization count = %d (value %q), want the stale value dropped", got.authCount, got.auth)
+	}
+}
+
+// TestOpenHonorsCallerDeadline verifies the handshake respects a caller-imposed
+// deadline: a server that accepts the stream but never replies makes Open fail
+// rather than hang.
+func TestOpenHonorsCallerDeadline(t *testing.T) {
+	srv := &fakeServer{streamID: "s", seen: make(chan observed, 1), hangHandshake: true}
+	conn := dialFake(t, srv)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+	defer cancel()
+
+	start := time.Now()
+	_, err := conn.Open(ctx, transport.StreamParams{
+		TableName:  "c.s.t",
+		RecordType: zerobuspb.RecordType_JSON,
+		Token:      "tok",
+	})
+	if err == nil {
+		t.Fatal("Open against a hanging handshake: got nil error, want deadline failure")
+	}
+	if elapsed := time.Since(start); elapsed > 5*time.Second {
+		t.Fatalf("Open took %v, expected it to fail near the 200ms deadline", elapsed)
+	}
+}
+
+// TestOpenDeadlineDoesNotTearDownStream verifies that a deadline used only to
+// bound Open does not cancel the established stream: after a successful Open
+// under a short-lived context, the stream stays usable past that deadline.
+func TestOpenDeadlineDoesNotTearDownStream(t *testing.T) {
+	srv := &fakeServer{streamID: "s", seen: make(chan observed, 1)}
+	conn := dialFake(t, srv)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+	defer cancel()
+
+	stream, err := conn.Open(ctx, transport.StreamParams{
+		TableName:  "c.s.t",
+		RecordType: zerobuspb.RecordType_JSON,
+		Token:      "tok",
+	})
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	<-srv.seen
+
+	// Wait until the Open context has expired, then confirm the stream is still
+	// live by exchanging a record.
+	<-ctx.Done()
+
+	if err := stream.Send(&zerobuspb.EphemeralStreamRequest{
+		Payload: &zerobuspb.EphemeralStreamRequest_IngestRecord{
+			IngestRecord: &zerobuspb.IngestRecordRequest{
+				OffsetId: proto.Int64(7),
+				Record:   &zerobuspb.IngestRecordRequest_JsonRecord{JsonRecord: `{"id":1}`},
+			},
+		},
+	}); err != nil {
+		t.Fatalf("Send after Open deadline: %v", err)
+	}
+	if _, err := stream.Recv(); err != nil {
+		t.Fatalf("Recv after Open deadline: %v", err)
+	}
+}
+
+// TestStreamGracefulClose exercises the documented graceful shutdown sequence:
+// CloseSend, drain to io.EOF, then Close. The server returns EOF once it sees
+// the half-close, so Recv observes a clean end rather than a cancellation.
+func TestStreamGracefulClose(t *testing.T) {
+	srv := &fakeServer{streamID: "s", seen: make(chan observed, 1)}
+	conn := dialFake(t, srv)
+
+	stream, err := conn.Open(context.Background(), transport.StreamParams{
+		TableName:  "c.s.t",
+		RecordType: zerobuspb.RecordType_JSON,
+		Token:      "tok",
+	})
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	<-srv.seen
+
+	if err := stream.CloseSend(); err != nil {
+		t.Fatalf("CloseSend: %v", err)
+	}
+	// Drain to the clean end-of-stream the server sends after the half-close.
+	for {
+		_, err := stream.Recv()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			t.Fatalf("Recv during drain: got %v, want io.EOF", err)
+		}
+	}
+	stream.Close() // releases resources; safe after a graceful drain
 }

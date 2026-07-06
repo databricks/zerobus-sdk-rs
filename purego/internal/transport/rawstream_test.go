@@ -1,6 +1,7 @@
 package transport
 
 import (
+	"context"
 	"errors"
 	"io"
 	"strings"
@@ -27,33 +28,44 @@ func (f *fakeBidiRPC) CloseSend() error { return f.closeErr }
 
 func TestRawStreamHandshakeAssignsID(t *testing.T) {
 	rpc := &fakeBidiRPC{resp: strPtr("ready")}
-	s := rawStream[string, string]{rpc: rpc, name: "fallback"}
+	s := &rawStream[string, string]{rpc: rpc}
+	s.setID("fallback")
 
 	if err := s.handshake(
+		context.Background(),
 		func(_ bidiRPC[string, string]) error { return nil },
 		func(_ *string) (string, error) { return "stream-123", nil },
 	); err != nil {
 		t.Fatalf("handshake failed: %v", err)
 	}
 
-	if s.name != "stream-123" {
-		t.Fatalf("name = %q, want stream-123", s.name)
+	if s.name() != "stream-123" {
+		t.Fatalf("name = %q, want stream-123", s.name())
 	}
 }
 
 func TestRawStreamHandshakeKeepsFallbackWhenIDEmpty(t *testing.T) {
 	rpc := &fakeBidiRPC{resp: strPtr("ready")}
-	s := rawStream[string, string]{rpc: rpc, name: "fallback"}
+	s := &rawStream[string, string]{rpc: rpc}
+	s.setID("fallback")
 
 	if err := s.handshake(
+		context.Background(),
 		func(_ bidiRPC[string, string]) error { return nil },
 		func(_ *string) (string, error) { return "", nil },
 	); err != nil {
 		t.Fatalf("handshake failed: %v", err)
 	}
 
-	if s.name != "fallback" {
-		t.Fatalf("name = %q, want fallback", s.name)
+	if s.name() != "fallback" {
+		t.Fatalf("name = %q, want fallback", s.name())
+	}
+}
+
+func TestRawStreamNameFallsBackWhenUnset(t *testing.T) {
+	s := &rawStream[string, string]{rpc: &fakeBidiRPC{}}
+	if got := s.name(); got != "stream" {
+		t.Fatalf("name = %q, want the neutral placeholder %q", got, "stream")
 	}
 }
 
@@ -62,10 +74,10 @@ func TestRawStreamSendRecvAndCloseSendWrapErrorsWithName(t *testing.T) {
 	recvBoom := errors.New("recv boom")
 	closeBoom := errors.New("close boom")
 
-	s := rawStream[string, string]{
-		rpc:  &fakeBidiRPC{sendErr: sendBoom, recvErr: recvBoom, closeErr: closeBoom},
-		name: "test-stream",
+	s := &rawStream[string, string]{
+		rpc: &fakeBidiRPC{sendErr: sendBoom, recvErr: recvBoom, closeErr: closeBoom},
 	}
+	s.setID("test-stream")
 
 	if err := s.send(strPtr("x")); err == nil || !strings.Contains(err.Error(), "test-stream") {
 		t.Fatalf("send err = %v, expected stream name in wrapped error", err)
@@ -79,7 +91,8 @@ func TestRawStreamSendRecvAndCloseSendWrapErrorsWithName(t *testing.T) {
 }
 
 func TestRawStreamRecvReturnsEOFUnwrapped(t *testing.T) {
-	s := rawStream[string, string]{rpc: &fakeBidiRPC{recvErr: io.EOF}, name: "test-stream"}
+	s := &rawStream[string, string]{rpc: &fakeBidiRPC{recvErr: io.EOF}}
+	s.setID("test-stream")
 	_, err := s.recv()
 	if err != io.EOF {
 		t.Fatalf("recv err = %v, want io.EOF", err)

@@ -14,36 +14,44 @@ const (
 	mdAuthorization = "authorization"
 )
 
-// streamContext builds the outgoing context an ingestion stream needs: table
-// name and authorization headers, wrapped in a cancelable child whose cancel
-// func tears the stream down.
-func streamContext(ctx context.Context, tableName, token string) (context.Context, context.CancelFunc) {
-	ctx = metadata.AppendToOutgoingContext(ctx, mdTableName, tableName)
-	ctx = withAuth(ctx, token)
-	return context.WithCancel(ctx)
-}
+// authSchemes are matched case-insensitively against a token's first word; a
+// match is sent verbatim, anything else is prefixed with "Bearer ".
+var authSchemes = []string{"bearer", "basic", "dpop"}
 
-// withAuth returns ctx with the authorization header set from token, or ctx
-// unchanged when token is empty.
-func withAuth(ctx context.Context, token string) context.Context {
-	if v := authHeaderValue(token); v != "" {
-		return metadata.AppendToOutgoingContext(ctx, mdAuthorization, v)
+// withStreamMetadata returns ctx carrying exactly the table-name and
+// authorization headers. These are Zerobus-owned keys, so any inherited values
+// are replaced (gRPC is first-value-wins, so a duplicate could mis-route or send
+// a stale token); unrelated caller metadata is preserved.
+func withStreamMetadata(ctx context.Context, tableName, token string) context.Context {
+	md, ok := metadata.FromOutgoingContext(ctx)
+	if ok {
+		md = md.Copy()
+	} else {
+		md = metadata.MD{}
 	}
-	return ctx
+	md.Set(mdTableName, tableName)
+	if v := authHeaderValue(token); v != "" {
+		md.Set(mdAuthorization, v)
+	} else {
+		md.Delete(mdAuthorization)
+	}
+	return metadata.NewOutgoingContext(ctx, md)
 }
 
-// authHeaderValue normalizes a token into an authorization header value: a bare
-// token is prefixed with "Bearer "; a value that already carries a scheme (for
-// example "Bearer ..." or "Basic ...") is returned verbatim. An empty token
-// yields "".
+// authHeaderValue normalizes a token into an authorization header value: a value
+// already carrying a known scheme (Bearer/Basic/DPoP) is returned verbatim, a
+// bare token is prefixed with "Bearer ", and an empty token yields "".
 func authHeaderValue(token string) string {
 	token = strings.TrimSpace(token)
 	if token == "" {
 		return ""
 	}
-	// If the caller already supplied a scheme (for example "Bearer ..."), keep it.
-	if strings.Contains(token, " ") {
-		return token
+	if scheme, _, found := strings.Cut(token, " "); found {
+		for _, s := range authSchemes {
+			if strings.EqualFold(scheme, s) {
+				return token
+			}
+		}
 	}
 	return "Bearer " + token
 }

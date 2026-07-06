@@ -5,12 +5,16 @@ import (
 	"fmt"
 	"io"
 	"sync"
+	"sync/atomic"
+	"time"
 )
 
+// defaultHandshakeTimeout bounds the readiness wait when the caller's context
+// has no deadline, so Open can't hang if the server half-opens the stream.
+const defaultHandshakeTimeout = 30 * time.Second
+
 // bidiRPC is the subset of a generated gRPC bidirectional streaming client that
-// rawStream needs. Zerobus EphemeralStream satisfies it; other bidirectional
-// RPCs that expose Send/Recv/CloseSend can also use the same shared transport
-// plumbing.
+// rawStream needs. EphemeralStream satisfies it, as will Arrow Flight's DoPut.
 type bidiRPC[Req, Resp any] interface {
 	Send(*Req) error
 	Recv() (*Resp, error)
@@ -18,26 +22,42 @@ type bidiRPC[Req, Resp any] interface {
 }
 
 // rawStream is the protocol-agnostic half of an open ingestion stream: the
-// send/receive plumbing, teardown, and the handshake flow over a bidirectional
-// RPC. It knows nothing about how records are framed or which setup message
-// opens the stream — concrete streams embed it and supply those via wire types
-// and handshake hooks. Stream (proto/JSON over EphemeralStream) is the current
-// implementation.
+// send/receive plumbing, teardown, and handshake over a bidirectional RPC. It
+// knows nothing about record framing or the setup message; concrete streams
+// embed it and supply those via wire types and handshake hooks. Stream
+// (proto/JSON over EphemeralStream) is the current implementation.
 //
-// Like the underlying gRPC stream, a rawStream is not safe for concurrent send;
-// pair it with a single writer goroutine. Calling send and recv from separate
-// goroutines is fine.
+// Not safe for concurrent send; pair with a single writer goroutine. Sending
+// and receiving from separate goroutines is fine.
 type rawStream[Req, Resp any] struct {
-	rpc    bidiRPC[Req, Resp]
-	name   string // identifies the stream in error messages
+	rpc bidiRPC[Req, Resp]
+	// id is the error-message label, set to the server stream ID by the
+	// handshake. Read by send/recv/closeSend/ID while recovery may reassign it
+	// on reconnect, so it is atomic. Nil means unset.
+	id     atomic.Pointer[string]
 	cancel context.CancelFunc
 	once   sync.Once
+}
+
+// name returns the stream label for error messages: the recorded ID, or a
+// neutral placeholder before one is set.
+func (s *rawStream[Req, Resp]) name() string {
+	if p := s.id.Load(); p != nil {
+		return *p
+	}
+	return "stream"
+}
+
+// setID records the stream identifier. Safe to call while send/recv/ID read the
+// label concurrently, as recovery does when it reassigns the ID on reconnect.
+func (s *rawStream[Req, Resp]) setID(id string) {
+	s.id.Store(&id)
 }
 
 // send writes one request to the server. It is not safe for concurrent use.
 func (s *rawStream[Req, Resp]) send(req *Req) error {
 	if err := s.rpc.Send(req); err != nil {
-		return fmt.Errorf("transport: send on stream %s: %w", s.name, err)
+		return fmt.Errorf("transport: send on stream %s: %w", s.name(), err)
 	}
 	return nil
 }
@@ -50,7 +70,7 @@ func (s *rawStream[Req, Resp]) recv() (*Resp, error) {
 	case err == io.EOF:
 		return nil, io.EOF
 	case err != nil:
-		return nil, fmt.Errorf("transport: recv on stream %s: %w", s.name, err)
+		return nil, fmt.Errorf("transport: recv on stream %s: %w", s.name(), err)
 	}
 	return resp, nil
 }
@@ -59,7 +79,7 @@ func (s *rawStream[Req, Resp]) recv() (*Resp, error) {
 // open to drain remaining responses.
 func (s *rawStream[Req, Resp]) closeSend() error {
 	if err := s.rpc.CloseSend(); err != nil {
-		return fmt.Errorf("transport: close-send on stream %s: %w", s.name, err)
+		return fmt.Errorf("transport: close-send on stream %s: %w", s.name(), err)
 	}
 	return nil
 }
@@ -74,38 +94,63 @@ func (s *rawStream[Req, Resp]) close() {
 	})
 }
 
-// handshake performs the create-stream exchange shared by every ingestion
-// protocol: send a setup message, block for the server's readiness response,
-// and validate it before any data flows. Blocking here surfaces setup failures
-// (auth, schema/descriptor validation, table access) at open time rather than
-// mid-ingest.
+// handshake runs the create-stream exchange shared by every ingestion protocol:
+// send a setup message, await the readiness response, and validate it. Blocking
+// here surfaces setup failures (auth, schema, table access) at open time.
 //
-// Only the two hooks are protocol-specific: sendSetup writes the first message
-// (create-stream for proto, schema for Arrow), and confirmReady validates the
-// first response and returns the stream's identifier ("" for protocols that
-// don't assign one). The send/await/validate flow, and recording the identifier
-// for error messages when available, are shared. On success the stream is live
-// for data.
+// hctx (the caller's Open context) bounds only the readiness wait, defaulting to
+// defaultHandshakeTimeout when it has no deadline; the live stream runs on a
+// separate Close-only context, so this never tears down an established stream.
 //
-// Errors carry a concise cause (from a hook, or the await step); the caller is
-// expected to annotate them with its operation context (e.g. the table name).
+// The two hooks are protocol-specific: sendSetup writes the first message, and
+// confirmReady validates the first response and returns the stream ID ("" if the
+// protocol assigns none). Errors carry a concise cause for the caller to
+// annotate.
 func (s *rawStream[Req, Resp]) handshake(
+	hctx context.Context,
 	sendSetup func(rpc bidiRPC[Req, Resp]) error,
 	confirmReady func(resp *Resp) (id string, err error),
 ) error {
 	if err := sendSetup(s.rpc); err != nil {
 		return err
 	}
-	resp, err := s.rpc.Recv()
-	if err != nil {
-		return fmt.Errorf("await ready response: %w", err)
+
+	if _, ok := hctx.Deadline(); !ok {
+		var cancel context.CancelFunc
+		hctx, cancel = context.WithTimeout(hctx, defaultHandshakeTimeout)
+		defer cancel()
 	}
+
+	// Recv runs on the Close-only stream context, not hctx, so bound it by
+	// receiving off-goroutine and selecting on hctx. On timeout/cancel Open tears
+	// the stream down, which unblocks the goroutine.
+	type recvResult struct {
+		resp *Resp
+		err  error
+	}
+	done := make(chan recvResult, 1)
+	go func() {
+		resp, err := s.recv()
+		done <- recvResult{resp, err}
+	}()
+
+	var resp *Resp
+	select {
+	case <-hctx.Done():
+		return fmt.Errorf("await ready response: %w", hctx.Err())
+	case r := <-done:
+		if r.err != nil {
+			return fmt.Errorf("await ready response: %w", r.err)
+		}
+		resp = r.resp
+	}
+
 	id, err := confirmReady(resp)
 	if err != nil {
 		return err
 	}
 	if id != "" {
-		s.name = id
+		s.setID(id)
 	}
 	return nil
 }

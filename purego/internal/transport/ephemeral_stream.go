@@ -21,7 +21,7 @@ type StreamParams struct {
 	// RecordType is PROTO and ignored otherwise.
 	DescriptorProto []byte
 	// Token is the credential sent in the authorization header. A bare token is
-	// prefixed with "Bearer "; a value that already carries a scheme (e.g.
+	// prefixed with "Bearer "; a value that already carries a known scheme (e.g.
 	// "Bearer ..." or "Basic ...") is sent verbatim. Empty means no header.
 	Token string
 }
@@ -38,12 +38,14 @@ type Stream struct {
 	rawStream[zerobuspb.EphemeralStreamRequest, zerobuspb.EphemeralStreamResponse]
 }
 
-// Open starts an EphemeralStream, performs the create-stream handshake, and
-// returns the live stream once the server has acknowledged it with a stream ID.
+// Open starts an EphemeralStream, runs the create-stream handshake, and returns
+// the live stream once the server acknowledges it with a stream ID.
 //
-// The returned Stream owns a child of ctx, so cancelling ctx tears the stream
-// down; if the handshake itself fails, Open releases that child before
-// returning. The caller must Close the returned Stream.
+// ctx bounds only opening the stream (dial + handshake), not the returned
+// stream's lifetime: the live stream runs on an internal context cancelled only
+// by Close, so a timeout on Open won't tear it down mid-ingest. ctx's values
+// (including caller-set outgoing metadata) carry onto the live stream. The
+// caller must Close the returned Stream.
 func (c *Conn) Open(ctx context.Context, p StreamParams) (*Stream, error) {
 	// Normalize once so the metadata header and the create request agree, and so
 	// the validation below also governs the value actually sent.
@@ -61,8 +63,13 @@ func (c *Conn) Open(ctx context.Context, p StreamParams) (*Stream, error) {
 		return nil, fmt.Errorf("transport: open %q: descriptor proto required for PROTO records", p.TableName)
 	}
 
-	ctx, cancel := streamContext(ctx, p.TableName, p.Token)
-	stream, err := c.open(ctx, p)
+	// The live stream must outlive Open: detach from ctx's cancel/deadline
+	// (WithoutCancel keeps its values, so caller metadata survives) and make it
+	// cancelable only via Close. ctx still bounds the handshake below.
+	streamCtx := withStreamMetadata(context.WithoutCancel(ctx), p.TableName, p.Token)
+	streamCtx, cancel := context.WithCancel(streamCtx)
+
+	stream, err := c.open(ctx, streamCtx, p)
 	if err != nil {
 		cancel()
 		return nil, err
@@ -71,20 +78,20 @@ func (c *Conn) Open(ctx context.Context, p StreamParams) (*Stream, error) {
 	return stream, nil
 }
 
-// open opens the RPC and runs the handshake on an already-prepared context. On
-// any error the caller (Open) cancels the context. The generic send/await/
-// validate flow lives in rawStream.handshake; open supplies only the two
-// proto-specific hooks and annotates their concise errors with the operation.
-func (c *Conn) open(ctx context.Context, p StreamParams) (*Stream, error) {
-	rpc, err := c.client.EphemeralStream(ctx)
+// open opens the RPC on streamCtx (the live-stream context) and runs the
+// handshake bounded by hctx (the caller's Open context). On error, Open cancels
+// streamCtx. It supplies the two proto-specific hooks and annotates their errors.
+func (c *Conn) open(hctx, streamCtx context.Context, p StreamParams) (*Stream, error) {
+	rpc, err := c.client.EphemeralStream(streamCtx)
 	if err != nil {
 		return nil, fmt.Errorf("transport: open %q: %w", p.TableName, err)
 	}
 
 	s := &Stream{}
 	s.rpc = rpc
-	s.name = "ephemeral-stream"
+	s.setID("ephemeral-stream") // placeholder label until the server assigns an ID
 	if err := s.handshake(
+		hctx,
 		func(rpc bidiRPC[zerobuspb.EphemeralStreamRequest, zerobuspb.EphemeralStreamResponse]) error {
 			return sendCreateStream(rpc, p)
 		},
@@ -129,7 +136,7 @@ func confirmCreateStream(resp *zerobuspb.EphemeralStreamResponse) (string, error
 }
 
 // ID returns the server-assigned stream identifier from the handshake.
-func (s *Stream) ID() string { return s.name }
+func (s *Stream) ID() string { return s.name() }
 
 // Send writes one request to the server. It is not safe for concurrent use.
 func (s *Stream) Send(req *zerobuspb.EphemeralStreamRequest) error { return s.send(req) }
