@@ -56,28 +56,6 @@ class Stream {
   /// Ingest a batch of JSON records. Returns the offset of the last record.
   std::int64_t ingest_json_records(const std::vector<std::string>& records);
 
-  /// Fire-and-forget single-record ingestion. Returns immediately; only
-  /// argument-validation errors are reported (as exceptions). Ingestion errors
-  /// are silently dropped. The stream must outlive the background work.
-  ///
-  /// WARNING — do not combine the `_nowait` APIs with a custom
-  /// `HeadersProvider`. A fire-and-forget task is detached: neither `close()`
-  /// nor the destructor drains it, and a task that still needs fresh headers
-  /// may call back into the provider after the `Stream` (and the `shared_ptr`
-  /// keeping the provider alive) is destroyed — a use-after-free. The FFI
-  /// exposes no way to drain these tasks, so there is no safe ordering. With a
-  /// `HeadersProvider`, use only the blocking ingest variants, which complete
-  /// before they return.
-  void ingest_proto_record_nowait(const std::uint8_t* data, std::size_t len);
-  void ingest_proto_record_nowait(const std::vector<std::uint8_t>& data);
-  void ingest_json_record_nowait(const std::string& json);
-
-  /// Fire-and-forget batch ingestion. Copies the payloads before returning, so
-  /// the caller's buffers may be released immediately.
-  void ingest_proto_records_nowait(
-      const std::vector<std::vector<std::uint8_t>>& records);
-  void ingest_json_records_nowait(const std::vector<std::string>& records);
-
   /// Block until the record at `offset` has been acknowledged by the server.
   void wait_for_offset(std::int64_t offset);
 
