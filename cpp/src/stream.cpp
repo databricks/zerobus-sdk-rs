@@ -143,8 +143,7 @@ Stream& Stream::operator=(Stream&& other) noexcept {
 
 // The ingest methods below share one shape: route a CResult through a
 // ResultGuard, call the matching zerobus_stream_* entry point, then
-// throw_if_error(). The blocking variants return the server-assigned offset;
-// the _nowait variants return void and only report argument-validation errors.
+// throw_if_error(), returning the server-assigned offset.
 
 std::int64_t Stream::ingest_proto_record(const std::uint8_t* data,
                                          std::size_t len) {
@@ -204,55 +203,6 @@ std::int64_t Stream::ingest_json_records(
       handle_, v.ptrs.data(), v.ptrs.size(), guard.ptr());
   guard.throw_if_error();
   return checked_offset(offset);
-}
-
-void Stream::ingest_proto_record_nowait(const std::uint8_t* data,
-                                        std::size_t len) {
-  ensure_open(handle_);
-  detail::ResultGuard guard;
-  zerobus_stream_ingest_proto_record_nowait(handle_, ptr_or_sentinel(data, len),
-                                            len, guard.ptr());
-  guard.throw_if_error();
-}
-
-void Stream::ingest_proto_record_nowait(const std::vector<std::uint8_t>& data) {
-  ingest_proto_record_nowait(ptr_or_sentinel(data), data.size());
-}
-
-void Stream::ingest_json_record_nowait(const std::string& json) {
-  ensure_open(handle_);
-  detail::ResultGuard guard;
-  zerobus_stream_ingest_json_record_nowait(
-      handle_, detail::checked_c_str(json, "JSON record"), guard.ptr());
-  guard.throw_if_error();
-}
-
-void Stream::ingest_proto_records_nowait(
-    const std::vector<std::vector<std::uint8_t>>& records) {
-  ensure_open(handle_);
-  // Nothing to enqueue; skip the FFI call (and its null-pointer ambiguity).
-  if (records.empty()) {
-    return;
-  }
-  ProtoBatchView v = make_proto_batch(records);
-  detail::ResultGuard guard;
-  zerobus_stream_ingest_proto_records_nowait(
-      handle_, v.ptrs.data(), v.lens.data(), v.ptrs.size(), guard.ptr());
-  guard.throw_if_error();
-}
-
-void Stream::ingest_json_records_nowait(
-    const std::vector<std::string>& records) {
-  ensure_open(handle_);
-  // Nothing to enqueue; skip the FFI call (and its null-pointer ambiguity).
-  if (records.empty()) {
-    return;
-  }
-  JsonBatchView v = make_json_batch(records);
-  detail::ResultGuard guard;
-  zerobus_stream_ingest_json_records_nowait(handle_, v.ptrs.data(),
-                                            v.ptrs.size(), guard.ptr());
-  guard.throw_if_error();
 }
 
 void Stream::wait_for_offset(std::int64_t offset) {

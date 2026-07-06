@@ -80,45 +80,6 @@ class Stream {
   /// @throws ZerobusException if the stream is closed or ingestion fails.
   std::int64_t ingest_json_records(const std::vector<std::string>& records);
 
-  /// Fire-and-forget single-record ingestion: queues the record on a background
-  /// task and returns immediately, without waiting for it to be sent.
-  ///
-  /// Only argument-validation errors are reported; errors during the background
-  /// ingestion itself are silently dropped. The stream must outlive the
-  /// background work.
-  ///
-  /// @param data Pointer to the protobuf-encoded record bytes.
-  /// @param len Number of bytes in @p data.
-  /// @throws ZerobusException on a closed stream or invalid argument.
-  void ingest_proto_record_nowait(const std::uint8_t* data, std::size_t len);
-
-  /// @overload
-  /// @param data The protobuf-encoded record bytes.
-  void ingest_proto_record_nowait(const std::vector<std::uint8_t>& data);
-
-  /// Fire-and-forget single JSON-record ingestion. See
-  /// ingest_proto_record_nowait() for the fire-and-forget semantics.
-  ///
-  /// @param json The record as a UTF-8 JSON string.
-  /// @throws ZerobusException on a closed stream or invalid argument.
-  void ingest_json_record_nowait(const std::string& json);
-
-  /// Fire-and-forget batch ingestion: queues the records on a background task
-  /// and returns immediately. The payloads are copied before returning, so the
-  /// caller's buffers may be released right away. An empty batch is a no-op.
-  ///
-  /// @param records The protobuf-encoded records to ingest.
-  /// @throws ZerobusException on a closed stream or invalid argument.
-  void ingest_proto_records_nowait(
-      const std::vector<std::vector<std::uint8_t>>& records);
-
-  /// Fire-and-forget batch ingestion of JSON records. See
-  /// ingest_proto_records_nowait() for the fire-and-forget semantics.
-  ///
-  /// @param records The records, each a UTF-8 JSON string.
-  /// @throws ZerobusException on a closed stream or invalid argument.
-  void ingest_json_records_nowait(const std::vector<std::string>& records);
-
   /// Block until the record at @p offset has been acknowledged by the server.
   ///
   /// @param offset A logical offset returned by an ingest call. Must be
