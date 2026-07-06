@@ -1244,12 +1244,15 @@ mod tests {
             ("common.rs", include_str!("common.rs")),
         ];
         // Entry points whose body builds a `#[repr(C)]` struct from compile-time
-        // constants or does nothing — no panic-capable operation, so the guard is
-        // intentionally omitted (documented at each definition).
+        // constants, does nothing, or is a pure allocator that returns null on
+        // failure — no panic-capable operation, so the guard is intentionally
+        // omitted (documented at each definition).
         let allowed_unguarded = [
             "zerobus_get_default_config",
             "zerobus_arrow_get_default_config",
             "zerobus_sdk_set_use_tls",
+            "zerobus_alloc_header_array",
+            "zerobus_alloc_cstring",
         ];
 
         let mut offenders = Vec::new();

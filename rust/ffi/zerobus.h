@@ -261,6 +261,37 @@ bool zerobus_arrow_stream_is_closed(struct CArrowStream *stream);
 struct CArrowStreamConfigurationOptions zerobus_arrow_get_default_config(void);
 
 /**
+ * Allocate a zeroed `CHeader` array of `count` elements for a headers callback
+ * to populate and return in a `CHeaders`.
+ *
+ * The array is allocated by the same allocator `zerobus_free_headers` releases
+ * it with (`libc::calloc` / `libc::free`), so a non-Rust callback can build a
+ * `CHeaders` without its own allocator having to match Rust's. This matters on
+ * Windows, where the C/C++ caller and this statically linked library can
+ * resolve to different CRT heaps; allocating here keeps the alloc/free pair on
+ * one heap and avoids the cross-heap free that would otherwise corrupt memory.
+ *
+ * Zero-initialised so a partially populated array is safe to pass to
+ * `zerobus_free_headers` (unset key/value pointers are null and skipped).
+ * Returns null if `count` is 0 or the allocation fails.
+ */
+struct CHeader *zerobus_alloc_header_array(uintptr_t count);
+
+/**
+ * Duplicate `len` bytes from `data` into a NUL-terminated C string for a
+ * headers callback to store in a `CHeader` key/value or a `CHeaders`
+ * error_message.
+ *
+ * Allocated as a Rust `CString`, matching the `CString::from_raw` that
+ * `zerobus_free_headers` frees it with — the string is allocated and freed by
+ * the same allocator inside this library (see `zerobus_alloc_header_array` for
+ * why that matters). `len` of 0 yields an empty string (a valid non-null
+ * pointer). Returns null on allocation failure or if the input contains an
+ * interior NUL byte (which a C string cannot represent).
+ */
+char *zerobus_alloc_cstring(const uint8_t *data, uintptr_t len);
+
+/**
  * Free headers returned from callback
  */
 void zerobus_free_headers(struct CHeaders headers);
