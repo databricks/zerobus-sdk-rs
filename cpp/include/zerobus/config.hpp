@@ -55,10 +55,8 @@ enum class IpcCompression : std::int32_t {
 
 /// Configuration for an Arrow Flight ingestion stream (Beta).
 ///
-/// Defaults mirror the FFI's `zerobus_arrow_get_default_config()` (which in
-/// turn draws from the Rust core's `stream_options::defaults`). Unlike
-/// `StreamOptions`, these defaults are not yet pinned by `config_defaults_test`,
-/// so keep them in sync with the FFI by hand.
+/// Defaults mirror `zerobus_arrow_get_default_config()`; keep them in sync by
+/// hand (not yet pinned by `config_defaults_test`).
 struct ArrowStreamOptions {
   /// Maximum number of in-flight (unacknowledged) batches.
   std::size_t max_inflight_batches = 1'000;
@@ -78,10 +76,8 @@ struct ArrowStreamOptions {
   std::uint64_t connection_timeout_ms = 30'000;
   /// Arrow IPC compression codec.
   IpcCompression ipc_compression = IpcCompression::None;
-  /// Max time to wait during a server-initiated pause before recovering:
-  /// - `nullopt`: wait the full server-specified duration (most graceful).
-  /// - `0`: recover immediately, closing the stream right away.
-  /// - `x > 0`: wait up to min(x, server_duration) milliseconds.
+  /// Max wait during a server-initiated pause before recovering. `nullopt` =
+  /// full server duration; `0` = recover immediately; `x` = min(x, server).
   std::optional<std::uint64_t> stream_paused_max_wait_time_ms;
 };
 

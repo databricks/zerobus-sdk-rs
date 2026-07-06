@@ -53,10 +53,8 @@ inline CArrowStreamConfigurationOptions to_c(const ArrowStreamOptions& opts) {
   c.flush_timeout_ms = opts.flush_timeout_ms;
   c.connection_timeout_ms = opts.connection_timeout_ms;
   c.ipc_compression = static_cast<std::int32_t>(opts.ipc_compression);
-  // The C field is signed with -1 as the "wait full server duration" sentinel;
-  // `nullopt` maps to it. A present value is non-negative (unsigned in the
-  // option), so cast to the signed field explicitly rather than letting the
-  // ternary fold both branches to unsigned.
+  // `nullopt` maps to the signed field's -1 sentinel ("full server duration").
+  // Cast explicitly so the ternary doesn't fold both branches to unsigned.
   c.stream_paused_max_wait_time_ms =
       opts.stream_paused_max_wait_time_ms.has_value()
           ? static_cast<std::int64_t>(*opts.stream_paused_max_wait_time_ms)
