@@ -242,8 +242,8 @@ ArrowStream Sdk::create_arrow_stream(
 
 // Arrow Flight stream (Beta) authenticated by a custom headers provider. Both
 // the provider and the schema bytes are validated up front; as with the proto
-// path, the Stream keeps the provider's shared_ptr alive for the callback's
-// lifetime.
+// path, the ArrowStream keeps the provider's shared_ptr alive for the
+// callback's lifetime.
 ArrowStream Sdk::create_arrow_stream(
     const std::string& table_name,
     const std::vector<std::uint8_t>& schema_ipc_bytes,
