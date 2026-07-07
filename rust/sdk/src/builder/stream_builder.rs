@@ -200,9 +200,9 @@ impl<'a> StreamBuilder<'a> {
     ///
     /// Build the `descriptor` with [`crate::schema::descriptor_from_uc_columns`]
     /// (or fetch it from Unity Catalog) and fill records with
-    /// [`crate::dynamic::DynamicRecord`]. Wire-identical to
-    /// [`compiled_proto`](Self::compiled_proto); see the [`dynamic`](crate::dynamic)
-    /// module for the full pattern.
+    /// [`crate::dynamic_proto::DynamicRecord`]. Wire-identical to
+    /// [`compiled_proto`](Self::compiled_proto); see the
+    /// [`dynamic_proto`](crate::dynamic_proto) module for the full pattern.
     pub fn dynamic_proto(mut self, descriptor: prost_types::DescriptorProto) -> Self {
         self.format = Some(FormatConfig::DynamicProto(Box::new(descriptor)));
         self

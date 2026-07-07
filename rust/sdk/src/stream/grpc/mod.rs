@@ -29,7 +29,7 @@ use tonic::transport::Channel;
 use tracing::instrument;
 
 use crate::databricks::zerobus::zerobus_client::ZerobusClient;
-use crate::dynamic::{DynamicRecord, MessageDescriptor};
+use crate::dynamic_proto::{DynamicRecord, MessageDescriptor};
 use crate::landing_zone::LandingZone;
 use crate::{
     HeadersProvider, OffsetId, OffsetIdGenerator, StreamConfigurationOptions, StreamType,
@@ -218,7 +218,7 @@ impl ZerobusStream {
     }
 
     /// Resolve the [`MessageDescriptor`] for this stream's table, for building
-    /// records with [`crate::dynamic::DynamicRecord`]. Cached after the first
+    /// records with [`crate::dynamic_proto::DynamicRecord`]. Cached after the first
     /// call, so it's cheap to call per record (the descriptor is Arc-backed).
     ///
     /// # Errors
@@ -238,7 +238,7 @@ impl ZerobusStream {
                         "stream has no protobuf descriptor: build it with .compiled_proto() or .dynamic_proto()".into(),
                     )
                 })?;
-        let descriptor = crate::dynamic::message_descriptor(descriptor_proto)?;
+        let descriptor = crate::dynamic_proto::message_descriptor(descriptor_proto)?;
         // A lost race just means another thread resolved it first — fine.
         let _ = self.dynamic_message_descriptor.set(descriptor.clone());
         Ok(descriptor)

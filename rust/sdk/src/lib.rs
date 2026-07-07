@@ -47,7 +47,7 @@ mod builder;
 mod callbacks;
 mod client_warnings;
 mod default_token_factory;
-pub mod dynamic;
+pub mod dynamic_proto;
 mod errors;
 mod headers_provider;
 mod landing_zone;

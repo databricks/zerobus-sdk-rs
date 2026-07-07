@@ -38,9 +38,10 @@ The SDK supports two serialization formats and two ingestion methods:
 |---------|--------|--------|----------|
 | [JSON Single](json/README.md#single-record-example) | JSON | Single-record | `cargo run -p rust-examples-json --example json_single` |
 | [JSON Batch](json/README.md#batch-example) | JSON | Batch | `cargo run -p rust-examples-json --example json_batch` |
-| [Proto Single](proto/README.md#single-record-example) | Protocol Buffers | Single-record | `cargo run -p rust-examples-proto --example proto_single` |
-| [Proto Batch](proto/README.md#batch-example) | Protocol Buffers | Batch | `cargo run -p rust-examples-proto --example proto_batch` |
-| [Proto Dynamic](proto/README.md#dynamic-schema-example) | Protocol Buffers | Single-record (runtime schema) | `cargo run -p rust-examples-proto --example proto_dynamic` |
+| [Proto Compiled Single](proto/README.md#compiled-single-record-example) | Protocol Buffers | Single-record | `cargo run -p rust-examples-proto --example proto_compiled_single` |
+| [Proto Compiled Batch](proto/README.md#compiled-batch-example) | Protocol Buffers | Batch | `cargo run -p rust-examples-proto --example proto_compiled_batch` |
+| [Proto Dynamic](proto/README.md#dynamic-schema-example) | Protocol Buffers | Single-record (runtime schema) | `cargo run -p rust-examples-proto --example proto_dynamic_single` |
+| [Proto Dynamic Batch](proto/README.md#dynamic-batch) | Protocol Buffers | Batch (runtime schema) | `cargo run -p rust-examples-proto --example proto_dynamic_batch` |
 | [Arrow](arrow/README.md) | Arrow Flight (Beta) | `RecordBatch` | `cargo run -p example_arrow` |
 
 ## Prerequisites

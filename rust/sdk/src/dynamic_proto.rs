@@ -12,7 +12,7 @@
 //! Ingest in a loop, then `flush()` once — never wait per record.
 //!
 //! ```no_run
-//! # use databricks_zerobus_ingest_sdk::{ProtoBytes, ZerobusStream, dynamic::DynamicRecord};
+//! # use databricks_zerobus_ingest_sdk::{ProtoBytes, ZerobusStream, dynamic_proto::DynamicRecord};
 //! # async fn example(stream: &ZerobusStream) -> Result<(), Box<dyn std::error::Error>> {
 //! let descriptor = stream.message_descriptor()?;
 //! for i in 0..1_000i64 {
@@ -219,7 +219,7 @@ impl IntoDynamicValue for Vec<u8> {
 /// then [`encode`](Self::encode)d to wire bytes and ingested.
 ///
 /// ```no_run
-/// # use databricks_zerobus_ingest_sdk::{ProtoBytes, ZerobusStream, dynamic::DynamicRecord};
+/// # use databricks_zerobus_ingest_sdk::{ProtoBytes, ZerobusStream, dynamic_proto::DynamicRecord};
 /// # async fn example(stream: &ZerobusStream) -> Result<(), Box<dyn std::error::Error>> {
 /// let descriptor = stream.message_descriptor()?;
 /// let mut record = DynamicRecord::new(descriptor);

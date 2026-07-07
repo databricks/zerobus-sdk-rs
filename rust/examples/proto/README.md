@@ -5,33 +5,44 @@ This directory contains examples demonstrating Protocol Buffers-based data inges
 ## Table of Contents
 
 - [Overview](#overview)
+- [Compiled vs. Dynamic](#compiled-vs-dynamic)
 - [Three Ways to Pass Data](#three-ways-to-pass-data)
-- [Single-Record Example](#single-record-example)
+- [Compiled: Single-Record Example](#compiled-single-record-example)
   - [Running the Example](#running-the-example)
   - [Code Highlights](#code-highlights)
-- [Batch Example](#batch-example)
+- [Compiled: Batch Example](#compiled-batch-example)
   - [Running the Example](#running-the-example-1)
   - [Code Highlights](#code-highlights-1)
 - [Dynamic Schema Example](#dynamic-schema-example)
   - [Running the Example](#running-the-example-2)
   - [Code Highlights](#code-highlights-2)
+  - [Dynamic Batch](#dynamic-batch)
 - [Adapting for Your Custom Table](#adapting-for-your-custom-table)
   - [Generate Schema Files](#generate-schema-files)
   - [Update main.rs](#update-mainrs)
 
 ## Overview
 
-Protocol Buffers examples provide type safety and better performance. **No schema generation needed to run these examples** - schema files are already included in the `output/` folders.
+Protocol Buffers examples provide type safety and better performance.
 
 **Features:**
 - Type-safe record creation with compile-time validation
 - Efficient binary encoding
 - Better for production use cases
 
-**Available examples:**
-- **`single.rs`** - Ingest records one at a time using `ingest_record_offset()` / `ingest_record()`
-- **`batch.rs`** - Ingest multiple records at once using `ingest_records_offset()` / `ingest_records()`
-- **`dynamic.rs`** - Build the schema at runtime (no compiled `.proto`) and fill records field-by-field with `DynamicRecord`
+## Compiled vs. Dynamic
+
+The examples are grouped by how the protobuf schema is obtained:
+
+- **`compiled/`** — the schema is known ahead of time and compiled into Rust structs.
+  **No schema generation needed to run these** — the files under `compiled/output/`
+  are already included.
+  - **`compiled/single.rs`** - Ingest records one at a time using `ingest_record_offset()` / `ingest_record()`
+  - **`compiled/batch.rs`** - Ingest multiple records at once using `ingest_records_offset()` / `ingest_records()`
+- **`dynamic/`** — the schema is known only at runtime (no compiled `.proto`), and records
+  are built field-by-field with `DynamicRecord`.
+  - **`dynamic/single.rs`** - Build the descriptor in code and ingest dynamic records one at a time
+  - **`dynamic/batch.rs`** - Ingest multiple dynamic records at once using `ingest_records_offset()`
 
 ## Three Ways to Pass Data
 
@@ -48,15 +59,15 @@ The SDK supports three approaches for passing Protocol Buffers data:
 - **`ProtoBytes`** - When you have pre-encoded bytes and want explicit type clarity
 - **Raw `Vec<u8>`** - For backward compatibility with existing code; works the same as `ProtoBytes`
 
-## Single-Record Example
+## Compiled: Single-Record Example
 
 ### Running the Example
 
-1. Configure credentials in `single.rs` (see [Prerequisites](../README.md#prerequisites))
+1. Configure credentials in `compiled/single.rs` (see [Prerequisites](../README.md#prerequisites))
 
 2. Run the example:
    ```bash
-   cargo run -p rust-examples-proto --example proto_single
+   cargo run -p rust-examples-proto --example proto_compiled_single
    ```
 
 **Expected output:**
@@ -119,15 +130,15 @@ let stream = sdk
     .await?;
 ```
 
-## Batch Example
+## Compiled: Batch Example
 
 ### Running the Example
 
-1. Configure credentials in `batch.rs` (see [Prerequisites](../README.md#prerequisites))
+1. Configure credentials in `compiled/batch.rs` (see [Prerequisites](../README.md#prerequisites))
 
 2. Run the example:
    ```bash
-   cargo run -p rust-examples-proto --example proto_batch
+   cargo run -p rust-examples-proto --example proto_compiled_batch
    ```
 
 **Expected output:**
@@ -185,19 +196,19 @@ if let Some(offset) = stream.ingest_records_offset(batch).await? {
 
 ## Dynamic Schema Example
 
-`dynamic.rs` covers the case where the table's schema is known only at runtime and
-there is no compiled `prost::Message` type. It builds a `DescriptorProto` in code
+`dynamic/single.rs` covers the case where the table's schema is known only at runtime
+and there is no compiled `prost::Message` type. It builds a `DescriptorProto` in code
 with `schema::descriptor_from_uc_columns` (you could equally fetch one from Unity
 Catalog), selects it with `.dynamic_proto(...)`, and fills each record
 field-by-field with `DynamicRecord`.
 
 ### Running the Example
 
-1. Configure credentials in `dynamic.rs` (see [Prerequisites](../README.md#prerequisites))
+1. Configure credentials in `dynamic/single.rs` (see [Prerequisites](../README.md#prerequisites))
 
 2. Run the example:
    ```bash
-   cargo run -p rust-examples-proto --example proto_dynamic
+   cargo run -p rust-examples-proto --example proto_dynamic_single
    ```
 
 ### Code Highlights
@@ -238,6 +249,35 @@ for i in 0..1_000i64 {
 stream.flush().await?; // wait once for all pending acks
 ```
 
+### Dynamic Batch
+
+`dynamic/batch.rs` ingests many dynamic records in a single all-or-nothing call.
+Each record is encoded up front (so `encode()`'s required-field check runs before
+anything is sent), then the bytes are passed to `ingest_records_offset()`:
+
+```bash
+cargo run -p rust-examples-proto --example proto_dynamic_batch
+```
+
+```rust
+// Build and encode each record; collecting into a ZerobusResult surfaces the
+// first record missing a required field as an error.
+let batch: Vec<ProtoBytes> = orders
+    .iter()
+    .map(|order| {
+        let mut record = stream.new_record()?;
+        record.set("id", order.id)?.set("customer_name", order.name)?;
+        Ok(ProtoBytes(record.encode()?))
+    })
+    .collect::<ZerobusResult<_>>()?;
+
+// The whole batch is queued in one call; a single offset covers it.
+if let Some(offset) = stream.ingest_records_offset(batch).await? {
+    println!("Batch queued with offset ID: {offset}");
+}
+stream.flush().await?;
+```
+
 ## Adapting for Your Custom Table
 
 To use your own table, you need to generate schema files and update the example code.
@@ -254,10 +294,10 @@ cargo run -- \
   --client-id "<your-client-id>" \
   --client-secret "<your-client-secret>" \
   --table "<catalog.schema.your_table>" \
-  --output-dir "../../examples/proto/output"
+  --output-dir "../../examples/proto/compiled/output"
 ```
 
-Both `single.rs` and `batch.rs` share the same `output/` directory, so the generated schema files only need to be produced once.
+Both `compiled/single.rs` and `compiled/batch.rs` share the same `compiled/output/` directory, so the generated schema files only need to be produced once. (The dynamic example needs no generated files.)
 
 This generates:
 - `output/<your_table>.proto` - Protocol Buffer schema definition

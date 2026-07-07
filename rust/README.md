@@ -562,7 +562,7 @@ for i in 0..100_000i64 {
 stream.flush().await?; // wait once for all pending acknowledgments
 ```
 
-On the wire this is identical to `.compiled_proto(...)`; the difference is that records are built dynamically rather than from a generated struct. See the [`dynamic`](https://docs.rs/databricks-zerobus-ingest-sdk/latest/databricks_zerobus_ingest_sdk/dynamic/) module and the `proto_dynamic` example for details.
+On the wire this is identical to `.compiled_proto(...)`; the difference is that records are built dynamically rather than from a generated struct. See the [`dynamic_proto`](https://docs.rs/databricks-zerobus-ingest-sdk/latest/databricks_zerobus_ingest_sdk/dynamic_proto/) module and the `proto_dynamic_single` example for details.
 
 Setters can be called in any order. The builder validates at `build()` time that both authentication and format have been configured.
 
@@ -575,7 +575,7 @@ The SDK provides flexible ways to ingest data with different levels of abstracti
 | `ProtoMessage<T>` | Proto | Auto-encoding: pass structs, SDK handles encoding |
 | `ProtoBytes` | Proto | Pre-encoded: pass bytes with explicit wrapper |
 | `Vec<u8>` | Proto | Backward-compatible: raw bytes without wrapper |
-| `DynamicRecord` | Proto | Dynamic: build fields at runtime against a descriptor ([`dynamic_proto`](#dynamic-protobuf-stream)) |
+| `ProtoBytes(record.encode()?)` | Proto | Dynamic: build fields at runtime against a descriptor, then encode ([`dynamic_proto`](#dynamic-protobuf-stream)) |
 | `JsonValue<T>` | JSON | Auto-serializing: pass structs, SDK handles JSON conversion |
 | `JsonString` | JSON | Pre-serialized: pass JSON strings with explicit wrapper |
 | `String` | JSON | Backward-compatible: raw strings without wrapper |
@@ -954,8 +954,10 @@ The `examples/` directory contains four working examples covering different seri
 |---------|--------------|-----------|----------|
 | `json/single.rs` | JSON | Single-record | `cargo run -p rust-examples-json --example json_single` |
 | `json/batch.rs` | JSON | Batch | `cargo run -p rust-examples-json --example json_batch` |
-| `proto/single.rs` | Protocol Buffers | Single-record | `cargo run -p rust-examples-proto --example proto_single` |
-| `proto/batch.rs` | Protocol Buffers | Batch | `cargo run -p rust-examples-proto --example proto_batch` |
+| `proto/compiled/single.rs` | Protocol Buffers | Single-record | `cargo run -p rust-examples-proto --example proto_compiled_single` |
+| `proto/compiled/batch.rs` | Protocol Buffers | Batch | `cargo run -p rust-examples-proto --example proto_compiled_batch` |
+| `proto/dynamic/single.rs` | Protocol Buffers (runtime schema) | Single-record | `cargo run -p rust-examples-proto --example proto_dynamic_single` |
+| `proto/dynamic/batch.rs` | Protocol Buffers (runtime schema) | Batch | `cargo run -p rust-examples-proto --example proto_dynamic_batch` |
 
 
 Check [`examples/README.md`](https://github.com/databricks/zerobus-sdk/blob/main/rust/examples/README.md) for setup instructions and detailed comparisons.
@@ -1220,11 +1222,15 @@ cargo run -p rust-examples-json --example json_single
 # Build and run JSON batch example
 cargo run -p rust-examples-json --example json_batch
 
-# Build and run Protocol Buffers single-record example
-cargo run -p rust-examples-proto --example proto_single
+# Build and run Protocol Buffers single-record example (compiled schema)
+cargo run -p rust-examples-proto --example proto_compiled_single
 
-# Build and run Protocol Buffers batch example
-cargo run -p rust-examples-proto --example proto_batch
+# Build and run Protocol Buffers batch example (compiled schema)
+cargo run -p rust-examples-proto --example proto_compiled_batch
+
+# Build and run Protocol Buffers dynamic-schema examples
+cargo run -p rust-examples-proto --example proto_dynamic_single
+cargo run -p rust-examples-proto --example proto_dynamic_batch
 ```
 
 ## Community and Contributing
