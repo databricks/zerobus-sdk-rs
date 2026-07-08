@@ -118,8 +118,8 @@ Stream::~Stream() {
   }
 }
 
-// Move transfers the handle plus the provider and ack callback that must
-// outlive it, nulling the source so only one Stream closes/frees it.
+// Move transfers the handle plus the provider and ack callback that outlive it,
+// nulling the source so only one Stream closes/frees it.
 Stream::Stream(Stream&& other) noexcept
     : handle_(other.handle_),
       provider_(std::move(other.provider_)),

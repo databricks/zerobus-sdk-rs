@@ -1,6 +1,6 @@
-// extern "C" trampolines the core invokes to deliver acks/errors (declared in
-// detail/ack_callback.hpp). Each recovers the AckCallback from user_data and
-// forwards to it. Exceptions are contained — unwinding across the C FFI is UB.
+// extern "C" trampolines the core invokes to deliver acks/errors. Each recovers
+// the AckCallback from user_data and forwards to it, containing exceptions
+// (unwinding across the C FFI is UB). Declared in detail/ack_callback.hpp.
 #include "detail/ack_callback.hpp"
 
 #include <cstdio>
@@ -12,7 +12,7 @@ namespace zerobus {
 namespace detail {
 
 extern "C" void zerobus_cpp_ack_on_ack_trampoline(std::int64_t offset,
-                                                  void* user_data) {
+                                                  void* user_data) noexcept {
   if (user_data == nullptr) {
     return;
   }
@@ -20,8 +20,8 @@ extern "C" void zerobus_cpp_ack_on_ack_trampoline(std::int64_t offset,
   try {
     callback->on_ack(offset);
   } catch (...) {
-    // Contain: must not unwind across the C FFI boundary. Log so a throwing
-    // callback (a user bug) leaves a signal rather than vanishing silently.
+    // Contain (can't unwind across the FFI) but log, so a throwing callback bug
+    // leaves a signal.
     std::fprintf(stderr,
                  "zerobus: AckCallback::on_ack threw for offset %lld; "
                  "exception swallowed at the C FFI boundary\n",
@@ -31,7 +31,7 @@ extern "C" void zerobus_cpp_ack_on_ack_trampoline(std::int64_t offset,
 
 extern "C" void zerobus_cpp_ack_on_error_trampoline(std::int64_t offset,
                                                     const char* error_message,
-                                                    void* user_data) {
+                                                    void* user_data) noexcept {
   if (user_data == nullptr) {
     return;
   }
@@ -41,8 +41,7 @@ extern "C" void zerobus_cpp_ack_on_error_trampoline(std::int64_t offset,
     std::string message = error_message != nullptr ? error_message : "";
     callback->on_error(offset, message);
   } catch (...) {
-    // Contain: must not unwind across the C FFI boundary. Log so a throwing
-    // callback (a user bug) leaves a signal rather than vanishing silently.
+    // See on_ack trampoline: contain but log.
     std::fprintf(stderr,
                  "zerobus: AckCallback::on_error threw for offset %lld; "
                  "exception swallowed at the C FFI boundary\n",

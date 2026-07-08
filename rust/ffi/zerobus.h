@@ -132,16 +132,15 @@ typedef struct CStreamConfigurationOptions {
    * Optional ack callback. When either pointer is non-null, acks/errors are
    * delivered asynchronously instead of only via wait_for_offset / flush.
    * Fired on a background task, serialized (never concurrent), so keep them
-   * lightweight; ack_user_data and any shared state need their own sync.
-   * ack_on_ack: once per record, in order; acks are monotonic (offset N => all <= N).
-   * ack_on_error: relays the core error text as-is (no retryability); the same
+   * lightweight; ack_user_data and shared state need their own sync.
+   * ack_on_ack: once per record, in order; monotonic (offset N => all <= N).
+   * ack_on_error: relays core error text as-is (no retryability); the same
    * failure may also surface from ingest / flush.
-   * Callbacks fire during close(), which drains the handler task but only
-   * waits up to callback_max_wait_time_ms before aborting it. abort() cancels
-   * at the next await point, so a callback executing synchronously when the
-   * budget expires can still be running after close() returns. Keep both
-   * pointers and ack_user_data alive until the callback object is destroyed,
-   * not merely until close() returns.
+   * close() drains the handler task up to callback_max_wait_time_ms, then
+   * abort()s it — but abort only cancels at an await, so a synchronously
+   * running callback can outlive close(). Keep both pointers and
+   * ack_user_data alive until the callback object is destroyed, not merely
+   * until close() returns.
    * error_message is valid only during the call (copy to keep). Callbacks must
    * not unwind across the C boundary (panics are contained and logged).
    */
