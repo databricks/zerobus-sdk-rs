@@ -912,6 +912,21 @@ pub extern "C" fn zerobus_stream_close(stream: *mut CZerobusStream, result: *mut
     })
 }
 
+/// Returns whether the stream has been closed.
+#[no_mangle]
+pub extern "C" fn zerobus_stream_is_closed(stream: *mut CZerobusStream) -> bool {
+    // No CResult out-param; on a caught panic return `true` (treat as closed),
+    // matching the answer for an invalid handle.
+    ffi_guard(
+        ptr::null_mut(),
+        true,
+        move || match validate_stream_ptr(stream) {
+            Ok(s) => s.is_closed(),
+            Err(_) => true,
+        },
+    )
+}
+
 /// Free error message string
 #[no_mangle]
 pub extern "C" fn zerobus_free_error_message(message: *mut c_char) {
