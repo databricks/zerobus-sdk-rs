@@ -6,8 +6,8 @@ mod tests {
         zerobus_get_default_config, zerobus_sdk_builder_application_name,
         zerobus_sdk_builder_build, zerobus_sdk_builder_disable_tls, zerobus_sdk_builder_endpoint,
         zerobus_sdk_builder_free, zerobus_sdk_builder_new, zerobus_sdk_builder_sdk_identifier,
-        zerobus_sdk_builder_unity_catalog_url, zerobus_sdk_free, CHeaders, CRecordArray, CResult,
-        CallbackHeadersProvider, RecordType, ZerobusError,
+        zerobus_sdk_builder_unity_catalog_url, zerobus_sdk_create_stream, zerobus_sdk_free,
+        CHeaders, CRecordArray, CResult, CallbackHeadersProvider, RecordType, ZerobusError,
     };
     use databricks_zerobus_ingest_sdk::HeadersProvider;
     use std::ffi::{CStr, CString};
@@ -339,6 +339,60 @@ mod tests {
         // Verify it returns reasonable defaults
         assert!(config.max_inflight_requests > 0);
         assert_eq!(config.record_type, 1); // Proto
+    }
+
+    #[test]
+    fn test_create_stream_retryable_error_sets_retryable_flag() {
+        // Build an SDK that points to an unreachable local endpoint so stream
+        // creation fails with a retryable transport/setup error.
+        let endpoint_c = CString::new("http://127.0.0.1:1").unwrap();
+        let uc_c = CString::new("http://127.0.0.1:1").unwrap();
+        let builder = zerobus_sdk_builder_new();
+        zerobus_sdk_builder_endpoint(builder, endpoint_c.as_ptr());
+        zerobus_sdk_builder_unity_catalog_url(builder, uc_c.as_ptr());
+        zerobus_sdk_builder_disable_tls(builder);
+
+        let mut build_result = CResult {
+            success: false,
+            error_message: ptr::null_mut(),
+            is_retryable: false,
+        };
+        let sdk = zerobus_sdk_builder_build(builder, &mut build_result as *mut CResult);
+        assert!(build_result.success, "SDK build should succeed");
+        assert!(!sdk.is_null(), "SDK pointer should be non-null");
+
+        let table = CString::new("main.default.events").unwrap();
+        let client_id = CString::new("client-id").unwrap();
+        let client_secret = CString::new("client-secret").unwrap();
+        let mut opts = zerobus_get_default_config();
+        opts.record_type = 2; // JSON stream: no proto descriptor required.
+
+        let mut create_result = CResult {
+            success: true,
+            error_message: ptr::null_mut(),
+            is_retryable: false,
+        };
+
+        let stream = zerobus_sdk_create_stream(
+            sdk,
+            table.as_ptr(),
+            ptr::null(),
+            0,
+            client_id.as_ptr(),
+            client_secret.as_ptr(),
+            &opts as *const _,
+            &mut create_result as *mut CResult,
+        );
+
+        assert!(stream.is_null(), "create_stream should fail");
+        assert!(!create_result.success, "result should indicate failure");
+        assert!(
+            create_result.is_retryable,
+            "retryable create failures must set is_retryable=true"
+        );
+
+        zerobus_free_error_message(create_result.error_message);
+        zerobus_sdk_free(sdk);
     }
 
     // ========================================================================

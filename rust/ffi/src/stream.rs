@@ -2,7 +2,9 @@
 
 use crate::common::*;
 use databricks_zerobus_ingest_sdk::databricks::zerobus::RecordType;
-use databricks_zerobus_ingest_sdk::{EncodedRecord, HeadersProvider, StreamBuilder, ZerobusStream};
+use databricks_zerobus_ingest_sdk::{
+    EncodedRecord, HeadersProvider, StreamBuilder, ZerobusError, ZerobusStream,
+};
 use prost::Message;
 use std::ffi::CString;
 use std::os::raw::c_char;
@@ -69,17 +71,28 @@ pub extern "C" fn zerobus_sdk_create_stream(
         };
 
         let res = RUNTIME.block_on(async {
-            let table_name_str = unsafe { c_str_to_string(table_name).map_err(|e| e.to_string())? };
-            let client_id_str = unsafe { c_str_to_string(client_id).map_err(|e| e.to_string())? };
-            let client_secret_str =
-                unsafe { c_str_to_string(client_secret).map_err(|e| e.to_string())? };
+            let table_name_str = unsafe {
+                c_str_to_string(table_name)
+                    .map_err(|e| ZerobusError::InvalidArgument(e.to_string()))?
+            };
+            let client_id_str = unsafe {
+                c_str_to_string(client_id)
+                    .map_err(|e| ZerobusError::InvalidArgument(e.to_string()))?
+            };
+            let client_secret_str = unsafe {
+                c_str_to_string(client_secret)
+                    .map_err(|e| ZerobusError::InvalidArgument(e.to_string()))?
+            };
 
             let descriptor_proto = if !descriptor_proto_bytes.is_null() && descriptor_proto_len > 0
             {
                 let bytes = unsafe {
                     std::slice::from_raw_parts(descriptor_proto_bytes, descriptor_proto_len)
                 };
-                Some(prost_types::DescriptorProto::decode(bytes).map_err(|e| e.to_string())?)
+                Some(
+                    prost_types::DescriptorProto::decode(bytes)
+                        .map_err(|e| ZerobusError::InvalidArgument(e.to_string()))?,
+                )
             } else {
                 None
             };
@@ -100,21 +113,27 @@ pub extern "C" fn zerobus_sdk_create_stream(
             let mut builder = match record_type {
                 RecordType::Proto => {
                     let desc = descriptor_proto.ok_or_else(|| {
-                        "Proto descriptor is required for Proto record type".to_string()
+                        ZerobusError::InvalidArgument(
+                            "Proto descriptor is required for Proto record type".to_string(),
+                        )
                     })?;
                     base.compiled_proto(desc)
                 }
                 RecordType::Json => base.json(),
-                RecordType::Unspecified => return Err("Record type is not specified".to_string()),
+                RecordType::Unspecified => {
+                    return Err(ZerobusError::InvalidArgument(
+                        "Record type is not specified".to_string(),
+                    ))
+                }
             };
             if let Some(c) = c_opts {
                 builder = apply_c_stream_options(builder, c);
             }
 
-            let stream = builder.build().await.map_err(|e| e.to_string())?;
+            let stream = builder.build().await?;
 
             let arc = Arc::new(stream);
-            Ok::<*mut CZerobusStream, String>(Arc::into_raw(arc) as *mut CZerobusStream)
+            Ok::<*mut CZerobusStream, ZerobusError>(Arc::into_raw(arc) as *mut CZerobusStream)
         });
 
         match res {
@@ -123,7 +142,11 @@ pub extern "C" fn zerobus_sdk_create_stream(
                 stream_ptr
             }
             Err(err) => {
-                write_error_result(result, &err, false);
+                if !result.is_null() {
+                    unsafe {
+                        *result = CResult::error(err);
+                    }
+                }
                 ptr::null_mut()
             }
         }
@@ -153,14 +176,20 @@ pub extern "C" fn zerobus_sdk_create_stream_with_headers_provider(
         };
 
         let res = RUNTIME.block_on(async {
-            let table_name_str = unsafe { c_str_to_string(table_name).map_err(|e| e.to_string())? };
+            let table_name_str = unsafe {
+                c_str_to_string(table_name)
+                    .map_err(|e| ZerobusError::InvalidArgument(e.to_string()))?
+            };
 
             let descriptor_proto = if !descriptor_proto_bytes.is_null() && descriptor_proto_len > 0
             {
                 let bytes = unsafe {
                     std::slice::from_raw_parts(descriptor_proto_bytes, descriptor_proto_len)
                 };
-                Some(prost_types::DescriptorProto::decode(bytes).map_err(|e| e.to_string())?)
+                Some(
+                    prost_types::DescriptorProto::decode(bytes)
+                        .map_err(|e| ZerobusError::InvalidArgument(e.to_string()))?,
+                )
             } else {
                 None
             };
@@ -184,21 +213,27 @@ pub extern "C" fn zerobus_sdk_create_stream_with_headers_provider(
             let mut builder = match record_type {
                 RecordType::Proto => {
                     let desc = descriptor_proto.ok_or_else(|| {
-                        "Proto descriptor is required for Proto record type".to_string()
+                        ZerobusError::InvalidArgument(
+                            "Proto descriptor is required for Proto record type".to_string(),
+                        )
                     })?;
                     base.compiled_proto(desc)
                 }
                 RecordType::Json => base.json(),
-                RecordType::Unspecified => return Err("Record type is not specified".to_string()),
+                RecordType::Unspecified => {
+                    return Err(ZerobusError::InvalidArgument(
+                        "Record type is not specified".to_string(),
+                    ))
+                }
             };
             if let Some(c) = c_opts {
                 builder = apply_c_stream_options(builder, c);
             }
 
-            let stream = builder.build().await.map_err(|e| e.to_string())?;
+            let stream = builder.build().await?;
 
             let arc = Arc::new(stream);
-            Ok::<*mut CZerobusStream, String>(Arc::into_raw(arc) as *mut CZerobusStream)
+            Ok::<*mut CZerobusStream, ZerobusError>(Arc::into_raw(arc) as *mut CZerobusStream)
         });
 
         match res {
@@ -207,7 +242,11 @@ pub extern "C" fn zerobus_sdk_create_stream_with_headers_provider(
                 stream_ptr
             }
             Err(err) => {
-                write_error_result(result, &err, false);
+                if !result.is_null() {
+                    unsafe {
+                        *result = CResult::error(err);
+                    }
+                }
                 ptr::null_mut()
             }
         }
@@ -240,13 +279,10 @@ pub extern "C" fn zerobus_sdk_recreate_stream(
         };
 
         let res = RUNTIME.block_on(async {
-            let new_stream = sdk_ref
-                .recreate_stream(stream_ref)
-                .await
-                .map_err(|e| e.to_string())?;
+            let new_stream = sdk_ref.recreate_stream(stream_ref).await?;
 
             let arc = Arc::new(new_stream);
-            Ok::<*mut CZerobusStream, String>(Arc::into_raw(arc) as *mut CZerobusStream)
+            Ok::<*mut CZerobusStream, ZerobusError>(Arc::into_raw(arc) as *mut CZerobusStream)
         });
 
         match res {
@@ -255,7 +291,11 @@ pub extern "C" fn zerobus_sdk_recreate_stream(
                 stream_ptr
             }
             Err(err) => {
-                write_error_result(result, &err, false);
+                if !result.is_null() {
+                    unsafe {
+                        *result = CResult::error(err);
+                    }
+                }
                 ptr::null_mut()
             }
         }
