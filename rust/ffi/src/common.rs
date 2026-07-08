@@ -147,8 +147,12 @@ pub struct CStreamConfigurationOptions {
     /// ack_on_ack: once per record, in order; acks are monotonic (offset N => all <= N).
     /// ack_on_error: relays the core error text as-is (no retryability); the same
     /// failure may also surface from ingest / flush.
-    /// Callbacks may fire during close() but never after it returns; keep both
-    /// pointers and ack_user_data alive until close() returns.
+    /// Callbacks fire during close(), which drains the handler task but only
+    /// waits up to callback_max_wait_time_ms before aborting it. abort() cancels
+    /// at the next await point, so a callback executing synchronously when the
+    /// budget expires can still be running after close() returns. Keep both
+    /// pointers and ack_user_data alive until the callback object is destroyed,
+    /// not merely until close() returns.
     /// error_message is valid only during the call (copy to keep). Callbacks must
     /// not unwind across the C boundary (panics are contained and logged).
     // Signatures are written inline rather than via the AckOn*Callback aliases

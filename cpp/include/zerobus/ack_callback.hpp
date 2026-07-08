@@ -12,10 +12,13 @@ namespace zerobus {
 ///
 /// `on_ack` fires once per record in offset order, monotonic (offset `N`
 /// implies all `<= N` acked); `on_error` fires per record left unacked on
-/// terminal failure. Callbacks run serialized on a background task and may run
-/// on a different thread than the stream: synchronize shared state and keep
-/// them light. Don't call back into the owning `Stream` (ingest/flush/close)
-/// from a callback — that is concurrent use of a non-thread-safe object.
+/// terminal failure. A terminal failure may also surface from
+/// `ingest`/`flush`/`wait_for_offset()`, so callers mixing those with a
+/// callback see it on both paths. Callbacks run serialized on a background task
+/// and may run on a different thread than the stream: synchronize shared state
+/// and keep them light. Don't call back into the owning `Stream`
+/// (ingest/flush/close) from a callback — that is concurrent use of a
+/// non-thread-safe object.
 ///
 /// Lifetime: the `Stream` holds a `shared_ptr` to the callback for its own
 /// lifetime. This is necessary but not always sufficient: a callback still

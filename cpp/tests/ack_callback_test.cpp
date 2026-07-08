@@ -89,6 +89,7 @@ void test_trampolines_dispatch() {
   zerobus::detail::zerobus_cpp_ack_on_error_trampoline(8, nullptr, &cb);
   check("on_error null message => empty", cb.last_error_message.empty());
   check("on_error offset still forwarded", cb.last_error_offset == 8);
+  check("on_error still invoked on null message", cb.error_count == 2);
 }
 
 void test_null_user_data_is_ignored() {

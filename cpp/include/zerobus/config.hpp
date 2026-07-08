@@ -43,8 +43,10 @@ struct StreamOptions {
   /// `nullopt` = wait the full server-specified duration; `0` = recover
   /// immediately; `>0` = wait up to min(this, server duration).
   std::optional<std::uint64_t> stream_paused_max_wait_time_ms;
-  /// Max time to wait for a headers-provider callback to return.
-  /// `nullopt` leaves the FFI default in place.
+  /// Max time `close()` waits for the async callback task (see `ack_callback`)
+  /// to drain before aborting it. A callback still running when this budget
+  /// expires can outlive `close()` (see `AckCallback` for the lifetime
+  /// consequences). `nullopt` leaves the FFI default in place.
   std::optional<std::uint64_t> callback_max_wait_time_ms;
   /// Optional async ack/error callback (default `nullptr` = none). The `Stream`
   /// keeps a `shared_ptr` to it for its lifetime. See `AckCallback` for the
