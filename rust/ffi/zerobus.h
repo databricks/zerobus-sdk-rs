@@ -545,6 +545,11 @@ void zerobus_free_record_array(struct CRecordArray array);
 bool zerobus_stream_close(struct CZerobusStream *stream, struct CResult *result);
 
 /**
+ * Returns whether the stream has been closed.
+ */
+bool zerobus_stream_is_closed(struct CZerobusStream *stream);
+
+/**
  * Free error message string
  */
 void zerobus_free_error_message(char *message);
