@@ -11,7 +11,7 @@ jobs:
     runs-on:
       group: databricks-protected-runner-group
       labels: linux-ubuntu-latest
-    needs: [changes, rust, java, typescript, python, go, cpp]
+    needs: [changes, rust, java, typescript, python, go, purego, cpp]
     if: always()
     steps:
       - run: |
@@ -21,6 +21,7 @@ jobs:
             "${{ needs.typescript.result }}" \
             "${{ needs.python.result }}" \
             "${{ needs.go.result }}" \
+            "${{ needs.purego.result }}" \
             "${{ needs.cpp.result }}"; do
             if [[ "$result" != "success" && "$result" != "skipped" ]]; then
               echo "Job failed or was cancelled: $result"
@@ -38,6 +39,7 @@ jobs:
       typescript: ${{ steps.filter.outputs.typescript }}
       python: ${{ steps.filter.outputs.python }}
       go: ${{ steps.filter.outputs.go }}
+      purego: ${{ steps.filter.outputs.purego }}
       cpp: ${{ steps.filter.outputs.cpp }}
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
@@ -62,6 +64,10 @@ jobs:
               - 'go/**'
               - 'rust/sdk/zerobus_service.proto'
               - '.github/workflows/ci-go.yml'
+            purego:
+              - 'purego/**'
+              - 'rust/sdk/zerobus_service.proto'
+              - '.github/workflows/ci-purego.yml'
             cpp:
               - 'cpp/**'
               - '.github/workflows/ci-cpp.yml'
@@ -106,6 +112,14 @@ jobs:
       id-token: write
       contents: read
     uses: ./.github/workflows/ci-go.yml
+
+  purego:
+    needs: changes
+    if: needs.changes.outputs.purego == 'true'
+    permissions:
+      id-token: write
+      contents: read
+    uses: ./.github/workflows/ci-purego.yml
 
   cpp:
     needs: changes
