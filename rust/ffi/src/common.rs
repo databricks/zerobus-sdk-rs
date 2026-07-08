@@ -251,7 +251,7 @@ impl HeadersProvider for CallbackHeadersProvider {
                     .to_string_lossy()
                     .into_owned()
             };
-            crate::zerobus_free_headers(c_headers);
+            zerobus_free_headers(c_headers);
             return Err(ZerobusError::InvalidArgument(format!(
                 "Headers provider error: {}",
                 error_str
@@ -277,9 +277,86 @@ impl HeadersProvider for CallbackHeadersProvider {
             }
         }
 
-        crate::zerobus_free_headers(c_headers);
+        zerobus_free_headers(c_headers);
         Ok(headers)
     }
+}
+
+/// Allocate a zeroed `CHeader` array of `count` elements for a headers callback
+/// to populate and return in a `CHeaders`.
+///
+/// The array is allocated by the same allocator `zerobus_free_headers` releases
+/// it with (`libc::calloc` / `libc::free`), so a non-Rust callback can build a
+/// `CHeaders` without its own allocator having to match Rust's. This matters on
+/// Windows, where the C/C++ caller and this statically linked library can
+/// resolve to different CRT heaps; allocating here keeps the alloc/free pair on
+/// one heap and avoids the cross-heap free that would otherwise corrupt memory.
+///
+/// Zero-initialised so a partially populated array is safe to pass to
+/// `zerobus_free_headers` (unset key/value pointers are null and skipped).
+/// Returns null if `count` is 0 or the allocation fails.
+// Not wrapped in `ffi_guard`: a pure `calloc` that returns null on failure,
+// with no panic-capable operation.
+#[no_mangle]
+pub extern "C" fn zerobus_alloc_header_array(count: usize) -> *mut CHeader {
+    if count == 0 {
+        return ptr::null_mut();
+    }
+    unsafe { libc::calloc(count, std::mem::size_of::<CHeader>()) as *mut CHeader }
+}
+
+/// Duplicate `len` bytes from `data` into a NUL-terminated C string for a
+/// headers callback to store in a `CHeader` key/value or a `CHeaders`
+/// error_message.
+///
+/// Allocated as a Rust `CString`, matching the `CString::from_raw` that
+/// `zerobus_free_headers` frees it with - the string is allocated and freed by
+/// the same allocator inside this library (see `zerobus_alloc_header_array` for
+/// why that matters). `len` of 0 yields an empty string (a valid non-null
+/// pointer). Returns null on allocation failure or if the input contains an
+/// interior NUL byte (which a C string cannot represent).
+// Not wrapped in `ffi_guard`: null-checks its input and returns null on any
+// failure (`CString::new` reports interior NULs as `Err`), with no
+// panic-capable operation.
+#[no_mangle]
+pub extern "C" fn zerobus_alloc_cstring(data: *const u8, len: usize) -> *mut c_char {
+    let bytes: &[u8] = if len == 0 {
+        &[]
+    } else if data.is_null() {
+        return ptr::null_mut();
+    } else {
+        unsafe { std::slice::from_raw_parts(data, len) }
+    };
+    match CString::new(bytes) {
+        Ok(s) => s.into_raw(),
+        Err(_) => ptr::null_mut(),
+    }
+}
+
+/// Free headers returned from callback
+#[no_mangle]
+pub extern "C" fn zerobus_free_headers(headers: CHeaders) {
+    ffi_guard(ptr::null_mut(), (), move || {
+        if !headers.headers.is_null() {
+            unsafe {
+                let headers_slice = std::slice::from_raw_parts_mut(headers.headers, headers.count);
+                for header in headers_slice {
+                    if !header.key.is_null() {
+                        let _ = CString::from_raw(header.key);
+                    }
+                    if !header.value.is_null() {
+                        let _ = CString::from_raw(header.value);
+                    }
+                }
+                libc::free(headers.headers as *mut std::ffi::c_void);
+            }
+        }
+        if !headers.error_message.is_null() {
+            unsafe {
+                let _ = CString::from_raw(headers.error_message);
+            }
+        }
+    })
 }
 
 /// Function pointer type for the ack-success callback.
