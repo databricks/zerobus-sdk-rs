@@ -128,6 +128,22 @@ typedef struct CStreamConfigurationOptions {
   bool has_stream_paused_max_wait_time_ms;
   uint64_t callback_max_wait_time_ms;
   bool has_callback_max_wait_time_ms;
+  /**
+   * Optional ack callback. When either pointer is non-null, acks/errors are
+   * delivered asynchronously instead of only via wait_for_offset / flush.
+   * Fired on a background task, serialized (never concurrent), so keep them
+   * lightweight; ack_user_data and any shared state need their own sync.
+   * ack_on_ack: once per record, in order; acks are monotonic (offset N => all <= N).
+   * ack_on_error: relays the core error text as-is (no retryability); the same
+   * failure may also surface from ingest / flush.
+   * Callbacks may fire during close() but never after it returns; keep both
+   * pointers and ack_user_data alive until close() returns.
+   * error_message is valid only during the call (copy to keep). Callbacks must
+   * not unwind across the C boundary (panics are contained and logged).
+   */
+  void (*ack_on_ack)(int64_t offset_id, void *user_data);
+  void (*ack_on_error)(int64_t offset_id, const char *error_message, void *user_data);
+  void *ack_user_data;
 } CStreamConfigurationOptions;
 
 /**
