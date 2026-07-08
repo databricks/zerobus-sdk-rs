@@ -1,4 +1,5 @@
 using System.Runtime.CompilerServices;
+using System.Runtime.ExceptionServices;
 using System.Runtime.InteropServices;
 using Databricks.Zerobus.Native;
 
@@ -14,9 +15,10 @@ namespace Databricks.Zerobus;
 /// multiple threads concurrently, just like the Go SDK supports goroutines.
 /// </para>
 /// <para>
-/// Always dispose the stream when finished. <see cref="Dispose()"/> will flush
-/// all pending records before closing. If you need to check for unacknowledged
-/// records after a failure, call <see cref="GetUnackedRecords"/> before disposing.
+/// <see cref="Close()"/> performs a graceful close (flush + close) but keeps the
+/// native stream alive so callers can inspect <see cref="GetUnackedRecords"/> or
+/// recover with <c>ZerobusSdk.RecreateStream(...)</c>. Call <see cref="Dispose()"/>
+/// when you are completely finished with the stream to free native resources.
 /// </para>
 /// </remarks>
 public sealed class ZerobusStream : IDisposable
@@ -217,19 +219,24 @@ public sealed class ZerobusStream : IDisposable
 
     /// <summary>
     /// Gracefully closes the stream after flushing all pending records.
-    /// The stream cannot be used after calling this method.
+    /// After close, ingestion APIs are no longer usable, but the stream remains
+    /// readable for recovery paths (for example <see cref="GetUnackedRecords"/>).
     /// </summary>
     /// <remarks>
-    /// This is automatically called by <see cref="Dispose()"/>, but you may call
-    /// it explicitly if you need to inspect the close error.
+    /// This method does not free native resources. Call <see cref="Dispose()"/>
+    /// after you have finished any recovery operations.
     /// </remarks>
     /// <exception cref="ZerobusException">
     /// Thrown if flush or close fails.
     /// </exception>
     public void Close()
     {
-        Dispose(true);
-        GC.SuppressFinalize(this);
+        using var handle = WithWriteLock();
+        ObjectDisposedException.ThrowIf(_disposed != 0, this);
+        var ptr = GetNativePointerForCall();
+        if (NativeMethods.StreamIsClosed(ptr)) return;
+
+        NativeInterop.StreamClose(ptr);
     }
 
     /// <inheritdoc />
@@ -242,18 +249,34 @@ public sealed class ZerobusStream : IDisposable
     private void Dispose(bool disposing)
     {
         if (Interlocked.CompareExchange(ref _disposed, 1, 0) != 0) return;
+
         using var handle = WithWriteLock();
         var ptr = Interlocked.Exchange(ref _ptr, IntPtr.Zero);
-        if (!disposing) return;
-        if (ptr != IntPtr.Zero)
+        if (ptr == IntPtr.Zero)
         {
-            NativeInterop.StreamClose(ptr);
+            FreeBridgeHandle();
+            return;
         }
-        if (ptr != IntPtr.Zero)
+
+        Exception? closeError = null;
+
+        if (disposing && !NativeMethods.StreamIsClosed(ptr))
         {
-            NativeMethods.StreamFree(ptr);
+            try
+            {
+                NativeInterop.StreamClose(ptr);
+            }
+            catch (Exception ex)
+            {
+                closeError = ex;
+            }
         }
+
+        NativeMethods.StreamFree(ptr);
         FreeBridgeHandle();
+
+        if (closeError is not null)
+            ExceptionDispatchInfo.Capture(closeError).Throw();
     }
 
     /// <summary>

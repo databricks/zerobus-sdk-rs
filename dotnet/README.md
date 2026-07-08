@@ -150,7 +150,10 @@ object[] unacked = stream.GetUnackedRecords();
 
 #### `Close` / `Dispose`
 
-Gracefully closes the stream (flushes first). Called automatically by `using`.
+`Close()` gracefully closes the stream (flushes first) but keeps the stream
+readable for recovery (`GetUnackedRecords`, `RecreateStream`).
+`Dispose()` frees native resources and should be called when recovery work is done.
+`using` calls `Dispose()` automatically.
 
 ```csharp
 stream.Close();
