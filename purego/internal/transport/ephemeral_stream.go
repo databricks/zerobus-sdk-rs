@@ -41,11 +41,12 @@ type Stream struct {
 // Open starts an EphemeralStream, runs the create-stream handshake, and returns
 // the live stream once the server acknowledges it with a stream ID.
 //
-// ctx bounds only opening the stream (dial + handshake), not the returned
-// stream's lifetime: the live stream runs on an internal context cancelled only
-// by Close, so a timeout on Open won't tear it down mid-ingest. ctx's values
-// (including caller-set outgoing metadata) carry onto the live stream. The
-// caller must Close the returned Stream.
+// ctx bounds only opening the stream (RPC start + handshake), not the returned
+// stream's lifetime: cancelling it aborts an in-progress Open promptly, but once
+// Open succeeds the live stream is detached and cancelled only by Close, so a
+// later ctx timeout won't tear it down mid-ingest. Without a deadline, the open
+// attempt is bounded by defaultHandshakeTimeout. ctx's values (including caller
+// metadata) carry onto the live stream. The caller must Close the Stream.
 func (c *Conn) Open(ctx context.Context, p StreamParams) (*Stream, error) {
 	// Normalize once so the metadata header and the create request agree, and so
 	// the validation below also governs the value actually sent.
@@ -63,25 +64,44 @@ func (c *Conn) Open(ctx context.Context, p StreamParams) (*Stream, error) {
 		return nil, fmt.Errorf("transport: open %q: descriptor proto required for PROTO records", p.TableName)
 	}
 
-	// The live stream must outlive Open: detach from ctx's cancel/deadline
-	// (WithoutCancel keeps its values, so caller metadata survives) and make it
-	// cancelable only via Close. ctx still bounds the handshake below.
-	streamCtx := withStreamMetadata(context.WithoutCancel(ctx), p.TableName, p.Token)
-	streamCtx, cancel := context.WithCancel(streamCtx)
+	// openCtx bounds the open attempt: the caller's ctx, defaulted to
+	// defaultHandshakeTimeout when it has no deadline.
+	openCtx := ctx
+	if _, ok := ctx.Deadline(); !ok {
+		var cancelOpen context.CancelFunc
+		openCtx, cancelOpen = context.WithTimeout(ctx, defaultHandshakeTimeout)
+		defer cancelOpen()
+	}
 
-	stream, err := c.open(ctx, streamCtx, p)
+	// Detach the live stream from ctx's cancel/deadline (WithoutCancel keeps its
+	// values, so caller metadata survives); Close is its only canceller.
+	streamCtx := withStreamMetadata(context.WithoutCancel(ctx), p.TableName, p.Token)
+	streamCtx, cancelStream := context.WithCancel(streamCtx)
+
+	// Until the handshake succeeds, bridge openCtx to cancelStream so a caller
+	// cancel/timeout unblocks the in-progress RPC start, first Send, and readiness
+	// wait. stopBridge removes it on success so the live stream is fully detached.
+	stopBridge := context.AfterFunc(openCtx, cancelStream)
+
+	stream, err := c.open(openCtx, streamCtx, cancelStream, p)
 	if err != nil {
-		cancel()
+		cancelStream()
 		return nil, err
 	}
-	stream.cancel = cancel
+	// If the bridge already fired, the stream is being torn down: fail rather than
+	// return one racing cancellation.
+	if !stopBridge() {
+		cancelStream()
+		return nil, fmt.Errorf("transport: open %q: %w", p.TableName, openCtx.Err())
+	}
+	stream.cancel = cancelStream
 	return stream, nil
 }
 
-// open opens the RPC on streamCtx (the live-stream context) and runs the
-// handshake bounded by hctx (the caller's Open context). On error, Open cancels
-// streamCtx. It supplies the two proto-specific hooks and annotates their errors.
-func (c *Conn) open(hctx, streamCtx context.Context, p StreamParams) (*Stream, error) {
+// open starts the RPC on streamCtx and runs the handshake bounded by hctx.
+// teardown cancels streamCtx so the handshake can reap its recv goroutine on
+// cancel/timeout. It supplies the proto-specific hooks and annotates their errors.
+func (c *Conn) open(hctx, streamCtx context.Context, teardown context.CancelFunc, p StreamParams) (*Stream, error) {
 	rpc, err := c.client.EphemeralStream(streamCtx)
 	if err != nil {
 		return nil, fmt.Errorf("transport: open %q: %w", p.TableName, err)
@@ -92,6 +112,7 @@ func (c *Conn) open(hctx, streamCtx context.Context, p StreamParams) (*Stream, e
 	s.setID("ephemeral-stream") // placeholder label until the server assigns an ID
 	if err := s.handshake(
 		hctx,
+		teardown,
 		func(rpc bidiRPC[zerobuspb.EphemeralStreamRequest, zerobuspb.EphemeralStreamResponse]) error {
 			return sendCreateStream(rpc, p)
 		},

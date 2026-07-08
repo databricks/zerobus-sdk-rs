@@ -458,6 +458,34 @@ func TestOpenHonorsCallerDeadline(t *testing.T) {
 	}
 }
 
+// TestOpenAbortsOnCallerCancel verifies that cancelling ctx mid-open (server
+// accepted the stream but withholds the readiness response) aborts Open promptly
+// rather than waiting out the default handshake timeout.
+func TestOpenAbortsOnCallerCancel(t *testing.T) {
+	srv := &fakeServer{streamID: "s", seen: make(chan observed, 1), hangHandshake: true}
+	conn := dialFake(t, srv)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	go func() { // cancel once Open is blocked on the readiness response
+		<-srv.seen
+		cancel()
+	}()
+
+	start := time.Now()
+	_, err := conn.Open(ctx, transport.StreamParams{
+		TableName:  "c.s.t",
+		RecordType: zerobuspb.RecordType_JSON,
+		Token:      "tok",
+	})
+	if err == nil {
+		t.Fatal("Open with caller cancel mid-open: got nil error, want cancellation")
+	}
+	// Well under defaultHandshakeTimeout (30s): the cancel ended it, not the timeout.
+	if elapsed := time.Since(start); elapsed > 5*time.Second {
+		t.Fatalf("Open took %v, expected prompt abort on caller cancel", elapsed)
+	}
+}
+
 // TestOpenDeadlineDoesNotTearDownStream verifies that a deadline used only to
 // bound Open does not cancel the established stream: after a successful Open
 // under a short-lived context, the stream stays usable past that deadline.

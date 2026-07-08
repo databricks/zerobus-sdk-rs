@@ -33,6 +33,7 @@ func TestRawStreamHandshakeAssignsID(t *testing.T) {
 
 	if err := s.handshake(
 		context.Background(),
+		func() {},
 		func(_ bidiRPC[string, string]) error { return nil },
 		func(_ *string) (string, error) { return "stream-123", nil },
 	); err != nil {
@@ -51,6 +52,7 @@ func TestRawStreamHandshakeKeepsFallbackWhenIDEmpty(t *testing.T) {
 
 	if err := s.handshake(
 		context.Background(),
+		func() {},
 		func(_ bidiRPC[string, string]) error { return nil },
 		func(_ *string) (string, error) { return "", nil },
 	); err != nil {
@@ -87,6 +89,57 @@ func TestRawStreamSendRecvAndCloseSendWrapErrorsWithName(t *testing.T) {
 	}
 	if err := s.closeSend(); err == nil || !strings.Contains(err.Error(), "test-stream") {
 		t.Fatalf("closeSend err = %v, expected stream name in wrapped error", err)
+	}
+}
+
+// blockingRPC blocks in Recv until teardown unblocks it, modeling a server that
+// accepts the setup message but withholds the readiness response.
+type blockingRPC struct {
+	release  chan struct{}
+	recvDone chan struct{}
+}
+
+func (b *blockingRPC) Send(_ *string) error { return nil }
+
+func (b *blockingRPC) Recv() (*string, error) {
+	<-b.release
+	close(b.recvDone)
+	return nil, context.Canceled
+}
+
+func (b *blockingRPC) CloseSend() error { return nil }
+
+// TestRawStreamHandshakeReapsGoroutineOnCancel verifies that on context cancel,
+// handshake calls teardown and waits for its recv goroutine before returning.
+func TestRawStreamHandshakeReapsGoroutineOnCancel(t *testing.T) {
+	rpc := &blockingRPC{release: make(chan struct{}), recvDone: make(chan struct{})}
+	s := &rawStream[string, string]{rpc: rpc}
+
+	hctx, cancel := context.WithCancel(context.Background())
+	var teardownCalls int
+	teardown := func() { // stands in for cancelling streamCtx; unblocks Recv
+		teardownCalls++
+		select {
+		case <-rpc.release:
+		default:
+			close(rpc.release)
+		}
+	}
+
+	cancel()
+	err := s.handshake(hctx, teardown, func(_ bidiRPC[string, string]) error { return nil },
+		func(_ *string) (string, error) { return "", nil })
+
+	if err == nil {
+		t.Fatal("handshake with cancelled context: got nil error, want cancellation")
+	}
+	if teardownCalls == 0 {
+		t.Fatal("handshake did not call teardown on cancellation")
+	}
+	select {
+	case <-rpc.recvDone:
+	default:
+		t.Fatal("handshake returned before its recv goroutine exited")
 	}
 }
 

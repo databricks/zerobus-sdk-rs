@@ -9,8 +9,8 @@ import (
 	"time"
 )
 
-// defaultHandshakeTimeout bounds the readiness wait when the caller's context
-// has no deadline, so Open can't hang if the server half-opens the stream.
+// defaultHandshakeTimeout bounds the open attempt when the caller's context has
+// no deadline, so Open can't hang if the server half-opens the stream.
 const defaultHandshakeTimeout = 30 * time.Second
 
 // bidiRPC is the subset of a generated gRPC bidirectional streaming client that
@@ -98,16 +98,18 @@ func (s *rawStream[Req, Resp]) close() {
 // send a setup message, await the readiness response, and validate it. Blocking
 // here surfaces setup failures (auth, schema, table access) at open time.
 //
-// hctx (the caller's Open context) bounds only the readiness wait, defaulting to
-// defaultHandshakeTimeout when it has no deadline; the live stream runs on a
-// separate Close-only context, so this never tears down an established stream.
+// hctx bounds the exchange. recv runs on the stream's Close-only context, so it
+// is bounded off-goroutine via a select on hctx; when hctx fires, teardown
+// cancels that context and handshake waits for the goroutine, so it never
+// outlives the call. teardown must cancel the RPC's context and is safe to call
+// more than once. Reusers (e.g. a future Arrow/Flight wireStream) must supply it.
 //
-// The two hooks are protocol-specific: sendSetup writes the first message, and
-// confirmReady validates the first response and returns the stream ID ("" if the
-// protocol assigns none). Errors carry a concise cause for the caller to
-// annotate.
+// The hooks are protocol-specific: sendSetup writes the first message;
+// confirmReady validates the first response and returns the stream ID ("" if
+// none).
 func (s *rawStream[Req, Resp]) handshake(
 	hctx context.Context,
+	teardown context.CancelFunc,
 	sendSetup func(rpc bidiRPC[Req, Resp]) error,
 	confirmReady func(resp *Resp) (id string, err error),
 ) error {
@@ -115,15 +117,6 @@ func (s *rawStream[Req, Resp]) handshake(
 		return err
 	}
 
-	if _, ok := hctx.Deadline(); !ok {
-		var cancel context.CancelFunc
-		hctx, cancel = context.WithTimeout(hctx, defaultHandshakeTimeout)
-		defer cancel()
-	}
-
-	// Recv runs on the Close-only stream context, not hctx, so bound it by
-	// receiving off-goroutine and selecting on hctx. On timeout/cancel Open tears
-	// the stream down, which unblocks the goroutine.
 	type recvResult struct {
 		resp *Resp
 		err  error
@@ -137,6 +130,9 @@ func (s *rawStream[Req, Resp]) handshake(
 	var resp *Resp
 	select {
 	case <-hctx.Done():
+		// Unblock recv, then wait so the goroutine can't outlive this call.
+		teardown()
+		<-done
 		return fmt.Errorf("await ready response: %w", hctx.Err())
 	case r := <-done:
 		if r.err != nil {

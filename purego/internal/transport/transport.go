@@ -13,7 +13,6 @@ import (
 
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials"
-	"google.golang.org/grpc/credentials/insecure"
 
 	"github.com/databricks/zerobus-sdk/purego/internal/zerobuspb"
 )
@@ -30,10 +29,9 @@ type Conn struct {
 // endpoint uses the same target syntax accepted by grpc.NewClient (for example
 // "host:port", "dns:///host:port", or resolver-specific targets used in tests).
 //
-// The connection is secured with TLS using the host's root CAs unless a
-// transport security option (WithTLSConfig or WithInsecure) overrides it. Like
-// grpc.NewClient, dialing is lazy: the TCP/TLS handshake happens on the first
-// stream, not here.
+// The connection is secured with TLS using the host's root CAs unless
+// WithTLSConfig overrides it. Like grpc.NewClient, dialing is lazy: the TCP/TLS
+// handshake happens on the first stream, not here.
 func Dial(endpoint string, opts ...DialOption) (*Conn, error) {
 	cfg := dialConfig{
 		creds: credentials.NewTLS(&tls.Config{MinVersion: tls.VersionTLS12}),
@@ -71,12 +69,6 @@ type DialOption func(*dialConfig)
 // replacing the default of system root CAs.
 func WithTLSConfig(tc *tls.Config) DialOption {
 	return func(cfg *dialConfig) { cfg.creds = credentials.NewTLS(tc) }
-}
-
-// WithInsecure disables transport security. It is intended for tests and local,
-// plaintext endpoints, and must not be used against production.
-func WithInsecure() DialOption {
-	return func(cfg *dialConfig) { cfg.creds = insecure.NewCredentials() }
 }
 
 // WithGRPCDialOptions passes additional options straight through to gRPC. It is
