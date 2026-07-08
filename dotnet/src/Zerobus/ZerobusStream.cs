@@ -41,6 +41,16 @@ public sealed class ZerobusStream : IDisposable
         _callbackRef = callbackRef;
     }
 
+    /// <summary>
+    /// Returns whether the stream has been closed
+    /// </summary>
+    /// <exception cref="ObjectDisposedException"></exception>
+    public bool IsClosed()
+    {
+        ObjectDisposedException.ThrowIf(_disposed != 0, this);
+        return NativeMethods.StreamIsClosed(_ptr);
+    }
+
     // ── Single-record ingestion ──────────────────────────────────────────
 
     /// <summary>
