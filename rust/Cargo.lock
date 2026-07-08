@@ -4004,7 +4004,7 @@ dependencies = [
 
 [[package]]
 name = "zerobus-ffi"
-version = "1.3.0"
+version = "1.4.0"
 dependencies = [
  "arrow-ipc",
  "async-trait",
@@ -4018,6 +4018,7 @@ dependencies = [
  "prost-types",
  "serde_json",
  "tokio",
+ "tracing",
  "tracing-subscriber",
 ]
 

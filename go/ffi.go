@@ -49,6 +49,12 @@ typedef struct CHeaders {
 
 typedef struct CHeaders (*HeadersProviderCallback)(void *user_data);
 
+// Ack callback function pointers, mirroring the C FFI struct. The Go SDK has no
+// ack-callback API yet and leaves these null; they exist only to keep the struct
+// layout byte-identical to the Rust CStreamConfigurationOptions.
+typedef void (*AckOnAckCallback)(int64_t offset_id, void *user_data);
+typedef void (*AckOnErrorCallback)(int64_t offset_id, const char *error_message, void *user_data);
+
 // Define stream configuration options
 typedef struct CStreamConfigurationOptions {
     uintptr_t max_inflight_requests;
@@ -63,6 +69,9 @@ typedef struct CStreamConfigurationOptions {
     bool has_stream_paused_max_wait_time_ms;
     uint64_t callback_max_wait_time_ms;
     bool has_callback_max_wait_time_ms;
+    AckOnAckCallback ack_on_ack;
+    AckOnErrorCallback ack_on_error;
+    void *ack_user_data;
 } CStreamConfigurationOptions;
 
 // Forward declare functions we need
@@ -267,6 +276,10 @@ func convertConfigToC(opts *StreamConfigurationOptions) C.CStreamConfigurationOp
 		has_stream_paused_max_wait_time_ms: hasStreamPausedMaxWait,
 		callback_max_wait_time_ms:          0,
 		has_callback_max_wait_time_ms:      C.bool(false),
+		// No ack-callback API in the Go SDK yet; leave these null.
+		ack_on_ack:    nil,
+		ack_on_error:  nil,
+		ack_user_data: nil,
 	}
 }
 

@@ -1011,12 +1011,14 @@ try {
 
 Main entry point for the SDK.
 
-**Constructor:**
+**Constructors:**
 ```java
 ZerobusSdk(String serverEndpoint, String unityCatalogEndpoint)
+ZerobusSdk(String serverEndpoint, String unityCatalogEndpoint, String applicationName)
 ```
 - `serverEndpoint` - The Zerobus gRPC endpoint (e.g., `https://<workspace-id>.zerobus.region.cloud.databricks.com`)
 - `unityCatalogEndpoint` - The Unity Catalog endpoint (your workspace URL)
+- `applicationName` (optional) - Application identifier appended to the HTTP `user-agent` header, conventionally `"<product>/<version>"` (e.g. `"my-app/1.0"`). Pass `null` to omit.
 
 **Methods:**
 

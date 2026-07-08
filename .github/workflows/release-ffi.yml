@@ -41,17 +41,17 @@ jobs:
           - runner: { group: databricks-protected-runner-group, labels: linux-ubuntu-latest }
             target: x86_64-apple-darwin
             static_lib: libzerobus_ffi.a
-            dynamic_lib: libzerobus_ffi.dylib
             artifact_dir: darwin-x86_64
             cross: false
             zigbuild: true
+            static_only: true
           - runner: { group: databricks-protected-runner-group, labels: linux-ubuntu-latest }
             target: aarch64-apple-darwin
             static_lib: libzerobus_ffi.a
-            dynamic_lib: libzerobus_ffi.dylib
             artifact_dir: darwin-aarch64
             cross: false
             zigbuild: true
+            static_only: true
           - runner: { group: databricks-protected-runner-group, labels: windows-server-latest }
             target: x86_64-pc-windows-msvc
             static_lib: zerobus_ffi.lib
@@ -121,17 +121,25 @@ jobs:
         run: cargo build --release -p zerobus-ffi --target ${{ matrix.target }}
 
       - name: Build FFI library (zigbuild)
-        if: matrix.zigbuild
+        if: matrix.zigbuild && !matrix.static_only
         env:
           RUSTFLAGS: ${{ matrix.rustflags }}
         run: cargo zigbuild --release -p zerobus-ffi --target ${{ matrix.target }}
+
+      - name: Build FFI static library (zigbuild, static only)
+        if: matrix.zigbuild && matrix.static_only
+        env:
+          RUSTFLAGS: ${{ matrix.rustflags }}
+        run: cargo zigbuild rustc --release -p zerobus-ffi --target ${{ matrix.target }} --crate-type staticlib
 
       - name: Prepare artifacts
         shell: bash
         run: |
           mkdir -p artifacts/${{ matrix.artifact_dir }}
           cp target/${{ matrix.target }}/release/${{ matrix.static_lib }} artifacts/${{ matrix.artifact_dir }}/
-          cp target/${{ matrix.target }}/release/${{ matrix.dynamic_lib }} artifacts/${{ matrix.artifact_dir }}/
+          if [ -n "${{ matrix.dynamic_lib }}" ]; then
+            cp target/${{ matrix.target }}/release/${{ matrix.dynamic_lib }} artifacts/${{ matrix.artifact_dir }}/
+          fi
           cp ffi/zerobus.h artifacts/${{ matrix.artifact_dir }}/
 
       - name: Upload artifact
