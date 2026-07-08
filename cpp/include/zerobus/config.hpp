@@ -46,9 +46,9 @@ struct StreamOptions {
   /// Max time to wait for a headers-provider callback to return.
   /// `nullopt` leaves the FFI default in place.
   std::optional<std::uint64_t> callback_max_wait_time_ms;
-  /// Optional async ack/error callback (default `nullptr` = none). Must outlive
-  /// the `Stream`, which keeps a `shared_ptr`. See `AckCallback` for the
-  /// contract.
+  /// Optional async ack/error callback (default `nullptr` = none). The `Stream`
+  /// keeps a `shared_ptr` to it for its lifetime. See `AckCallback` for the
+  /// full lifetime and threading contract.
   std::shared_ptr<AckCallback> ack_callback;
 };
 

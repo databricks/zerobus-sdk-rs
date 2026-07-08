@@ -159,7 +159,9 @@ Sdk& Sdk::operator=(Sdk&& other) noexcept {
 // Create an OAuth-authenticated proto/JSON stream. The descriptor pointer is
 // null for a JSON stream (descriptor_ptr() maps an empty vector to null), and
 // the StreamOptions are converted to the C struct just for this call. The
-// resulting Stream owns no headers provider, hence the null second argument.
+// resulting Stream owns no headers provider, hence the null second argument;
+// the third argument hands it the ack callback (if any) so the Stream keeps it
+// alive for the raw user_data pointer the core holds.
 Stream Sdk::create_stream(const TableProperties& table,
                           const std::string& client_id,
                           const std::string& client_secret,

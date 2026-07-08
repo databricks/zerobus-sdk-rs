@@ -12,11 +12,20 @@ namespace zerobus {
 ///
 /// `on_ack` fires once per record in offset order, monotonic (offset `N`
 /// implies all `<= N` acked); `on_error` fires per record left unacked on
-/// terminal failure. Callbacks run serialized on a background task, on a
-/// different thread than the stream: synchronize shared state, keep them light.
-/// The callback must outlive the `Stream` (held via `shared_ptr`); it may fire
-/// until `close()` returns, never after. Don't throw — exceptions can't cross
-/// the C boundary (the SDK drops any that do).
+/// terminal failure. Callbacks run serialized on a background task and may run
+/// on a different thread than the stream: synchronize shared state and keep
+/// them light. Don't call back into the owning `Stream` (ingest/flush/close)
+/// from a callback — that is concurrent use of a non-thread-safe object.
+///
+/// Lifetime: the `Stream` holds a `shared_ptr` to the callback for its own
+/// lifetime. This is necessary but not always sufficient: a callback still
+/// running when `close()` hits `callback_max_wait_time_ms` can be invoked after
+/// `close()` returns, and on a freed object if the `Stream` is then destroyed.
+/// Keep callbacks well under that budget, or keep the callback alive past the
+/// `Stream`.
+///
+/// Don't throw — unwinding across the C FFI boundary is undefined behavior; the
+/// SDK catches and logs any exception that escapes.
 class AckCallback {
  public:
   virtual ~AckCallback() = default;

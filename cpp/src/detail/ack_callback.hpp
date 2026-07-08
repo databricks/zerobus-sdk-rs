@@ -10,10 +10,10 @@ namespace detail {
 /// `CStreamConfigurationOptions`. `user_data` points to a live `AckCallback`;
 /// each dispatches to the matching method. Exceptions are contained and a null
 /// `user_data` is ignored.
-extern "C" void zerobus_cpp_ack_on_ack_trampoline(std::int64_t offset_id,
+extern "C" void zerobus_cpp_ack_on_ack_trampoline(std::int64_t offset,
                                                   void* user_data);
 
-extern "C" void zerobus_cpp_ack_on_error_trampoline(std::int64_t offset_id,
+extern "C" void zerobus_cpp_ack_on_error_trampoline(std::int64_t offset,
                                                     const char* error_message,
                                                     void* user_data);
 
