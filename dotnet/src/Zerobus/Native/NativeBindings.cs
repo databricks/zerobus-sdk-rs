@@ -213,6 +213,9 @@ internal static partial class NativeMethods
         IntPtr stream,
         ref CResult result);
 
+    [DllImport(LibName, CallingConvention = CallingConvention.Cdecl, EntryPoint = "zerobus_stream_is_closed")]
+    public static extern bool StreamIsClosed(IntPtr stream);
+
     [DllImport(LibName, CallingConvention = CallingConvention.Cdecl, EntryPoint = "zerobus_stream_free")]
     public static extern void StreamFree(IntPtr stream);
 
