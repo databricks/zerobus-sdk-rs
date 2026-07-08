@@ -1,6 +1,7 @@
-// Covers to_c(ArrowStreamOptions)'s stream_paused_max_wait_time_ms handling:
-// set-value round-trip and the >INT64_MAX rejection (arrow_config_defaults_test
-// only pins the nullopt -> -1 default).
+// Covers to_c(ArrowStreamOptions)'s client-side validation and optional-field
+// handling: the stream_paused_max_wait_time_ms set-value round-trip and
+// >INT64_MAX rejection, and the max_inflight_batches == 0 rejection
+// (arrow_config_defaults_test only pins the nullopt -> -1 default).
 
 #include <cstdint>
 #include <cstdio>
@@ -79,6 +80,33 @@ int main() {
     }
     if (!threw) {
       fail("stream_paused_max_wait_time_ms > INT64_MAX was NOT rejected");
+    }
+  }
+
+  // max_inflight_batches == 0 must be rejected client-side: the core builds a
+  // bounded Tokio channel with this capacity, which panics on 0.
+  {
+    zerobus::ArrowStreamOptions opts{};
+    opts.max_inflight_batches = 0;
+    bool threw = false;
+    try {
+      zerobus::detail::to_c(opts);
+    } catch (const zerobus::ZerobusException&) {
+      threw = true;
+    }
+    if (!threw) {
+      fail("max_inflight_batches == 0 was NOT rejected");
+    }
+  }
+
+  // A positive max_inflight_batches round-trips unchanged.
+  {
+    zerobus::ArrowStreamOptions opts{};
+    opts.max_inflight_batches = 42;
+    const zerobus::CArrowStreamConfigurationOptions c =
+        zerobus::detail::to_c(opts);
+    if (c.max_inflight_batches != 42) {
+      fail("set max_inflight_batches did not round-trip to 42");
     }
   }
 

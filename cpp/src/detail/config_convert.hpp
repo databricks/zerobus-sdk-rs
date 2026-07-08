@@ -46,6 +46,13 @@ inline CStreamConfigurationOptions to_c(const StreamOptions& opts) {
 
 /// Build the C Arrow stream-config struct from `ArrowStreamOptions`.
 inline CArrowStreamConfigurationOptions to_c(const ArrowStreamOptions& opts) {
+  // The core builds a bounded Tokio channel with this capacity
+  // (`mpsc::channel(max_inflight_batches)` in `arrow_stream.rs`), which panics
+  // on a capacity of 0. Reject it here with an actionable message rather than
+  // letting the FFI panic guard surface the opaque panic text.
+  if (opts.max_inflight_batches == 0) {
+    throw ZerobusException("max_inflight_batches must be at least 1", false);
+  }
   CArrowStreamConfigurationOptions c = zerobus_arrow_get_default_config();
   c.max_inflight_batches = opts.max_inflight_batches;
   c.recovery = opts.recovery;

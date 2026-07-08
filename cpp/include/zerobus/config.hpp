@@ -14,7 +14,7 @@ enum class RecordType : std::int32_t {
   Json = 2,
 };
 
-/// Configuration for a (non-Arrow) ingestion stream.
+/// Configuration for a gRPC ingestion stream.
 ///
 /// The scalar defaults below are hand-kept in sync with the Rust core and sent
 /// to the FFI verbatim (see `to_c()`). `config_defaults_test` fails the build
