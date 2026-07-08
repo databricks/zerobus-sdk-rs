@@ -15,7 +15,7 @@ fn apply_c_stream_options<'a>(
     builder: StreamBuilder<'a>,
     c: &CStreamConfigurationOptions,
 ) -> StreamBuilder<'a> {
-    builder
+    let builder = builder
         .max_inflight_requests(c.max_inflight_requests)
         .recovery(c.recovery)
         .recovery_timeout_ms(c.recovery_timeout_ms)
@@ -32,7 +32,18 @@ fn apply_c_stream_options<'a>(
             Some(c.callback_max_wait_time_ms)
         } else {
             None
-        })
+        });
+
+    // Register the ack callback only when the caller supplied a function pointer.
+    if c.ack_on_ack.is_some() || c.ack_on_error.is_some() {
+        builder.ack_callback(Arc::new(CallbackAckCallback::new(
+            c.ack_on_ack,
+            c.ack_on_error,
+            c.ack_user_data,
+        )))
+    } else {
+        builder
+    }
 }
 
 /// Create a stream with OAuth authentication
@@ -884,5 +895,9 @@ pub extern "C" fn zerobus_get_default_config() -> CStreamConfigurationOptions {
         has_stream_paused_max_wait_time_ms: false,
         callback_max_wait_time_ms: defaults::CALLBACK_MAX_WAIT_TIME_MS,
         has_callback_max_wait_time_ms: true,
+        // No ack callback by default.
+        ack_on_ack: None,
+        ack_on_error: None,
+        ack_user_data: ptr::null_mut(),
     }
 }
