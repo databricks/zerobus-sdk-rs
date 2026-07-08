@@ -135,8 +135,8 @@ class Stream {
   // Kept alive for the stream's lifetime; the FFI callback holds a raw pointer
   // into this object.
   std::shared_ptr<HeadersProvider> provider_;
-  // Kept alive for the stream's lifetime for the same reason: the core holds a
-  // raw pointer to it as the ack callback's user_data. May be null.
+  // Kept alive for the same reason: the core holds a raw pointer to it as the
+  // ack callback's user_data. May be null.
   std::shared_ptr<AckCallback> ack_callback_;
 };
 

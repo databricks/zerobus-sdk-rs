@@ -176,8 +176,8 @@ Stream Sdk::create_stream(const TableProperties& table,
     guard.throw_if_error();
     throw ZerobusException("failed to create stream", false);
   }
-  // Hand the ack callback (if any) to the Stream so it outlives the core's raw
-  // user_data pointer to it. No headers provider on the OAuth path.
+  // Keep the ack callback (if any) alive on the Stream. No headers provider
+  // here.
   return Stream(stream, nullptr, options.ack_callback);
 }
 
@@ -203,8 +203,8 @@ Stream Sdk::create_stream(const TableProperties& table,
     guard.throw_if_error();
     throw ZerobusException("failed to create stream", false);
   }
-  // Keep both the headers provider and the ack callback alive on the Stream:
-  // the core holds raw pointers to each for the stream's lifetime.
+  // Keep both the headers provider and ack callback alive on the Stream: the
+  // core holds a raw pointer to each.
   return Stream(stream, std::move(headers_provider), options.ack_callback);
 }
 

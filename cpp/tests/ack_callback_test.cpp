@@ -1,12 +1,7 @@
-// Verifies the C++ ack-callback wiring:
-//  1. to_c() installs the trampolines and points ack_user_data at the callback
-//     only when StreamOptions::ack_callback is set.
-//  2. The extern "C" trampolines dispatch to the right AckCallback method with
-//     the right arguments, tolerate a null user_data, copy the error message,
-//     and contain exceptions thrown by user callbacks (they must not escape
-//     across the C FFI boundary).
-//
-// Dependency-free like the other tests: returns non-zero on failure.
+// Verifies the C++ ack-callback wiring: to_c() installs the trampolines only
+// when a callback is set, and the trampolines dispatch correctly, tolerate a
+// null user_data / null message, and contain exceptions. Returns non-zero on
+// failure (dependency-free, like the other tests).
 
 #include "detail/ack_callback.hpp"
 
