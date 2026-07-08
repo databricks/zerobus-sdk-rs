@@ -1,7 +1,7 @@
-// Verifies the C++ ack-callback wiring: to_c() installs the trampolines only
-// when a callback is set, and the trampolines dispatch correctly, tolerate a
-// null user_data / null message, and contain exceptions. Returns non-zero on
-// failure (dependency-free, like the other tests).
+// Verifies the C++ ack-callback wiring: to_c() installs trampolines only when a
+// callback is set, wait_forever maps correctly, and the trampolines dispatch,
+// tolerate null user_data / null message, and contain exceptions. Returns
+// non-zero on failure (dependency-free, like the other tests).
 
 #include "detail/ack_callback.hpp"
 
@@ -73,6 +73,25 @@ void test_to_c_installs_only_when_set() {
         c.ack_user_data == cb.get());
 }
 
+void test_wait_forever_clears_presence_flag() {
+  // wait_forever must clear the presence flag (Rust reads None => drain
+  // forever) and win over an explicit finite budget.
+  zerobus::StreamOptions opts;
+  opts.callback_wait_forever = true;
+  opts.callback_max_wait_time_ms = 1234;  // ignored when waiting forever
+  zerobus::CStreamConfigurationOptions c = zerobus::detail::to_c(opts);
+  check("wait_forever => presence flag cleared",
+        c.has_callback_max_wait_time_ms == false);
+
+  // Without wait_forever, a finite budget is still honored.
+  opts.callback_wait_forever = false;
+  c = zerobus::detail::to_c(opts);
+  check("finite budget => presence flag set",
+        c.has_callback_max_wait_time_ms == true);
+  check("finite budget => value forwarded",
+        c.callback_max_wait_time_ms == 1234);
+}
+
 void test_trampolines_dispatch() {
   RecordingCallback cb;
 
@@ -93,10 +112,14 @@ void test_trampolines_dispatch() {
 }
 
 void test_null_user_data_is_ignored() {
-  // Must not dereference null; simply returns.
+  // Null user_data must hit the early-return guard rather than dereferencing
+  // it. There is no callback to observe (that is the point), so the only
+  // property we can honestly assert is that neither call crashes; reaching the
+  // check proves the guard fired instead of casting and dispatching to a null
+  // pointer.
   zerobus::detail::zerobus_cpp_ack_on_ack_trampoline(1, nullptr);
   zerobus::detail::zerobus_cpp_ack_on_error_trampoline(1, "x", nullptr);
-  check("null user_data tolerated", true);  // reached here => no crash
+  check("null user_data tolerated (no crash)", true);
 }
 
 void test_exceptions_are_contained() {
@@ -111,6 +134,7 @@ void test_exceptions_are_contained() {
 
 int main() {
   test_to_c_installs_only_when_set();
+  test_wait_forever_clears_presence_flag();
   test_trampolines_dispatch();
   test_null_user_data_is_ignored();
   test_exceptions_are_contained();

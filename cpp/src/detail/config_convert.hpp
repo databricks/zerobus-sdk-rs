@@ -8,15 +8,12 @@
 namespace zerobus {
 namespace detail {
 
-/// Build the C stream-config struct. Seeds from the live FFI defaults, then
-/// overrides each known field. The seed only survives for unknown future fields
-/// and for `callback_max_wait_time_ms` when left unset (below) — every scalar
-/// is overwritten unconditionally (guarded by `config_defaults_test`). Unlike
-/// the Go wrapper, `recovery` has no zero-value ambiguity: always written
-/// explicitly.
-///
-/// Ack-callback fields are wired only when `opts.ack_callback` is set; left
-/// null otherwise (no callbacks, matching the FFI default).
+/// Build the C stream-config struct: seed from the live FFI defaults, then
+/// overwrite every scalar unconditionally (guarded by `config_defaults_test`).
+/// The seed survives only for unknown future fields and for
+/// `callback_max_wait_time_ms` when `callback_wait_forever` is false and the
+/// budget is left unset (below). Ack-callback fields are wired only when
+/// `opts.ack_callback` is set, matching the null FFI default.
 inline CStreamConfigurationOptions to_c(const StreamOptions& opts) {
   CStreamConfigurationOptions c = zerobus_get_default_config();
   c.max_inflight_requests = opts.max_inflight_requests;
@@ -34,15 +31,17 @@ inline CStreamConfigurationOptions to_c(const StreamOptions& opts) {
     c.has_stream_paused_max_wait_time_ms = false;
     c.stream_paused_max_wait_time_ms = 0;
   }
-  // Only override when set. On nullopt we deliberately leave the presence flag
-  // and value seeded from zerobus_get_default_config() untouched, so the FFI
-  // default stays in place (as the header documents). Clearing the flag here
-  // would instead force Rust to interpret it as None (wait indefinitely).
-  if (opts.callback_max_wait_time_ms.has_value()) {
+  // wait_forever wins: clearing the flag makes Rust read the budget as None
+  // (drain indefinitely). Otherwise override only when a budget is set; nullopt
+  // leaves the finite FFI seed in place.
+  if (opts.callback_wait_forever) {
+    c.has_callback_max_wait_time_ms = false;
+    c.callback_max_wait_time_ms = 0;
+  } else if (opts.callback_max_wait_time_ms.has_value()) {
     c.has_callback_max_wait_time_ms = true;
     c.callback_max_wait_time_ms = *opts.callback_max_wait_time_ms;
   }
-  // Install the trampolines only when a callback is set; the Stream keeps the
+  // Install trampolines only when a callback is set; the Stream keeps the
   // shared_ptr alive so this user_data stays valid.
   if (opts.ack_callback != nullptr) {
     c.ack_on_ack = zerobus_cpp_ack_on_ack_trampoline;

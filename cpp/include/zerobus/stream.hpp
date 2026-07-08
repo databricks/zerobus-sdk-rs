@@ -26,10 +26,12 @@ class Sdk;
 /// - `close()` flushes pending records and surfaces any error by throwing,
 ///   whereas the destructor swallows it.
 /// - Closing flushes synchronously and can block up to the stream's
-///   `flush_timeout_ms` (default 5 minutes) if the server is unresponsive. A
-///   `Stream` that falls out of scope therefore drags that blocking close into
-///   the destructor at an unpredictable point. Call `close()` at a controlled
-///   point in your code instead.
+///   `flush_timeout_ms` (default 5 minutes) if the server is unresponsive, and
+///   then drains any registered `ack_callback` task (up to
+///   `callback_max_wait_time_ms`, or indefinitely if `callback_wait_forever`
+///   is set). A `Stream` that falls out of scope therefore drags that blocking
+///   close into the destructor at an unpredictable point. Call `close()` at a
+///   controlled point in your code instead.
 ///
 /// Thread safety: not safe for concurrent use from multiple threads. Serialize
 /// access externally, matching the Java and Rust core contracts.
@@ -108,8 +110,11 @@ class Stream {
   /// safe to call more than once.
   ///
   /// Blocks until the flush completes or the stream's `flush_timeout_ms`
-  /// elapses (default 5 minutes), so call it at a controlled point rather than
-  /// leaving it to the destructor.
+  /// elapses (default 5 minutes), then drains any registered `ack_callback`
+  /// task before returning (up to `callback_max_wait_time_ms`, or indefinitely
+  /// if `callback_wait_forever` is set — a wedged callback can then block
+  /// `close()` forever). Call it at a controlled point rather than leaving it
+  /// to the destructor.
   ///
   /// On success the stream becomes unusable. If the close fails it keeps the
   /// stream handle alive, so the caller can still recover buffered data via
@@ -132,11 +137,11 @@ class Stream {
         ack_callback_(std::move(ack_callback)) {}
 
   CZerobusStream* handle_;
-  // Kept alive for the stream's lifetime; the FFI callback holds a raw pointer
-  // into this object.
+  // Kept alive for the stream's lifetime; the core holds a raw pointer to it.
   std::shared_ptr<HeadersProvider> provider_;
-  // Kept alive for the same reason: the core holds a raw pointer to it as the
-  // ack callback's user_data. May be null.
+  // Also raw-pointed-to by the core (ack user_data), but with a weaker bound: a
+  // callback can still run after close(), so dropping this at ~Stream() can
+  // free it mid-call (see AckCallback). May be null.
   std::shared_ptr<AckCallback> ack_callback_;
 };
 

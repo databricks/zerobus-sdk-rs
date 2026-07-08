@@ -43,14 +43,20 @@ struct StreamOptions {
   /// `nullopt` = wait the full server-specified duration; `0` = recover
   /// immediately; `>0` = wait up to min(this, server duration).
   std::optional<std::uint64_t> stream_paused_max_wait_time_ms;
-  /// Max time `close()` waits for the async callback task (see `ack_callback`)
-  /// to drain before aborting it. A callback still running when this budget
-  /// expires can outlive `close()` (see `AckCallback` for the lifetime
-  /// consequences). `nullopt` leaves the FFI default in place.
+  /// Time `close()` waits for the async callback task (see `ack_callback`) to
+  /// drain before aborting it; a callback outrunning it can outlive `close()`
+  /// (see `AckCallback`). `nullopt` keeps the finite FFI default; for no
+  /// deadline, use `callback_wait_forever`.
   std::optional<std::uint64_t> callback_max_wait_time_ms;
-  /// Optional async ack/error callback (default `nullptr` = none). The `Stream`
-  /// keeps a `shared_ptr` to it for its lifetime. See `AckCallback` for the
-  /// full lifetime and threading contract.
+  /// If `true`, `close()` drains the callback task with no deadline instead of
+  /// aborting it. The only setting that guarantees no `AckCallback` is still
+  /// running after `close()` returns (keeping the callback alive past the
+  /// `Stream` also prevents the use-after-free, but not a callback outliving
+  /// `close()`); the tradeoff is that `close()` blocks on a wedged callback.
+  /// Overrides `callback_max_wait_time_ms`.
+  bool callback_wait_forever = false;
+  /// Optional async ack/error callback (`nullptr` = none). The `Stream` keeps a
+  /// `shared_ptr` for its lifetime; see `AckCallback` for the full contract.
   std::shared_ptr<AckCallback> ack_callback;
 };
 
