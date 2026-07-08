@@ -29,8 +29,10 @@ class Sdk;
 /// Thread safety: not safe for concurrent use from multiple threads.
 ///
 /// Only the IPC-bytes ingest path is wrapped. The FFI's
-/// `zerobus_arrow_stream_ingest_batch_via_record_batch` takes an opaque
-/// `RecordBatch*` no C++ caller can construct, so it is intentionally omitted.
+/// `zerobus_arrow_stream_ingest_batch_via_record_batch` takes the same IPC bytes
+/// and is a functional duplicate of `zerobus_arrow_stream_ingest_batch` (both
+/// deserialise the bytes and re-encode with the stream's compression settings),
+/// so it is intentionally omitted as redundant.
 class ArrowStream {
  public:
   ~ArrowStream();
