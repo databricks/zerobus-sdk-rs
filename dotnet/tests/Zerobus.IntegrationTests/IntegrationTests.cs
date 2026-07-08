@@ -353,6 +353,69 @@ public class IntegrationTests
         Assert.That(maxOffset, Is.EqualTo(numRecords - 1));
     }
 
+    [Test]
+    public async Task IngestSingleStreamConcurrently()
+    {
+        await using var fixture = await MockServerFixture.StartAsync();
+
+        const int numRecords = 32;
+
+        var responses = new List<MockResponse>
+        {
+            MockResponses.CreateStreamResponse("test_stream_concurrent_1"),
+        };
+
+        for (var i = 0; i < numRecords; i++)
+        {
+            responses.Add(MockResponses.RecordAckResponse(i));
+        }
+
+        fixture.MockServer.InjectResponses(TestTableName, responses);
+
+        using var sdk = new ZerobusSdk(fixture.ServerUrl, "https://mock-uc.com");
+
+        var tableProps = new TableProperties(TestTableName, TestDescriptor.CreateTestDescriptorProto());
+
+        var options = StreamConfigurationOptions.Default with
+        {
+            MaxInflightRequests = 100,
+            Recovery = false,
+        };
+
+        using var stream = sdk.CreateStreamWithHeadersProvider(tableProps, new TestHeadersProvider(), options);
+
+        var offsets = new long[numRecords];
+        var tasks = new Task[numRecords];
+
+        for (var i = 0; i < numRecords; i++)
+        {
+            var index = i;
+            tasks[index] = Task.Run(() =>
+            {
+                var payload = System.Text.Encoding.UTF8.GetBytes($"concurrent test record {index}");
+                offsets[index] = stream.IngestRecord(payload);
+            });
+        }
+
+        await Task.WhenAll(tasks);
+
+        var sortedOffsets = (long[])offsets.Clone();
+        Array.Sort(sortedOffsets);
+
+        for (var i = 0; i < numRecords; i++)
+        {
+            Assert.That(sortedOffsets[i], Is.EqualTo(i));
+        }
+
+        stream.WaitForOffset(numRecords - 1);
+
+        var writeCount = fixture.MockServer.GetWriteCount();
+        var maxOffset = fixture.MockServer.GetMaxOffsetSent();
+
+        Assert.That(writeCount, Is.EqualTo((ulong)numRecords));
+        Assert.That(maxOffset, Is.EqualTo(numRecords - 1));
+    }
+
     // ── Batch Record Ingestion ────────────────────────────────────────
 
     [Test]
