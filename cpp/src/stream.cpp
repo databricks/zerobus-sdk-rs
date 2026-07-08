@@ -118,10 +118,13 @@ Stream::~Stream() {
   }
 }
 
-// Move transfers both the handle and the headers-provider that must outlive it,
-// nulling the source handle so only one Stream ever closes/frees it.
+// Move transfers the handle and the two objects that must outlive it (the
+// headers provider and the ack callback), nulling the source handle so only one
+// Stream ever closes/frees it.
 Stream::Stream(Stream&& other) noexcept
-    : handle_(other.handle_), provider_(std::move(other.provider_)) {
+    : handle_(other.handle_),
+      provider_(std::move(other.provider_)),
+      ack_callback_(std::move(other.ack_callback_)) {
   other.handle_ = nullptr;
 }
 
@@ -136,6 +139,7 @@ Stream& Stream::operator=(Stream&& other) noexcept {
     }
     handle_ = other.handle_;
     provider_ = std::move(other.provider_);
+    ack_callback_ = std::move(other.ack_callback_);
     other.handle_ = nullptr;
   }
   return *this;

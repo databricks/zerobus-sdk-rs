@@ -68,7 +68,8 @@ add_library(zerobus_cpp
     src/sdk.cpp
     src/stream.cpp
     src/proto_schema.cpp
-    src/headers_callback.cpp)
+    src/headers_callback.cpp
+    src/ack_callback.cpp)
 add_library(zerobus::zerobus ALIAS zerobus_cpp)
 
 target_compile_features(zerobus_cpp PUBLIC cxx_std_17)

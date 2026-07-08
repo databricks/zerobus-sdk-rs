@@ -82,6 +82,22 @@ int main() {
   check_eq("callback_max_wait_time_ms", from_cpp.callback_max_wait_time_ms,
            from_ffi.callback_max_wait_time_ms);
 
+  // A default StreamOptions has no ack callback, so to_c() must leave the three
+  // ack fields null — matching the FFI default (no callback). This also guards
+  // against accidentally installing the trampolines when none was requested.
+  if (from_cpp.ack_on_ack != nullptr) {
+    std::fprintf(stderr, "FAIL: ack_on_ack: default should be null\n");
+    ++g_failures;
+  }
+  if (from_cpp.ack_on_error != nullptr) {
+    std::fprintf(stderr, "FAIL: ack_on_error: default should be null\n");
+    ++g_failures;
+  }
+  if (from_cpp.ack_user_data != nullptr) {
+    std::fprintf(stderr, "FAIL: ack_user_data: default should be null\n");
+    ++g_failures;
+  }
+
   if (g_failures != 0) {
     std::fprintf(stderr, "%d field(s) diverged from the FFI defaults.\n",
                  g_failures);

@@ -8,6 +8,7 @@
 #include <utility>
 #include <vector>
 
+#include "zerobus/ack_callback.hpp"
 #include "zerobus/headers_provider.hpp"
 #include "zerobus/record.hpp"
 
@@ -124,13 +125,19 @@ class Stream {
 
  private:
   friend class Sdk;
-  Stream(CZerobusStream* handle, std::shared_ptr<HeadersProvider> provider)
-      : handle_(handle), provider_(std::move(provider)) {}
+  Stream(CZerobusStream* handle, std::shared_ptr<HeadersProvider> provider,
+         std::shared_ptr<AckCallback> ack_callback)
+      : handle_(handle),
+        provider_(std::move(provider)),
+        ack_callback_(std::move(ack_callback)) {}
 
   CZerobusStream* handle_;
   // Kept alive for the stream's lifetime; the FFI callback holds a raw pointer
   // into this object.
   std::shared_ptr<HeadersProvider> provider_;
+  // Kept alive for the stream's lifetime for the same reason: the core holds a
+  // raw pointer to it as the ack callback's user_data. May be null.
+  std::shared_ptr<AckCallback> ack_callback_;
 };
 
 }  // namespace zerobus

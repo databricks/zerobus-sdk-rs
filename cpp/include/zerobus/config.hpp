@@ -3,7 +3,10 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <memory>
 #include <optional>
+
+#include "zerobus/ack_callback.hpp"
 
 namespace zerobus {
 
@@ -43,6 +46,12 @@ struct StreamOptions {
   /// Max time to wait for a headers-provider callback to return.
   /// `nullopt` leaves the FFI default in place.
   std::optional<std::uint64_t> callback_max_wait_time_ms;
+  /// Optional callback for asynchronous ack/error notifications. When set, the
+  /// core delivers per-record acks and terminal errors to it on a background
+  /// task instead of only via `wait_for_offset()` / `flush()`. The callback
+  /// must outlive the `Stream` (which keeps a `shared_ptr` to it). `nullptr`
+  /// (the default) means no callback. See `AckCallback` for the full contract.
+  std::shared_ptr<AckCallback> ack_callback;
 };
 
 }  // namespace zerobus

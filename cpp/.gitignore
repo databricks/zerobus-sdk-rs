@@ -1,0 +1,7 @@
+# CMake build trees (see Makefile BUILD_DIR; sanitizer builds use build-*).
+/build/
+/build-*/
+
+# clangd index / editor caches.
+/.cache/
+compile_commands.json

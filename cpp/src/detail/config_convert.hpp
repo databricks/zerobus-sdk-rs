@@ -1,6 +1,7 @@
 #ifndef ZEROBUS_DETAIL_CONFIG_CONVERT_HPP
 #define ZEROBUS_DETAIL_CONFIG_CONVERT_HPP
 
+#include "detail/ack_callback.hpp"
 #include "detail/ffi_util.hpp"
 #include "zerobus/config.hpp"
 
@@ -13,6 +14,11 @@ namespace detail {
 /// is overwritten unconditionally (guarded by `config_defaults_test`). Unlike
 /// the Go wrapper, `recovery` has no zero-value ambiguity: always written
 /// explicitly.
+///
+/// The ack-callback fields are wired only when `opts.ack_callback` is set: the
+/// two trampolines are installed and `ack_user_data` points at the callback the
+/// caller must keep alive (the owning `Stream` holds a `shared_ptr`). Left null
+/// otherwise, so the core delivers no callbacks — matching the FFI default.
 inline CStreamConfigurationOptions to_c(const StreamOptions& opts) {
   CStreamConfigurationOptions c = zerobus_get_default_config();
   c.max_inflight_requests = opts.max_inflight_requests;
@@ -37,6 +43,16 @@ inline CStreamConfigurationOptions to_c(const StreamOptions& opts) {
   if (opts.callback_max_wait_time_ms.has_value()) {
     c.has_callback_max_wait_time_ms = true;
     c.callback_max_wait_time_ms = *opts.callback_max_wait_time_ms;
+  }
+  // Install the ack-callback trampolines only when a callback is set. The core
+  // treats null function pointers as "no callback" (the FFI default), so an
+  // unset ack_callback leaves the seeded nulls in place. user_data points at
+  // the AckCallback; the caller (Sdk::create_stream) hands the shared_ptr to
+  // the Stream so it outlives every callback the core makes.
+  if (opts.ack_callback != nullptr) {
+    c.ack_on_ack = zerobus_cpp_ack_on_ack_trampoline;
+    c.ack_on_error = zerobus_cpp_ack_on_error_trampoline;
+    c.ack_user_data = opts.ack_callback.get();
   }
   return c;
 }

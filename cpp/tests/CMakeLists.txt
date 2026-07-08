@@ -22,3 +22,4 @@ endfunction()
 
 zerobus_add_test(config_defaults_test)
 zerobus_add_test(embedded_nul_test)
+zerobus_add_test(ack_callback_test)
