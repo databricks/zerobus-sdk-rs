@@ -279,6 +279,12 @@ internal static partial class NativeMethods
     [DllImport(LibName, CallingConvention = CallingConvention.Cdecl, EntryPoint = "zerobus_free_error_message")]
     public static extern void FreeErrorMessage(IntPtr message);
 
+    [DllImport(LibName, CallingConvention = CallingConvention.Cdecl, EntryPoint = "zerobus_alloc_header_array")]
+    public static extern IntPtr AllocHeaderArray(nuint count);
+
+    [DllImport(LibName, CallingConvention = CallingConvention.Cdecl, EntryPoint = "zerobus_alloc_cstring")]
+    public static extern unsafe IntPtr AllocCString(byte* data, nuint len);
+
     [DllImport(LibName, CallingConvention = CallingConvention.Cdecl, EntryPoint = "zerobus_free_headers")]
     public static extern void FreeHeaders(CHeaders headers);
 
