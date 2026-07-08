@@ -262,10 +262,9 @@ public class IntegrationTests
 
         stream.Close();
 
-        // Ingesting after close should throw.
-        // Close() zeroes the native ptr, so the native layer returns an error.
+        // Ingesting after close should throw from the native closed-stream state.
         Assert.That(() => stream.IngestRecord("test record data"u8.ToArray()),
-            Throws.InstanceOf<Exception>());
+            Throws.InstanceOf<ZerobusException>());
     }
 
     // ── Single Record Ingestion ───────────────────────────────────────
@@ -435,7 +434,7 @@ public class IntegrationTests
     }
 
     [Test]
-    public async Task RecreateStream_OriginalDisposed_RecreatedStreamUsable()
+    public async Task RecreateStream_ClosedStream_RecreatedStreamUsable()
     {
         await using var fixture = await MockServerFixture.StartAsync();
 
@@ -457,7 +456,11 @@ public class IntegrationTests
         };
 
         var stream = sdk.CreateStreamWithHeadersProvider(tableProps, new TestHeadersProvider(), options);
-        Native.NativeInterop.StreamClose(stream.NativePointer); // simulate stream being closed by some external factor
+        stream.Close();
+
+        var unacked = stream.GetUnackedRecords();
+        Assert.That(unacked, Is.Empty);
+
         using var recreatedStream = sdk.RecreateStream(stream);
 
         Assert.That(recreatedStream, Is.Not.Null);
