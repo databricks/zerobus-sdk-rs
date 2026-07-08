@@ -1,7 +1,6 @@
-// Exercises the one piece of real logic in to_c(ArrowStreamOptions): the
-// stream_paused_max_wait_time_ms optional handling. arrow_config_defaults_test
-// only pins the default-constructed (nullopt -> -1) case, so the "value set"
-// round-trip and the ">INT64_MAX rejection" branch are covered here.
+// Covers to_c(ArrowStreamOptions)'s stream_paused_max_wait_time_ms handling:
+// set-value round-trip and the >INT64_MAX rejection (arrow_config_defaults_test
+// only pins the nullopt -> -1 default).
 
 #include <cstdint>
 #include <cstdio>
@@ -44,8 +43,7 @@ int main() {
     }
   }
 
-  // INT64_MAX is the largest accepted value: it must not be rejected and must
-  // round-trip (not wrap to a negative int64 misread as the -1 sentinel).
+  // INT64_MAX is the largest accepted value: round-trips, not rejected.
   {
     zerobus::ArrowStreamOptions opts{};
     opts.stream_paused_max_wait_time_ms =
@@ -66,7 +64,7 @@ int main() {
     }
   }
 
-  // A value above INT64_MAX must throw rather than wrap to a negative int64.
+  // Above INT64_MAX must throw, not wrap to a negative int64.
   {
     zerobus::ArrowStreamOptions opts{};
     opts.stream_paused_max_wait_time_ms =

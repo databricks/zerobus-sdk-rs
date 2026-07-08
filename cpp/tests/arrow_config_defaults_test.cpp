@@ -12,11 +12,9 @@ namespace {
 
 int g_failures = 0;
 
-// Report but don't abort, so a single run lists every drifted field at once.
-// Compare through signed int64 (not uint64 like config_defaults_test): the Arrow
-// config's ipc_compression and stream_paused_max_wait_time_ms default to -1, and
-// a signed cast compares those sentinels cleanly. max_inflight_batches (1'000)
-// is far below INT64_MAX, so the cast is exact for every current field.
+// Report but don't abort, so one run lists every drifted field.
+// Signed int64 (not uint64): the -1 sentinels (ipc_compression,
+// stream_paused_max_wait_time_ms) compare cleanly, and every field is < INT64_MAX.
 template <typename A, typename B>
 void check_eq(const char* field, A actual, B expected) {
   if (static_cast<std::int64_t>(actual) !=
