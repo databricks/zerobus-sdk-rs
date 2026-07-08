@@ -67,8 +67,10 @@ int main() {
   // Above INT64_MAX must throw, not wrap to a negative int64.
   {
     zerobus::ArrowStreamOptions opts{};
-    opts.stream_paused_max_wait_time_ms =
-        static_cast<std::uint64_t>(std::numeric_limits<std::int64_t>::max()) + 1;
+    const auto too_large =
+        static_cast<std::uint64_t>(std::numeric_limits<std::int64_t>::max()) +
+        1;
+    opts.stream_paused_max_wait_time_ms = too_large;
     bool threw = false;
     try {
       zerobus::detail::to_c(opts);

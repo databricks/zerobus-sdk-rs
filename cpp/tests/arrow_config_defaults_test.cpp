@@ -14,7 +14,8 @@ int g_failures = 0;
 
 // Report but don't abort, so one run lists every drifted field.
 // Signed int64 (not uint64): the -1 sentinels (ipc_compression,
-// stream_paused_max_wait_time_ms) compare cleanly, and every field is < INT64_MAX.
+// stream_paused_max_wait_time_ms) compare cleanly, and every field is
+// < INT64_MAX.
 template <typename A, typename B>
 void check_eq(const char* field, A actual, B expected) {
   if (static_cast<std::int64_t>(actual) !=
