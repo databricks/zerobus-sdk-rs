@@ -1,3 +1,4 @@
+using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 using Databricks.Zerobus.Native;
 
@@ -22,6 +23,7 @@ public sealed class ZerobusStream : IDisposable
 {
     private IntPtr _ptr;
     private int _disposed;
+    private readonly ReaderWriterLockSlim _lifetimeLock = new();
 
     // Prevent the GCHandle / delegate from being collected while the native code holds a reference.
     // Not readonly: GCHandle is not a readonly struct, so calling Free() on a readonly field
@@ -47,8 +49,7 @@ public sealed class ZerobusStream : IDisposable
     /// <exception cref="ObjectDisposedException"></exception>
     public bool IsClosed()
     {
-        ObjectDisposedException.ThrowIf(_disposed != 0, this);
-        return NativeMethods.StreamIsClosed(_ptr);
+        return WithReadLock(NativeMethods.StreamIsClosed);
     }
 
     // ── Single-record ingestion ──────────────────────────────────────────
@@ -80,26 +81,22 @@ public sealed class ZerobusStream : IDisposable
     /// </example>
     public long IngestRecord(string payload)
     {
-        ObjectDisposedException.ThrowIf(_disposed != 0, this);
         ArgumentNullException.ThrowIfNull(payload);
-
-        return NativeInterop.StreamIngestJsonRecord(_ptr, payload);
+        return WithReadLock(ptr => NativeInterop.StreamIngestJsonRecord(ptr, payload));
     }
 
     /// <inheritdoc cref="IngestRecord(string)"/>
     public long IngestRecord(byte[] payload)
     {
-        ObjectDisposedException.ThrowIf(_disposed != 0, this);
         ArgumentNullException.ThrowIfNull(payload);
-
-        return NativeInterop.StreamIngestProtoRecord(_ptr, payload);
+        return WithReadLock(ptr => NativeInterop.StreamIngestProtoRecord(ptr, payload));
     }
 
     /// <inheritdoc cref="IngestRecord(string)"/>
     public long IngestRecord(ReadOnlySpan<byte> payload)
     {
-        ObjectDisposedException.ThrowIf(_disposed != 0, this);
-        return NativeInterop.StreamIngestProtoRecord(_ptr, payload);
+        using var handle = WithReadLock();
+        return NativeInterop.StreamIngestProtoRecord(GetNativePointerForCall(), payload);
     }
 
     // ── Batch ingestion ──────────────────────────────────────────────────
@@ -124,10 +121,8 @@ public sealed class ZerobusStream : IDisposable
     /// </example>
     public long IngestRecords(string[] records)
     {
-        ObjectDisposedException.ThrowIf(_disposed != 0, this);
         ArgumentNullException.ThrowIfNull(records);
-
-        return NativeInterop.StreamIngestJsonRecords(_ptr, records);
+        return WithReadLock(ptr => NativeInterop.StreamIngestJsonRecords(ptr, records));
     }
 
     /// <summary>
@@ -140,10 +135,8 @@ public sealed class ZerobusStream : IDisposable
     /// <exception cref="ObjectDisposedException">Thrown if the stream has been disposed.</exception>
     public long IngestRecords(byte[][] records)
     {
-        ObjectDisposedException.ThrowIf(_disposed != 0, this);
         ArgumentNullException.ThrowIfNull(records);
-
-        return NativeInterop.StreamIngestProtoRecords(_ptr, records);
+        return WithReadLock(ptr => NativeInterop.StreamIngestProtoRecords(ptr, records));
     }
 
     // ── Acknowledgment / flush ───────────────────────────────────────────
@@ -165,8 +158,7 @@ public sealed class ZerobusStream : IDisposable
     /// </example>
     public void WaitForOffset(long offset)
     {
-        ObjectDisposedException.ThrowIf(_disposed != 0, this);
-        NativeInterop.StreamWaitForOffset(_ptr, offset);
+        WithReadLock(ptr => NativeInterop.StreamWaitForOffset(ptr, offset));
     }
 
     /// <summary>
@@ -185,8 +177,7 @@ public sealed class ZerobusStream : IDisposable
     /// </example>
     public void Flush()
     {
-        ObjectDisposedException.ThrowIf(_disposed != 0, this);
-        NativeInterop.StreamFlush(_ptr);
+        WithReadLock(NativeInterop.StreamFlush);
     }
 
     // ── Unacknowledged records ───────────────────────────────────────────
@@ -219,8 +210,7 @@ public sealed class ZerobusStream : IDisposable
     /// </example>
     public object[] GetUnackedRecords()
     {
-        ObjectDisposedException.ThrowIf(_disposed != 0, this);
-        return NativeInterop.StreamGetUnackedRecords(_ptr);
+        return WithReadLock(NativeInterop.StreamGetUnackedRecords);
     }
 
     // ── Close / Dispose ──────────────────────────────────────────────────
@@ -252,23 +242,18 @@ public sealed class ZerobusStream : IDisposable
     private void Dispose(bool disposing)
     {
         if (Interlocked.CompareExchange(ref _disposed, 1, 0) != 0) return;
+        using var handle = WithWriteLock();
         var ptr = Interlocked.Exchange(ref _ptr, IntPtr.Zero);
-        try
+        if (!disposing) return;
+        if (ptr != IntPtr.Zero)
         {
-            if (!disposing) return;
-            if (ptr != IntPtr.Zero)
-            {
-                NativeInterop.StreamClose(ptr);
-            }
+            NativeInterop.StreamClose(ptr);
         }
-        finally
+        if (ptr != IntPtr.Zero)
         {
-            if (ptr != IntPtr.Zero)
-            {
-                NativeMethods.StreamFree(ptr);
-            }
-            FreeBridgeHandle();
+            NativeMethods.StreamFree(ptr);
         }
+        FreeBridgeHandle();
     }
 
     /// <summary>
@@ -297,8 +282,7 @@ public sealed class ZerobusStream : IDisposable
     {
         get
         {
-            ObjectDisposedException.ThrowIf(_disposed != 0, this);
-            return _ptr;
+            return WithReadLock(ptr => ptr);
         }
     }
 
@@ -310,6 +294,8 @@ public sealed class ZerobusStream : IDisposable
     {
         var disposed = Interlocked.CompareExchange(ref _disposed, 1, 0);
         ObjectDisposedException.ThrowIf(disposed != 0, this);
+
+        using var handle = WithWriteLock();
 
         var oldPtr = Interlocked.Exchange(ref _ptr, IntPtr.Zero);
         var newStream = _bridgeHandle.IsAllocated
@@ -324,5 +310,46 @@ public sealed class ZerobusStream : IDisposable
             NativeMethods.StreamFree(oldPtr);
 
         return newStream;
+    }
+
+    private IntPtr GetNativePointerForCall()
+    {
+        ObjectDisposedException.ThrowIf(_disposed != 0, this);
+        var ptr = _ptr;
+        ObjectDisposedException.ThrowIf(ptr == IntPtr.Zero, this);
+        return ptr;
+    }
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private T WithReadLock<T>(Func<IntPtr, T> call)
+    {
+        using var handle = WithReadLock();
+        return call(GetNativePointerForCall());
+    }
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private void WithReadLock(Action<IntPtr> call)
+    {
+        using var handle = WithReadLock();
+        call(GetNativePointerForCall());
+    }
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private IDisposable WithReadLock()
+    {
+        _lifetimeLock.EnterReadLock();
+        return new Disposable(() => _lifetimeLock.ExitReadLock());
+    }
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private IDisposable WithWriteLock()
+    {
+        _lifetimeLock.EnterWriteLock();
+        return new Disposable(() => _lifetimeLock.ExitWriteLock());
+    }
+
+    private class Disposable(Action action) : IDisposable
+    {
+        public void Dispose() => action();
     }
 }
