@@ -6,6 +6,7 @@ use databricks_zerobus_ingest_sdk::{
     EncodedRecord, HeadersProvider, StreamBuilder, ZerobusError, ZerobusStream,
 };
 use prost::Message;
+use std::mem::ManuallyDrop;
 use std::ffi::CString;
 use std::os::raw::c_char;
 use std::ptr;
@@ -45,6 +46,227 @@ fn apply_c_stream_options<'a>(
         )))
     } else {
         builder
+    }
+}
+
+#[derive(Clone, Copy)]
+struct SendPtr<T>(*mut T);
+
+impl<T> SendPtr<T> {
+    const fn new(ptr: *mut T) -> Self {
+        Self(ptr)
+    }
+
+    const fn get(self) -> *mut T {
+        self.0
+    }
+}
+
+// Safety: this wrapper carries an opaque FFI pointer across task boundaries.
+// The pointee's lifetime and synchronization remain the caller's contract.
+unsafe impl<T> Send for SendPtr<T> {}
+
+enum StreamCreateAuth {
+    OAuth {
+        client_id: String,
+        client_secret: String,
+    },
+    HeadersProvider {
+        headers_callback: HeadersProviderCallback,
+        user_data: SendPtr<std::ffi::c_void>,
+    },
+}
+
+async fn build_stream_from_parts(
+    sdk_ref: &databricks_zerobus_ingest_sdk::ZerobusSdk,
+    table_name: String,
+    descriptor_proto: Option<prost_types::DescriptorProto>,
+    auth: StreamCreateAuth,
+    options: Option<CStreamConfigurationOptions>,
+) -> Result<*mut CZerobusStream, ZerobusError> {
+    let record_type = options
+        .as_ref()
+        .map(|c| c_record_type(c.record_type))
+        .unwrap_or(RecordType::Proto);
+
+    let base = match auth {
+        StreamCreateAuth::OAuth {
+            client_id,
+            client_secret,
+        } => sdk_ref
+            .stream_builder()
+            .table(table_name)
+            .oauth(client_id, client_secret),
+        StreamCreateAuth::HeadersProvider {
+            headers_callback,
+            user_data,
+        } => {
+            let headers_provider: Arc<dyn HeadersProvider> =
+                Arc::new(CallbackHeadersProvider::new(headers_callback, user_data.get()));
+            sdk_ref
+                .stream_builder()
+                .table(table_name)
+                .headers_provider(headers_provider)
+        }
+    };
+
+    let mut builder = match record_type {
+        RecordType::Proto => {
+            let desc = descriptor_proto.ok_or_else(|| {
+                ZerobusError::InvalidArgument(
+                    "Proto descriptor is required for Proto record type".to_string(),
+                )
+            })?;
+            base.compiled_proto(desc)
+        }
+        RecordType::Json => base.json(),
+        RecordType::Unspecified => {
+            return Err(ZerobusError::InvalidArgument(
+                "Record type is not specified".to_string(),
+            ))
+        }
+    };
+
+    if let Some(c) = options.as_ref() {
+        builder = apply_c_stream_options(builder, c);
+    }
+
+    let stream = builder.build().await?;
+    Ok(Arc::into_raw(Arc::new(stream)) as *mut CZerobusStream)
+}
+
+fn invoke_create_stream_async_callback(
+    callback: CreateStreamAsyncCallback,
+    stream: *mut CZerobusStream,
+    result: CResult,
+    user_data: *mut std::ffi::c_void,
+) {
+    let callback_result = result;
+    let callback_result_ptr = &callback_result as *const CResult;
+
+    if std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        callback(stream, callback_result_ptr, user_data)
+    }))
+    .is_err()
+    {
+        tracing::error!("async create_stream callback panicked; contained at FFI boundary");
+    }
+
+    if !callback_result.error_message.is_null() {
+        unsafe {
+            let _ = CString::from_raw(callback_result.error_message);
+        }
+    }
+}
+
+fn invoke_offset_async_callback(
+    callback: OffsetAsyncCallback,
+    offset: i64,
+    result: CResult,
+    user_data: *mut std::ffi::c_void,
+) {
+    let callback_result = result;
+    let callback_result_ptr = &callback_result as *const CResult;
+
+    if std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        callback(offset, callback_result_ptr, user_data)
+    }))
+    .is_err()
+    {
+        tracing::error!(offset, "async offset callback panicked; contained at FFI boundary");
+    }
+
+    if !callback_result.error_message.is_null() {
+        unsafe {
+            let _ = CString::from_raw(callback_result.error_message);
+        }
+    }
+}
+
+fn invoke_bool_async_callback(
+    callback: BoolAsyncCallback,
+    value: bool,
+    result: CResult,
+    user_data: *mut std::ffi::c_void,
+) {
+    let callback_result = result;
+    let callback_result_ptr = &callback_result as *const CResult;
+
+    if std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        callback(value, callback_result_ptr, user_data)
+    }))
+    .is_err()
+    {
+        tracing::error!(value, "async bool callback panicked; contained at FFI boundary");
+    }
+
+    if !callback_result.error_message.is_null() {
+        unsafe {
+            let _ = CString::from_raw(callback_result.error_message);
+        }
+    }
+}
+
+fn invoke_record_array_async_callback(
+    callback: RecordArrayAsyncCallback,
+    records: CRecordArray,
+    result: CResult,
+    user_data: *mut std::ffi::c_void,
+) {
+    let callback_result = result;
+    let callback_result_ptr = &callback_result as *const CResult;
+    let callback_records = ManuallyDrop::new(records);
+
+    let panicked = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| unsafe {
+        callback(ptr::read(&*callback_records), callback_result_ptr, user_data)
+    }))
+    .is_err();
+    if panicked {
+        tracing::error!("async record-array callback panicked; contained at FFI boundary");
+        zerobus_free_record_array(ManuallyDrop::into_inner(callback_records));
+    }
+
+    if !callback_result.error_message.is_null() {
+        unsafe {
+            let _ = CString::from_raw(callback_result.error_message);
+        }
+    }
+}
+
+fn encoded_records_to_c_array(records_vec: Vec<EncodedRecord>) -> CRecordArray {
+    let len = records_vec.len();
+
+    let mut c_records: Vec<CRecord> = records_vec
+        .into_iter()
+        .map(|record| match record {
+            EncodedRecord::Proto(data) => {
+                let data_len = data.len();
+                let data_ptr = Box::into_raw(data.into_boxed_slice()) as *mut u8;
+                CRecord {
+                    is_json: false,
+                    data: data_ptr,
+                    data_len,
+                }
+            }
+            EncodedRecord::Json(json_str) => {
+                let bytes = json_str.into_bytes();
+                let data_len = bytes.len();
+                let data_ptr = Box::into_raw(bytes.into_boxed_slice()) as *mut u8;
+                CRecord {
+                    is_json: true,
+                    data: data_ptr,
+                    data_len,
+                }
+            }
+        })
+        .collect();
+
+    let records_ptr = c_records.as_mut_ptr();
+    std::mem::forget(c_records);
+
+    CRecordArray {
+        records: records_ptr,
+        len,
     }
 }
 
@@ -98,42 +320,22 @@ pub extern "C" fn zerobus_sdk_create_stream(
             };
 
             let c_opts = if !options.is_null() {
-                Some(unsafe { &*options })
+                Some(unsafe { *options })
             } else {
                 None
             };
-            let record_type = c_opts
-                .map(|c| c_record_type(c.record_type))
-                .unwrap_or(RecordType::Proto);
 
-            let base = sdk_ref
-                .stream_builder()
-                .table(table_name_str)
-                .oauth(client_id_str, client_secret_str);
-            let mut builder = match record_type {
-                RecordType::Proto => {
-                    let desc = descriptor_proto.ok_or_else(|| {
-                        ZerobusError::InvalidArgument(
-                            "Proto descriptor is required for Proto record type".to_string(),
-                        )
-                    })?;
-                    base.compiled_proto(desc)
-                }
-                RecordType::Json => base.json(),
-                RecordType::Unspecified => {
-                    return Err(ZerobusError::InvalidArgument(
-                        "Record type is not specified".to_string(),
-                    ))
-                }
-            };
-            if let Some(c) = c_opts {
-                builder = apply_c_stream_options(builder, c);
-            }
-
-            let stream = builder.build().await?;
-
-            let arc = Arc::new(stream);
-            Ok::<*mut CZerobusStream, ZerobusError>(Arc::into_raw(arc) as *mut CZerobusStream)
+            build_stream_from_parts(
+                sdk_ref,
+                table_name_str,
+                descriptor_proto,
+                StreamCreateAuth::OAuth {
+                    client_id: client_id_str,
+                    client_secret: client_secret_str,
+                },
+                c_opts,
+            )
+            .await
         });
 
         match res {
@@ -150,6 +352,123 @@ pub extern "C" fn zerobus_sdk_create_stream(
                 ptr::null_mut()
             }
         }
+    })
+}
+
+/// Create a stream with OAuth authentication on a background task.
+///
+/// Returns `true` once the request has been validated and scheduled. The
+/// callback is invoked exactly once with either a non-null stream pointer and a
+/// success result, or a null stream pointer and a failure result. The SDK
+/// handle must remain valid until the callback runs.
+#[no_mangle]
+pub extern "C" fn zerobus_sdk_create_stream_async(
+    sdk: *mut CZerobusSdk,
+    table_name: *const c_char,
+    descriptor_proto_bytes: *const u8,
+    descriptor_proto_len: usize,
+    client_id: *const c_char,
+    client_secret: *const c_char,
+    options: *const CStreamConfigurationOptions,
+    callback: CreateStreamAsyncCallback,
+    user_data: *mut std::ffi::c_void,
+    result: *mut CResult,
+) -> bool {
+    ffi_guard(result, false, move || {
+        if let Err(msg) = validate_sdk_ptr(sdk) {
+            write_error_result(result, msg, false);
+            return false;
+        }
+
+        let table_name_str = match unsafe { c_str_to_string(table_name) } {
+            Ok(s) => s,
+            Err(e) => {
+                write_error_result(result, e, false);
+                return false;
+            }
+        };
+        let client_id_str = match unsafe { c_str_to_string(client_id) } {
+            Ok(s) => s,
+            Err(e) => {
+                write_error_result(result, e, false);
+                return false;
+            }
+        };
+        let client_secret_str = match unsafe { c_str_to_string(client_secret) } {
+            Ok(s) => s,
+            Err(e) => {
+                write_error_result(result, e, false);
+                return false;
+            }
+        };
+
+        let descriptor_proto = if !descriptor_proto_bytes.is_null() && descriptor_proto_len > 0 {
+            let bytes = unsafe {
+                std::slice::from_raw_parts(descriptor_proto_bytes, descriptor_proto_len)
+            };
+            match prost_types::DescriptorProto::decode(bytes) {
+                Ok(desc) => Some(desc),
+                Err(e) => {
+                    write_error_result(result, &e.to_string(), false);
+                    return false;
+                }
+            }
+        } else {
+            None
+        };
+
+        let c_opts = if !options.is_null() {
+            Some(unsafe { *options })
+        } else {
+            None
+        };
+
+        let sdk_ptr = SendPtr::new(sdk);
+        let callback_user_data = SendPtr::new(user_data);
+        RUNTIME.spawn(async move {
+            let callback_result = match validate_sdk_ptr(sdk_ptr.get()) {
+                Ok(sdk_ref) => match build_stream_from_parts(
+                    sdk_ref,
+                    table_name_str,
+                    descriptor_proto,
+                    StreamCreateAuth::OAuth {
+                        client_id: client_id_str,
+                        client_secret: client_secret_str,
+                    },
+                    c_opts,
+                )
+                .await
+                {
+                    Ok(stream_ptr) => {
+                        invoke_create_stream_async_callback(
+                            callback,
+                            stream_ptr,
+                            CResult::success(),
+                            callback_user_data.get(),
+                        );
+                        return;
+                    }
+                    Err(err) => CResult::error(err),
+                },
+                Err(msg) => CResult {
+                    success: false,
+                    error_message: CString::new(msg)
+                        .unwrap_or_else(|_| CString::new("SDK pointer is invalid").unwrap())
+                        .into_raw(),
+                    is_retryable: false,
+                },
+            };
+
+            invoke_create_stream_async_callback(
+                callback,
+                ptr::null_mut(),
+                callback_result,
+                callback_user_data.get(),
+            );
+        });
+
+        write_success_result(result);
+        true
     })
 }
 
@@ -195,45 +514,22 @@ pub extern "C" fn zerobus_sdk_create_stream_with_headers_provider(
             };
 
             let c_opts = if !options.is_null() {
-                Some(unsafe { &*options })
+                Some(unsafe { *options })
             } else {
                 None
             };
-            let record_type = c_opts
-                .map(|c| c_record_type(c.record_type))
-                .unwrap_or(RecordType::Proto);
 
-            let headers_provider: Arc<dyn HeadersProvider> =
-                Arc::new(CallbackHeadersProvider::new(headers_callback, user_data));
-
-            let base = sdk_ref
-                .stream_builder()
-                .table(table_name_str)
-                .headers_provider(headers_provider);
-            let mut builder = match record_type {
-                RecordType::Proto => {
-                    let desc = descriptor_proto.ok_or_else(|| {
-                        ZerobusError::InvalidArgument(
-                            "Proto descriptor is required for Proto record type".to_string(),
-                        )
-                    })?;
-                    base.compiled_proto(desc)
-                }
-                RecordType::Json => base.json(),
-                RecordType::Unspecified => {
-                    return Err(ZerobusError::InvalidArgument(
-                        "Record type is not specified".to_string(),
-                    ))
-                }
-            };
-            if let Some(c) = c_opts {
-                builder = apply_c_stream_options(builder, c);
-            }
-
-            let stream = builder.build().await?;
-
-            let arc = Arc::new(stream);
-            Ok::<*mut CZerobusStream, ZerobusError>(Arc::into_raw(arc) as *mut CZerobusStream)
+            build_stream_from_parts(
+                sdk_ref,
+                table_name_str,
+                descriptor_proto,
+                StreamCreateAuth::HeadersProvider {
+                    headers_callback,
+                    user_data: SendPtr::new(user_data),
+                },
+                c_opts,
+            )
+            .await
         });
 
         match res {
@@ -250,6 +546,110 @@ pub extern "C" fn zerobus_sdk_create_stream_with_headers_provider(
                 ptr::null_mut()
             }
         }
+    })
+}
+
+/// Create a stream with a custom headers provider callback on a background task.
+///
+/// Returns `true` once the request has been validated and scheduled. The
+/// callback is invoked exactly once with either a non-null stream pointer and a
+/// success result, or a null stream pointer and a failure result. The SDK
+/// handle must remain valid until the callback runs.
+#[no_mangle]
+pub extern "C" fn zerobus_sdk_create_stream_with_headers_provider_async(
+    sdk: *mut CZerobusSdk,
+    table_name: *const c_char,
+    descriptor_proto_bytes: *const u8,
+    descriptor_proto_len: usize,
+    headers_callback: HeadersProviderCallback,
+    user_data: *mut std::ffi::c_void,
+    options: *const CStreamConfigurationOptions,
+    callback: CreateStreamAsyncCallback,
+    callback_user_data: *mut std::ffi::c_void,
+    result: *mut CResult,
+) -> bool {
+    ffi_guard(result, false, move || {
+        if let Err(msg) = validate_sdk_ptr(sdk) {
+            write_error_result(result, msg, false);
+            return false;
+        }
+
+        let table_name_str = match unsafe { c_str_to_string(table_name) } {
+            Ok(s) => s,
+            Err(e) => {
+                write_error_result(result, e, false);
+                return false;
+            }
+        };
+
+        let descriptor_proto = if !descriptor_proto_bytes.is_null() && descriptor_proto_len > 0 {
+            let bytes = unsafe {
+                std::slice::from_raw_parts(descriptor_proto_bytes, descriptor_proto_len)
+            };
+            match prost_types::DescriptorProto::decode(bytes) {
+                Ok(desc) => Some(desc),
+                Err(e) => {
+                    write_error_result(result, &e.to_string(), false);
+                    return false;
+                }
+            }
+        } else {
+            None
+        };
+
+        let c_opts = if !options.is_null() {
+            Some(unsafe { *options })
+        } else {
+            None
+        };
+
+        let sdk_ptr = SendPtr::new(sdk);
+        let stream_user_data = SendPtr::new(user_data);
+        let callback_user_data = SendPtr::new(callback_user_data);
+        RUNTIME.spawn(async move {
+            let callback_result = match validate_sdk_ptr(sdk_ptr.get()) {
+                Ok(sdk_ref) => match build_stream_from_parts(
+                    sdk_ref,
+                    table_name_str,
+                    descriptor_proto,
+                    StreamCreateAuth::HeadersProvider {
+                        headers_callback,
+                        user_data: stream_user_data,
+                    },
+                    c_opts,
+                )
+                .await
+                {
+                    Ok(stream_ptr) => {
+                        invoke_create_stream_async_callback(
+                            callback,
+                            stream_ptr,
+                            CResult::success(),
+                            callback_user_data.get(),
+                        );
+                        return;
+                    }
+                    Err(err) => CResult::error(err),
+                },
+                Err(msg) => CResult {
+                    success: false,
+                    error_message: CString::new(msg)
+                        .unwrap_or_else(|_| CString::new("SDK pointer is invalid").unwrap())
+                        .into_raw(),
+                    is_retryable: false,
+                },
+            };
+
+            invoke_create_stream_async_callback(
+                callback,
+                ptr::null_mut(),
+                callback_result,
+                callback_user_data.get(),
+            );
+        });
+
+        write_success_result(result);
+        true
     })
 }
 
@@ -299,6 +699,65 @@ pub extern "C" fn zerobus_sdk_recreate_stream(
                 ptr::null_mut()
             }
         }
+    })
+}
+
+/// Recreate a stream from an existing stream on a background task.
+#[no_mangle]
+pub extern "C" fn zerobus_sdk_recreate_stream_async(
+    sdk: *mut CZerobusSdk,
+    stream: *mut CZerobusStream,
+    callback: CreateStreamAsyncCallback,
+    user_data: *mut std::ffi::c_void,
+    result: *mut CResult,
+) -> bool {
+    ffi_guard(result, false, move || {
+        if let Err(msg) = validate_sdk_ptr(sdk) {
+            write_error_result(result, msg, false);
+            return false;
+        }
+        if let Err(msg) = validate_stream_ptr(stream) {
+            write_error_result(result, msg, false);
+            return false;
+        }
+
+        let sdk_ptr = SendPtr::new(sdk);
+        let stream_arc = unsafe { clone_stream_arc(stream) };
+        let callback_user_data = SendPtr::new(user_data);
+        RUNTIME.spawn(async move {
+            let callback_result = match validate_sdk_ptr(sdk_ptr.get()) {
+                Ok(sdk_ref) => match sdk_ref.recreate_stream(stream_arc.as_ref()).await {
+                    Ok(new_stream) => {
+                        let stream_ptr = Arc::into_raw(Arc::new(new_stream)) as *mut CZerobusStream;
+                        invoke_create_stream_async_callback(
+                            callback,
+                            stream_ptr,
+                            CResult::success(),
+                            callback_user_data.get(),
+                        );
+                        return;
+                    }
+                    Err(err) => CResult::error(err),
+                },
+                Err(msg) => CResult {
+                    success: false,
+                    error_message: CString::new(msg)
+                        .unwrap_or_else(|_| CString::new("SDK pointer is invalid").unwrap())
+                        .into_raw(),
+                    is_retryable: false,
+                },
+            };
+
+            invoke_create_stream_async_callback(
+                callback,
+                ptr::null_mut(),
+                callback_result,
+                callback_user_data.get(),
+            );
+        });
+
+        write_success_result(result);
+        true
     })
 }
 
@@ -366,6 +825,54 @@ pub extern "C" fn zerobus_stream_ingest_proto_record(
     })
 }
 
+/// Ingest a protobuf record on a background task and report the assigned offset via callback.
+#[no_mangle]
+pub extern "C" fn zerobus_stream_ingest_proto_record_async(
+    stream: *mut CZerobusStream,
+    data: *const u8,
+    data_len: usize,
+    callback: OffsetAsyncCallback,
+    user_data: *mut std::ffi::c_void,
+    result: *mut CResult,
+) -> bool {
+    ffi_guard(result, false, move || {
+        if data.is_null() {
+            write_error_result(result, "Invalid data pointer", false);
+            return false;
+        }
+        if let Err(msg) = validate_stream_ptr(stream) {
+            write_error_result(result, msg, false);
+            return false;
+        }
+
+        let data_vec = unsafe { std::slice::from_raw_parts(data, data_len) }.to_vec();
+        let stream_arc = unsafe { clone_stream_arc(stream) };
+        let callback_user_data = SendPtr::new(user_data);
+        RUNTIME.spawn(async move {
+            match stream_arc
+                .ingest_record_offset(EncodedRecord::Proto(data_vec))
+                .await
+            {
+                Ok(offset) => invoke_offset_async_callback(
+                    callback,
+                    offset,
+                    CResult::success(),
+                    callback_user_data.get(),
+                ),
+                Err(err) => invoke_offset_async_callback(
+                    callback,
+                    -1,
+                    CResult::error(err),
+                    callback_user_data.get(),
+                ),
+            }
+        });
+
+        write_success_result(result);
+        true
+    })
+}
+
 /// Ingest a JSON record
 /// Returns the offset directly
 /// Returns -1 on error
@@ -412,6 +919,53 @@ pub extern "C" fn zerobus_stream_ingest_json_record(
                 -1
             }
         }
+    })
+}
+
+/// Ingest a JSON record on a background task and report the assigned offset via callback.
+#[no_mangle]
+pub extern "C" fn zerobus_stream_ingest_json_record_async(
+    stream: *mut CZerobusStream,
+    json_data: *const c_char,
+    callback: OffsetAsyncCallback,
+    user_data: *mut std::ffi::c_void,
+    result: *mut CResult,
+) -> bool {
+    ffi_guard(result, false, move || {
+        if let Err(msg) = validate_stream_ptr(stream) {
+            write_error_result(result, msg, false);
+            return false;
+        }
+
+        let json_str = match unsafe { c_str_to_string(json_data) } {
+            Ok(s) => s,
+            Err(e) => {
+                write_error_result(result, e, false);
+                return false;
+            }
+        };
+
+        let stream_arc = unsafe { clone_stream_arc(stream) };
+        let callback_user_data = SendPtr::new(user_data);
+        RUNTIME.spawn(async move {
+            match stream_arc.ingest_record_offset(EncodedRecord::Json(json_str)).await {
+                Ok(offset) => invoke_offset_async_callback(
+                    callback,
+                    offset,
+                    CResult::success(),
+                    callback_user_data.get(),
+                ),
+                Err(err) => invoke_offset_async_callback(
+                    callback,
+                    -1,
+                    CResult::error(err),
+                    callback_user_data.get(),
+                ),
+            }
+        });
+
+        write_success_result(result);
+        true
     })
 }
 
@@ -488,6 +1042,83 @@ pub extern "C" fn zerobus_stream_ingest_proto_records(
     })
 }
 
+/// Ingest a batch of protobuf records on a background task and report the last offset via callback.
+#[no_mangle]
+pub extern "C" fn zerobus_stream_ingest_proto_records_async(
+    stream: *mut CZerobusStream,
+    records: *const *const u8,
+    record_lens: *const usize,
+    num_records: usize,
+    callback: OffsetAsyncCallback,
+    user_data: *mut std::ffi::c_void,
+    result: *mut CResult,
+) -> bool {
+    ffi_guard(result, false, move || {
+        if records.is_null() || record_lens.is_null() {
+            write_error_result(result, "Invalid records pointer", false);
+            return false;
+        }
+
+        let callback_user_data = SendPtr::new(user_data);
+        if num_records == 0 {
+            RUNTIME.spawn(async move {
+                invoke_offset_async_callback(
+                    callback,
+                    -2,
+                    CResult::success(),
+                    callback_user_data.get(),
+                );
+            });
+            write_success_result(result);
+            return true;
+        }
+
+        if let Err(msg) = validate_stream_ptr(stream) {
+            write_error_result(result, msg, false);
+            return false;
+        }
+
+        let records_vec: Vec<Vec<u8>> = unsafe {
+            let records_slice = std::slice::from_raw_parts(records, num_records);
+            let lens_slice = std::slice::from_raw_parts(record_lens, num_records);
+            records_slice
+                .iter()
+                .zip(lens_slice.iter())
+                .map(|(ptr, len)| std::slice::from_raw_parts(*ptr, *len).to_vec())
+                .collect()
+        };
+
+        let stream_arc = unsafe { clone_stream_arc(stream) };
+        RUNTIME.spawn(async move {
+            let payloads: Vec<EncodedRecord> =
+                records_vec.into_iter().map(EncodedRecord::Proto).collect();
+            match stream_arc.ingest_records_offset(payloads).await {
+                Ok(Some(offset)) => invoke_offset_async_callback(
+                    callback,
+                    offset,
+                    CResult::success(),
+                    callback_user_data.get(),
+                ),
+                Ok(None) => invoke_offset_async_callback(
+                    callback,
+                    -2,
+                    CResult::success(),
+                    callback_user_data.get(),
+                ),
+                Err(err) => invoke_offset_async_callback(
+                    callback,
+                    -1,
+                    CResult::error(err),
+                    callback_user_data.get(),
+                ),
+            }
+        });
+
+        write_success_result(result);
+        true
+    })
+}
+
 /// Ingest a batch of JSON records
 /// Returns the offset of the last record in the batch, or -1 on error
 /// Returns -2 if batch is empty
@@ -556,6 +1187,84 @@ pub extern "C" fn zerobus_stream_ingest_json_records(
                 -1
             }
         }
+    })
+}
+
+/// Ingest a batch of JSON records on a background task and report the last offset via callback.
+#[no_mangle]
+pub extern "C" fn zerobus_stream_ingest_json_records_async(
+    stream: *mut CZerobusStream,
+    json_records: *const *const c_char,
+    num_records: usize,
+    callback: OffsetAsyncCallback,
+    user_data: *mut std::ffi::c_void,
+    result: *mut CResult,
+) -> bool {
+    ffi_guard(result, false, move || {
+        if json_records.is_null() {
+            write_error_result(result, "Invalid records pointer", false);
+            return false;
+        }
+
+        let callback_user_data = SendPtr::new(user_data);
+        if num_records == 0 {
+            RUNTIME.spawn(async move {
+                invoke_offset_async_callback(
+                    callback,
+                    -2,
+                    CResult::success(),
+                    callback_user_data.get(),
+                );
+            });
+            write_success_result(result);
+            return true;
+        }
+
+        if let Err(msg) = validate_stream_ptr(stream) {
+            write_error_result(result, msg, false);
+            return false;
+        }
+
+        let json_vec: Result<Vec<String>, _> = unsafe {
+            let json_slice = std::slice::from_raw_parts(json_records, num_records);
+            json_slice.iter().map(|ptr| c_str_to_string(*ptr)).collect()
+        };
+        let json_vec = match json_vec {
+            Ok(v) => v,
+            Err(e) => {
+                write_error_result(result, e, false);
+                return false;
+            }
+        };
+
+        let stream_arc = unsafe { clone_stream_arc(stream) };
+        RUNTIME.spawn(async move {
+            let payloads: Vec<EncodedRecord> =
+                json_vec.into_iter().map(EncodedRecord::Json).collect();
+            match stream_arc.ingest_records_offset(payloads).await {
+                Ok(Some(offset)) => invoke_offset_async_callback(
+                    callback,
+                    offset,
+                    CResult::success(),
+                    callback_user_data.get(),
+                ),
+                Ok(None) => invoke_offset_async_callback(
+                    callback,
+                    -2,
+                    CResult::success(),
+                    callback_user_data.get(),
+                ),
+                Err(err) => invoke_offset_async_callback(
+                    callback,
+                    -1,
+                    CResult::error(err),
+                    callback_user_data.get(),
+                ),
+            }
+        });
+
+        write_success_result(result);
+        true
     })
 }
 
@@ -790,6 +1499,45 @@ pub extern "C" fn zerobus_stream_wait_for_offset(
     })
 }
 
+/// Wait for an offset on a background task and report completion via callback.
+#[no_mangle]
+pub extern "C" fn zerobus_stream_wait_for_offset_async(
+    stream: *mut CZerobusStream,
+    offset: i64,
+    callback: BoolAsyncCallback,
+    user_data: *mut std::ffi::c_void,
+    result: *mut CResult,
+) -> bool {
+    ffi_guard(result, false, move || {
+        if let Err(msg) = validate_stream_ptr(stream) {
+            write_error_result(result, msg, false);
+            return false;
+        }
+
+        let stream_arc = unsafe { clone_stream_arc(stream) };
+        let callback_user_data = SendPtr::new(user_data);
+        RUNTIME.spawn(async move {
+            match stream_arc.wait_for_offset(offset).await {
+                Ok(()) => invoke_bool_async_callback(
+                    callback,
+                    true,
+                    CResult::success(),
+                    callback_user_data.get(),
+                ),
+                Err(err) => invoke_bool_async_callback(
+                    callback,
+                    false,
+                    CResult::error(err),
+                    callback_user_data.get(),
+                ),
+            }
+        });
+
+        write_success_result(result);
+        true
+    })
+}
+
 /// Flush all pending records
 #[no_mangle]
 pub extern "C" fn zerobus_stream_flush(stream: *mut CZerobusStream, result: *mut CResult) -> bool {
@@ -821,6 +1569,44 @@ pub extern "C" fn zerobus_stream_flush(stream: *mut CZerobusStream, result: *mut
     })
 }
 
+/// Flush all pending records on a background task and report completion via callback.
+#[no_mangle]
+pub extern "C" fn zerobus_stream_flush_async(
+    stream: *mut CZerobusStream,
+    callback: BoolAsyncCallback,
+    user_data: *mut std::ffi::c_void,
+    result: *mut CResult,
+) -> bool {
+    ffi_guard(result, false, move || {
+        if let Err(msg) = validate_stream_ptr(stream) {
+            write_error_result(result, msg, false);
+            return false;
+        }
+
+        let stream_arc = unsafe { clone_stream_arc(stream) };
+        let callback_user_data = SendPtr::new(user_data);
+        RUNTIME.spawn(async move {
+            match stream_arc.flush().await {
+                Ok(_) => invoke_bool_async_callback(
+                    callback,
+                    true,
+                    CResult::success(),
+                    callback_user_data.get(),
+                ),
+                Err(err) => invoke_bool_async_callback(
+                    callback,
+                    false,
+                    CResult::error(err),
+                    callback_user_data.get(),
+                ),
+            }
+        });
+
+        write_success_result(result);
+        true
+    })
+}
+
 /// Get unacknowledged records from a closed stream
 /// Returns a CRecordArray that must be freed with zerobus_free_record_array
 #[no_mangle]
@@ -848,44 +1634,8 @@ pub extern "C" fn zerobus_stream_get_unacked_records(
 
         match records_res {
             Ok(records_iter) => {
-                // Collect into Vec
-                let records_vec: Vec<EncodedRecord> = records_iter.collect();
-                let len = records_vec.len();
-
-                // Convert to CRecords
-                let mut c_records: Vec<CRecord> = records_vec
-                    .into_iter()
-                    .map(|record| match record {
-                        EncodedRecord::Proto(data) => {
-                            let data_len = data.len();
-                            let data_ptr = Box::into_raw(data.into_boxed_slice()) as *mut u8;
-                            CRecord {
-                                is_json: false,
-                                data: data_ptr,
-                                data_len,
-                            }
-                        }
-                        EncodedRecord::Json(json_str) => {
-                            let bytes = json_str.into_bytes();
-                            let data_len = bytes.len();
-                            let data_ptr = Box::into_raw(bytes.into_boxed_slice()) as *mut u8;
-                            CRecord {
-                                is_json: true,
-                                data: data_ptr,
-                                data_len,
-                            }
-                        }
-                    })
-                    .collect();
-
-                let records_ptr = c_records.as_mut_ptr();
-                std::mem::forget(c_records); // Don't drop, Go will call free
-
                 write_success_result(result);
-                CRecordArray {
-                    records: records_ptr,
-                    len,
-                }
+                encoded_records_to_c_array(records_iter.collect())
             }
             Err(err) => {
                 if !result.is_null() {
@@ -899,6 +1649,47 @@ pub extern "C" fn zerobus_stream_get_unacked_records(
                 }
             }
         }
+    })
+}
+
+/// Get unacknowledged records from a closed stream on a background task.
+#[no_mangle]
+pub extern "C" fn zerobus_stream_get_unacked_records_async(
+    stream: *mut CZerobusStream,
+    callback: RecordArrayAsyncCallback,
+    user_data: *mut std::ffi::c_void,
+    result: *mut CResult,
+) -> bool {
+    ffi_guard(result, false, move || {
+        if let Err(msg) = validate_stream_ptr(stream) {
+            write_error_result(result, msg, false);
+            return false;
+        }
+
+        let stream_arc = unsafe { clone_stream_arc(stream) };
+        let callback_user_data = SendPtr::new(user_data);
+        RUNTIME.spawn(async move {
+            match stream_arc.get_unacked_records().await {
+                Ok(records_iter) => invoke_record_array_async_callback(
+                    callback,
+                    encoded_records_to_c_array(records_iter.collect()),
+                    CResult::success(),
+                    callback_user_data.get(),
+                ),
+                Err(err) => invoke_record_array_async_callback(
+                    callback,
+                    CRecordArray {
+                        records: ptr::null_mut(),
+                        len: 0,
+                    },
+                    CResult::error(err),
+                    callback_user_data.get(),
+                ),
+            }
+        });
+
+        write_success_result(result);
+        true
     })
 }
 
@@ -949,6 +1740,58 @@ pub extern "C" fn zerobus_stream_close(stream: *mut CZerobusStream, result: *mut
                 false
             }
         }
+    })
+}
+
+/// Close the stream gracefully on a background task.
+#[no_mangle]
+pub extern "C" fn zerobus_stream_close_async(
+    stream: *mut CZerobusStream,
+    callback: BoolAsyncCallback,
+    user_data: *mut std::ffi::c_void,
+    result: *mut CResult,
+) -> bool {
+    ffi_guard(result, false, move || {
+        if let Err(msg) = validate_stream_ptr_mut(stream) {
+            write_error_result(result, msg, false);
+            return false;
+        }
+
+        let stream_ptr = SendPtr::new(stream);
+        let callback_user_data = SendPtr::new(user_data);
+        RUNTIME.spawn(async move {
+            let callback_result = match validate_stream_ptr_mut(stream_ptr.get()) {
+                Ok(stream_ref) => match stream_ref.close().await {
+                    Ok(_) => {
+                        invoke_bool_async_callback(
+                            callback,
+                            true,
+                            CResult::success(),
+                            callback_user_data.get(),
+                        );
+                        return;
+                    }
+                    Err(err) => CResult::error(err),
+                },
+                Err(msg) => CResult {
+                    success: false,
+                    error_message: CString::new(msg)
+                        .unwrap_or_else(|_| CString::new("Stream pointer is invalid").unwrap())
+                        .into_raw(),
+                    is_retryable: false,
+                },
+            };
+
+            invoke_bool_async_callback(
+                callback,
+                false,
+                callback_result,
+                callback_user_data.get(),
+            );
+        });
+
+        write_success_result(result);
+        true
     })
 }
 

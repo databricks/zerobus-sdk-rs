@@ -68,6 +68,20 @@ private static extern IntPtr zerobus_sdk_new(string endpoint, string ucUrl, ref 
 // Link with -lzerobus_ffi
 ```
 
+### Async stream creation callback
+
+For callers that do not want to block a thread in the synchronous stream
+creation functions, use `zerobus_sdk_create_stream_async` or
+`zerobus_sdk_create_stream_with_headers_provider_async`. Each returns once the
+request has been validated and queued on the Rust runtime, then invokes a
+one-shot `CreateStreamAsyncCallback` with either the created
+`CZerobusStream*` or a null stream plus a failure `CResult`.
+
+The callback receives a `const CResult*` that is valid only for the duration of
+the call, so copy `error_message` if you need to keep it. All string,
+descriptor, and config inputs are copied before the async create call returns,
+but the `CZerobusSdk*` itself must remain valid until the callback fires.
+
 ### Dynamic protobuf from a Unity Catalog schema (pure C)
 
 Build a protobuf descriptor and encode records straight from Unity Catalog

@@ -167,6 +167,10 @@ pub struct CStreamConfigurationOptions {
     pub ack_user_data: *mut std::ffi::c_void,
 }
 
+// Safety: this POD struct only carries scalars, function pointers, and an
+// opaque user_data pointer whose synchronization remains the caller's contract.
+unsafe impl Send for CStreamConfigurationOptions {}
+
 // Helper to convert C string to Rust String
 pub(crate) unsafe fn c_str_to_string(c_str: *const c_char) -> Result<String, &'static str> {
     if c_str.is_null() {
@@ -205,6 +209,52 @@ pub struct CHeaders {
 /// The callback should return a CHeaders struct
 /// The caller is responsible for freeing the returned CHeaders using zerobus_free_headers
 pub type HeadersProviderCallback = extern "C" fn(user_data: *mut std::ffi::c_void) -> CHeaders;
+
+/// Function pointer type for async stream creation completion.
+///
+/// `stream` is non-null on success and null on failure. `result` points to a
+/// `CResult` valid only for the duration of the call; copy any error text during
+/// the callback if you need to retain it.
+///
+/// Invoked from a background task, so it must be thread-safe and must not
+/// unwind across the FFI boundary.
+pub type CreateStreamAsyncCallback = extern "C" fn(
+    stream: *mut CZerobusStream,
+    result: *const CResult,
+    user_data: *mut std::ffi::c_void,
+);
+
+/// Function pointer type for async offset-returning operations.
+///
+/// `result` points to a `CResult` valid only for the duration of the call; copy
+/// any error text during the callback if you need to retain it.
+pub type OffsetAsyncCallback = extern "C" fn(
+    offset: i64,
+    result: *const CResult,
+    user_data: *mut std::ffi::c_void,
+);
+
+/// Function pointer type for async bool-returning operations.
+///
+/// `result` points to a `CResult` valid only for the duration of the call; copy
+/// any error text during the callback if you need to retain it.
+pub type BoolAsyncCallback = extern "C" fn(
+    value: bool,
+    result: *const CResult,
+    user_data: *mut std::ffi::c_void,
+);
+
+/// Function pointer type for async `CRecordArray`-returning operations.
+///
+/// On success, ownership of `records` transfers to the callback recipient, who
+/// must free it with `zerobus_free_record_array`. `result` points to a `CResult`
+/// valid only for the duration of the call; copy any error text during the
+/// callback if you need to retain it.
+pub type RecordArrayAsyncCallback = extern "C" fn(
+    records: CRecordArray,
+    result: *const CResult,
+    user_data: *mut std::ffi::c_void,
+);
 
 /// Rust struct that wraps a Go callback and implements HeadersProvider
 pub(crate) struct CallbackHeadersProvider {
