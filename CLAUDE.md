@@ -2,7 +2,7 @@
 
 ## Architecture
 
-This is a polyglot SDK monorepo. A single Rust core (`rust/sdk/`) implements gRPC streaming, OAuth, recovery, and ingestion logic. Four wrapper SDKs expose it to other languages:
+This is a polyglot SDK monorepo. A single Rust core (`rust/sdk/`) implements gRPC streaming, OAuth, recovery, and ingestion logic. Five wrapper SDKs expose it to other languages:
 
 | SDK        | Directory      | Binding mechanism        | Build system     |
 |------------|----------------|--------------------------|------------------|

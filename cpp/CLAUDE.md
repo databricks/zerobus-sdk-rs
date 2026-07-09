@@ -24,7 +24,7 @@ cpp/
 │   ├── headers_callback.cpp  # extern "C" trampoline for HeadersProvider
 │   └── detail/           # Internal: ffi_util, config_convert, headers_callback
 ├── tests/                # Dependency-free unit tests (plain executables)
-├── examples/             # Runnable usage examples
+├── examples/             # Runnable usage examples (forthcoming)
 ├── cmake/
 │   ├── BuildRustFfi.cmake       # Builds libzerobus_ffi from local Rust source
 │   └── zerobus-config.cmake.in  # find_package(zerobus) package-config template
@@ -40,7 +40,8 @@ implementation detail of the SDK.
 
 Run from `cpp/`:
 
-- `make build` — Configure (CMake) and build the SDK, tests, and examples
+- `make build` — Configure (CMake) and build the SDK and tests
+  (also builds examples once they land)
 - `make build-ffi` — Build only the Rust C FFI static library
 - `make test` — Build and run the test suite (`ctest`)
 - `make lint` — Formatting check + compiler warnings (`-Wall -Wextra`)
@@ -85,7 +86,10 @@ When using a custom `HeadersProvider`:
   `HeadersProvider*`.
 - The `Stream` / `ArrowStream` keeps a `std::shared_ptr<HeadersProvider>` alive
   for its whole lifetime; the handle is freed in the destructor **before** the
-  shared_ptr member is destroyed, so the provider always outlives the stream.
+  shared_ptr member is destroyed. Necessary but not always sufficient (see
+  `headers_provider.hpp`): a `get_headers()` call still running when `close()`
+  times out (~1s) can be invoked on a freed provider. Keep `get_headers()` well
+  under that budget, or keep the provider alive past the stream.
 - The trampoline marshals the returned map into `CHeaders` using the allocators
   the Rust core's `zerobus_free_headers` expects to free. Do not change the
   allocator without checking `zerobus_free_headers` in the FFI crate.
@@ -106,7 +110,7 @@ in `StreamOptions` / `ArrowStreamOptions` drift from the FFI defaults.
 ## Thread safety
 
 - A `Stream` / `ArrowStream` is **not** safe for concurrent use — serialize
-  access externally (same contract as Java and the Rust core).
+  access externally (same contract as the Rust core).
 - A `HeadersProvider::get_headers()` may be invoked from an internal worker
   thread; the core guards against overlapping calls but implementations should
   be thread-safe with respect to their own state.

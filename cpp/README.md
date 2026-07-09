@@ -16,6 +16,9 @@ every other Zerobus SDK.
 
 > Status: `0.1.0` — initial development. The API may change before `1.0.0`.
 
+**Prerequisites** (workspace setup, Delta table, service principal): See the
+[top-level README](../README.md#prerequisites).
+
 ## Requirements
 
 - A C++17 compiler (GCC, Clang, or MSVC)
@@ -28,7 +31,8 @@ every other Zerobus SDK.
 From `cpp/`:
 
 ```bash
-make build        # configure + build the SDK, tests, and examples
+make build        # configure + build the SDK and tests
+                  # (also builds examples once they land)
 make test         # build + run the test suite
 ```
 
@@ -116,6 +120,10 @@ stream.flush();                        // wait once for all pending acks
 For continuous/unbounded streams, call `flush()` every N records rather than per
 record. Prefer the batch APIs (`ingest_*_records`) in hot paths — each FFI
 crossing has a fixed cost that batching amortizes.
+
+`wait_for_offset()` behaves the same way: acks are monotonic, so waiting on the
+*last* offset returned by a run of ingests confirms all prior ones too. Wait on
+the last offset, not each one.
 
 ## Quickstart
 
@@ -270,8 +278,13 @@ cargo run -- \
   --client-id "$ZEROBUS_CLIENT_ID" \
   --client-secret "$ZEROBUS_CLIENT_SECRET" \
   --table "catalog.schema.table" \
-  --output-dir ./out
+  --output-dir ./out \
+  --output catalog.schema.table.proto
 ```
+
+Without `--output`, the generator defaults the filename to the cleaned last
+component of the table name (e.g. `./out/table.proto`), which is why the next
+paragraph refers to `catalog.schema.table.proto` — pass `--output` to match.
 
 Compile the generated `catalog.schema.table.proto` for C++ with
 `protoc --cpp_out=...` and link libprotobuf, then build the descriptor from the
@@ -294,9 +307,9 @@ calling `close()` explicitly** rather than relying on the destructor:
 ## Thread safety
 
 A `Stream` or `ArrowStream` is **not** safe for concurrent use — serialize
-access externally (the same contract as Java and the Rust core). A single `Sdk`
-may create many streams. See [`CLAUDE.md`](CLAUDE.md) for the full
-memory-ownership and threading contract.
+access externally (the same contract as the Rust core). A single `Sdk` may
+create many streams. See [`CLAUDE.md`](CLAUDE.md) for the full memory-ownership
+and threading contract.
 
 ## License
 
