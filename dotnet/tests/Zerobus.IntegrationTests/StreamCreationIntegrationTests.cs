@@ -67,6 +67,93 @@ public class StreamCreationIntegrationTests : IntegrationTestBase
     }
 
     [Test]
+    public async Task CreateJsonStreamWithHeadersProvider_ReturnsTypedJsonStream()
+    {
+        await using var fixture = await MockServerFixture.StartAsync();
+
+        fixture.MockServer.InjectResponses(TestTableName,
+        [
+            MockResponses.CreateStreamResponse("test_stream_json"),
+            MockResponses.RecordAckResponse(0),
+        ]);
+
+        using var sdk = CreateDefaultSdk(fixture);
+        var options = CreateDefaultOptions();
+
+        using var stream = sdk.CreateJsonStreamWithHeadersProvider(
+            TestTableName,
+            new TestHeadersProvider(),
+            options);
+
+        var offset = stream.IngestRecord("{\"message\":\"json\"}");
+        stream.WaitForOffset(offset);
+
+        Assert.That(offset, Is.EqualTo(0));
+    }
+
+    [Test]
+    public async Task CreateProtoStreamWithHeadersProvider_ReturnsTypedProtoStream()
+    {
+        await using var fixture = await MockServerFixture.StartAsync();
+
+        fixture.MockServer.InjectResponses(TestTableName,
+        [
+            MockResponses.CreateStreamResponse("test_stream_proto"),
+            MockResponses.RecordAckResponse(0),
+        ]);
+
+        using var sdk = CreateDefaultSdk(fixture);
+        var options = CreateDefaultOptions();
+
+        using var stream = sdk.CreateProtoStreamWithHeadersProvider(
+            TestTableName,
+            TestDescriptor.CreateTestDescriptorProto(),
+            new TestHeadersProvider(),
+            options);
+
+        var offset = stream.IngestRecord("proto-payload"u8.ToArray());
+        stream.WaitForOffset(offset);
+
+        Assert.That(offset, Is.EqualTo(0));
+    }
+
+    [Test]
+    public async Task CreateStream_JsonRecordTypeWithDescriptor_ThrowsArgumentException()
+    {
+        await using var fixture = await MockServerFixture.StartAsync();
+
+        using var sdk = CreateDefaultSdk(fixture);
+        var options = CreateDefaultOptions() with { RecordType = RecordType.Json };
+        var tableProperties = CreateTableProperties();
+
+        var ex = Assert.Throws<ArgumentException>(() =>
+        {
+            sdk.CreateStreamWithHeadersProvider(tableProperties, new TestHeadersProvider(), options);
+        });
+
+        Assert.That(ex!.Message, Does.Contain("JSON streams cannot specify DescriptorProto"));
+    }
+
+    [Test]
+    public async Task CreateStream_ProtoRecordTypeWithoutDescriptor_ThrowsArgumentException()
+    {
+        await using var fixture = await MockServerFixture.StartAsync();
+
+        using var sdk = CreateDefaultSdk(fixture);
+        var options = CreateDefaultOptions() with { RecordType = RecordType.Proto };
+
+        var ex = Assert.Throws<ArgumentException>(() =>
+        {
+            sdk.CreateStreamWithHeadersProvider(
+                new TableProperties(TestTableName),
+                new TestHeadersProvider(),
+                options);
+        });
+
+        Assert.That(ex!.Message, Does.Contain("Proto streams require a non-empty DescriptorProto"));
+    }
+
+    [Test]
     public async Task TimeoutedStreamCreation()
     {
         await using var fixture = await MockServerFixture.StartAsync();

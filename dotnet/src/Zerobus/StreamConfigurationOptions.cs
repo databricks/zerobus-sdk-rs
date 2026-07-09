@@ -9,7 +9,7 @@ namespace Databricks.Zerobus;
 /// var options = StreamConfigurationOptions.Default with
 /// {
 ///     MaxInflightRequests = 50_000,
-///     RecordType = RecordType.Json,
+///     RecoveryRetries = 8,
 /// };
 /// </code>
 /// </example>
@@ -65,6 +65,9 @@ public sealed record StreamConfigurationOptions
 
     /// <summary>
     /// Type of record to ingest (Proto, Json, or Unspecified).
+    /// Typed factories such as <see cref="ZerobusSdk.CreateJsonStream(string, string, string, StreamConfigurationOptions?)"/>
+    /// and <see cref="ZerobusSdk.CreateProtoStream(string, byte[], string, string, StreamConfigurationOptions?)"/>
+    /// set this automatically.
     /// Default: <see cref="Zerobus.RecordType.Proto"/>.
     /// </summary>
     public RecordType RecordType { get; init; } = RecordType.Proto;

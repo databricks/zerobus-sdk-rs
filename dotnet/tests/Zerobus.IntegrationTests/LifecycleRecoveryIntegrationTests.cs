@@ -382,6 +382,35 @@ public class LifecycleRecoveryIntegrationTests : IntegrationTestBase
     }
 
     [Test]
+    public async Task RecreateStream_JsonTypedStream_RecreatedStreamUsable()
+    {
+        await using var fixture = await MockServerFixture.StartAsync();
+
+        fixture.MockServer.InjectResponses(TestTableName,
+        [
+            MockResponses.CreateStreamResponse("test_stream_json_1"),
+            MockResponses.CreateStreamResponse("test_stream_json_2"),
+            MockResponses.RecordAckResponse(0),
+        ]);
+
+        using var sdk = CreateDefaultSdk(fixture);
+        var options = CreateDefaultOptions();
+
+        var stream = sdk.CreateJsonStreamWithHeadersProvider(
+            TestTableName,
+            new TestHeadersProvider(),
+            options);
+        stream.Close();
+
+        using var recreatedStream = sdk.RecreateStream(stream);
+
+        var offsetId = recreatedStream.IngestRecord("{\"message\":\"recreated\"}");
+        recreatedStream.WaitForOffset(offsetId);
+
+        Assert.That(offsetId, Is.EqualTo(0));
+    }
+
+    [Test]
     public async Task FlushFailure_GetUnackedRecords_ThenRecreateStream_Works()
     {
         await using var fixture = await MockServerFixture.StartAsync();
