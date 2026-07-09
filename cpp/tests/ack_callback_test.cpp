@@ -113,21 +113,18 @@ void test_trampolines_dispatch() {
 
 void test_null_user_data_is_ignored() {
   // Null user_data must hit the early-return guard rather than dereferencing
-  // it. There is no callback to observe (that is the point), so the only
-  // property we can honestly assert is that neither call crashes; reaching the
-  // check proves the guard fired instead of casting and dispatching to a null
-  // pointer.
+  // it. There is no callback to observe (that is the point): reaching the end
+  // without crashing is the assertion, so there is nothing to check().
   zerobus::detail::zerobus_cpp_ack_on_ack_trampoline(1, nullptr);
   zerobus::detail::zerobus_cpp_ack_on_error_trampoline(1, "x", nullptr);
-  check("null user_data tolerated (no crash)", true);
 }
 
 void test_exceptions_are_contained() {
   ThrowingCallback cb;
-  // Neither call may propagate the exception out of the trampoline.
+  // Neither call may propagate the exception out of the trampoline: returning
+  // here (rather than terminating on an escaped throw) is the assertion.
   zerobus::detail::zerobus_cpp_ack_on_ack_trampoline(1, &cb);
   zerobus::detail::zerobus_cpp_ack_on_error_trampoline(1, "x", &cb);
-  check("exceptions contained at boundary", true);  // reached here => contained
 }
 
 }  // namespace

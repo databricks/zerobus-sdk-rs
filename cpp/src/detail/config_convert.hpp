@@ -12,8 +12,9 @@ namespace detail {
 /// overwrite every scalar unconditionally (guarded by `config_defaults_test`).
 /// The seed survives only for unknown future fields and for
 /// `callback_max_wait_time_ms` when `callback_wait_forever` is false and the
-/// budget is left unset (below). Ack-callback fields are wired only when
-/// `opts.ack_callback` is set, matching the null FFI default.
+/// budget is left unset (below). Ack-callback fields are set from
+/// `opts.ack_callback` and zeroed explicitly when it is unset, so correctness
+/// does not depend on the FFI default seeding them null.
 inline CStreamConfigurationOptions to_c(const StreamOptions& opts) {
   CStreamConfigurationOptions c = zerobus_get_default_config();
   c.max_inflight_requests = opts.max_inflight_requests;
@@ -42,11 +43,16 @@ inline CStreamConfigurationOptions to_c(const StreamOptions& opts) {
     c.callback_max_wait_time_ms = *opts.callback_max_wait_time_ms;
   }
   // Install trampolines only when a callback is set; the Stream keeps the
-  // shared_ptr alive so this user_data stays valid.
+  // shared_ptr alive so this user_data stays valid. Zero the fields explicitly
+  // otherwise rather than trusting the FFI default to leave them null.
   if (opts.ack_callback != nullptr) {
     c.ack_on_ack = zerobus_cpp_ack_on_ack_trampoline;
     c.ack_on_error = zerobus_cpp_ack_on_error_trampoline;
     c.ack_user_data = opts.ack_callback.get();
+  } else {
+    c.ack_on_ack = nullptr;
+    c.ack_on_error = nullptr;
+    c.ack_user_data = nullptr;
   }
   return c;
 }

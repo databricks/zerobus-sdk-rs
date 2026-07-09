@@ -3,6 +3,7 @@
 // (unwinding across the C FFI is UB). Declared in detail/ack_callback.hpp.
 #include "detail/ack_callback.hpp"
 
+#include <cinttypes>
 #include <cstdio>
 #include <string>
 
@@ -23,9 +24,9 @@ extern "C" void zerobus_cpp_ack_on_ack_trampoline(std::int64_t offset,
     // Contain (can't unwind across the FFI) but log, so a throwing callback bug
     // leaves a signal.
     std::fprintf(stderr,
-                 "zerobus: AckCallback::on_ack threw for offset %lld; "
-                 "exception swallowed at the C FFI boundary\n",
-                 static_cast<long long>(offset));
+                 "zerobus: AckCallback::on_ack threw for offset %" PRId64
+                 "; exception swallowed at the C FFI boundary\n",
+                 offset);
   }
 }
 
@@ -43,9 +44,9 @@ extern "C" void zerobus_cpp_ack_on_error_trampoline(std::int64_t offset,
   } catch (...) {
     // See on_ack trampoline: contain but log.
     std::fprintf(stderr,
-                 "zerobus: AckCallback::on_error threw for offset %lld; "
-                 "exception swallowed at the C FFI boundary\n",
-                 static_cast<long long>(offset));
+                 "zerobus: AckCallback::on_error threw for offset %" PRId64
+                 "; exception swallowed at the C FFI boundary\n",
+                 offset);
   }
 }
 
