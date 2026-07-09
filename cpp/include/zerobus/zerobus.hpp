@@ -9,6 +9,7 @@
 /// `zerobus::ZerobusException`.
 
 #include "zerobus/ack_callback.hpp"
+#include "zerobus/arrow_stream.hpp"
 #include "zerobus/config.hpp"
 #include "zerobus/error.hpp"
 #include "zerobus/headers_provider.hpp"

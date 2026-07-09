@@ -18,5 +18,7 @@ function(zerobus_add_test name)
 endfunction()
 
 zerobus_add_test(config_defaults_test)
+zerobus_add_test(arrow_config_defaults_test)
+zerobus_add_test(arrow_config_convert_test)
 zerobus_add_test(embedded_nul_test)
 zerobus_add_test(ack_callback_test)
