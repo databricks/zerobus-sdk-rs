@@ -329,7 +329,7 @@ internal static class NativeInterop
     /// <summary>
     /// Retrieves all unacknowledged records from a closed/failed stream.
     /// </summary>
-    public static object[] StreamGetUnackedRecords(IntPtr streamPtr)
+    public static ReadOnlyMemory<byte>[] StreamGetUnackedRecords(IntPtr streamPtr)
     {
         var result = new CResult();
         var cArray = NativeMethods.StreamGetUnackedRecords(streamPtr, ref result);
@@ -350,20 +350,26 @@ internal static class NativeInterop
         if ((int)cArray.Len == 0)
             return [];
 
-        var records = new object[(int)cArray.Len];
-        var recordSize = Marshal.SizeOf<CRecord>();
-
-        for (var i = 0; i < (int)cArray.Len; i++)
+        try
         {
-            var cRecord = Marshal.PtrToStructure<CRecord>(cArray.Records + i * recordSize);
-            var data = new byte[(int)cRecord.DataLen];
-            Marshal.Copy(cRecord.Data, data, 0, data.Length);
+            var records = new ReadOnlyMemory<byte>[(int)cArray.Len];
+            var recordSize = Marshal.SizeOf<CRecord>();
 
-            records[i] = cRecord.IsJson ? Encoding.UTF8.GetString(data) : data;
+            for (var i = 0; i < (int)cArray.Len; i++)
+            {
+                var cRecord = Marshal.PtrToStructure<CRecord>(cArray.Records + i * recordSize);
+                var data = new byte[(int)cRecord.DataLen];
+                Marshal.Copy(cRecord.Data, data, 0, data.Length);
+
+                records[i] = data;
+            }
+
+            return records;
         }
-
-        NativeMethods.FreeRecordArray(cArray);
-        return records;
+        finally
+        {
+            NativeMethods.FreeRecordArray(cArray);
+        }
     }
 
     /// <summary>

@@ -408,8 +408,7 @@ public class LifecycleRecoveryIntegrationTests : IntegrationTestBase
 
         var unacked = stream.GetUnackedRecords();
         Assert.That(unacked, Has.Length.EqualTo(1));
-        Assert.That(unacked[0], Is.TypeOf<byte[]>());
-        Assert.That((byte[])unacked[0], Is.EqualTo(failedPayload));
+        Assert.That(unacked[0].ToArray(), Is.EqualTo(failedPayload));
 
         using var recreated = sdk.RecreateStream(stream);
 
