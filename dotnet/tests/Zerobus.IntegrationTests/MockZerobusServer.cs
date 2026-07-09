@@ -40,9 +40,11 @@ public sealed class MockZerobusServer : Protos.Zerobus.ZerobusBase
     private readonly object _offsetLock = new();
     private readonly object _writeCountLock = new();
     private readonly object _responseIndicesLock = new();
+    private readonly object _requestHeadersLock = new();
 
     private Dictionary<string, List<MockResponse>> _responses = new();
     private Dictionary<string, int> _responseIndices = new();
+    private Dictionary<string, Dictionary<string, string>> _lastRequestHeadersByTable = new();
     private int _streamCounter;
     private long _maxOffsetSent = -1;
     private ulong _writeCount;
@@ -86,12 +88,26 @@ public sealed class MockZerobusServer : Protos.Zerobus.ZerobusBase
     }
 
     /// <summary>
+    /// Returns the request headers seen for the latest create stream call for a table.
+    /// </summary>
+    public IDictionary<string, string> GetLastRequestHeaders(string tableName)
+    {
+        lock (_requestHeadersLock)
+        {
+            return _lastRequestHeadersByTable.TryGetValue(tableName, out var headers)
+                ? new Dictionary<string, string>(headers)
+                : new Dictionary<string, string>();
+        }
+    }
+
+    /// <summary>
     /// Resets all server state.
     /// </summary>
     public void Reset()
     {
         lock (_responsesLock) { _responses = new Dictionary<string, List<MockResponse>>(); }
         lock (_responseIndicesLock) { _responseIndices = new Dictionary<string, int>(); }
+        lock (_requestHeadersLock) { _lastRequestHeadersByTable = new Dictionary<string, Dictionary<string, string>>(); }
         lock (_offsetLock) { _maxOffsetSent = -1; }
         lock (_writeCountLock) { _writeCount = 0; }
         lock (_counterLock) { _streamCounter = 0; }
@@ -123,6 +139,20 @@ public sealed class MockZerobusServer : Protos.Zerobus.ZerobusBase
         }
 
         var tableName = createReq.TableName ?? "";
+
+        // Capture incoming metadata so tests can validate custom header callback behavior.
+        var requestHeaders = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var entry in context.RequestHeaders)
+        {
+            requestHeaders[entry.Key] = entry.IsBinary
+                ? Convert.ToBase64String(entry.ValueBytes ?? [])
+                : entry.Value ?? string.Empty;
+        }
+
+        lock (_requestHeadersLock)
+        {
+            _lastRequestHeadersByTable[tableName] = requestHeaders;
+        }
 
         // Get stream ID.
         string streamId;
