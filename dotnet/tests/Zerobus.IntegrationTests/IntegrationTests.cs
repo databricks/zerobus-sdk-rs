@@ -17,7 +17,11 @@ public class IntegrationTests
     {
         await using var fixture = await MockServerFixture.StartAsync();
 
-        using var sdk = new ZerobusSdk(fixture.ServerUrl, "https://mock-uc.com");
+        using var sdk = ZerobusSdk.CreateBuilder()
+            .Endpoint(fixture.ServerUrl)
+            .UnityCatalogUrl("https://mock-uc.com")
+            .DisableTls()
+            .Build();
 
         Assert.Throws<ArgumentNullException>(() =>
         {
@@ -30,7 +34,11 @@ public class IntegrationTests
     {
         await using var fixture = await MockServerFixture.StartAsync();
 
-        using var sdk = new ZerobusSdk(fixture.ServerUrl, "https://mock-uc.com");
+        using var sdk = ZerobusSdk.CreateBuilder()
+            .Endpoint(fixture.ServerUrl)
+            .UnityCatalogUrl("https://mock-uc.com")
+            .DisableTls()
+            .Build();
 
         Assert.Throws<ArgumentNullException>(() =>
         {
@@ -43,7 +51,11 @@ public class IntegrationTests
     {
         await using var fixture = await MockServerFixture.StartAsync();
 
-        using var sdk = new ZerobusSdk(fixture.ServerUrl, "https://mock-uc.com");
+        using var sdk = ZerobusSdk.CreateBuilder()
+            .Endpoint(fixture.ServerUrl)
+            .UnityCatalogUrl("https://mock-uc.com")
+            .DisableTls()
+            .Build();
 
         Assert.Throws<ArgumentNullException>(() =>
         {
@@ -63,7 +75,11 @@ public class IntegrationTests
             MockResponses.CreateStreamResponse("test_stream_1"),
         ]);
 
-        using var sdk = new ZerobusSdk(fixture.ServerUrl, "https://mock-uc.com");
+        using var sdk = ZerobusSdk.CreateBuilder()
+            .Endpoint(fixture.ServerUrl)
+            .UnityCatalogUrl("https://mock-uc.com")
+            .DisableTls()
+            .Build();
 
         var tableProps = new TableProperties(TestTableName, TestDescriptor.CreateTestDescriptorProto());
 
@@ -88,7 +104,11 @@ public class IntegrationTests
             MockResponses.CreateStreamResponse("test_stream_1", delayMs: 300),
         ]);
 
-        using var sdk = new ZerobusSdk(fixture.ServerUrl, "https://mock-uc.com");
+        using var sdk = ZerobusSdk.CreateBuilder()
+            .Endpoint(fixture.ServerUrl)
+            .UnityCatalogUrl("https://mock-uc.com")
+            .DisableTls()
+            .Build();
 
         var tableProps = new TableProperties(TestTableName, TestDescriptor.CreateTestDescriptorProto());
 
@@ -118,7 +138,11 @@ public class IntegrationTests
             MockResponses.ErrorResponse(StatusCode.Unauthenticated, "Non-retriable error"),
         ]);
 
-        using var sdk = new ZerobusSdk(fixture.ServerUrl, "https://mock-uc.com");
+        using var sdk = ZerobusSdk.CreateBuilder()
+            .Endpoint(fixture.ServerUrl)
+            .UnityCatalogUrl("https://mock-uc.com")
+            .DisableTls()
+            .Build();
 
         var tableProps = new TableProperties(TestTableName, TestDescriptor.CreateTestDescriptorProto());
 
@@ -144,7 +168,11 @@ public class IntegrationTests
             MockResponses.ErrorResponse(StatusCode.Unavailable, "Retriable error"),
         ]);
 
-        using var sdk = new ZerobusSdk(fixture.ServerUrl, "https://mock-uc.com");
+        using var sdk = ZerobusSdk.CreateBuilder()
+            .Endpoint(fixture.ServerUrl)
+            .UnityCatalogUrl("https://mock-uc.com")
+            .DisableTls()
+            .Build();
 
         var tableProps = new TableProperties(TestTableName, TestDescriptor.CreateTestDescriptorProto());
 
@@ -170,6 +198,33 @@ public class IntegrationTests
             $"Expected reasonable failure time, but took {sw.ElapsedMilliseconds}ms");
     }
 
+    [Test]
+    public async Task Builder_CreatesWorkingSdk()
+    {
+        await using var fixture = await MockServerFixture.StartAsync();
+
+        fixture.MockServer.InjectResponses(TestTableName,
+        [
+            MockResponses.CreateStreamResponse("test_stream_builder"),
+        ]);
+
+        // Builder path: UnityCatalogUrl omitted because we use a custom headers provider.
+        using var sdk = ZerobusSdk.CreateBuilder()
+            .Endpoint(fixture.ServerUrl)
+            .ApplicationName("integration-test")
+            .DisableTls()
+            .Build();
+
+        var tableProps = new TableProperties(TestTableName, TestDescriptor.CreateTestDescriptorProto());
+
+        using var stream = sdk.CreateStreamWithHeadersProvider(
+            tableProps,
+            new TestHeadersProvider(),
+            StreamConfigurationOptions.Default with { Recovery = false });
+
+        Assert.That(stream, Is.Not.Null);
+    }
+
     // ── Close ─────────────────────────────────────────────────────────
 
     [Test]
@@ -183,7 +238,11 @@ public class IntegrationTests
             MockResponses.RecordAckResponse(0, delayMs: 100),
         ]);
 
-        using var sdk = new ZerobusSdk(fixture.ServerUrl, "https://mock-uc.com");
+        using var sdk = ZerobusSdk.CreateBuilder()
+            .Endpoint(fixture.ServerUrl)
+            .UnityCatalogUrl("https://mock-uc.com")
+            .DisableTls()
+            .Build();
 
         var tableProps = new TableProperties(TestTableName, TestDescriptor.CreateTestDescriptorProto());
 
@@ -219,7 +278,11 @@ public class IntegrationTests
             MockResponses.CreateStreamResponse("test_stream_1"),
         ]);
 
-        using var sdk = new ZerobusSdk(fixture.ServerUrl, "https://mock-uc.com");
+        using var sdk = ZerobusSdk.CreateBuilder()
+            .Endpoint(fixture.ServerUrl)
+            .UnityCatalogUrl("https://mock-uc.com")
+            .DisableTls()
+            .Build();
 
         var tableProps = new TableProperties(TestTableName, TestDescriptor.CreateTestDescriptorProto());
 
@@ -248,7 +311,11 @@ public class IntegrationTests
             MockResponses.CreateStreamResponse("test_stream_1"),
         ]);
 
-        using var sdk = new ZerobusSdk(fixture.ServerUrl, "https://mock-uc.com");
+        using var sdk = ZerobusSdk.CreateBuilder()
+            .Endpoint(fixture.ServerUrl)
+            .UnityCatalogUrl("https://mock-uc.com")
+            .DisableTls()
+            .Build();
 
         var tableProps = new TableProperties(TestTableName, TestDescriptor.CreateTestDescriptorProto());
 
@@ -280,7 +347,11 @@ public class IntegrationTests
             MockResponses.RecordAckResponse(0), // Ack for offset 0
         ]);
 
-        using var sdk = new ZerobusSdk(fixture.ServerUrl, "https://mock-uc.com");
+        using var sdk = ZerobusSdk.CreateBuilder()
+            .Endpoint(fixture.ServerUrl)
+            .UnityCatalogUrl("https://mock-uc.com")
+            .DisableTls()
+            .Build();
 
         var tableProps = new TableProperties(TestTableName, TestDescriptor.CreateTestDescriptorProto());
 
@@ -322,7 +393,11 @@ public class IntegrationTests
             MockResponses.RecordAckResponse(2), // Ack for offset 2
         ]);
 
-        using var sdk = new ZerobusSdk(fixture.ServerUrl, "https://mock-uc.com");
+        using var sdk = ZerobusSdk.CreateBuilder()
+            .Endpoint(fixture.ServerUrl)
+            .UnityCatalogUrl("https://mock-uc.com")
+            .DisableTls()
+            .Build();
 
         var tableProps = new TableProperties(TestTableName, TestDescriptor.CreateTestDescriptorProto());
 
@@ -372,7 +447,11 @@ public class IntegrationTests
 
         fixture.MockServer.InjectResponses(TestTableName, responses);
 
-        using var sdk = new ZerobusSdk(fixture.ServerUrl, "https://mock-uc.com");
+        using var sdk = ZerobusSdk.CreateBuilder()
+            .Endpoint(fixture.ServerUrl)
+            .UnityCatalogUrl("https://mock-uc.com")
+            .DisableTls()
+            .Build();
 
         var tableProps = new TableProperties(TestTableName, TestDescriptor.CreateTestDescriptorProto());
 
@@ -429,7 +508,11 @@ public class IntegrationTests
             MockResponses.RecordAckResponse(0), // Ack for the batch at offset 0
         ]);
 
-        using var sdk = new ZerobusSdk(fixture.ServerUrl, "https://mock-uc.com");
+        using var sdk = ZerobusSdk.CreateBuilder()
+            .Endpoint(fixture.ServerUrl)
+            .UnityCatalogUrl("https://mock-uc.com")
+            .DisableTls()
+            .Build();
 
         var tableProps = new TableProperties(TestTableName, TestDescriptor.CreateTestDescriptorProto());
 
@@ -476,7 +559,11 @@ public class IntegrationTests
             MockResponses.CreateStreamResponse("test_stream_batch_after_close"),
         ]);
 
-        using var sdk = new ZerobusSdk(fixture.ServerUrl, "https://mock-uc.com");
+        using var sdk = ZerobusSdk.CreateBuilder()
+            .Endpoint(fixture.ServerUrl)
+            .UnityCatalogUrl("https://mock-uc.com")
+            .DisableTls()
+            .Build();
 
         var tableProps = new TableProperties(TestTableName, TestDescriptor.CreateTestDescriptorProto());
 
@@ -508,7 +595,11 @@ public class IntegrationTests
             MockResponses.RecordAckResponse(0),
         ]);
 
-        using var sdk = new ZerobusSdk(fixture.ServerUrl, "https://mock-uc.com");
+        using var sdk = ZerobusSdk.CreateBuilder()
+            .Endpoint(fixture.ServerUrl)
+            .UnityCatalogUrl("https://mock-uc.com")
+            .DisableTls()
+            .Build();
 
         var tableProps = new TableProperties(TestTableName, TestDescriptor.CreateTestDescriptorProto());
 
@@ -554,7 +645,11 @@ public class IntegrationTests
             MockResponses.CreateStreamResponse("test_stream_1"),
         ]);
 
-        using var sdk = new ZerobusSdk(fixture.ServerUrl, "https://mock-uc.com");
+        using var sdk = ZerobusSdk.CreateBuilder()
+            .Endpoint(fixture.ServerUrl)
+            .UnityCatalogUrl("https://mock-uc.com")
+            .DisableTls()
+            .Build();
 
         var tableProps = new TableProperties(TestTableName, TestDescriptor.CreateTestDescriptorProto());
 

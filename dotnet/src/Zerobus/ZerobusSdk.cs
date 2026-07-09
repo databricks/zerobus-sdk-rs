@@ -18,9 +18,10 @@ namespace Databricks.Zerobus;
 /// </remarks>
 /// <example>
 /// <code>
-/// using var sdk = new ZerobusSdk(
-///     "https://your-shard.zerobus.databricks.com",
-///     "https://your-workspace.databricks.com");
+/// using var sdk = ZerobusSdk.CreateBuilder()
+///     .Endpoint("https://your-shard.zerobus.databricks.com")
+///     .UnityCatalogUrl("https://your-workspace.databricks.com")
+///     .Build();
 ///
 /// var options = StreamConfigurationOptions.Default with
 /// {
@@ -40,26 +41,30 @@ public sealed class ZerobusSdk : IDisposable
     private int _disposed;
 
     /// <summary>
-    /// Creates a new SDK instance.
+    /// Internal constructor used by <see cref="ZerobusSdkBuilder.Build"/>.
+    /// Takes ownership of the native pointer.
     /// </summary>
-    /// <param name="zerobusEndpoint">
-    /// The gRPC endpoint for the Zerobus service
-    /// (e.g. <c>https://zerobus.databricks.com</c>).
-    /// </param>
-    /// <param name="unityCatalogUrl">
-    /// The Unity Catalog URL for OAuth token acquisition
-    /// (e.g. <c>https://workspace.databricks.com</c>).
-    /// </param>
-    /// <exception cref="ZerobusException">
-    /// Thrown if the SDK cannot be initialised (invalid URLs, etc.).
-    /// </exception>
-    public ZerobusSdk(string zerobusEndpoint, string unityCatalogUrl)
+    internal ZerobusSdk(IntPtr ptr)
     {
-        ArgumentNullException.ThrowIfNull(zerobusEndpoint);
-        ArgumentNullException.ThrowIfNull(unityCatalogUrl);
-
-        _ptr = NativeInterop.SdkNew(zerobusEndpoint, unityCatalogUrl);
+        _ptr = ptr;
     }
+
+    /// <summary>
+    /// Returns a new builder for constructing a <see cref="ZerobusSdk"/> with
+    /// optional settings such as application name, TLS override, or a Unity
+    /// Catalog URL that can be omitted when using a custom headers provider.
+    /// </summary>
+    /// <returns>A <see cref="ZerobusSdkBuilder"/> ready to configure and build.</returns>
+    /// <example>
+    /// <code>
+    /// using var sdk = ZerobusSdk.CreateBuilder()
+    ///     .Endpoint("https://zerobus.databricks.com")
+    ///     .UnityCatalogUrl("https://workspace.databricks.com")
+    ///     .ApplicationName("my-service")
+    ///     .Build();
+    /// </code>
+    /// </example>
+    public static ZerobusSdkBuilder CreateBuilder() => new();
 
     /// <summary>
     /// Creates a new bidirectional gRPC stream for ingesting records into a Databricks table.
