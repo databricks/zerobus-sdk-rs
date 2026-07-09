@@ -393,28 +393,25 @@ internal static class NativeInterop
         if (options is null)
             return NativeMethods.GetDefaultConfig();
 
-        var defaults = StreamConfigurationOptions.Default;
+        var config = NativeMethods.GetDefaultConfig();
 
-        return new CStreamConfigurationOptions
+        config.MaxInflightRequests = (nuint)(options.MaxInflightRequests ?? config.MaxInflightRequests);
+        config.Recovery = options.Recovery;
+        config.RecoveryTimeoutMs = options.RecoveryTimeoutMs ?? config.RecoveryTimeoutMs;
+        config.RecoveryBackoffMs = options.RecoveryBackoffMs ?? config.RecoveryBackoffMs;
+        config.RecoveryRetries = options.RecoveryRetries ?? config.RecoveryRetries;
+        config.ServerLackOfAckTimeoutMs = options.ServerLackOfAckTimeoutMs ?? config.ServerLackOfAckTimeoutMs;
+        config.FlushTimeoutMs = options.FlushTimeoutMs ?? config.FlushTimeoutMs;
+        if (options.RecordType != RecordType.Unspecified)
+            config.RecordType = (int)options.RecordType;
+
+        if (options.StreamPausedMaxWaitTimeMs.HasValue)
         {
-            MaxInflightRequests = (nuint)(options.MaxInflightRequests ?? defaults.MaxInflightRequests!.Value),
-            Recovery = options.Recovery,
-            RecoveryTimeoutMs = options.RecoveryTimeoutMs ?? defaults.RecoveryTimeoutMs!.Value,
-            RecoveryBackoffMs = options.RecoveryBackoffMs ?? defaults.RecoveryBackoffMs!.Value,
-            RecoveryRetries = options.RecoveryRetries ?? defaults.RecoveryRetries!.Value,
-            ServerLackOfAckTimeoutMs = options.ServerLackOfAckTimeoutMs ?? defaults.ServerLackOfAckTimeoutMs!.Value,
-            FlushTimeoutMs = options.FlushTimeoutMs ?? defaults.FlushTimeoutMs!.Value,
-            RecordType = (int)(options.RecordType != RecordType.Unspecified
-                ? options.RecordType
-                : defaults.RecordType),
-            StreamPausedMaxWaitTimeMs = options.StreamPausedMaxWaitTimeMs ?? 0,
-            HasStreamPausedMaxWaitTimeMs = options.StreamPausedMaxWaitTimeMs.HasValue,
-            CallbackMaxWaitTimeMs = 0,
-            HasCallbackMaxWaitTimeMs = false,
-            AckOnAck = IntPtr.Zero,
-            AckOnError = IntPtr.Zero,
-            AckUserData = IntPtr.Zero,
-        };
+            config.StreamPausedMaxWaitTimeMs = options.StreamPausedMaxWaitTimeMs.Value;
+            config.HasStreamPausedMaxWaitTimeMs = true;
+        }
+
+        return config;
     }
 
     /// <summary>

@@ -83,14 +83,33 @@ public class NativeInteropTests
             FlushTimeoutMs = null,
         };
 
+        var nativeDefaults = NativeMethods.GetDefaultConfig();
         var native = NativeInterop.ConvertConfig(options);
 
-        Assert.That(native.MaxInflightRequests, Is.EqualTo((nuint)1_000_000));
-        Assert.That(native.RecoveryTimeoutMs, Is.EqualTo(15_000UL));
-        Assert.That(native.RecoveryBackoffMs, Is.EqualTo(2_000UL));
-        Assert.That(native.RecoveryRetries, Is.EqualTo(4U));
-        Assert.That(native.ServerLackOfAckTimeoutMs, Is.EqualTo(60_000UL));
-        Assert.That(native.FlushTimeoutMs, Is.EqualTo(300_000UL));
+        Assert.That(native.MaxInflightRequests, Is.EqualTo(nativeDefaults.MaxInflightRequests));
+        Assert.That(native.RecoveryTimeoutMs, Is.EqualTo(nativeDefaults.RecoveryTimeoutMs));
+        Assert.That(native.RecoveryBackoffMs, Is.EqualTo(nativeDefaults.RecoveryBackoffMs));
+        Assert.That(native.RecoveryRetries, Is.EqualTo(nativeDefaults.RecoveryRetries));
+        Assert.That(native.ServerLackOfAckTimeoutMs, Is.EqualTo(nativeDefaults.ServerLackOfAckTimeoutMs));
+        Assert.That(native.FlushTimeoutMs, Is.EqualTo(nativeDefaults.FlushTimeoutMs));
+    }
+
+    [Test]
+    public void ConvertConfig_DefaultManagedOptions_MatchNativeDefaults()
+    {
+        var nativeDefaults = NativeMethods.GetDefaultConfig();
+        var converted = NativeInterop.ConvertConfig(StreamConfigurationOptions.Default);
+
+        Assert.That(converted.MaxInflightRequests, Is.EqualTo(nativeDefaults.MaxInflightRequests));
+        Assert.That(converted.Recovery, Is.EqualTo(nativeDefaults.Recovery));
+        Assert.That(converted.RecoveryTimeoutMs, Is.EqualTo(nativeDefaults.RecoveryTimeoutMs));
+        Assert.That(converted.RecoveryBackoffMs, Is.EqualTo(nativeDefaults.RecoveryBackoffMs));
+        Assert.That(converted.RecoveryRetries, Is.EqualTo(nativeDefaults.RecoveryRetries));
+        Assert.That(converted.ServerLackOfAckTimeoutMs, Is.EqualTo(nativeDefaults.ServerLackOfAckTimeoutMs));
+        Assert.That(converted.FlushTimeoutMs, Is.EqualTo(nativeDefaults.FlushTimeoutMs));
+        Assert.That(converted.RecordType, Is.EqualTo(nativeDefaults.RecordType));
+        Assert.That(converted.HasStreamPausedMaxWaitTimeMs, Is.EqualTo(nativeDefaults.HasStreamPausedMaxWaitTimeMs));
+        Assert.That(converted.StreamPausedMaxWaitTimeMs, Is.EqualTo(nativeDefaults.StreamPausedMaxWaitTimeMs));
     }
 
     [Test]
