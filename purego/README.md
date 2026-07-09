@@ -8,15 +8,21 @@ so it is fully isolated from the existing cgo-based SDK under `go/` while it is
 built out. The two do not share a `go.mod`: the cgo SDK keeps its lean
 dependency set, and this module owns the gRPC/protobuf dependencies.
 
-## Status
+## Current scope
 
-Foundational only so far:
+Implemented packages:
 
 - `internal/zerobuspb` — protobuf message types and the gRPC `ZerobusClient`
   (the bidirectional `EphemeralStream` RPC), generated from `zerobus_service.proto`.
+- `internal/transport` — dials the service (TLS by default), performs the
+  create-stream handshake, and exposes send/receive operations over the
+  bidirectional stream. It validates stream-open inputs (`TableName`,
+  `RecordType`, descriptor requirement for `PROTO`) and sets auth metadata from
+  `StreamParams.Token` (`"Bearer <token>"` for bare tokens, verbatim when a
+  known scheme — `Bearer`, `Basic`, or `DPoP` — is already present).
 
-Planned layers (each added incrementally): transport, OAuth/auth, the
-ingest/ack state machine, recovery, and the public API.
+Planned layers: OAuth/auth, ingest/ack state management, recovery, and the
+public API.
 
 ## Regenerating the protobuf bindings
 
