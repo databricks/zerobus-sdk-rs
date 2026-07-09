@@ -44,18 +44,6 @@ public abstract class TypedZerobusStream : IDisposable
         return _innerStream.FlushAsync();
     }
 
-    /// <inheritdoc cref="ZerobusStream.GetUnackedRecords"/>
-    public ReadOnlyMemory<byte>[] GetUnackedRecords()
-    {
-        return _innerStream.GetUnackedRecords();
-    }
-
-    /// <inheritdoc cref="ZerobusStream.GetUnackedRecordsAsync"/>
-    public Task<ReadOnlyMemory<byte>[]> GetUnackedRecordsAsync()
-    {
-        return _innerStream.GetUnackedRecordsAsync();
-    }
-
     /// <inheritdoc cref="ZerobusStream.Close"/>
     public void Close()
     {

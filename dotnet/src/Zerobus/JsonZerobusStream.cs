@@ -33,4 +33,40 @@ public sealed class JsonZerobusStream : TypedZerobusStream
     {
         return InnerStream.IngestRecordsAsync(records);
     }
+
+    /// <summary>
+    /// Retrieves all records that have not yet been acknowledged by the server.
+    /// <para>
+    /// <strong>Important:</strong> This should only be called after the stream has
+    /// closed or failed. Calling it on an active stream will return an error.
+    /// </para>
+    /// </summary>
+    /// <returns>
+    /// An array of JSON record payloads as strings, decoded from UTF-8.
+    /// </returns>
+    /// <exception cref="ZerobusException">Thrown if retrieval fails.</exception>
+    /// <exception cref="ObjectDisposedException">Thrown if the stream has been disposed.</exception>
+    public string[] GetUnackedRecords()
+    {
+        var records = InnerStream.GetUnackedRecords();
+        return Array.ConvertAll(records, memory => System.Text.Encoding.UTF8.GetString(memory.Span));
+    }
+
+    /// <summary>
+    /// Asynchronously retrieves all records that have not yet been acknowledged by the server.
+    /// <para>
+    /// <strong>Important:</strong> This should only be called after the stream has
+    /// closed or failed. Calling it on an active stream will return an error.
+    /// </para>
+    /// </summary>
+    /// <returns>
+    /// A task that resolves to an array of JSON record payloads as strings, decoded from UTF-8.
+    /// </returns>
+    /// <exception cref="ZerobusException">Thrown if retrieval fails.</exception>
+    /// <exception cref="ObjectDisposedException">Thrown if the stream has been disposed.</exception>
+    public async Task<string[]> GetUnackedRecordsAsync()
+    {
+        var records = await InnerStream.GetUnackedRecordsAsync();
+        return Array.ConvertAll(records, memory => System.Text.Encoding.UTF8.GetString(memory.Span));
+    }
 }
