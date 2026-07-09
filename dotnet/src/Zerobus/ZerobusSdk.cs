@@ -179,6 +179,21 @@ public sealed class ZerobusSdk : IDisposable
     /// using the existing stream's configuration and state.
     /// </summary>
     /// <param name="stream">The existing stream to recreate from.</param>
+    /// <remarks>
+    /// <para>
+    /// This method transfers ownership from <paramref name="stream"/> to the returned stream.
+    /// The input stream is disposed as part of recreation and cannot be used afterward.
+    /// </para>
+    /// <para>
+    /// A later <see cref="IDisposable.Dispose"/> call on the original stream wrapper is a no-op,
+    /// so <c>using</c> declarations remain safe:
+    /// <code>
+    /// using var stream = sdk.CreateStream(...);
+    /// stream.Close();
+    /// using var recreated = sdk.RecreateStream(stream);
+    /// </code>
+    /// </para>
+    /// </remarks>
     /// <returns>A new <see cref="ZerobusStream"/> ready for record ingestion.</returns>
     /// <exception cref="ZerobusException">Thrown if the stream cannot be recreated.</exception>
     /// <exception cref="ObjectDisposedException">Thrown if the SDK has been disposed.</exception>

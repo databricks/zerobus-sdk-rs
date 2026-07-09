@@ -20,6 +20,10 @@ namespace Databricks.Zerobus;
 /// recover with <c>ZerobusSdk.RecreateStream(...)</c>. Call <see cref="Dispose()"/>
 /// when you are completely finished with the stream to free native resources.
 /// </para>
+/// <para>
+/// <c>ZerobusSdk.RecreateStream(stream)</c> consumes <c>stream</c> and returns a
+/// replacement stream wrapper. The original wrapper is disposed during recreation.
+/// </para>
 /// </remarks>
 public sealed class ZerobusStream : IDisposable
 {
