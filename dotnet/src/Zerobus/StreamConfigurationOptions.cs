@@ -17,9 +17,10 @@ public sealed record StreamConfigurationOptions
 {
     /// <summary>
     /// Maximum number of requests that can be in-flight (pending acknowledgment) at once.
+    /// <c>null</c> uses the SDK default.
     /// Default: 1,000,000.
     /// </summary>
-    public ulong MaxInflightRequests { get; init; } = 1_000_000;
+    public ulong? MaxInflightRequests { get; init; }
 
     /// <summary>
     /// Enable automatic stream recovery on retryable failures.
@@ -29,33 +30,38 @@ public sealed record StreamConfigurationOptions
 
     /// <summary>
     /// Timeout for each recovery attempt in milliseconds.
+    /// <c>null</c> uses the SDK default.
     /// Default: 15,000 (15 seconds).
     /// </summary>
-    public ulong RecoveryTimeoutMs { get; init; } = 15_000;
+    public ulong? RecoveryTimeoutMs { get; init; }
 
     /// <summary>
     /// Backoff delay between recovery attempts in milliseconds.
+    /// <c>null</c> uses the SDK default.
     /// Default: 2,000 (2 seconds).
     /// </summary>
-    public ulong RecoveryBackoffMs { get; init; } = 2_000;
+    public ulong? RecoveryBackoffMs { get; init; }
 
     /// <summary>
     /// Maximum number of recovery retry attempts.
+    /// <c>null</c> uses the SDK default.
     /// Default: 4.
     /// </summary>
-    public uint RecoveryRetries { get; init; } = 4;
+    public uint? RecoveryRetries { get; init; }
 
     /// <summary>
     /// Server acknowledgment timeout in milliseconds.
+    /// <c>null</c> uses the SDK default.
     /// Default: 60,000 (60 seconds).
     /// </summary>
-    public ulong ServerLackOfAckTimeoutMs { get; init; } = 60_000;
+    public ulong? ServerLackOfAckTimeoutMs { get; init; }
 
     /// <summary>
     /// Flush operation timeout in milliseconds.
+    /// <c>null</c> uses the SDK default.
     /// Default: 300,000 (5 minutes).
     /// </summary>
-    public ulong FlushTimeoutMs { get; init; } = 300_000;
+    public ulong? FlushTimeoutMs { get; init; }
 
     /// <summary>
     /// Type of record to ingest (Proto, Json, or Unspecified).
@@ -79,5 +85,13 @@ public sealed record StreamConfigurationOptions
     /// Returns the default configuration options.
     /// This is the idiomatic starting point — use C# record <c>with</c> expressions to override.
     /// </summary>
-    public static StreamConfigurationOptions Default => new();
+    public static StreamConfigurationOptions Default => new()
+    {
+        MaxInflightRequests = 1_000_000,
+        RecoveryTimeoutMs = 15_000,
+        RecoveryBackoffMs = 2_000,
+        RecoveryRetries = 4,
+        ServerLackOfAckTimeoutMs = 60_000,
+        FlushTimeoutMs = 300_000,
+    };
 }
