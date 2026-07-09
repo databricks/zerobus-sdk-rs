@@ -48,6 +48,9 @@ type fakeServer struct {
 	// blocking until the stream context is cancelled. Used to exercise the
 	// handshake deadline.
 	hangHandshake bool
+	// hangDrain makes the server ignore the client's half-close and never end the
+	// stream, so GracefulClose can't drain to io.EOF and must hit its ctx deadline.
+	hangDrain bool
 }
 
 func (f *fakeServer) EphemeralStream(stream zerobuspb.Zerobus_EphemeralStreamServer) error {
@@ -99,6 +102,10 @@ func (f *fakeServer) EphemeralStream(stream zerobuspb.Zerobus_EphemeralStreamSer
 	for {
 		req, err := stream.Recv()
 		if err == io.EOF {
+			if f.hangDrain {
+				<-stream.Context().Done() // withhold the clean end
+				return stream.Context().Err()
+			}
 			return nil
 		}
 		if err != nil {
@@ -525,9 +532,8 @@ func TestOpenDeadlineDoesNotTearDownStream(t *testing.T) {
 	}
 }
 
-// TestStreamGracefulClose exercises the documented graceful shutdown sequence:
-// CloseSend, drain to io.EOF, then Close. The server returns EOF once it sees
-// the half-close, so Recv observes a clean end rather than a cancellation.
+// TestStreamGracefulClose: the server ends the stream on half-close, so
+// GracefulClose drains to a clean io.EOF and returns nil.
 func TestStreamGracefulClose(t *testing.T) {
 	srv := &fakeServer{streamID: "s", seen: make(chan observed, 1)}
 	conn := dialFake(t, srv)
@@ -542,18 +548,79 @@ func TestStreamGracefulClose(t *testing.T) {
 	}
 	<-srv.seen
 
-	if err := stream.CloseSend(); err != nil {
-		t.Fatalf("CloseSend: %v", err)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := stream.GracefulClose(ctx); err != nil {
+		t.Fatalf("GracefulClose: %v", err)
 	}
-	// Drain to the clean end-of-stream the server sends after the half-close.
-	for {
-		_, err := stream.Recv()
-		if err == io.EOF {
-			break
-		}
-		if err != nil {
-			t.Fatalf("Recv during drain: got %v, want io.EOF", err)
-		}
+	stream.Close() // idempotent no-op after a graceful shutdown
+}
+
+// TestStreamGracefulCloseDrainsPending: an in-flight ack precedes io.EOF, so
+// GracefulClose must discard it and keep draining rather than stop at the first
+// response.
+func TestStreamGracefulCloseDrainsPending(t *testing.T) {
+	srv := &fakeServer{streamID: "s", seen: make(chan observed, 1)}
+	conn := dialFake(t, srv)
+
+	stream, err := conn.Open(context.Background(), transport.StreamParams{
+		TableName:  "c.s.t",
+		RecordType: zerobuspb.RecordType_JSON,
+		Token:      "tok",
+	})
+	if err != nil {
+		t.Fatalf("Open: %v", err)
 	}
-	stream.Close() // releases resources; safe after a graceful drain
+	<-srv.seen
+
+	if err := stream.Send(&zerobuspb.EphemeralStreamRequest{
+		Payload: &zerobuspb.EphemeralStreamRequest_IngestRecord{
+			IngestRecord: &zerobuspb.IngestRecordRequest{
+				OffsetId: proto.Int64(1),
+				Record:   &zerobuspb.IngestRecordRequest_JsonRecord{JsonRecord: `{"id":1}`},
+			},
+		},
+	}); err != nil {
+		t.Fatalf("Send: %v", err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := stream.GracefulClose(ctx); err != nil {
+		t.Fatalf("GracefulClose with a pending response: %v", err)
+	}
+}
+
+// TestStreamGracefulCloseHonorsDeadline: the server never ends the stream, so
+// GracefulClose returns its ctx error promptly instead of blocking, and leaves
+// the stream torn down.
+func TestStreamGracefulCloseHonorsDeadline(t *testing.T) {
+	srv := &fakeServer{streamID: "s", seen: make(chan observed, 1), hangDrain: true}
+	conn := dialFake(t, srv)
+
+	stream, err := conn.Open(context.Background(), transport.StreamParams{
+		TableName:  "c.s.t",
+		RecordType: zerobuspb.RecordType_JSON,
+		Token:      "tok",
+	})
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	<-srv.seen
+
+	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+	defer cancel()
+
+	start := time.Now()
+	err = stream.GracefulClose(ctx)
+	if err == nil {
+		t.Fatal("GracefulClose against a server that never ends the stream: got nil, want deadline error")
+	}
+	if elapsed := time.Since(start); elapsed > 5*time.Second {
+		t.Fatalf("GracefulClose took %v, expected it to return near the 200ms deadline", elapsed)
+	}
+	// Bounded-out drain tears the stream down: Recv is unblocked, not hanging.
+	if _, err := stream.Recv(); err == nil {
+		t.Fatal("Recv after a deadline-bounded GracefulClose: got nil error, want cancellation")
+	}
 }

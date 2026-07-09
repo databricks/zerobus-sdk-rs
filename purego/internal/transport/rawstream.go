@@ -94,6 +94,41 @@ func (s *rawStream[Req, Resp]) close() {
 	})
 }
 
+// gracefulClose half-closes the send side, drains remaining responses to io.EOF,
+// then releases resources. Draining to EOF lets the server see an orderly close;
+// a bare close cancels the context and the server sees an abrupt reset instead.
+//
+// ctx bounds the drain: on ctx expiry or a non-EOF error it hard-aborts and
+// returns the cause (ctx error preferred); a clean drain returns nil. Not safe to
+// call concurrently with recv. Safe to call once; a later close is a no-op.
+func (s *rawStream[Req, Resp]) gracefulClose(ctx context.Context) error {
+	if err := s.closeSend(); err != nil {
+		s.close() // can't half-close cleanly; hard-abort
+		return err
+	}
+
+	// Bridge ctx to close so a caller deadline unblocks the recv below, which
+	// otherwise waits on the stream's Close-only context.
+	stop := context.AfterFunc(ctx, s.close)
+	defer stop()
+
+	for {
+		_, err := s.recv()
+		switch {
+		case err == io.EOF:
+			s.close()
+			return nil
+		case err != nil:
+			s.close()
+			if ctxErr := ctx.Err(); ctxErr != nil {
+				return ctxErr
+			}
+			return err
+		}
+		// Response arrived before EOF; discard and keep draining.
+	}
+}
+
 // handshake runs the create-stream exchange shared by every ingestion protocol:
 // send a setup message, await the readiness response, and validate it. Blocking
 // here surfaces setup failures (auth, schema, table access) at open time.
