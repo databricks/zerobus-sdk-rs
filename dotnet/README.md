@@ -97,6 +97,15 @@ using var stream = sdk.CreateStreamWithHeadersProvider(
     options);  // optional
 ```
 
+#### `RecreateStream`
+
+Recreates a stream for recovery after the original stream has failed or closed.
+
+Important: `RecreateStream(stream)` transfers ownership from `stream` to the returned
+stream. The input `stream` is disposed during recreation and must not be used afterward.
+A later `Dispose()` on the original wrapper (for example at the end of a `using` scope)
+is a no-op.
+
 ### `ZerobusStream`
 
 An active bidirectional gRPC stream for record ingestion. Thread-safe.
@@ -156,6 +165,8 @@ object[] unacked = stream.GetUnackedRecords();
 
 `Close()` gracefully closes the stream (flushes first) but keeps the stream
 readable for recovery (`GetUnackedRecords`, `RecreateStream`).
+If you call `RecreateStream(stream)`, the original stream object is disposed and
+no longer usable.
 `Dispose()` frees native resources and should be called when recovery work is done.
 `using` calls `Dispose()` automatically.
 
