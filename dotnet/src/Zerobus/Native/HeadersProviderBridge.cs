@@ -27,6 +27,7 @@ internal sealed class HeadersProviderBridge
         var result = new CHeaders();
         IntPtr arrayPtr = IntPtr.Zero;
         nuint arrayCount = 0;
+        int filledCount = 0;
 
         try
         {
@@ -49,7 +50,6 @@ internal sealed class HeadersProviderBridge
             }
 
             var headerArray = (CHeader*)arrayPtr;
-            int idx = 0;
             foreach (var (key, value) in headers)
             {
                 var cKey = AllocUtf8String(key);
@@ -64,12 +64,12 @@ internal sealed class HeadersProviderBridge
                     throw new OutOfMemoryException("Failed to allocate header value string");
                 }
 
-                headerArray[idx] = new CHeader
+                headerArray[filledCount] = new CHeader
                 {
                     Key = cKey,
                     Value = cValue,
                 };
-                idx++;
+                filledCount++;
             }
 
             result.Headers = arrayPtr;
@@ -82,10 +82,12 @@ internal sealed class HeadersProviderBridge
         {
             if (arrayPtr != IntPtr.Zero)
             {
+                // Only free the headers that were actually filled, not the entire allocated count.
+                // This prevents attempting to free uninitialized memory if an allocation failed mid-loop.
                 NativeMethods.FreeHeaders(new CHeaders
                 {
                     Headers = arrayPtr,
-                    Count = arrayCount,
+                    Count = (nuint)filledCount,
                     ErrorMessage = IntPtr.Zero,
                 });
             }
