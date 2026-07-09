@@ -196,8 +196,8 @@ public sealed class ZerobusStream : IDisposable
     /// </para>
     /// </summary>
     /// <returns>
-    /// An array where each element is either a <see cref="string"/> (JSON)
-    /// or a <c>byte[]</c> (protobuf).
+    /// An array of raw record payloads as <see cref="ReadOnlyMemory{T}"/> of <see cref="byte"/>.
+    /// JSON payloads are UTF-8 encoded; callers can decode as needed.
     /// </returns>
     /// <exception cref="ZerobusException">Thrown if retrieval fails.</exception>
     /// <exception cref="ObjectDisposedException">Thrown if the stream has been disposed.</exception>
@@ -211,10 +211,12 @@ public sealed class ZerobusStream : IDisposable
     /// {
     ///     var unacked = stream.GetUnackedRecords();
     ///     Console.WriteLine($"Failed to acknowledge {unacked.Length} records");
+    ///     foreach (var payload in unacked)
+    ///         Console.WriteLine($"{payload.Length} bytes");
     /// }
     /// </code>
     /// </example>
-    public object[] GetUnackedRecords()
+    public ReadOnlyMemory<byte>[] GetUnackedRecords()
     {
         return WithReadLock(NativeInterop.StreamGetUnackedRecords);
     }

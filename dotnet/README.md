@@ -158,7 +158,12 @@ stream.Flush();
 Retrieves unacknowledged records after stream failure (call after close/failure only).
 
 ```csharp
-object[] unacked = stream.GetUnackedRecords();
+ReadOnlyMemory<byte>[] unacked = stream.GetUnackedRecords();
+foreach (var payload in unacked)
+{
+    // Decode as UTF-8 if you know this stream ingests JSON.
+    Console.WriteLine($"record bytes: {payload.Length}");
+}
 ```
 
 #### `Close` / `Dispose`
