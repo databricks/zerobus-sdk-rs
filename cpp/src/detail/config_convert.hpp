@@ -1,10 +1,10 @@
 #ifndef ZEROBUS_DETAIL_CONFIG_CONVERT_HPP
 #define ZEROBUS_DETAIL_CONFIG_CONVERT_HPP
 
-#include "detail/ack_callback.hpp"
 #include <cstdint>
 #include <limits>
 
+#include "detail/ack_callback.hpp"
 #include "detail/ffi_util.hpp"
 #include "zerobus/config.hpp"
 
