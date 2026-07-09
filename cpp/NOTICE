@@ -1,4 +1,4 @@
-Copyright (2025) Databricks, Inc.
+Copyright (2026) Databricks, Inc.
 
 This Software includes software developed at Databricks (https://www.databricks.com/) and its use is subject to the included LICENSE file.
 
@@ -8,7 +8,7 @@ This Software includes the following components:
 
 ## Rust Dependencies (via FFI)
 
-This Go SDK wraps the Zerobus Rust SDK via C FFI. The compiled native library includes the following open source components:
+This C++ SDK wraps the Zerobus Rust SDK via C FFI. The compiled native library includes the following open source components:
 
 ### MIT License
 
@@ -35,10 +35,8 @@ This Go SDK wraps the Zerobus Rust SDK via C FFI. The compiled native library in
 - **reqwest**: Copyright (c) 2016 Sean McArthur (https://github.com/seanmonstar/reqwest)
 - **arrow-ipc**: Copyright (c) 2020 Apache Arrow contributors (https://github.com/apache/arrow-rs)
 
-## Go Dependencies
+## C++ Dependencies
 
-The Go SDK itself has no external Go runtime dependencies. The Go standard library and CGO are used for the FFI bridge:
-
-- **Go Programming Language**: Copyright (c) 2009 The Go Authors (https://golang.org/) — BSD-style license
+The C++ SDK itself pulls in no third-party C++ libraries: it uses only the C++ standard library and the Zerobus FFI's generated C header (`rust/ffi/zerobus.h`). It links the Zerobus Rust FFI static library (compiled from `rust/ffi/`), which transitively requires the platform's system libraries — `pthread`, `dl`, `m`, and `resolv` on Linux; the `CoreFoundation` and `Security` frameworks and `iconv` on macOS; and `ws2_32`, `userenv`, `bcrypt`, and `ntdll` on Windows.
 
 For a complete list of Rust dependencies and their licenses, see the `../rust/sdk/Cargo.toml` and `../rust/ffi/Cargo.toml` files.

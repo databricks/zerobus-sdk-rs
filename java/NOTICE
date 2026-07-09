@@ -8,15 +8,17 @@ This Software includes the following open source components:
 
 ## Apache License 2.0
 
-### Protocol Buffers (protobuf-java)
-Copyright 2008 Google Inc.
-https://github.com/protocolbuffers/protobuf
-License: https://github.com/protocolbuffers/protobuf/blob/main/LICENSE
-
 ### Apache Arrow (arrow-vector) — optional, provided scope
 Copyright 2016 The Apache Software Foundation
 https://github.com/apache/arrow
 License: https://github.com/apache/arrow/blob/main/LICENSE.txt
+
+## BSD 3-Clause License
+
+### Protocol Buffers (protobuf-java)
+Copyright 2008 Google Inc.
+https://github.com/protocolbuffers/protobuf
+License: https://github.com/protocolbuffers/protobuf/blob/main/LICENSE
 
 ## MIT License
 

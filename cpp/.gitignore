@@ -5,3 +5,29 @@
 # clangd index / editor caches.
 /.cache/
 compile_commands.json
+# CMake build artifacts
+build/
+cmake-build-*/
+
+# Ignore native libraries everywhere, but keep release artifacts under lib/.
+# Ignore by extension (not lib/*/): a directory ignore can't be undone by a
+# later negation, which would force `git add -f` at release. Mirrors go/.gitignore.
+*.a
+*.so
+*.dylib
+*.lib
+*.dll
+!lib/**/*.a
+!lib/**/*.so
+!lib/**/*.dylib
+!lib/**/*.lib
+!lib/**/*.dll
+
+# OS files
+.DS_Store
+
+# IDE
+.idea/
+.vscode/
+compile_commands.json
+.cache/
