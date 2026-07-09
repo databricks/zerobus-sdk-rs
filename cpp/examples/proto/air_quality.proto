@@ -1,0 +1,21 @@
+// Static protobuf schema for the demo table shinkansen.default.air_quality_zlata:
+//   device_name STRING, temp INT, humidity INT
+//
+// This is the "static proto" alternative to fetching the descriptor from Unity
+// Catalog at runtime (ProtoSchema::from_uc_json). It is a HAND-MAINTAINED copy
+// of the table's schema — if the table changes, this file must be updated to
+// match or records will land in the wrong columns.
+//
+// Field numbers map to the table's column ordinals (1-based, declaration order).
+// proto2 is used so nullable columns can be `optional` (proto3 has no explicit
+// presence for scalars). INT -> int32, STRING -> string.
+
+syntax = "proto2";
+
+package zerobus_demo;
+
+message AirQuality {
+  optional string device_name = 1;
+  optional int32 temp = 2;
+  optional int32 humidity = 3;
+}
