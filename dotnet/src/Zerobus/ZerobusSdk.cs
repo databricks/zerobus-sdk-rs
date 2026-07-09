@@ -98,6 +98,23 @@ public sealed class ZerobusSdk : IDisposable
     }
 
     /// <summary>
+    /// Creates a new bidirectional gRPC stream asynchronously.
+    /// </summary>
+    public Task<ZerobusStream> CreateStreamAsync(
+        TableProperties tableProperties,
+        string clientId,
+        string clientSecret,
+        StreamConfigurationOptions? options = null)
+    {
+        ObjectDisposedException.ThrowIf(_disposed != 0, this);
+        ArgumentNullException.ThrowIfNull(tableProperties);
+        ArgumentNullException.ThrowIfNull(clientId);
+        ArgumentNullException.ThrowIfNull(clientSecret);
+
+        return CreateStreamCoreAsync(tableProperties, clientId, clientSecret, options);
+    }
+
+    /// <summary>
     /// Creates a JSON-only stream with OAuth 2.0 client credentials authentication.
     /// This factory sets <see cref="StreamConfigurationOptions.RecordType"/> to
     /// <see cref="RecordType.Json"/> automatically and returns a stream wrapper that
@@ -123,6 +140,29 @@ public sealed class ZerobusSdk : IDisposable
             clientId,
             clientSecret,
             NormalizeStreamOptions(options, RecordType.Json));
+
+        return new JsonZerobusStream(stream);
+    }
+
+    /// <summary>
+    /// Creates a JSON-only stream asynchronously.
+    /// </summary>
+    public async Task<JsonZerobusStream> CreateJsonStreamAsync(
+        string tableName,
+        string clientId,
+        string clientSecret,
+        StreamConfigurationOptions? options = null)
+    {
+        ArgumentNullException.ThrowIfNull(tableName);
+        ArgumentNullException.ThrowIfNull(clientId);
+        ArgumentNullException.ThrowIfNull(clientSecret);
+
+        var stream = await CreateStreamCoreAsync(
+                new TableProperties(tableName),
+                clientId,
+                clientSecret,
+                NormalizeStreamOptions(options, RecordType.Json))
+            .ConfigureAwait(false);
 
         return new JsonZerobusStream(stream);
     }
@@ -160,6 +200,31 @@ public sealed class ZerobusSdk : IDisposable
         return new ProtoZerobusStream(stream);
     }
 
+    /// <summary>
+    /// Creates a protobuf-only stream asynchronously.
+    /// </summary>
+    public async Task<ProtoZerobusStream> CreateProtoStreamAsync(
+        string tableName,
+        byte[] descriptorProto,
+        string clientId,
+        string clientSecret,
+        StreamConfigurationOptions? options = null)
+    {
+        ArgumentNullException.ThrowIfNull(tableName);
+        ArgumentNullException.ThrowIfNull(descriptorProto);
+        ArgumentNullException.ThrowIfNull(clientId);
+        ArgumentNullException.ThrowIfNull(clientSecret);
+
+        var stream = await CreateStreamCoreAsync(
+                new TableProperties(tableName, descriptorProto),
+                clientId,
+                clientSecret,
+                NormalizeStreamOptions(options, RecordType.Proto))
+            .ConfigureAwait(false);
+
+        return new ProtoZerobusStream(stream);
+    }
+
     private ZerobusStream CreateStreamCore(
         TableProperties tableProperties,
         string clientId,
@@ -177,6 +242,28 @@ public sealed class ZerobusSdk : IDisposable
             clientId,
             clientSecret,
             ref nativeOpts);
+
+        return new ZerobusStream(streamPtr);
+    }
+
+    private async Task<ZerobusStream> CreateStreamCoreAsync(
+        TableProperties tableProperties,
+        string clientId,
+        string clientSecret,
+        StreamConfigurationOptions? options)
+    {
+        ValidateStreamConfiguration(tableProperties, options);
+
+        var nativeOpts = NativeInterop.ConvertConfig(options);
+
+        var streamPtr = await NativeInterop.SdkCreateStreamAsync(
+                _ptr,
+                tableProperties.TableName,
+                tableProperties.DescriptorProto ?? [],
+                clientId,
+                clientSecret,
+                ref nativeOpts)
+            .ConfigureAwait(false);
 
         return new ZerobusStream(streamPtr);
     }
@@ -216,6 +303,21 @@ public sealed class ZerobusSdk : IDisposable
     }
 
     /// <summary>
+    /// Creates a new bidirectional gRPC stream using a custom headers provider asynchronously.
+    /// </summary>
+    public Task<ZerobusStream> CreateStreamWithHeadersProviderAsync(
+        TableProperties tableProperties,
+        IHeadersProvider headersProvider,
+        StreamConfigurationOptions? options = null)
+    {
+        ObjectDisposedException.ThrowIf(_disposed != 0, this);
+        ArgumentNullException.ThrowIfNull(tableProperties);
+        ArgumentNullException.ThrowIfNull(headersProvider);
+
+        return CreateStreamWithHeadersProviderCoreAsync(tableProperties, headersProvider, options);
+    }
+
+    /// <summary>
     /// Creates a JSON-only stream using a custom headers provider.
     /// </summary>
     /// <param name="tableName">Fully qualified table name in the form <c>catalog.schema.table</c>.</param>
@@ -234,6 +336,26 @@ public sealed class ZerobusSdk : IDisposable
             new TableProperties(tableName),
             headersProvider,
             NormalizeStreamOptions(options, RecordType.Json));
+
+        return new JsonZerobusStream(stream);
+    }
+
+    /// <summary>
+    /// Creates a JSON-only stream using a custom headers provider asynchronously.
+    /// </summary>
+    public async Task<JsonZerobusStream> CreateJsonStreamWithHeadersProviderAsync(
+        string tableName,
+        IHeadersProvider headersProvider,
+        StreamConfigurationOptions? options = null)
+    {
+        ArgumentNullException.ThrowIfNull(tableName);
+        ArgumentNullException.ThrowIfNull(headersProvider);
+
+        var stream = await CreateStreamWithHeadersProviderAsync(
+                new TableProperties(tableName),
+                headersProvider,
+                NormalizeStreamOptions(options, RecordType.Json))
+            .ConfigureAwait(false);
 
         return new JsonZerobusStream(stream);
     }
@@ -260,6 +382,28 @@ public sealed class ZerobusSdk : IDisposable
             new TableProperties(tableName, descriptorProto),
             headersProvider,
             NormalizeStreamOptions(options, RecordType.Proto));
+
+        return new ProtoZerobusStream(stream);
+    }
+
+    /// <summary>
+    /// Creates a protobuf-only stream using a custom headers provider asynchronously.
+    /// </summary>
+    public async Task<ProtoZerobusStream> CreateProtoStreamWithHeadersProviderAsync(
+        string tableName,
+        byte[] descriptorProto,
+        IHeadersProvider headersProvider,
+        StreamConfigurationOptions? options = null)
+    {
+        ArgumentNullException.ThrowIfNull(tableName);
+        ArgumentNullException.ThrowIfNull(descriptorProto);
+        ArgumentNullException.ThrowIfNull(headersProvider);
+
+        var stream = await CreateStreamWithHeadersProviderAsync(
+                new TableProperties(tableName, descriptorProto),
+                headersProvider,
+                NormalizeStreamOptions(options, RecordType.Proto))
+            .ConfigureAwait(false);
 
         return new ProtoZerobusStream(stream);
     }
@@ -300,6 +444,42 @@ public sealed class ZerobusSdk : IDisposable
         return new ZerobusStream(streamPtr, handle, callback);
     }
 
+    private async Task<ZerobusStream> CreateStreamWithHeadersProviderCoreAsync(
+        TableProperties tableProperties,
+        IHeadersProvider headersProvider,
+        StreamConfigurationOptions? options)
+    {
+        ValidateStreamConfiguration(tableProperties, options);
+
+        var nativeOpts = NativeInterop.ConvertConfig(options);
+
+        var bridge = new HeadersProviderBridge(headersProvider);
+        var callback = new HeadersProviderCallback(bridge.NativeCallback);
+
+        var handle = GCHandle.Alloc(bridge);
+
+        IntPtr streamPtr;
+        try
+        {
+            streamPtr = await NativeInterop.SdkCreateStreamWithHeadersProviderAsync(
+                    _ptr,
+                    tableProperties.TableName,
+                    tableProperties.DescriptorProto ?? [],
+                    callback,
+                    GCHandle.ToIntPtr(handle),
+                    nativeOpts)
+                .ConfigureAwait(false);
+        }
+        catch
+        {
+            if (handle.IsAllocated)
+                handle.Free();
+            throw;
+        }
+
+        return new ZerobusStream(streamPtr, handle, callback);
+    }
+
     /// <summary>
     /// Recreates a new bidirectional gRPC stream from an existing stream.
     /// This is used for recovery scenarios where a stream needs to be re-established
@@ -334,6 +514,20 @@ public sealed class ZerobusSdk : IDisposable
     }
 
     /// <summary>
+    /// Recreates a new bidirectional gRPC stream asynchronously from an existing stream.
+    /// </summary>
+    public async Task<ZerobusStream> RecreateStreamAsync(
+        ZerobusStream stream)
+    {
+        ObjectDisposedException.ThrowIf(_disposed != 0, this);
+        ArgumentNullException.ThrowIfNull(stream);
+
+        var ptr = await NativeInterop.SdkRecreateStreamAsync(_ptr, stream.NativePointer)
+            .ConfigureAwait(false);
+        return stream.Recreate(ptr);
+    }
+
+    /// <summary>
     /// Recreates a JSON-only stream after the original stream has failed or closed.
     /// </summary>
     public JsonZerobusStream RecreateStream(JsonZerobusStream stream)
@@ -345,6 +539,19 @@ public sealed class ZerobusSdk : IDisposable
     }
 
     /// <summary>
+    /// Recreates a JSON-only stream asynchronously after the original stream has failed or closed.
+    /// </summary>
+    public async Task<JsonZerobusStream> RecreateStreamAsync(
+        JsonZerobusStream stream)
+    {
+        ObjectDisposedException.ThrowIf(_disposed != 0, this);
+        ArgumentNullException.ThrowIfNull(stream);
+
+        var recreated = await RecreateStreamAsync(stream.InnerStream).ConfigureAwait(false);
+        return new JsonZerobusStream(recreated);
+    }
+
+    /// <summary>
     /// Recreates a protobuf-only stream after the original stream has failed or closed.
     /// </summary>
     public ProtoZerobusStream RecreateStream(ProtoZerobusStream stream)
@@ -353,6 +560,18 @@ public sealed class ZerobusSdk : IDisposable
         ArgumentNullException.ThrowIfNull(stream);
 
         return new ProtoZerobusStream(RecreateStream(stream.InnerStream));
+    }
+
+    /// <summary>
+    /// Recreates a protobuf-only stream asynchronously after the original stream has failed or closed.
+    /// </summary>
+    public async Task<ProtoZerobusStream> RecreateStreamAsync(ProtoZerobusStream stream)
+    {
+        ObjectDisposedException.ThrowIf(_disposed != 0, this);
+        ArgumentNullException.ThrowIfNull(stream);
+
+        var recreated = await RecreateStreamAsync(stream.InnerStream).ConfigureAwait(false);
+        return new ProtoZerobusStream(recreated);
     }
 
     private static StreamConfigurationOptions NormalizeStreamOptions(

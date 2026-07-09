@@ -40,6 +40,37 @@ public class LifecycleRecoveryIntegrationTests : IntegrationTestBase
     }
 
     [Test]
+    public async Task GracefulClose_AsyncApi()
+    {
+        await using var fixture = await MockServerFixture.StartAsync();
+
+        fixture.MockServer.InjectResponses(TestTableName,
+        [
+            MockResponses.CreateStreamResponse("test_stream_async_close"),
+            MockResponses.RecordAckResponse(0, delayMs: 100),
+        ]);
+
+        using var sdk = CreateDefaultSdk(fixture);
+        var tableProps = CreateTableProperties();
+        var options = CreateDefaultOptions();
+
+        var stream = await sdk.CreateStreamWithHeadersProviderAsync(tableProps, new TestHeadersProvider(), options);
+
+        var testRecord = "test record data"u8.ToArray();
+        var offsetId = await stream.IngestRecordAsync(testRecord);
+
+        Assert.That(offsetId, Is.EqualTo(0));
+
+        await stream.CloseAsync();
+
+        var writeCount = fixture.MockServer.GetWriteCount();
+        var maxOffset = fixture.MockServer.GetMaxOffsetSent();
+
+        Assert.That(writeCount, Is.EqualTo(1));
+        Assert.That(maxOffset, Is.EqualTo(0));
+    }
+
+    [Test]
     public async Task IdempotentClose()
     {
         await using var fixture = await MockServerFixture.StartAsync();
@@ -57,6 +88,26 @@ public class LifecycleRecoveryIntegrationTests : IntegrationTestBase
 
         stream.Close();
         stream.Close();
+    }
+
+    [Test]
+    public async Task IdempotentClose_AsyncApi()
+    {
+        await using var fixture = await MockServerFixture.StartAsync();
+
+        fixture.MockServer.InjectResponses(TestTableName,
+        [
+            MockResponses.CreateStreamResponse("test_stream_async_idempotent_close"),
+        ]);
+
+        using var sdk = CreateDefaultSdk(fixture);
+        var tableProps = CreateTableProperties();
+        var options = CreateDefaultOptions();
+
+        var stream = await sdk.CreateStreamWithHeadersProviderAsync(tableProps, new TestHeadersProvider(), options);
+
+        await stream.CloseAsync();
+        await stream.CloseAsync();
     }
 
     [Test]
@@ -78,6 +129,29 @@ public class LifecycleRecoveryIntegrationTests : IntegrationTestBase
 
         Assert.That(() => stream.IngestRecord("test record data"u8.ToArray()),
             Throws.InstanceOf<ZerobusException>());
+    }
+
+    [Test]
+    public async Task IngestAfterClose_AsyncApi()
+    {
+        await using var fixture = await MockServerFixture.StartAsync();
+
+        fixture.MockServer.InjectResponses(TestTableName,
+        [
+            MockResponses.CreateStreamResponse("test_stream_async_after_close"),
+        ]);
+
+        using var sdk = CreateDefaultSdk(fixture);
+        var tableProps = CreateTableProperties();
+        var options = CreateDefaultOptions();
+
+        var stream = await sdk.CreateStreamWithHeadersProviderAsync(tableProps, new TestHeadersProvider(), options);
+        await stream.CloseAsync();
+
+        Assert.ThrowsAsync<ZerobusException>(async () =>
+        {
+            await stream.IngestRecordAsync("test record data"u8.ToArray());
+        });
     }
 
     [Test]
@@ -382,6 +456,50 @@ public class LifecycleRecoveryIntegrationTests : IntegrationTestBase
     }
 
     [Test]
+    public async Task RecreateStream_ClosedStream_RecreatedStreamUsable_AsyncApi()
+    {
+        await using var fixture = await MockServerFixture.StartAsync();
+
+        fixture.MockServer.InjectResponses(TestTableName,
+        [
+            MockResponses.CreateStreamResponse("test_stream_async_recreate_1"),
+            MockResponses.CreateStreamResponse("test_stream_async_recreate_2"),
+            MockResponses.RecordAckResponse(0),
+        ]);
+
+        using var sdk = CreateDefaultSdk(fixture);
+        var tableProps = CreateTableProperties();
+        var options = CreateDefaultOptions();
+
+        var stream = await sdk.CreateStreamWithHeadersProviderAsync(tableProps, new TestHeadersProvider(), options);
+        await stream.CloseAsync();
+
+        var unacked = await stream.GetUnackedRecordsAsync();
+        Assert.That(unacked, Is.Empty);
+
+        using var recreatedStream = await sdk.RecreateStreamAsync(stream);
+
+        Assert.That(recreatedStream, Is.Not.Null);
+        Assert.That(recreatedStream, Is.Not.SameAs(stream));
+
+        Assert.ThrowsAsync<ObjectDisposedException>(async () =>
+        {
+            await stream.IngestRecordAsync("old stream"u8.ToArray());
+        });
+
+        var offsetId = await recreatedStream.IngestRecordAsync("recreated stream"u8.ToArray());
+        Assert.That(offsetId, Is.EqualTo(0));
+
+        await recreatedStream.WaitForOffsetAsync(offsetId);
+
+        var writeCount = fixture.MockServer.GetWriteCount();
+        var maxOffset = fixture.MockServer.GetMaxOffsetSent();
+
+        Assert.That(writeCount, Is.EqualTo(1));
+        Assert.That(maxOffset, Is.EqualTo(0));
+    }
+
+    [Test]
     public async Task RecreateStream_JsonTypedStream_RecreatedStreamUsable()
     {
         await using var fixture = await MockServerFixture.StartAsync();
@@ -406,6 +524,35 @@ public class LifecycleRecoveryIntegrationTests : IntegrationTestBase
 
         var offsetId = recreatedStream.IngestRecord("{\"message\":\"recreated\"}");
         recreatedStream.WaitForOffset(offsetId);
+
+        Assert.That(offsetId, Is.EqualTo(0));
+    }
+
+    [Test]
+    public async Task RecreateStream_JsonTypedStream_RecreatedStreamUsable_AsyncApi()
+    {
+        await using var fixture = await MockServerFixture.StartAsync();
+
+        fixture.MockServer.InjectResponses(TestTableName,
+        [
+            MockResponses.CreateStreamResponse("test_stream_json_async_1"),
+            MockResponses.CreateStreamResponse("test_stream_json_async_2"),
+            MockResponses.RecordAckResponse(0),
+        ]);
+
+        using var sdk = CreateDefaultSdk(fixture);
+        var options = CreateDefaultOptions();
+
+        var stream = await sdk.CreateJsonStreamWithHeadersProviderAsync(
+            TestTableName,
+            new TestHeadersProvider(),
+            options);
+        await stream.CloseAsync();
+
+        using var recreatedStream = await sdk.RecreateStreamAsync(stream);
+
+        var offsetId = await recreatedStream.IngestRecordAsync("{\"message\":\"recreated\"}");
+        await recreatedStream.WaitForOffsetAsync(offsetId);
 
         Assert.That(offsetId, Is.EqualTo(0));
     }
@@ -470,6 +617,30 @@ public class LifecycleRecoveryIntegrationTests : IntegrationTestBase
     }
 
     [Test]
+    public async Task RecreateStream_RetryableFailure_ThrowsRetryableException_AsyncApi()
+    {
+        await using var fixture = await MockServerFixture.StartAsync();
+
+        fixture.MockServer.InjectResponses(TestTableName,
+        [
+            MockResponses.CreateStreamResponse("test_stream_recreate_retryable_async_1"),
+            MockResponses.ErrorResponse(StatusCode.Unavailable, "recreate unavailable"),
+        ]);
+
+        using var sdk = CreateDefaultSdk(fixture);
+
+        var tableProps = CreateTableProperties();
+        var options = CreateDefaultOptions();
+
+        using var stream = await sdk.CreateStreamWithHeadersProviderAsync(tableProps, new TestHeadersProvider(), options);
+        await stream.CloseAsync();
+
+        var ex = Assert.ThrowsAsync<ZerobusException>(async () => await sdk.RecreateStreamAsync(stream));
+        Assert.That(ex, Is.Not.Null);
+        Assert.That(ex!.IsRetryable, Is.True);
+    }
+
+    [Test]
     public async Task RecreateStream_ActiveStream_ThrowsZerobusException()
     {
         await using var fixture = await MockServerFixture.StartAsync();
@@ -486,6 +657,26 @@ public class LifecycleRecoveryIntegrationTests : IntegrationTestBase
         using var stream = sdk.CreateStreamWithHeadersProvider(tableProps, new TestHeadersProvider(), options);
 
         var ex = Assert.Throws<ZerobusException>(() => sdk.RecreateStream(stream));
+        Assert.That(ex!.Message, Does.Contain("active stream"));
+    }
+
+    [Test]
+    public async Task RecreateStream_ActiveStream_ThrowsZerobusException_AsyncApi()
+    {
+        await using var fixture = await MockServerFixture.StartAsync();
+
+        fixture.MockServer.InjectResponses(TestTableName,
+        [
+            MockResponses.CreateStreamResponse("test_stream_active_async_1"),
+        ]);
+
+        using var sdk = CreateDefaultSdk(fixture);
+        var tableProps = CreateTableProperties();
+        var options = CreateDefaultOptions();
+
+        using var stream = await sdk.CreateStreamWithHeadersProviderAsync(tableProps, new TestHeadersProvider(), options);
+
+        var ex = Assert.ThrowsAsync<ZerobusException>(async () => await sdk.RecreateStreamAsync(stream));
         Assert.That(ex!.Message, Does.Contain("active stream"));
     }
 }

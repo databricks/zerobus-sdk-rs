@@ -30,6 +30,8 @@ public sealed class ZerobusStream : IDisposable
     private IntPtr _ptr;
     private int _disposed;
     private readonly ReaderWriterLockSlim _lifetimeLock = new();
+    private int _inflightAsyncOperations;
+    private readonly ManualResetEventSlim _asyncOperationsDrained = new(initialState: true);
 
     // Prevent the GCHandle / delegate from being collected while the native code holds a reference.
     // Not readonly: GCHandle is not a readonly struct, so calling Free() on a readonly field
@@ -92,10 +94,24 @@ public sealed class ZerobusStream : IDisposable
     }
 
     /// <inheritdoc cref="IngestRecord(string)"/>
+    public Task<long> IngestRecordAsync(string payload)
+    {
+        ArgumentNullException.ThrowIfNull(payload);
+        return WithReadLockAsync(ptr => NativeInterop.StreamIngestJsonRecordAsync(ptr, payload));
+    }
+
+    /// <inheritdoc cref="IngestRecord(string)"/>
     public long IngestRecord(byte[] payload)
     {
         ArgumentNullException.ThrowIfNull(payload);
         return WithReadLock(ptr => NativeInterop.StreamIngestProtoRecord(ptr, payload));
+    }
+
+    /// <inheritdoc cref="IngestRecord(byte[])"/>
+    public Task<long> IngestRecordAsync(byte[] payload)
+    {
+        ArgumentNullException.ThrowIfNull(payload);
+        return WithReadLockAsync(ptr => NativeInterop.StreamIngestProtoRecordAsync(ptr, payload));
     }
 
     /// <inheritdoc cref="IngestRecord(string)"/>
@@ -131,6 +147,13 @@ public sealed class ZerobusStream : IDisposable
         return WithReadLock(ptr => NativeInterop.StreamIngestJsonRecords(ptr, records));
     }
 
+    /// <inheritdoc cref="IngestRecords(string[])"/>
+    public Task<long> IngestRecordsAsync(string[] records)
+    {
+        ArgumentNullException.ThrowIfNull(records);
+        return WithReadLockAsync(ptr => NativeInterop.StreamIngestJsonRecordsAsync(ptr, records));
+    }
+
     /// <summary>
     /// Ingests a batch of protobuf records and returns one offset for the entire batch.
     /// All records in the batch must be serialised protobuf byte arrays.
@@ -143,6 +166,13 @@ public sealed class ZerobusStream : IDisposable
     {
         ArgumentNullException.ThrowIfNull(records);
         return WithReadLock(ptr => NativeInterop.StreamIngestProtoRecords(ptr, records));
+    }
+
+    /// <inheritdoc cref="IngestRecords(byte[][])"/>
+    public Task<long> IngestRecordsAsync(byte[][] records)
+    {
+        ArgumentNullException.ThrowIfNull(records);
+        return WithReadLockAsync(ptr => NativeInterop.StreamIngestProtoRecordsAsync(ptr, records));
     }
 
     // ── Acknowledgment / flush ───────────────────────────────────────────
@@ -167,6 +197,12 @@ public sealed class ZerobusStream : IDisposable
         WithReadLock(ptr => NativeInterop.StreamWaitForOffset(ptr, offset));
     }
 
+    /// <inheritdoc cref="WaitForOffset(long)"/>
+    public Task WaitForOffsetAsync(long offset)
+    {
+        return WithReadLockAsync(ptr => NativeInterop.StreamWaitForOffsetAsync(ptr, offset));
+    }
+
     /// <summary>
     /// Blocks until all pending records have been acknowledged by the server.
     /// This ensures durability guarantees before proceeding.
@@ -184,6 +220,12 @@ public sealed class ZerobusStream : IDisposable
     public void Flush()
     {
         WithReadLock(NativeInterop.StreamFlush);
+    }
+
+    /// <inheritdoc cref="Flush"/>
+    public Task FlushAsync()
+    {
+        return WithReadLockAsync(NativeInterop.StreamFlushAsync);
     }
 
     // ── Unacknowledged records ───────────────────────────────────────────
@@ -221,6 +263,12 @@ public sealed class ZerobusStream : IDisposable
         return WithReadLock(NativeInterop.StreamGetUnackedRecords);
     }
 
+    /// <inheritdoc cref="GetUnackedRecords"/>
+    public Task<ReadOnlyMemory<byte>[]> GetUnackedRecordsAsync()
+    {
+        return WithReadLockAsync(NativeInterop.StreamGetUnackedRecordsAsync);
+    }
+
     // ── Close / Dispose ──────────────────────────────────────────────────
 
     /// <summary>
@@ -243,6 +291,18 @@ public sealed class ZerobusStream : IDisposable
         if (NativeMethods.StreamIsClosed(ptr)) return;
 
         NativeInterop.StreamClose(ptr);
+    }
+
+    /// <inheritdoc cref="Close"/>
+    public Task CloseAsync()
+    {
+        return WithWriteLockAsync(
+            ptr =>
+            {
+                if (NativeMethods.StreamIsClosed(ptr))
+                    return Task.CompletedTask;
+                return NativeInterop.StreamCloseAsync(ptr);
+            });
     }
 
     /// <inheritdoc />
@@ -364,6 +424,24 @@ public sealed class ZerobusStream : IDisposable
     }
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private Task<T> WithReadLockAsync<T>(Func<IntPtr, Task<T>> call)
+    {
+        return WithAsyncLock(writeLock: false, call);
+    }
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private Task WithReadLockAsync(Func<IntPtr, Task> call)
+    {
+        return WithAsyncLock(writeLock: false, call);
+    }
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private Task WithWriteLockAsync(Func<IntPtr, Task> call)
+    {
+        return WithAsyncLock(writeLock: true, call);
+    }
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
     private IDisposable WithReadLock()
     {
         _lifetimeLock.EnterReadLock();
@@ -374,11 +452,102 @@ public sealed class ZerobusStream : IDisposable
     private IDisposable WithWriteLock()
     {
         _lifetimeLock.EnterWriteLock();
+        _asyncOperationsDrained.Wait();
         return new Disposable(() => _lifetimeLock.ExitWriteLock());
+    }
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private Task<T> WithAsyncLock<T>(bool writeLock, Func<IntPtr, Task<T>> call)
+    {
+        var ptr = BeginAsyncOperation(writeLock);
+        try
+        {
+            var task = call(ptr);
+            return CompleteAsyncOperation(task);
+        }
+        catch
+        {
+            EndAsyncOperation();
+            throw;
+        }
+    }
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private Task WithAsyncLock(bool writeLock, Func<IntPtr, Task> call)
+    {
+        var ptr = BeginAsyncOperation(writeLock);
+        try
+        {
+            var task = call(ptr);
+            return CompleteAsyncOperation(task);
+        }
+        catch
+        {
+            EndAsyncOperation();
+            throw;
+        }
+    }
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private IntPtr BeginAsyncOperation(bool writeLock)
+    {
+        if (writeLock)
+            _lifetimeLock.EnterWriteLock();
+        else
+            _lifetimeLock.EnterReadLock();
+
+        try
+        {
+            var ptr = GetNativePointerForCall();
+            if (Interlocked.Increment(ref _inflightAsyncOperations) == 1)
+                _asyncOperationsDrained.Reset();
+            return ptr;
+        }
+        finally
+        {
+            if (writeLock)
+                _lifetimeLock.ExitWriteLock();
+            else
+                _lifetimeLock.ExitReadLock();
+        }
+    }
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private void EndAsyncOperation()
+    {
+        if (Interlocked.Decrement(ref _inflightAsyncOperations) == 0)
+            _asyncOperationsDrained.Set();
+    }
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private async Task<T> CompleteAsyncOperation<T>(Task<T> task)
+    {
+        try
+        {
+            return await task.ConfigureAwait(false);
+        }
+        finally
+        {
+            EndAsyncOperation();
+        }
+    }
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private async Task CompleteAsyncOperation(Task task)
+    {
+        try
+        {
+            await task.ConfigureAwait(false);
+        }
+        finally
+        {
+            EndAsyncOperation();
+        }
     }
 
     private class Disposable(Action action) : IDisposable
     {
         public void Dispose() => action();
     }
+
 }

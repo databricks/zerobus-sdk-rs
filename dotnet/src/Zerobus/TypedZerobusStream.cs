@@ -26,10 +26,22 @@ public abstract class TypedZerobusStream : IDisposable
         _innerStream.WaitForOffset(offset);
     }
 
+    /// <inheritdoc cref="ZerobusStream.WaitForOffsetAsync"/>
+    public Task WaitForOffsetAsync(long offset)
+    {
+        return _innerStream.WaitForOffsetAsync(offset);
+    }
+
     /// <inheritdoc cref="ZerobusStream.Flush"/>
     public void Flush()
     {
         _innerStream.Flush();
+    }
+
+    /// <inheritdoc cref="ZerobusStream.FlushAsync"/>
+    public Task FlushAsync()
+    {
+        return _innerStream.FlushAsync();
     }
 
     /// <inheritdoc cref="ZerobusStream.GetUnackedRecords"/>
@@ -38,10 +50,22 @@ public abstract class TypedZerobusStream : IDisposable
         return _innerStream.GetUnackedRecords();
     }
 
+    /// <inheritdoc cref="ZerobusStream.GetUnackedRecordsAsync"/>
+    public Task<ReadOnlyMemory<byte>[]> GetUnackedRecordsAsync()
+    {
+        return _innerStream.GetUnackedRecordsAsync();
+    }
+
     /// <inheritdoc cref="ZerobusStream.Close"/>
     public void Close()
     {
         _innerStream.Close();
+    }
+
+    /// <inheritdoc cref="ZerobusStream.CloseAsync"/>
+    public Task CloseAsync()
+    {
+        return _innerStream.CloseAsync();
     }
 
     /// <inheritdoc />

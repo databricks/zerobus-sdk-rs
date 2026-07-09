@@ -16,6 +16,12 @@ public sealed class ProtoZerobusStream : TypedZerobusStream
         return InnerStream.IngestRecord(payload);
     }
 
+    /// <inheritdoc cref="ZerobusStream.IngestRecordAsync(byte[])"/>
+    public Task<long> IngestRecordAsync(byte[] payload)
+    {
+        return InnerStream.IngestRecordAsync(payload);
+    }
+
     /// <inheritdoc cref="ZerobusStream.IngestRecord(ReadOnlySpan{byte})"/>
     public long IngestRecord(ReadOnlySpan<byte> payload)
     {
@@ -26,5 +32,11 @@ public sealed class ProtoZerobusStream : TypedZerobusStream
     public long IngestRecords(byte[][] records)
     {
         return InnerStream.IngestRecords(records);
+    }
+
+    /// <inheritdoc cref="ZerobusStream.IngestRecordsAsync(byte[][])"/>
+    public Task<long> IngestRecordsAsync(byte[][] records)
+    {
+        return InnerStream.IngestRecordsAsync(records);
     }
 }
