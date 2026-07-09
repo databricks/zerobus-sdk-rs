@@ -425,7 +425,7 @@ internal static class NativeInterop
 
     /// <summary>
     /// Allocates a new native SDK builder. Must be terminated with
-    /// <see cref="SdkBuilderBuild"/> or <see cref="SdkBuilderFree"/>.
+    /// <see cref="SdkBuilderBuild"/> or <see cref="NativeMethods.SdkBuilderFree"/>.
     /// </summary>
     public static IntPtr SdkBuilderNew()
     {

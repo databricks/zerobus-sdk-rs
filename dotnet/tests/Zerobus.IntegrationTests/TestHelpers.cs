@@ -26,6 +26,29 @@ public sealed class TestHeadersProvider : IHeadersProvider
 }
 
 /// <summary>
+/// Headers provider that tracks callback invocation count.
+/// Useful for asserting that the native callback bridge path was exercised.
+/// </summary>
+public sealed class CountingHeadersProvider : IHeadersProvider
+{
+    private readonly Dictionary<string, string> _headers;
+    private int _callCount;
+
+    public CountingHeadersProvider(IDictionary<string, string> headers)
+    {
+        _headers = new Dictionary<string, string>(headers, StringComparer.OrdinalIgnoreCase);
+    }
+
+    public int CallCount => Volatile.Read(ref _callCount);
+
+    public IDictionary<string, string> GetHeaders()
+    {
+        Interlocked.Increment(ref _callCount);
+        return new Dictionary<string, string>(_headers, StringComparer.OrdinalIgnoreCase);
+    }
+}
+
+/// <summary>
 /// Helper methods for creating mock responses and test data.
 /// </summary>
 public static class MockResponses
