@@ -39,4 +39,38 @@ public sealed class ProtoZerobusStream : TypedZerobusStream
     {
         return InnerStream.IngestRecordsAsync(records);
     }
+
+    /// <summary>
+    /// Retrieves all records that have not yet been acknowledged by the server.
+    /// <para>
+    /// <strong>Important:</strong> This should only be called after the stream has
+    /// closed or failed. Calling it on an active stream will return an error.
+    /// </para>
+    /// </summary>
+    /// <returns>
+    /// An array of raw protobuf record payloads as <see cref="ReadOnlyMemory{T}"/> of <see cref="byte"/>.
+    /// </returns>
+    /// <exception cref="ZerobusException">Thrown if retrieval fails.</exception>
+    /// <exception cref="ObjectDisposedException">Thrown if the stream has been disposed.</exception>
+    public ReadOnlyMemory<byte>[] GetUnackedRecords()
+    {
+        return InnerStream.GetUnackedRecords();
+    }
+
+    /// <summary>
+    /// Asynchronously retrieves all records that have not yet been acknowledged by the server.
+    /// <para>
+    /// <strong>Important:</strong> This should only be called after the stream has
+    /// closed or failed. Calling it on an active stream will return an error.
+    /// </para>
+    /// </summary>
+    /// <returns>
+    /// A task that resolves to an array of raw protobuf record payloads as <see cref="ReadOnlyMemory{T}"/> of <see cref="byte"/>.
+    /// </returns>
+    /// <exception cref="ZerobusException">Thrown if retrieval fails.</exception>
+    /// <exception cref="ObjectDisposedException">Thrown if the stream has been disposed.</exception>
+    public Task<ReadOnlyMemory<byte>[]> GetUnackedRecordsAsync()
+    {
+        return InnerStream.GetUnackedRecordsAsync();
+    }
 }
