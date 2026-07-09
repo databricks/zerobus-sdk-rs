@@ -5,6 +5,7 @@
 #include <cstdint>
 #include <memory>
 #include <optional>
+#include <variant>
 
 #include "zerobus/ack_callback.hpp"
 
@@ -15,6 +16,57 @@ enum class RecordType : std::int32_t {
   Unspecified = 0,
   Proto = 1,
   Json = 2,
+};
+
+/// How long `close()` waits for the async ack-callback task to drain before
+/// giving up. A callback that outruns the wait can outlive `close()` (see
+/// `AckCallback` for the lifetime contract). Exactly one of three states holds,
+/// so the finite budget and the "wait forever" flag can never contradict:
+///
+/// - `use_default()` (the default): the finite budget baked into the FFI.
+/// - `duration(ms)`: an explicit finite budget; the task is aborted after `ms`.
+/// - `forever()`: no deadline — `close()` blocks until every in-flight callback
+///   finishes. The only policy that guarantees no callback runs after `close()`
+///   returns; the tradeoff is that a wedged callback blocks `close()`.
+class CallbackWaitPolicy {
+ public:
+  /// Use the finite budget baked into the FFI default.
+  CallbackWaitPolicy() = default;
+
+  /// Use the FFI default finite budget (same as the default constructor).
+  static CallbackWaitPolicy use_default() { return CallbackWaitPolicy{}; }
+
+  /// Wait up to @p ms milliseconds, then abort the callback task.
+  static CallbackWaitPolicy duration(std::uint64_t ms) {
+    return CallbackWaitPolicy{Duration{ms}};
+  }
+
+  /// Drain with no deadline; `close()` blocks until callbacks finish.
+  static CallbackWaitPolicy forever() { return CallbackWaitPolicy{Forever{}}; }
+
+  bool is_default() const { return std::holds_alternative<Default>(state_); }
+  bool is_forever() const { return std::holds_alternative<Forever>(state_); }
+
+  /// The finite budget in milliseconds, or `nullopt` unless this is a
+  /// `duration(ms)` policy.
+  std::optional<std::uint64_t> duration_ms() const {
+    if (const auto* d = std::get_if<Duration>(&state_)) {
+      return d->ms;
+    }
+    return std::nullopt;
+  }
+
+ private:
+  struct Default {};
+  struct Forever {};
+  struct Duration {
+    std::uint64_t ms;
+  };
+  using State = std::variant<Default, Forever, Duration>;
+
+  explicit CallbackWaitPolicy(State state) : state_(std::move(state)) {}
+
+  State state_{Default{}};
 };
 
 /// Configuration for an ingestion stream.
@@ -43,20 +95,12 @@ struct StreamOptions {
   /// `nullopt` = wait the full server-specified duration; `0` = recover
   /// immediately; `>0` = wait up to min(this, server duration).
   std::optional<std::uint64_t> stream_paused_max_wait_time_ms;
-  /// Time `close()` waits for the async callback task (see `ack_callback`) to
-  /// drain before aborting it; a callback outrunning it can outlive `close()`
-  /// (see `AckCallback`). `nullopt` keeps the finite FFI default; for no
-  /// deadline, use `callback_wait_forever`.
-  std::optional<std::uint64_t> callback_max_wait_time_ms;
-  /// If `true`, `close()` drains the callback task with no deadline instead of
-  /// aborting it. The only setting that guarantees no `AckCallback` is still
-  /// running after `close()` returns (keeping the callback alive past the
-  /// `Stream` also prevents the use-after-free, but not a callback outliving
-  /// `close()`); the tradeoff is that `close()` blocks on a wedged callback.
-  /// Overrides `callback_max_wait_time_ms`.
-  bool callback_wait_forever = false;
+  /// How long `close()` waits for the ack-callback task to drain. See
+  /// `CallbackWaitPolicy`; defaults to the finite FFI budget.
+  CallbackWaitPolicy callback_wait_policy;
   /// Optional async ack/error callback (`nullptr` = none). The `Stream` keeps a
-  /// `shared_ptr` for its lifetime; see `AckCallback` for the full contract.
+  /// `shared_ptr` for its lifetime; see `AckCallback` for the full contract,
+  /// including the lifetime and no-throw rules.
   std::shared_ptr<AckCallback> ack_callback;
 };
 

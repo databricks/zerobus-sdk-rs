@@ -1,15 +1,59 @@
-// extern "C" trampolines the core invokes to deliver acks/errors. Each recovers
-// the AckCallback from user_data and forwards to it, containing exceptions
-// (unwinding across the C FFI is UB). Declared in detail/ack_callback.hpp.
+// extern "C" trampolines the core invokes to deliver acks/errors, plus the
+// AckCallback::from adapter. Each trampoline recovers the AckCallback from
+// user_data and forwards to it. The AckCallback methods are noexcept, so a
+// throwing callback terminates at its own throw site (with the user's stack)
+// rather than unwinding across the C FFI, which is UB — the trampolines add no
+// try/catch of their own. Declared in detail/ack_callback.hpp.
 #include "detail/ack_callback.hpp"
 
-#include <cinttypes>
-#include <cstdio>
+#include <cstdint>
+#include <functional>
 #include <string>
+#include <utility>
 
 #include "zerobus/ack_callback.hpp"
 
 namespace zerobus {
+
+namespace {
+
+// AckCallback backed by std::function handlers, used by AckCallback::from. The
+// error handler may be empty (errors ignored). Both handlers inherit the
+// noexcept contract; if one throws, std::terminate fires at the throw site.
+class LambdaAckCallback : public AckCallback {
+ public:
+  LambdaAckCallback(
+      std::function<void(std::int64_t)> on_ack,
+      std::function<void(std::int64_t, const std::string&)> on_error)
+      : on_ack_(std::move(on_ack)), on_error_(std::move(on_error)) {}
+
+  void on_ack(std::int64_t offset) noexcept override {
+    if (on_ack_) {
+      on_ack_(offset);
+    }
+  }
+
+  void on_error(std::int64_t offset,
+                const std::string& error_message) noexcept override {
+    if (on_error_) {
+      on_error_(offset, error_message);
+    }
+  }
+
+ private:
+  std::function<void(std::int64_t)> on_ack_;
+  std::function<void(std::int64_t, const std::string&)> on_error_;
+};
+
+}  // namespace
+
+std::shared_ptr<AckCallback> AckCallback::from(
+    std::function<void(std::int64_t)> on_ack,
+    std::function<void(std::int64_t, const std::string&)> on_error) {
+  return std::make_shared<LambdaAckCallback>(std::move(on_ack),
+                                             std::move(on_error));
+}
+
 namespace detail {
 
 extern "C" void zerobus_cpp_ack_on_ack_trampoline(std::int64_t offset,
@@ -17,17 +61,7 @@ extern "C" void zerobus_cpp_ack_on_ack_trampoline(std::int64_t offset,
   if (user_data == nullptr) {
     return;
   }
-  auto* callback = static_cast<AckCallback*>(user_data);
-  try {
-    callback->on_ack(offset);
-  } catch (...) {
-    // Contain (can't unwind across the FFI) but log, so a throwing callback bug
-    // leaves a signal.
-    std::fprintf(stderr,
-                 "zerobus: AckCallback::on_ack threw for offset %" PRId64
-                 "; exception swallowed at the C FFI boundary\n",
-                 offset);
-  }
+  static_cast<AckCallback*>(user_data)->on_ack(offset);
 }
 
 extern "C" void zerobus_cpp_ack_on_error_trampoline(std::int64_t offset,
@@ -36,18 +70,9 @@ extern "C" void zerobus_cpp_ack_on_error_trampoline(std::int64_t offset,
   if (user_data == nullptr) {
     return;
   }
-  auto* callback = static_cast<AckCallback*>(user_data);
-  try {
-    // error_message is borrowed for this call only; copy it (empty on null).
-    std::string message = error_message != nullptr ? error_message : "";
-    callback->on_error(offset, message);
-  } catch (...) {
-    // See on_ack trampoline: contain but log.
-    std::fprintf(stderr,
-                 "zerobus: AckCallback::on_error threw for offset %" PRId64
-                 "; exception swallowed at the C FFI boundary\n",
-                 offset);
-  }
+  // error_message is borrowed for this call only; copy it (empty on null).
+  std::string message = error_message != nullptr ? error_message : "";
+  static_cast<AckCallback*>(user_data)->on_error(offset, message);
 }
 
 }  // namespace detail

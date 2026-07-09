@@ -10,11 +10,10 @@ namespace detail {
 
 /// Build the C stream-config struct: seed from the live FFI defaults, then
 /// overwrite every scalar unconditionally (guarded by `config_defaults_test`).
-/// The seed survives only for unknown future fields and for
-/// `callback_max_wait_time_ms` when `callback_wait_forever` is false and the
-/// budget is left unset (below). Ack-callback fields are set from
-/// `opts.ack_callback` and zeroed explicitly when it is unset, so correctness
-/// does not depend on the FFI default seeding them null.
+/// The seed survives only for unknown future fields and for the callback wait
+/// budget when the policy is `use_default()` (below). Ack-callback fields are
+/// set from `opts.ack_callback` and zeroed explicitly when it is unset, so
+/// correctness does not depend on the FFI default seeding them null.
 inline CStreamConfigurationOptions to_c(const StreamOptions& opts) {
   CStreamConfigurationOptions c = zerobus_get_default_config();
   c.max_inflight_requests = opts.max_inflight_requests;
@@ -32,15 +31,16 @@ inline CStreamConfigurationOptions to_c(const StreamOptions& opts) {
     c.has_stream_paused_max_wait_time_ms = false;
     c.stream_paused_max_wait_time_ms = 0;
   }
-  // wait_forever wins: clearing the flag makes Rust read the budget as None
-  // (drain indefinitely). Otherwise override only when a budget is set; nullopt
-  // leaves the finite FFI seed in place.
-  if (opts.callback_wait_forever) {
+  // Map the wait policy to the FFI's (presence flag, value) pair. forever()
+  // clears the flag so Rust reads the budget as None (drain indefinitely);
+  // duration(ms) sets an explicit finite budget; use_default() leaves the
+  // finite FFI seed in place.
+  if (opts.callback_wait_policy.is_forever()) {
     c.has_callback_max_wait_time_ms = false;
     c.callback_max_wait_time_ms = 0;
-  } else if (opts.callback_max_wait_time_ms.has_value()) {
+  } else if (auto ms = opts.callback_wait_policy.duration_ms()) {
     c.has_callback_max_wait_time_ms = true;
-    c.callback_max_wait_time_ms = *opts.callback_max_wait_time_ms;
+    c.callback_max_wait_time_ms = *ms;
   }
   // Install trampolines only when a callback is set; the Stream keeps the
   // shared_ptr alive so this user_data stays valid. Zero the fields explicitly

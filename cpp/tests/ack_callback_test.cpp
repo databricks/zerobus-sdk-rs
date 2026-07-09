@@ -1,14 +1,14 @@
 // Verifies the C++ ack-callback wiring: to_c() installs trampolines only when a
-// callback is set, wait_forever maps correctly, and the trampolines dispatch,
-// tolerate null user_data / null message, and contain exceptions. Returns
-// non-zero on failure (dependency-free, like the other tests).
+// callback is set, the wait policy maps correctly, the trampolines dispatch and
+// tolerate null user_data / null message, and AckCallback::from adapts
+// std::functions. Returns non-zero on failure (dependency-free, like the other
+// tests).
 
 #include "detail/ack_callback.hpp"
 
 #include <cstdint>
 #include <cstdio>
 #include <memory>
-#include <stdexcept>
 #include <string>
 
 #include "detail/config_convert.hpp"
@@ -35,23 +35,15 @@ class RecordingCallback : public zerobus::AckCallback {
   int ack_count = 0;
   int error_count = 0;
 
-  void on_ack(std::int64_t offset) override {
+  void on_ack(std::int64_t offset) noexcept override {
     last_ack = offset;
     ++ack_count;
   }
-  void on_error(std::int64_t offset, const std::string& message) override {
+  void on_error(std::int64_t offset,
+                const std::string& message) noexcept override {
     last_error_offset = offset;
     last_error_message = message;
     ++error_count;
-  }
-};
-
-// Always throws, to prove exceptions are contained at the boundary.
-class ThrowingCallback : public zerobus::AckCallback {
- public:
-  void on_ack(std::int64_t) override { throw std::runtime_error("boom"); }
-  void on_error(std::int64_t, const std::string&) override {
-    throw std::runtime_error("boom");
   }
 };
 
@@ -73,23 +65,29 @@ void test_to_c_installs_only_when_set() {
         c.ack_user_data == cb.get());
 }
 
-void test_wait_forever_clears_presence_flag() {
-  // wait_forever must clear the presence flag (Rust reads None => drain
-  // forever) and win over an explicit finite budget.
+void test_wait_policy_maps_to_ffi() {
+  // forever() clears the presence flag (Rust reads None => drain forever).
   zerobus::StreamOptions opts;
-  opts.callback_wait_forever = true;
-  opts.callback_max_wait_time_ms = 1234;  // ignored when waiting forever
+  opts.callback_wait_policy = zerobus::CallbackWaitPolicy::forever();
   zerobus::CStreamConfigurationOptions c = zerobus::detail::to_c(opts);
-  check("wait_forever => presence flag cleared",
+  check("forever => presence flag cleared",
         c.has_callback_max_wait_time_ms == false);
 
-  // Without wait_forever, a finite budget is still honored.
-  opts.callback_wait_forever = false;
+  // duration(ms) sets an explicit finite budget.
+  opts.callback_wait_policy = zerobus::CallbackWaitPolicy::duration(1234);
   c = zerobus::detail::to_c(opts);
-  check("finite budget => presence flag set",
+  check("duration => presence flag set",
         c.has_callback_max_wait_time_ms == true);
-  check("finite budget => value forwarded",
-        c.callback_max_wait_time_ms == 1234);
+  check("duration => value forwarded", c.callback_max_wait_time_ms == 1234);
+
+  // use_default() leaves the finite FFI seed untouched (presence stays set, as
+  // config_defaults_test also pins).
+  opts.callback_wait_policy = zerobus::CallbackWaitPolicy::use_default();
+  c = zerobus::detail::to_c(opts);
+  check(
+      "default => presence flag left at FFI seed",
+      c.has_callback_max_wait_time_ms ==
+          zerobus::zerobus_get_default_config().has_callback_max_wait_time_ms);
 }
 
 void test_trampolines_dispatch() {
@@ -119,22 +117,44 @@ void test_null_user_data_is_ignored() {
   zerobus::detail::zerobus_cpp_ack_on_error_trampoline(1, "x", nullptr);
 }
 
-void test_exceptions_are_contained() {
-  ThrowingCallback cb;
-  // Neither call may propagate the exception out of the trampoline: returning
-  // here (rather than terminating on an escaped throw) is the assertion.
-  zerobus::detail::zerobus_cpp_ack_on_ack_trampoline(1, &cb);
-  zerobus::detail::zerobus_cpp_ack_on_error_trampoline(1, "x", &cb);
+void test_from_adapter_dispatches() {
+  // AckCallback::from wraps std::functions; the trampolines dispatch to them
+  // just like a subclass.
+  std::int64_t acked = -1;
+  std::int64_t err_offset = -1;
+  std::string err_message;
+  auto cb = zerobus::AckCallback::from(
+      [&](std::int64_t offset) noexcept { acked = offset; },
+      [&](std::int64_t offset, const std::string& msg) noexcept {
+        err_offset = offset;
+        err_message = msg;
+      });
+  zerobus::detail::zerobus_cpp_ack_on_ack_trampoline(5, cb.get());
+  zerobus::detail::zerobus_cpp_ack_on_error_trampoline(6, "bad", cb.get());
+  check("from: on_ack dispatched", acked == 5);
+  check("from: on_error offset dispatched", err_offset == 6);
+  check("from: on_error message dispatched", err_message == "bad");
+}
+
+void test_from_adapter_omitted_error_handler() {
+  // The error handler is optional; a null one must be tolerated, not crash.
+  bool acked = false;
+  auto cb =
+      zerobus::AckCallback::from([&](std::int64_t) noexcept { acked = true; });
+  zerobus::detail::zerobus_cpp_ack_on_ack_trampoline(1, cb.get());
+  zerobus::detail::zerobus_cpp_ack_on_error_trampoline(1, "x", cb.get());
+  check("from: on_ack fired with omitted error handler", acked);
 }
 
 }  // namespace
 
 int main() {
   test_to_c_installs_only_when_set();
-  test_wait_forever_clears_presence_flag();
+  test_wait_policy_maps_to_ffi();
   test_trampolines_dispatch();
   test_null_user_data_is_ignored();
-  test_exceptions_are_contained();
+  test_from_adapter_dispatches();
+  test_from_adapter_omitted_error_handler();
 
   if (g_failures != 0) {
     std::fprintf(stderr, "%d ack-callback check(s) failed.\n", g_failures);

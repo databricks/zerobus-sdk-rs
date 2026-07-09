@@ -27,11 +27,11 @@ class Sdk;
 ///   whereas the destructor swallows it.
 /// - Closing flushes synchronously and can block up to the stream's
 ///   `flush_timeout_ms` (default 5 minutes) if the server is unresponsive, and
-///   then drains any registered `ack_callback` task (up to
-///   `callback_max_wait_time_ms`, or indefinitely if `callback_wait_forever`
-///   is set). A `Stream` that falls out of scope therefore drags that blocking
-///   close into the destructor at an unpredictable point. Call `close()` at a
-///   controlled point in your code instead.
+///   then drains any registered `ack_callback` task per
+///   `StreamOptions::callback_wait_policy` (which may be unbounded). A `Stream`
+///   that falls out of scope therefore drags that blocking close into the
+///   destructor at an unpredictable point. Call `close()` at a controlled point
+///   in your code instead.
 ///
 /// Thread safety: not safe for concurrent use from multiple threads. Serialize
 /// access externally, matching the Java and Rust core contracts.
@@ -111,10 +111,9 @@ class Stream {
   ///
   /// Blocks until the flush completes or the stream's `flush_timeout_ms`
   /// elapses (default 5 minutes), then drains any registered `ack_callback`
-  /// task before returning (up to `callback_max_wait_time_ms`, or indefinitely
-  /// if `callback_wait_forever` is set — a wedged callback can then block
-  /// `close()` forever). Call it at a controlled point rather than leaving it
-  /// to the destructor.
+  /// task before returning, per `StreamOptions::callback_wait_policy`
+  /// (`forever()` can block `close()` on a wedged callback). Call it at a
+  /// controlled point rather than leaving it to the destructor.
   ///
   /// On success the stream becomes unusable. If the close fails it keeps the
   /// stream handle alive, so the caller can still recover buffered data via

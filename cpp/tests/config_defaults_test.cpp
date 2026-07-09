@@ -66,10 +66,10 @@ int main() {
            from_ffi.flush_timeout_ms);
   check_eq("record_type", from_cpp.record_type, from_ffi.record_type);
 
-  // Optionals: a default StreamOptions leaves both unset. stream_paused is
-  // written as absent; callback_max_wait_time_ms is left at the FFI seed
-  // (which is present). Either way the presence flag and value must match the
-  // FFI default struct.
+  // Optionals: a default StreamOptions leaves stream_paused unset (written as
+  // absent) and its callback wait policy at use_default(), which leaves the
+  // callback budget at the FFI seed (present). Either way the presence flag and
+  // value must match the FFI default struct.
   check_eq("has_stream_paused_max_wait_time_ms",
            from_cpp.has_stream_paused_max_wait_time_ms,
            from_ffi.has_stream_paused_max_wait_time_ms);
