@@ -18,7 +18,10 @@ var tableName = Environment.GetEnvironmentVariable("ZEROBUS_TABLE_NAME")
 byte[] descriptorProto = []; // Replace with your actual descriptor bytes.
 
 // Create SDK instance.
-using var sdk = new ZerobusSdk(zerobusEndpoint, unityCatalogUrl);
+using var sdk = ZerobusSdk.CreateBuilder()
+    .Endpoint(zerobusEndpoint)
+    .UnityCatalogUrl(unityCatalogUrl)
+    .Build();
 
 // Configure stream options for protobuf.
 var options = StreamConfigurationOptions.Default with

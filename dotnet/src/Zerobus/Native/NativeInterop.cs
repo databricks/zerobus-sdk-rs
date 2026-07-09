@@ -50,23 +50,6 @@ internal static class NativeInterop
     }
 
     /// <summary>
-    /// Creates a new SDK instance.
-    /// </summary>
-    public static IntPtr SdkNew(string zerobusEndpoint, string unityCatalogUrl)
-    {
-        var result = new CResult();
-        var ptr = NativeMethods.SdkNew(zerobusEndpoint, unityCatalogUrl, ref result);
-
-        if (ptr == IntPtr.Zero)
-        {
-            var ex = ToException(ref result);
-            throw ex ?? new ZerobusException("Failed to create SDK instance", isRetryable: false);
-        }
-
-        return ptr;
-    }
-
-    /// <summary>
     /// Creates a stream with OAuth credentials.
     /// </summary>
     public static unsafe IntPtr SdkCreateStream(
@@ -438,5 +421,35 @@ internal static class NativeInterop
             AckOnError = IntPtr.Zero,
             AckUserData = IntPtr.Zero,
         };
+    }
+
+    /// <summary>
+    /// Allocates a new native SDK builder. Must be terminated with
+    /// <see cref="SdkBuilderBuild"/> or <see cref="SdkBuilderFree"/>.
+    /// </summary>
+    public static IntPtr SdkBuilderNew()
+    {
+        var ptr = NativeMethods.SdkBuilderNew();
+        if (ptr == IntPtr.Zero)
+            throw new ZerobusException("Failed to allocate SDK builder", isRetryable: false);
+        return ptr;
+    }
+
+    /// <summary>
+    /// Consumes the builder and returns a native SDK pointer.
+    /// The builder pointer must not be used after this call.
+    /// </summary>
+    public static IntPtr SdkBuilderBuild(IntPtr builder)
+    {
+        var result = new CResult();
+        var ptr = NativeMethods.SdkBuilderBuild(builder, ref result);
+
+        if (ptr == IntPtr.Zero)
+        {
+            var ex = ToException(ref result);
+            throw ex ?? new ZerobusException("Failed to build SDK", isRetryable: false);
+        }
+
+        return ptr;
     }
 }

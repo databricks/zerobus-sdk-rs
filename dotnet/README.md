@@ -13,9 +13,10 @@ High-performance .NET SDK for streaming data ingestion into Databricks Delta tab
 using Databricks.Zerobus;
 
 // 1. Create SDK instance.
-using var sdk = new ZerobusSdk(
-    "https://your-shard.zerobus.databricks.com",
-    "https://your-workspace.databricks.com");
+using var sdk = ZerobusSdk.CreateBuilder()
+    .Endpoint("https://your-shard.zerobus.databricks.com")
+    .UnityCatalogUrl("https://your-workspace.databricks.com")
+    .Build();
 
 // 2. Configure stream options.
 var options = StreamConfigurationOptions.Default with
@@ -67,7 +68,10 @@ dotnet build -p:SkipNativeBuild=true
 The main entry point. Manages the connection to Zerobus and Unity Catalog.
 
 ```csharp
-using var sdk = new ZerobusSdk(zerobusEndpoint, unityCatalogUrl);
+using var sdk = ZerobusSdk.CreateBuilder()
+    .Endpoint(zerobusEndpoint)
+    .UnityCatalogUrl(unityCatalogUrl)
+    .Build();
 ```
 
 #### `CreateStream`

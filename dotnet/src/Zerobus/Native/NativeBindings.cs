@@ -174,12 +174,6 @@ internal static partial class NativeMethods
 
     // --- SDK lifecycle ---
 
-    [DllImport(LibName, CallingConvention = CallingConvention.Cdecl, EntryPoint = "zerobus_sdk_new")]
-    public static extern IntPtr SdkNew(
-        [MarshalAs(UnmanagedType.LPUTF8Str)] string zerobusEndpoint,
-        [MarshalAs(UnmanagedType.LPUTF8Str)] string unityCatalogUrl,
-        ref CResult result);
-
     [DllImport(LibName, CallingConvention = CallingConvention.Cdecl, EntryPoint = "zerobus_sdk_free")]
     public static extern void SdkFree(IntPtr sdk);
 
@@ -292,4 +286,38 @@ internal static partial class NativeMethods
 
     [DllImport(LibName, CallingConvention = CallingConvention.Cdecl, EntryPoint = "zerobus_get_default_config")]
     public static extern CStreamConfigurationOptions GetDefaultConfig();
+
+    // --- SDK builder ---
+
+    [DllImport(LibName, CallingConvention = CallingConvention.Cdecl, EntryPoint = "zerobus_sdk_builder_new")]
+    public static extern IntPtr SdkBuilderNew();
+
+    [DllImport(LibName, CallingConvention = CallingConvention.Cdecl, EntryPoint = "zerobus_sdk_builder_endpoint")]
+    public static extern void SdkBuilderEndpoint(
+        IntPtr builder,
+        [MarshalAs(UnmanagedType.LPUTF8Str)] string value);
+
+    [DllImport(LibName, CallingConvention = CallingConvention.Cdecl, EntryPoint = "zerobus_sdk_builder_unity_catalog_url")]
+    public static extern void SdkBuilderUnityCatalogUrl(
+        IntPtr builder,
+        [MarshalAs(UnmanagedType.LPUTF8Str)] string value);
+
+    [DllImport(LibName, CallingConvention = CallingConvention.Cdecl, EntryPoint = "zerobus_sdk_builder_sdk_identifier")]
+    public static extern void SdkBuilderSdkIdentifier(
+        IntPtr builder,
+        [MarshalAs(UnmanagedType.LPUTF8Str)] string value);
+
+    [DllImport(LibName, CallingConvention = CallingConvention.Cdecl, EntryPoint = "zerobus_sdk_builder_application_name")]
+    public static extern void SdkBuilderApplicationName(
+        IntPtr builder,
+        [MarshalAs(UnmanagedType.LPUTF8Str)] string value);
+
+    [DllImport(LibName, CallingConvention = CallingConvention.Cdecl, EntryPoint = "zerobus_sdk_builder_disable_tls")]
+    public static extern void SdkBuilderDisableTls(IntPtr builder);
+
+    [DllImport(LibName, CallingConvention = CallingConvention.Cdecl, EntryPoint = "zerobus_sdk_builder_build")]
+    public static extern IntPtr SdkBuilderBuild(IntPtr builder, ref CResult result);
+
+    [DllImport(LibName, CallingConvention = CallingConvention.Cdecl, EntryPoint = "zerobus_sdk_builder_free")]
+    public static extern void SdkBuilderFree(IntPtr builder);
 }

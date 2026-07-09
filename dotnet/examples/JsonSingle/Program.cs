@@ -13,7 +13,10 @@ var tableName = Environment.GetEnvironmentVariable("ZEROBUS_TABLE_NAME")
     ?? throw new InvalidOperationException("ZEROBUS_TABLE_NAME not set");
 
 // Create SDK instance.
-using var sdk = new ZerobusSdk(zerobusEndpoint, unityCatalogUrl);
+using var sdk = ZerobusSdk.CreateBuilder()
+    .Endpoint(zerobusEndpoint)
+    .UnityCatalogUrl(unityCatalogUrl)
+    .Build();
 
 // Configure stream options (optional).
 var options = StreamConfigurationOptions.Default with
