@@ -177,8 +177,9 @@ func (s *Stream) CloseSend() error { return s.closeSend() }
 // than the abrupt reset Close produces.
 //
 // ctx bounds the drain; on expiry or a stream error it hard-aborts like Close and
-// returns the cause, else nil. Must not be called concurrently with Recv; a later
-// Close is a no-op.
+// returns the cause, else nil. Must not be called concurrently with Recv, and no
+// Send may follow (the send side is half-closed). A later Close is a no-op, since
+// GracefulClose always releases resources before it returns.
 func (s *Stream) GracefulClose(ctx context.Context) error { return s.gracefulClose(ctx) }
 
 // Close aborts the stream and releases its resources. It is idempotent and safe

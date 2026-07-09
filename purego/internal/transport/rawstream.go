@@ -100,7 +100,8 @@ func (s *rawStream[Req, Resp]) close() {
 //
 // ctx bounds the drain: on ctx expiry or a non-EOF error it hard-aborts and
 // returns the cause (ctx error preferred); a clean drain returns nil. Not safe to
-// call concurrently with recv. Safe to call once; a later close is a no-op.
+// call concurrently with recv, and no send may follow (the send side is
+// half-closed). Every return path calls close first, so a later close is a no-op.
 func (s *rawStream[Req, Resp]) gracefulClose(ctx context.Context) error {
 	if err := s.closeSend(); err != nil {
 		s.close() // can't half-close cleanly; hard-abort
