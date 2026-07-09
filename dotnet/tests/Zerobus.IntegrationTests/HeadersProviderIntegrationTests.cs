@@ -62,7 +62,7 @@ public class HeadersProviderIntegrationTests : IntegrationTestBase
 
         var tableProps = CreateTableProperties();
 
-        using var stream = await sdk.CreateStreamWithHeadersProviderAsync(
+        await using var stream = await sdk.CreateStreamWithHeadersProviderAsync(
             tableProps,
             provider,
             StreamConfigurationOptions.Default with { Recovery = false });

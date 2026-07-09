@@ -23,9 +23,11 @@ namespace Databricks.Zerobus;
 /// <para>
 /// <c>ZerobusSdk.RecreateStream(stream)</c> consumes <c>stream</c> and returns a
 /// replacement stream wrapper. The original wrapper is disposed during recreation.
+/// <see cref="DisposeAsync()"/> performs the same graceful close as <see cref="Dispose()"/>
+/// without blocking the calling thread, enabling <c>await using</c> for streams.
 /// </para>
 /// </remarks>
-public sealed class ZerobusStream : IDisposable
+public sealed class ZerobusStream : IDisposable, IAsyncDisposable
 {
     private IntPtr _ptr;
     private int _disposed;
@@ -310,6 +312,48 @@ public sealed class ZerobusStream : IDisposable
     {
         Dispose(true);
         GC.SuppressFinalize(this);
+    }
+
+    /// <inheritdoc />
+    public async ValueTask DisposeAsync()
+    {
+        if (Interlocked.CompareExchange(ref _disposed, 1, 0) != 0)
+            return;
+
+        IntPtr ptr = IntPtr.Zero;
+        var shouldClose = false;
+        Exception? closeError = null;
+
+        using (WithWriteLock())
+        {
+            ptr = Interlocked.Exchange(ref _ptr, IntPtr.Zero);
+            if (ptr == IntPtr.Zero)
+            {
+                FreeBridgeHandle();
+                return;
+            }
+
+            shouldClose = !NativeMethods.StreamIsClosed(ptr);
+        }
+
+        if (shouldClose)
+        {
+            try
+            {
+                await NativeInterop.StreamCloseAsync(ptr).ConfigureAwait(false);
+            }
+            catch (Exception ex)
+            {
+                closeError = ex;
+            }
+        }
+
+        NativeMethods.StreamFree(ptr);
+        FreeBridgeHandle();
+        GC.SuppressFinalize(this);
+
+        if (closeError is not null)
+            ExceptionDispatchInfo.Capture(closeError).Throw();
     }
 
     private void Dispose(bool disposing)

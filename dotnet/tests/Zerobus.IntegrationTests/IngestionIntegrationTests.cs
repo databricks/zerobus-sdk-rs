@@ -52,7 +52,7 @@ public class IngestionIntegrationTests : IntegrationTestBase
         var tableProps = CreateTableProperties();
         var options = CreateDefaultOptions();
 
-        using var stream = await sdk.CreateStreamWithHeadersProviderAsync(tableProps, new TestHeadersProvider(), options);
+        await using var stream = await sdk.CreateStreamWithHeadersProviderAsync(tableProps, new TestHeadersProvider(), options);
 
         var testRecord = "test record data"u8.ToArray();
         var offsetId = await stream.IngestRecordAsync(testRecord);
@@ -122,7 +122,7 @@ public class IngestionIntegrationTests : IntegrationTestBase
         var tableProps = CreateTableProperties();
         var options = CreateDefaultOptions();
 
-        using var stream = await sdk.CreateStreamWithHeadersProviderAsync(tableProps, new TestHeadersProvider(), options);
+        await using var stream = await sdk.CreateStreamWithHeadersProviderAsync(tableProps, new TestHeadersProvider(), options);
 
         const int numRecords = 3;
         for (var i = 0; i < numRecords; i++)
@@ -222,7 +222,7 @@ public class IngestionIntegrationTests : IntegrationTestBase
         var tableProps = CreateTableProperties();
         var options = CreateDefaultOptions();
 
-        using var stream = await sdk.CreateStreamWithHeadersProviderAsync(tableProps, new TestHeadersProvider(), options);
+        await using var stream = await sdk.CreateStreamWithHeadersProviderAsync(tableProps, new TestHeadersProvider(), options);
 
         var offsets = new long[numRecords];
         var tasks = new Task[numRecords];
@@ -310,7 +310,7 @@ public class IngestionIntegrationTests : IntegrationTestBase
         var tableProps = CreateTableProperties();
         var options = CreateDefaultOptions();
 
-        using var stream = await sdk.CreateStreamWithHeadersProviderAsync(tableProps, new TestHeadersProvider(), options);
+        await using var stream = await sdk.CreateStreamWithHeadersProviderAsync(tableProps, new TestHeadersProvider(), options);
 
         byte[][] batch =
         [

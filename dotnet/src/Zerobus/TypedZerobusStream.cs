@@ -3,7 +3,7 @@ namespace Databricks.Zerobus;
 /// <summary>
 /// Common lifecycle and acknowledgment APIs shared by type-safe stream wrappers.
 /// </summary>
-public abstract class TypedZerobusStream : IDisposable
+public abstract class TypedZerobusStream : IDisposable, IAsyncDisposable
 {
     private readonly ZerobusStream _innerStream;
 
@@ -60,5 +60,11 @@ public abstract class TypedZerobusStream : IDisposable
     public void Dispose()
     {
         _innerStream.Dispose();
+    }
+
+    /// <inheritdoc />
+    public ValueTask DisposeAsync()
+    {
+        return _innerStream.DisposeAsync();
     }
 }
