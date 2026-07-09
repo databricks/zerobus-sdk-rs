@@ -26,7 +26,10 @@ void check(const char* what, bool ok) {
   }
 }
 
-// Records what the trampolines deliver.
+// Records what the trampolines deliver. Fields are non-atomic: safe for these
+// synchronous unit tests, but the live-stream teardown test tracked in #469
+// will drive callbacks from the core's background thread and needs to make
+// these concurrent-safe (or introduce its own thread-safe fixture).
 class RecordingCallback : public zerobus::AckCallback {
  public:
   std::int64_t last_ack = -1;

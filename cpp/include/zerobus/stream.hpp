@@ -30,8 +30,10 @@ class Sdk;
 ///   then drains any registered `ack_callback` task per
 ///   `StreamOptions::callback_wait_policy` (which may be unbounded). A `Stream`
 ///   that falls out of scope therefore drags that blocking close into the
-///   destructor at an unpredictable point. Call `close()` at a controlled point
-///   in your code instead.
+///   destructor at an unpredictable point. With `CallbackWaitPolicy::forever()`
+///   the drain has no deadline — including during exception unwinding, where a
+///   wedged callback can deadlock the unwind. Call `close()` at a controlled
+///   point in your code instead.
 ///
 /// Thread safety: not safe for concurrent use from multiple threads. Serialize
 /// access externally, matching the Java and Rust core contracts.
