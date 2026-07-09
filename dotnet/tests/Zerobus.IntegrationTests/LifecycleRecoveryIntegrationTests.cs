@@ -71,6 +71,36 @@ public class LifecycleRecoveryIntegrationTests : IntegrationTestBase
     }
 
     [Test]
+    public async Task AsyncDispose_GracefullyClosesStream()
+    {
+        await using var fixture = await MockServerFixture.StartAsync();
+
+        fixture.MockServer.InjectResponses(TestTableName,
+        [
+            MockResponses.CreateStreamResponse("test_stream_async_dispose"),
+            MockResponses.RecordAckResponse(0, delayMs: 100),
+        ]);
+
+        using var sdk = CreateDefaultSdk(fixture);
+        var tableProps = CreateTableProperties();
+        var options = CreateDefaultOptions();
+
+        await using (var stream = await sdk.CreateStreamWithHeadersProviderAsync(tableProps, new TestHeadersProvider(), options))
+        {
+            var testRecord = "test record data"u8.ToArray();
+            var offsetId = await stream.IngestRecordAsync(testRecord);
+
+            Assert.That(offsetId, Is.EqualTo(0));
+        }
+
+        var writeCount = fixture.MockServer.GetWriteCount();
+        var maxOffset = fixture.MockServer.GetMaxOffsetSent();
+
+        Assert.That(writeCount, Is.EqualTo(1));
+        Assert.That(maxOffset, Is.EqualTo(0));
+    }
+
+    [Test]
     public async Task IdempotentClose()
     {
         await using var fixture = await MockServerFixture.StartAsync();
@@ -477,7 +507,7 @@ public class LifecycleRecoveryIntegrationTests : IntegrationTestBase
         var unacked = await stream.GetUnackedRecordsAsync();
         Assert.That(unacked, Is.Empty);
 
-        using var recreatedStream = await sdk.RecreateStreamAsync(stream);
+        await using var recreatedStream = await sdk.RecreateStreamAsync(stream);
 
         Assert.That(recreatedStream, Is.Not.Null);
         Assert.That(recreatedStream, Is.Not.SameAs(stream));
@@ -549,7 +579,7 @@ public class LifecycleRecoveryIntegrationTests : IntegrationTestBase
             options);
         await stream.CloseAsync();
 
-        using var recreatedStream = await sdk.RecreateStreamAsync(stream);
+        await using var recreatedStream = await sdk.RecreateStreamAsync(stream);
 
         var offsetId = await recreatedStream.IngestRecordAsync("{\"message\":\"recreated\"}");
         await recreatedStream.WaitForOffsetAsync(offsetId);
@@ -632,7 +662,7 @@ public class LifecycleRecoveryIntegrationTests : IntegrationTestBase
         var tableProps = CreateTableProperties();
         var options = CreateDefaultOptions();
 
-        using var stream = await sdk.CreateStreamWithHeadersProviderAsync(tableProps, new TestHeadersProvider(), options);
+        await using var stream = await sdk.CreateStreamWithHeadersProviderAsync(tableProps, new TestHeadersProvider(), options);
         await stream.CloseAsync();
 
         var ex = Assert.ThrowsAsync<ZerobusException>(async () => await sdk.RecreateStreamAsync(stream));
@@ -674,7 +704,7 @@ public class LifecycleRecoveryIntegrationTests : IntegrationTestBase
         var tableProps = CreateTableProperties();
         var options = CreateDefaultOptions();
 
-        using var stream = await sdk.CreateStreamWithHeadersProviderAsync(tableProps, new TestHeadersProvider(), options);
+        await using var stream = await sdk.CreateStreamWithHeadersProviderAsync(tableProps, new TestHeadersProvider(), options);
 
         var ex = Assert.ThrowsAsync<ZerobusException>(async () => await sdk.RecreateStreamAsync(stream));
         Assert.That(ex!.Message, Does.Contain("active stream"));

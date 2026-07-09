@@ -238,7 +238,7 @@ foreach (var payload in unacked)
 }
 ```
 
-#### `Close` / `Dispose`
+#### `Close` / `Dispose` / `DisposeAsync`
 
 `Close()` gracefully closes the stream (flushes first) but keeps the stream
 readable for recovery (`GetUnackedRecords`, `RecreateStream`).
@@ -249,7 +249,7 @@ no longer usable.
 
 ```csharp
 stream.Close();
-// or simply let `using` handle it
+// or let `using` / `await using` handle cleanup
 ```
 
 ### `IHeadersProvider`

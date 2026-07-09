@@ -119,7 +119,7 @@ public class StreamCreationIntegrationTests : IntegrationTestBase
         var tableProps = CreateTableProperties();
         var options = CreateDefaultOptions();
 
-        using var stream = await sdk.CreateStreamWithHeadersProviderAsync(tableProps, new TestHeadersProvider(), options);
+        await using var stream = await sdk.CreateStreamWithHeadersProviderAsync(tableProps, new TestHeadersProvider(), options);
 
         Assert.That(stream, Is.Not.Null);
     }
@@ -163,7 +163,7 @@ public class StreamCreationIntegrationTests : IntegrationTestBase
         using var sdk = CreateDefaultSdk(fixture);
         var options = CreateDefaultOptions();
 
-        using var stream = await sdk.CreateJsonStreamWithHeadersProviderAsync(
+        await using var stream = await sdk.CreateJsonStreamWithHeadersProviderAsync(
             TestTableName,
             new TestHeadersProvider(),
             options);
@@ -214,7 +214,7 @@ public class StreamCreationIntegrationTests : IntegrationTestBase
         using var sdk = CreateDefaultSdk(fixture);
         var options = CreateDefaultOptions();
 
-        using var stream = await sdk.CreateProtoStreamWithHeadersProviderAsync(
+        await using var stream = await sdk.CreateProtoStreamWithHeadersProviderAsync(
             TestTableName,
             TestDescriptor.CreateTestDescriptorProto(),
             new TestHeadersProvider(),
