@@ -21,12 +21,12 @@ using var sdk = ZerobusSdk.CreateBuilder()
 // 2. Configure stream options.
 var options = StreamConfigurationOptions.Default with
 {
-    RecordType = RecordType.Json,
+    MaxInflightRequests = 50_000,
 };
 
 // 3. Create stream.
-using var stream = sdk.CreateStream(
-    new TableProperties("catalog.schema.table"),
+using var stream = sdk.CreateJsonStream(
+    "catalog.schema.table",
     clientId,
     clientSecret,
     options);
@@ -74,9 +74,36 @@ using var sdk = ZerobusSdk.CreateBuilder()
     .Build();
 ```
 
+#### `CreateJsonStream`
+
+Creates a JSON-only stream with OAuth 2.0 client credentials authentication.
+
+```csharp
+using var stream = sdk.CreateJsonStream(
+    "catalog.schema.table",
+    clientId,
+    clientSecret,
+    options);  // optional, defaults if null
+```
+
+#### `CreateProtoStream`
+
+Creates a protobuf-only stream with OAuth 2.0 client credentials authentication.
+
+```csharp
+using var stream = sdk.CreateProtoStream(
+    "catalog.schema.table",
+    descriptorProto,
+    clientId,
+    clientSecret,
+    options);  // optional, defaults if null
+```
+
 #### `CreateStream`
 
-Creates a stream with OAuth 2.0 client credentials authentication.
+Creates the legacy untyped stream with OAuth 2.0 client credentials authentication.
+Use this only when you intentionally need access to both JSON and protobuf overloads.
+The SDK now validates the `RecordType`/`DescriptorProto` combination before calling Rust.
 
 ```csharp
 using var stream = sdk.CreateStream(
@@ -84,6 +111,29 @@ using var stream = sdk.CreateStream(
     clientId,
     clientSecret,
     options);  // optional, defaults if null
+```
+
+#### `CreateJsonStreamWithHeadersProvider`
+
+Creates a JSON-only stream with custom authentication headers.
+
+```csharp
+using var stream = sdk.CreateJsonStreamWithHeadersProvider(
+    "catalog.schema.table",
+    new MyHeadersProvider(),
+    options);  // optional
+```
+
+#### `CreateProtoStreamWithHeadersProvider`
+
+Creates a protobuf-only stream with custom authentication headers.
+
+```csharp
+using var stream = sdk.CreateProtoStreamWithHeadersProvider(
+    "catalog.schema.table",
+    descriptorProto,
+    new MyHeadersProvider(),
+    options);  // optional
 ```
 
 #### `CreateStreamWithHeadersProvider`
@@ -106,13 +156,35 @@ stream. The input `stream` is disposed during recreation and must not be used af
 A later `Dispose()` on the original wrapper (for example at the end of a `using` scope)
 is a no-op.
 
+### `JsonZerobusStream` and `ProtoZerobusStream`
+
+Typed stream wrappers expose only the matching ingest overloads while preserving the
+same lifecycle APIs (`Flush`, `WaitForOffset`, `Close`, `Dispose`, `GetUnackedRecords`).
+
+#### `JsonZerobusStream.IngestRecord`
+
+```csharp
+stream.IngestRecord("""{"field": "value"}""");
+stream.Flush();
+```
+
+#### `ProtoZerobusStream.IngestRecord`
+
+```csharp
+byte[] protoBytes = myMessage.ToByteArray();
+stream.IngestRecord(protoBytes);
+stream.Flush();
+```
+
 ### `ZerobusStream`
 
-An active bidirectional gRPC stream for record ingestion. Thread-safe.
+The untyped stream remains available for advanced callers. Thread-safe.
 
 #### `IngestRecord`
 
 Ingests a single record and returns its offset immediately (acknowledgment happens in background).
+If you use this untyped API, JSON streams must set `RecordType.Json` and use the string overloads.
+Proto streams must provide `DescriptorProto` and use the byte-oriented overloads.
 
 ```csharp
 // JSON
@@ -206,7 +278,6 @@ Use C# record `with` expressions to customise:
 var options = StreamConfigurationOptions.Default with
 {
     MaxInflightRequests = 50_000,
-    RecordType = RecordType.Json,
     RecoveryRetries = 10,
 };
 ```
@@ -222,6 +293,9 @@ var options = StreamConfigurationOptions.Default with
 | `FlushTimeoutMs`            | 300,000   | Flush timeout (5 min)        |
 | `RecordType`                | `Proto`   | Proto / Json / Unspecified   |
 | `StreamPausedMaxWaitTimeMs` | `null`    | Graceful close wait time     |
+
+Typed factories set `RecordType` automatically. You only need to set it manually when using
+the untyped `CreateStream` or `CreateStreamWithHeadersProvider` APIs.
 
 ### Error Handling
 

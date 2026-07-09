@@ -23,16 +23,10 @@ namespace Databricks.Zerobus;
 ///     .UnityCatalogUrl("https://your-workspace.databricks.com")
 ///     .Build();
 ///
-/// var options = StreamConfigurationOptions.Default with
-/// {
-///     RecordType = RecordType.Json,
-/// };
-///
-/// using var stream = sdk.CreateStream(
-///     new TableProperties("catalog.schema.table"),
+/// using var stream = sdk.CreateJsonStream(
+///     "catalog.schema.table",
 ///     clientId,
-///     clientSecret,
-///     options);
+///     clientSecret);
 /// </code>
 /// </example>
 public sealed class ZerobusSdk : IDisposable
@@ -100,6 +94,80 @@ public sealed class ZerobusSdk : IDisposable
         ArgumentNullException.ThrowIfNull(clientId);
         ArgumentNullException.ThrowIfNull(clientSecret);
 
+        return CreateStreamCore(tableProperties, clientId, clientSecret, options);
+    }
+
+    /// <summary>
+    /// Creates a JSON-only stream with OAuth 2.0 client credentials authentication.
+    /// This factory sets <see cref="StreamConfigurationOptions.RecordType"/> to
+    /// <see cref="RecordType.Json"/> automatically and returns a stream wrapper that
+    /// exposes JSON ingest overloads only.
+    /// </summary>
+    /// <param name="tableName">Fully qualified table name in the form <c>catalog.schema.table</c>.</param>
+    /// <param name="clientId">OAuth 2.0 client ID.</param>
+    /// <param name="clientSecret">OAuth 2.0 client secret.</param>
+    /// <param name="options">Optional stream configuration overrides.</param>
+    /// <returns>A new <see cref="JsonZerobusStream"/> ready for JSON ingestion.</returns>
+    public JsonZerobusStream CreateJsonStream(
+        string tableName,
+        string clientId,
+        string clientSecret,
+        StreamConfigurationOptions? options = null)
+    {
+        ArgumentNullException.ThrowIfNull(tableName);
+        ArgumentNullException.ThrowIfNull(clientId);
+        ArgumentNullException.ThrowIfNull(clientSecret);
+
+        var stream = CreateStreamCore(
+            new TableProperties(tableName),
+            clientId,
+            clientSecret,
+            NormalizeStreamOptions(options, RecordType.Json));
+
+        return new JsonZerobusStream(stream);
+    }
+
+    /// <summary>
+    /// Creates a protobuf-only stream with OAuth 2.0 client credentials authentication.
+    /// This factory sets <see cref="StreamConfigurationOptions.RecordType"/> to
+    /// <see cref="RecordType.Proto"/> automatically and returns a stream wrapper that
+    /// exposes protobuf ingest overloads only.
+    /// </summary>
+    /// <param name="tableName">Fully qualified table name in the form <c>catalog.schema.table</c>.</param>
+    /// <param name="descriptorProto">Serialized protobuf descriptor for the target table schema.</param>
+    /// <param name="clientId">OAuth 2.0 client ID.</param>
+    /// <param name="clientSecret">OAuth 2.0 client secret.</param>
+    /// <param name="options">Optional stream configuration overrides.</param>
+    /// <returns>A new <see cref="ProtoZerobusStream"/> ready for protobuf ingestion.</returns>
+    public ProtoZerobusStream CreateProtoStream(
+        string tableName,
+        byte[] descriptorProto,
+        string clientId,
+        string clientSecret,
+        StreamConfigurationOptions? options = null)
+    {
+        ArgumentNullException.ThrowIfNull(tableName);
+        ArgumentNullException.ThrowIfNull(descriptorProto);
+        ArgumentNullException.ThrowIfNull(clientId);
+        ArgumentNullException.ThrowIfNull(clientSecret);
+
+        var stream = CreateStreamCore(
+            new TableProperties(tableName, descriptorProto),
+            clientId,
+            clientSecret,
+            NormalizeStreamOptions(options, RecordType.Proto));
+
+        return new ProtoZerobusStream(stream);
+    }
+
+    private ZerobusStream CreateStreamCore(
+        TableProperties tableProperties,
+        string clientId,
+        string clientSecret,
+        StreamConfigurationOptions? options)
+    {
+        ValidateStreamConfiguration(tableProperties, options);
+
         var nativeOpts = NativeInterop.ConvertConfig(options);
 
         var streamPtr = NativeInterop.SdkCreateStream(
@@ -143,6 +211,65 @@ public sealed class ZerobusSdk : IDisposable
         ObjectDisposedException.ThrowIf(_disposed != 0, this);
         ArgumentNullException.ThrowIfNull(tableProperties);
         ArgumentNullException.ThrowIfNull(headersProvider);
+
+        return CreateStreamWithHeadersProviderCore(tableProperties, headersProvider, options);
+    }
+
+    /// <summary>
+    /// Creates a JSON-only stream using a custom headers provider.
+    /// </summary>
+    /// <param name="tableName">Fully qualified table name in the form <c>catalog.schema.table</c>.</param>
+    /// <param name="headersProvider">Custom authentication headers provider.</param>
+    /// <param name="options">Optional stream configuration overrides.</param>
+    /// <returns>A new <see cref="JsonZerobusStream"/> ready for JSON ingestion.</returns>
+    public JsonZerobusStream CreateJsonStreamWithHeadersProvider(
+        string tableName,
+        IHeadersProvider headersProvider,
+        StreamConfigurationOptions? options = null)
+    {
+        ArgumentNullException.ThrowIfNull(tableName);
+        ArgumentNullException.ThrowIfNull(headersProvider);
+
+        var stream = CreateStreamWithHeadersProviderCore(
+            new TableProperties(tableName),
+            headersProvider,
+            NormalizeStreamOptions(options, RecordType.Json));
+
+        return new JsonZerobusStream(stream);
+    }
+
+    /// <summary>
+    /// Creates a protobuf-only stream using a custom headers provider.
+    /// </summary>
+    /// <param name="tableName">Fully qualified table name in the form <c>catalog.schema.table</c>.</param>
+    /// <param name="descriptorProto">Serialized protobuf descriptor for the target table schema.</param>
+    /// <param name="headersProvider">Custom authentication headers provider.</param>
+    /// <param name="options">Optional stream configuration overrides.</param>
+    /// <returns>A new <see cref="ProtoZerobusStream"/> ready for protobuf ingestion.</returns>
+    public ProtoZerobusStream CreateProtoStreamWithHeadersProvider(
+        string tableName,
+        byte[] descriptorProto,
+        IHeadersProvider headersProvider,
+        StreamConfigurationOptions? options = null)
+    {
+        ArgumentNullException.ThrowIfNull(tableName);
+        ArgumentNullException.ThrowIfNull(descriptorProto);
+        ArgumentNullException.ThrowIfNull(headersProvider);
+
+        var stream = CreateStreamWithHeadersProviderCore(
+            new TableProperties(tableName, descriptorProto),
+            headersProvider,
+            NormalizeStreamOptions(options, RecordType.Proto));
+
+        return new ProtoZerobusStream(stream);
+    }
+
+    private ZerobusStream CreateStreamWithHeadersProviderCore(
+        TableProperties tableProperties,
+        IHeadersProvider headersProvider,
+        StreamConfigurationOptions? options)
+    {
+        ValidateStreamConfiguration(tableProperties, options);
 
         var nativeOpts = NativeInterop.ConvertConfig(options);
 
@@ -204,6 +331,73 @@ public sealed class ZerobusSdk : IDisposable
 
         var ptr = NativeInterop.SdkRecreateStream(_ptr, stream.NativePointer);
         return stream.Recreate(ptr);
+    }
+
+    /// <summary>
+    /// Recreates a JSON-only stream after the original stream has failed or closed.
+    /// </summary>
+    public JsonZerobusStream RecreateStream(JsonZerobusStream stream)
+    {
+        ObjectDisposedException.ThrowIf(_disposed != 0, this);
+        ArgumentNullException.ThrowIfNull(stream);
+
+        return new JsonZerobusStream(RecreateStream(stream.InnerStream));
+    }
+
+    /// <summary>
+    /// Recreates a protobuf-only stream after the original stream has failed or closed.
+    /// </summary>
+    public ProtoZerobusStream RecreateStream(ProtoZerobusStream stream)
+    {
+        ObjectDisposedException.ThrowIf(_disposed != 0, this);
+        ArgumentNullException.ThrowIfNull(stream);
+
+        return new ProtoZerobusStream(RecreateStream(stream.InnerStream));
+    }
+
+    private static StreamConfigurationOptions NormalizeStreamOptions(
+        StreamConfigurationOptions? options,
+        RecordType recordType)
+    {
+        return (options ?? StreamConfigurationOptions.Default) with { RecordType = recordType };
+    }
+
+    private static void ValidateStreamConfiguration(
+        TableProperties tableProperties,
+        StreamConfigurationOptions? options)
+    {
+        ArgumentNullException.ThrowIfNull(tableProperties);
+
+        var descriptor = tableProperties.DescriptorProto;
+        var effectiveRecordType = options?.RecordType switch
+        {
+            null => StreamConfigurationOptions.Default.RecordType,
+            RecordType.Unspecified => StreamConfigurationOptions.Default.RecordType,
+            var recordType => recordType,
+        };
+
+        if (descriptor is { Length: 0 })
+        {
+            throw new ArgumentException(
+                "DescriptorProto must be null for JSON streams or a non-empty serialized DescriptorProto for protobuf streams.",
+                nameof(tableProperties));
+        }
+
+        var hasDescriptor = descriptor is { Length: > 0 };
+
+        if (effectiveRecordType == RecordType.Json && hasDescriptor)
+        {
+            throw new ArgumentException(
+                "JSON streams cannot specify DescriptorProto. Use TableProperties(tableName) or CreateJsonStream(...).",
+                nameof(tableProperties));
+        }
+
+        if (effectiveRecordType == RecordType.Proto && !hasDescriptor)
+        {
+            throw new ArgumentException(
+                "Proto streams require a non-empty DescriptorProto. Use TableProperties(tableName, descriptorProto) or CreateProtoStream(...).",
+                nameof(tableProperties));
+        }
     }
 
     private void Free()

@@ -27,12 +27,12 @@ using var sdk = ZerobusSdk.CreateBuilder()
 var options = StreamConfigurationOptions.Default with
 {
     MaxInflightRequests = 50_000,
-    RecordType = RecordType.Proto,
 };
 
-// Create stream with protobuf descriptor.
-using var stream = sdk.CreateStream(
-    new TableProperties(tableName, descriptorProto),
+// Create protobuf stream.
+using var stream = sdk.CreateProtoStream(
+    tableName,
+    descriptorProto,
     clientId,
     clientSecret,
     options);

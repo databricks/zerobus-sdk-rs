@@ -22,12 +22,11 @@ using var sdk = ZerobusSdk.CreateBuilder()
 var options = StreamConfigurationOptions.Default with
 {
     MaxInflightRequests = 50_000,
-    RecordType = RecordType.Json,
 };
 
-// Create stream.
-using var stream = sdk.CreateStream(
-    new TableProperties(tableName),
+// Create JSON stream.
+using var stream = sdk.CreateJsonStream(
+    tableName,
     clientId,
     clientSecret,
     options);
