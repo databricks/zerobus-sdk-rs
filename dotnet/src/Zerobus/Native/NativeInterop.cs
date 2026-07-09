@@ -391,25 +391,13 @@ internal static class NativeInterop
 
         return new CStreamConfigurationOptions
         {
-            MaxInflightRequests = (nuint)(options.MaxInflightRequests > 0
-                ? options.MaxInflightRequests
-                : defaults.MaxInflightRequests),
+            MaxInflightRequests = (nuint)(options.MaxInflightRequests ?? defaults.MaxInflightRequests!.Value),
             Recovery = options.Recovery,
-            RecoveryTimeoutMs = options.RecoveryTimeoutMs > 0
-                ? options.RecoveryTimeoutMs
-                : defaults.RecoveryTimeoutMs,
-            RecoveryBackoffMs = options.RecoveryBackoffMs > 0
-                ? options.RecoveryBackoffMs
-                : defaults.RecoveryBackoffMs,
-            RecoveryRetries = options.RecoveryRetries > 0
-                ? options.RecoveryRetries
-                : defaults.RecoveryRetries,
-            ServerLackOfAckTimeoutMs = options.ServerLackOfAckTimeoutMs > 0
-                ? options.ServerLackOfAckTimeoutMs
-                : defaults.ServerLackOfAckTimeoutMs,
-            FlushTimeoutMs = options.FlushTimeoutMs > 0
-                ? options.FlushTimeoutMs
-                : defaults.FlushTimeoutMs,
+            RecoveryTimeoutMs = options.RecoveryTimeoutMs ?? defaults.RecoveryTimeoutMs!.Value,
+            RecoveryBackoffMs = options.RecoveryBackoffMs ?? defaults.RecoveryBackoffMs!.Value,
+            RecoveryRetries = options.RecoveryRetries ?? defaults.RecoveryRetries!.Value,
+            ServerLackOfAckTimeoutMs = options.ServerLackOfAckTimeoutMs ?? defaults.ServerLackOfAckTimeoutMs!.Value,
+            FlushTimeoutMs = options.FlushTimeoutMs ?? defaults.FlushTimeoutMs!.Value,
             RecordType = (int)(options.RecordType != RecordType.Unspecified
                 ? options.RecordType
                 : defaults.RecordType),

@@ -63,6 +63,27 @@ public class StreamConfigurationOptionsTests
     }
 
     [Test]
+    public void WithExpression_CanSetNumericFieldsToNull()
+    {
+        var options = StreamConfigurationOptions.Default with
+        {
+            MaxInflightRequests = null,
+            RecoveryTimeoutMs = null,
+            RecoveryBackoffMs = null,
+            RecoveryRetries = null,
+            ServerLackOfAckTimeoutMs = null,
+            FlushTimeoutMs = null,
+        };
+
+        Assert.That(options.MaxInflightRequests, Is.Null);
+        Assert.That(options.RecoveryTimeoutMs, Is.Null);
+        Assert.That(options.RecoveryBackoffMs, Is.Null);
+        Assert.That(options.RecoveryRetries, Is.Null);
+        Assert.That(options.ServerLackOfAckTimeoutMs, Is.Null);
+        Assert.That(options.FlushTimeoutMs, Is.Null);
+    }
+
+    [Test]
     public void Record_SupportsEquality()
     {
         var a = StreamConfigurationOptions.Default;

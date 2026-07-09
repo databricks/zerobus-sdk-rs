@@ -48,6 +48,52 @@ public class NativeInteropTests
     }
 
     [Test]
+    public void ConvertConfig_ExplicitZeroValues_ArePreserved()
+    {
+        var options = StreamConfigurationOptions.Default with
+        {
+            MaxInflightRequests = 0,
+            RecoveryTimeoutMs = 0,
+            RecoveryBackoffMs = 0,
+            RecoveryRetries = 0,
+            ServerLackOfAckTimeoutMs = 0,
+            FlushTimeoutMs = 0,
+        };
+
+        var native = NativeInterop.ConvertConfig(options);
+
+        Assert.That(native.MaxInflightRequests, Is.EqualTo((nuint)0));
+        Assert.That(native.RecoveryTimeoutMs, Is.EqualTo(0UL));
+        Assert.That(native.RecoveryBackoffMs, Is.EqualTo(0UL));
+        Assert.That(native.RecoveryRetries, Is.EqualTo(0U));
+        Assert.That(native.ServerLackOfAckTimeoutMs, Is.EqualTo(0UL));
+        Assert.That(native.FlushTimeoutMs, Is.EqualTo(0UL));
+    }
+
+    [Test]
+    public void ConvertConfig_NullNumericValues_FallBackToDefaults()
+    {
+        var options = StreamConfigurationOptions.Default with
+        {
+            MaxInflightRequests = null,
+            RecoveryTimeoutMs = null,
+            RecoveryBackoffMs = null,
+            RecoveryRetries = null,
+            ServerLackOfAckTimeoutMs = null,
+            FlushTimeoutMs = null,
+        };
+
+        var native = NativeInterop.ConvertConfig(options);
+
+        Assert.That(native.MaxInflightRequests, Is.EqualTo((nuint)1_000_000));
+        Assert.That(native.RecoveryTimeoutMs, Is.EqualTo(15_000UL));
+        Assert.That(native.RecoveryBackoffMs, Is.EqualTo(2_000UL));
+        Assert.That(native.RecoveryRetries, Is.EqualTo(4U));
+        Assert.That(native.ServerLackOfAckTimeoutMs, Is.EqualTo(60_000UL));
+        Assert.That(native.FlushTimeoutMs, Is.EqualTo(300_000UL));
+    }
+
+    [Test]
     public void ToException_SuccessResult_ReturnsNull()
     {
         var result = new CResult { Success = true, ErrorMessage = IntPtr.Zero, IsRetryable = false };
