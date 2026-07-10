@@ -40,8 +40,8 @@ implementation detail of the SDK.
 
 Run from `cpp/`:
 
-- `make build` — Configure (CMake) and build the SDK and tests
-  (also builds examples once they land)
+- `make build` — Configure (CMake) and build the SDK and tests (also builds an
+  `examples/` directory once one is added; none ships yet)
 - `make build-ffi` — Build only the Rust C FFI static library
 - `make test` — Build and run the test suite (`ctest`)
 - `make lint` — Formatting check + compiler warnings (`-Wall -Wextra`)

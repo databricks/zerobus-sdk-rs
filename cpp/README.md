@@ -32,9 +32,11 @@ From `cpp/`:
 
 ```bash
 make build        # configure + build the SDK and tests
-                  # (also builds examples once they land)
 make test         # build + run the test suite
 ```
+
+(`make build` also builds an `examples/` directory once one is added; none
+ships yet.)
 
 Or drive CMake directly:
 
@@ -356,6 +358,14 @@ A `Stream` or `ArrowStream` is **not** safe for concurrent use — serialize
 access externally (the same contract as the Rust core). A single `Sdk` may
 create many streams. See [`CLAUDE.md`](CLAUDE.md) for the full memory-ownership
 and threading contract.
+
+## HTTP proxy support
+
+Like the other SDKs, the C++ SDK honors the standard proxy environment variables
+(`grpc_proxy`/`https_proxy`/`http_proxy` and the matching `no_proxy` list) — the
+Rust core detects them automatically, so no code change is needed. See the
+[top-level README](../README.md#http-proxy-support) for the full precedence
+rules and behavior.
 
 ## Community and Contributing
 
