@@ -21,6 +21,7 @@ Zerobus is a high-throughput streaming service for direct data ingestion into Da
 | Go         | [`go/`](go/)                 | [`github.com/databricks/zerobus-sdk/go`](https://pkg.go.dev/github.com/databricks/zerobus-sdk/go)              |
 | TypeScript | [`typescript/`](typescript/) | [`@databricks/zerobus-ingest-sdk`](https://www.npmjs.com/package/@databricks/zerobus-ingest-sdk)               |
 | Java       | [`java/`](java/)             | [`com.databricks:zerobus-ingest-sdk`](https://central.sonatype.com/artifact/com.databricks/zerobus-ingest-sdk) |
+| C++        | [`cpp/`](cpp/)               | Source / CMake (`zerobus::zerobus`)                                                                            |
 
 ## Platform Support
 
@@ -132,12 +133,12 @@ Instead of writing `.proto` files by hand, each SDK ships a tool to generate pro
 
 ### Arrow Flight ingestion (Beta)
 
-Supported by all SDKs starting from version 2.0.0. Currently in Beta — the API is stabilising but may still change before reaching GA. A third record format option alongside JSON and Protocol Buffers: send Apache Arrow `RecordBatch` data directly to Zerobus over the Arrow Flight protocol, on the same gRPC connection. Best fit when:
+Available in the Rust, Python, Go, TypeScript, and Java SDKs starting from version 2.0.0, and in the C++ SDK from its initial `0.1.0` release. Currently in Beta — the API is stabilising but may still change before reaching GA. A third record format option alongside JSON and Protocol Buffers: send Apache Arrow `RecordBatch` data directly to Zerobus over the Arrow Flight protocol, on the same gRPC connection. Best fit when:
 
 - Your workload is naturally columnar or batched — analytics pipelines, gateways aggregating short windows of rows, wide/numeric schemas where row-by-row serialization adds noticeable CPU overhead.
 - Your application already produces Arrow data — pyarrow, the [arrow-rs](https://github.com/apache/arrow-rs) crates, DataFusion, Polars, or other libraries built on Arrow.
 
-For sparse, one-row-at-a-time traffic, JSON or Protocol Buffers over the standard SDK gRPC path are usually simpler. See each SDK's `examples/arrow/` directory for usage.
+For sparse, one-row-at-a-time traffic, JSON or Protocol Buffers over the standard SDK gRPC path are usually simpler. Most SDKs ship a runnable `examples/arrow/` directory; the C++ SDK covers Arrow Flight in its [README](cpp/README.md#arrow-flight-ingestion-beta) until its examples land.
 
 ### Acknowledgments and throughput
 
