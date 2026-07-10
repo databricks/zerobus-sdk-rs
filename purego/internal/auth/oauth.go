@@ -384,16 +384,10 @@ func (e *TokenError) IsRetryable() bool { return e.retryable }
 func (e *TokenError) Unwrap() error { return e.cause }
 
 // isRetryableStatus reports whether an HTTP status is a transient failure worth
-// suppressing when a cached token can be served: any 5xx, plus 429 and 408.
+// suppressing when a cached token can be served. Only 5xx responses qualify;
+// all 4xx (including 429 and 408) are non-retryable, matching the Rust SDK.
 func isRetryableStatus(code int) bool {
-	switch {
-	case code >= 500:
-		return true
-	case code == http.StatusTooManyRequests, code == http.StatusRequestTimeout:
-		return true
-	default:
-		return false
-	}
+	return code >= 500
 }
 
 func classifyHTTPError(resp *http.Response) error {

@@ -188,7 +188,7 @@ func TestOAuthTokenProviderConnectionRefusedIsRetryable(t *testing.T) {
 	}
 }
 
-func TestOAuthTokenProvider429IsRetryable(t *testing.T) {
+func TestOAuthTokenProvider429IsNonRetryable(t *testing.T) {
 	srv := &tokenServer{statusCode: http.StatusTooManyRequests}
 	p, ts := newTestProvider(t, srv, "cat.sch.tbl")
 	defer ts.Close()
@@ -198,13 +198,13 @@ func TestOAuthTokenProvider429IsRetryable(t *testing.T) {
 		t.Fatal("want error for 429, got nil")
 	}
 	var te *TokenError
-	if !asTokenError(err, &te) || !te.IsRetryable() {
-		t.Fatalf("want retryable TokenError for 429, got %T (retryable=%v): %v",
+	if !asTokenError(err, &te) || te.IsRetryable() {
+		t.Fatalf("want non-retryable TokenError for 429, got %T (retryable=%v): %v",
 			err, te != nil && te.IsRetryable(), err)
 	}
 }
 
-func TestOAuthTokenProvider408IsRetryable(t *testing.T) {
+func TestOAuthTokenProvider408IsNonRetryable(t *testing.T) {
 	srv := &tokenServer{statusCode: http.StatusRequestTimeout}
 	p, ts := newTestProvider(t, srv, "cat.sch.tbl")
 	defer ts.Close()
@@ -214,8 +214,8 @@ func TestOAuthTokenProvider408IsRetryable(t *testing.T) {
 		t.Fatal("want error for 408, got nil")
 	}
 	var te *TokenError
-	if !asTokenError(err, &te) || !te.IsRetryable() {
-		t.Fatalf("want retryable TokenError for 408, got %T (retryable=%v): %v",
+	if !asTokenError(err, &te) || te.IsRetryable() {
+		t.Fatalf("want non-retryable TokenError for 408, got %T (retryable=%v): %v",
 			err, te != nil && te.IsRetryable(), err)
 	}
 }

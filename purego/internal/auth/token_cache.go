@@ -83,8 +83,7 @@ func (c *cachedToken) isExpired() bool {
 }
 
 // newCachedToken builds an entry for a token whose TTL started at mintedAt
-// (request-dispatch time, so latency is charged against the token rather than
-// overestimating its validity). A non-positive ttl falls back to
+// (response-receipt time, matching the Rust SDK). A non-positive ttl falls back to
 // defaultNoTTLLifetime so a token that the server didn't tag with an expires_in
 // still gets a bounded cache window.
 //
@@ -228,10 +227,6 @@ func (c *tokenCache) getOrFetch(
 	entry.inflight = flight
 	entry.mu.Unlock()
 
-	// Anchor the TTL at request dispatch, not response receipt: the server starts
-	// the clock when it issues the token, so using receipt time would overestimate
-	// its remaining validity by the round-trip latency.
-	mintedAt := time.Now()
 	fetched, err := mint(ctx, reason)
 
 	entry.mu.Lock()
@@ -261,6 +256,7 @@ func (c *tokenCache) getOrFetch(
 	if fetched.expiresIn != nil {
 		ttl = *fetched.expiresIn
 	}
+	mintedAt := time.Now()
 	entry.cached = newCachedToken(token, ttl, c.refreshBuffer, mintedAt)
 	flight.token, flight.err = token, nil
 	close(flight.done)
