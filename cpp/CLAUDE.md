@@ -15,14 +15,16 @@ cpp/
 │   ├── arrow_stream.hpp  # ArrowStream (Arrow Flight, Beta)
 │   ├── proto_schema.hpp  # ProtoSchema (UC JSON → descriptor + encoder)
 │   ├── headers_provider.hpp  # HeadersProvider interface
-│   ├── config.hpp        # StreamOptions / ArrowStreamOptions / enums
+│   ├── ack_callback.hpp  # AckCallback interface + AckCallback::from adapter
+│   ├── config.hpp        # StreamOptions / ArrowStreamOptions / CallbackWaitPolicy / enums
 │   ├── record.hpp        # UnackedRecord
 │   ├── error.hpp         # ZerobusException
 │   └── version.hpp       # ZEROBUS_CPP_VERSION
 ├── src/                  # Implementation (the only place that includes zerobus.h)
 │   ├── sdk.cpp / stream.cpp / arrow_stream.cpp / proto_schema.cpp
+│   ├── ack_callback.cpp  # AckCallback::from lambda adapter
 │   ├── headers_callback.cpp  # extern "C" trampoline for HeadersProvider
-│   └── detail/           # Internal: ffi_util, config_convert, headers_callback
+│   └── detail/           # Internal: ffi_util, config_convert, headers_callback, ack_callback
 ├── tests/                # Dependency-free unit tests (plain executables)
 ├── examples/             # Runnable usage examples (forthcoming)
 ├── cmake/
@@ -96,6 +98,25 @@ When using a custom `HeadersProvider`:
 - Exceptions thrown from `get_headers()` are caught and surfaced as a
   headers-provider error; they never cross the FFI boundary as C++ exceptions.
 
+### Ack callback
+
+When a `StreamOptions::ack_callback` is set:
+- `detail::zerobus_cpp_ack_on_ack_trampoline` /
+  `zerobus_cpp_ack_on_error_trampoline` are the `extern "C"` functions wired into
+  the C config (`ack_on_ack` / `ack_on_error`); `user_data` is the raw
+  `AckCallback*`. `to_c()` installs them only when the callback is non-null and
+  zeroes all three fields otherwise (see `detail/config_convert.hpp`).
+- The `Stream` keeps a `std::shared_ptr<AckCallback>` alive for its whole
+  lifetime, but that is **not always sufficient**: a callback still running when
+  `close()` hits its wait budget (`StreamOptions::callback_wait_policy`) can be
+  invoked on a freed object once the `Stream` is destroyed. `CallbackWaitPolicy::
+  forever()` is the only policy that guarantees no callback runs after `close()`
+  returns. This is the canonical FFI-side view of the contract in
+  `include/zerobus/ack_callback.hpp` — keep the two in sync.
+- `AckCallback::on_ack` / `on_error` are `noexcept`. The trampolines must not let
+  anything unwind across the boundary; an escaping exception calls
+  `std::terminate` at the throw site.
+
 ## Configuration mapping
 
 `detail::to_c` (overloaded for `StreamOptions` and `ArrowStreamOptions`) seeds
@@ -106,6 +127,13 @@ with the C struct's `has_*` presence flags; the Arrow variant uses a `-1`
 sentinel for "wait the full server-specified pause duration". `config_defaults_test`
 and `arrow_config_defaults_test` fail the build if the hand-kept scalar defaults
 in `StreamOptions` / `ArrowStreamOptions` drift from the FFI defaults.
+
+`StreamOptions::callback_wait_policy` (a `CallbackWaitPolicy`) also maps to a
+`has_*`/value pair: `forever()` clears `has_callback_max_wait_time_ms` so Rust
+reads `None` (drain indefinitely), `duration(ms)` sets an explicit finite budget,
+and `use_default()` leaves the FFI seed in place. The ack-callback trampolines
+and `ack_user_data` are set from `StreamOptions::ack_callback` (see [Ack
+callback](#ack-callback)).
 
 ## Thread safety
 

@@ -13,6 +13,9 @@ every other Zerobus SDK.
   Unity Catalog table metadata, with no `.proto` file or `protoc` required.
 - **Arrow Flight** ingestion (Beta) — stream Arrow record batches with optional
   LZ4/ZSTD compression.
+- **Async ack callback** — register an `AckCallback` to be notified of durable
+  acks and terminal errors on a background task, without blocking in
+  `wait_for_offset()` / `flush()`.
 
 > Status: `0.1.0` — initial development. The API may change before `1.0.0`.
 
@@ -120,8 +123,9 @@ stream.flush();                        // wait once for all pending acks
 ```
 
 For continuous/unbounded streams, call `flush()` every N records rather than per
-record. Prefer the batch APIs (`ingest_*_records`) in hot paths — each FFI
-crossing has a fixed cost that batching amortizes.
+record, or register an [async ack callback](#async-ack-callback) to track
+durability without blocking at all. Prefer the batch APIs (`ingest_*_records`)
+in hot paths — each FFI crossing has a fixed cost that batching amortizes.
 
 `wait_for_offset()` behaves the same way: acks are monotonic, so waiting on the
 *last* offset returned by a run of ingests confirms all prior ones too. Wait on
@@ -229,6 +233,46 @@ try {
 }
 ```
 
+### Async ack callback
+
+For a continuous stream, an `AckCallback` lets you track durability without
+blocking in `wait_for_offset()` / `flush()`. Register it via
+`StreamOptions::ack_callback` — either implement the interface or adapt a pair
+of lambdas with `AckCallback::from`:
+
+```cpp
+zerobus::StreamOptions options;
+options.ack_callback = zerobus::AckCallback::from(
+    [](std::int64_t offset) noexcept {
+      // Durable up to `offset` (acks are monotonic: offset N => all <= N acked).
+    },
+    [](std::int64_t offset, const std::string& msg) noexcept {
+      // The record at `offset` failed terminally.
+    });
+
+zerobus::Stream stream =
+    sdk.create_stream(table, client_id, client_secret, options);
+```
+
+Contract (see [`ack_callback.hpp`](include/zerobus/ack_callback.hpp) for the
+canonical version):
+
+- `on_ack` fires once per record in monotonic offset order; `on_error` fires per
+  unacked record on terminal failure (errors also still surface from
+  `ingest`/`flush`/`wait_for_offset()`).
+- Both methods are **`noexcept`** — an escaping exception crosses the C FFI
+  boundary, which is UB, so it calls `std::terminate`. Handle errors inside the
+  callback.
+- Callbacks run serialized on a background task, possibly on another thread.
+  Keep them light, synchronize any shared state, and **do not call back into the
+  owning `Stream`** (that is concurrent use of a non-thread-safe object).
+- `StreamOptions::callback_wait_policy` controls how long `close()` drains the
+  callback task — `CallbackWaitPolicy::use_default()` (finite FFI budget),
+  `duration(ms)`, or `forever()`. Only `forever()` guarantees no callback is
+  still running once `close()` returns; a callback that outruns a finite budget
+  can outlive `close()` and touch a freed `Stream`, so keep callbacks well under
+  the budget or keep them alive past the `Stream`.
+
 ## API overview
 
 | Type | Purpose |
@@ -238,6 +282,7 @@ try {
 | `zerobus::ArrowStream` | Arrow Flight ingestion stream (Beta) |
 | `zerobus::ProtoSchema` | UC table metadata → descriptor + JSON encoder |
 | `zerobus::HeadersProvider` | Custom authentication headers |
+| `zerobus::AckCallback` | Async ack/error notifications (`AckCallback::from` adapts lambdas) |
 | `zerobus::StreamOptions` / `zerobus::ArrowStreamOptions` | Stream configuration |
 | `zerobus::ZerobusException` | Thrown on any failure; `is_retryable()` |
 | `zerobus::UnackedRecord` | An unacknowledged record recovered from a failed stream |
@@ -275,7 +320,8 @@ the FFI defaults.
 | `flush_timeout_ms` | `std::uint64_t` | 300,000 | Time budget for `flush()` / `close()` (ms) |
 | `record_type` | `RecordType` | `RecordType::Proto` | Wire format; must match the stream's table (`Proto` or `Json`) |
 | `stream_paused_max_wait_time_ms` | `std::optional<std::uint64_t>` | `nullopt` | Max wait during a server-initiated pause before recovering (`nullopt` = full server duration, `0` = recover immediately, `>0` = min(this, server duration)) |
-| `callback_max_wait_time_ms` | `std::optional<std::uint64_t>` | `nullopt` | Max time to wait for a headers-provider callback to return (`nullopt` leaves the FFI default in place) |
+| `callback_wait_policy` | `CallbackWaitPolicy` | `use_default()` | How long `close()` drains the async ack-callback task: `use_default()` (finite FFI budget), `duration(ms)`, or `forever()` (block until callbacks finish). See [Async ack callback](#async-ack-callback) |
+| `ack_callback` | `std::shared_ptr<AckCallback>` | `nullptr` | Optional async ack/error callback; `nullptr` = none. See [Async ack callback](#async-ack-callback) |
 
 ### `ArrowStreamOptions` (Arrow Flight streams, Beta)
 
@@ -351,6 +397,11 @@ calling `close()` explicitly** rather than relying on the destructor:
   `flush_timeout_ms` (default 5 minutes) if the server is unresponsive. Letting
   a `Stream` fall out of scope drags that blocking close into the destructor at
   an unpredictable point, so close at a controlled point in your code.
+- If an [ack callback](#async-ack-callback) is registered, `close()` then drains
+  its task per `callback_wait_policy`. `CallbackWaitPolicy::forever()` makes that
+  drain unbounded — including during exception unwinding, where a wedged callback
+  can deadlock the unwind — which is another reason to `close()` explicitly
+  rather than in the destructor.
 
 ## Thread safety
 
