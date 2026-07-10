@@ -161,6 +161,8 @@ impl Zerobus for MockZerobusServer {
                             }
 
                             // Search for the next CreateStream response starting from response_index.
+                            // Bind the start separately so mutating `response_index` in the loop
+                            // body (to persist resume state) doesn't trip `clippy::mut_range_bound`.
                             let mut create_stream_found = false;
                             let search_start = response_index;
                             for idx in search_start..stream_responses.len() {
