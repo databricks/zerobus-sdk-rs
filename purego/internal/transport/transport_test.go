@@ -52,6 +52,9 @@ type fakeServer struct {
 	// hangDrain makes the server ignore the client's half-close and never end the
 	// stream, so GracefulClose can't drain to io.EOF and must hit its ctx deadline.
 	hangDrain bool
+	// drainGate, when non-nil, holds io.EOF back until closed, so a test can
+	// assert GracefulClose keeps draining rather than returning at the first ack.
+	drainGate chan struct{}
 }
 
 func (f *fakeServer) EphemeralStream(stream zerobuspb.Zerobus_EphemeralStreamServer) error {
@@ -106,6 +109,10 @@ func (f *fakeServer) EphemeralStream(stream zerobuspb.Zerobus_EphemeralStreamSer
 			if f.hangDrain {
 				<-stream.Context().Done()
 				return stream.Context().Err()
+			}
+			// Hold EOF until the test releases the gate.
+			if f.drainGate != nil {
+				<-f.drainGate
 			}
 			return nil
 		}
@@ -533,14 +540,12 @@ func TestOpenDeadlineDoesNotTearDownStream(t *testing.T) {
 	}
 }
 
-// TestStreamGracefulCloseDefaultsDeadline: passing a context with no deadline
-// (e.g. context.Background()) must not hang when the server stalls — the
-// function applies defaultHandshakeTimeout internally, mirroring Open.
-// Runs under -short but takes ~defaultHandshakeTimeout (30s) to complete.
+// TestStreamGracefulCloseDefaultsDeadline: with no deadline on the context,
+// GracefulClose must apply defaultDrainTimeout and not hang on a stalled server.
+// The default is shrunk to a few ms so the path runs quickly.
 func TestStreamGracefulCloseDefaultsDeadline(t *testing.T) {
-	if testing.Short() {
-		t.Skip("skipping: takes defaultHandshakeTimeout (30s) to exercise the no-deadline path")
-	}
+	defer transport.SetDefaultDrainTimeout(50 * time.Millisecond)()
+
 	srv := &fakeServer{streamID: "s", seen: make(chan observed, 1), hangDrain: true}
 	conn := dialFake(t, srv)
 
@@ -587,10 +592,10 @@ func TestStreamGracefulClose(t *testing.T) {
 }
 
 // TestStreamGracefulCloseDrainsPending: an in-flight ack precedes io.EOF, so
-// GracefulClose must discard it and keep draining rather than stop at the first
-// response.
+// GracefulClose must discard it and keep draining. drainGate holds EOF back to
+// prove it's still draining after the ack, then returns nil once EOF arrives.
 func TestStreamGracefulCloseDrainsPending(t *testing.T) {
-	srv := &fakeServer{streamID: "s", seen: make(chan observed, 1)}
+	srv := &fakeServer{streamID: "s", seen: make(chan observed, 1), drainGate: make(chan struct{})}
 	conn := dialFake(t, srv)
 
 	stream, err := conn.Open(context.Background(), transport.StreamParams{
@@ -616,8 +621,27 @@ func TestStreamGracefulCloseDrainsPending(t *testing.T) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	if err := stream.GracefulClose(ctx); err != nil {
-		t.Fatalf("GracefulClose with a pending response: %v", err)
+
+	done := make(chan error, 1)
+	go func() { done <- stream.GracefulClose(ctx) }()
+
+	// The server sends the ack, then blocks before EOF. A correct drain discards
+	// the ack and waits for EOF, so GracefulClose must not have returned yet.
+	select {
+	case err := <-done:
+		t.Fatalf("GracefulClose returned at the pending ack (err=%v); it must keep draining to io.EOF", err)
+	case <-time.After(200 * time.Millisecond):
+	}
+
+	// Release EOF; the drain completes cleanly.
+	close(srv.drainGate)
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("GracefulClose after draining the pending ack: %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("GracefulClose did not return after io.EOF was released")
 	}
 }
 

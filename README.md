@@ -133,7 +133,7 @@ Instead of writing `.proto` files by hand, each SDK ships a tool to generate pro
 
 ### Arrow Flight ingestion (Beta)
 
-Available in the Rust, Python, Go, TypeScript, and Java SDKs starting from version 2.0.0, and in the C++ SDK from its initial `0.1.0` release. Currently in Beta — the API is stabilising but may still change before reaching GA. A third record format option alongside JSON and Protocol Buffers: send Apache Arrow `RecordBatch` data directly to Zerobus over the Arrow Flight protocol, on the same gRPC connection. Best fit when:
+Available in the Rust, Python, Go, TypeScript, and Java SDKs starting from their 2.0.0 releases, and in the C++ SDK from its initial `0.1.0` release. Currently in Beta — the API is stabilising but may still change before reaching GA. A third record format option alongside JSON and Protocol Buffers: send Apache Arrow `RecordBatch` data directly to Zerobus over the Arrow Flight protocol, on the same gRPC connection. Best fit when:
 
 - Your workload is naturally columnar or batched — analytics pipelines, gateways aggregating short windows of rows, wide/numeric schemas where row-by-row serialization adds noticeable CPU overhead.
 - Your application already produces Arrow data — pyarrow, the [arrow-rs](https://github.com/apache/arrow-rs) crates, DataFusion, Polars, or other libraries built on Arrow.

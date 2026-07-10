@@ -13,6 +13,11 @@ import (
 // no deadline, so Open can't hang if the server half-opens the stream.
 const defaultHandshakeTimeout = 30 * time.Second
 
+// defaultDrainTimeout bounds gracefulClose when the caller's context has no
+// deadline, so it can't hang on an unresponsive server. A var so tests can
+// shrink it.
+var defaultDrainTimeout = 30 * time.Second
+
 // bidiRPC is the subset of a generated gRPC bidirectional streaming client that
 // rawStream needs. EphemeralStream satisfies it, as will Arrow Flight's DoPut.
 type bidiRPC[Req, Resp any] interface {
@@ -105,7 +110,7 @@ func (s *rawStream[Req, Resp]) close() {
 func (s *rawStream[Req, Resp]) gracefulClose(ctx context.Context) error {
 	if _, ok := ctx.Deadline(); !ok {
 		var cancel context.CancelFunc
-		ctx, cancel = context.WithTimeout(ctx, defaultHandshakeTimeout)
+		ctx, cancel = context.WithTimeout(ctx, defaultDrainTimeout)
 		defer cancel()
 	}
 

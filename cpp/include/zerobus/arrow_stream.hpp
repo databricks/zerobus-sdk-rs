@@ -64,10 +64,10 @@ class ArrowStream {
   /// Flush all pending batches and wait for their acknowledgment.
   void flush();
 
-  /// Return all unacknowledged batches from a closed or failed stream, each as
-  /// a self-contained Arrow IPC stream (schema + one batch). Remains callable
-  /// after a failed `close()`, which keeps the handle alive so recovery is
-  /// possible.
+  /// Return all unacknowledged batches from a failed stream, each as a
+  /// self-contained Arrow IPC stream (schema + one batch). Callable after a
+  /// failed `close()` (the handle stays alive for recovery); after a successful
+  /// `close()` the handle is freed, so this throws instead.
   std::vector<std::vector<std::uint8_t>> get_unacked_batches();
 
   /// Gracefully close the stream, flushing pending batches first. Idempotent.
