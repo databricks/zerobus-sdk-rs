@@ -152,4 +152,28 @@ func TestRawStreamRecvReturnsEOFUnwrapped(t *testing.T) {
 	}
 }
 
+// TestGracefulCloseCloseSendFailure: when CloseSend itself fails (e.g. the
+// stream is already broken), gracefulClose must hard-abort and return the error
+// rather than proceeding to drain.
+func TestGracefulCloseCloseSendFailure(t *testing.T) {
+	closeSendBoom := errors.New("close-send boom")
+	var cancelled bool
+	s := &rawStream[string, string]{
+		rpc:    &fakeBidiRPC{closeErr: closeSendBoom},
+		cancel: func() { cancelled = true },
+	}
+	s.setID("test-stream")
+
+	err := s.gracefulClose(context.Background())
+	if err == nil {
+		t.Fatal("gracefulClose with failing CloseSend: got nil error, want failure")
+	}
+	if !strings.Contains(err.Error(), "test-stream") {
+		t.Errorf("error %q should contain stream name", err.Error())
+	}
+	if !cancelled {
+		t.Error("gracefulClose did not call close (cancel) after CloseSend failure")
+	}
+}
+
 func strPtr(s string) *string { return &s }

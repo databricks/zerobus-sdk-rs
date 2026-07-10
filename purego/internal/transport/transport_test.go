@@ -640,13 +640,14 @@ func TestStreamGracefulCloseHonorsDeadline(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
 	defer cancel()
 
+	const deadline = 200 * time.Millisecond
 	start := time.Now()
 	err = stream.GracefulClose(ctx)
 	if err == nil {
 		t.Fatal("GracefulClose against a server that never ends the stream: got nil, want deadline error")
 	}
-	if elapsed := time.Since(start); elapsed > 5*time.Second {
-		t.Fatalf("GracefulClose took %v, expected it to return near the 200ms deadline", elapsed)
+	if elapsed := time.Since(start); elapsed > 5*deadline {
+		t.Fatalf("GracefulClose took %v, expected it to return near the %v deadline", elapsed, deadline)
 	}
 	// Bounded-out drain tears the stream down: Recv is unblocked, not hanging.
 	if _, err := stream.Recv(); err == nil {
