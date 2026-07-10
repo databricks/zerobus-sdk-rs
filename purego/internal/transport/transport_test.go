@@ -104,7 +104,7 @@ func (f *fakeServer) EphemeralStream(stream zerobuspb.Zerobus_EphemeralStreamSer
 		req, err := stream.Recv()
 		if err == io.EOF {
 			if f.hangDrain {
-				<-stream.Context().Done() // withhold the clean end
+				<-stream.Context().Done()
 				return stream.Context().Err()
 			}
 			return nil
@@ -583,7 +583,7 @@ func TestStreamGracefulClose(t *testing.T) {
 	if err := stream.GracefulClose(ctx); err != nil {
 		t.Fatalf("GracefulClose: %v", err)
 	}
-	stream.Close() // idempotent no-op after a graceful shutdown
+	stream.Close()
 }
 
 // TestStreamGracefulCloseDrainsPending: an in-flight ack precedes io.EOF, so

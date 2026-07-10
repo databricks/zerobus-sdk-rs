@@ -110,7 +110,7 @@ func (s *rawStream[Req, Resp]) gracefulClose(ctx context.Context) error {
 	}
 
 	if err := s.closeSend(); err != nil {
-		s.close() // can't half-close cleanly; hard-abort
+		s.close()
 		return err
 	}
 
