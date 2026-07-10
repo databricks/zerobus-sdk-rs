@@ -8,7 +8,9 @@
 use std::error::Error;
 
 use databricks_zerobus_ingest_sdk::schema::{descriptor_from_uc_columns, UcColumn};
-use databricks_zerobus_ingest_sdk::{ProtoBytes, ZerobusResult, ZerobusSdk, ZerobusStream};
+use databricks_zerobus_ingest_sdk::{
+    message_descriptor, ProtoBytes, ZerobusResult, ZerobusSdk, ZerobusStream,
+};
 
 // Change constants to match your data.
 const TABLE_NAME: &str = "<your_table_name>";
@@ -35,7 +37,8 @@ async fn main() -> Result<(), Box<dyn Error>> {
         col("quantity", "INT", 2),
         col("price", "DOUBLE", 3),
     ];
-    let descriptor = descriptor_from_uc_columns(&columns, "table_Orders")?;
+    let descriptor_proto = descriptor_from_uc_columns(&columns, "table_Orders")?;
+    let descriptor = message_descriptor(&descriptor_proto)?;
 
     let sdk_handle = ZerobusSdk::builder()
         .endpoint(SERVER_ENDPOINT)

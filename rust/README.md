@@ -535,13 +535,15 @@ let mut stream = sdk
 
 #### Dynamic Protobuf Stream
 
-When the table's schema is known only at runtime — for example a descriptor fetched from Unity Catalog or built in code with `schema::descriptor_from_uc_columns` — there is no compiled `prost::Message` type. Select `.dynamic_proto(descriptor)` and fill records field-by-field with `DynamicRecord`:
+When the table's schema is known only at runtime — for example a descriptor fetched from Unity Catalog or built in code with `schema::descriptor_from_uc_columns` — there is no compiled `prost::Message` type. Resolve the descriptor with `message_descriptor`, pass it to `.dynamic_proto(descriptor)`, and fill records field-by-field with `DynamicRecord`:
 
 ```rust
+use databricks_zerobus_ingest_sdk::{message_descriptor, DynamicRecord, ProtoBytes};
 use databricks_zerobus_ingest_sdk::schema::{descriptor_from_uc_columns, UcColumn};
 
 // Build the descriptor at runtime (a column's proto field number is `position + 1`).
-let descriptor = descriptor_from_uc_columns(&columns, "table_Orders")?;
+let descriptor_proto = descriptor_from_uc_columns(&columns, "table_Orders")?;
+let descriptor = message_descriptor(&descriptor_proto)?;
 
 let mut stream = sdk
     .stream_builder().table("catalog.schema.orders")
@@ -561,6 +563,8 @@ for i in 0..100_000i64 {
 }
 stream.flush().await?; // wait once for all pending acknowledgments
 ```
+
+`.dynamic_proto()` takes a resolved `MessageDescriptor`. `message_descriptor(&proto)` is a convenience for a self-contained descriptor; if your message references types in other `.proto` files, build the `MessageDescriptor` against your own `prost_reflect::DescriptorPool` and pass it in directly.
 
 On the wire this is identical to `.compiled_proto(...)`; the difference is that records are built dynamically rather than from a generated struct. See the [`dynamic_proto`](https://docs.rs/databricks-zerobus-ingest-sdk/latest/databricks_zerobus_ingest_sdk/dynamic_proto/) module and the `proto_dynamic_single` example for details.
 

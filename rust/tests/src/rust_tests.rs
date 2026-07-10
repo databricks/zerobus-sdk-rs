@@ -4,7 +4,7 @@ mod utils;
 use std::sync::Arc;
 
 use databricks_zerobus_ingest_sdk::{
-    NoTlsConfig, ProtoBytes, StreamType, ZerobusError, ZerobusSdk,
+    message_descriptor, NoTlsConfig, ProtoBytes, StreamType, ZerobusError, ZerobusSdk,
 };
 use mock_grpc::{start_mock_server, MockResponse};
 use tracing::info;
@@ -1320,11 +1320,12 @@ mod schema_tests {
             .tls_config(Arc::new(NoTlsConfig))
             .build()?;
 
+        let descriptor = message_descriptor(&create_test_descriptor_proto().unwrap())?;
         let stream = sdk
             .stream_builder()
             .table(TABLE_NAME)
             .headers_provider(Arc::new(TestHeadersProvider::default()))
-            .dynamic_proto(create_test_descriptor_proto().unwrap_or_default())
+            .dynamic_proto(descriptor)
             .max_inflight_requests(100)
             .recovery(false)
             .build()

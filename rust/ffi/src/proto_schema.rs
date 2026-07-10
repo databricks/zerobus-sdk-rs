@@ -223,8 +223,7 @@ pub extern "C" fn zerobus_proto_schema_encode_json(
 
         // prost-reflect doesn't enforce proto2 `required` presence on encode, so
         // reject a record missing one here rather than emit bytes the server rejects.
-        let missing =
-            databricks_zerobus_ingest_sdk::dynamic_proto::missing_required_fields(&message);
+        let missing = databricks_zerobus_ingest_sdk::missing_required_fields(&message);
         if !missing.is_empty() {
             write_error_result(
                 result,

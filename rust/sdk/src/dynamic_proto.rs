@@ -1,18 +1,23 @@
 //! Native dynamic-protobuf record support.
 //!
-//! For tables whose schema is known only at runtime (a
-//! [`prost_types::DescriptorProto`] from Unity Catalog or built with
-//! [`crate::schema::descriptor_from_uc_columns`]), so there is no compiled
-//! `prost::Message`. Select the format with
+//! For tables whose schema is known only at runtime, so there is no compiled
+//! `prost::Message`. Pass a resolved [`MessageDescriptor`] to
 //! [`StreamBuilder::dynamic_proto`](crate::StreamBuilder::dynamic_proto), then
-//! build records field-by-field with [`DynamicRecord`] against the
-//! [`MessageDescriptor`] from
-//! [`ZerobusStream::message_descriptor`](crate::ZerobusStream::message_descriptor).
+//! build records field-by-field with [`DynamicRecord`] (obtain the same
+//! descriptor back from
+//! [`ZerobusStream::message_descriptor`](crate::ZerobusStream::message_descriptor)).
+//!
+//! You can obtain the [`MessageDescriptor`] by building it against your own
+//! [`prost_reflect::DescriptorPool`] (needed when the message references types
+//! in other files), or, for a self-contained descriptor, let
+//! [`message_descriptor`] resolve one from a [`prost_types::DescriptorProto`]
+//! (built with [`crate::schema::descriptor_from_uc_columns`] or fetched from
+//! Unity Catalog).
 //!
 //! Ingest in a loop, then `flush()` once — never wait per record.
 //!
 //! ```no_run
-//! # use databricks_zerobus_ingest_sdk::{ProtoBytes, ZerobusStream, dynamic_proto::DynamicRecord};
+//! # use databricks_zerobus_ingest_sdk::{ProtoBytes, DynamicRecord, ZerobusStream};
 //! # async fn example(stream: &ZerobusStream) -> Result<(), Box<dyn std::error::Error>> {
 //! let descriptor = stream.message_descriptor()?;
 //! for i in 0..1_000i64 {
@@ -34,12 +39,17 @@ use crate::{ZerobusError, ZerobusResult};
 
 pub use prost_reflect::{DynamicMessage, MessageDescriptor, Value};
 
-/// Resolve a [`MessageDescriptor`] from a bare [`prost_types::DescriptorProto`],
-/// for building [`DynamicRecord`]s against a runtime schema.
+/// Resolve a [`MessageDescriptor`] from a bare, **self-contained**
+/// [`prost_types::DescriptorProto`] — a convenience for the common case, to pass
+/// to [`StreamBuilder::dynamic_proto`](crate::StreamBuilder::dynamic_proto).
 ///
-/// Building the descriptor pool has a cost; resolve once and clone per record (a
-/// cheap Arc-backed clone). [`ZerobusStream::message_descriptor`](crate::ZerobusStream::message_descriptor)
-/// caches it for you.
+/// The descriptor is registered in a fresh single-file pool, so it must not
+/// reference types defined in other files. If it does, build the
+/// [`MessageDescriptor`] against your own [`prost_reflect::DescriptorPool`]
+/// instead and pass that to `dynamic_proto` directly.
+///
+/// Resolving builds a descriptor pool; do it once per schema and reuse the result
+/// (it is a cheap, Arc-backed clone) for both the builder and every record.
 ///
 /// # Errors
 ///
@@ -219,7 +229,7 @@ impl IntoDynamicValue for Vec<u8> {
 /// then [`encode`](Self::encode)d to wire bytes and ingested.
 ///
 /// ```no_run
-/// # use databricks_zerobus_ingest_sdk::{ProtoBytes, ZerobusStream, dynamic_proto::DynamicRecord};
+/// # use databricks_zerobus_ingest_sdk::{ProtoBytes, DynamicRecord, ZerobusStream};
 /// # async fn example(stream: &ZerobusStream) -> Result<(), Box<dyn std::error::Error>> {
 /// let descriptor = stream.message_descriptor()?;
 /// let mut record = DynamicRecord::new(descriptor);

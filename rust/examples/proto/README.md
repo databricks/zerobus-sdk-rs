@@ -214,6 +214,7 @@ field-by-field with `DynamicRecord`.
 ### Code Highlights
 
 ```rust
+use databricks_zerobus_ingest_sdk::message_descriptor;
 use databricks_zerobus_ingest_sdk::schema::{descriptor_from_uc_columns, UcColumn};
 
 // Build the descriptor at runtime — no `.proto` file, no generated structs.
@@ -224,7 +225,8 @@ let columns = vec![
     col("quantity", "INT", 2),
     col("price", "DOUBLE", 3),
 ];
-let descriptor = descriptor_from_uc_columns(&columns, "table_Orders")?;
+let descriptor_proto = descriptor_from_uc_columns(&columns, "table_Orders")?;
+let descriptor = message_descriptor(&descriptor_proto)?;
 
 let mut stream = sdk
     .stream_builder()

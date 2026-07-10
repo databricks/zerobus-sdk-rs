@@ -21,7 +21,7 @@
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, OnceLock};
+use std::sync::Arc;
 
 use tokio::sync::RwLock;
 use tokio_util::sync::CancellationToken;
@@ -29,11 +29,10 @@ use tonic::transport::Channel;
 use tracing::instrument;
 
 use crate::databricks::zerobus::zerobus_client::ZerobusClient;
-use crate::dynamic_proto::{DynamicRecord, MessageDescriptor};
 use crate::landing_zone::LandingZone;
 use crate::{
-    HeadersProvider, OffsetId, OffsetIdGenerator, StreamConfigurationOptions, StreamType,
-    TableProperties, ZerobusError, ZerobusResult,
+    DynamicRecord, HeadersProvider, MessageDescriptor, OffsetId, OffsetIdGenerator,
+    StreamConfigurationOptions, StreamType, TableProperties, ZerobusError, ZerobusResult,
 };
 
 mod acks;
@@ -129,9 +128,9 @@ pub struct ZerobusStream {
     cancellation_token: CancellationToken,
     /// Callback handler task that executes callbacks in a separate thread.
     callback_handler_task: Option<tokio::task::JoinHandle<()>>,
-    /// Message descriptor for dynamic-proto records, resolved and cached on first
-    /// [`Self::message_descriptor`] call so ingest loops don't rebuild the pool.
-    dynamic_message_descriptor: OnceLock<MessageDescriptor>,
+    /// Resolved message descriptor for building dynamic-proto records, supplied by
+    /// the builder. `None` for JSON and compiled-proto streams.
+    dynamic_message_descriptor: Option<MessageDescriptor>,
 }
 
 impl ZerobusStream {
@@ -193,6 +192,8 @@ impl ZerobusStream {
             )
         })??);
 
+        // Cloned out before `table_properties` is moved into the struct below.
+        let dynamic_message_descriptor = table_properties.message_descriptor.clone();
         let stream = Self {
             stream_type: StreamType::Ephemeral,
             headers_provider,
@@ -211,37 +212,27 @@ impl ZerobusStream {
             server_error_rx,
             cancellation_token,
             callback_handler_task,
-            dynamic_message_descriptor: OnceLock::new(),
+            dynamic_message_descriptor,
         };
 
         Ok(stream)
     }
 
-    /// Resolve the [`MessageDescriptor`] for this stream's table, for building
-    /// records with [`crate::dynamic_proto::DynamicRecord`]. Cached after the first
-    /// call, so it's cheap to call per record (the descriptor is Arc-backed).
+    /// The [`MessageDescriptor`] for this stream's schema, for building records
+    /// with [`crate::DynamicRecord`]. Supplied at build time; the
+    /// returned clone is cheap (Arc-backed).
     ///
     /// # Errors
     ///
-    /// [`ZerobusError::InvalidArgument`] if this isn't a proto stream (e.g. JSON)
-    /// or the descriptor can't be resolved.
+    /// [`ZerobusError::InvalidArgument`] if this isn't a dynamic-proto stream
+    /// (i.e. not built with [`dynamic_proto`](crate::StreamBuilder::dynamic_proto)).
     pub fn message_descriptor(&self) -> ZerobusResult<MessageDescriptor> {
-        if let Some(descriptor) = self.dynamic_message_descriptor.get() {
-            return Ok(descriptor.clone());
-        }
-        let descriptor_proto =
-            self.table_properties
-                .descriptor_proto
-                .as_ref()
-                .ok_or_else(|| {
-                    ZerobusError::InvalidArgument(
-                        "stream has no protobuf descriptor: build it with .compiled_proto() or .dynamic_proto()".into(),
-                    )
-                })?;
-        let descriptor = crate::dynamic_proto::message_descriptor(descriptor_proto)?;
-        // A lost race just means another thread resolved it first — fine.
-        let _ = self.dynamic_message_descriptor.set(descriptor.clone());
-        Ok(descriptor)
+        self.dynamic_message_descriptor.clone().ok_or_else(|| {
+            ZerobusError::InvalidArgument(
+                "stream was not built with .dynamic_proto(); no message descriptor available"
+                    .into(),
+            )
+        })
     }
 
     /// Create an empty [`DynamicRecord`] bound to this stream's schema.
