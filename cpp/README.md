@@ -244,6 +244,52 @@ Key `Stream` methods: `ingest_proto_record`, `ingest_json_record`,
 `ingest_proto_records`, `ingest_json_records`, `wait_for_offset`, `flush`,
 `get_unacked_records`, `close`.
 
+## Configuration
+
+Both option structs are plain aggregates — default-construct one and override
+only the fields you care about:
+
+```cpp
+zerobus::StreamOptions options;
+options.record_type = zerobus::RecordType::Json;
+options.max_inflight_requests = 50'000;
+options.recovery_retries = 10;
+```
+
+The scalar defaults are hand-kept in sync with the Rust core; a build-time test
+(`config_defaults_test` / `arrow_config_defaults_test`) fails if they drift from
+the FFI defaults.
+
+### `StreamOptions` (proto/JSON streams)
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `max_inflight_requests` | `std::size_t` | 1,000,000 | Maximum unacknowledged requests in flight |
+| `recovery` | `bool` | `true` | Enable automatic stream recovery on failure |
+| `recovery_timeout_ms` | `std::uint64_t` | 15,000 | Total time budget for a recovery attempt (ms) |
+| `recovery_backoff_ms` | `std::uint64_t` | 2,000 | Backoff between recovery retries (ms) |
+| `recovery_retries` | `std::uint32_t` | 4 | Number of recovery retries before giving up |
+| `server_lack_of_ack_timeout_ms` | `std::uint64_t` | 60,000 | How long to wait for a server ack before the stream is considered stalled (ms) |
+| `flush_timeout_ms` | `std::uint64_t` | 300,000 | Time budget for `flush()` / `close()` (ms) |
+| `record_type` | `RecordType` | `RecordType::Proto` | Wire format; must match the stream's table (`Proto` or `Json`) |
+| `stream_paused_max_wait_time_ms` | `std::optional<std::uint64_t>` | `nullopt` | Max wait during a server-initiated pause before recovering (`nullopt` = full server duration, `0` = recover immediately, `>0` = min(this, server duration)) |
+| `callback_max_wait_time_ms` | `std::optional<std::uint64_t>` | `nullopt` | Max time to wait for a headers-provider callback to return (`nullopt` leaves the FFI default in place) |
+
+### `ArrowStreamOptions` (Arrow Flight streams, Beta)
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `max_inflight_batches` | `std::size_t` | 1,000 | Maximum unacknowledged batches in flight |
+| `recovery` | `bool` | `true` | Enable automatic stream recovery on failure |
+| `recovery_timeout_ms` | `std::uint64_t` | 15,000 | Total time budget for a recovery attempt (ms) |
+| `recovery_backoff_ms` | `std::uint64_t` | 2,000 | Backoff between recovery retries (ms) |
+| `recovery_retries` | `std::uint32_t` | 4 | Number of recovery retries before giving up |
+| `server_lack_of_ack_timeout_ms` | `std::uint64_t` | 60,000 | How long to wait for a server ack before the stream is considered stalled (ms) |
+| `flush_timeout_ms` | `std::uint64_t` | 300,000 | Time budget for `flush()` / `close()` (ms) |
+| `connection_timeout_ms` | `std::uint64_t` | 30,000 | Connection establishment timeout (ms) |
+| `ipc_compression` | `IpcCompression` | `IpcCompression::NoCompression` | Arrow IPC compression codec (`NoCompression`, `Lz4Frame`, or `Zstd`) |
+| `stream_paused_max_wait_time_ms` | `std::optional<std::uint64_t>` | `nullopt` | Max wait during a server-initiated pause before recovering (same semantics as above) |
+
 ## Examples
 
 Runnable examples will live under `examples/`, covering the three ingestion
@@ -310,6 +356,18 @@ A `Stream` or `ArrowStream` is **not** safe for concurrent use — serialize
 access externally (the same contract as the Rust core). A single `Sdk` may
 create many streams. See [`CLAUDE.md`](CLAUDE.md) for the full memory-ownership
 and threading contract.
+
+## Community and Contributing
+
+This is an open source project. We welcome contributions, feedback, and bug
+reports.
+
+- **[Contributing Guide](CONTRIBUTING.md)**: C++-specific development setup and workflow.
+- **[General Contributing Guide](../CONTRIBUTING.md)**: Pull request process, commit requirements, and policies.
+- **[Changelog](CHANGELOG.md)**: See the history of changes in the SDK.
+- **[Security Policy](../SECURITY.md)**: Read about our security process and how to report vulnerabilities.
+- **[Developer Certificate of Origin (DCO)](../DCO)**: Understand the agreement for contributions.
+- **[Open Source Attributions](NOTICE)**: See a list of the open source libraries we use.
 
 ## License
 
