@@ -532,6 +532,35 @@ func TestOpenDeadlineDoesNotTearDownStream(t *testing.T) {
 	}
 }
 
+// TestStreamGracefulCloseDefaultsDeadline: passing a context with no deadline
+// (e.g. context.Background()) must not hang when the server stalls — the
+// function applies defaultHandshakeTimeout internally, mirroring Open.
+// Runs under -short but takes ~defaultHandshakeTimeout (30s) to complete.
+func TestStreamGracefulCloseDefaultsDeadline(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping: takes defaultHandshakeTimeout (30s) to exercise the no-deadline path")
+	}
+	srv := &fakeServer{streamID: "s", seen: make(chan observed, 1), hangDrain: true}
+	conn := dialFake(t, srv)
+
+	stream, err := conn.Open(context.Background(), transport.StreamParams{
+		TableName:  "c.s.t",
+		RecordType: zerobuspb.RecordType_JSON,
+		Token:      "tok",
+	})
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	<-srv.seen
+
+	// No deadline on the context — the function must impose one itself and
+	// return an error rather than hanging forever.
+	err = stream.GracefulClose(context.Background())
+	if err == nil {
+		t.Fatal("GracefulClose against a stalled server with no deadline: got nil, want timeout error")
+	}
+}
+
 // TestStreamGracefulClose: the server ends the stream on half-close, so
 // GracefulClose drains to a clean io.EOF and returns nil.
 func TestStreamGracefulClose(t *testing.T) {
