@@ -63,6 +63,11 @@ func (c *Conn) Open(ctx context.Context, p StreamParams) (*Stream, error) {
 	if p.RecordType == zerobuspb.RecordType_PROTO && len(p.DescriptorProto) == 0 {
 		return nil, fmt.Errorf("transport: open %q: descriptor proto required for PROTO records", p.TableName)
 	}
+	// Reject control chars at the wire boundary so every TokenProvider is
+	// covered, not just the OAuth mint path; gRPC would otherwise fail opaquely.
+	if !isUsableAsHeader(p.Token) {
+		return nil, fmt.Errorf("transport: open %q: token contains invalid header characters", p.TableName)
+	}
 
 	// openCtx bounds the open attempt: the caller's ctx, defaulted to
 	// defaultHandshakeTimeout when it has no deadline.

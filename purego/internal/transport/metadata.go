@@ -3,6 +3,7 @@ package transport
 import (
 	"context"
 	"strings"
+	"unicode"
 
 	"google.golang.org/grpc/metadata"
 )
@@ -36,6 +37,18 @@ func withStreamMetadata(ctx context.Context, tableName, token string) context.Co
 		md.Delete(mdAuthorization)
 	}
 	return metadata.NewOutgoingContext(ctx, md)
+}
+
+// isUsableAsHeader reports whether token is safe in a gRPC authorization
+// header: no control or non-ASCII chars, which gRPC metadata rejects. An empty
+// token is usable (it yields no header).
+func isUsableAsHeader(token string) bool {
+	for _, r := range token {
+		if r > unicode.MaxASCII || unicode.IsControl(r) {
+			return false
+		}
+	}
+	return true
 }
 
 // authHeaderValue normalizes a token into an authorization header value: a value

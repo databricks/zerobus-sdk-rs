@@ -237,6 +237,22 @@ func TestOpenPrefixesUnknownScheme(t *testing.T) {
 	}
 }
 
+func TestOpenRejectsTokenWithControlChars(t *testing.T) {
+	for _, tok := range []string{"tok\nen", "tok\x00en", "Bearer tok\ren"} {
+		srv := &fakeServer{streamID: "s", seen: make(chan observed, 1)}
+		conn := dialFake(t, srv)
+
+		_, err := conn.Open(context.Background(), transport.StreamParams{
+			TableName:  "c.s.t",
+			RecordType: zerobuspb.RecordType_JSON,
+			Token:      tok,
+		})
+		if err == nil {
+			t.Errorf("Open with token %q: got nil error, want rejection", tok)
+		}
+	}
+}
+
 func TestStreamSendRecv(t *testing.T) {
 	srv := &fakeServer{streamID: "s1", seen: make(chan observed, 1)}
 	conn := dialFake(t, srv)

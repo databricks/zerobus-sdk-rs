@@ -20,9 +20,13 @@ Implemented packages:
   `RecordType`, descriptor requirement for `PROTO`) and sets auth metadata from
   `StreamParams.Token` (`"Bearer <token>"` for bare tokens, verbatim when a
   known scheme — `Bearer`, `Basic`, or `DPoP` — is already present).
+- `internal/auth` — token providers for stream authentication. `OAuthTokenProvider`
+  implements the Unity Catalog OAuth 2.0 client-credentials flow with per-table
+  token caching and proactive refresh; `StaticTokenProvider` wraps a fixed token
+  for tests or externally managed lifecycles. Obtain a token with `Token(ctx)`
+  and pass it as `StreamParams.Token`.
 
-Planned layers: OAuth/auth, ingest/ack state management, recovery, and the
-public API.
+Planned layers: ingest/ack state management, recovery, and the public API.
 
 ## Regenerating the protobuf bindings
 
