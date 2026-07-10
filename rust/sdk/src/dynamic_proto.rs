@@ -384,4 +384,93 @@ mod tests {
         record.set("id", 1i64).unwrap();
         assert!(record.encode().is_ok());
     }
+
+    /// A UC descriptor with a nested `address` struct whose `zip` field is
+    /// non-nullable (proto2 `required`), built via `descriptor_from_uc_columns`.
+    fn uc_descriptor_with_required_nested_field() -> MessageDescriptor {
+        use crate::schema::{descriptor_from_uc_columns, UcColumn};
+
+        let col = |name: &str, type_name: &str, type_json: &str, position: i32| UcColumn {
+            name: name.to_string(),
+            type_name: type_name.to_string(),
+            type_text: String::new(),
+            type_json: type_json.to_string(),
+            nullable: true,
+            position,
+        };
+        let address_json = r#"{
+            "type":"struct",
+            "fields":[
+                {"name":"street","type":"string","nullable":true,"metadata":{}},
+                {"name":"zip","type":"integer","nullable":false,"metadata":{}}
+            ]
+        }"#;
+        let columns = vec![
+            col("id", "BIGINT", "", 0),
+            col("address", "STRUCT", address_json, 1),
+        ];
+        let proto = descriptor_from_uc_columns(&columns, "table_Orders").unwrap();
+        message_descriptor(&proto).unwrap()
+    }
+
+    #[test]
+    fn encode_reports_missing_required_field_in_nested_struct() {
+        let md = uc_descriptor_with_required_nested_field();
+
+        // Present `address` but omit its required `zip`: encode must report the
+        // nested field by its dotted path.
+        let address_desc = match md.get_field_by_name("address").unwrap().kind() {
+            Kind::Message(m) => m,
+            other => panic!("expected message field, got {other:?}"),
+        };
+        let mut record = DynamicRecord::new(md);
+        record
+            .set("id", 1i64)
+            .unwrap()
+            .set("address", Value::Message(DynamicMessage::new(address_desc)))
+            .unwrap();
+
+        let err = record.encode().unwrap_err();
+        match err {
+            ZerobusError::InvalidArgument(msg) => assert!(
+                msg.contains("address.zip"),
+                "expected nested path in error, got: {msg}"
+            ),
+            other => panic!("expected InvalidArgument, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn valid_nested_record_round_trips() {
+        let md = uc_descriptor_with_required_nested_field();
+        let address_desc = match md.get_field_by_name("address").unwrap().kind() {
+            Kind::Message(m) => m,
+            other => panic!("expected message field, got {other:?}"),
+        };
+
+        let mut address = DynamicMessage::new(address_desc);
+        address.set_field_by_name("street", Value::String("1 Main St".to_string()));
+        address.set_field_by_name("zip", Value::I32(94105));
+
+        let mut record = DynamicRecord::new(md.clone());
+        record
+            .set("id", 7i64)
+            .unwrap()
+            .set("address", Value::Message(address))
+            .unwrap();
+
+        let bytes = record.encode().unwrap();
+        let decoded = DynamicMessage::decode(md, bytes.as_slice()).unwrap();
+        assert_eq!(decoded.get_field_by_name("id").unwrap().as_i64(), Some(7));
+        let decoded_addr = decoded.get_field_by_name("address").unwrap();
+        let decoded_addr = decoded_addr.as_message().unwrap();
+        assert_eq!(
+            decoded_addr.get_field_by_name("zip").unwrap().as_i32(),
+            Some(94105)
+        );
+        assert_eq!(
+            decoded_addr.get_field_by_name("street").unwrap().as_str(),
+            Some("1 Main St")
+        );
+    }
 }
