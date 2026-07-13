@@ -50,7 +50,7 @@ impl std::fmt::Display for MessageId {
 }
 
 impl MessageId {
-    fn new(stream_index: usize, sub_offset: OffsetId) -> Self {
+    pub(crate) fn new(stream_index: usize, sub_offset: OffsetId) -> Self {
         debug_assert!(stream_index < (1 << STREAM_BITS));
         debug_assert!((0..=OFFSET_MASK).contains(&sub_offset));
         Self(((stream_index as i64) << (64 - STREAM_BITS)) | (sub_offset & OFFSET_MASK))
@@ -89,6 +89,7 @@ pub struct MultiplexedStream {
     streams: Vec<ZerobusStream>,
     round_robin_counter: AtomicUsize,
     is_closed: AtomicBool,
+    admission: tokio::sync::RwLock<()>,
 }
 
 impl MultiplexedStream {
@@ -111,6 +112,7 @@ impl MultiplexedStream {
             streams,
             round_robin_counter: AtomicUsize::new(0),
             is_closed: AtomicBool::new(false),
+            admission: tokio::sync::RwLock::new(()),
         }
     }
 
@@ -140,6 +142,7 @@ impl MultiplexedStream {
             "MultiplexedStream poisoned due to sub-stream failure"
         );
 
+        let _admission = self.admission.write().await;
         let flush_results = join_all(self.streams.iter().map(|s| s.flush())).await;
         for (i, result) in flush_results.into_iter().enumerate() {
             if let Err(e) = result {
@@ -161,10 +164,15 @@ impl MultiplexedStream {
         self.round_robin_counter.fetch_add(1, Ordering::Relaxed) % self.streams.len()
     }
 
-    async fn wait_for_capacity(&self, stream: &ZerobusStream, idx: usize) -> ZerobusResult<()> {
+    async fn reserve_capacity(
+        &self,
+        stream: &ZerobusStream,
+        idx: usize,
+    ) -> ZerobusResult<crate::landing_zone::CapacityReservation> {
         let mut backoff_ms = 1u64;
-        let mut total_wait_ms = 0u64;
         let mut logged_backpressure = false;
+        let started_at = tokio::time::Instant::now();
+        let deadline = started_at + stream.capacity_wait_timeout();
 
         loop {
             self.check_closed()?;
@@ -178,14 +186,28 @@ impl MultiplexedStream {
                 return Err(err);
             }
 
-            if stream.has_capacity() {
-                return Ok(());
+            let now = tokio::time::Instant::now();
+            if now >= deadline {
+                return Err(ZerobusError::ConnectionTimeout(format!(
+                    "Timed out waiting for capacity on multiplexed sub-stream {}",
+                    idx
+                )));
             }
 
-            tokio::time::sleep(std::time::Duration::from_millis(backoff_ms)).await;
-            total_wait_ms += backoff_ms;
+            let wait_duration = std::time::Duration::from_millis(backoff_ms)
+                .min(deadline.saturating_duration_since(now));
+
+            match tokio::time::timeout(wait_duration, stream.reserve_capacity()).await {
+                Ok(Ok(reservation)) => return Ok(reservation),
+                Ok(Err(e)) => return Err(self.handle_ingest_error(e, stream, idx).await),
+                // Timed out waiting for a permit: the sub-stream is still at
+                // capacity. Loop to re-check liveness and keep waiting.
+                Err(_elapsed) => {}
+            }
+
             backoff_ms = (backoff_ms * 2).min(50);
 
+            let total_wait_ms = started_at.elapsed().as_millis();
             if !logged_backpressure && total_wait_ms >= 1000 {
                 warn!(
                     stream_index = idx,
@@ -193,6 +215,27 @@ impl MultiplexedStream {
                 );
                 logged_backpressure = true;
             }
+        }
+    }
+
+    async fn enqueue_reserved(
+        &self,
+        stream: &ZerobusStream,
+        idx: usize,
+        encoded_batch: EncodedBatch,
+    ) -> ZerobusResult<MessageId> {
+        let reservation = self.reserve_capacity(stream, idx).await?;
+        let enqueue_result = stream
+            .enqueue_reserved_admitted(encoded_batch, reservation, || async {
+                let admission = self.admission.read().await;
+                self.check_closed()?;
+                Ok(admission)
+            })
+            .await;
+
+        match enqueue_result {
+            Ok(off) => Ok(MessageId::new(idx, off)),
+            Err(e) => Err(self.handle_ingest_error(e, stream, idx).await),
         }
     }
 
@@ -230,13 +273,8 @@ impl MultiplexedStream {
         let record = payload.into();
         let idx = self.pick_substream();
         let stream = &self.streams[idx];
-        self.wait_for_capacity(stream, idx).await?;
-        self.check_closed()?;
-
-        match stream.ingest_record_offset(record).await {
-            Ok(off) => Ok(MessageId::new(idx, off)),
-            Err(e) => Err(self.handle_ingest_error(e, stream, idx).await),
-        }
+        let encoded_batch = stream.prepare_record_batch(record)?;
+        self.enqueue_reserved(stream, idx, encoded_batch).await
     }
 
     /// Ingests a batch of records into a single sub-stream (round-robin).
@@ -256,13 +294,10 @@ impl MultiplexedStream {
         }
         let idx = self.pick_substream();
         let stream = &self.streams[idx];
-        self.wait_for_capacity(stream, idx).await?;
-        self.check_closed()?;
-
-        match stream.ingest_records_offset(records).await {
-            Ok(sub_offset) => Ok(sub_offset.map(|off| MessageId::new(idx, off))),
-            Err(e) => Err(self.handle_ingest_error(e, stream, idx).await),
-        }
+        let encoded_batch = stream.prepare_records_batch(records)?;
+        self.enqueue_reserved(stream, idx, encoded_batch)
+            .await
+            .map(Some)
     }
 
     /// Waits until every record already queued on every sub-stream is

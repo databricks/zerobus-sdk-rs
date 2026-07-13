@@ -53,14 +53,8 @@ impl ZerobusStream {
         &self,
         payload: impl Into<EncodedRecord>,
     ) -> ZerobusResult<OffsetId> {
-        let encoded_batch = EncodedBatch::try_from_record(payload, self.options.record_type)
-            .ok_or_else(|| {
-                ZerobusError::InvalidArgument(
-                    "Record type does not match stream configuration".to_string(),
-                )
-            })?;
-
-        self.ingest_internal_v2(encoded_batch).await
+        let encoded_batch = self.prepare_record_batch(payload)?;
+        self.enqueue_prepared_batch(encoded_batch).await
     }
 
     /// Ingests a batch of records and returns the logical offset directly.
@@ -104,20 +98,69 @@ impl ZerobusStream {
         I: IntoIterator<Item = T>,
         T: Into<EncodedRecord>,
     {
+        let encoded_batch = self.prepare_records_batch(payload)?;
+
+        if encoded_batch.is_empty() {
+            Ok(None)
+        } else {
+            self.enqueue_prepared_batch(encoded_batch)
+                .await
+                .map(Option::Some)
+        }
+    }
+
+    #[allow(clippy::result_large_err)]
+    pub(crate) fn prepare_record_batch(
+        &self,
+        payload: impl Into<EncodedRecord>,
+    ) -> ZerobusResult<EncodedBatch> {
+        let encoded_batch = EncodedBatch::try_from_record(payload, self.options.record_type)
+            .ok_or_else(|| {
+                ZerobusError::InvalidArgument(
+                    "Record type does not match stream configuration".to_string(),
+                )
+            })?;
+        self.validate_ingest_payload(&encoded_batch)?;
+        Ok(encoded_batch)
+    }
+
+    #[allow(clippy::result_large_err)]
+    pub(crate) fn prepare_records_batch<I, T>(&self, payload: I) -> ZerobusResult<EncodedBatch>
+    where
+        I: IntoIterator<Item = T>,
+        T: Into<EncodedRecord>,
+    {
         let encoded_batch = EncodedBatch::try_from_batch(payload, self.options.record_type)
             .ok_or_else(|| {
                 ZerobusError::InvalidArgument(
                     "Record type does not match stream configuration".to_string(),
                 )
             })?;
+        self.validate_ingest_payload(&encoded_batch)?;
+        Ok(encoded_batch)
+    }
 
-        if encoded_batch.is_empty() {
-            Ok(None)
-        } else {
-            self.ingest_internal_v2(encoded_batch)
-                .await
-                .map(Option::Some)
+    #[allow(clippy::result_large_err)]
+    fn validate_ingest_payload(&self, encoded_batch: &EncodedBatch) -> ZerobusResult<()> {
+        let byte_size = encoded_batch.total_byte_size();
+        let max_payload_bytes = self.options.max_ingest_payload_bytes;
+        if byte_size > max_payload_bytes {
+            return Err(ZerobusError::InvalidArgument(format!(
+                "Ingest payload too large: {byte_size} bytes exceeds the configured limit of {max_payload_bytes} bytes"
+            )));
         }
+        Ok(())
+    }
+
+    #[allow(clippy::result_large_err)]
+    pub(crate) fn check_open(&self) -> ZerobusResult<()> {
+        if self.is_closed.load(Ordering::Relaxed) {
+            error!(table_name = %self.table_properties.table_name, "Stream closed");
+            return Err(ZerobusError::StreamClosedError(tonic::Status::internal(
+                "Stream closed",
+            )));
+        }
+        Ok(())
     }
 
     /// Internal unified method for ingesting records and batches.
@@ -128,12 +171,7 @@ impl ZerobusStream {
         &self,
         encoded_batch: EncodedBatch,
     ) -> ZerobusResult<impl Future<Output = ZerobusResult<OffsetId>>> {
-        if self.is_closed.load(Ordering::Relaxed) {
-            error!(table_name = %self.table_properties.table_name, "Stream closed");
-            return Err(ZerobusError::StreamClosedError(tonic::Status::internal(
-                "Stream closed",
-            )));
-        }
+        self.check_open()?;
 
         let _guard = self.sync_mutex.lock().await;
 
@@ -177,21 +215,8 @@ impl ZerobusStream {
     ///
     /// Returns the logical offset directly without waiting for acknowledgment.
     /// Used by the public `ingest_*_offset` methods.
-    async fn ingest_internal_v2(&self, encoded_batch: EncodedBatch) -> ZerobusResult<OffsetId> {
-        let byte_size = encoded_batch.total_byte_size();
-        let max_payload_bytes = self.options.max_ingest_payload_bytes;
-        if byte_size > max_payload_bytes {
-            return Err(ZerobusError::InvalidArgument(format!(
-                "Ingest payload too large: {byte_size} bytes exceeds the configured limit of {max_payload_bytes} bytes"
-            )));
-        }
-
-        if self.is_closed.load(Ordering::Relaxed) {
-            error!(table_name = %self.table_properties.table_name, "Stream closed");
-            return Err(ZerobusError::StreamClosedError(tonic::Status::internal(
-                "Stream closed",
-            )));
-        }
+    async fn enqueue_prepared_batch(&self, encoded_batch: EncodedBatch) -> ZerobusResult<OffsetId> {
+        self.check_open()?;
 
         let _guard = self.sync_mutex.lock().await;
 
@@ -211,7 +236,47 @@ impl ZerobusStream {
     }
 
     #[cfg(feature = "testing")]
-    pub(crate) fn has_capacity(&self) -> bool {
-        self.landing_zone.len() < self.options.max_inflight_requests
+    pub(crate) async fn reserve_capacity(
+        &self,
+    ) -> ZerobusResult<crate::landing_zone::CapacityReservation> {
+        self.check_open()?;
+        Ok(self.landing_zone.reserve_capacity().await)
+    }
+
+    #[cfg(feature = "testing")]
+    pub(crate) fn capacity_wait_timeout(&self) -> std::time::Duration {
+        std::time::Duration::from_millis(self.options.flush_timeout_ms)
+    }
+
+    #[cfg(feature = "testing")]
+    pub(crate) async fn enqueue_reserved_admitted<F, Fut, G>(
+        &self,
+        encoded_batch: EncodedBatch,
+        reservation: crate::landing_zone::CapacityReservation,
+        admit: F,
+    ) -> ZerobusResult<OffsetId>
+    where
+        F: FnOnce() -> Fut,
+        Fut: Future<Output = ZerobusResult<G>>,
+    {
+        let _guard = self.sync_mutex.lock().await;
+        let admission_guard = admit().await?;
+        self.check_open()?;
+
+        let offset_id = self.logical_offset_id_generator.next();
+        debug!(
+            offset_id,
+            record_count = encoded_batch.get_record_count(),
+            "Ingesting record(s)"
+        );
+        self.landing_zone.enqueue_reserved(
+            Box::new(IngestRequest {
+                payload: encoded_batch,
+                offset_id,
+            }),
+            reservation,
+        );
+        drop(admission_guard);
+        Ok(offset_id)
     }
 }

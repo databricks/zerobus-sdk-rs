@@ -75,6 +75,8 @@ pub struct StreamConfigurationOptions {
     /// Timeout in milliseconds for flush operations.
     ///
     /// If a flush() call cannot complete within this time, it will return a timeout error.
+    /// Multiplexed streams also use this as the maximum time an ingest call may
+    /// wait for sub-stream capacity to become available.
     ///
     /// Default: 300,000 (5 minutes)
     pub flush_timeout_ms: u64,

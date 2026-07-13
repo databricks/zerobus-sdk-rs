@@ -987,6 +987,122 @@ mod failure_tests {
     }
 
     #[tokio::test]
+    async fn test_concurrent_ingest_waiting_for_capacity_fails_after_mux_poison(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        setup_tracing();
+        info!("Starting test_concurrent_ingest_waiting_for_capacity_fails_after_mux_poison");
+
+        let (mock_server, server_url) = start_mock_server().await?;
+        mock_server
+            .inject_responses(
+                TABLE_FAIL,
+                vec![
+                    MockResponse::CreateStream {
+                        stream_id: "poisoned".to_string(),
+                        delay_ms: 0,
+                    },
+                    MockResponse::Error {
+                        status: tonic::Status::permission_denied("sub-stream failure"),
+                        delay_ms: 0,
+                    },
+                ],
+            )
+            .await;
+
+        let sdk = create_test_sdk(&server_url).await?;
+        let opts = TestOpts {
+            max_inflight_requests: 1,
+            ..default_options()
+        };
+        let stream = create_test_stream(&sdk, TABLE_FAIL, opts).await?;
+        let mux = Arc::new(MultiplexedStream::new(vec![stream]));
+
+        const TASKS: usize = 16;
+        let barrier = Arc::new(tokio::sync::Barrier::new(TASKS));
+        let mut handles = Vec::with_capacity(TASKS);
+
+        for i in 0..TASKS {
+            let mux = Arc::clone(&mux);
+            let barrier = Arc::clone(&barrier);
+            handles.push(tokio::spawn(async move {
+                barrier.wait().await;
+                mux.ingest_record(format!("record-{i}").into_bytes()).await
+            }));
+        }
+
+        let mut successes = Vec::new();
+        let mut errors = 0;
+        for handle in handles {
+            match tokio::time::timeout(std::time::Duration::from_secs(2), handle)
+                .await
+                .expect("ingest task should finish after mux poison")?
+            {
+                Ok(message_id) => successes.push(message_id),
+                Err(ZerobusError::InvalidStateError(_))
+                | Err(ZerobusError::StreamClosedError(_)) => errors += 1,
+                Err(e) => panic!("unexpected ingest error: {e:?}"),
+            }
+        }
+
+        assert_eq!(
+            successes.len(),
+            1,
+            "Only the first record should be admitted before poison"
+        );
+        assert_eq!(successes[0].stream_index(), 0);
+        assert_eq!(successes[0].sub_offset(), 0);
+        assert_eq!(errors, TASKS - 1);
+        assert!(mux.is_closed(), "Mux should report the failed sub-stream");
+        assert_eq!(mock_server.get_write_count().await, 1);
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_ingest_times_out_when_capacity_never_recovers(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        setup_tracing();
+
+        let (mock_server, server_url) = start_mock_server().await?;
+        mock_server
+            .inject_responses(
+                TABLE_OK,
+                vec![MockResponse::CreateStream {
+                    stream_id: "stalled".to_string(),
+                    delay_ms: 0,
+                }],
+            )
+            .await;
+
+        let sdk = create_test_sdk(&server_url).await?;
+        let stream = create_test_stream(
+            &sdk,
+            TABLE_OK,
+            TestOpts {
+                max_inflight_requests: 1,
+                flush_timeout_ms: Some(100),
+            },
+        )
+        .await?;
+        let mux = MultiplexedStream::new(vec![stream]);
+
+        mux.ingest_record(b"fills-capacity".to_vec()).await?;
+        let result = mux.ingest_record(b"times-out".to_vec()).await;
+
+        assert!(matches!(
+            result,
+            Err(ZerobusError::ConnectionTimeout(message))
+                if message.contains("sub-stream 0")
+        ));
+        assert!(
+            !mux.is_closed(),
+            "capacity timeout should not poison the mux"
+        );
+
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn test_public_is_closed_reports_closed_substream(
     ) -> Result<(), Box<dyn std::error::Error>> {
         setup_tracing();
