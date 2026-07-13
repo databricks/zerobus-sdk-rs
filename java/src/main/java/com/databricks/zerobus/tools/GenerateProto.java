@@ -26,7 +26,7 @@ import java.util.regex.Pattern;
  * --client-secret &lt;secret&gt; --table &lt;catalog.schema.table&gt; --output &lt;output.proto&gt;
  * [--proto-msg &lt;message_name&gt;]
  *
- * <p>Type mappings: INT -&gt; int32 STRING -&gt; string FLOAT -&gt; float LONG/BIGINT -&gt; int64
+ * <p>Type mappings: INT -&gt; int32 STRING/VARIANT -&gt; string FLOAT -&gt; float LONG/BIGINT -&gt; int64
  * SHORT/SMALLINT -&gt; int32 DOUBLE -&gt; double BOOLEAN -&gt; bool BINARY -&gt; bytes DATE -&gt;
  * int32 TIMESTAMP -&gt; int64 ARRAY&lt;type&gt; -&gt; repeated type MAP&lt;key_type, value_type&gt;
  * -&gt; map&lt;key_type, value_type&gt;
@@ -55,6 +55,7 @@ public class GenerateProto {
           + "  Delta            -> Proto2\n"
           + "  INT              -> int32\n"
           + "  STRING           -> string\n"
+          + "  VARIANT          -> string\n"
           + "  FLOAT            -> float\n"
           + "  LONG             -> int64\n"
           + "  SHORT            -> int32\n"
@@ -286,6 +287,7 @@ public class GenerateProto {
         protoType = "int64";
         break;
       case "STRING":
+      case "VARIANT":
         protoType = "string";
         break;
       case "FLOAT":
@@ -365,6 +367,7 @@ public class GenerateProto {
       case "TIMESTAMP":
         return "int64";
       case "STRING":
+      case "VARIANT":
         return "string";
       case "FLOAT":
         return "float";
