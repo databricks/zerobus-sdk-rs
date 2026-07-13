@@ -291,6 +291,41 @@ func TestOpenRejectsTokenWithControlChars(t *testing.T) {
 	}
 }
 
+func TestOpenRejectsHeadersProviderWithControlChars(t *testing.T) {
+	cases := []struct {
+		name    string
+		headers map[string]string
+	}{
+		{
+			name:    "authorization with newline",
+			headers: map[string]string{"authorization": "tok\nen"},
+		},
+		{
+			name:    "authorization with null",
+			headers: map[string]string{"authorization": "tok\x00en"},
+		},
+		{
+			name:    "custom header with carriage return",
+			headers: map[string]string{mdUserKey: "val\ruer"},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			srv := &fakeServer{streamID: "s", seen: make(chan observed, 1)}
+			conn := dialFake(t, srv)
+
+			_, err := conn.Open(context.Background(), transport.StreamParams{
+				TableName:       "c.s.t",
+				RecordType:      zerobuspb.RecordType_JSON,
+				HeadersProvider: &stubHeadersProvider{headers: tc.headers},
+			})
+			if err == nil {
+				t.Fatal("Open with invalid provider header value: got nil error, want rejection")
+			}
+		})
+	}
+}
+
 func TestStreamSendRecv(t *testing.T) {
 	srv := &fakeServer{streamID: "s1", seen: make(chan observed, 1)}
 	conn := dialFake(t, srv)

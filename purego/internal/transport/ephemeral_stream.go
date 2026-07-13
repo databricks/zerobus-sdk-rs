@@ -28,13 +28,25 @@ type StreamParams struct {
 	// Ignored when HeadersProvider is set.
 	Token string
 	// HeadersProvider supplies custom auth headers, similar to other SDKs.
-	// When set, it is used instead of Token.
+	// When set, it is used instead of Token. See HeadersProvider for timeout
+	// behavior when GetHeaders may block (e.g. token mint).
 	HeadersProvider HeadersProvider
 }
 
 // HeadersProvider provides gRPC metadata headers for stream authentication.
 type HeadersProvider interface {
+	// GetHeaders returns the metadata headers to attach to the stream. Called
+	// during Open before the RPC handshake starts.
+	//
+	// ctx is the same context passed to Open. Open applies defaultHandshakeTimeout
+	// only to the RPC start and handshake that follow; GetHeaders runs first and
+	// is not separately bounded. If GetHeaders may block on network I/O, ctx must
+	// carry a deadline or cancellation, or Open can hang until GetHeaders returns.
 	GetHeaders(ctx context.Context, tableName string) (map[string]string, error)
+
+	// Invalidate drops any cached credentials so the next GetHeaders re-derives
+	// them. Open calls this when the server rejects the supplied credentials
+	// with Unauthenticated or PermissionDenied during stream creation.
 	Invalidate(ctx context.Context, tableName string)
 }
 
@@ -53,11 +65,12 @@ type Stream struct {
 // Open starts an EphemeralStream, runs the create-stream handshake, and returns
 // the live stream once the server acknowledges it with a stream ID.
 //
-// ctx bounds only opening the stream (RPC start + handshake), not the returned
-// stream's lifetime: cancelling it aborts an in-progress Open promptly, but once
-// Open succeeds the live stream is detached and cancelled only by Close, so a
-// later ctx timeout won't tear it down mid-ingest. Without a deadline, the open
-// attempt is bounded by defaultHandshakeTimeout. ctx's values (including caller
+// ctx bounds opening the stream. When HeadersProvider is set, GetHeaders is
+// invoked first (see HeadersProvider); only the subsequent RPC start and
+// handshake are bounded by defaultHandshakeTimeout when ctx has no deadline.
+// Cancelling ctx aborts an in-progress Open promptly, but once Open succeeds
+// the live stream is detached and cancelled only by Close, so a later ctx
+// timeout won't tear it down mid-ingest. ctx's values (including caller
 // metadata) carry onto the live stream. The caller must Close the Stream.
 func (c *Conn) Open(ctx context.Context, p StreamParams) (*Stream, error) {
 	// Normalize once so the metadata header and the create request agree, and so
