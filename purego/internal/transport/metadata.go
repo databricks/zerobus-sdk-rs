@@ -63,9 +63,9 @@ func withStreamMetadataHeaders(ctx context.Context, tableName string, headers ma
 	return metadata.NewOutgoingContext(ctx, md)
 }
 
-// isUsableAsHeader reports whether token is safe in a gRPC authorization
-// header: no control or non-ASCII chars, which gRPC metadata rejects. An empty
-// token is usable (it yields no header).
+// isUsableAsHeader reports whether value is safe as a gRPC metadata header
+// value: no control or non-ASCII characters, which gRPC rejects. An empty
+// value is usable (it yields no header when used for authorization).
 func isUsableAsHeader(token string) bool {
 	for _, r := range token {
 		if r > unicode.MaxASCII || unicode.IsControl(r) {

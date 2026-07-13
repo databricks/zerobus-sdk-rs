@@ -55,8 +55,9 @@ type fakeServer struct {
 	// hangDrain makes the server ignore the client's half-close and never end the
 	// stream, so GracefulClose can't drain to io.EOF and must hit its ctx deadline.
 	hangDrain bool
-	// authReject makes open fail with UNAUTHENTICATED after receiving create.
-	authReject bool
+	// authRejectCode, when not codes.OK, makes open fail with that gRPC status
+	// after receiving create.
+	authRejectCode codes.Code
 	// drainGate, when non-nil, holds io.EOF back until closed, so a test can
 	// assert GracefulClose keeps draining rather than returning at the first ack.
 	drainGate chan struct{}
@@ -87,8 +88,8 @@ func (f *fakeServer) EphemeralStream(stream zerobuspb.Zerobus_EphemeralStreamSer
 		<-stream.Context().Done()
 		return stream.Context().Err()
 	}
-	if f.authReject {
-		return status.Error(codes.Unauthenticated, "bad credentials")
+	if f.authRejectCode != codes.OK {
+		return status.Error(f.authRejectCode, "bad credentials")
 	}
 
 	var resp *zerobuspb.EphemeralStreamResponse
@@ -519,22 +520,32 @@ func TestOpenHeadersProviderNoAuthDoesNotFallBackToToken(t *testing.T) {
 }
 
 func TestOpenAuthRejectionInvalidatesHeadersProvider(t *testing.T) {
-	srv := &fakeServer{streamID: "s", seen: make(chan observed, 1), authReject: true}
-	conn := dialFake(t, srv)
+	for _, tc := range []struct {
+		name string
+		code codes.Code
+	}{
+		{name: "Unauthenticated", code: codes.Unauthenticated},
+		{name: "PermissionDenied", code: codes.PermissionDenied},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			srv := &fakeServer{streamID: "s", seen: make(chan observed, 1), authRejectCode: tc.code}
+			conn := dialFake(t, srv)
 
-	p := &stubHeadersProvider{
-		headers: map[string]string{"authorization": "tok"},
-	}
-	_, err := conn.Open(context.Background(), transport.StreamParams{
-		TableName:       "c.s.t",
-		RecordType:      zerobuspb.RecordType_JSON,
-		HeadersProvider: p,
-	})
-	if err == nil {
-		t.Fatal("Open with server auth rejection: got nil error")
-	}
-	if p.invalidateCalls.Load() != 1 {
-		t.Fatalf("Invalidate calls = %d, want 1", p.invalidateCalls.Load())
+			p := &stubHeadersProvider{
+				headers: map[string]string{"authorization": "tok"},
+			}
+			_, err := conn.Open(context.Background(), transport.StreamParams{
+				TableName:       "c.s.t",
+				RecordType:      zerobuspb.RecordType_JSON,
+				HeadersProvider: p,
+			})
+			if err == nil {
+				t.Fatal("Open with server auth rejection: got nil error")
+			}
+			if p.invalidateCalls.Load() != 1 {
+				t.Fatalf("Invalidate calls = %d, want 1", p.invalidateCalls.Load())
+			}
+		})
 	}
 }
 
