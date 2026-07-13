@@ -57,7 +57,7 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 arrow-flight = { path = "third_party/arrow-flight", version = "58.3", default-features = false }
 arrow-array = { version = "58.3", default-features = false }
 arrow-schema = { version = "58.3", default-features = false }
-arrow-ipc = { version = "58.3", default-features = false }
+arrow-ipc = { version = "59.1", default-features = false }
 
 # Misc
 futures = "0.3"
