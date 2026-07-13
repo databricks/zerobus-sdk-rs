@@ -397,7 +397,8 @@ fn type_ref_to_complex(tref: &TypeRef, level: usize) -> Result<ComplexType, Stri
 
 fn parse_primitive_type(s: &str) -> Result<PrimitiveType, String> {
     Ok(match s {
-        "string" => PrimitiveType::String,
+        // VARIANT is carried as an unshredded JSON-encoded string.
+        "string" | "variant" => PrimitiveType::String,
         "long" => PrimitiveType::Long,
         "integer" => PrimitiveType::Integer,
         "short" => PrimitiveType::Short,
@@ -978,6 +979,38 @@ mod tests {
     }
 
     #[test]
+    fn nested_variant_maps_to_string() {
+        // VARIANT nested in STRUCT/ARRAY/MAP arrives as the lowercase "variant"
+        // token in type_json and must map to proto `string`, like the top level.
+        let type_json = r#"{
+            "type":"struct",
+            "fields":[
+                {"name":"v","type":"variant","nullable":true,"metadata":{}},
+                {"name":"tags","type":{"type":"array","elementType":"variant","containsNull":true},"nullable":true,"metadata":{}},
+                {"name":"props","type":{"type":"map","keyType":"string","valueType":"variant","valueContainsNull":true},"nullable":true,"metadata":{}}
+            ]
+        }"#;
+        let cols = vec![complex_col("payload", "STRUCT", type_json, 0)];
+        let d = descriptor_from_uc_columns(&cols, "m").unwrap();
+
+        let nested = d
+            .nested_type
+            .iter()
+            .find(|n| n.name() == field(&d, "payload").type_name.as_deref().unwrap())
+            .expect("nested struct message not emitted");
+        assert_eq!(field(nested, "v").r#type(), ProtoType::String);
+        assert_eq!(field(nested, "tags").r#type(), ProtoType::String);
+        assert_eq!(field(nested, "tags").label(), Label::Repeated);
+        let entry_name = field(nested, "props").type_name.as_deref().unwrap();
+        let entry = nested
+            .nested_type
+            .iter()
+            .find(|n| n.name() == entry_name)
+            .expect("map entry message missing");
+        assert_eq!(field(entry, "value").r#type(), ProtoType::String);
+    }
+
+    #[test]
     fn map_with_struct_value_emits_value_and_entry() {
         let type_json = r#"{
             "type":"map",
@@ -1409,6 +1442,20 @@ mod tests {
                         &DataType::Timestamp(TimeUnit::Microsecond, None)
                     );
                 }
+                other => panic!("expected Struct, got {:?}", other),
+            }
+        }
+
+        #[test]
+        fn nested_variant_maps_to_large_utf8() {
+            let type_json = r#"{
+                "type":"struct",
+                "fields":[{"name":"v","type":"variant","nullable":true,"metadata":{}}]
+            }"#;
+            let cols = vec![complex_col("payload", "STRUCT", type_json, 0)];
+            let s = arrow_schema_from_uc_columns(&cols).unwrap();
+            match arrow_field(&s, "payload").data_type() {
+                DataType::Struct(fs) => assert_eq!(fs[0].data_type(), &DataType::LargeUtf8),
                 other => panic!("expected Struct, got {:?}", other),
             }
         }

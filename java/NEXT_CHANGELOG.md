@@ -17,6 +17,7 @@
 
 ### Bug Fixes
 
+- Fixed the `GenerateProto` tool rejecting `VARIANT` columns with `Unsupported column type` (and `Unsupported array/map element type` when nested). `VARIANT` now maps to `string` (unshredded JSON-encoded text) at the top level and inside `ARRAY`/`MAP`, matching the other SDKs.
 - Fixed the default `recoveryRetries`, which was `3` instead of the `4` used by the Rust core and every other SDK (Go, TypeScript, C++). A stream left with the default now makes 4 recovery attempts on transient failures instead of 3, matching the documented cross-SDK behavior. Callers that set `recoveryRetries` explicitly are unaffected. (#438)
 
 ### Documentation
