@@ -97,7 +97,7 @@ func TestTokenCacheRotatedSecretGetsFreshEntry(t *testing.T) {
 	}
 }
 
-func TestTokenCacheNoTTLIsCachedUnderDefaultLifetime(t *testing.T) {
+func TestTokenCacheNoTTLIsNotCached(t *testing.T) {
 	c := newTokenCache()
 	var calls atomic.Int64
 	mint := func(_ context.Context, _ mintReason) (fetchedToken, error) {
@@ -108,13 +108,11 @@ func TestTokenCacheNoTTLIsCachedUnderDefaultLifetime(t *testing.T) {
 	a := getOrFetch(t, c, "id", "secret", "c.s.t", mint)
 	b := getOrFetch(t, c, "id", "secret", "c.s.t", mint)
 
-	// A token with no expires_in is now cached under the default lifetime and
-	// reused, rather than re-minted on every call.
 	if a != "tok" || b != "tok" {
 		t.Fatalf("want tok/tok, got %q/%q", a, b)
 	}
-	if n := calls.Load(); n != 1 {
-		t.Fatalf("want 1 mint for no-TTL token (cached), got %d", n)
+	if n := calls.Load(); n != 2 {
+		t.Fatalf("want 2 mints for no-TTL token (not cached), got %d", n)
 	}
 }
 
@@ -195,13 +193,13 @@ func TestTokenCacheNonRetryableRefreshErrorPropagates(t *testing.T) {
 	}
 }
 
-func TestTokenCacheNoTTLResponseReplacesCachedToken(t *testing.T) {
+func TestTokenCacheNoTTLResponseKeepsExistingCachedToken(t *testing.T) {
 	c := newTokenCache()
 	// Seed a token that is due for refresh (refreshAt already in the past).
 	seedRefreshable(c, "id", "secret", "c.s.t", "valid")
 
-	// A refresh returns a token with no TTL; the caller gets the new token and it
-	// is now cached under the default lifetime (no longer discarded).
+	// A refresh returns a token with no TTL; caller gets the fresh token but the
+	// existing valid cached token is retained (Rust parity).
 	fresh := getOrFetch(t, c, "id", "secret", "c.s.t",
 		func(_ context.Context, _ mintReason) (fetchedToken, error) {
 			return fetchedToken{token: "nottl"}, nil
@@ -211,19 +209,18 @@ func TestTokenCacheNoTTLResponseReplacesCachedToken(t *testing.T) {
 		t.Fatalf("want %q, got %q", "nottl", fresh)
 	}
 
-	// The next call reuses the freshly cached no-TTL token rather than re-minting.
-	var minted atomic.Bool
-	tok := getOrFetch(t, c, "id", "secret", "c.s.t",
+	// A subsequent retryable refresh failure should still fall back to the
+	// original valid cached token, proving it was retained.
+	tok, err := c.getOrFetch(context.Background(), "id", "secret", "c.s.t",
 		func(_ context.Context, _ mintReason) (fetchedToken, error) {
-			minted.Store(true)
-			return fetchedToken{token: "unexpected"}, nil
+			return fetchedToken{}, &retryErr{"blip"}
 		},
 	)
-	if tok != "nottl" {
-		t.Fatalf("want cached %q, got %q", "nottl", tok)
+	if err != nil {
+		t.Fatalf("want fallback to retained cached token, got error: %v", err)
 	}
-	if minted.Load() {
-		t.Fatal("second call should hit cache, not re-mint")
+	if tok != "valid" {
+		t.Fatalf("want retained cached token %q, got %q", "valid", tok)
 	}
 }
 
@@ -415,12 +412,6 @@ func TestNewCachedToken(t *testing.T) {
 	}
 	if !ct.refreshAt.Equal(now.Add(time.Hour - 5*time.Minute)) {
 		t.Fatalf("refreshAt = %v, want +55m", ct.refreshAt)
-	}
-
-	// No TTL: falls back to the default lifetime.
-	ct = newCachedToken("v", 0, 5*time.Minute, now)
-	if !ct.expiresAt.Equal(now.Add(defaultNoTTLLifetime)) {
-		t.Fatalf("no-TTL expiresAt = %v, want +%v", ct.expiresAt, defaultNoTTLLifetime)
 	}
 
 	// Buffer larger than ttl/2 is clamped so at least half the TTL is reusable.

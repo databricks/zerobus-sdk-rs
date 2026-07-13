@@ -5,11 +5,14 @@ import (
 	"errors"
 	"io"
 	"net"
+	"sync/atomic"
 	"testing"
 	"time"
 
+	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/metadata"
+	"google.golang.org/grpc/status"
 	"google.golang.org/grpc/test/bufconn"
 	"google.golang.org/protobuf/proto"
 
@@ -52,6 +55,8 @@ type fakeServer struct {
 	// hangDrain makes the server ignore the client's half-close and never end the
 	// stream, so GracefulClose can't drain to io.EOF and must hit its ctx deadline.
 	hangDrain bool
+	// authReject makes open fail with UNAUTHENTICATED after receiving create.
+	authReject bool
 	// drainGate, when non-nil, holds io.EOF back until closed, so a test can
 	// assert GracefulClose keeps draining rather than returning at the first ack.
 	drainGate chan struct{}
@@ -81,6 +86,9 @@ func (f *fakeServer) EphemeralStream(stream zerobuspb.Zerobus_EphemeralStreamSer
 	if f.hangHandshake {
 		<-stream.Context().Done()
 		return stream.Context().Err()
+	}
+	if f.authReject {
+		return status.Error(codes.Unauthenticated, "bad credentials")
 	}
 
 	var resp *zerobuspb.EphemeralStreamResponse
@@ -133,6 +141,28 @@ func (f *fakeServer) EphemeralStream(stream zerobuspb.Zerobus_EphemeralStreamSer
 			return err
 		}
 	}
+}
+
+type stubHeadersProvider struct {
+	headers         map[string]string
+	calls           atomic.Int32
+	invalidateCalls atomic.Int32
+	lastTable       atomic.Value // string
+}
+
+func (p *stubHeadersProvider) GetHeaders(_ context.Context, tableName string) (map[string]string, error) {
+	p.calls.Add(1)
+	p.lastTable.Store(tableName)
+	out := make(map[string]string, len(p.headers))
+	for k, v := range p.headers {
+		out[k] = v
+	}
+	return out, nil
+}
+
+func (p *stubHeadersProvider) Invalidate(_ context.Context, tableName string) {
+	p.invalidateCalls.Add(1)
+	p.lastTable.Store(tableName)
 }
 
 // firstMD returns the first metadata value for key, or "".
@@ -384,6 +414,64 @@ func TestOpenOmitsEmptyToken(t *testing.T) {
 	}
 	if got := <-srv.seen; got.auth != "" {
 		t.Errorf("server saw authorization %q, want it absent", got.auth)
+	}
+}
+
+func TestOpenUsesHeadersProviderAndTableIsAuthoritative(t *testing.T) {
+	srv := &fakeServer{streamID: "s", seen: make(chan observed, 1)}
+	conn := dialFake(t, srv)
+
+	p := &stubHeadersProvider{
+		headers: map[string]string{
+			"authorization":                    "provider-token",
+			"x-databricks-zerobus-table-name": "wrong.table.name",
+			mdUserKey:                         "provider-md",
+		},
+	}
+	_, err := conn.Open(context.Background(), transport.StreamParams{
+		TableName:       "c.s.t",
+		RecordType:      zerobuspb.RecordType_JSON,
+		HeadersProvider: p,
+	})
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	got := <-srv.seen
+	if got.tableName != "c.s.t" {
+		t.Fatalf("server saw table %q, want %q", got.tableName, "c.s.t")
+	}
+	if got.auth != "Bearer provider-token" {
+		t.Fatalf("server saw auth %q, want %q", got.auth, "Bearer provider-token")
+	}
+	if got.userMD != "provider-md" {
+		t.Fatalf("server saw custom metadata %q, want %q", got.userMD, "provider-md")
+	}
+	if p.calls.Load() != 1 {
+		t.Fatalf("GetHeaders calls = %d, want 1", p.calls.Load())
+	}
+	last, _ := p.lastTable.Load().(string)
+	if last != "c.s.t" {
+		t.Fatalf("provider saw table %q, want %q", last, "c.s.t")
+	}
+}
+
+func TestOpenAuthRejectionInvalidatesHeadersProvider(t *testing.T) {
+	srv := &fakeServer{streamID: "s", seen: make(chan observed, 1), authReject: true}
+	conn := dialFake(t, srv)
+
+	p := &stubHeadersProvider{
+		headers: map[string]string{"authorization": "tok"},
+	}
+	_, err := conn.Open(context.Background(), transport.StreamParams{
+		TableName:       "c.s.t",
+		RecordType:      zerobuspb.RecordType_JSON,
+		HeadersProvider: p,
+	})
+	if err == nil {
+		t.Fatal("Open with server auth rejection: got nil error")
+	}
+	if p.invalidateCalls.Load() != 1 {
+		t.Fatalf("Invalidate calls = %d, want 1", p.invalidateCalls.Load())
 	}
 }
 

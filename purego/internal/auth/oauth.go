@@ -35,8 +35,8 @@ type OAuthTokenProvider struct {
 	clientID     string
 	clientSecret string
 	workspaceID  string
+	zerobusHost  string
 	ucEndpoint   string // e.g. "https://workspace.databricks.com"
-	tableName    string
 
 	cache  *tokenCache
 	client *http.Client
@@ -112,19 +112,16 @@ func WithLogger(l *slog.Logger) OAuthOption {
 	}
 }
 
-// NewOAuthTokenProvider creates a provider that mints UC OAuth tokens for
-// tableName using the client credentials flow.
+// NewOAuthTokenProvider creates a provider that mints UC OAuth tokens using the
+// client credentials flow.
 //
+// zerobusEndpoint is the Zerobus service URL. The workspace ID used in OAuth
+// resource audience is derived from its host prefix (matching the Rust SDK).
 // ucEndpoint is the workspace URL (e.g. "https://my-workspace.databricks.com").
-// workspaceID is the numeric Databricks workspace ID.
 func NewOAuthTokenProvider(
-	clientID, clientSecret, workspaceID, ucEndpoint, tableName string,
+	clientID, clientSecret, zerobusEndpoint, ucEndpoint string,
 	opts ...OAuthOption,
 ) (*OAuthTokenProvider, error) {
-	tableName = strings.TrimSpace(tableName)
-	if err := validateTableName(tableName); err != nil {
-		return nil, fmt.Errorf("auth: oauth: %w", err)
-	}
 	ucEndpoint = strings.TrimRight(strings.TrimSpace(ucEndpoint), "/")
 	if ucEndpoint == "" {
 		return nil, fmt.Errorf("auth: oauth: ucEndpoint is required")
@@ -138,16 +135,17 @@ func NewOAuthTokenProvider(
 	if clientSecret == "" {
 		return nil, fmt.Errorf("auth: oauth: clientSecret is required")
 	}
-	if workspaceID == "" {
-		return nil, fmt.Errorf("auth: oauth: workspaceID is required")
+	workspaceID, zerobusHost, err := deriveWorkspaceIDFromEndpoint(zerobusEndpoint)
+	if err != nil {
+		return nil, fmt.Errorf("auth: oauth: %w", err)
 	}
 
 	p := &OAuthTokenProvider{
 		clientID:     clientID,
 		clientSecret: clientSecret,
 		workspaceID:  workspaceID,
+		zerobusHost:  zerobusHost,
 		ucEndpoint:   ucEndpoint,
-		tableName:    tableName,
 		client:       &http.Client{Timeout: 30 * time.Second},
 		logger:       slog.New(slog.DiscardHandler),
 	}
@@ -172,28 +170,38 @@ func NewSharedTokenCache(opts ...CacheOption) *SharedTokenCache {
 	return newTokenCache(opts...)
 }
 
-// Token returns a valid bearer token for the provider's table, minting a new
-// one via Unity Catalog's OIDC token endpoint when the cache is empty or
-// nearing expiry.
+// Token returns a valid bearer token for tableName, minting a new one via
+// Unity Catalog's OIDC token endpoint when the cache is empty or nearing
+// expiry.
 //
 // ctx bounds the token request when a mint is required. Cancelling ctx during a
 // cached hit is a no-op.
 //
-// Every successful mint is cached. If UC reports an expires_in it is honored; if
-// it omits one the token is cached under a bounded default lifetime instead of
-// being re-minted on every call. The proactive-refresh lead time is clamped to
-// at most half the token's TTL, so even a short-lived token gets some reuse
-// before it is refreshed.
-func (p *OAuthTokenProvider) Token(ctx context.Context) (string, error) {
-	return p.cache.getOrFetch(ctx, p.clientID, p.clientSecret, p.tableName, p.mint)
+// A successful mint is cached only when UC reports a usable expires_in. If UC
+// omits expires_in (or reports a non-positive value), the token is returned but
+// not cached to match Rust SDK behavior.
+func (p *OAuthTokenProvider) Token(ctx context.Context, tableName string) (string, error) {
+	tableName = strings.TrimSpace(tableName)
+	if err := validateTableName(tableName); err != nil {
+		return "", fmt.Errorf("auth: oauth: %w", err)
+	}
+	return p.cache.getOrFetch(ctx, p.clientID, p.clientSecret, tableName,
+		func(ctx context.Context, reason mintReason) (fetchedToken, error) {
+			return p.mint(ctx, tableName, reason)
+		},
+	)
 }
 
 // FetchToken mints a token directly from Unity Catalog, bypassing the cache. It
 // neither reads nor writes the cache, so callers get a guaranteed-fresh token;
 // most callers should use [OAuthTokenProvider.Token] instead so tokens are
 // reused across streams.
-func (p *OAuthTokenProvider) FetchToken(ctx context.Context) (string, error) {
-	fetched, err := p.mint(ctx, mintReasonDirect)
+func (p *OAuthTokenProvider) FetchToken(ctx context.Context, tableName string) (string, error) {
+	tableName = strings.TrimSpace(tableName)
+	if err := validateTableName(tableName); err != nil {
+		return "", fmt.Errorf("auth: oauth: %w", err)
+	}
+	fetched, err := p.mint(ctx, tableName, mintReasonDirect)
 	if err != nil {
 		return "", err
 	}
@@ -202,29 +210,29 @@ func (p *OAuthTokenProvider) FetchToken(ctx context.Context) (string, error) {
 
 // mint fetches a token and emits structured observability for the outcome. It
 // is the single mint entry point shared by the cached and direct paths.
-func (p *OAuthTokenProvider) mint(ctx context.Context, reason mintReason) (fetchedToken, error) {
+func (p *OAuthTokenProvider) mint(ctx context.Context, tableName string, reason mintReason) (fetchedToken, error) {
 	started := time.Now()
-	fetched, err := p.fetchToken(ctx)
+	fetched, err := p.fetchToken(ctx, tableName)
 	elapsed := time.Since(started)
 
 	switch {
 	case err != nil:
 		p.logger.LogAttrs(ctx, slog.LevelWarn, "failed to mint UC OAuth token",
-			slog.String("table", p.tableName),
+			slog.String("table", tableName),
 			slog.String("reason", reason.String()),
 			slog.Bool("retryable", isRetryable(err)),
 			slog.Duration("elapsed", elapsed),
 			slog.String("error", err.Error()),
 		)
 	case fetched.expiresIn == nil:
-		p.logger.LogAttrs(ctx, slog.LevelWarn, "minted UC OAuth token but UC returned no expires_in; caching under a conservative default lifetime",
-			slog.String("table", p.tableName),
+		p.logger.LogAttrs(ctx, slog.LevelWarn, "minted UC OAuth token but UC returned no expires_in; token will not be cached",
+			slog.String("table", tableName),
 			slog.String("reason", reason.String()),
 			slog.Duration("elapsed", elapsed),
 		)
 	default:
 		p.logger.LogAttrs(ctx, slog.LevelInfo, "minted UC OAuth token",
-			slog.String("table", p.tableName),
+			slog.String("table", tableName),
 			slog.String("reason", reason.String()),
 			slog.Duration("expires_in", *fetched.expiresIn),
 			slog.Duration("elapsed", elapsed),
@@ -236,19 +244,23 @@ func (p *OAuthTokenProvider) mint(ctx context.Context, reason mintReason) (fetch
 // Invalidate drops the cached token for this provider's table so the next
 // Token call re-mints from Unity Catalog. Call this when the server rejects
 // the token with an authentication error.
-func (p *OAuthTokenProvider) Invalidate(_ context.Context) {
-	p.cache.invalidate(p.clientID, p.clientSecret, p.tableName)
+func (p *OAuthTokenProvider) Invalidate(_ context.Context, tableName string) {
+	tableName = strings.TrimSpace(tableName)
+	if err := validateTableName(tableName); err != nil {
+		return
+	}
+	p.cache.invalidate(p.clientID, p.clientSecret, tableName)
 }
 
 // fetchToken performs the OAuth 2.0 client credentials request against Unity
 // Catalog's OIDC token endpoint.
-func (p *OAuthTokenProvider) fetchToken(ctx context.Context) (fetchedToken, error) {
-	catalog, schema, _, err := parseTableName(p.tableName)
+func (p *OAuthTokenProvider) fetchToken(ctx context.Context, tableName string) (fetchedToken, error) {
+	catalog, schema, _, err := parseTableName(tableName)
 	if err != nil {
 		return fetchedToken{}, err
 	}
 
-	authDetails, err := buildAuthorizationDetails(catalog, schema, p.tableName)
+	authDetails, err := buildAuthorizationDetails(catalog, schema, tableName)
 	if err != nil {
 		return fetchedToken{}, fmt.Errorf("auth: oauth: marshal authorization_details: %w", err)
 	}
@@ -477,6 +489,31 @@ func isLoopbackHost(host string) bool {
 		return ip.IsLoopback()
 	}
 	return false
+}
+
+// deriveWorkspaceIDFromEndpoint extracts workspace ID from Zerobus endpoint
+// host by taking the first DNS label, matching Rust SDK behavior.
+func deriveWorkspaceIDFromEndpoint(endpoint string) (workspaceID, host string, err error) {
+	endpoint = strings.TrimSpace(endpoint)
+	if endpoint == "" {
+		return "", "", fmt.Errorf("zerobusEndpoint is required")
+	}
+	if !strings.HasPrefix(endpoint, "https://") && !strings.HasPrefix(endpoint, "http://") {
+		endpoint = "https://" + endpoint
+	}
+	u, err := url.Parse(endpoint)
+	if err != nil {
+		return "", "", fmt.Errorf("zerobusEndpoint is not a valid URL: %w", err)
+	}
+	host = u.Hostname()
+	if host == "" {
+		return "", "", fmt.Errorf("zerobusEndpoint has no host: %q", endpoint)
+	}
+	workspaceID, _, _ = strings.Cut(host, ".")
+	if workspaceID == "" {
+		return "", "", fmt.Errorf("failed to extract workspaceID from zerobusEndpoint host %q", host)
+	}
+	return workspaceID, host, nil
 }
 
 // validateTableName checks that s is a non-empty three-part dotted name.

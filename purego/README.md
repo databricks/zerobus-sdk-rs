@@ -23,8 +23,9 @@ Implemented packages:
 - `internal/auth` — token providers for stream authentication. `OAuthTokenProvider`
   implements the Unity Catalog OAuth 2.0 client-credentials flow with per-table
   token caching and proactive refresh; `StaticTokenProvider` wraps a fixed token
-  for tests or externally managed lifecycles. Obtain a token with `Token(ctx)`
-  and pass it as `StreamParams.Token`.
+  for tests or externally managed lifecycles. The package also exposes
+  `HeadersProvider` variants (`OAuthHeadersProvider`, `StaticHeadersProvider`)
+  so transport open can authenticate via provider callbacks like other SDKs.
 
 Planned layers: ingest/ack state management, recovery, and the public API.
 

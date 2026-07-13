@@ -43,7 +43,7 @@ func (s *tokenServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 func newTestProvider(t *testing.T, srv *tokenServer, table string) (*OAuthTokenProvider, *httptest.Server) {
 	t.Helper()
 	ts := httptest.NewServer(srv)
-	p, err := NewOAuthTokenProvider("clientID", "clientSecret", "ws123", ts.URL, table,
+	p, err := NewOAuthTokenProvider("clientID", "clientSecret", "https://ws123.zerobus.databricks.com", ts.URL,
 		WithHTTPClient(ts.Client()),
 	)
 	if err != nil {
@@ -57,7 +57,7 @@ func TestOAuthTokenProviderHappyPath(t *testing.T) {
 	p, ts := newTestProvider(t, srv, "cat.sch.tbl")
 	defer ts.Close()
 
-	tok, err := p.Token(context.Background())
+	tok, err := p.Token(context.Background(), "cat.sch.tbl")
 	if err != nil {
 		t.Fatalf("Token: %v", err)
 	}
@@ -71,10 +71,10 @@ func TestOAuthTokenProviderCachesToken(t *testing.T) {
 	p, ts := newTestProvider(t, srv, "cat.sch.tbl")
 	defer ts.Close()
 
-	if _, err := p.Token(context.Background()); err != nil {
+	if _, err := p.Token(context.Background(), "cat.sch.tbl"); err != nil {
 		t.Fatalf("first Token: %v", err)
 	}
-	if _, err := p.Token(context.Background()); err != nil {
+	if _, err := p.Token(context.Background(), "cat.sch.tbl"); err != nil {
 		t.Fatalf("second Token: %v", err)
 	}
 	if got := srv.calls.Load(); got != 1 {
@@ -87,11 +87,11 @@ func TestOAuthTokenProviderInvalidateForcesRemint(t *testing.T) {
 	p, ts := newTestProvider(t, srv, "cat.sch.tbl")
 	defer ts.Close()
 
-	if _, err := p.Token(context.Background()); err != nil {
+	if _, err := p.Token(context.Background(), "cat.sch.tbl"); err != nil {
 		t.Fatalf("first Token: %v", err)
 	}
-	p.Invalidate(context.Background())
-	if _, err := p.Token(context.Background()); err != nil {
+	p.Invalidate(context.Background(), "cat.sch.tbl")
+	if _, err := p.Token(context.Background(), "cat.sch.tbl"); err != nil {
 		t.Fatalf("Token after Invalidate: %v", err)
 	}
 	if got := srv.calls.Load(); got != 2 {
@@ -104,7 +104,7 @@ func TestOAuthTokenProvider5xxIsRetryable(t *testing.T) {
 	p, ts := newTestProvider(t, srv, "cat.sch.tbl")
 	defer ts.Close()
 
-	_, err := p.Token(context.Background())
+	_, err := p.Token(context.Background(), "cat.sch.tbl")
 	if err == nil {
 		t.Fatal("want error for 500, got nil")
 	}
@@ -119,7 +119,7 @@ func TestOAuthTokenProvider4xxIsNonRetryable(t *testing.T) {
 	p, ts := newTestProvider(t, srv, "cat.sch.tbl")
 	defer ts.Close()
 
-	_, err := p.Token(context.Background())
+	_, err := p.Token(context.Background(), "cat.sch.tbl")
 	if err == nil {
 		t.Fatal("want error for 401, got nil")
 	}
@@ -143,7 +143,7 @@ func TestOAuthTokenProviderContextCancellation(t *testing.T) {
 	defer hang.Close()   // executed second: server is now idle
 	defer close(unblock) // executed first: unblocks the handler
 
-	p, err := NewOAuthTokenProvider("id", "secret", "ws", hang.URL, "c.s.t",
+	p, err := NewOAuthTokenProvider("id", "secret", "https://ws.zerobus.databricks.com", hang.URL,
 		WithHTTPClient(hang.Client()),
 	)
 	if err != nil {
@@ -154,7 +154,7 @@ func TestOAuthTokenProviderContextCancellation(t *testing.T) {
 	defer cancel()
 
 	start := time.Now()
-	_, err = p.Token(ctx)
+	_, err = p.Token(ctx, "c.s.t")
 	if err == nil {
 		t.Fatal("want error on ctx cancellation, got nil")
 	}
@@ -171,13 +171,13 @@ func TestOAuthTokenProviderConnectionRefusedIsRetryable(t *testing.T) {
 	url := ts.URL
 	ts.Close() // close immediately so connections are refused
 
-	p, err := NewOAuthTokenProvider("id", "secret", "ws", url, "c.s.t",
+	p, err := NewOAuthTokenProvider("id", "secret", "https://ws.zerobus.databricks.com", url,
 		WithHTTPClient(client),
 	)
 	if err != nil {
 		t.Fatalf("NewOAuthTokenProvider: %v", err)
 	}
-	_, err = p.Token(context.Background())
+	_, err = p.Token(context.Background(), "c.s.t")
 	if err == nil {
 		t.Fatal("want error for refused connection, got nil")
 	}
@@ -193,7 +193,7 @@ func TestOAuthTokenProvider429IsNonRetryable(t *testing.T) {
 	p, ts := newTestProvider(t, srv, "cat.sch.tbl")
 	defer ts.Close()
 
-	_, err := p.Token(context.Background())
+	_, err := p.Token(context.Background(), "cat.sch.tbl")
 	if err == nil {
 		t.Fatal("want error for 429, got nil")
 	}
@@ -209,7 +209,7 @@ func TestOAuthTokenProvider408IsNonRetryable(t *testing.T) {
 	p, ts := newTestProvider(t, srv, "cat.sch.tbl")
 	defer ts.Close()
 
-	_, err := p.Token(context.Background())
+	_, err := p.Token(context.Background(), "cat.sch.tbl")
 	if err == nil {
 		t.Fatal("want error for 408, got nil")
 	}
@@ -234,7 +234,7 @@ func TestTokenErrorUnwrapsContextCancellation(t *testing.T) {
 	defer hang.Close()
 	defer close(unblock)
 
-	p, err := NewOAuthTokenProvider("id", "secret", "ws", hang.URL, "c.s.t",
+	p, err := NewOAuthTokenProvider("id", "secret", "https://ws.zerobus.databricks.com", hang.URL,
 		WithHTTPClient(hang.Client()),
 	)
 	if err != nil {
@@ -244,7 +244,7 @@ func TestTokenErrorUnwrapsContextCancellation(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
 	defer cancel()
 
-	_, err = p.Token(ctx)
+	_, err = p.Token(ctx, "c.s.t")
 	if err == nil {
 		t.Fatal("want error on ctx cancellation, got nil")
 	}
@@ -265,7 +265,7 @@ func TestOAuthTokenProviderNilOptionsKeepDefaults(t *testing.T) {
 	ts := httptest.NewServer(srv)
 	defer ts.Close()
 
-	p, err := NewOAuthTokenProvider("id", "secret", "ws", ts.URL, "c.s.t",
+	p, err := NewOAuthTokenProvider("id", "secret", "https://ws.zerobus.databricks.com", ts.URL,
 		WithHTTPClient(nil),
 		WithSharedTokenCache(nil),
 	)
@@ -279,7 +279,7 @@ func TestOAuthTokenProviderNilOptionsKeepDefaults(t *testing.T) {
 		t.Fatal("WithSharedTokenCache(nil) overwrote the default cache")
 	}
 	// It must not panic and must actually work end to end.
-	if _, err := p.Token(context.Background()); err != nil {
+	if _, err := p.Token(context.Background(), "c.s.t"); err != nil {
 		t.Fatalf("Token with nil options: %v", err)
 	}
 }
@@ -289,7 +289,7 @@ func TestClassifyHTTPErrorPreservesBody(t *testing.T) {
 	p, ts := newTestProvider(t, srv, "cat.sch.tbl")
 	defer ts.Close()
 
-	_, err := p.Token(context.Background())
+	_, err := p.Token(context.Background(), "cat.sch.tbl")
 	if err == nil {
 		t.Fatal("want error for 401, got nil")
 	}
@@ -305,23 +305,24 @@ func TestClassifyHTTPErrorPreservesBody(t *testing.T) {
 
 func TestNewOAuthTokenProviderValidation(t *testing.T) {
 	cases := []struct {
-		name                                      string
-		clientID, secret, wsID, ucEndpoint, table string
+		name                                        string
+		clientID, secret, zerobusEndpoint, ucEndpoint, table string
 	}{
-		{"empty clientID", "", "s", "ws", "https://host", "c.s.t"},
-		{"empty secret", "id", "", "ws", "https://host", "c.s.t"},
-		{"empty wsID", "id", "s", "", "https://host", "c.s.t"},
-		{"empty ucEndpoint", "id", "s", "ws", "", "c.s.t"},
-		{"bad table (2 parts)", "id", "s", "ws", "https://host", "c.s"},
-		{"bad table (empty schema)", "id", "s", "ws", "https://host", "c..t"},
-		{"plaintext http endpoint", "id", "s", "ws", "http://host.databricks.com", "c.s.t"},
-		{"non-http scheme", "id", "s", "ws", "ftp://host", "c.s.t"},
+		{"empty clientID", "", "s", "https://ws.zerobus.databricks.com", "https://host", "c.s.t"},
+		{"empty secret", "id", "", "https://ws.zerobus.databricks.com", "https://host", "c.s.t"},
+		{"empty zerobus endpoint", "id", "s", "", "https://host", "c.s.t"},
+		{"empty ucEndpoint", "id", "s", "https://ws.zerobus.databricks.com", "", "c.s.t"},
+		{"bad table (2 parts)", "id", "s", "https://ws.zerobus.databricks.com", "https://host", "c.s"},
+		{"bad table (empty schema)", "id", "s", "https://ws.zerobus.databricks.com", "https://host", "c..t"},
+		{"bad zerobus endpoint host", "id", "s", "https://", "https://host", "c.s.t"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			_, err := NewOAuthTokenProvider(tc.clientID, tc.secret, tc.wsID, tc.ucEndpoint, tc.table)
+			p, err := NewOAuthTokenProvider(tc.clientID, tc.secret, tc.zerobusEndpoint, tc.ucEndpoint)
 			if err == nil {
-				t.Fatal("want error, got nil")
+				if _, tokErr := p.Token(context.Background(), tc.table); tokErr == nil {
+					t.Fatal("want constructor or token validation error, got nil")
+				}
 			}
 		})
 	}
@@ -377,17 +378,17 @@ func TestOAuthTokenProviderCacheDisabledAlwaysMints(t *testing.T) {
 	ts := httptest.NewServer(srv)
 	defer ts.Close()
 
-	p, err := NewOAuthTokenProvider("id", "secret", "ws", ts.URL, "c.s.t",
+	p, err := NewOAuthTokenProvider("id", "secret", "https://ws.zerobus.databricks.com", ts.URL,
 		WithHTTPClient(ts.Client()),
 		WithTokenCacheEnabled(false),
 	)
 	if err != nil {
 		t.Fatalf("NewOAuthTokenProvider: %v", err)
 	}
-	if _, err := p.Token(context.Background()); err != nil {
+	if _, err := p.Token(context.Background(), "c.s.t"); err != nil {
 		t.Fatalf("first Token: %v", err)
 	}
-	if _, err := p.Token(context.Background()); err != nil {
+	if _, err := p.Token(context.Background(), "c.s.t"); err != nil {
 		t.Fatalf("second Token: %v", err)
 	}
 	if got := srv.calls.Load(); got != 2 {
@@ -399,7 +400,7 @@ func TestOAuthTokenProviderCustomRefreshBuffer(t *testing.T) {
 	// WithRefreshBuffer must reach the provider's own cache. (The refresh-timing
 	// behavior itself is covered by the tokenCache unit tests; a large buffer no
 	// longer forces a re-mint on every call because it is clamped to ttl/2.)
-	p, err := NewOAuthTokenProvider("id", "secret", "ws", "https://host", "c.s.t",
+	p, err := NewOAuthTokenProvider("id", "secret", "https://ws.zerobus.databricks.com", "https://host",
 		WithRefreshBuffer(90*time.Second),
 	)
 	if err != nil {
@@ -418,7 +419,7 @@ func TestOAuthTokenProviderSharedCacheIgnoresProviderCacheOpts(t *testing.T) {
 	defer ts.Close()
 
 	shared := NewSharedTokenCache()
-	p, err := NewOAuthTokenProvider("id", "secret", "ws", ts.URL, "c.s.t",
+	p, err := NewOAuthTokenProvider("id", "secret", "https://ws.zerobus.databricks.com", ts.URL,
 		WithHTTPClient(ts.Client()),
 		WithSharedTokenCache(shared),
 		WithTokenCacheEnabled(false),
@@ -426,10 +427,10 @@ func TestOAuthTokenProviderSharedCacheIgnoresProviderCacheOpts(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewOAuthTokenProvider: %v", err)
 	}
-	if _, err := p.Token(context.Background()); err != nil {
+	if _, err := p.Token(context.Background(), "c.s.t"); err != nil {
 		t.Fatalf("first Token: %v", err)
 	}
-	if _, err := p.Token(context.Background()); err != nil {
+	if _, err := p.Token(context.Background(), "c.s.t"); err != nil {
 		t.Fatalf("second Token: %v", err)
 	}
 	if got := srv.calls.Load(); got != 1 {
@@ -443,17 +444,17 @@ func TestSharedTokenCacheDisabled(t *testing.T) {
 	defer ts.Close()
 
 	shared := NewSharedTokenCache(CacheEnabled(false))
-	p, err := NewOAuthTokenProvider("id", "secret", "ws", ts.URL, "c.s.t",
+	p, err := NewOAuthTokenProvider("id", "secret", "https://ws.zerobus.databricks.com", ts.URL,
 		WithHTTPClient(ts.Client()),
 		WithSharedTokenCache(shared),
 	)
 	if err != nil {
 		t.Fatalf("NewOAuthTokenProvider: %v", err)
 	}
-	if _, err := p.Token(context.Background()); err != nil {
+	if _, err := p.Token(context.Background(), "c.s.t"); err != nil {
 		t.Fatalf("first Token: %v", err)
 	}
-	if _, err := p.Token(context.Background()); err != nil {
+	if _, err := p.Token(context.Background(), "c.s.t"); err != nil {
 		t.Fatalf("second Token: %v", err)
 	}
 	if got := srv.calls.Load(); got != 2 {
@@ -467,18 +468,18 @@ func TestOAuthTokenProviderFetchTokenBypassesCache(t *testing.T) {
 	defer ts.Close()
 
 	// Warm the cache.
-	if _, err := p.Token(context.Background()); err != nil {
+	if _, err := p.Token(context.Background(), "cat.sch.tbl"); err != nil {
 		t.Fatalf("Token: %v", err)
 	}
 	// FetchToken must mint fresh regardless of the warm cache…
-	if _, err := p.FetchToken(context.Background()); err != nil {
+	if _, err := p.FetchToken(context.Background(), "cat.sch.tbl"); err != nil {
 		t.Fatalf("FetchToken: %v", err)
 	}
 	if got := srv.calls.Load(); got != 2 {
 		t.Fatalf("FetchToken should bypass cache (2 calls), got %d", got)
 	}
 	// …and must not populate/replace the cached entry the next Token call uses.
-	if _, err := p.Token(context.Background()); err != nil {
+	if _, err := p.Token(context.Background(), "cat.sch.tbl"); err != nil {
 		t.Fatalf("Token after FetchToken: %v", err)
 	}
 	if got := srv.calls.Load(); got != 2 {
@@ -494,14 +495,14 @@ func TestOAuthTokenProviderLoggerReceivesMint(t *testing.T) {
 	ts := httptest.NewServer(srv)
 	defer ts.Close()
 
-	p, err := NewOAuthTokenProvider("id", "secret", "ws", ts.URL, "c.s.t",
+	p, err := NewOAuthTokenProvider("id", "secret", "https://ws.zerobus.databricks.com", ts.URL,
 		WithHTTPClient(ts.Client()),
 		WithLogger(logger),
 	)
 	if err != nil {
 		t.Fatalf("NewOAuthTokenProvider: %v", err)
 	}
-	if _, err := p.Token(context.Background()); err != nil {
+	if _, err := p.Token(context.Background(), "c.s.t"); err != nil {
 		t.Fatalf("Token: %v", err)
 	}
 	out := buf.String()
@@ -521,13 +522,13 @@ func TestAuthorizationDetailsContent(t *testing.T) {
 	}))
 	defer ts.Close()
 
-	p, err := NewOAuthTokenProvider("id", "secret", "ws", ts.URL, "mycat.mysch.mytbl",
+	p, err := NewOAuthTokenProvider("id", "secret", "https://ws.zerobus.databricks.com", ts.URL,
 		WithHTTPClient(ts.Client()),
 	)
 	if err != nil {
 		t.Fatalf("NewOAuthTokenProvider: %v", err)
 	}
-	if _, err := p.Token(context.Background()); err != nil {
+	if _, err := p.Token(context.Background(), "mycat.mysch.mytbl"); err != nil {
 		t.Fatalf("Token: %v", err)
 	}
 

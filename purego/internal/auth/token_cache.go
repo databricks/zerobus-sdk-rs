@@ -11,13 +11,6 @@ import (
 // cache proactively re-mints; 5 minutes is the SDK-wide standard.
 const defaultRefreshBuffer = 5 * time.Minute
 
-// defaultNoTTLLifetime is the lifetime assigned to a token whose response omits
-// (or reports a non-positive) expires_in. Without it such a token would never
-// be cached and every Token call would pay a full HTTP round-trip; a bounded,
-// conservative lifetime instead lets it be reused for a short window. UC tokens
-// carry an expires_in in practice, so this is a safety net, not the norm.
-const defaultNoTTLLifetime = 10 * time.Minute
-
 // fetchedToken is the raw result of a mint: the token string plus its
 // server-reported lifetime (nil when the OAuth server omits expires_in).
 type fetchedToken struct {
@@ -83,18 +76,13 @@ func (c *cachedToken) isExpired() bool {
 }
 
 // newCachedToken builds an entry for a token whose TTL started at mintedAt
-// (response-receipt time, matching the Rust SDK). A non-positive ttl falls back to
-// defaultNoTTLLifetime so a token that the server didn't tag with an expires_in
-// still gets a bounded cache window.
+// (response-receipt time, matching the Rust SDK). ttl must be positive.
 //
 // The effective refresh lead time is clamped to at most half the TTL: with the
 // default 5-minute buffer a 10-minute token would otherwise be due for refresh
 // the instant it is cached, collapsing to a re-mint on every call. Clamping
 // guarantees at least ttl/2 of reuse before proactive refresh kicks in.
 func newCachedToken(value string, ttl, refreshBuffer time.Duration, mintedAt time.Time) *cachedToken {
-	if ttl <= 0 {
-		ttl = defaultNoTTLLifetime
-	}
 	if maxBuffer := ttl / 2; refreshBuffer > maxBuffer {
 		refreshBuffer = maxBuffer
 	}
@@ -248,16 +236,17 @@ func (c *tokenCache) getOrFetch(
 
 	token := fetched.token
 
-	// Always cache a successful mint. When the server reports a usable TTL we
-	// honor it; when it omits expires_in newCachedToken falls back to a bounded
-	// default lifetime so the token is still reused for a short window rather
-	// than re-minted on every call.
-	ttl := time.Duration(0)
-	if fetched.expiresIn != nil {
-		ttl = *fetched.expiresIn
+	// Cache only tokens with a usable TTL. If refresh returned no expires_in,
+	// keep any existing still-valid token rather than discarding it.
+	if fetched.expiresIn != nil && *fetched.expiresIn > 0 {
+		mintedAt := time.Now()
+		entry.cached = newCachedToken(token, *fetched.expiresIn, c.refreshBuffer, mintedAt)
+	} else {
+		keepExisting := entry.cached != nil && !entry.cached.isExpired()
+		if !keepExisting {
+			entry.cached = nil
+		}
 	}
-	mintedAt := time.Now()
-	entry.cached = newCachedToken(token, ttl, c.refreshBuffer, mintedAt)
 	flight.token, flight.err = token, nil
 	close(flight.done)
 	entry.mu.Unlock()
