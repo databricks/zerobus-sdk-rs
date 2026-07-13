@@ -3,6 +3,7 @@ package transport
 import (
 	"context"
 	"strings"
+	"unicode"
 
 	"google.golang.org/grpc/metadata"
 )
@@ -23,19 +24,55 @@ var authSchemes = []string{"bearer", "basic", "dpop"}
 // are replaced (gRPC is first-value-wins, so a duplicate could mis-route or send
 // a stale token); unrelated caller metadata is preserved.
 func withStreamMetadata(ctx context.Context, tableName, token string) context.Context {
+	return withStreamMetadataHeaders(ctx, tableName, nil, token)
+}
+
+// withStreamMetadataHeaders applies stream metadata using either headers from a
+// provider or a direct token string.
+func withStreamMetadataHeaders(ctx context.Context, tableName string, headers map[string]string, token string) context.Context {
 	md, ok := metadata.FromOutgoingContext(ctx)
 	if ok {
 		md = md.Copy()
 	} else {
 		md = metadata.MD{}
 	}
+	var authValue string
+	for key, value := range headers {
+		key = strings.ToLower(strings.TrimSpace(key))
+		switch key {
+		case "":
+			continue
+		case mdTableName:
+			// table header is authoritative from stream-open params.
+			continue
+		case mdAuthorization:
+			authValue = value
+		default:
+			md.Set(key, strings.TrimSpace(value))
+		}
+	}
 	md.Set(mdTableName, tableName)
-	if v := authHeaderValue(token); v != "" {
+	if authValue == "" {
+		authValue = token
+	}
+	if v := authHeaderValue(authValue); v != "" {
 		md.Set(mdAuthorization, v)
 	} else {
 		md.Delete(mdAuthorization)
 	}
 	return metadata.NewOutgoingContext(ctx, md)
+}
+
+// isUsableAsHeader reports whether token is safe in a gRPC authorization
+// header: no control or non-ASCII chars, which gRPC metadata rejects. An empty
+// token is usable (it yields no header).
+func isUsableAsHeader(token string) bool {
+	for _, r := range token {
+		if r > unicode.MaxASCII || unicode.IsControl(r) {
+			return false
+		}
+	}
+	return true
 }
 
 // authHeaderValue normalizes a token into an authorization header value: a value

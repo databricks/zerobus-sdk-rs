@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"strings"
 
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 	"google.golang.org/protobuf/proto"
 
 	"github.com/databricks/zerobus-sdk/purego/internal/zerobuspb"
@@ -23,7 +25,17 @@ type StreamParams struct {
 	// Token is the credential sent in the authorization header. A bare token is
 	// prefixed with "Bearer "; a value that already carries a known scheme (e.g.
 	// "Bearer ..." or "Basic ...") is sent verbatim. Empty means no header.
+	// Ignored when HeadersProvider is set.
 	Token string
+	// HeadersProvider supplies custom auth headers, similar to other SDKs.
+	// When set, it is used instead of Token.
+	HeadersProvider HeadersProvider
+}
+
+// HeadersProvider provides gRPC metadata headers for stream authentication.
+type HeadersProvider interface {
+	GetHeaders(ctx context.Context, tableName string) (map[string]string, error)
+	Invalidate(ctx context.Context, tableName string)
 }
 
 // Stream is an open ephemeral ingestion stream over the proto/JSON
@@ -63,6 +75,23 @@ func (c *Conn) Open(ctx context.Context, p StreamParams) (*Stream, error) {
 	if p.RecordType == zerobuspb.RecordType_PROTO && len(p.DescriptorProto) == 0 {
 		return nil, fmt.Errorf("transport: open %q: descriptor proto required for PROTO records", p.TableName)
 	}
+	var headers map[string]string
+	if p.HeadersProvider != nil {
+		var err error
+		headers, err = p.HeadersProvider.GetHeaders(ctx, p.TableName)
+		if err != nil {
+			return nil, fmt.Errorf("transport: open %q: headers provider: %w", p.TableName, err)
+		}
+		for k, v := range headers {
+			if !isUsableAsHeader(v) {
+				return nil, fmt.Errorf("transport: open %q: header %q contains invalid value characters", p.TableName, strings.TrimSpace(k))
+			}
+		}
+	} else if !isUsableAsHeader(p.Token) {
+		// Reject control chars at the wire boundary so every token source is
+		// covered, not just the OAuth mint path; gRPC would otherwise fail opaquely.
+		return nil, fmt.Errorf("transport: open %q: token contains invalid header characters", p.TableName)
+	}
 
 	// openCtx bounds the open attempt: the caller's ctx, defaulted to
 	// defaultHandshakeTimeout when it has no deadline.
@@ -73,9 +102,17 @@ func (c *Conn) Open(ctx context.Context, p StreamParams) (*Stream, error) {
 		defer cancelOpen()
 	}
 
+	// When a HeadersProvider is set, Token is ignored (per StreamParams docs): a
+	// provider that omits an authorization header must not silently fall back to
+	// Token. Pass an empty token so withStreamMetadataHeaders cannot substitute it.
+	token := p.Token
+	if p.HeadersProvider != nil {
+		token = ""
+	}
+
 	// Detach the live stream from ctx's cancel/deadline (WithoutCancel keeps its
 	// values, so caller metadata survives); Close is its only canceller.
-	streamCtx := withStreamMetadata(context.WithoutCancel(ctx), p.TableName, p.Token)
+	streamCtx := withStreamMetadataHeaders(context.WithoutCancel(ctx), p.TableName, headers, token)
 	streamCtx, cancelStream := context.WithCancel(streamCtx)
 
 	// Until the handshake succeeds, bridge openCtx to cancelStream so a caller
@@ -85,6 +122,9 @@ func (c *Conn) Open(ctx context.Context, p StreamParams) (*Stream, error) {
 
 	stream, err := c.open(openCtx, streamCtx, cancelStream, p)
 	if err != nil {
+		if p.HeadersProvider != nil && isAuthRejection(err) {
+			p.HeadersProvider.Invalidate(ctx, p.TableName)
+		}
 		cancelStream()
 		return nil, err
 	}
@@ -96,6 +136,11 @@ func (c *Conn) Open(ctx context.Context, p StreamParams) (*Stream, error) {
 	}
 	stream.cancel = cancelStream
 	return stream, nil
+}
+
+func isAuthRejection(err error) bool {
+	code := status.Code(err)
+	return code == codes.Unauthenticated || code == codes.PermissionDenied
 }
 
 // open starts the RPC on streamCtx and runs the handshake bounded by hctx.
