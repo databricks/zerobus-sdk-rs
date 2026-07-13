@@ -13,6 +13,11 @@ import (
 // no deadline, so Open can't hang if the server half-opens the stream.
 const defaultHandshakeTimeout = 30 * time.Second
 
+// defaultDrainTimeout bounds gracefulClose when the caller's context has no
+// deadline, so it can't hang on an unresponsive server. A var so tests can
+// shrink it.
+var defaultDrainTimeout = 30 * time.Second
+
 // bidiRPC is the subset of a generated gRPC bidirectional streaming client that
 // rawStream needs. EphemeralStream satisfies it, as will Arrow Flight's DoPut.
 type bidiRPC[Req, Resp any] interface {
@@ -92,6 +97,48 @@ func (s *rawStream[Req, Resp]) close() {
 			s.cancel()
 		}
 	})
+}
+
+// gracefulClose half-closes the send side, drains remaining responses to io.EOF,
+// then releases resources. Draining to EOF lets the server see an orderly close;
+// a bare close cancels the context and the server sees an abrupt reset instead.
+//
+// ctx bounds the drain: on ctx expiry or a non-EOF error it hard-aborts and
+// returns the cause (ctx error preferred); a clean drain returns nil. Not safe to
+// call concurrently with recv, and no send may follow (the send side is
+// half-closed). Every return path calls close first, so a later close is a no-op.
+func (s *rawStream[Req, Resp]) gracefulClose(ctx context.Context) error {
+	if _, ok := ctx.Deadline(); !ok {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, defaultDrainTimeout)
+		defer cancel()
+	}
+
+	if err := s.closeSend(); err != nil {
+		s.close()
+		return err
+	}
+
+	// Bridge ctx to close so a caller deadline unblocks the recv below, which
+	// otherwise waits on the stream's Close-only context.
+	stop := context.AfterFunc(ctx, s.close)
+	defer stop()
+
+	for {
+		_, err := s.recv()
+		switch {
+		case err == io.EOF:
+			s.close()
+			return nil
+		case err != nil:
+			s.close()
+			if ctxErr := ctx.Err(); ctxErr != nil {
+				return ctxErr
+			}
+			return err
+		}
+		// Response arrived before EOF; discard and keep draining.
+	}
 }
 
 // handshake runs the create-stream exchange shared by every ingestion protocol:

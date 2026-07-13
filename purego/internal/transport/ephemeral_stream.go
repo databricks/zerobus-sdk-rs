@@ -168,11 +168,22 @@ func (s *Stream) Recv() (*zerobuspb.EphemeralStreamResponse, error) { return s.r
 
 // CloseSend signals that no more requests will be sent, half-closing the stream
 // while leaving Recv open to drain remaining responses. For a graceful shutdown,
-// call CloseSend, read until io.EOF, then Close.
+// prefer GracefulClose, which performs the CloseSend/drain/Close sequence for you.
 func (s *Stream) CloseSend() error { return s.closeSend() }
 
+// GracefulClose half-closes the send side, drains remaining responses until the
+// server ends the stream, then releases resources. Prefer it over Close when done
+// sending: draining to end-of-stream lets the server see an orderly close rather
+// than the abrupt reset Close produces.
+//
+// ctx bounds the drain; on expiry or a stream error it hard-aborts like Close and
+// returns the cause, else nil. Must not be called concurrently with Recv, and no
+// Send may follow (the send side is half-closed). A later Close is a no-op, since
+// GracefulClose always releases resources before it returns.
+func (s *Stream) GracefulClose(ctx context.Context) error { return s.gracefulClose(ctx) }
+
 // Close aborts the stream and releases its resources. It is idempotent and safe
-// to call after a graceful CloseSend/drain. Unlike CloseSend it does not wait
-// for the server: any in-flight Send or Recv is unblocked with a cancellation
-// error.
+// to call after a graceful CloseSend/drain (or GracefulClose). Unlike GracefulClose
+// it does not wait for the server: any in-flight Send or Recv is unblocked with a
+// cancellation error.
 func (s *Stream) Close() { s.close() }
