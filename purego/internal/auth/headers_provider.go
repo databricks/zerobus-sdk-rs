@@ -26,6 +26,40 @@ type HeadersProvider interface {
 	Invalidate(ctx context.Context, tableName string)
 }
 
+// OAuthHeadersProvider bridges OAuth token minting into headers-provider shape.
+type OAuthHeadersProvider struct {
+	tokenProvider *OAuthTokenProvider
+}
+
+// NewOAuthHeadersProvider creates an OAuth-backed headers provider.
+func NewOAuthHeadersProvider(
+	clientID, clientSecret, zerobusEndpoint, ucEndpoint string,
+	opts ...OAuthOption,
+) (*OAuthHeadersProvider, error) {
+	p, err := NewOAuthTokenProvider(clientID, clientSecret, zerobusEndpoint, ucEndpoint, opts...)
+	if err != nil {
+		return nil, err
+	}
+	return &OAuthHeadersProvider{tokenProvider: p}, nil
+}
+
+// GetHeaders returns Zerobus auth headers for tableName.
+func (p *OAuthHeadersProvider) GetHeaders(ctx context.Context, tableName string) (map[string]string, error) {
+	token, err := p.tokenProvider.Token(ctx, tableName)
+	if err != nil {
+		return nil, err
+	}
+	return map[string]string{
+		"authorization":                   "Bearer " + token,
+		"x-databricks-zerobus-table-name": tableName,
+	}, nil
+}
+
+// Invalidate drops the cached token for tableName.
+func (p *OAuthHeadersProvider) Invalidate(ctx context.Context, tableName string) {
+	p.tokenProvider.Invalidate(ctx, tableName)
+}
+
 // StaticHeadersProvider returns a fixed header set.
 type StaticHeadersProvider struct {
 	headers map[string]string

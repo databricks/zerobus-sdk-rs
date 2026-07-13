@@ -27,6 +27,7 @@ const (
 	mintReasonColdMiss      mintReason = iota // no usable entry in cache
 	mintReasonRefresh                         // token is within the refresh buffer
 	mintReasonCacheDisabled                   // caching is off, so every call mints
+	mintReasonDirect                          // minted outside the cache via FetchToken
 )
 
 func (r mintReason) String() string {
@@ -37,6 +38,8 @@ func (r mintReason) String() string {
 		return "refresh"
 	case mintReasonCacheDisabled:
 		return "cache_disabled"
+	case mintReasonDirect:
+		return "direct"
 	default:
 		return "unknown"
 	}
@@ -125,21 +128,20 @@ type tokenCache struct {
 	disabled      bool // when true, every getOrFetch mints without caching
 }
 
-// cacheOption configures a token cache at construction. See [cacheEnabled] and
-// [cacheRefreshBuffer]. Unexported until a public SDK builder needs to surface
-// these knobs.
-type cacheOption func(*tokenCache)
+// CacheOption configures a token cache at construction. See [CacheEnabled] and
+// [CacheRefreshBuffer].
+type CacheOption func(*tokenCache)
 
-// cacheEnabled toggles token caching. When disabled, every token request mints
+// CacheEnabled toggles token caching. When disabled, every token request mints
 // a fresh token instead of consulting the cache. Caching is enabled by default.
-func cacheEnabled(enabled bool) cacheOption {
+func CacheEnabled(enabled bool) CacheOption {
 	return func(c *tokenCache) { c.disabled = !enabled }
 }
 
-// cacheRefreshBuffer sets the lead time before a token's expiry at which it is
+// CacheRefreshBuffer sets the lead time before a token's expiry at which it is
 // proactively re-minted; it defaults to 5 minutes. A non-positive value is
 // ignored so the default holds.
-func cacheRefreshBuffer(d time.Duration) cacheOption {
+func CacheRefreshBuffer(d time.Duration) CacheOption {
 	return func(c *tokenCache) {
 		if d > 0 {
 			c.refreshBuffer = d
@@ -147,7 +149,7 @@ func cacheRefreshBuffer(d time.Duration) cacheOption {
 	}
 }
 
-func newTokenCache(opts ...cacheOption) *tokenCache {
+func newTokenCache(opts ...CacheOption) *tokenCache {
 	c := &tokenCache{
 		entries:       make(map[tokenKey]*tokenCacheEntry),
 		refreshBuffer: defaultRefreshBuffer,

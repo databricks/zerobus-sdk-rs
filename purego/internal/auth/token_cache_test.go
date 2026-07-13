@@ -535,7 +535,7 @@ func TestTokenCacheWaiterRemintsWhenLeaderContextCancelled(t *testing.T) {
 }
 
 func TestTokenCacheDisabledAlwaysMints(t *testing.T) {
-	c := newTokenCache(cacheEnabled(false))
+	c := newTokenCache(CacheEnabled(false))
 	var calls atomic.Int64
 	reasons := make(chan mintReason, 2)
 	mint := func(_ context.Context, r mintReason) (fetchedToken, error) {
@@ -564,7 +564,7 @@ func TestTokenCacheCustomRefreshBuffer(t *testing.T) {
 	// effect. Compare against the default 5-minute buffer, which would place it
 	// ~55 minutes out.
 	const buffer = 20 * time.Minute
-	c := newTokenCache(cacheRefreshBuffer(buffer))
+	c := newTokenCache(CacheRefreshBuffer(buffer))
 
 	before := time.Now()
 	getOrFetch(t, c, "id", "secret", "c.s.t", makeMint("tok", 3600))
@@ -610,7 +610,7 @@ func TestNewCachedToken(t *testing.T) {
 }
 
 func TestTokenCacheNonPositiveRefreshBufferKeepsDefault(t *testing.T) {
-	c := newTokenCache(cacheRefreshBuffer(-1))
+	c := newTokenCache(CacheRefreshBuffer(-1))
 	if c.refreshBuffer != defaultRefreshBuffer {
 		t.Fatalf("non-positive buffer should be ignored, got %v", c.refreshBuffer)
 	}
