@@ -432,24 +432,15 @@ impl AckCallback for CallbackAckCallback {
     }
 }
 
-// Test-only drop observation for `CallbackAckCallback`.
-//
-// `CallbackAckCallback` is created internally by `apply_c_stream_options` and
-// wrapped in an `Arc`, so a test cannot hold a `Weak` to it to observe its
-// release. Gating a `Drop` impl on `#[cfg(test)]` compiles it ONLY into the
-// FFI crate's own test build (where `tests.rs` runs) and leaves the shipped
-// library byte-identical — no Cargo feature, no production code path.
-//
-// The counter is bumped only when `user_data` matches the dedicated sentinel
-// address `ACK_DROP_SENTINEL`, so the failure-path create tests observe the
-// release of the callback THEY registered without being perturbed by other
-// tests that build ack callbacks with a null `user_data`.
+// Test-only drop observation for `CallbackAckCallback` (created internally, so
+// tests can't hold a `Weak`). `#[cfg(test)]` keeps the shipped library
+// unchanged. Counts only drops keyed to `ACK_DROP_SENTINEL`, so other tests'
+// callbacks (null `user_data`) don't perturb it.
 #[cfg(test)]
 pub(crate) static ACK_CALLBACK_DROP_COUNT: std::sync::atomic::AtomicUsize =
     std::sync::atomic::AtomicUsize::new(0);
 
-/// Test-only sentinel address used as `ack_user_data` so the drop hook only
-/// counts callbacks created by the failure-path create tests.
+/// Sentinel `ack_user_data` so the drop hook counts only the create tests' callbacks.
 #[cfg(test)]
 pub(crate) static ACK_DROP_SENTINEL: u8 = 0;
 

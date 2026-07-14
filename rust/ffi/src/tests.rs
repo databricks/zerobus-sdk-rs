@@ -518,38 +518,21 @@ mod tests {
     // Ack callback lifetime on failed stream creation
     // ========================================================================
     //
-    // Failure-path sibling of the success-path teardown test (#469): when
-    // `create_stream` FAILS, the `Arc<CallbackAckCallback>` registered by
-    // `apply_c_stream_options` must be dropped, not leaked to a background
-    // handler task. Today that is safe only by construction — the builder that
-    // owns the Arc is dropped when `build()` returns an error. This pins the
-    // invariant so a future refactor (e.g. spawning the handler task earlier in
-    // the create path) cannot silently start leaking the callback + user_data.
-    //
-    // Observation: `CallbackAckCallback` is created internally and has no
-    // observable drop in the shipped build, so `common.rs` adds a `#[cfg(test)]`
-    // `Drop` impl that bumps `ACK_CALLBACK_DROP_COUNT` — but only when
-    // `user_data` is the `ACK_DROP_SENTINEL` address, so these tests observe the
-    // release of the callback THEY registered and are not perturbed by the
-    // bridge tests above (which use a null `user_data`).
-    //
-    // Forced-failure trigger (hermetic, no network): RecordType::Json with an
-    // empty table name. Json skips the "Proto descriptor required" check, so the
-    // path reaches `apply_c_stream_options` (Arc registered into the builder),
-    // then fails in `build()` -> `validate()` on the empty table name, which
-    // returns `InvalidArgument` before any channel/network I/O.
+    // Failure-path sibling of #469: when `create_stream` fails, the registered
+    // `Arc<CallbackAckCallback>` must drop (with the builder), not leak to a
+    // background task. Pins an invariant that's currently only safe by
+    // construction. Observed via the `#[cfg(test)]` drop hook in `common.rs`.
+    // Failure trigger (hermetic): JSON + empty table name — reaches
+    // `apply_c_stream_options` (Arc registered), then fails in `build()`'s
+    // validation before any network I/O.
 
     use crate::common::{ACK_CALLBACK_DROP_COUNT, ACK_DROP_SENTINEL};
     use crate::{zerobus_sdk_create_stream, zerobus_sdk_create_stream_with_headers_provider};
 
-    // The drop counter is process-global and keyed on the shared sentinel
-    // address, so these two tests would race if run concurrently. Serialize
-    // them (and their reset/assert window) with a dedicated mutex.
+    // Global counter, so serialize the two tests' reset/assert windows.
     static ACK_DROP_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
-    // Build config options with a JSON record type and an ack callback whose
-    // user_data is the drop sentinel, so a successful registration is observable
-    // when the callback object is dropped.
+    // JSON config with an ack callback keyed to the drop sentinel.
     fn json_config_with_ack_callback() -> crate::CStreamConfigurationOptions {
         let mut config = zerobus_get_default_config();
         config.record_type = 2; // RecordType::Json
@@ -558,8 +541,7 @@ mod tests {
         config
     }
 
-    // A headers-provider callback for the with-headers-provider create path.
-    // Never invoked here (creation fails before any header fetch).
+    // Headers callback for the with-headers-provider path; never invoked (create fails first).
     extern "C" fn empty_headers(_user_data: *mut std::ffi::c_void) -> CHeaders {
         CHeaders {
             headers: ptr::null_mut(),
@@ -583,7 +565,7 @@ mod tests {
         let options = json_config_with_ack_callback();
         let mut result = presumed_success_result();
 
-        // Capture the delta across exactly the failing call.
+        // Delta across the single failing call.
         let before = ACK_CALLBACK_DROP_COUNT.load(AtomicOrdering::SeqCst);
         let stream = zerobus_sdk_create_stream(
             sdk,
@@ -597,7 +579,7 @@ mod tests {
         );
         let after = ACK_CALLBACK_DROP_COUNT.load(AtomicOrdering::SeqCst);
 
-        // Creation must have failed (empty table -> InvalidArgument in build()).
+        // Creation failed on the empty table (InvalidArgument in build()).
         assert!(stream.is_null());
         let (success, _retryable, msg) = drain_result(&mut result);
         assert!(!success, "expected create_stream to fail on empty table");
@@ -606,7 +588,7 @@ mod tests {
             "expected empty-table validation error, got: {msg}"
         );
 
-        // The registered ack callback Arc was released, not retained by any task.
+        // Ack callback Arc was released, not retained by a task.
         assert_eq!(
             after - before,
             1,
