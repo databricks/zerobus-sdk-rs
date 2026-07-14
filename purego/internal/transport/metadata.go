@@ -19,17 +19,11 @@ const (
 // match is sent verbatim, anything else is prefixed with "Bearer ".
 var authSchemes = []string{"bearer", "basic", "dpop"}
 
-// withStreamMetadata returns ctx carrying exactly the table-name and
-// authorization headers. These are Zerobus-owned keys, so any inherited values
-// are replaced (gRPC is first-value-wins, so a duplicate could mis-route or send
-// a stale token); unrelated caller metadata is preserved.
-func withStreamMetadata(ctx context.Context, tableName, token string) context.Context {
-	return withStreamMetadataHeaders(ctx, tableName, nil, token)
-}
-
-// withStreamMetadataHeaders applies stream metadata using either headers from a
-// provider or a direct token string.
-func withStreamMetadataHeaders(ctx context.Context, tableName string, headers map[string]string, token string) context.Context {
+// withStreamMetadataHeaders returns ctx carrying the table-name header plus the
+// provider headers. The table-name and authorization keys are Zerobus-owned, so
+// any inherited values are replaced (gRPC is first-value-wins, so a duplicate
+// could mis-route or send a stale token); unrelated caller metadata is preserved.
+func withStreamMetadataHeaders(ctx context.Context, tableName string, headers map[string]string) context.Context {
 	md, ok := metadata.FromOutgoingContext(ctx)
 	if ok {
 		md = md.Copy()
@@ -52,9 +46,6 @@ func withStreamMetadataHeaders(ctx context.Context, tableName string, headers ma
 		}
 	}
 	md.Set(mdTableName, tableName)
-	if authValue == "" {
-		authValue = token
-	}
 	if v := authHeaderValue(authValue); v != "" {
 		md.Set(mdAuthorization, v)
 	} else {

@@ -22,14 +22,9 @@ type StreamParams struct {
 	// DescriptorProto is the serialized message descriptor. Required when
 	// RecordType is PROTO and ignored otherwise.
 	DescriptorProto []byte
-	// Token is the credential sent in the authorization header. A bare token is
-	// prefixed with "Bearer "; a value that already carries a known scheme (e.g.
-	// "Bearer ..." or "Basic ...") is sent verbatim. Empty means no header.
-	// Ignored when HeadersProvider is set.
-	Token string
-	// HeadersProvider supplies custom auth headers, similar to other SDKs.
-	// When set, it is used instead of Token. See HeadersProvider for timeout
-	// behavior when GetHeaders may block (e.g. token mint).
+	// HeadersProvider supplies the auth (and any other) metadata headers for the
+	// stream. See HeadersProvider for timeout behavior when GetHeaders may block
+	// (e.g. token mint). When nil, the stream is opened without an auth header.
 	HeadersProvider HeadersProvider
 }
 
@@ -96,14 +91,12 @@ func (c *Conn) Open(ctx context.Context, p StreamParams) (*Stream, error) {
 			return nil, fmt.Errorf("transport: open %q: headers provider: %w", p.TableName, err)
 		}
 		for k, v := range headers {
+			// Reject control/non-ASCII chars at the wire boundary; gRPC would
+			// otherwise fail opaquely.
 			if !isUsableAsHeader(v) {
 				return nil, fmt.Errorf("transport: open %q: header %q contains invalid value characters", p.TableName, strings.TrimSpace(k))
 			}
 		}
-	} else if !isUsableAsHeader(p.Token) {
-		// Reject control chars at the wire boundary so every token source is
-		// covered, not just the OAuth mint path; gRPC would otherwise fail opaquely.
-		return nil, fmt.Errorf("transport: open %q: token contains invalid header characters", p.TableName)
 	}
 
 	// openCtx bounds the open attempt: the caller's ctx, defaulted to
@@ -115,17 +108,9 @@ func (c *Conn) Open(ctx context.Context, p StreamParams) (*Stream, error) {
 		defer cancelOpen()
 	}
 
-	// When a HeadersProvider is set, Token is ignored (per StreamParams docs): a
-	// provider that omits an authorization header must not silently fall back to
-	// Token. Pass an empty token so withStreamMetadataHeaders cannot substitute it.
-	token := p.Token
-	if p.HeadersProvider != nil {
-		token = ""
-	}
-
 	// Detach the live stream from ctx's cancel/deadline (WithoutCancel keeps its
 	// values, so caller metadata survives); Close is its only canceller.
-	streamCtx := withStreamMetadataHeaders(context.WithoutCancel(ctx), p.TableName, headers, token)
+	streamCtx := withStreamMetadataHeaders(context.WithoutCancel(ctx), p.TableName, headers)
 	streamCtx, cancelStream := context.WithCancel(streamCtx)
 
 	// Until the handshake succeeds, bridge openCtx to cancelStream so a caller
