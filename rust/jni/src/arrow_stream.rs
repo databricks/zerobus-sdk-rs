@@ -230,7 +230,7 @@ pub extern "system" fn Java_com_databricks_zerobus_ZerobusArrowStream_nativeClos
     // Block on the async operation
     let result = block_on(async {
         let mut guard = stream_handle.stream.lock().await;
-        if let Some(mut stream) = guard.take() {
+        if let Some(stream) = guard.as_mut() {
             stream.close().await?;
         }
         Ok::<_, databricks_zerobus_ingest_sdk::ZerobusError>(())
@@ -269,48 +269,6 @@ pub extern "system" fn Java_com_databricks_zerobus_ZerobusArrowStream_nativeIsCl
         JNI_TRUE
     } else {
         JNI_FALSE
-    }
-}
-
-/// Get the table name.
-///
-/// # JNI Signature
-/// ```java
-/// private native String nativeGetTableName(long handle);
-/// ```
-#[no_mangle]
-pub extern "system" fn Java_com_databricks_zerobus_ZerobusArrowStream_nativeGetTableName<'local>(
-    mut env: JNIEnv<'local>,
-    _obj: JObject<'local>,
-    handle: jlong,
-) -> JObject<'local> {
-    // Get stream handle
-    let stream_handle = unsafe { NativeArrowStreamHandle::borrow_from_raw(handle) };
-
-    // Block on the async operation to get the table name
-    let result = block_on(async {
-        let guard = stream_handle.stream.lock().await;
-        let stream = guard.as_ref().ok_or_else(|| {
-            databricks_zerobus_ingest_sdk::ZerobusError::InvalidStateError(
-                "Arrow stream is closed".to_string(),
-            )
-        })?;
-
-        Ok::<_, databricks_zerobus_ingest_sdk::ZerobusError>(stream.table_name().to_string())
-    });
-
-    match result {
-        Ok(name) => match env.new_string(&name) {
-            Ok(s) => s.into(),
-            Err(e) => {
-                throw_zerobus_exception(&mut env, &format!("Failed to create string: {}", e));
-                JObject::null()
-            }
-        },
-        Err(e) => {
-            throw_from_zerobus_error(&mut env, &e);
-            JObject::null()
-        }
     }
 }
 
@@ -398,11 +356,12 @@ pub extern "system" fn Java_com_databricks_zerobus_ZerobusArrowStream_nativeGetU
             }
         };
 
+        let byte_array = env.auto_local(JObject::from(byte_array));
         if let Err(e) = env.call_method(
             &list,
             "add",
             "(Ljava/lang/Object;)Z",
-            &[JValue::Object(&byte_array.into())],
+            &[JValue::Object(byte_array.as_ref())],
         ) {
             throw_zerobus_exception(&mut env, &format!("Failed to add to list: {}", e));
             return JObject::null();

@@ -227,6 +227,10 @@ public class ArrowStreamConfigurationOptions {
      * @return this builder for method chaining
      */
     public ArrowStreamConfigurationOptionsBuilder setMaxInflightBatches(int maxInflightBatches) {
+      if (maxInflightBatches <= 0) {
+        throw new IllegalArgumentException(
+            "maxInflightBatches must be > 0, got: " + maxInflightBatches);
+      }
       this.maxInflightBatches = maxInflightBatches;
       return this;
     }
@@ -249,6 +253,10 @@ public class ArrowStreamConfigurationOptions {
      * @return this builder for method chaining
      */
     public ArrowStreamConfigurationOptionsBuilder setRecoveryTimeoutMs(long recoveryTimeoutMs) {
+      if (recoveryTimeoutMs < 0) {
+        throw new IllegalArgumentException(
+            "recoveryTimeoutMs must be >= 0, got: " + recoveryTimeoutMs);
+      }
       this.recoveryTimeoutMs = recoveryTimeoutMs;
       return this;
     }
@@ -260,6 +268,10 @@ public class ArrowStreamConfigurationOptions {
      * @return this builder for method chaining
      */
     public ArrowStreamConfigurationOptionsBuilder setRecoveryBackoffMs(long recoveryBackoffMs) {
+      if (recoveryBackoffMs < 0) {
+        throw new IllegalArgumentException(
+            "recoveryBackoffMs must be >= 0, got: " + recoveryBackoffMs);
+      }
       this.recoveryBackoffMs = recoveryBackoffMs;
       return this;
     }
@@ -271,6 +283,9 @@ public class ArrowStreamConfigurationOptions {
      * @return this builder for method chaining
      */
     public ArrowStreamConfigurationOptionsBuilder setRecoveryRetries(int recoveryRetries) {
+      if (recoveryRetries < 0) {
+        throw new IllegalArgumentException("recoveryRetries must be >= 0, got: " + recoveryRetries);
+      }
       this.recoveryRetries = recoveryRetries;
       return this;
     }
@@ -283,6 +298,10 @@ public class ArrowStreamConfigurationOptions {
      */
     public ArrowStreamConfigurationOptionsBuilder setServerLackOfAckTimeoutMs(
         long serverLackOfAckTimeoutMs) {
+      if (serverLackOfAckTimeoutMs < 0) {
+        throw new IllegalArgumentException(
+            "serverLackOfAckTimeoutMs must be >= 0, got: " + serverLackOfAckTimeoutMs);
+      }
       this.serverLackOfAckTimeoutMs = serverLackOfAckTimeoutMs;
       return this;
     }
@@ -294,6 +313,9 @@ public class ArrowStreamConfigurationOptions {
      * @return this builder for method chaining
      */
     public ArrowStreamConfigurationOptionsBuilder setFlushTimeoutMs(long flushTimeoutMs) {
+      if (flushTimeoutMs < 0) {
+        throw new IllegalArgumentException("flushTimeoutMs must be >= 0, got: " + flushTimeoutMs);
+      }
       this.flushTimeoutMs = flushTimeoutMs;
       return this;
     }
@@ -305,6 +327,10 @@ public class ArrowStreamConfigurationOptions {
      * @return this builder for method chaining
      */
     public ArrowStreamConfigurationOptionsBuilder setConnectionTimeoutMs(long connectionTimeoutMs) {
+      if (connectionTimeoutMs < 0) {
+        throw new IllegalArgumentException(
+            "connectionTimeoutMs must be >= 0, got: " + connectionTimeoutMs);
+      }
       this.connectionTimeoutMs = connectionTimeoutMs;
       return this;
     }
@@ -340,6 +366,10 @@ public class ArrowStreamConfigurationOptions {
      */
     public ArrowStreamConfigurationOptionsBuilder setStreamPausedMaxWaitTimeMs(
         long streamPausedMaxWaitTimeMs) {
+      if (streamPausedMaxWaitTimeMs < -1) {
+        throw new IllegalArgumentException(
+            "streamPausedMaxWaitTimeMs must be >= -1, got: " + streamPausedMaxWaitTimeMs);
+      }
       this.streamPausedMaxWaitTimeMs = streamPausedMaxWaitTimeMs;
       return this;
     }

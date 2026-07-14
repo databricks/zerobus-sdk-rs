@@ -119,4 +119,44 @@ public class StreamConfigurationOptionsTest {
     assertEquals(1_000_000, options.maxInflightRecords());
     assertTrue(options.recovery());
   }
+
+  @Test
+  void testRejectsInvalidNumericValues() {
+    assertThrows(
+        IllegalArgumentException.class,
+        () -> StreamConfigurationOptions.builder().setMaxInflightRecords(0));
+    assertThrows(
+        IllegalArgumentException.class,
+        () -> StreamConfigurationOptions.builder().setRecoveryTimeoutMs(-1));
+    assertThrows(
+        IllegalArgumentException.class,
+        () -> StreamConfigurationOptions.builder().setRecoveryBackoffMs(-1));
+    assertThrows(
+        IllegalArgumentException.class,
+        () -> StreamConfigurationOptions.builder().setRecoveryRetries(-1));
+    assertThrows(
+        IllegalArgumentException.class,
+        () -> StreamConfigurationOptions.builder().setFlushTimeoutMs(-1));
+    assertThrows(
+        IllegalArgumentException.class,
+        () -> StreamConfigurationOptions.builder().setServerLackOfAckTimeoutMs(-1));
+  }
+
+  @Test
+  void testAllowsZeroTimeoutsAndRetries() {
+    StreamConfigurationOptions options =
+        StreamConfigurationOptions.builder()
+            .setRecoveryTimeoutMs(0)
+            .setRecoveryBackoffMs(0)
+            .setRecoveryRetries(0)
+            .setFlushTimeoutMs(0)
+            .setServerLackOfAckTimeoutMs(0)
+            .build();
+
+    assertEquals(0, options.recoveryTimeoutMs());
+    assertEquals(0, options.recoveryBackoffMs());
+    assertEquals(0, options.recoveryRetries());
+    assertEquals(0, options.flushTimeoutMs());
+    assertEquals(0, options.serverLackOfAckTimeoutMs());
+  }
 }

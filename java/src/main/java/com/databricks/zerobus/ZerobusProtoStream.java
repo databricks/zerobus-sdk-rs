@@ -90,6 +90,9 @@ public class ZerobusProtoStream extends BaseZerobusStream {
    * @throws ZerobusException if the stream is not in a valid state or an error occurs
    */
   public <T extends Message> long ingestRecordOffset(T record) throws ZerobusException {
+    if (record == null) {
+      throw new IllegalArgumentException("record must not be null");
+    }
     ensureOpen();
     return nativeIngestRecordOffset(nativeHandle, record.toByteArray(), false);
   }
@@ -105,6 +108,9 @@ public class ZerobusProtoStream extends BaseZerobusStream {
    * @throws ZerobusException if the stream is not in a valid state or an error occurs
    */
   public long ingestRecordOffset(byte[] encodedBytes) throws ZerobusException {
+    if (encodedBytes == null) {
+      throw new IllegalArgumentException("encodedBytes must not be null");
+    }
     ensureOpen();
     return nativeIngestRecordOffset(nativeHandle, encodedBytes, false);
   }
@@ -123,8 +129,14 @@ public class ZerobusProtoStream extends BaseZerobusStream {
    */
   public <T extends Message> Optional<Long> ingestRecordsOffset(Iterable<T> records)
       throws ZerobusException {
+    if (records == null) {
+      throw new IllegalArgumentException("records must not be null");
+    }
     List<byte[]> payloads = new ArrayList<>();
     for (T record : records) {
+      if (record == null) {
+        throw new IllegalArgumentException("records must not contain null elements");
+      }
       payloads.add(record.toByteArray());
     }
     if (payloads.isEmpty()) {
@@ -145,8 +157,16 @@ public class ZerobusProtoStream extends BaseZerobusStream {
    * @throws ZerobusException if the stream is not in a valid state or an error occurs
    */
   public Optional<Long> ingestRecordsOffset(List<byte[]> encodedRecords) throws ZerobusException {
+    if (encodedRecords == null) {
+      throw new IllegalArgumentException("encodedRecords must not be null");
+    }
     if (encodedRecords.isEmpty()) {
       return Optional.empty();
+    }
+    for (byte[] encodedRecord : encodedRecords) {
+      if (encodedRecord == null) {
+        throw new IllegalArgumentException("encodedRecords must not contain null elements");
+      }
     }
     ensureOpen();
     return Optional.of(nativeIngestRecordsOffset(nativeHandle, encodedRecords, false));
@@ -192,6 +212,9 @@ public class ZerobusProtoStream extends BaseZerobusStream {
    * @throws ZerobusException if an error occurs or parsing fails
    */
   public <T extends Message> List<T> getUnackedRecords(Parser<T> parser) throws ZerobusException {
+    if (parser == null) {
+      throw new IllegalArgumentException("parser must not be null");
+    }
     List<byte[]> rawRecords = getUnackedRecords();
     List<T> result = new ArrayList<>(rawRecords.size());
     for (byte[] bytes : rawRecords) {

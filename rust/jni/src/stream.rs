@@ -252,7 +252,8 @@ pub extern "system" fn Java_com_databricks_zerobus_BaseZerobusStream_nativeInges
             return -1;
         }
     } {
-        let byte_array: JByteArray = obj.into();
+        let obj = env.auto_local(obj);
+        let byte_array: &JByteArray = obj.as_ref().into();
         let bytes: Vec<u8> = match env.convert_byte_array(byte_array) {
             Ok(b) => b,
             Err(e) => {
@@ -392,7 +393,7 @@ pub extern "system" fn Java_com_databricks_zerobus_BaseZerobusStream_nativeClose
     // Block on the async operation
     let result = block_on(async {
         let mut guard = stream_handle.stream.lock().await;
-        if let Some(mut stream) = guard.take() {
+        if let Some(stream) = guard.as_mut() {
             stream.close().await?;
         }
         Ok::<_, databricks_zerobus_ingest_sdk::ZerobusError>(())
@@ -497,11 +498,12 @@ pub extern "system" fn Java_com_databricks_zerobus_BaseZerobusStream_nativeGetUn
             }
         };
 
+        let byte_array = env.auto_local(JObject::from(byte_array));
         if let Err(e) = env.call_method(
             &list,
             "add",
             "(Ljava/lang/Object;)Z",
-            &[JValue::Object(&byte_array.into())],
+            &[JValue::Object(byte_array.as_ref())],
         ) {
             throw_zerobus_exception(&mut env, &format!("Failed to add to list: {}", e));
             return JObject::null();
@@ -581,6 +583,7 @@ pub extern "system" fn Java_com_databricks_zerobus_BaseZerobusStream_nativeGetUn
                 return JObject::null();
             }
         };
+        let records_list = env.auto_local(records_list);
 
         for record_bytes in records {
             let byte_array = match env.byte_array_from_slice(&record_bytes) {
@@ -594,11 +597,12 @@ pub extern "system" fn Java_com_databricks_zerobus_BaseZerobusStream_nativeGetUn
                 }
             };
 
+            let byte_array = env.auto_local(JObject::from(byte_array));
             if let Err(e) = env.call_method(
-                &records_list,
+                records_list.as_ref(),
                 "add",
                 "(Ljava/lang/Object;)Z",
-                &[JValue::Object(&byte_array.into())],
+                &[JValue::Object(byte_array.as_ref())],
             ) {
                 throw_zerobus_exception(&mut env, &format!("Failed to add to inner list: {}", e));
                 return JObject::null();
@@ -610,7 +614,7 @@ pub extern "system" fn Java_com_databricks_zerobus_BaseZerobusStream_nativeGetUn
             &encoded_batch_class,
             "(Ljava/util/List;Z)V",
             &[
-                JValue::Object(&records_list),
+                JValue::Object(records_list.as_ref()),
                 JValue::Bool(if is_json { JNI_TRUE } else { JNI_FALSE }),
             ],
         ) {
@@ -620,12 +624,13 @@ pub extern "system" fn Java_com_databricks_zerobus_BaseZerobusStream_nativeGetUn
                 return JObject::null();
             }
         };
+        let batch_obj = env.auto_local(batch_obj);
 
         if let Err(e) = env.call_method(
             &list,
             "add",
             "(Ljava/lang/Object;)Z",
-            &[JValue::Object(&batch_obj)],
+            &[JValue::Object(batch_obj.as_ref())],
         ) {
             throw_zerobus_exception(&mut env, &format!("Failed to add batch to list: {}", e));
             return JObject::null();

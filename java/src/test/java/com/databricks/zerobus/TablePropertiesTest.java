@@ -71,4 +71,17 @@ public class TablePropertiesTest {
     assertNotNull(serialized);
     assertTrue(serialized.length > 0);
   }
+
+  @Test
+  void testRejectsMissingArguments() {
+    CityPopulationTableRow defaultInstance = CityPopulationTableRow.getDefaultInstance();
+
+    assertThrows(
+        IllegalArgumentException.class, () -> new TableProperties<>(null, defaultInstance));
+    assertThrows(
+        IllegalArgumentException.class, () -> new TableProperties<>("  ", defaultInstance));
+    assertThrows(
+        IllegalArgumentException.class,
+        () -> new TableProperties<CityPopulationTableRow>("catalog.schema.table", null));
+  }
 }

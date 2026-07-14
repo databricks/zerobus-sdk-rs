@@ -3,9 +3,10 @@
 //! This module provides a Rust implementation of the SDK's AckCallback trait
 //! that delegates to a Java AckCallback object.
 
+use crate::errors::check_and_clear_exception;
 use crate::runtime::get_jvm;
 use databricks_zerobus_ingest_sdk::{AckCallback, OffsetId};
-use jni::objects::{GlobalRef, JValue};
+use jni::objects::{GlobalRef, JObject, JValue};
 use std::sync::Arc;
 
 /// A JNI bridge that implements the Rust AckCallback trait by delegating
@@ -41,7 +42,9 @@ impl AckCallback for JavaAckCallback {
         let callback = self.callback_ref.as_obj();
 
         if let Err(e) = env.call_method(callback, "onAck", "(J)V", &[JValue::Long(offset_id)]) {
-            tracing::error!("Failed to call onAck callback: {}", e);
+            let java_error = check_and_clear_exception(&mut env)
+                .unwrap_or_else(|| "no Java exception details available".to_string());
+            tracing::error!("Failed to call onAck callback: {} ({})", e, java_error);
         }
     }
 
@@ -60,18 +63,27 @@ impl AckCallback for JavaAckCallback {
         let j_message = match env.new_string(error_message) {
             Ok(s) => s,
             Err(e) => {
-                tracing::error!("Failed to create error message string: {}", e);
+                let java_error = check_and_clear_exception(&mut env)
+                    .unwrap_or_else(|| "no Java exception details available".to_string());
+                tracing::error!(
+                    "Failed to create error message string: {} ({})",
+                    e,
+                    java_error
+                );
                 return;
             }
         };
+        let j_message = env.auto_local(JObject::from(j_message));
 
         if let Err(e) = env.call_method(
             callback,
             "onError",
             "(JLjava/lang/String;)V",
-            &[JValue::Long(offset_id), JValue::Object(&j_message.into())],
+            &[JValue::Long(offset_id), JValue::Object(j_message.as_ref())],
         ) {
-            tracing::error!("Failed to call onError callback: {}", e);
+            let java_error = check_and_clear_exception(&mut env)
+                .unwrap_or_else(|| "no Java exception details available".to_string());
+            tracing::error!("Failed to call onError callback: {} ({})", e, java_error);
         }
     }
 }

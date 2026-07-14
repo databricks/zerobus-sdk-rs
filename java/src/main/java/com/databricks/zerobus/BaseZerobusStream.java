@@ -75,6 +75,9 @@ abstract class BaseZerobusStream implements AutoCloseable {
    * @throws ZerobusException if an error occurs or the wait times out
    */
   public void waitForOffset(long offset) throws ZerobusException {
+    if (offset < 0) {
+      throw new IllegalArgumentException("offset must be >= 0, got: " + offset);
+    }
     ensureOpen();
     nativeWaitForOffset(nativeHandle, offset);
   }
@@ -102,24 +105,47 @@ abstract class BaseZerobusStream implements AutoCloseable {
   public void close() throws ZerobusException {
     long handle = nativeHandle;
     if (handle != 0) {
-      // Close the stream first (flushes pending records)
-      nativeClose(handle);
-
-      // Cache unacked records before destroying the handle (for recreateStream)
+      ZerobusException failure = null;
       try {
-        cachedUnackedRecords = nativeGetUnackedRecords(handle);
+        nativeClose(handle);
+      } catch (Exception e) {
+        failure = recordCloseFailure(failure, "Failed to close stream", e);
+      }
+
+      try {
         cachedUnackedBatches = nativeGetUnackedBatches(handle);
+        cachedUnackedRecords = new ArrayList<>();
+        for (EncodedBatch batch : cachedUnackedBatches) {
+          cachedUnackedRecords.addAll(batch.getRecords());
+        }
       } catch (Exception e) {
         logger.warn("Failed to cache unacked records: {}", e.getMessage());
         cachedUnackedRecords = new ArrayList<>();
         cachedUnackedBatches = new ArrayList<>();
+        failure = recordCloseFailure(failure, "Failed to cache unacknowledged records", e);
+      } finally {
+        nativeHandle = 0;
+        nativeDestroy(handle);
+        logger.info("Stream closed");
       }
 
-      // Now destroy the handle
-      nativeHandle = 0;
-      nativeDestroy(handle);
-      logger.info("Stream closed");
+      if (failure != null) {
+        throw failure;
+      }
     }
+  }
+
+  private static ZerobusException recordCloseFailure(
+      ZerobusException current, String message, Exception error) {
+    ZerobusException failure =
+        error instanceof ZerobusException
+            ? (ZerobusException) error
+            : new ZerobusException(message, error);
+    if (current == null) {
+      return failure;
+    }
+    current.addSuppressed(failure);
+    return current;
   }
 
   /**
@@ -189,25 +215,26 @@ abstract class BaseZerobusStream implements AutoCloseable {
 
   // ==================== Native methods implemented in Rust ====================
 
-  private static native void nativeDestroy(long handle);
+  static native void nativeDestroy(long handle);
 
   protected native CompletableFuture<Void> nativeIngestRecord(
-      long handle, byte[] payload, boolean isJson);
+      long handle, byte[] payload, boolean isJson) throws ZerobusException;
 
-  protected native long nativeIngestRecordOffset(long handle, byte[] payload, boolean isJson);
+  protected native long nativeIngestRecordOffset(long handle, byte[] payload, boolean isJson)
+      throws ZerobusException;
 
   protected native long nativeIngestRecordsOffset(
-      long handle, List<byte[]> payloads, boolean isJson);
+      long handle, List<byte[]> payloads, boolean isJson) throws ZerobusException;
 
-  private native void nativeWaitForOffset(long handle, long offset);
+  private native void nativeWaitForOffset(long handle, long offset) throws ZerobusException;
 
-  private native void nativeFlush(long handle);
+  private native void nativeFlush(long handle) throws ZerobusException;
 
-  private native void nativeClose(long handle);
+  private native void nativeClose(long handle) throws ZerobusException;
 
   private native boolean nativeIsClosed(long handle);
 
-  protected native List<byte[]> nativeGetUnackedRecords(long handle);
+  protected native List<byte[]> nativeGetUnackedRecords(long handle) throws ZerobusException;
 
-  protected native List<EncodedBatch> nativeGetUnackedBatches(long handle);
+  protected native List<EncodedBatch> nativeGetUnackedBatches(long handle) throws ZerobusException;
 }

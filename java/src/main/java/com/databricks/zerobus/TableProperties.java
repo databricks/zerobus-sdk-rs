@@ -18,6 +18,12 @@ public class TableProperties<RecordType extends Message> {
    * @param defaultInstance The default instance of the record type (used to get the descriptor).
    */
   public TableProperties(String tableName, RecordType defaultInstance) {
+    if (tableName == null || tableName.trim().isEmpty()) {
+      throw new IllegalArgumentException("tableName must not be null or blank");
+    }
+    if (defaultInstance == null) {
+      throw new IllegalArgumentException("defaultInstance must not be null");
+    }
     this.tableName = tableName;
     this.defaultInstance = defaultInstance;
   }

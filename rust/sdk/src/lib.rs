@@ -239,6 +239,8 @@ pub struct ZerobusStream {
     cancellation_token: CancellationToken,
     /// Callback handler task that executes callbacks in a separate thread.
     callback_handler_task: Option<tokio::task::JoinHandle<()>>,
+    /// Sender used to report acknowledgements and failures to the callback handler.
+    callback_tx: Option<tokio::sync::mpsc::UnboundedSender<CallbackMessage>>,
 }
 
 /// Default identifier the SDK sends as the HTTP `user-agent` header on every
@@ -647,6 +649,7 @@ impl ZerobusStream {
             server_error_rx,
             cancellation_token,
             callback_handler_task,
+            callback_tx,
         };
 
         Ok(stream)
@@ -1777,6 +1780,16 @@ impl ZerobusStream {
             error!("Stream ID is None during closing");
         }
         let flush_result = self.flush().await;
+        if let Err(error) = &flush_result {
+            Self::fail_all_pending_records(
+                Arc::clone(&self.landing_zone),
+                Arc::clone(&self.oneshot_map),
+                Arc::clone(&self.failed_records),
+                error,
+                &self.callback_tx,
+            )
+            .await;
+        }
         self.is_closed.store(true, Ordering::Relaxed);
         self.shutdown_all_tasks_gracefully().await;
         flush_result
@@ -1948,5 +1961,53 @@ impl Drop for ZerobusStream {
         if let Some(callback_handler_task) = self.callback_handler_task.take() {
             callback_handler_task.abort();
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use smallvec::smallvec;
+
+    #[tokio::test]
+    async fn fail_all_pending_records_preserves_payloads_and_notifies_waiters() {
+        let landing_zone = Arc::new(LandingZone::new(4));
+        let payload = EncodedBatch::Proto(smallvec![vec![1, 2, 3]]);
+        let offset_id = 7;
+        landing_zone
+            .add(Box::new(IngestRequest {
+                payload: payload.clone(),
+                offset_id,
+            }))
+            .await;
+
+        let (ack_tx, ack_rx) = tokio::sync::oneshot::channel();
+        let oneshot_map = Arc::new(tokio::sync::Mutex::new(HashMap::from([(
+            offset_id, ack_tx,
+        )])));
+        let failed_records = Arc::new(RwLock::new(Vec::new()));
+        let (callback_tx, mut callback_rx) = tokio::sync::mpsc::unbounded_channel();
+        let error = ZerobusError::InvalidStateError("close failed".to_string());
+
+        ZerobusStream::fail_all_pending_records(
+            Arc::clone(&landing_zone),
+            Arc::clone(&oneshot_map),
+            Arc::clone(&failed_records),
+            &error,
+            &Some(callback_tx),
+        )
+        .await;
+
+        assert_eq!(landing_zone.len(), 0);
+        assert_eq!(*failed_records.read().await, vec![payload]);
+        assert!(oneshot_map.lock().await.is_empty());
+        assert!(matches!(
+            ack_rx.await,
+            Ok(Err(ZerobusError::InvalidStateError(_)))
+        ));
+        assert!(matches!(
+            callback_rx.recv().await,
+            Some(CallbackMessage::Error(7, message)) if message.contains("close failed")
+        ));
     }
 }

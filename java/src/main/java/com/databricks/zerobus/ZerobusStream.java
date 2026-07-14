@@ -132,6 +132,9 @@ public class ZerobusStream<RecordType extends Message> extends BaseZerobusStream
    * @throws ZerobusException if the stream is not in a valid state for ingestion
    */
   public CompletableFuture<Void> ingestRecord(RecordType record) throws ZerobusException {
+    if (record == null) {
+      throw new IllegalArgumentException("record must not be null");
+    }
     ensureOpen();
     return nativeIngestRecord(nativeHandle, record.toByteArray(), false);
   }

@@ -138,6 +138,9 @@ public class ZerobusArrowStream implements AutoCloseable {
    * @throws ZerobusException if an error occurs or the wait times out
    */
   public void waitForOffset(long offset) throws ZerobusException {
+    if (offset < 0) {
+      throw new IllegalArgumentException("offset must be >= 0, got: " + offset);
+    }
     ensureOpen();
     nativeWaitForOffset(nativeHandle, offset);
   }
@@ -169,22 +172,42 @@ public class ZerobusArrowStream implements AutoCloseable {
   public void close() throws ZerobusException {
     long handle = nativeHandle;
     if (handle != 0) {
-      // Close the stream first (flushes pending batches)
-      nativeClose(handle);
+      ZerobusException failure = null;
+      try {
+        nativeClose(handle);
+      } catch (Exception e) {
+        failure = recordCloseFailure(failure, "Failed to close Arrow stream", e);
+      }
 
-      // Cache unacked batches before destroying the handle (for recreateArrowStream)
       try {
         cachedUnackedBatches = nativeGetUnackedBatches(handle);
       } catch (Exception e) {
         logger.warn("Failed to cache unacked batches: {}", e.getMessage());
         cachedUnackedBatches = new ArrayList<>();
+        failure = recordCloseFailure(failure, "Failed to cache unacknowledged Arrow batches", e);
+      } finally {
+        nativeHandle = 0;
+        nativeDestroy(handle);
+        logger.info("Arrow stream closed");
       }
 
-      // Now destroy the handle
-      nativeHandle = 0;
-      nativeDestroy(handle);
-      logger.info("Arrow stream closed");
+      if (failure != null) {
+        throw failure;
+      }
     }
+  }
+
+  private static ZerobusException recordCloseFailure(
+      ZerobusException current, String message, Exception error) {
+    ZerobusException failure =
+        error instanceof ZerobusException
+            ? (ZerobusException) error
+            : new ZerobusException(message, error);
+    if (current == null) {
+      return failure;
+    }
+    current.addSuppressed(failure);
+    return current;
   }
 
   /**
@@ -245,12 +268,12 @@ public class ZerobusArrowStream implements AutoCloseable {
   }
 
   /** Returns the client ID used to create this stream. */
-  String getClientId() {
+  public String getClientId() {
     return clientId;
   }
 
   /** Returns the client secret used to create this stream. */
-  String getClientSecret() {
+  public String getClientSecret() {
     return clientSecret;
   }
 
@@ -259,6 +282,9 @@ public class ZerobusArrowStream implements AutoCloseable {
    * ZerobusSdk#recreateArrowStream} during re-ingestion of unacked batches.
    */
   long ingestBatchIpc(byte[] ipcBytes) throws ZerobusException {
+    if (ipcBytes == null) {
+      throw new IllegalArgumentException("ipcBytes must not be null");
+    }
     ensureOpen();
     return nativeIngestBatch(nativeHandle, ipcBytes);
   }
@@ -270,13 +296,14 @@ public class ZerobusArrowStream implements AutoCloseable {
    *
    * <p>Package-private for use by {@link ZerobusSdk#createArrowStream}.
    */
-  /** Shared allocator for schema serialization — lightweight, only used for empty roots. */
-  private static final BufferAllocator SCHEMA_ALLOCATOR = new RootAllocator(1024 * 1024);
-
   static byte[] serializeSchemaToIpc(Schema schema) throws ZerobusException {
+    if (schema == null) {
+      throw new IllegalArgumentException("schema must not be null");
+    }
     try {
       ByteArrayOutputStream out = new ByteArrayOutputStream();
-      try (VectorSchemaRoot root = VectorSchemaRoot.create(schema, SCHEMA_ALLOCATOR);
+      try (BufferAllocator allocator = new RootAllocator(1024 * 1024);
+          VectorSchemaRoot root = VectorSchemaRoot.create(schema, allocator);
           ArrowStreamWriter writer = new ArrowStreamWriter(root, null, Channels.newChannel(out))) {
         writer.start();
         writer.end();
@@ -313,20 +340,18 @@ public class ZerobusArrowStream implements AutoCloseable {
 
   // ==================== Native methods implemented in Rust ====================
 
-  private static native void nativeDestroy(long handle);
+  static native void nativeDestroy(long handle);
 
-  private native long nativeIngestBatch(long handle, byte[] batchData);
+  private native long nativeIngestBatch(long handle, byte[] batchData) throws ZerobusException;
 
-  private native void nativeWaitForOffset(long handle, long offset);
+  private native void nativeWaitForOffset(long handle, long offset) throws ZerobusException;
 
-  private native void nativeFlush(long handle);
+  private native void nativeFlush(long handle) throws ZerobusException;
 
-  private native void nativeClose(long handle);
+  private native void nativeClose(long handle) throws ZerobusException;
 
   private native boolean nativeIsClosed(long handle);
 
-  private native String nativeGetTableName(long handle);
-
   @SuppressWarnings("unchecked")
-  private native List<byte[]> nativeGetUnackedBatches(long handle);
+  private native List<byte[]> nativeGetUnackedBatches(long handle) throws ZerobusException;
 }

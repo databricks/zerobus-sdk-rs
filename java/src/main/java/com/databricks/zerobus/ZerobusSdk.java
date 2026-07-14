@@ -3,6 +3,9 @@ package com.databricks.zerobus;
 import com.google.protobuf.Message;
 import java.util.List;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.CompletionException;
+import java.util.function.Function;
+import java.util.function.LongConsumer;
 import org.apache.arrow.vector.types.pojo.Schema;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -89,12 +92,19 @@ public class ZerobusSdk implements AutoCloseable {
    *
    * @param serverEndpoint The gRPC endpoint URL for the Zerobus service.
    * @param unityCatalogEndpoint The Unity Catalog endpoint URL.
-   * @throws ZerobusException if the SDK cannot be initialized
+   * @throws IllegalArgumentException if either endpoint is null or blank
+   * @throws IllegalStateException if the native SDK cannot be initialized
    */
   public ZerobusSdk(String serverEndpoint, String unityCatalogEndpoint) {
+    requireNonBlank(serverEndpoint, "serverEndpoint");
+    requireNonBlank(unityCatalogEndpoint, "unityCatalogEndpoint");
     this.serverEndpoint = serverEndpoint;
     this.unityCatalogEndpoint = unityCatalogEndpoint;
-    this.nativeHandle = nativeCreate(serverEndpoint, unityCatalogEndpoint);
+    try {
+      this.nativeHandle = nativeCreate(serverEndpoint, unityCatalogEndpoint);
+    } catch (ZerobusException e) {
+      throw new IllegalStateException("Failed to create native SDK instance", e);
+    }
     if (this.nativeHandle == 0) {
       throw new RuntimeException("Failed to create native SDK instance");
     }
@@ -158,6 +168,12 @@ public class ZerobusSdk implements AutoCloseable {
       String clientSecret,
       StreamConfigurationOptions options) {
 
+    requireNonBlank(tableName, "tableName");
+    if (descriptorProto == null) {
+      throw new IllegalArgumentException("descriptorProto must not be null");
+    }
+    requireNonBlank(clientId, "clientId");
+    requireNonBlank(clientSecret, "clientSecret");
     ensureOpen();
 
     StreamConfigurationOptions effectiveOptions = options != null ? options : DEFAULT_OPTIONS;
@@ -167,7 +183,7 @@ public class ZerobusSdk implements AutoCloseable {
     byte[] descriptorProtoBytes = descriptorProto.toByteArray();
 
     CompletableFuture<Long> handleFuture =
-        nativeCreateStream(
+        createNativeStream(
             nativeHandle,
             tableName,
             descriptorProtoBytes,
@@ -176,7 +192,9 @@ public class ZerobusSdk implements AutoCloseable {
             effectiveOptions,
             false);
 
-    return handleFuture.thenApply(
+    return completeNativeHandle(
+        handleFuture,
+        BaseZerobusStream::nativeDestroy,
         handle -> {
           if (handle == null || handle == 0) {
             throw new RuntimeException("Failed to create proto stream: null handle returned");
@@ -236,6 +254,9 @@ public class ZerobusSdk implements AutoCloseable {
   public CompletableFuture<ZerobusJsonStream> createJsonStream(
       String tableName, String clientId, String clientSecret, StreamConfigurationOptions options) {
 
+    requireNonBlank(tableName, "tableName");
+    requireNonBlank(clientId, "clientId");
+    requireNonBlank(clientSecret, "clientSecret");
     ensureOpen();
 
     StreamConfigurationOptions effectiveOptions = options != null ? options : DEFAULT_OPTIONS;
@@ -243,10 +264,12 @@ public class ZerobusSdk implements AutoCloseable {
     logger.debug("Creating JSON stream for table: {}", tableName);
 
     CompletableFuture<Long> handleFuture =
-        nativeCreateStream(
+        createNativeStream(
             nativeHandle, tableName, null, clientId, clientSecret, effectiveOptions, true);
 
-    return handleFuture.thenApply(
+    return completeNativeHandle(
+        handleFuture,
+        BaseZerobusStream::nativeDestroy,
         handle -> {
           if (handle == null || handle == 0) {
             throw new RuntimeException("Failed to create JSON stream: null handle returned");
@@ -278,6 +301,11 @@ public class ZerobusSdk implements AutoCloseable {
       String clientSecret,
       StreamConfigurationOptions options) {
 
+    if (tableProperties == null) {
+      throw new IllegalArgumentException("tableProperties must not be null");
+    }
+    requireNonBlank(clientId, "clientId");
+    requireNonBlank(clientSecret, "clientSecret");
     ensureOpen();
 
     StreamConfigurationOptions effectiveOptions = options != null ? options : DEFAULT_OPTIONS;
@@ -287,7 +315,7 @@ public class ZerobusSdk implements AutoCloseable {
     byte[] descriptorProtoBytes = tableProperties.getDescriptorProto().toByteArray();
 
     CompletableFuture<Long> handleFuture =
-        nativeCreateStream(
+        createNativeStream(
             nativeHandle,
             tableProperties.getTableName(),
             descriptorProtoBytes,
@@ -296,7 +324,9 @@ public class ZerobusSdk implements AutoCloseable {
             effectiveOptions,
             false);
 
-    return handleFuture.thenApply(
+    return completeNativeHandle(
+        handleFuture,
+        BaseZerobusStream::nativeDestroy,
         handle -> {
           if (handle == null || handle == 0) {
             throw new RuntimeException("Failed to create stream: null handle returned");
@@ -362,6 +392,12 @@ public class ZerobusSdk implements AutoCloseable {
       String clientSecret,
       ArrowStreamConfigurationOptions options) {
 
+    requireNonBlank(tableName, "tableName");
+    if (schema == null) {
+      throw new IllegalArgumentException("schema must not be null");
+    }
+    requireNonBlank(clientId, "clientId");
+    requireNonBlank(clientSecret, "clientSecret");
     ensureOpen();
 
     ArrowStreamConfigurationOptions effectiveOptions =
@@ -379,10 +415,12 @@ public class ZerobusSdk implements AutoCloseable {
     }
 
     CompletableFuture<Long> handleFuture =
-        nativeCreateArrowStream(
+        createNativeArrowStream(
             nativeHandle, tableName, schemaIpc, clientId, clientSecret, effectiveOptions);
 
-    return handleFuture.thenApply(
+    return completeNativeHandle(
+        handleFuture,
+        ZerobusArrowStream::nativeDestroy,
         handle -> {
           if (handle == null || handle == 0) {
             throw new RuntimeException("Failed to create Arrow stream: null handle returned");
@@ -408,6 +446,9 @@ public class ZerobusSdk implements AutoCloseable {
    * @throws IllegalStateException if the original stream is not closed
    */
   public CompletableFuture<ZerobusProtoStream> recreateStream(ZerobusProtoStream closedStream) {
+    if (closedStream == null) {
+      throw new IllegalArgumentException("closedStream must not be null");
+    }
     if (!closedStream.isClosed()) {
       throw new IllegalStateException("Stream must be closed before recreation");
     }
@@ -419,14 +460,12 @@ public class ZerobusSdk implements AutoCloseable {
     try {
       unackedBatches = closedStream.getUnackedBatches();
     } catch (ZerobusException e) {
-      CompletableFuture<ZerobusProtoStream> failed = new CompletableFuture<>();
-      failed.completeExceptionally(e);
-      return failed;
+      return failedFuture(e);
     }
 
     // Create new stream with same parameters
     CompletableFuture<Long> handleFuture =
-        nativeCreateStream(
+        createNativeStream(
             nativeHandle,
             closedStream.getTableName(),
             closedStream.getDescriptorProtoBytes(),
@@ -435,7 +474,9 @@ public class ZerobusSdk implements AutoCloseable {
             closedStream.getOptions(),
             false);
 
-    return handleFuture.thenApply(
+    return completeNativeHandle(
+        handleFuture,
+        BaseZerobusStream::nativeDestroy,
         handle -> {
           if (handle == null || handle == 0) {
             throw new RuntimeException("Failed to recreate proto stream: null handle returned");
@@ -455,8 +496,8 @@ public class ZerobusSdk implements AutoCloseable {
               newStream.ingestRecordsOffset(batch.getRecords());
             }
             newStream.flush();
-          } catch (ZerobusException e) {
-            throw new RuntimeException("Failed to re-ingest unacked records", e);
+          } catch (Exception e) {
+            throw recreationFailure(newStream, "Failed to re-ingest unacked records", e);
           }
 
           return newStream;
@@ -477,6 +518,9 @@ public class ZerobusSdk implements AutoCloseable {
    * @throws IllegalStateException if the original stream is not closed
    */
   public CompletableFuture<ZerobusJsonStream> recreateStream(ZerobusJsonStream closedStream) {
+    if (closedStream == null) {
+      throw new IllegalArgumentException("closedStream must not be null");
+    }
     if (!closedStream.isClosed()) {
       throw new IllegalStateException("Stream must be closed before recreation");
     }
@@ -488,14 +532,12 @@ public class ZerobusSdk implements AutoCloseable {
     try {
       unackedRecords = closedStream.getUnackedRecords();
     } catch (ZerobusException e) {
-      CompletableFuture<ZerobusJsonStream> failed = new CompletableFuture<>();
-      failed.completeExceptionally(e);
-      return failed;
+      return failedFuture(e);
     }
 
     // Create new stream with same parameters
     CompletableFuture<Long> handleFuture =
-        nativeCreateStream(
+        createNativeStream(
             nativeHandle,
             closedStream.getTableName(),
             null,
@@ -504,7 +546,9 @@ public class ZerobusSdk implements AutoCloseable {
             closedStream.getOptions(),
             true);
 
-    return handleFuture.thenApply(
+    return completeNativeHandle(
+        handleFuture,
+        BaseZerobusStream::nativeDestroy,
         handle -> {
           if (handle == null || handle == 0) {
             throw new RuntimeException("Failed to recreate JSON stream: null handle returned");
@@ -523,8 +567,8 @@ public class ZerobusSdk implements AutoCloseable {
               newStream.ingestRecordOffset(json);
             }
             newStream.flush();
-          } catch (ZerobusException e) {
-            throw new RuntimeException("Failed to re-ingest unacked records", e);
+          } catch (Exception e) {
+            throw recreationFailure(newStream, "Failed to re-ingest unacked records", e);
           }
 
           return newStream;
@@ -541,6 +585,9 @@ public class ZerobusSdk implements AutoCloseable {
    */
   public CompletableFuture<ZerobusArrowStream> recreateArrowStream(
       ZerobusArrowStream closedStream) {
+    if (closedStream == null) {
+      throw new IllegalArgumentException("closedStream must not be null");
+    }
     if (!closedStream.isClosed()) {
       throw new IllegalStateException("Arrow stream must be closed before recreation");
     }
@@ -551,13 +598,11 @@ public class ZerobusSdk implements AutoCloseable {
     try {
       unackedBatches = closedStream.getUnackedBatches();
     } catch (ZerobusException e) {
-      CompletableFuture<ZerobusArrowStream> failed = new CompletableFuture<>();
-      failed.completeExceptionally(e);
-      return failed;
+      return failedFuture(e);
     }
 
     CompletableFuture<Long> handleFuture =
-        nativeCreateArrowStream(
+        createNativeArrowStream(
             nativeHandle,
             closedStream.getTableName(),
             closedStream.getSchemaIpc(),
@@ -565,7 +610,9 @@ public class ZerobusSdk implements AutoCloseable {
             closedStream.getClientSecret(),
             closedStream.getOptions());
 
-    return handleFuture.thenApply(
+    return completeNativeHandle(
+        handleFuture,
+        ZerobusArrowStream::nativeDestroy,
         handle -> {
           if (handle == null || handle == 0) {
             throw new RuntimeException("Failed to recreate Arrow stream: null handle returned");
@@ -584,8 +631,8 @@ public class ZerobusSdk implements AutoCloseable {
               newStream.ingestBatchIpc(batchIpc);
             }
             newStream.flush();
-          } catch (ZerobusException e) {
-            throw new RuntimeException("Failed to re-ingest unacked Arrow batches", e);
+          } catch (Exception e) {
+            throw recreationFailure(newStream, "Failed to re-ingest unacked Arrow batches", e);
           }
 
           return newStream;
@@ -610,6 +657,9 @@ public class ZerobusSdk implements AutoCloseable {
   @Deprecated
   public <RecordType extends Message> CompletableFuture<ZerobusStream<RecordType>> recreateStream(
       ZerobusStream<RecordType> closedStream) {
+    if (closedStream == null) {
+      throw new IllegalArgumentException("closedStream must not be null");
+    }
     if (!closedStream.isClosed()) {
       throw new IllegalStateException("Stream must be closed before recreation");
     }
@@ -625,7 +675,7 @@ public class ZerobusSdk implements AutoCloseable {
 
     // Create new stream with same parameters
     CompletableFuture<Long> handleFuture =
-        nativeCreateStream(
+        createNativeStream(
             nativeHandle,
             tableProperties.getTableName(),
             descriptorProtoBytes,
@@ -634,7 +684,9 @@ public class ZerobusSdk implements AutoCloseable {
             closedStream.getOptions(),
             false);
 
-    return handleFuture.thenApply(
+    return completeNativeHandle(
+        handleFuture,
+        BaseZerobusStream::nativeDestroy,
         handle -> {
           if (handle == null || handle == 0) {
             throw new RuntimeException("Failed to recreate stream: null handle returned");
@@ -653,8 +705,8 @@ public class ZerobusSdk implements AutoCloseable {
               newStream.nativeIngestRecordOffset(newStream.nativeHandle, record, false);
             }
             newStream.flush();
-          } catch (ZerobusException e) {
-            throw new RuntimeException("Failed to re-ingest unacked records", e);
+          } catch (Exception e) {
+            throw recreationFailure(newStream, "Failed to re-ingest unacked records", e);
           }
 
           return newStream;
@@ -681,9 +733,99 @@ public class ZerobusSdk implements AutoCloseable {
     }
   }
 
+  private static void requireNonBlank(String value, String name) {
+    if (value == null || value.trim().isEmpty()) {
+      throw new IllegalArgumentException(name + " must not be null or blank");
+    }
+  }
+
+  private static <T> CompletableFuture<T> failedFuture(Throwable error) {
+    CompletableFuture<T> failed = new CompletableFuture<>();
+    failed.completeExceptionally(error);
+    return failed;
+  }
+
+  private static <T> CompletableFuture<T> completeNativeHandle(
+      CompletableFuture<Long> handleFuture,
+      LongConsumer destroyHandle,
+      Function<Long, T> streamFactory) {
+    CompletableFuture<T> result = new CompletableFuture<>();
+    handleFuture.whenComplete(
+        (handle, error) -> {
+          if (error != null) {
+            result.completeExceptionally(error);
+            return;
+          }
+          if (handle == null || handle == 0) {
+            result.completeExceptionally(
+                new IllegalStateException("Native stream creation returned an invalid handle"));
+            return;
+          }
+          if (result.isCancelled()) {
+            destroyHandle.accept(handle);
+            return;
+          }
+
+          T stream;
+          try {
+            stream = streamFactory.apply(handle);
+          } catch (Throwable factoryError) {
+            result.completeExceptionally(factoryError);
+            return;
+          }
+
+          if (!result.complete(stream)) {
+            destroyHandle.accept(handle);
+          }
+        });
+    return result;
+  }
+
+  private static CompletionException recreationFailure(
+      AutoCloseable stream, String message, Exception error) {
+    try {
+      stream.close();
+    } catch (Exception closeError) {
+      error.addSuppressed(closeError);
+    }
+    return new CompletionException(message, error);
+  }
+
+  private CompletableFuture<Long> createNativeStream(
+      long sdkHandle,
+      String tableName,
+      byte[] descriptorProto,
+      String clientId,
+      String clientSecret,
+      Object options,
+      boolean isJson) {
+    try {
+      return nativeCreateStream(
+          sdkHandle, tableName, descriptorProto, clientId, clientSecret, options, isJson);
+    } catch (ZerobusException e) {
+      return failedFuture(e);
+    }
+  }
+
+  private CompletableFuture<Long> createNativeArrowStream(
+      long sdkHandle,
+      String tableName,
+      byte[] arrowSchema,
+      String clientId,
+      String clientSecret,
+      Object options) {
+    try {
+      return nativeCreateArrowStream(
+          sdkHandle, tableName, arrowSchema, clientId, clientSecret, options);
+    } catch (ZerobusException e) {
+      return failedFuture(e);
+    }
+  }
+
   // Native methods implemented in Rust
 
-  private static native long nativeCreate(String serverEndpoint, String unityCatalogEndpoint);
+  private static native long nativeCreate(String serverEndpoint, String unityCatalogEndpoint)
+      throws ZerobusException;
 
   private static native void nativeDestroy(long handle);
 
@@ -694,7 +836,8 @@ public class ZerobusSdk implements AutoCloseable {
       String clientId,
       String clientSecret,
       Object options,
-      boolean isJson);
+      boolean isJson)
+      throws ZerobusException;
 
   private native CompletableFuture<Long> nativeCreateArrowStream(
       long sdkHandle,
@@ -702,5 +845,6 @@ public class ZerobusSdk implements AutoCloseable {
       byte[] arrowSchema,
       String clientId,
       String clientSecret,
-      Object options);
+      Object options)
+      throws ZerobusException;
 }

@@ -89,7 +89,9 @@ On Linux, the libc flavor (glibc vs musl) is detected at runtime. To override de
 ### Dependencies
 
 **When using the fat JAR** (recommended for most users):
-- No additional dependencies required - all dependencies are bundled
+- No additional dependencies are required for Proto or JSON ingestion.
+- Arrow Flight ingestion remains opt-in and requires `arrow-vector` and an allocator such as
+  `arrow-memory-netty` on the application classpath.
 
 **When using the regular JAR**:
 - [`protobuf-java` 4.33.0](https://mvnrepository.com/artifact/com.google.protobuf/protobuf-java/4.33.0)

@@ -1556,7 +1556,8 @@ impl ZerobusArrowStream {
         );
 
         // Flush pending batches.
-        if let Err(e) = self.flush().await {
+        let flush_result = self.flush().await;
+        if let Err(e) = &flush_result {
             warn!(
                 "Flush failed during close: {}. Moving pending batches to failed.",
                 e
@@ -1582,7 +1583,7 @@ impl ZerobusArrowStream {
             }
         }
 
-        Ok(())
+        flush_result
     }
 
     /// Returns all batches that were ingested but not acknowledged by the server.

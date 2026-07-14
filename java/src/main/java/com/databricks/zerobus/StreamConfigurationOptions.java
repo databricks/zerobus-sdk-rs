@@ -250,6 +250,10 @@ public class StreamConfigurationOptions {
      * @return this builder for method chaining
      */
     public StreamConfigurationOptionsBuilder setMaxInflightRecords(int maxInflightRecords) {
+      if (maxInflightRecords <= 0) {
+        throw new IllegalArgumentException(
+            "maxInflightRecords must be > 0, got: " + maxInflightRecords);
+      }
       this.maxInflightRecords = maxInflightRecords;
       return this;
     }
@@ -278,6 +282,10 @@ public class StreamConfigurationOptions {
      * @return this builder for method chaining
      */
     public StreamConfigurationOptionsBuilder setRecoveryTimeoutMs(int recoveryTimeoutMs) {
+      if (recoveryTimeoutMs < 0) {
+        throw new IllegalArgumentException(
+            "recoveryTimeoutMs must be >= 0, got: " + recoveryTimeoutMs);
+      }
       this.recoveryTimeoutMs = recoveryTimeoutMs;
       return this;
     }
@@ -293,6 +301,10 @@ public class StreamConfigurationOptions {
      * @throws IllegalArgumentException if recoveryBackoffMs is less than 0
      */
     public StreamConfigurationOptionsBuilder setRecoveryBackoffMs(int recoveryBackoffMs) {
+      if (recoveryBackoffMs < 0) {
+        throw new IllegalArgumentException(
+            "recoveryBackoffMs must be >= 0, got: " + recoveryBackoffMs);
+      }
       this.recoveryBackoffMs = recoveryBackoffMs;
       return this;
     }
@@ -307,6 +319,9 @@ public class StreamConfigurationOptions {
      * @return this builder for method chaining
      */
     public StreamConfigurationOptionsBuilder setRecoveryRetries(int recoveryRetries) {
+      if (recoveryRetries < 0) {
+        throw new IllegalArgumentException("recoveryRetries must be >= 0, got: " + recoveryRetries);
+      }
       this.recoveryRetries = recoveryRetries;
       return this;
     }
@@ -321,6 +336,9 @@ public class StreamConfigurationOptions {
      * @return this builder for method chaining
      */
     public StreamConfigurationOptionsBuilder setFlushTimeoutMs(int flushTimeoutMs) {
+      if (flushTimeoutMs < 0) {
+        throw new IllegalArgumentException("flushTimeoutMs must be >= 0, got: " + flushTimeoutMs);
+      }
       this.flushTimeoutMs = flushTimeoutMs;
       return this;
     }
@@ -336,6 +354,10 @@ public class StreamConfigurationOptions {
      */
     public StreamConfigurationOptionsBuilder setServerLackOfAckTimeoutMs(
         int serverLackOfAckTimeoutMs) {
+      if (serverLackOfAckTimeoutMs < 0) {
+        throw new IllegalArgumentException(
+            "serverLackOfAckTimeoutMs must be >= 0, got: " + serverLackOfAckTimeoutMs);
+      }
       this.serverLackOfAckTimeoutMs = serverLackOfAckTimeoutMs;
       return this;
     }

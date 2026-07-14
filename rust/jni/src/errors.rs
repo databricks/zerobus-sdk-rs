@@ -5,7 +5,7 @@
 
 use crate::class_cache::{as_jclass, get_class_cache};
 use databricks_zerobus_ingest_sdk::ZerobusError;
-use jni::objects::{GlobalRef, JString, JThrowable, JValue};
+use jni::objects::{GlobalRef, JObject, JString, JThrowable, JValue};
 use jni::JNIEnv;
 
 /// Throw a ZerobusException in Java.
@@ -131,21 +131,25 @@ pub fn check_and_clear_exception(env: &mut JNIEnv) -> Option<String> {
     if env.exception_check().unwrap_or(false) {
         if let Ok(exc) = env.exception_occurred() {
             let _ = env.exception_clear();
+            let exc = env.auto_local(JObject::from(exc));
 
             // Try to get the exception message
-            if let Ok(message_obj) =
-                env.call_method(&exc, "getMessage", "()Ljava/lang/String;", &[])
-            {
-                if let Ok(msg) = message_obj.l() {
-                    if !msg.is_null() {
-                        let jstr: &JString = msg.as_ref().into();
-                        if let Ok(s) = env.get_string(jstr) {
-                            return Some(s.into());
-                        }
+            let message = env
+                .call_method(exc.as_ref(), "getMessage", "()Ljava/lang/String;", &[])
+                .ok()
+                .and_then(|value| value.l().ok())
+                .and_then(|message_obj| {
+                    let message_obj = env.auto_local(message_obj);
+                    if message_obj.as_ref().is_null() {
+                        return None;
                     }
-                }
+                    let jstr: &JString = message_obj.as_ref().into();
+                    env.get_string(jstr).ok().map(|value| value.into())
+                });
+            if env.exception_check().unwrap_or(false) {
+                let _ = env.exception_clear();
             }
-            return Some("Unknown exception".to_string());
+            return Some(message.unwrap_or_else(|| "Unknown exception".to_string()));
         }
     }
     None

@@ -152,8 +152,14 @@ public class ZerobusJsonStream extends BaseZerobusStream {
    */
   public <T> long ingestRecordOffset(T object, JsonSerializer<T> serializer)
       throws ZerobusException {
+    if (serializer == null) {
+      throw new IllegalArgumentException("serializer must not be null");
+    }
     ensureOpen();
     String json = serializer.serialize(object);
+    if (json == null) {
+      throw new IllegalArgumentException("serializer must not return null");
+    }
     return nativeIngestRecordOffset(nativeHandle, json.getBytes(StandardCharsets.UTF_8), true);
   }
 
@@ -167,6 +173,9 @@ public class ZerobusJsonStream extends BaseZerobusStream {
    * @throws ZerobusException if the stream is not in a valid state or an error occurs
    */
   public long ingestRecordOffset(String json) throws ZerobusException {
+    if (json == null) {
+      throw new IllegalArgumentException("json must not be null");
+    }
     ensureOpen();
     return nativeIngestRecordOffset(nativeHandle, json.getBytes(StandardCharsets.UTF_8), true);
   }
@@ -187,9 +196,18 @@ public class ZerobusJsonStream extends BaseZerobusStream {
    */
   public <T> Optional<Long> ingestRecordsOffset(Iterable<T> objects, JsonSerializer<T> serializer)
       throws ZerobusException {
+    if (objects == null) {
+      throw new IllegalArgumentException("objects must not be null");
+    }
+    if (serializer == null) {
+      throw new IllegalArgumentException("serializer must not be null");
+    }
     List<byte[]> payloads = new ArrayList<>();
     for (T obj : objects) {
       String json = serializer.serialize(obj);
+      if (json == null) {
+        throw new IllegalArgumentException("serializer must not return null");
+      }
       payloads.add(json.getBytes(StandardCharsets.UTF_8));
     }
     if (payloads.isEmpty()) {
@@ -209,8 +227,14 @@ public class ZerobusJsonStream extends BaseZerobusStream {
    * @throws ZerobusException if the stream is not in a valid state or an error occurs
    */
   public Optional<Long> ingestRecordsOffset(Iterable<String> jsonStrings) throws ZerobusException {
+    if (jsonStrings == null) {
+      throw new IllegalArgumentException("jsonStrings must not be null");
+    }
     List<byte[]> payloads = new ArrayList<>();
     for (String json : jsonStrings) {
+      if (json == null) {
+        throw new IllegalArgumentException("jsonStrings must not contain null elements");
+      }
       payloads.add(json.getBytes(StandardCharsets.UTF_8));
     }
     if (payloads.isEmpty()) {
@@ -269,6 +293,9 @@ public class ZerobusJsonStream extends BaseZerobusStream {
    * @throws ZerobusException if an error occurs
    */
   public <T> List<T> getUnackedRecords(JsonDeserializer<T> deserializer) throws ZerobusException {
+    if (deserializer == null) {
+      throw new IllegalArgumentException("deserializer must not be null");
+    }
     List<String> jsonRecords = getUnackedRecords();
     List<T> result = new ArrayList<>(jsonRecords.size());
     for (String json : jsonRecords) {
