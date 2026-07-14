@@ -518,13 +518,11 @@ mod tests {
     // Ack callback lifetime on failed stream creation
     // ========================================================================
     //
-    // Failure-path sibling of #469: when `create_stream` fails, the registered
-    // `Arc<CallbackAckCallback>` must drop (with the builder), not leak to a
-    // background task. Pins an invariant that's currently only safe by
-    // construction. Observed via the `#[cfg(test)]` drop hook in `common.rs`.
-    // Failure trigger (hermetic): JSON + empty table name — reaches
-    // `apply_c_stream_options` (Arc registered), then fails in `build()`'s
-    // validation before any network I/O.
+    // When `create_stream` fails, the registered `Arc<CallbackAckCallback>` must
+    // drop (with the builder), not leak to a background task. Observed via the
+    // `#[cfg(test)]` drop hook in `common.rs`. Hermetic failure trigger: JSON +
+    // empty table name registers the Arc in `apply_c_stream_options`, then fails
+    // in `build()` validation before any network I/O.
 
     use crate::common::{ACK_CALLBACK_DROP_COUNT, ACK_DROP_SENTINEL_CREATE_FAIL_TESTS};
     use crate::{zerobus_sdk_create_stream, zerobus_sdk_create_stream_with_headers_provider};
