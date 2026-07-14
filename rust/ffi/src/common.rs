@@ -432,6 +432,36 @@ impl AckCallback for CallbackAckCallback {
     }
 }
 
+// Test-only drop observation for `CallbackAckCallback`.
+//
+// `CallbackAckCallback` is created internally by `apply_c_stream_options` and
+// wrapped in an `Arc`, so a test cannot hold a `Weak` to it to observe its
+// release. Gating a `Drop` impl on `#[cfg(test)]` compiles it ONLY into the
+// FFI crate's own test build (where `tests.rs` runs) and leaves the shipped
+// library byte-identical — no Cargo feature, no production code path.
+//
+// The counter is bumped only when `user_data` matches the dedicated sentinel
+// address `ACK_DROP_SENTINEL`, so the failure-path create tests observe the
+// release of the callback THEY registered without being perturbed by other
+// tests that build ack callbacks with a null `user_data`.
+#[cfg(test)]
+pub(crate) static ACK_CALLBACK_DROP_COUNT: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(0);
+
+/// Test-only sentinel address used as `ack_user_data` so the drop hook only
+/// counts callbacks created by the failure-path create tests.
+#[cfg(test)]
+pub(crate) static ACK_DROP_SENTINEL: u8 = 0;
+
+#[cfg(test)]
+impl Drop for CallbackAckCallback {
+    fn drop(&mut self) {
+        if std::ptr::eq(self.user_data as *const u8, &ACK_DROP_SENTINEL) {
+            ACK_CALLBACK_DROP_COUNT.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+}
+
 /// Safe wrapper to validate SDK pointer
 pub(crate) fn validate_sdk_ptr<'a>(sdk: *mut CZerobusSdk) -> Result<&'a ZerobusSdk, &'static str> {
     if sdk.is_null() {
