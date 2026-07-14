@@ -633,21 +633,22 @@ mod tests {
         // Teardown path (a): drain up to the deadline, then abort.
         harness.teardown(Some(50)).await;
 
-        // After teardown returns, callbacks must have stopped. Enqueue more and
-        // confirm the count does not increase (the sender no longer has a live
-        // receiver, and the task is gone).
-        let before = unsafe { &*user_data }.calls.load(AtomicOrdering::SeqCst);
-        harness.send_ack(4);
-        harness.send_error(5, "late");
-        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-        let after = unsafe { &*user_data }.calls.load(AtomicOrdering::SeqCst);
-        assert_eq!(
-            before, after,
-            "no callback may fire after teardown returns (drain-then-abort)"
+        // The handler task is gone: its receiver is dropped, so the callback can
+        // no longer be dispatched to. Assert that directly (rather than racing a
+        // sleep), and confirm a further enqueue is rejected outright.
+        assert!(
+            harness.is_closed(),
+            "handler task must be gone after teardown (drain-then-abort)"
         );
+        assert!(
+            !harness.send_ack(4),
+            "enqueue must be rejected once the handler task is gone"
+        );
+        assert!(!harness.send_error(5, "late"));
         assert_eq!(
-            after, 3,
-            "exactly the pre-teardown callbacks were delivered"
+            unsafe { &*user_data }.calls.load(AtomicOrdering::SeqCst),
+            3,
+            "exactly the pre-teardown callbacks were delivered; none fired after"
         );
 
         // No use-after-free: teardown has returned, so freeing user_data is
@@ -674,17 +675,18 @@ mod tests {
         // to observe cancellation and unwind.
         harness.teardown(None).await;
 
-        let before = unsafe { &*user_data }.calls.load(AtomicOrdering::SeqCst);
-        harness.send_ack(12);
-        tokio::time::sleep(std::time::Duration::from_millis(30)).await;
-        let after = unsafe { &*user_data }.calls.load(AtomicOrdering::SeqCst);
-        assert_eq!(
-            before, after,
-            "no callback may fire after teardown returns (wait-indefinitely)"
+        assert!(
+            harness.is_closed(),
+            "handler task must be gone after teardown (wait-indefinitely)"
+        );
+        assert!(
+            !harness.send_ack(12),
+            "enqueue must be rejected once the handler task is gone"
         );
         assert_eq!(
-            after, 2,
-            "exactly the pre-teardown callbacks were delivered"
+            unsafe { &*user_data }.calls.load(AtomicOrdering::SeqCst),
+            2,
+            "exactly the pre-teardown callbacks were delivered; none fired after"
         );
 
         // No use-after-free: safe to release user_data now that teardown returned.
@@ -696,14 +698,17 @@ mod tests {
 
     // Teardown with a callback registered but nothing ever sent: teardown must
     // still complete cleanly and leave user_data untouched (0 calls), so it is
-    // safe to free.
-    #[tokio::test]
-    async fn test_ack_callback_teardown_no_messages() {
+    // safe to free. Covers both teardown modes.
+    async fn teardown_no_messages_case(callback_max_wait_time_ms: Option<u64>) {
         let (callback, user_data) = make_live_callback();
         let mut harness = CallbackHandlerHarness::spawn(callback);
 
-        harness.teardown(Some(50)).await;
+        harness.teardown(callback_max_wait_time_ms).await;
 
+        assert!(
+            harness.is_closed(),
+            "handler task must be gone after teardown"
+        );
         assert_eq!(
             unsafe { &*user_data }.calls.load(AtomicOrdering::SeqCst),
             0,
@@ -713,6 +718,16 @@ mod tests {
         unsafe {
             drop(Box::from_raw(user_data));
         }
+    }
+
+    #[tokio::test]
+    async fn test_ack_callback_teardown_no_messages_drain_then_abort() {
+        teardown_no_messages_case(Some(50)).await;
+    }
+
+    #[tokio::test]
+    async fn test_ack_callback_teardown_no_messages_wait_indefinitely() {
+        teardown_no_messages_case(None).await;
     }
 
     // Running under a sanitizer (issue #469 asks for ASan "where practical"):

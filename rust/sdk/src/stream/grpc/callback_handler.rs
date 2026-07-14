@@ -98,16 +98,26 @@ impl CallbackHandlerHarness {
         }
     }
 
-    /// Enqueues an ack for delivery through the handler task.
-    pub fn send_ack(&self, offset_id: crate::OffsetId) {
-        let _ = self.sender.send(CallbackMessage::Ack(offset_id));
+    /// Enqueues an ack for delivery through the handler task. Returns `true` if
+    /// it was queued, `false` if the task's receiver is already gone (e.g. after
+    /// teardown).
+    pub fn send_ack(&self, offset_id: crate::OffsetId) -> bool {
+        self.sender.send(CallbackMessage::Ack(offset_id)).is_ok()
     }
 
-    /// Enqueues an error for delivery through the handler task.
-    pub fn send_error(&self, offset_id: crate::OffsetId, message: &str) {
-        let _ = self
-            .sender
-            .send(CallbackMessage::Error(offset_id, message.to_string()));
+    /// Enqueues an error for delivery through the handler task. Returns `true` if
+    /// it was queued, `false` if the task's receiver is already gone.
+    pub fn send_error(&self, offset_id: crate::OffsetId, message: &str) -> bool {
+        self.sender
+            .send(CallbackMessage::Error(offset_id, message.to_string()))
+            .is_ok()
+    }
+
+    /// Whether the handler task's receiver has been dropped — true once the task
+    /// has exited (e.g. after [`Self::teardown`]), so no further message can be
+    /// dispatched to the callback.
+    pub fn is_closed(&self) -> bool {
+        self.sender.is_closed()
     }
 
     /// Reproduces `ZerobusStream::close()`'s callback teardown: cancels the
