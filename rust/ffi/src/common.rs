@@ -434,20 +434,23 @@ impl AckCallback for CallbackAckCallback {
 
 // Test-only drop observation for `CallbackAckCallback` (created internally, so
 // tests can't hold a `Weak`). `#[cfg(test)]` keeps the shipped library
-// unchanged. Counts only drops keyed to `ACK_DROP_SENTINEL`, so other tests'
-// callbacks (null `user_data`) don't perturb it.
+// unchanged. Counts only drops keyed to `ACK_DROP_SENTINEL_CREATE_FAIL_TESTS`,
+// so other tests' callbacks (null `user_data`) don't perturb it.
 #[cfg(test)]
 pub(crate) static ACK_CALLBACK_DROP_COUNT: std::sync::atomic::AtomicUsize =
     std::sync::atomic::AtomicUsize::new(0);
 
-/// Sentinel `ack_user_data` so the drop hook counts only the create tests' callbacks.
+/// Sentinel `ack_user_data` reserved for the create-failure ack-drop tests.
 #[cfg(test)]
-pub(crate) static ACK_DROP_SENTINEL: u8 = 0;
+pub(crate) static ACK_DROP_SENTINEL_CREATE_FAIL_TESTS: u8 = 0;
 
 #[cfg(test)]
 impl Drop for CallbackAckCallback {
     fn drop(&mut self) {
-        if std::ptr::eq(self.user_data as *const u8, &ACK_DROP_SENTINEL) {
+        if std::ptr::eq(
+            self.user_data as *const u8,
+            &ACK_DROP_SENTINEL_CREATE_FAIL_TESTS,
+        ) {
             ACK_CALLBACK_DROP_COUNT.fetch_add(1, Ordering::SeqCst);
         }
     }

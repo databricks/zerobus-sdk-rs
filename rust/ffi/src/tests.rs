@@ -526,10 +526,10 @@ mod tests {
     // `apply_c_stream_options` (Arc registered), then fails in `build()`'s
     // validation before any network I/O.
 
-    use crate::common::{ACK_CALLBACK_DROP_COUNT, ACK_DROP_SENTINEL};
+    use crate::common::{ACK_CALLBACK_DROP_COUNT, ACK_DROP_SENTINEL_CREATE_FAIL_TESTS};
     use crate::{zerobus_sdk_create_stream, zerobus_sdk_create_stream_with_headers_provider};
 
-    // Global counter, so serialize the two tests' reset/assert windows.
+    // Global counter, so serialize this pair's before/after sampling window.
     static ACK_DROP_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
     // No-op ack/error callbacks; never invoked (create fails before any ack).
@@ -541,13 +541,14 @@ mod tests {
     ) {
     }
 
-    // JSON config with both ack callbacks set, keyed to the drop sentinel.
+    // JSON config with both ack callbacks set, keyed to this test-only sentinel.
     fn json_config_with_ack_callback() -> crate::CStreamConfigurationOptions {
         let mut config = zerobus_get_default_config();
         config.record_type = 2; // RecordType::Json
         config.ack_on_ack = Some(noop_ack);
         config.ack_on_error = Some(noop_error);
-        config.ack_user_data = (&ACK_DROP_SENTINEL as *const u8) as *mut std::ffi::c_void;
+        config.ack_user_data =
+            (&ACK_DROP_SENTINEL_CREATE_FAIL_TESTS as *const u8) as *mut std::ffi::c_void;
         config
     }
 
