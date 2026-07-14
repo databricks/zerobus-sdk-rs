@@ -339,8 +339,8 @@ impl<'a> StreamBuilder<'a> {
     /// ```rust,ignore
     /// let builder = sdk
     ///     .stream_builder()
-    ///     .table("catalog.schema.table")
-    ///     .oauth("client-id", "client-secret")
+    ///     .table(\"catalog.schema.table\")
+    ///     .oauth(\"client-id\", \"client-secret\")
     ///     .json();
     ///
     /// // Check configuration before opening the stream
@@ -352,6 +352,31 @@ impl<'a> StreamBuilder<'a> {
             return Err(ZerobusError::InvalidArgument(
                 "table name is required: call .table()".into(),
             ));
+        }
+        #[cfg(not(feature = "testing"))]
+        {
+            let parts: Vec<&str> = self.table_name.split('.').collect();
+            if parts.len() != 3 {
+                return Err(ZerobusError::InvalidTableName(format!(
+                    "Table name must have exactly 3 parts (catalog.schema.table), found {} parts",
+                    parts.len()
+                )));
+            }
+            if parts[0].is_empty() {
+                return Err(ZerobusError::InvalidTableName(
+                    "Catalog name cannot be empty".to_string(),
+                ));
+            }
+            if parts[1].is_empty() {
+                return Err(ZerobusError::InvalidTableName(
+                    "Schema name cannot be empty".to_string(),
+                ));
+            }
+            if parts[2].is_empty() {
+                return Err(ZerobusError::InvalidTableName(
+                    "Table name cannot be empty".to_string(),
+                ));
+            }
         }
         if self.auth.is_none() {
             return Err(ZerobusError::InvalidArgument(missing_auth_error().into()));
@@ -647,6 +672,50 @@ mod tests {
         assert!(debug_str.contains("StreamBuilder"));
         assert!(debug_str.contains("OAuth"));
         assert!(debug_str.contains("Json"));
+    }
+
+    #[test]
+    fn validate_rejects_single_part_table_name() {
+        let sdk = test_sdk();
+        let builder = sdk.stream_builder().table("mytable").oauth("a", "b").json();
+        match builder.validate() {
+            Err(ZerobusError::InvalidTableName(msg)) => {
+                assert!(msg.contains("exactly 3 parts"), "unexpected: {}", msg);
+            }
+            other => panic!("expected InvalidTableName, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn validate_rejects_two_part_table_name() {
+        let sdk = test_sdk();
+        let builder = sdk
+            .stream_builder()
+            .table("schema.table")
+            .oauth("a", "b")
+            .json();
+        match builder.validate() {
+            Err(ZerobusError::InvalidTableName(msg)) => {
+                assert!(msg.contains("exactly 3 parts"), "unexpected: {}", msg);
+            }
+            other => panic!("expected InvalidTableName, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn validate_rejects_table_name_with_empty_part() {
+        let sdk = test_sdk();
+        let builder = sdk
+            .stream_builder()
+            .table("catalog..table")
+            .oauth("a", "b")
+            .json();
+        match builder.validate() {
+            Err(ZerobusError::InvalidTableName(msg)) => {
+                assert!(msg.contains("Schema name cannot be empty"), "unexpected: {}", msg);
+            }
+            other => panic!("expected InvalidTableName, got {:?}", other),
+        }
     }
 
     #[tokio::test]
