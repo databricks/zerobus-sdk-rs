@@ -157,9 +157,9 @@ Sdk& Sdk::operator=(Sdk&& other) noexcept {
 }
 
 // Create an OAuth-authenticated proto/JSON stream. The descriptor pointer is
-// null for a JSON stream (descriptor_ptr() maps an empty vector to null), and
-// the StreamOptions are converted to the C struct just for this call. The
-// resulting Stream owns no headers provider, hence the null second argument.
+// null for a JSON stream (descriptor_ptr() maps an empty vector to null). No
+// headers provider (null second arg); the third arg keeps the ack callback (if
+// any) alive for the raw user_data the core holds.
 Stream Sdk::create_stream(const TableProperties& table,
                           const std::string& client_id,
                           const std::string& client_secret,
@@ -176,14 +176,14 @@ Stream Sdk::create_stream(const TableProperties& table,
     guard.throw_if_error();
     throw ZerobusException("failed to create stream", false);
   }
-  return Stream(stream, nullptr);
+  // No headers provider; keep the ack callback (if any) alive on the Stream.
+  return Stream(stream, nullptr, options.ack_callback);
 }
 
-// Same as above but authenticated by a custom headers provider. We validate the
-// pointer here (the FFI would otherwise receive a null callback target), pass
-// the raw provider pointer as the trampoline's user_data, and hand the
-// shared_ptr to the Stream so the provider outlives every callback the core
-// makes through it.
+// Same as above but authenticated by a custom headers provider. Validate the
+// pointer (else the FFI gets a null callback target), pass the raw provider as
+// the trampoline's user_data, and hand the shared_ptr to the Stream so it
+// outlives the core's callbacks.
 Stream Sdk::create_stream(const TableProperties& table,
                           std::shared_ptr<HeadersProvider> headers_provider,
                           const StreamOptions& options) {
@@ -201,7 +201,8 @@ Stream Sdk::create_stream(const TableProperties& table,
     guard.throw_if_error();
     throw ZerobusException("failed to create stream", false);
   }
-  return Stream(stream, std::move(headers_provider));
+  // Keep both provider and ack callback alive: the core raw-points to each.
+  return Stream(stream, std::move(headers_provider), options.ack_callback);
 }
 
 // Create an OAuth-authenticated Arrow Flight stream (Beta). The schema IPC

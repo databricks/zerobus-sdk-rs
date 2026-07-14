@@ -8,6 +8,7 @@
 /// which in turn wraps the Rust core. All operations report failure by throwing
 /// `zerobus::ZerobusException`.
 
+#include "zerobus/ack_callback.hpp"
 #include "zerobus/arrow_stream.hpp"
 #include "zerobus/config.hpp"
 #include "zerobus/error.hpp"

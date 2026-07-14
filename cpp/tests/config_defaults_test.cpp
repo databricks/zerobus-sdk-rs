@@ -66,10 +66,10 @@ int main() {
            from_ffi.flush_timeout_ms);
   check_eq("record_type", from_cpp.record_type, from_ffi.record_type);
 
-  // Optionals: a default StreamOptions leaves both unset. stream_paused is
-  // written as absent; callback_max_wait_time_ms is left at the FFI seed
-  // (which is present). Either way the presence flag and value must match the
-  // FFI default struct.
+  // Optionals: a default StreamOptions leaves stream_paused unset (written as
+  // absent) and its callback wait policy at use_default(), which leaves the
+  // callback budget at the FFI seed (present). Either way the presence flag and
+  // value must match the FFI default struct.
   check_eq("has_stream_paused_max_wait_time_ms",
            from_cpp.has_stream_paused_max_wait_time_ms,
            from_ffi.has_stream_paused_max_wait_time_ms);
@@ -81,6 +81,20 @@ int main() {
            from_ffi.has_callback_max_wait_time_ms);
   check_eq("callback_max_wait_time_ms", from_cpp.callback_max_wait_time_ms,
            from_ffi.callback_max_wait_time_ms);
+
+  // A default StreamOptions has no callback, so the three ack fields stay null.
+  if (from_cpp.ack_on_ack != nullptr) {
+    std::fprintf(stderr, "FAIL: ack_on_ack: default should be null\n");
+    ++g_failures;
+  }
+  if (from_cpp.ack_on_error != nullptr) {
+    std::fprintf(stderr, "FAIL: ack_on_error: default should be null\n");
+    ++g_failures;
+  }
+  if (from_cpp.ack_user_data != nullptr) {
+    std::fprintf(stderr, "FAIL: ack_user_data: default should be null\n");
+    ++g_failures;
+  }
 
   if (g_failures != 0) {
     std::fprintf(stderr, "%d field(s) diverged from the FFI defaults.\n",
