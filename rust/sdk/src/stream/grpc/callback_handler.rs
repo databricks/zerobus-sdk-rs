@@ -61,3 +61,66 @@ impl ZerobusStream {
         })
     }
 }
+
+/// Test-only harness that drives the *real* callback handler task and the
+/// *real* teardown sequence in isolation, without a live gRPC connection.
+///
+/// There is no in-process mock gRPC server, so a fully end-to-end "stream over
+/// a socket" callback test isn't hermetically feasible. This harness is the
+/// faithful hermetic substitute: it wires up the same `spawn_callback_handler_task`
+/// and channel that `ZerobusStream::new` uses, so tests push genuine
+/// `CallbackMessage`s through it and then reproduce `close()`'s teardown via
+/// [`ZerobusStream::shutdown_callback_task`] — the identical timeout-then-abort
+/// / wait-indefinitely logic. It lets the FFI crate exercise the ack callback
+/// lifetime + teardown contract against production code paths.
+#[cfg(feature = "testing")]
+pub struct CallbackHandlerHarness {
+    sender: tokio::sync::mpsc::UnboundedSender<CallbackMessage>,
+    task: Option<tokio::task::JoinHandle<()>>,
+    cancellation_token: CancellationToken,
+}
+
+#[cfg(feature = "testing")]
+impl CallbackHandlerHarness {
+    /// Spawns the real callback handler task around the given `AckCallback`.
+    pub fn spawn(ack_callback: Arc<dyn AckCallback>) -> Self {
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+        let cancellation_token = CancellationToken::new();
+        let task = ZerobusStream::spawn_callback_handler_task(
+            rx,
+            Some(ack_callback),
+            cancellation_token.clone(),
+        );
+        Self {
+            sender: tx,
+            task: Some(task),
+            cancellation_token,
+        }
+    }
+
+    /// Enqueues an ack for delivery through the handler task.
+    pub fn send_ack(&self, offset_id: crate::OffsetId) {
+        let _ = self.sender.send(CallbackMessage::Ack(offset_id));
+    }
+
+    /// Enqueues an error for delivery through the handler task.
+    pub fn send_error(&self, offset_id: crate::OffsetId, message: &str) {
+        let _ = self
+            .sender
+            .send(CallbackMessage::Error(offset_id, message.to_string()));
+    }
+
+    /// Reproduces `ZerobusStream::close()`'s callback teardown: cancels the
+    /// token, then drains the handler task via the production
+    /// [`ZerobusStream::shutdown_callback_task`] path (timeout-then-abort when
+    /// `callback_max_wait_time_ms` is `Some`, wait-indefinitely when `None`).
+    ///
+    /// When this returns, the handler task has stopped invoking the callback,
+    /// so the caller may safely release the callback's `user_data`.
+    pub async fn teardown(&mut self, callback_max_wait_time_ms: Option<u64>) {
+        self.cancellation_token.cancel();
+        if let Some(task) = self.task.take() {
+            ZerobusStream::shutdown_callback_task(task, callback_max_wait_time_ms).await;
+        }
+    }
+}

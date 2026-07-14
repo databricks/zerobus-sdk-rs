@@ -85,26 +85,41 @@ impl ZerobusStream {
             }
         }
         // Shutdown callback handler task, if there are any callbacks.
-        if let Some(mut task) = self.callback_handler_task.take() {
-            if let Some(callback_max_wait_time_ms) = self.options.callback_max_wait_time_ms {
-                match tokio::time::timeout(
-                    Duration::from_millis(callback_max_wait_time_ms),
-                    &mut task,
-                )
+        if let Some(task) = self.callback_handler_task.take() {
+            Self::shutdown_callback_task(task, self.options.callback_max_wait_time_ms).await;
+        }
+    }
+
+    /// Drains the callback handler task during teardown.
+    ///
+    /// The caller must have already cancelled the stream's `cancellation_token`
+    /// so the task can observe cancellation at its next await point. If
+    /// `callback_max_wait_time_ms` is `Some`, waits up to that long for the task
+    /// to finish draining, then aborts it if it hasn't; if `None`, waits
+    /// indefinitely for it to drain.
+    ///
+    /// Split out of `shutdown_all_tasks_gracefully` so the exact teardown
+    /// sequence can be exercised in isolation by tests (see the callback
+    /// handler harness under the `testing` feature).
+    pub(super) async fn shutdown_callback_task(
+        mut task: tokio::task::JoinHandle<()>,
+        callback_max_wait_time_ms: Option<u64>,
+    ) {
+        if let Some(callback_max_wait_time_ms) = callback_max_wait_time_ms {
+            match tokio::time::timeout(Duration::from_millis(callback_max_wait_time_ms), &mut task)
                 .await
-                {
-                    Ok(_) => {
-                        debug!("Callback handler task exited gracefully");
-                    }
-                    Err(_) => {
-                        debug!("Callback handler task did not exit within timeout, aborting");
-                        task.abort();
-                    }
+            {
+                Ok(_) => {
+                    debug!("Callback handler task exited gracefully");
                 }
-            } else {
-                debug!("Callback max wait time is not set, waiting indefinitely");
-                let _ = (&mut task).await;
+                Err(_) => {
+                    debug!("Callback handler task did not exit within timeout, aborting");
+                    task.abort();
+                }
             }
+        } else {
+            debug!("Callback max wait time is not set, waiting indefinitely");
+            let _ = (&mut task).await;
         }
     }
 

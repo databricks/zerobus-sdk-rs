@@ -515,6 +515,220 @@ mod tests {
     }
 
     // ========================================================================
+    // Ack callback live-stream teardown / use-after-free tests (issue #469)
+    // ========================================================================
+    //
+    // The isolation tests above exercise the `CallbackAckCallback` bridge by
+    // calling `on_ack` / `on_error` directly. They never drive a callback
+    // through a running stream + teardown, so they don't cover the lifetime
+    // contract that `close()` relies on: callbacks must STOP once teardown
+    // returns, and the caller's `user_data` must be safe to free at that point.
+    //
+    // Approach (hermetic, not truly-live):
+    //   There is no in-process mock gRPC server, so a socket-level end-to-end
+    //   test isn't hermetically feasible here. Instead we drive the REAL
+    //   callback-handler task and the REAL teardown code:
+    //     * `CallbackHandlerHarness` (sdk crate, `testing` feature) spawns the
+    //       same `spawn_callback_handler_task` + channel that `ZerobusStream`
+    //       wires up, and its `teardown()` reproduces `close()`'s exact
+    //       shutdown sequence (cancel token, then the production
+    //       `shutdown_callback_task`: timeout-then-abort when
+    //       `callback_max_wait_time_ms` is `Some`, wait-indefinitely when
+    //       `None`).
+    //     * The callback we register is a real `CallbackAckCallback` wrapping a
+    //       heap-allocated `user_data` (`Box::into_raw`). The extern "C"
+    //       callbacks DEREFERENCE that pointer on every invocation, so if a
+    //       callback ever fired after the box was freed, ASan/Miri would flag a
+    //       use-after-free (see "Running under a sanitizer" at the bottom of
+    //       this file's module). We free the box only after `teardown()`
+    //       returns, mirroring the FFI lifetime contract.
+    //
+    // Both teardown paths from close.rs are covered:
+    //   (a) `Some(ms)` -> drain up to the deadline, then abort.
+    //   (b) `None`     -> wait indefinitely for the task to drain.
+
+    use databricks_zerobus_ingest_sdk::CallbackHandlerHarness;
+    use std::sync::atomic::AtomicU64;
+    use std::sync::Arc;
+
+    // Live, heap-allocated user_data. Each callback invocation dereferences the
+    // pointer and bumps `calls`, so a post-free callback is a genuine UAF that a
+    // sanitizer can catch. `magic` is checked to detect a freed/garbage box.
+    #[repr(C)]
+    struct AckUserData {
+        magic: u64,
+        calls: AtomicU64,
+    }
+
+    const ACK_MAGIC: u64 = 0x00C0_FFEE_1234_5678;
+
+    // These extern "C" callbacks can't capture, so they operate purely through
+    // the `user_data` pointer handed to them — exactly like a real C consumer.
+    extern "C" fn live_ack(_offset_id: i64, user_data: *mut std::ffi::c_void) {
+        assert!(!user_data.is_null(), "user_data must be live on ack");
+        // UAF trip-wire: dereference the caller-owned heap allocation.
+        let data = unsafe { &*(user_data as *const AckUserData) };
+        assert_eq!(data.magic, ACK_MAGIC, "user_data was freed or corrupted");
+        data.calls.fetch_add(1, AtomicOrdering::SeqCst);
+    }
+
+    extern "C" fn live_error(
+        _offset_id: i64,
+        error_message: *const c_char,
+        user_data: *mut std::ffi::c_void,
+    ) {
+        assert!(!user_data.is_null(), "user_data must be live on error");
+        assert!(!error_message.is_null());
+        let data = unsafe { &*(user_data as *const AckUserData) };
+        assert_eq!(data.magic, ACK_MAGIC, "user_data was freed or corrupted");
+        data.calls.fetch_add(1, AtomicOrdering::SeqCst);
+    }
+
+    // Builds a real FFI ack bridge over a freshly heap-allocated user_data.
+    // Returns the raw pointer so the test owns the box's lifetime explicitly
+    // and can free it *after* teardown, proving the no-UAF contract.
+    fn make_live_callback() -> (Arc<CallbackAckCallback>, *mut AckUserData) {
+        let user_data = Box::into_raw(Box::new(AckUserData {
+            magic: ACK_MAGIC,
+            calls: AtomicU64::new(0),
+        }));
+        let cb = CallbackAckCallback::new(
+            Some(live_ack),
+            Some(live_error),
+            user_data as *mut std::ffi::c_void,
+        );
+        (Arc::new(cb), user_data)
+    }
+
+    // Waits until the handler task has delivered `expected` callbacks (or times
+    // out). Avoids racing the async task without an arbitrary fixed sleep.
+    async fn wait_for_calls(user_data: *const AckUserData, expected: u64) {
+        let data = unsafe { &*user_data };
+        for _ in 0..200 {
+            if data.calls.load(AtomicOrdering::SeqCst) >= expected {
+                return;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+        panic!(
+            "timed out waiting for {expected} callbacks, saw {}",
+            data.calls.load(AtomicOrdering::SeqCst)
+        );
+    }
+
+    // Path (a): drain-then-abort. `callback_max_wait_time_ms = Some(..)`.
+    // Drives real acks/errors through the handler, tears it down, then asserts
+    // no further callback fires and the heap user_data is safe to free.
+    #[tokio::test]
+    async fn test_ack_callback_teardown_drain_then_abort() {
+        let (callback, user_data) = make_live_callback();
+        let mut harness = CallbackHandlerHarness::spawn(callback);
+
+        // Drive records/acks + an error through the live callback path.
+        harness.send_ack(1);
+        harness.send_ack(2);
+        harness.send_error(3, "boom");
+        wait_for_calls(user_data, 3).await;
+
+        // Teardown path (a): drain up to the deadline, then abort.
+        harness.teardown(Some(50)).await;
+
+        // After teardown returns, callbacks must have stopped. Enqueue more and
+        // confirm the count does not increase (the sender no longer has a live
+        // receiver, and the task is gone).
+        let before = unsafe { &*user_data }.calls.load(AtomicOrdering::SeqCst);
+        harness.send_ack(4);
+        harness.send_error(5, "late");
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        let after = unsafe { &*user_data }.calls.load(AtomicOrdering::SeqCst);
+        assert_eq!(
+            before, after,
+            "no callback may fire after teardown returns (drain-then-abort)"
+        );
+        assert_eq!(
+            after, 3,
+            "exactly the pre-teardown callbacks were delivered"
+        );
+
+        // No use-after-free: teardown has returned, so freeing user_data is
+        // safe. If any callback fired after this point it would be a UAF that
+        // ASan/Miri would catch.
+        drop(harness);
+        unsafe {
+            drop(Box::from_raw(user_data));
+        }
+    }
+
+    // Path (b): wait-indefinitely. `callback_max_wait_time_ms = None`.
+    // The handler task drains on cancellation; teardown awaits it fully.
+    #[tokio::test]
+    async fn test_ack_callback_teardown_wait_indefinitely() {
+        let (callback, user_data) = make_live_callback();
+        let mut harness = CallbackHandlerHarness::spawn(callback);
+
+        harness.send_ack(10);
+        harness.send_ack(11);
+        wait_for_calls(user_data, 2).await;
+
+        // Teardown path (b): no max wait time -> wait indefinitely for the task
+        // to observe cancellation and unwind.
+        harness.teardown(None).await;
+
+        let before = unsafe { &*user_data }.calls.load(AtomicOrdering::SeqCst);
+        harness.send_ack(12);
+        tokio::time::sleep(std::time::Duration::from_millis(30)).await;
+        let after = unsafe { &*user_data }.calls.load(AtomicOrdering::SeqCst);
+        assert_eq!(
+            before, after,
+            "no callback may fire after teardown returns (wait-indefinitely)"
+        );
+        assert_eq!(
+            after, 2,
+            "exactly the pre-teardown callbacks were delivered"
+        );
+
+        // No use-after-free: safe to release user_data now that teardown returned.
+        drop(harness);
+        unsafe {
+            drop(Box::from_raw(user_data));
+        }
+    }
+
+    // Teardown with a callback registered but nothing ever sent: teardown must
+    // still complete cleanly and leave user_data untouched (0 calls), so it is
+    // safe to free.
+    #[tokio::test]
+    async fn test_ack_callback_teardown_no_messages() {
+        let (callback, user_data) = make_live_callback();
+        let mut harness = CallbackHandlerHarness::spawn(callback);
+
+        harness.teardown(Some(50)).await;
+
+        assert_eq!(
+            unsafe { &*user_data }.calls.load(AtomicOrdering::SeqCst),
+            0,
+            "no callbacks should have fired"
+        );
+        drop(harness);
+        unsafe {
+            drop(Box::from_raw(user_data));
+        }
+    }
+
+    // Running under a sanitizer (issue #469 asks for ASan "where practical"):
+    //   The tests above are structured to CATCH a use-after-free: user_data is
+    //   a heap `Box` that every callback dereferences, and it is freed only
+    //   after `teardown()` returns. If the lifetime contract regressed (a
+    //   callback firing post-teardown), the deref would hit freed memory.
+    //   To run them under a sanitizer:
+    //     Miri:  cargo +nightly miri test -p zerobus-ffi \
+    //              --features testing ack_callback_teardown
+    //     ASan:  RUSTFLAGS="-Zsanitizer=address" \
+    //              cargo +nightly test -p zerobus-ffi \
+    //              --features testing --target x86_64-unknown-linux-gnu \
+    //              ack_callback_teardown
+
+    // ========================================================================
     // Dynamic protobuf schema tests
     // ========================================================================
 
