@@ -34,6 +34,16 @@
   guards, null `user_data`), and `Sdk` / `SdkBuilder` (offline build, move, and
   `create_stream` / `create_arrow_stream` argument validation). Still
   dependency-free and network-free; the suite also passes under AddressSanitizer.
+- Added an env-var-gated live integration test (`integration_test`) covering the
+  create-stream -> ingest -> flush -> close path against a real endpoint,
+  mirroring the Java/TypeScript integration suites. It skips (passes) unless
+  `ZEROBUS_SERVER_ENDPOINT`, `DATABRICKS_WORKSPACE_URL`, `ZEROBUS_TABLE_NAME`,
+  `DATABRICKS_CLIENT_ID`, and `DATABRICKS_CLIENT_SECRET` are set, so `make test`
+  and CI stay hermetic.
+- Added a ThreadSanitizer CI job (`make test SANITIZE=thread`) and a
+  `concurrency_test` that exercises the documented "concurrent readers on a
+  shared `ProtoSchema`" contract under many threads, catching data races the
+  AddressSanitizer job cannot.
 
 ### Breaking Changes
 

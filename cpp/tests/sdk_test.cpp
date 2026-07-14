@@ -1,12 +1,9 @@
-// Unit tests for Sdk and SdkBuilder. Building an Sdk only stores the endpoint
-// and defers the channel (the Rust core holds a lazily-connected
-// shared_channel), so construction performs no network I/O and is safe as a
-// unit test. The create_stream / create_arrow_stream cases here all hit the
-// wrapper's argument-validation guards (null headers provider, empty schema),
-// which throw in pure C++ before any FFI/connection attempt.
+// Sdk / SdkBuilder. build() only stores the endpoint (the channel is lazy), so
+// construction does no network I/O; the create_* cases hit the wrapper's
+// argument guards (null provider, empty schema) before any FFI call.
 //
-// Runtime ingest/ack paths that require a live endpoint are out of scope (they
-// need a mock/real server; tracked separately, cf. issue #469).
+// Runtime ingest/ack paths need a live endpoint and are out of scope (cf.
+// #469).
 
 #include "zerobus/sdk.hpp"
 
@@ -44,7 +41,7 @@ int main() {
   using zerobus::TableProperties;
   using zerobus::ZerobusException;
 
-  // Building an SDK against a never-contacted endpoint succeeds (no network).
+  // Build succeeds with no network.
   {
     try {
       Sdk sdk = build_local_sdk();
@@ -55,8 +52,7 @@ int main() {
     }
   }
 
-  // Move transfers the handle; destroying both the moved-from and moved-to SDK
-  // must be safe (no double-free) — the moved-from handle is nulled.
+  // Move nulls the source handle, so both destruct safely (no double-free).
   {
     try {
       Sdk sdk = build_local_sdk();
@@ -67,8 +63,7 @@ int main() {
     }
   }
 
-  // create_stream with a null headers provider is rejected by the wrapper's
-  // guard before any FFI call.
+  // create_stream rejects a null headers provider.
   {
     Sdk sdk = build_local_sdk();
     TableProperties table;
@@ -85,8 +80,7 @@ int main() {
     }
   }
 
-  // create_arrow_stream with an empty schema is rejected (an Arrow stream has
-  // no JSON fallback, so the schema bytes are required).
+  // create_arrow_stream rejects an empty schema (no JSON fallback).
   {
     Sdk sdk = build_local_sdk();
     std::vector<std::uint8_t> empty_schema;
@@ -102,8 +96,7 @@ int main() {
     }
   }
 
-  // create_arrow_stream with a null headers provider is rejected before the FFI
-  // call, even when the schema is non-empty.
+  // create_arrow_stream rejects a null headers provider (schema non-empty).
   {
     Sdk sdk = build_local_sdk();
     std::vector<std::uint8_t> schema = {1};

@@ -1,6 +1,5 @@
-// Unit tests for ZerobusException: it carries the message and the is_retryable
-// flag, and is catchable as a std::exception (the base all SDK operations
-// throw). Dependency-free, returns non-zero on failure, like the other tests.
+// ZerobusException: carries the message + is_retryable flag, and is catchable
+// as a std::exception.
 
 #include "zerobus/error.hpp"
 
@@ -22,7 +21,7 @@ void fail(const char* msg) {
 int main() {
   using zerobus::ZerobusException;
 
-  // Retryable=true round-trips the message and the flag.
+  // Retryable=true.
   {
     ZerobusException e("transient failure", true);
     if (std::string(e.what()) != "transient failure") {
@@ -33,7 +32,7 @@ int main() {
     }
   }
 
-  // Retryable=false likewise.
+  // Retryable=false.
   {
     ZerobusException e("permanent failure", false);
     if (std::string(e.what()) != "permanent failure") {
@@ -44,7 +43,7 @@ int main() {
     }
   }
 
-  // Catchable through the std::exception base, since callers may catch either.
+  // Catchable as std::exception.
   {
     bool caught = false;
     try {

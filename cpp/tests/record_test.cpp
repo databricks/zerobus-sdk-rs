@@ -1,7 +1,5 @@
-// Unit tests for UnackedRecord, the value type returned by
-// Stream::get_unacked_records(). It owns its payload bytes and exposes the
-// JSON/proto discriminator; as_string() reinterprets the bytes as a string.
-// Pure value type — no FFI, no network.
+// UnackedRecord: owns its payload bytes, exposes the JSON/proto flag, and
+// reinterprets the bytes via as_string(). Pure value type.
 
 #include "zerobus/record.hpp"
 
@@ -24,8 +22,7 @@ void fail(const char* msg) {
 int main() {
   using zerobus::UnackedRecord;
 
-  // A JSON record reports is_json() and round-trips its bytes both as a raw
-  // vector and as a string.
+  // JSON record: flag set, bytes round-trip as vector and string.
   {
     const std::string json = R"({"id":7})";
     const std::vector<std::uint8_t> bytes(json.begin(), json.end());
@@ -41,8 +38,7 @@ int main() {
     }
   }
 
-  // A proto record reports !is_json() and preserves arbitrary bytes, including
-  // an embedded NUL (proto payloads are binary, not C strings).
+  // Proto record: flag clear, binary bytes (incl. embedded NUL) preserved.
   {
     const std::vector<std::uint8_t> bytes = {0x00, 0x01, 0x02, 0x00, 0xff};
     UnackedRecord rec(false, bytes);
@@ -57,7 +53,7 @@ int main() {
     }
   }
 
-  // An empty payload is valid and yields an empty view.
+  // Empty payload.
   {
     UnackedRecord rec(true, {});
     if (!rec.data().empty()) {

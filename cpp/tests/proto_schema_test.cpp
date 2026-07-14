@@ -1,11 +1,6 @@
-// Unit tests for ProtoSchema. Using an inline Unity Catalog table-metadata
-// fixture (no network), they exercise the descriptor + JSON-encode round trip,
-// the error paths (invalid UC JSON, and a record missing a required column),
-// and move semantics — including that a moved-from schema is left with a null
-// handle but stays safe to use (the FFI null-handle contract, which the Rust
-// FFI's own tests cover for zerobus_proto_schema_descriptor_bytes(null)).
-//
-// Dependency-free: exercises only the JSON+FFI path, no live server.
+// ProtoSchema: descriptor + JSON-encode round trip, error paths, and move
+// semantics (incl. the moved-from null-handle contract). Uses an inline UC
+// fixture, no live server.
 
 #include "zerobus/proto_schema.hpp"
 
@@ -26,9 +21,7 @@ void fail(const char* msg) {
   ++g_failures;
 }
 
-// A minimal Unity Catalog table-metadata JSON. The descriptor it yields has
-// three fields (id, payload, ts). Mirrors the Rust FFI's own round-trip
-// fixture; exercises the full proto-schema FFI path with no network.
+// Minimal UC table metadata (fields: id, payload, ts).
 const char* kUcTableJson = R"({
   "name": "events",
   "catalog_name": "main",
@@ -46,8 +39,8 @@ int main() {
   using zerobus::ProtoSchema;
   using zerobus::ZerobusException;
 
-  // Round trip: build from UC JSON, get a non-empty descriptor, and encode a
-  // record (unknown keys such as "extra" are ignored) to non-empty bytes.
+  // Round trip: descriptor is non-empty and a record encodes (unknown keys
+  // ignored).
   {
     try {
       ProtoSchema schema = ProtoSchema::from_uc_json(kUcTableJson);
@@ -65,7 +58,7 @@ int main() {
     }
   }
 
-  // Invalid UC JSON throws a non-retryable ZerobusException with a message.
+  // Invalid UC JSON throws non-retryable, with a message.
   {
     bool threw = false;
     try {
@@ -84,8 +77,7 @@ int main() {
     }
   }
 
-  // Encoding a record that omits the required (non-nullable) 'id' column
-  // throws.
+  // Omitting the required 'id' column throws.
   {
     ProtoSchema schema = ProtoSchema::from_uc_json(kUcTableJson);
     bool threw = false;
@@ -99,17 +91,15 @@ int main() {
     }
   }
 
-  // Move leaves the source with a null handle but safe to use: the moved-to
-  // schema owns the descriptor; the moved-from schema returns empty rather
-  // than crashing.
+  // Move: moved-to owns the descriptor; moved-from returns empty (not a crash).
   {
     ProtoSchema schema = ProtoSchema::from_uc_json(kUcTableJson);
     ProtoSchema moved = std::move(schema);
     if (moved.descriptor_bytes().empty()) {
       fail("moved-to schema lost its descriptor");
     }
-    // NOLINTNEXTLINE(bugprone-use-after-move) — deliberately exercising the
-    // documented moved-from null-handle contract.
+    // NOLINTNEXTLINE(bugprone-use-after-move) — the null-handle contract is
+    // the point.
     if (!schema.descriptor_bytes().empty()) {
       fail("moved-from schema should return an empty descriptor");
     }

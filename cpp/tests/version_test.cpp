@@ -1,7 +1,5 @@
-// Pins zerobus::version() to the ZEROBUS_CPP_VERSION macro. CLAUDE.md requires
-// version.hpp to stay in sync with the CMake project version on release; this
-// turns an accidental divergence between the accessor and the macro into a
-// build failure. Dependency-free, no FFI.
+// Pins zerobus::version() to the ZEROBUS_CPP_VERSION macro, catching an
+// accessor/macro divergence.
 
 #include "zerobus/version.hpp"
 
@@ -20,12 +18,11 @@ void fail(const char* msg) {
 }  // namespace
 
 int main() {
-  // The accessor must return exactly the macro string.
   if (std::strcmp(zerobus::version(), ZEROBUS_CPP_VERSION) != 0) {
     fail("version() does not match ZEROBUS_CPP_VERSION");
   }
 
-  // The macro must not be empty (guards an accidental blank define).
+  // Guard against a blank define.
   if (std::strlen(zerobus::version()) == 0) {
     fail("version() is empty");
   }

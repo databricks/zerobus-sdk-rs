@@ -1,14 +1,8 @@
-// Unit tests for the headers-provider trampoline
-// (detail::zerobus_cpp_headers_trampoline): a provider's map is marshalled into
-// CHeaders, the empty case yields a null array, and a throwing provider, a
-// header with an embedded NUL, or a null user_data become a
-// CHeaders.error_message rather than crossing the FFI boundary as an exception
-// or corrupt metadata. Each result is freed with the Rust core's
-// zerobus_free_headers, exactly as it would be in production, so the suite run
-// under a sanitizer also checks the alloc/free pairing.
-//
-// This mirrors the already-tested ack-callback trampoline; it is the headers
-// side of the same extern "C" boundary.
+// Headers-provider trampoline (detail::zerobus_cpp_headers_trampoline):
+// marshals a provider's map into CHeaders; empty/throwing/embedded-NUL/null
+// cases become CHeaders.error_message instead of crossing the boundary. Each
+// result is freed via zerobus_free_headers, so a sanitizer run also checks the
+// alloc/free pairing.
 
 #include "detail/headers_callback.hpp"
 
@@ -53,8 +47,7 @@ int main() {
   using zerobus::zerobus_free_headers;
   using zerobus::detail::zerobus_cpp_headers_trampoline;
 
-  // A populated map marshals into a CHeaders with matching key/value pairs and
-  // no error.
+  // Populated map: key/value pairs round-trip, no error.
   {
     MapProvider provider;
     provider.headers = {{"Authorization", "Bearer abc"}, {"X-Custom", "v1"}};
@@ -82,7 +75,7 @@ int main() {
     zerobus_free_headers(out);
   }
 
-  // An empty map yields a null array and zero count, with no error.
+  // Empty map: null array, zero count, no error.
   {
     MapProvider provider;  // no headers
     CHeaders out = zerobus_cpp_headers_trampoline(&provider);
@@ -93,8 +86,8 @@ int main() {
     zerobus_free_headers(out);
   }
 
-  // A throwing provider is caught and its message surfaces via error_message;
-  // the exception never crosses the FFI boundary.
+  // Throwing provider: message surfaces via error_message, no exception
+  // escapes.
   {
     ThrowingProvider provider;
     CHeaders out = zerobus_cpp_headers_trampoline(&provider);
@@ -110,8 +103,7 @@ int main() {
     zerobus_free_headers(out);
   }
 
-  // A header value with an embedded NUL is rejected (it would be silently
-  // truncated on the Rust side) rather than marshalled.
+  // Embedded-NUL header value is rejected, not truncated.
   {
     MapProvider provider;
     provider.headers = {{"X-Bad", std::string("a\0b", 3)}};
@@ -125,7 +117,7 @@ int main() {
     zerobus_free_headers(out);
   }
 
-  // A null user_data (no provider) is reported as an error, not a crash.
+  // Null user_data: error, not a crash.
   {
     CHeaders out = zerobus_cpp_headers_trampoline(nullptr);
     if (out.error_message == nullptr) {
