@@ -186,10 +186,10 @@
         <executions>
           <execution>
             <id>require-native-libs</id>
-            <phase>prepare-package</phase>
             <goals>
               <goal>enforce</goal>
             </goals>
+            <phase>prepare-package</phase>
             <configuration>
               <skip>${zerobus.skipNativeLibCheck}</skip>
               <rules>
