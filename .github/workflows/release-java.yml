@@ -59,6 +59,41 @@ jobs:
         working-directory: java
         run: mvn -DskipTests=true --batch-mode package
 
+      - name: Verify JAR bundles JNI libraries
+        working-directory: java
+        run: |
+          required_entries=(
+            native/linux-x86_64/libzerobus_jni.so
+            native/linux-aarch64/libzerobus_jni.so
+            native/linux-musl-x86_64/libzerobus_jni.so
+            native/linux-musl-aarch64/libzerobus_jni.so
+            native/windows-x86_64/zerobus_jni.dll
+          )
+
+          shopt -s nullglob
+          jars=(target/zerobus-ingest-sdk-*.jar)
+          checked=0
+          for jar in "${jars[@]}"; do
+            case "$jar" in
+              *-sources.jar|*-javadoc.jar) continue ;;
+            esac
+            checked=$((checked + 1))
+            echo "Verifying native entries in $jar"
+            for entry in "${required_entries[@]}"; do
+              if ! jar tf "$jar" | grep -Fxq "$entry"; then
+                echo "ERROR: $jar is missing $entry"
+                echo "Native entries present:"
+                jar tf "$jar" | grep '^native/' | sort || true
+                exit 1
+              fi
+            done
+          done
+
+          if [[ "$checked" -eq 0 ]]; then
+            echo "ERROR: no deployable zerobus-ingest-sdk JARs found"
+            exit 1
+          fi
+
       - name: Upload JAR
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:

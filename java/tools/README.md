@@ -33,7 +33,7 @@ If you have the SDK source repository:
 
 ```bash
 # First, build the SDK JAR
-mvn package
+mvn package -Dzerobus.skipNativeLibCheck=true
 
 # Then run the tool
 ./tools/generate_proto.sh \
@@ -241,7 +241,7 @@ The tool is distributed as part of the Zerobus SDK JAR. When you download or bui
 Users can run the tool directly from the JAR without needing access to the source code:
 
 ```bash
-# Download the SDK JAR (or build it with mvn package)
+# Download the SDK JAR (or build it with mvn package -Dzerobus.skipNativeLibCheck=true)
 # Then simply run:
 java -jar databricks-zerobus-ingest-sdk-0.1.0-jar-with-dependencies.jar \
   --uc-endpoint "..." \

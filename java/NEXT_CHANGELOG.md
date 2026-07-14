@@ -27,6 +27,14 @@
 ### Internal Changes
 
 - The Java SDK now generates its protobuf classes from the canonical `rust/sdk/zerobus_service.proto` instead of a local copy under `src/main/proto/`. This reconciles schema drift: the generated classes now include the batch-ingest messages (`JsonRecordBatch`, `ProtoEncodedRecordBatch`, `IngestRecordBatchRequest`) that the canonical schema already defined. Purely additive — no change to the hand-written `com.databricks.zerobus` public API, and batch ingestion (`ingestRecordsOffset`) already worked via the JNI boundary.
+- Added a `maven-enforcer-plugin` rule that fails `mvn package`/`install`/`deploy`
+  if the JNI native libraries (`linux-x86_64`, `linux-aarch64`,
+  `linux-musl-x86_64`, `linux-musl-aarch64`, `windows-x86_64`) aren't staged
+  under `src/main/resources/native/`. v1.2.0 was published with an empty JAR
+  because the release pipeline ran `mvn deploy` on a fresh checkout without
+  staging natives; this guard makes that failure mode impossible going forward.
+  Local Java-only builds that don't need packaged natives can skip this specific
+  rule with `-Dzerobus.skipNativeLibCheck=true`.
 
 ### Breaking Changes
 
