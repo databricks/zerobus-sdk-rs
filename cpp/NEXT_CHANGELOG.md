@@ -24,6 +24,9 @@
   `CONTRIBUTING.md` with C++-specific development setup and workflow. Added C++
   rows to the root `README.md` and `CLAUDE.md`, and reconciled the root
   Arrow-Flight and `examples/arrow/` notes with the C++ SDK's `0.1.0` state.
+- Documented running the tests in `README.md`: the sanitizer runs
+  (`make test SANITIZE=address` / `thread`) and the env-var-gated
+  `integration_test` (which variables it needs and that it skips without them).
 
 ### Internal Changes
 

@@ -51,7 +51,15 @@ int main() {
 
   std::string record_json = env("ZEROBUS_TEST_RECORD_JSON");
   if (record_json.empty()) {
+    // Fallback record for the common {id, payload} shape. It almost certainly
+    // won't match an arbitrary table's schema, in which case the run fails at
+    // flush() (ingest only queues) with a schema-mismatch error from the
+    // server. Set ZEROBUS_TEST_RECORD_JSON to a record matching
+    // ZEROBUS_TABLE_NAME.
     record_json = R"({"id": 1, "payload": "zerobus-cpp-integration"})";
+    std::printf(
+        "integration_test: ZEROBUS_TEST_RECORD_JSON unset, using the default "
+        "{id, payload} record; set it to match your table if flush() fails.\n");
   }
 
   try {
@@ -76,7 +84,10 @@ int main() {
       fail("ingest returned a negative offset for a non-empty record");
     }
 
-    // One flush covers every offset (acks are monotonic).
+    // One flush covers every offset (acks are monotonic), so a single flush()
+    // confirms all 10 records are durable. close() flushes again internally,
+    // but calling flush() explicitly first surfaces an ack failure here rather
+    // than folded into close()'s teardown.
     stream.flush();
     stream.close();
 

@@ -58,6 +58,31 @@ cmake -S . -B build \
   -DZEROBUS_FFI_HEADER_DIR=/path/to/dir/containing/zerobus.h
 ```
 
+### Running the tests
+
+`make test` runs the full suite (`ctest`). Every test is a dependency-free,
+network-free executable — the suite is hermetic and safe to run anywhere.
+
+```bash
+make test                        # full suite
+make test SANITIZE=address       # under AddressSanitizer (use-after-free, double-free)
+make test SANITIZE=thread        # under ThreadSanitizer (data races, e.g. shared ProtoSchema)
+```
+
+One test, `integration_test`, exercises the live
+create-stream → ingest → flush → close path against a real endpoint. It
+**skips (passes)** unless all of these environment variables are set, so it
+never affects a normal `make test` run:
+
+| Variable | Purpose |
+|----------|---------|
+| `ZEROBUS_SERVER_ENDPOINT` | Zerobus gRPC endpoint URL |
+| `DATABRICKS_WORKSPACE_URL` | Unity Catalog / workspace URL |
+| `ZEROBUS_TABLE_NAME` | Fully-qualified target table (`catalog.schema.table`) |
+| `DATABRICKS_CLIENT_ID` | OAuth service-principal client id |
+| `DATABRICKS_CLIENT_SECRET` | OAuth service-principal client secret |
+| `ZEROBUS_TEST_RECORD_JSON` | *(optional)* a JSON record matching the table schema; the default `{id, payload}` record likely won't match your table, so set this for a real run |
+
 ## Using the SDK in your project
 
 ### With CMake `add_subdirectory` (or `FetchContent`)
