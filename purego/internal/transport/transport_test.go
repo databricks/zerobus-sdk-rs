@@ -542,6 +542,50 @@ func TestOpenAuthRejectionInvalidatesHeadersProvider(t *testing.T) {
 	}
 }
 
+// blockingHeadersProvider blocks in GetHeaders until the passed context is done,
+// then returns its error. It lets a test assert that Open bounds GetHeaders with
+// the open deadline rather than hanging on a stalled credential mint.
+type blockingHeadersProvider struct {
+	ctxErr chan error
+}
+
+func (p *blockingHeadersProvider) GetHeaders(ctx context.Context, _ string) (map[string]string, error) {
+	<-ctx.Done()
+	p.ctxErr <- ctx.Err()
+	return nil, ctx.Err()
+}
+
+func (p *blockingHeadersProvider) Invalidate(context.Context, string) {}
+
+// TestOpenBoundsGetHeadersWithDeadline verifies GetHeaders runs under the open
+// deadline: a provider that blocks is cancelled when the caller's ctx expires,
+// so Open fails promptly instead of hanging on a stalled credential mint.
+func TestOpenBoundsGetHeadersWithDeadline(t *testing.T) {
+	srv := &fakeServer{streamID: "s", seen: make(chan observed, 1)}
+	conn := dialFake(t, srv)
+
+	p := &blockingHeadersProvider{ctxErr: make(chan error, 1)}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+	defer cancel()
+
+	start := time.Now()
+	_, err := conn.Open(ctx, transport.StreamParams{
+		TableName:       "c.s.t",
+		RecordType:      zerobuspb.RecordType_JSON,
+		HeadersProvider: p,
+	})
+	if err == nil {
+		t.Fatal("Open with a blocking headers provider: got nil error, want deadline failure")
+	}
+	if elapsed := time.Since(start); elapsed > 5*time.Second {
+		t.Fatalf("Open took %v, expected it to fail near the 200ms deadline", elapsed)
+	}
+	if gotErr := <-p.ctxErr; !errors.Is(gotErr, context.DeadlineExceeded) {
+		t.Fatalf("GetHeaders context error = %v, want DeadlineExceeded", gotErr)
+	}
+}
+
 func TestStreamCloseAbortsRecv(t *testing.T) {
 	srv := &fakeServer{streamID: "s", seen: make(chan observed, 1)}
 	conn := dialFake(t, srv)

@@ -33,10 +33,10 @@ type HeadersProvider interface {
 	// GetHeaders returns the metadata headers to attach to the stream. Called
 	// during Open before the RPC handshake starts.
 	//
-	// ctx is the same context passed to Open. Open applies defaultHandshakeTimeout
-	// only to the RPC start and handshake that follow; GetHeaders runs first and
-	// is not separately bounded. If GetHeaders may block on network I/O, ctx must
-	// carry a deadline or cancellation, or Open can hang until GetHeaders returns.
+	// ctx bounds GetHeaders: it is the caller's Open context, or, when that
+	// context has no deadline, one bounded by defaultHandshakeTimeout. A
+	// GetHeaders that blocks on network I/O (e.g. a token mint) is therefore
+	// cancelled once the open budget is exhausted rather than hanging forever.
 	GetHeaders(ctx context.Context, tableName string) (map[string]string, error)
 
 	// Invalidate drops any cached credentials so the next GetHeaders re-derives
@@ -60,9 +60,9 @@ type Stream struct {
 // Open starts an EphemeralStream, runs the create-stream handshake, and returns
 // the live stream once the server acknowledges it with a stream ID.
 //
-// ctx bounds opening the stream. When HeadersProvider is set, GetHeaders is
-// invoked first (see HeadersProvider); only the subsequent RPC start and
-// handshake are bounded by defaultHandshakeTimeout when ctx has no deadline.
+// ctx bounds opening the stream — GetHeaders (when a HeadersProvider is set),
+// the RPC start, and the handshake — and is defaulted to defaultHandshakeTimeout
+// when it carries no deadline.
 // Cancelling ctx aborts an in-progress Open promptly, but once Open succeeds
 // the live stream is detached and cancelled only by Close, so a later ctx
 // timeout won't tear it down mid-ingest. ctx's values (including caller
@@ -83,10 +83,20 @@ func (c *Conn) Open(ctx context.Context, p StreamParams) (*Stream, error) {
 	if p.RecordType == zerobuspb.RecordType_PROTO && len(p.DescriptorProto) == 0 {
 		return nil, fmt.Errorf("transport: open %q: descriptor proto required for PROTO records", p.TableName)
 	}
+	// openCtx bounds the whole open attempt — GetHeaders (which may block on a
+	// token mint), the RPC start, and the handshake — using the caller's ctx,
+	// defaulted to defaultHandshakeTimeout when it has no deadline.
+	openCtx := ctx
+	if _, ok := ctx.Deadline(); !ok {
+		var cancelOpen context.CancelFunc
+		openCtx, cancelOpen = context.WithTimeout(ctx, defaultHandshakeTimeout)
+		defer cancelOpen()
+	}
+
 	var headers map[string]string
 	if p.HeadersProvider != nil {
 		var err error
-		headers, err = p.HeadersProvider.GetHeaders(ctx, p.TableName)
+		headers, err = p.HeadersProvider.GetHeaders(openCtx, p.TableName)
 		if err != nil {
 			return nil, fmt.Errorf("transport: open %q: headers provider: %w", p.TableName, err)
 		}
@@ -97,15 +107,6 @@ func (c *Conn) Open(ctx context.Context, p StreamParams) (*Stream, error) {
 				return nil, fmt.Errorf("transport: open %q: header %q contains invalid value characters", p.TableName, strings.TrimSpace(k))
 			}
 		}
-	}
-
-	// openCtx bounds the open attempt: the caller's ctx, defaulted to
-	// defaultHandshakeTimeout when it has no deadline.
-	openCtx := ctx
-	if _, ok := ctx.Deadline(); !ok {
-		var cancelOpen context.CancelFunc
-		openCtx, cancelOpen = context.WithTimeout(ctx, defaultHandshakeTimeout)
-		defer cancelOpen()
 	}
 
 	// Detach the live stream from ctx's cancel/deadline (WithoutCancel keeps its
