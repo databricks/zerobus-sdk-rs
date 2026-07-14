@@ -15,7 +15,7 @@
 
 ### Internal Changes
 
-- Add ack-callback live-teardown / use-after-free tests (issue #469). They drive the real `CallbackAckCallback` bridge over a heap-allocated `user_data` through the real callback-handler task, then tear it down via the production teardown code, asserting no callback fires after teardown returns and that `user_data` is safe to release at that point. Both teardown paths are covered (drain-up-to-`callback_max_wait_time_ms`-then-abort, and wait-indefinitely). Test-only; no ABI or behavior change.
+- Add ack-callback live-teardown / use-after-free tests. They drive the real `CallbackAckCallback` bridge over a heap-allocated `user_data` through the real callback-handler task, then tear it down via the production teardown code, asserting no callback fires after teardown returns and that `user_data` is safe to release at that point. Both teardown paths are covered (drain-up-to-`callback_max_wait_time_ms`-then-abort, and wait-indefinitely). Test-only; no ABI or behavior change.
 - Move the header-callback helpers `zerobus_alloc_header_array`, `zerobus_alloc_cstring`, and `zerobus_free_headers` from `arrow.rs` into the shared `common.rs` module, next to the `CHeader`/`CHeaders` types they serve. No behavior, signature, or ABI change; their declarations move ahead of the Arrow functions in the generated `zerobus.h`.
 
 ### Behavior Changes

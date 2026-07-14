@@ -90,17 +90,12 @@ impl ZerobusStream {
         }
     }
 
-    /// Drains the callback handler task during teardown.
+    /// Drains the callback handler task during teardown. The caller must have
+    /// already cancelled the `cancellation_token`. With `Some(ms)`, waits up to
+    /// that long then aborts; with `None`, waits indefinitely.
     ///
-    /// The caller must have already cancelled the stream's `cancellation_token`
-    /// so the task can observe cancellation at its next await point. If
-    /// `callback_max_wait_time_ms` is `Some`, waits up to that long for the task
-    /// to finish draining, then aborts it if it hasn't; if `None`, waits
-    /// indefinitely for it to drain.
-    ///
-    /// Split out of `shutdown_all_tasks_gracefully` so the exact teardown
-    /// sequence can be exercised in isolation by tests (see the callback
-    /// handler harness under the `testing` feature).
+    /// Split out so the teardown can be exercised in isolation by tests
+    /// (`CallbackHandlerHarness`, `testing` feature).
     pub(super) async fn shutdown_callback_task(
         mut task: tokio::task::JoinHandle<()>,
         callback_max_wait_time_ms: Option<u64>,
