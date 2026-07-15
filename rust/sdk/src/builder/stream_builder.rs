@@ -200,13 +200,11 @@ impl<'a> StreamBuilder<'a> {
 
     /// Select dynamic protobuf record format, for a schema known only at runtime.
     ///
-    /// Takes a resolved [`MessageDescriptor`](crate::MessageDescriptor), so you
-    /// can supply one from any source — build it against your own
-    /// [`prost_reflect::DescriptorPool`] (e.g. when the message references types
-    /// in other files), or, for a self-contained descriptor, let
-    /// [`message_descriptor`](crate::message_descriptor) resolve one from a
+    /// Takes a resolved [`MessageDescriptor`](crate::MessageDescriptor). Get one
+    /// from [`message_descriptor`](crate::message_descriptor), which resolves a
     /// [`prost_types::DescriptorProto`] (built with
-    /// [`crate::schema::descriptor_from_uc_columns`] or fetched from Unity Catalog).
+    /// [`crate::schema::descriptor_from_uc_columns`] or fetched from Unity
+    /// Catalog), or from your own [`prost_reflect::DescriptorPool`].
     ///
     /// Fill records with [`DynamicRecord`](crate::DynamicRecord). Wire-identical to
     /// [`compiled_proto`](Self::compiled_proto).

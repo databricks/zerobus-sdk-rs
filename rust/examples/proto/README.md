@@ -114,9 +114,9 @@ stream.flush().await?;
 
 **Building a Protocol Buffers stream:**
 ```rust
-// Load descriptor from generated files
+// The descriptor is embedded at compile time, so it needs no runtime file read.
 let descriptor_proto = load_descriptor_proto(
-    "output/orders.descriptor",
+    include_bytes!("output/orders.descriptor"),
     "orders.proto",
     "table_Orders"
 );
@@ -331,14 +331,14 @@ use crate::inventory::TableInventory;
 ```rust
 // Before:
 let descriptor_proto = load_descriptor_proto(
-    "output/orders.descriptor",
+    include_bytes!("output/orders.descriptor"),
     "orders.proto",
     "table_Orders"
 );
 
 // After:
 let descriptor_proto = load_descriptor_proto(
-    "output/inventory.descriptor",
+    include_bytes!("output/inventory.descriptor"),
     "inventory.proto",
     "table_Inventory"
 );

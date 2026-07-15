@@ -261,7 +261,7 @@ zerobus_rust_sdk/
 |                  |                   |
 |      +-----------+-----------+       |
 |      v                       v       |
-| +----------+          +----------+   | 
+| +----------+          +----------+   |
 | |  Sender  |          | Receiver |   | Parallel tasks
 | |  Task    |          |  Task    |   |
 | +----------+          +----------+   |
@@ -371,7 +371,7 @@ For JSON-based ingestion, you can skip the schema generation step and directly p
 ### 1. Generate Protocol Buffer Schema (Protocol Buffers approach only)
 
 > **Important Note**: The schema generation tool and examples are **only available in the GitHub repository**. The crate published on [crates.io](https://crates.io/crates/databricks-zerobus-ingest-sdk) contains only the core Zerobus ingestion SDK logic. To generate protobuf schemas or see working examples, clone the repository:
-> 
+>
 > ```bash
 > git clone https://github.com/databricks/zerobus-sdk.git
 > cd zerobus-sdk/rust
@@ -564,7 +564,7 @@ for i in 0..100_000i64 {
 stream.flush().await?; // wait once for all pending acknowledgments
 ```
 
-`.dynamic_proto()` takes a resolved `MessageDescriptor`. `message_descriptor(&proto)` is a convenience for a self-contained descriptor; if your message references types in other `.proto` files, build the `MessageDescriptor` against your own `prost_reflect::DescriptorPool` and pass it in directly.
+`.dynamic_proto()` takes a resolved `MessageDescriptor`. Get one from `message_descriptor(&proto)` or build it against your own `prost_reflect::DescriptorPool`.
 
 On the wire this is identical to `.compiled_proto(...)`; the difference is that records are built dynamically rather than from a generated struct. See the [`dynamic_proto`](https://docs.rs/databricks-zerobus-ingest-sdk/latest/databricks_zerobus_ingest_sdk/dynamic_proto/) module and the `proto_dynamic_single` example for details.
 
@@ -758,12 +758,12 @@ match stream.close().await {
         let unacked = stream.get_unacked_records().await?;
         let total_records = unacked.count();
         println!("Failed to ack {} records", total_records);
-        
+
         // Option 2: Get records grouped by batch (preserves batch structure)
         let unacked_batches = stream.get_unacked_batches().await?;
         let total_records: usize = unacked_batches.iter().map(|batch| batch.get_record_count()).sum();
         println!("Failed to ack {} records in {} batches", total_records, unacked_batches.len());
-        
+
         // Retry with a new stream
     }
     Ok(_) => println!("Stream closed successfully"),

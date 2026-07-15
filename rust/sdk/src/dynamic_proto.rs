@@ -7,12 +7,10 @@
 //! descriptor back from
 //! [`ZerobusStream::message_descriptor`](crate::ZerobusStream::message_descriptor)).
 //!
-//! You can obtain the [`MessageDescriptor`] by building it against your own
-//! [`prost_reflect::DescriptorPool`] (needed when the message references types
-//! in other files), or, for a self-contained descriptor, let
-//! [`message_descriptor`] resolve one from a [`prost_types::DescriptorProto`]
-//! (built with [`crate::schema::descriptor_from_uc_columns`] or fetched from
-//! Unity Catalog).
+//! Obtain the [`MessageDescriptor`] from [`message_descriptor`], which resolves a
+//! [`prost_types::DescriptorProto`] (built with
+//! [`crate::schema::descriptor_from_uc_columns`] or fetched from Unity Catalog),
+//! or from your own [`prost_reflect::DescriptorPool`].
 //!
 //! Ingest in a loop, then `flush()` once — never wait per record.
 //!
@@ -39,14 +37,11 @@ use crate::{ZerobusError, ZerobusResult};
 
 pub use prost_reflect::{DynamicMessage, MessageDescriptor, Value};
 
-/// Resolve a [`MessageDescriptor`] from a bare, **self-contained**
-/// [`prost_types::DescriptorProto`] — a convenience for the common case, to pass
-/// to [`StreamBuilder::dynamic_proto`](crate::StreamBuilder::dynamic_proto).
+/// Resolve a [`MessageDescriptor`] from a [`prost_types::DescriptorProto`], to
+/// pass to [`StreamBuilder::dynamic_proto`](crate::StreamBuilder::dynamic_proto).
 ///
-/// The descriptor is registered in a fresh single-file pool, so it must not
-/// reference types defined in other files. If it does, build the
-/// [`MessageDescriptor`] against your own [`prost_reflect::DescriptorPool`]
-/// instead and pass that to `dynamic_proto` directly.
+/// The descriptor is registered in a fresh single-file pool, so it must be
+/// self-contained — it must not reference types defined in other files.
 ///
 /// Resolving builds a descriptor pool; do it once per schema and reuse the result
 /// (it is a cheap, Arc-backed clone) for both the builder and every record.
