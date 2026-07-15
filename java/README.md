@@ -83,6 +83,7 @@ This SDK includes native libraries for the following platforms:
 | macOS    | x86_64       | Supported |
 | macOS    | aarch64 (Apple Silicon) | Supported |
 
+Linux glibc builds support glibc 2.26 and newer, including Amazon Linux 2.
 On Linux, the libc flavor (glibc vs musl) is detected at runtime. To override detection, set
 `-Dzerobus.libc=musl` or `-Dzerobus.libc=glibc` on the JVM command line.
 
