@@ -58,7 +58,21 @@ func (p StreamParams) resolveHeaders(ctx context.Context) (map[string]string, er
 	if err != nil {
 		return nil, fmt.Errorf("transport: open %q: headers provider: %w", p.TableName, err)
 	}
+	// Snapshot provider output so downstream processing can't race or change if
+	// a provider reuses and mutates an internal map.
+	snapshot := make(map[string]string, len(headers))
 	for k, v := range headers {
+		snapshot[k] = v
+	}
+	seenNormalizedKeys := make(map[string]struct{}, len(snapshot))
+	for k, v := range snapshot {
+		normalized := normalizeHeaderKey(k)
+		if normalized != "" {
+			if _, exists := seenNormalizedKeys[normalized]; exists {
+				return nil, fmt.Errorf("transport: open %q: duplicate header key %q after normalization", p.TableName, normalized)
+			}
+			seenNormalizedKeys[normalized] = struct{}{}
+		}
 		// Reject at the wire boundary; gRPC would otherwise fail opaquely.
 		if !isUsableAsHeaderKey(k) {
 			return nil, fmt.Errorf("transport: open %q: header key %q is not a valid gRPC metadata key", p.TableName, strings.TrimSpace(k))
@@ -67,7 +81,7 @@ func (p StreamParams) resolveHeaders(ctx context.Context) (map[string]string, er
 			return nil, fmt.Errorf("transport: open %q: header %q contains invalid value characters", p.TableName, strings.TrimSpace(k))
 		}
 	}
-	return headers, nil
+	return snapshot, nil
 }
 
 // withStreamMetadataHeaders returns ctx carrying the table-name header plus the
@@ -83,7 +97,7 @@ func withStreamMetadataHeaders(ctx context.Context, tableName string, headers ma
 	}
 	var authValue string
 	for key, value := range headers {
-		key = strings.ToLower(strings.TrimSpace(key))
+		key = normalizeHeaderKey(key)
 		switch key {
 		case "":
 			continue
@@ -110,7 +124,7 @@ func withStreamMetadataHeaders(ctx context.Context, tableName string, headers ma
 // so an upper-case letter is accepted here and folded by withStreamMetadataHeaders.
 // An empty key is unusable (it carries no header).
 func isUsableAsHeaderKey(key string) bool {
-	key = strings.ToLower(strings.TrimSpace(key))
+	key = normalizeHeaderKey(key)
 	if key == "" {
 		return false
 	}
@@ -120,6 +134,10 @@ func isUsableAsHeaderKey(key string) bool {
 		}
 	}
 	return true
+}
+
+func normalizeHeaderKey(key string) string {
+	return strings.ToLower(strings.TrimSpace(key))
 }
 
 // isUsableAsHeaderValue reports whether value is safe as a gRPC metadata header

@@ -315,6 +315,13 @@ func TestOpenRejectsInvalidHeaders(t *testing.T) {
 			name:    "custom header key with non-ASCII",
 			headers: map[string]string{"x-bäd": "v"},
 		},
+		{
+			name: "duplicate normalized key",
+			headers: map[string]string{
+				"authorization":  "tok-1",
+				" Authorization ": "tok-2",
+			},
+		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
