@@ -18,10 +18,6 @@ const (
 	mdAuthorization = "authorization"
 )
 
-// authSchemes are matched case-insensitively against an authorization value's
-// first word; a match is sent verbatim, anything else is prefixed with "Bearer ".
-var authSchemes = []string{"bearer", "basic", "dpop"}
-
 // HeadersProvider provides gRPC metadata headers for stream authentication.
 type HeadersProvider interface {
 	// GetHeaders returns the metadata headers to attach to the stream. Called
@@ -112,7 +108,9 @@ func withStreamMetadataHeaders(ctx context.Context, tableName string, headers ma
 		}
 	}
 	md.Set(mdTableName, tableName)
-	if v := authHeaderValue(authValue); v != "" {
+	// The authorization value is sent verbatim, as the provider formatted it;
+	// an empty value drops the header so a stale inherited one can't leak.
+	if v := strings.TrimSpace(authValue); v != "" {
 		md.Set(mdAuthorization, v)
 	} else {
 		md.Delete(mdAuthorization)
@@ -152,24 +150,6 @@ func isUsableAsHeaderValue(value string) bool {
 		}
 	}
 	return true
-}
-
-// authHeaderValue normalizes a value into an authorization header value: a value
-// already carrying a known scheme (Bearer/Basic/DPoP) is returned verbatim, a
-// bare value is prefixed with "Bearer ", and an empty value yields "".
-func authHeaderValue(value string) string {
-	value = strings.TrimSpace(value)
-	if value == "" {
-		return ""
-	}
-	if scheme, _, found := strings.Cut(value, " "); found {
-		for _, s := range authSchemes {
-			if strings.EqualFold(scheme, s) {
-				return value
-			}
-		}
-	}
-	return "Bearer " + value
 }
 
 // isAuthRejection reports whether err is a gRPC auth rejection

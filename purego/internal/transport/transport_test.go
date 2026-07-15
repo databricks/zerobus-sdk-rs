@@ -220,7 +220,7 @@ func TestOpenHandshake(t *testing.T) {
 		TableName:       "main.sales.orders",
 		RecordType:      zerobuspb.RecordType_PROTO,
 		DescriptorProto: []byte("descriptor-bytes"),
-		HeadersProvider: authProvider("tok-abc"),
+		HeadersProvider: authProvider("Bearer tok-abc"),
 	})
 	if err != nil {
 		t.Fatalf("Open: %v", err)
@@ -244,8 +244,11 @@ func TestOpenHandshake(t *testing.T) {
 	}
 }
 
-func TestOpenPreservesKnownAuthScheme(t *testing.T) {
-	for _, tok := range []string{"Bearer tok", "basic dXNlcg==", "DPoP proof"} {
+// TestOpenSendsAuthValueVerbatim verifies the transport sends the provider's
+// authorization value exactly as given (only trimmed), leaving scheme formatting
+// to the provider rather than rewriting it.
+func TestOpenSendsAuthValueVerbatim(t *testing.T) {
+	for _, tok := range []string{"Bearer tok", "basic dXNlcg==", "DPoP proof", "raw-token", "Custom abc"} {
 		srv := &fakeServer{streamID: "s", seen: make(chan observed, 1)}
 		conn := dialFake(t, srv)
 
@@ -260,25 +263,6 @@ func TestOpenPreservesKnownAuthScheme(t *testing.T) {
 		if got := <-srv.seen; got.auth != tok {
 			t.Errorf("token %q: server saw authorization %q, want it verbatim", tok, got.auth)
 		}
-	}
-}
-
-func TestOpenPrefixesUnknownScheme(t *testing.T) {
-	srv := &fakeServer{streamID: "s", seen: make(chan observed, 1)}
-	conn := dialFake(t, srv)
-
-	// A value whose first word is not a known scheme is a bare token and gets
-	// prefixed, rather than being sent unprefixed.
-	_, err := conn.Open(context.Background(), transport.StreamParams{
-		TableName:       "c.s.t",
-		RecordType:      zerobuspb.RecordType_JSON,
-		HeadersProvider: authProvider("my token"),
-	})
-	if err != nil {
-		t.Fatalf("Open: %v", err)
-	}
-	if got := <-srv.seen; got.auth != "Bearer my token" {
-		t.Errorf("server saw authorization %q, want %q", got.auth, "Bearer my token")
 	}
 }
 
@@ -480,7 +464,7 @@ func TestOpenUsesHeadersProviderAndTableIsAuthoritative(t *testing.T) {
 
 	p := &stubHeadersProvider{
 		headers: map[string]string{
-			"authorization":                   "provider-token",
+			"authorization":                   "Bearer provider-token",
 			"x-databricks-zerobus-table-name": "wrong.table.name",
 			mdUserKey:                         "provider-md",
 		},
@@ -717,7 +701,7 @@ func TestOpenReplacesInheritedMetadata(t *testing.T) {
 	_, err := conn.Open(ctx, transport.StreamParams{
 		TableName:       "c.s.t",
 		RecordType:      zerobuspb.RecordType_JSON,
-		HeadersProvider: authProvider("fresh-token"),
+		HeadersProvider: authProvider("Bearer fresh-token"),
 	})
 	if err != nil {
 		t.Fatalf("Open: %v", err)
