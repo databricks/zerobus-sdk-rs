@@ -18,12 +18,14 @@
 //! [`get_unacked_records`](MultiplexedStream::get_unacked_records) or
 //! [`get_unacked_batches`](MultiplexedStream::get_unacked_batches).
 
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-
 use futures::future::join_all;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::Arc;
 use tracing::{error, info, warn};
 
-use crate::{EncodedBatch, EncodedRecord, OffsetId, ZerobusError, ZerobusResult, ZerobusStream};
+use crate::{
+    AckCallback, EncodedBatch, EncodedRecord, OffsetId, ZerobusError, ZerobusResult, ZerobusStream,
+};
 
 /// Number of bits reserved for the stream index.
 /// 6 bits supports up to 64 sub-streams.
@@ -79,6 +81,43 @@ impl MessageId {
     pub fn from_raw(raw: i64) -> Self {
         Self(raw)
     }
+}
+
+struct MultiplexedAckCallbackAdapter {
+    stream_index: usize,
+    callback: Arc<dyn AckCallback<MessageId>>,
+}
+
+impl AckCallback for MultiplexedAckCallbackAdapter {
+    fn on_ack(&self, offset_id: OffsetId) {
+        self.callback
+            .on_ack(MessageId::new(self.stream_index, offset_id));
+    }
+
+    fn on_error(&self, offset_id: OffsetId, error_message: &str) {
+        self.callback
+            .on_error(MessageId::new(self.stream_index, offset_id), error_message);
+    }
+}
+
+/// Creates the callback installed on one multiplexed sub-stream.
+///
+/// The adapter captures the sub-stream index and converts each stream-local
+/// [`OffsetId`] into the [`MessageId`] exposed by [`MultiplexedStream`].
+#[allow(dead_code)]
+pub(crate) fn multiplexed_ack_callback(
+    stream_index: usize,
+    callback: Arc<dyn AckCallback<MessageId>>,
+) -> Arc<dyn AckCallback> {
+    assert!(
+        stream_index < (1 << STREAM_BITS),
+        "MultiplexedStream supports at most {} sub-streams",
+        1 << STREAM_BITS
+    );
+    Arc::new(MultiplexedAckCallbackAdapter {
+        stream_index,
+        callback,
+    })
 }
 
 /// Distributes ingestion round-robin across a fixed set of [`ZerobusStream`]s.
@@ -438,6 +477,26 @@ impl Drop for MultiplexedStream {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Mutex;
+
+    #[derive(Default)]
+    struct RecordingMultiplexedCallback {
+        acks: Mutex<Vec<MessageId>>,
+        errors: Mutex<Vec<(MessageId, String)>>,
+    }
+
+    impl AckCallback<MessageId> for RecordingMultiplexedCallback {
+        fn on_ack(&self, message_id: MessageId) {
+            self.acks.lock().unwrap().push(message_id);
+        }
+
+        fn on_error(&self, message_id: MessageId, error_message: &str) {
+            self.errors
+                .lock()
+                .unwrap()
+                .push((message_id, error_message.to_string()));
+        }
+    }
 
     #[test]
     #[should_panic(expected = "MultiplexedStream requires at least one sub-stream")]
@@ -471,5 +530,32 @@ mod tests {
         assert_ne!(a, b);
         assert_eq!(a.sub_offset(), b.sub_offset());
         assert_ne!(a.stream_index(), b.stream_index());
+    }
+
+    #[test]
+    fn test_multiplexed_ack_callback_routes_substream_ids() {
+        let callback = Arc::new(RecordingMultiplexedCallback::default());
+        let stream_0 = multiplexed_ack_callback(0, callback.clone());
+        let stream_1 = multiplexed_ack_callback(1, callback.clone());
+
+        stream_0.on_ack(42);
+        stream_1.on_ack(42);
+        stream_1.on_error(43, "test error");
+
+        assert_eq!(
+            callback.acks.lock().unwrap().as_slice(),
+            &[MessageId::new(0, 42), MessageId::new(1, 42)]
+        );
+        assert_eq!(
+            callback.errors.lock().unwrap().as_slice(),
+            &[(MessageId::new(1, 43), "test error".to_string())]
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "MultiplexedStream supports at most 64 sub-streams")]
+    fn test_multiplexed_ack_callback_rejects_invalid_stream_index() {
+        let callback = Arc::new(RecordingMultiplexedCallback::default());
+        multiplexed_ack_callback(64, callback);
     }
 }
