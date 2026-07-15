@@ -318,7 +318,7 @@ func TestOpenRejectsInvalidHeaders(t *testing.T) {
 		{
 			name: "duplicate normalized key",
 			headers: map[string]string{
-				"authorization":  "tok-1",
+				"authorization":   "tok-1",
 				" Authorization ": "tok-2",
 			},
 		},
