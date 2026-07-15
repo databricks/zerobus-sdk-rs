@@ -107,6 +107,7 @@ public class ZerobusJsonStream extends BaseZerobusStream {
   // Stream creation parameters (stored for recreateStream)
   private final String clientId;
   private final String clientSecret;
+  private final HeadersProvider headersProvider;
 
   /** Package-private constructor. Use {@link ZerobusSdk#streamBuilder()} to create instances. */
   ZerobusJsonStream(
@@ -115,9 +116,20 @@ public class ZerobusJsonStream extends BaseZerobusStream {
       StreamConfigurationOptions options,
       String clientId,
       String clientSecret) {
+    this(nativeHandle, tableName, options, clientId, clientSecret, null);
+  }
+
+  ZerobusJsonStream(
+      long nativeHandle,
+      String tableName,
+      StreamConfigurationOptions options,
+      String clientId,
+      String clientSecret,
+      HeadersProvider headersProvider) {
     super(nativeHandle, tableName, options, true);
     this.clientId = clientId;
     this.clientSecret = clientSecret;
+    this.headersProvider = headersProvider;
   }
 
   /** Returns the client ID used to create this stream. */
@@ -128,6 +140,10 @@ public class ZerobusJsonStream extends BaseZerobusStream {
   /** Returns the client secret used to create this stream. */
   public String getClientSecret() {
     return clientSecret;
+  }
+
+  HeadersProvider getHeadersProvider() {
+    return headersProvider;
   }
 
   // ==================== Single Record Ingestion ====================

@@ -87,6 +87,7 @@ public class ZerobusArrowStream implements AutoCloseable {
   // Credentials stored for stream recreation.
   private final String clientId;
   private final String clientSecret;
+  private final HeadersProvider headersProvider;
 
   // Cached unacked batches (populated on close for use in recreateArrowStream).
   private volatile List<byte[]> cachedUnackedBatches;
@@ -99,12 +100,24 @@ public class ZerobusArrowStream implements AutoCloseable {
       byte[] schemaIpc,
       String clientId,
       String clientSecret) {
+    this(nativeHandle, tableName, options, schemaIpc, clientId, clientSecret, null);
+  }
+
+  ZerobusArrowStream(
+      long nativeHandle,
+      String tableName,
+      ArrowStreamConfigurationOptions options,
+      byte[] schemaIpc,
+      String clientId,
+      String clientSecret,
+      HeadersProvider headersProvider) {
     this.nativeHandle = nativeHandle;
     this.tableName = tableName;
     this.options = options;
     this.schemaIpc = schemaIpc;
     this.clientId = clientId;
     this.clientSecret = clientSecret;
+    this.headersProvider = headersProvider;
   }
 
   // ==================== Batch Ingestion ====================
@@ -254,6 +267,10 @@ public class ZerobusArrowStream implements AutoCloseable {
   /** Returns the client secret used to create this stream. */
   String getClientSecret() {
     return clientSecret;
+  }
+
+  HeadersProvider getHeadersProvider() {
+    return headersProvider;
   }
 
   /**

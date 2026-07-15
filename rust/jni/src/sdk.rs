@@ -5,6 +5,7 @@
 use crate::arrow_stream::NativeArrowStreamHandle;
 use crate::async_bridge::{create_completable_future, spawn_and_complete};
 use crate::errors::{throw_from_zerobus_error, throw_zerobus_exception};
+use crate::headers_provider::JavaHeadersProvider;
 use crate::options::{
     apply_arrow_stream_options, apply_stream_options, extract_arrow_stream_options,
     extract_stream_options,
@@ -152,6 +153,7 @@ pub extern "system" fn Java_com_databricks_zerobus_ZerobusSdk_nativeCreateStream
     descriptor_proto: JByteArray<'local>,
     client_id: JString<'local>,
     client_secret: JString<'local>,
+    headers_provider: JObject<'local>,
     options: JObject<'local>,
     is_json: jboolean,
 ) -> JObject<'local> {
@@ -195,6 +197,21 @@ pub extern "system" fn Java_com_databricks_zerobus_ZerobusSdk_nativeCreateStream
         Err(e) => {
             throw_zerobus_exception(&mut env, &format!("Invalid client secret: {}", e));
             return JObject::null();
+        }
+    };
+
+    let headers_provider = if headers_provider.is_null() {
+        None
+    } else {
+        match env.new_global_ref(&headers_provider) {
+            Ok(provider_ref) => Some(JavaHeadersProvider::new(provider_ref).into_arc()),
+            Err(e) => {
+                throw_zerobus_exception(
+                    &mut env,
+                    &format!("Failed to retain headers provider: {}", e),
+                );
+                return JObject::null();
+            }
         }
     };
 
@@ -253,10 +270,11 @@ pub extern "system" fn Java_com_databricks_zerobus_ZerobusSdk_nativeCreateStream
                 None
             };
 
-            let base = sdk_arc
-                .stream_builder()
-                .table(table_name)
-                .oauth(credentials.0.clone(), credentials.1.clone());
+            let base = sdk_arc.stream_builder().table(table_name);
+            let base = match headers_provider {
+                Some(provider) => base.headers_provider(provider),
+                None => base.oauth(credentials.0.clone(), credentials.1.clone()),
+            };
             let mut builder = match record_type {
                 RecordType::Proto => {
                     let desc = descriptor_proto.ok_or_else(|| {
@@ -385,6 +403,7 @@ pub extern "system" fn Java_com_databricks_zerobus_ZerobusSdk_nativeCreateArrowS
     arrow_schema: JByteArray<'local>,
     client_id: JString<'local>,
     client_secret: JString<'local>,
+    headers_provider: JObject<'local>,
     options: JObject<'local>,
 ) -> JObject<'local> {
     // Create the CompletableFuture to return
@@ -430,6 +449,21 @@ pub extern "system" fn Java_com_databricks_zerobus_ZerobusSdk_nativeCreateArrowS
         }
     };
 
+    let headers_provider = if headers_provider.is_null() {
+        None
+    } else {
+        match env.new_global_ref(&headers_provider) {
+            Ok(provider_ref) => Some(JavaHeadersProvider::new(provider_ref).into_arc()),
+            Err(e) => {
+                throw_zerobus_exception(
+                    &mut env,
+                    &format!("Failed to retain headers provider: {}", e),
+                );
+                return JObject::null();
+            }
+        }
+    };
+
     // Extract Arrow schema bytes
     let schema_bytes: Vec<u8> = match env.convert_byte_array(arrow_schema) {
         Ok(bytes) => bytes,
@@ -472,11 +506,12 @@ pub extern "system" fn Java_com_databricks_zerobus_ZerobusSdk_nativeCreateArrowS
 
             let schema = reader.schema();
 
-            let mut builder = sdk_arc
-                .stream_builder()
-                .table(table_name)
-                .oauth(credentials.0.clone(), credentials.1.clone())
-                .arrow(schema);
+            let builder = sdk_arc.stream_builder().table(table_name);
+            let builder = match headers_provider {
+                Some(provider) => builder.headers_provider(provider),
+                None => builder.oauth(credentials.0.clone(), credentials.1.clone()),
+            };
+            let mut builder = builder.arrow(schema);
             if let Some(opts) = extracted_options {
                 builder = apply_arrow_stream_options(builder, opts);
             }

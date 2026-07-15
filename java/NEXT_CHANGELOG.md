@@ -6,6 +6,7 @@
 
 ### New Features and Improvements
 
+- Added `HeadersProvider` support to `StreamBuilder` for custom authentication on JSON, Protocol Buffer, and Arrow streams, including stream recreation and credential invalidation callbacks.
 - Added native library support for Linux musl (Alpine) on x86_64 and aarch64. The libc flavor is detected automatically at runtime; override with `-Dzerobus.libc=musl|glibc`.
 - Added `ZerobusSdk.streamBuilder()`, a fluent builder for creating streams that mirrors the Rust SDK's `stream_builder()`. It supports JSON, Protocol Buffer, and Arrow Flight streams through a single chainable API and is now the recommended way to create streams. See `StreamBuilder`.
 - `ZerobusSdk` now has a three-argument constructor accepting an optional `applicationName`
@@ -53,6 +54,7 @@
 - Added `StreamBuilder` and its typed sub-builders (`StreamBuilder.JsonStreamBuilder`,
   `StreamBuilder.ProtoStreamBuilder`, `StreamBuilder.ArrowStreamBuilder`), returned by
   `ZerobusSdk.streamBuilder()`.
+- Added `HeadersProvider` and `StreamBuilder.headersProvider()` for custom authentication.
 - Added a three-argument `ZerobusSdk(String serverEndpoint, String unityCatalogEndpoint, String
   applicationName)` constructor. The existing two-argument constructor delegates to it with a
   `null` application name.

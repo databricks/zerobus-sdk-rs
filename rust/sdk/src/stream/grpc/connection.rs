@@ -8,7 +8,7 @@ use std::sync::Arc;
 
 use prost::Message;
 use tokio_stream::wrappers::ReceiverStream;
-use tonic::metadata::MetadataValue;
+use tonic::metadata::{MetadataKey, MetadataMap, MetadataValue};
 use tonic::transport::Channel;
 use tracing::{debug, error, info, instrument};
 
@@ -91,9 +91,7 @@ impl ZerobusStream {
                     stream_metadata.insert("authorization", auth_value);
                 }
                 other_key => {
-                    let header_value = MetadataValue::try_from(value.as_str())
-                        .map_err(|_| ZerobusError::InvalidArgument(other_key.to_string()))?;
-                    stream_metadata.insert(other_key, header_value);
+                    insert_custom_header(stream_metadata, other_key, &value)?;
                 }
             }
         }
@@ -171,5 +169,31 @@ impl ZerobusStream {
                 Err(ZerobusError::CreateStreamError(status))
             }
         }
+    }
+}
+
+fn insert_custom_header(
+    metadata: &mut MetadataMap,
+    key: &'static str,
+    value: &str,
+) -> ZerobusResult<()> {
+    let key = MetadataKey::from_bytes(key.as_bytes())
+        .map_err(|_| ZerobusError::InvalidArgument(key.to_string()))?;
+    let value = MetadataValue::try_from(value)
+        .map_err(|_| ZerobusError::InvalidArgument(key.to_string()))?;
+    metadata.insert(key, value);
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn invalid_custom_header_name_returns_error() {
+        let error = insert_custom_header(&mut MetadataMap::new(), "invalid header", "value")
+            .expect_err("invalid metadata key must be rejected");
+
+        assert!(matches!(error, ZerobusError::InvalidArgument(_)));
     }
 }

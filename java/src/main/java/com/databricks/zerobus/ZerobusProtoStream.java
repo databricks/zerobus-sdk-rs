@@ -45,6 +45,7 @@ public class ZerobusProtoStream extends BaseZerobusStream {
   private final byte[] descriptorProtoBytes;
   private final String clientId;
   private final String clientSecret;
+  private final HeadersProvider headersProvider;
 
   /** Package-private constructor. Use {@link ZerobusSdk#streamBuilder()} to create instances. */
   ZerobusProtoStream(
@@ -54,10 +55,22 @@ public class ZerobusProtoStream extends BaseZerobusStream {
       byte[] descriptorProtoBytes,
       String clientId,
       String clientSecret) {
+    this(nativeHandle, tableName, options, descriptorProtoBytes, clientId, clientSecret, null);
+  }
+
+  ZerobusProtoStream(
+      long nativeHandle,
+      String tableName,
+      StreamConfigurationOptions options,
+      byte[] descriptorProtoBytes,
+      String clientId,
+      String clientSecret,
+      HeadersProvider headersProvider) {
     super(nativeHandle, tableName, options, false);
     this.descriptorProtoBytes = descriptorProtoBytes;
     this.clientId = clientId;
     this.clientSecret = clientSecret;
+    this.headersProvider = headersProvider;
   }
 
   /** Returns the descriptor proto bytes used to create this stream. */
@@ -73,6 +86,10 @@ public class ZerobusProtoStream extends BaseZerobusStream {
   /** Returns the client secret used to create this stream. */
   public String getClientSecret() {
     return clientSecret;
+  }
+
+  HeadersProvider getHeadersProvider() {
+    return headersProvider;
   }
 
   // ==================== Single Record Ingestion ====================
