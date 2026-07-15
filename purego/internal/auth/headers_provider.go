@@ -9,6 +9,7 @@ package auth
 import (
 	"context"
 	"fmt"
+	"maps"
 	"strings"
 )
 
@@ -46,9 +47,7 @@ func (p *StaticHeadersProvider) GetHeaders(_ context.Context, _ string) (map[str
 		return nil, fmt.Errorf("auth: static headers are empty")
 	}
 	out := make(map[string]string, len(p.headers))
-	for k, v := range p.headers {
-		out[k] = v
-	}
+	maps.Copy(out, p.headers)
 	return out, nil
 }
 
