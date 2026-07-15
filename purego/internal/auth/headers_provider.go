@@ -1,13 +1,9 @@
-// Package auth provides OAuth 2.0 and custom-header authentication for the
-// Zerobus pure-Go SDK.
+// Package auth provides authentication for the Zerobus pure-Go SDK.
 //
-// Authentication is expressed through [HeadersProvider], which supplies the
-// gRPC metadata headers for a stream. The package ships two implementations:
-//   - [OAuthHeadersProvider] — wraps an [OAuthTokenProvider] (Unity Catalog
-//     OAuth 2.0 client credentials flow with per-table token caching and
-//     proactive refresh) and emits the required Zerobus metadata headers.
-//   - [StaticHeadersProvider] — returns a fixed headers map, for tests or
-//     externally managed credentials.
+// Authentication is expressed through [HeadersProvider], which supplies the gRPC
+// metadata headers for a stream. [StaticHeadersProvider] returns a fixed headers
+// map, for tests or externally managed credentials; a per-table token cache
+// backs the Unity Catalog OAuth flow added on top of this package.
 package auth
 
 import (

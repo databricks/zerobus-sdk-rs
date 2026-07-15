@@ -193,6 +193,32 @@ func TestTokenCacheNonRetryableRefreshErrorPropagates(t *testing.T) {
 	}
 }
 
+func TestTokenCacheColdMissFailureLeavesNoEntry(t *testing.T) {
+	c := newTokenCache()
+
+	// A failed cold-miss mint must not cache anything: the error propagates and a
+	// retry re-mints rather than serving a phantom token.
+	_, err := c.getOrFetch(context.Background(), "id", "secret", "c.s.t",
+		func(_ context.Context, _ mintReason) (fetchedToken, error) {
+			return fetchedToken{}, &fatalErr{"boom"}
+		},
+	)
+	if err == nil {
+		t.Fatal("want error from failed cold-miss mint, got nil")
+	}
+
+	var calls atomic.Int64
+	tok := getOrFetch(t, c, "id", "secret", "c.s.t",
+		func(_ context.Context, _ mintReason) (fetchedToken, error) {
+			calls.Add(1)
+			return fetchedToken{token: "tok", expiresIn: dur(3600)}, nil
+		},
+	)
+	if tok != "tok" || calls.Load() != 1 {
+		t.Fatalf("want a fresh mint after cold-miss failure, got %q with %d calls", tok, calls.Load())
+	}
+}
+
 func TestTokenCacheNoTTLResponseKeepsExistingCachedToken(t *testing.T) {
 	c := newTokenCache()
 	// Seed a token that is due for refresh (refreshAt already in the past).

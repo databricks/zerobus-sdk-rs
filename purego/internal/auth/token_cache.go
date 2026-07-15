@@ -126,9 +126,8 @@ type tokenCache struct {
 	disabled      bool // when true, every getOrFetch mints without caching
 }
 
-// CacheOption configures a [SharedTokenCache] passed to [NewSharedTokenCache].
-// The same settings are available per-provider via [WithTokenCacheEnabled] and
-// [WithRefreshBuffer].
+// CacheOption configures a token cache at construction. See [CacheEnabled] and
+// [CacheRefreshBuffer].
 type CacheOption func(*tokenCache)
 
 // CacheEnabled toggles token caching. When disabled, every token request mints
