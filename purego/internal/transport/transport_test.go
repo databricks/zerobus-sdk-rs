@@ -282,7 +282,7 @@ func TestOpenPrefixesUnknownScheme(t *testing.T) {
 	}
 }
 
-func TestOpenRejectsHeadersProviderWithControlChars(t *testing.T) {
+func TestOpenRejectsInvalidHeaders(t *testing.T) {
 	cases := []struct {
 		name    string
 		headers map[string]string
@@ -303,6 +303,18 @@ func TestOpenRejectsHeadersProviderWithControlChars(t *testing.T) {
 			name:    "custom header with carriage return",
 			headers: map[string]string{mdUserKey: "val\ruer"},
 		},
+		{
+			name:    "authorization with non-ASCII value",
+			headers: map[string]string{"authorization": "Bearer tøken"},
+		},
+		{
+			name:    "custom header key with space",
+			headers: map[string]string{"x bad": "v"},
+		},
+		{
+			name:    "custom header key with non-ASCII",
+			headers: map[string]string{"x-bäd": "v"},
+		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -315,7 +327,7 @@ func TestOpenRejectsHeadersProviderWithControlChars(t *testing.T) {
 				HeadersProvider: &stubHeadersProvider{headers: tc.headers},
 			})
 			if err == nil {
-				t.Fatal("Open with invalid provider header value: got nil error, want rejection")
+				t.Fatal("Open with invalid provider header: got nil error, want rejection")
 			}
 		})
 	}
@@ -538,7 +550,76 @@ func TestOpenAuthRejectionInvalidatesHeadersProvider(t *testing.T) {
 			if p.invalidateCalls.Load() != 1 {
 				t.Fatalf("Invalidate calls = %d, want 1", p.invalidateCalls.Load())
 			}
+			if last, _ := p.lastTable.Load().(string); last != "c.s.t" {
+				t.Fatalf("Invalidate saw table %q, want %q", last, "c.s.t")
+			}
 		})
+	}
+}
+
+// TestOpenNonAuthRejectionDoesNotInvalidate verifies that a non-auth failure
+// (e.g. a bad handshake, or a non-auth gRPC code) leaves the provider's cached
+// credentials intact: only Unauthenticated/PermissionDenied invalidate.
+func TestOpenNonAuthRejectionDoesNotInvalidate(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		srv  *fakeServer
+	}{
+		{
+			name: "Internal code",
+			srv:  &fakeServer{streamID: "s", seen: make(chan observed, 1), authRejectCode: codes.Internal},
+		},
+		{
+			name: "unexpected first response",
+			srv:  &fakeServer{streamID: "s", seen: make(chan observed, 1), badHandshake: true},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			conn := dialFake(t, tc.srv)
+
+			p := &stubHeadersProvider{headers: map[string]string{"authorization": "tok"}}
+			_, err := conn.Open(context.Background(), transport.StreamParams{
+				TableName:       "c.s.t",
+				RecordType:      zerobuspb.RecordType_JSON,
+				HeadersProvider: p,
+			})
+			if err == nil {
+				t.Fatal("Open against a non-auth failure: got nil error")
+			}
+			if p.invalidateCalls.Load() != 0 {
+				t.Fatalf("Invalidate calls = %d, want 0 for a non-auth failure", p.invalidateCalls.Load())
+			}
+		})
+	}
+}
+
+// errHeadersProvider returns a fixed error from GetHeaders, to assert Open
+// surfaces a provider failure wrapped rather than opening the stream.
+type errHeadersProvider struct{ err error }
+
+func (p *errHeadersProvider) GetHeaders(context.Context, string) (map[string]string, error) {
+	return nil, p.err
+}
+
+func (p *errHeadersProvider) Invalidate(context.Context, string) {}
+
+// TestOpenSurfacesHeadersProviderError verifies that when GetHeaders returns a
+// non-context error, Open fails with it wrapped rather than opening the stream.
+func TestOpenSurfacesHeadersProviderError(t *testing.T) {
+	srv := &fakeServer{streamID: "s", seen: make(chan observed, 1)}
+	conn := dialFake(t, srv)
+
+	sentinel := errors.New("mint failed")
+	_, err := conn.Open(context.Background(), transport.StreamParams{
+		TableName:       "c.s.t",
+		RecordType:      zerobuspb.RecordType_JSON,
+		HeadersProvider: &errHeadersProvider{err: sentinel},
+	})
+	if err == nil {
+		t.Fatal("Open with a failing headers provider: got nil error, want failure")
+	}
+	if !errors.Is(err, sentinel) {
+		t.Fatalf("Open error = %v, want it to wrap %v", err, sentinel)
 	}
 }
 
@@ -710,7 +791,7 @@ func TestOpenAbortsOnCallerCancel(t *testing.T) {
 	if err == nil {
 		t.Fatal("Open with caller cancel mid-open: got nil error, want cancellation")
 	}
-	// Well under defaultHandshakeTimeout (30s): the cancel ended it, not the timeout.
+	// Well under defaultHandshakeTimeout (15s): the cancel ended it, not the timeout.
 	if elapsed := time.Since(start); elapsed > 5*time.Second {
 		t.Fatalf("Open took %v, expected prompt abort on caller cancel", elapsed)
 	}

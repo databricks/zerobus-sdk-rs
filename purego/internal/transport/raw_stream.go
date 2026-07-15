@@ -10,13 +10,15 @@ import (
 )
 
 // defaultHandshakeTimeout bounds the open attempt when the caller's context has
-// no deadline, so Open can't hang if the server half-opens the stream.
-const defaultHandshakeTimeout = 30 * time.Second
+// no deadline, so Open can't hang if the server half-opens the stream. Matches
+// the Rust core's stream-creation budget (recovery_timeout_ms).
+const defaultHandshakeTimeout = 15 * time.Second
 
 // defaultDrainTimeout bounds gracefulClose when the caller's context has no
-// deadline, so it can't hang on an unresponsive server. A var so tests can
+// deadline, so it can't hang on an unresponsive server. Matches the Rust core's
+// teardown drain budget (STREAM_TEARDOWN_DRAIN_TIMEOUT_MS). A var so tests can
 // shrink it.
-var defaultDrainTimeout = 30 * time.Second
+var defaultDrainTimeout = 500 * time.Millisecond
 
 // bidiRPC is the subset of a generated gRPC bidirectional streaming client that
 // rawStream needs. EphemeralStream satisfies it, as will Arrow Flight's DoPut.

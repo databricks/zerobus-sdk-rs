@@ -5,15 +5,13 @@ import (
 	"fmt"
 	"strings"
 
-	"google.golang.org/grpc/codes"
-	"google.golang.org/grpc/status"
 	"google.golang.org/protobuf/proto"
 
 	"github.com/databricks/zerobus-sdk/purego/internal/zerobuspb"
 )
 
 // StreamParams describes the stream to open: which table to ingest into, how
-// records are encoded, and which auth credential to send.
+// records are encoded, and which headers provider supplies its credentials.
 type StreamParams struct {
 	// TableName is the fully-qualified target table (catalog.schema.table).
 	TableName string
@@ -26,23 +24,6 @@ type StreamParams struct {
 	// stream. See HeadersProvider for timeout behavior when GetHeaders may block
 	// (e.g. token mint). When nil, the stream is opened without an auth header.
 	HeadersProvider HeadersProvider
-}
-
-// HeadersProvider provides gRPC metadata headers for stream authentication.
-type HeadersProvider interface {
-	// GetHeaders returns the metadata headers to attach to the stream. Called
-	// during Open before the RPC handshake starts.
-	//
-	// ctx bounds GetHeaders: it is the caller's Open context, or, when that
-	// context has no deadline, one bounded by defaultHandshakeTimeout. A
-	// GetHeaders that blocks on network I/O (e.g. a token mint) is therefore
-	// cancelled once the open budget is exhausted rather than hanging forever.
-	GetHeaders(ctx context.Context, tableName string) (map[string]string, error)
-
-	// Invalidate drops any cached credentials so the next GetHeaders re-derives
-	// them. Open calls this when the server rejects the supplied credentials
-	// with Unauthenticated or PermissionDenied during stream creation.
-	Invalidate(ctx context.Context, tableName string)
 }
 
 // Stream is an open ephemeral ingestion stream over the proto/JSON
@@ -93,20 +74,9 @@ func (c *Conn) Open(ctx context.Context, p StreamParams) (*Stream, error) {
 		defer cancelOpen()
 	}
 
-	var headers map[string]string
-	if p.HeadersProvider != nil {
-		var err error
-		headers, err = p.HeadersProvider.GetHeaders(openCtx, p.TableName)
-		if err != nil {
-			return nil, fmt.Errorf("transport: open %q: headers provider: %w", p.TableName, err)
-		}
-		for k, v := range headers {
-			// Reject control/non-ASCII chars at the wire boundary; gRPC would
-			// otherwise fail opaquely.
-			if !isUsableAsHeader(v) {
-				return nil, fmt.Errorf("transport: open %q: header %q contains invalid value characters", p.TableName, strings.TrimSpace(k))
-			}
-		}
+	headers, err := p.resolveHeaders(openCtx)
+	if err != nil {
+		return nil, err
 	}
 
 	// Detach the live stream from ctx's cancel/deadline (WithoutCancel keeps its
@@ -135,11 +105,6 @@ func (c *Conn) Open(ctx context.Context, p StreamParams) (*Stream, error) {
 	}
 	stream.cancel = cancelStream
 	return stream, nil
-}
-
-func isAuthRejection(err error) bool {
-	code := status.Code(err)
-	return code == codes.Unauthenticated || code == codes.PermissionDenied
 }
 
 // open starts the RPC on streamCtx and runs the handshake bounded by hctx.
