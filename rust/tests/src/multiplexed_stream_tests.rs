@@ -2,11 +2,13 @@ mod mock_grpc;
 mod utils;
 
 use std::sync::Arc;
+use std::task::Poll;
 
 use databricks_zerobus_ingest_sdk::{
     MessageId, MultiplexedStream, NoTlsConfig, ZerobusError, ZerobusSdk, ZerobusStream,
 };
-use mock_grpc::{start_mock_server, MockResponse};
+use futures::poll;
+use mock_grpc::{start_mock_server, MockResponse, MockResponseGate};
 use tracing::info;
 use utils::{create_test_descriptor_proto, setup_tracing, TestHeadersProvider};
 
@@ -228,7 +230,6 @@ mod single_stream_tests {
 
 mod multi_stream_tests {
     use super::*;
-    use std::time::Duration;
 
     /// Use separate table names per stream so each gRPC connection gets its own response sequence.
     const TABLE_A: &str = "multi.schema.table_a";
@@ -320,6 +321,7 @@ mod multi_stream_tests {
         info!("Starting test_ingest_waits_on_chosen_stream_when_it_is_full");
 
         let (mock_server, server_url) = start_mock_server().await?;
+        let slow_ack = Arc::new(MockResponseGate::new());
         mock_server
             .inject_responses(
                 TABLE_A,
@@ -328,9 +330,9 @@ mod multi_stream_tests {
                         stream_id: "slow_a".to_string(),
                         delay_ms: 0,
                     },
-                    MockResponse::RecordAck {
+                    MockResponse::GatedRecordAck {
                         ack_up_to_offset: 0,
-                        delay_ms: 250,
+                        gate: Arc::clone(&slow_ack),
                     },
                     MockResponse::RecordAck {
                         ack_up_to_offset: 1,
@@ -371,19 +373,14 @@ mod multi_stream_tests {
         assert_eq!(second.stream_index(), 1);
         mux.wait_for_message_id(second).await?;
 
-        let mux_for_task = Arc::clone(&mux);
-        let third_task =
-            tokio::spawn(async move { mux_for_task.ingest_record(b"waited".to_vec()).await });
-
-        tokio::time::sleep(Duration::from_millis(100)).await;
+        let mut third_future = Box::pin(mux.ingest_record(b"waited".to_vec()));
         assert!(
-            !third_task.is_finished(),
+            matches!(poll!(&mut third_future), Poll::Pending),
             "Expected ingest to wait on the chosen stream even when another sibling is free"
         );
 
-        let third = tokio::time::timeout(Duration::from_millis(500), third_task)
-            .await
-            .expect("ingest should complete once the chosen lane drains")??;
+        slow_ack.release();
+        let third = third_future.await?;
 
         assert_eq!(third.stream_index(), 0);
         assert_eq!(third.sub_offset(), 1);
@@ -401,6 +398,7 @@ mod multi_stream_tests {
         info!("Starting test_batch_ingest_waits_on_chosen_stream_when_it_is_full");
 
         let (mock_server, server_url) = start_mock_server().await?;
+        let slow_ack = Arc::new(MockResponseGate::new());
         mock_server
             .inject_responses(
                 TABLE_A,
@@ -409,9 +407,9 @@ mod multi_stream_tests {
                         stream_id: "slow_a".to_string(),
                         delay_ms: 0,
                     },
-                    MockResponse::RecordAck {
+                    MockResponse::GatedRecordAck {
                         ack_up_to_offset: 0,
-                        delay_ms: 250,
+                        gate: Arc::clone(&slow_ack),
                     },
                     MockResponse::RecordAck {
                         ack_up_to_offset: 1,
@@ -452,22 +450,16 @@ mod multi_stream_tests {
         assert_eq!(second.stream_index(), 1);
         mux.wait_for_message_id(second).await?;
 
-        let mux_for_task = Arc::clone(&mux);
-        let batch_task = tokio::spawn(async move {
-            mux_for_task
-                .ingest_records(vec![b"r1".to_vec(), b"r2".to_vec(), b"r3".to_vec()])
-                .await
-        });
-
-        tokio::time::sleep(Duration::from_millis(100)).await;
+        let mut batch_future =
+            Box::pin(mux.ingest_records(vec![b"r1".to_vec(), b"r2".to_vec(), b"r3".to_vec()]));
         assert!(
-            !batch_task.is_finished(),
+            matches!(poll!(&mut batch_future), Poll::Pending),
             "Expected batch ingest to wait on the chosen stream even when another sibling is free"
         );
 
-        let batch_id = tokio::time::timeout(Duration::from_millis(500), batch_task)
-            .await
-            .expect("batch ingest should complete once the chosen lane drains")??
+        slow_ack.release();
+        let batch_id = batch_future
+            .await?
             .expect("non-empty batch should return a message id");
 
         assert_eq!(batch_id.stream_index(), 0);
@@ -486,6 +478,8 @@ mod multi_stream_tests {
         info!("Starting test_ingest_blocks_on_original_lane_when_all_streams_are_full");
 
         let (mock_server, server_url) = start_mock_server().await?;
+        let lane_a_ack = Arc::new(MockResponseGate::new());
+        let lane_b_ack = Arc::new(MockResponseGate::new());
         mock_server
             .inject_responses(
                 TABLE_A,
@@ -494,9 +488,9 @@ mod multi_stream_tests {
                         stream_id: "slow_a".to_string(),
                         delay_ms: 0,
                     },
-                    MockResponse::RecordAck {
+                    MockResponse::GatedRecordAck {
                         ack_up_to_offset: 0,
-                        delay_ms: 200,
+                        gate: Arc::clone(&lane_a_ack),
                     },
                     MockResponse::RecordAck {
                         ack_up_to_offset: 1,
@@ -513,9 +507,9 @@ mod multi_stream_tests {
                         stream_id: "slow_b".to_string(),
                         delay_ms: 0,
                     },
-                    MockResponse::RecordAck {
+                    MockResponse::GatedRecordAck {
                         ack_up_to_offset: 0,
-                        delay_ms: 200,
+                        gate: Arc::clone(&lane_b_ack),
                     },
                 ],
             )
@@ -533,19 +527,14 @@ mod multi_stream_tests {
         let first = mux.ingest_record(b"slow_a".to_vec()).await?;
         let second = mux.ingest_record(b"slow_b".to_vec()).await?;
 
-        let mux_for_task = Arc::clone(&mux);
-        let third_task =
-            tokio::spawn(async move { mux_for_task.ingest_record(b"blocked".to_vec()).await });
-
-        tokio::time::sleep(Duration::from_millis(50)).await;
+        let mut third_future = Box::pin(mux.ingest_record(b"blocked".to_vec()));
         assert!(
-            !third_task.is_finished(),
+            matches!(poll!(&mut third_future), Poll::Pending),
             "Expected ingest to block while all sub-streams are full"
         );
 
-        let third = tokio::time::timeout(Duration::from_millis(500), third_task)
-            .await
-            .expect("ingest should complete once the chosen lane drains")??;
+        lane_a_ack.release();
+        let third = third_future.await?;
 
         assert_eq!(
             third.stream_index(),
@@ -554,6 +543,7 @@ mod multi_stream_tests {
         );
         assert_eq!(third.sub_offset(), 1);
 
+        lane_b_ack.release();
         mux.wait_for_message_id(first).await?;
         mux.wait_for_message_id(second).await?;
         mux.wait_for_message_id(third).await?;
