@@ -26,7 +26,6 @@ const (
 	mintReasonColdMiss      mintReason = iota // no usable entry in cache
 	mintReasonRefresh                         // token is within the refresh buffer
 	mintReasonCacheDisabled                   // caching is off, so every call mints
-	mintReasonDirect                          // minted outside the cache via FetchToken
 )
 
 func (r mintReason) String() string {
@@ -37,8 +36,6 @@ func (r mintReason) String() string {
 		return "refresh"
 	case mintReasonCacheDisabled:
 		return "cache_disabled"
-	case mintReasonDirect:
-		return "direct"
 	default:
 		return "unknown"
 	}

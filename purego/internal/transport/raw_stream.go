@@ -10,9 +10,14 @@ import (
 	"time"
 )
 
-// defaultHandshakeTimeout bounds the open attempt when the caller's context has
-// no deadline, so Open can't hang if the server half-opens the stream.
-const defaultHandshakeTimeout = 15 * time.Second
+// defaultHeadersTimeout bounds header resolution during Open when the caller's
+// context has no deadline. A var so tests can shrink it.
+var defaultHeadersTimeout = 15 * time.Second
+
+// defaultHandshakeTimeout bounds the create-stream handshake during Open when
+// the caller's context has no deadline, so Open can't hang if the server
+// half-opens the stream. A var so tests can shrink it.
+var defaultHandshakeTimeout = 15 * time.Second
 
 // defaultDrainTimeout bounds gracefulClose's drain-to-EOF when the caller's
 // context has no deadline, so it can't hang on an unresponsive server. This caps

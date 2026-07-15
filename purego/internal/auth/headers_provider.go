@@ -2,8 +2,8 @@
 //
 // Authentication is expressed through [HeadersProvider], which supplies the gRPC
 // metadata headers for a stream. [StaticHeadersProvider] returns a fixed headers
-// map, for tests or externally managed credentials; a per-table token cache
-// backs the Unity Catalog OAuth flow added on top of this package.
+// map, for tests or externally managed credentials; a per-table token cache in
+// this package supports OAuth-based providers built on top of this interface.
 package auth
 
 import (
