@@ -65,7 +65,7 @@ impl ZerobusStream {
 /// Test-only harness driving the real callback handler task and teardown
 /// without a gRPC connection. Wires up the same `spawn_callback_handler_task` +
 /// channel as `ZerobusStream::new_stream`, and its `teardown()` runs the production
-/// [`ZerobusStream::shutdown_callback_task`], so tests exercise the ack callback
+/// `ZerobusStream::shutdown_callback_task`, so tests exercise the ack callback
 /// lifetime contract against real code.
 #[cfg(feature = "testing")]
 pub struct CallbackHandlerHarness {
@@ -113,7 +113,7 @@ impl CallbackHandlerHarness {
     }
 
     /// Reproduces `close()`'s callback teardown: cancel the token, then run the
-    /// production [`ZerobusStream::shutdown_callback_task`]. On return the task
+    /// production `ZerobusStream::shutdown_callback_task`. On return the task
     /// has stopped, so `user_data` is safe to release.
     pub async fn teardown(&mut self, callback_max_wait_time_ms: Option<u64>) {
         self.cancellation_token.cancel();
