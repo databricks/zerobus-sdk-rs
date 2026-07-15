@@ -64,7 +64,7 @@ impl ZerobusStream {
 
 /// Test-only harness driving the real callback handler task and teardown
 /// without a gRPC connection. Wires up the same `spawn_callback_handler_task` +
-/// channel as `ZerobusStream::new`, and its `teardown()` runs the production
+/// channel as `ZerobusStream::new_stream`, and its `teardown()` runs the production
 /// [`ZerobusStream::shutdown_callback_task`], so tests exercise the ack callback
 /// lifetime contract against real code.
 #[cfg(feature = "testing")]
@@ -105,8 +105,10 @@ impl CallbackHandlerHarness {
     }
 
     /// Whether the handler task has exited (e.g. after teardown), so no further
-    /// callback can be dispatched.
-    pub fn is_closed(&self) -> bool {
+    /// callback can be dispatched. Named distinctly from
+    /// [`ZerobusStream::is_closed`] (the stream's `is_closed` flag) since this
+    /// reports the callback channel's sender state instead.
+    pub fn is_task_gone(&self) -> bool {
         self.sender.is_closed()
     }
 
