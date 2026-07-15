@@ -6,6 +6,9 @@ import (
 	"io"
 	"strings"
 	"testing"
+
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 )
 
 type fakeBidiRPC struct {
@@ -42,6 +45,29 @@ func TestRawStreamHandshakeAssignsID(t *testing.T) {
 
 	if s.name() != "stream-123" {
 		t.Fatalf("name = %q, want stream-123", s.name())
+	}
+}
+
+// TestRawStreamHandshakeSendEOFFallsThroughToRecv verifies the gRPC contract
+// handling: when sendSetup fails with io.EOF (the stream aborted server-side),
+// handshake ignores it and surfaces the real status via recv rather than
+// returning the opaque EOF.
+func TestRawStreamHandshakeSendEOFFallsThroughToRecv(t *testing.T) {
+	rejected := status.Error(codes.Unauthenticated, "bad credentials")
+	rpc := &fakeBidiRPC{recvErr: rejected}
+	s := &rawStream[string, string]{rpc: rpc}
+
+	err := s.handshake(
+		context.Background(),
+		func() {},
+		func(_ bidiRPC[string, string]) error { return io.EOF },
+		func(_ *string) (string, error) { return "", nil },
+	)
+	if err == nil {
+		t.Fatal("handshake with Send io.EOF: got nil error, want the recv status")
+	}
+	if !isAuthRejection(err) {
+		t.Fatalf("handshake error = %v, want an auth rejection recovered from recv", err)
 	}
 }
 
