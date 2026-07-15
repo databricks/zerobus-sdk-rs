@@ -100,6 +100,7 @@ func withStreamMetadataHeaders(ctx context.Context, tableName string, headers ma
 		key = normalizeHeaderKey(key)
 		switch key {
 		case "":
+			// Defensive: resolveHeaders already rejects empty keys.
 			continue
 		case mdTableName:
 			// table header is authoritative from stream-open params.
@@ -120,9 +121,8 @@ func withStreamMetadataHeaders(ctx context.Context, tableName string, headers ma
 }
 
 // isUsableAsHeaderKey reports whether key is a valid gRPC metadata key: one or
-// more characters drawn from [0-9 a-z - _ .]. Keys are lower-cased before use,
-// so an upper-case letter is accepted here and folded by withStreamMetadataHeaders.
-// An empty key is unusable (it carries no header).
+// more characters drawn from [0-9 a-z - _ .]. normalizeHeaderKey folds case, so
+// an upper-case letter is accepted here. An empty key is unusable.
 func isUsableAsHeaderKey(key string) bool {
 	key = normalizeHeaderKey(key)
 	if key == "" {
@@ -136,6 +136,8 @@ func isUsableAsHeaderKey(key string) bool {
 	return true
 }
 
+// normalizeHeaderKey trims surrounding whitespace and lower-cases key, the
+// canonical form used for validation, dedup, and matching Zerobus-owned keys.
 func normalizeHeaderKey(key string) string {
 	return strings.ToLower(strings.TrimSpace(key))
 }

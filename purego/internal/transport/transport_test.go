@@ -322,6 +322,14 @@ func TestOpenRejectsInvalidHeaders(t *testing.T) {
 				" Authorization ": "tok-2",
 			},
 		},
+		{
+			name:    "empty key",
+			headers: map[string]string{"": "v"},
+		},
+		{
+			name:    "whitespace-only key",
+			headers: map[string]string{"   ": "v"},
+		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
