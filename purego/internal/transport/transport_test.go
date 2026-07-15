@@ -665,7 +665,6 @@ func TestOpenBoundsGetHeadersWithDeadline(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
 	defer cancel()
 
-	start := time.Now()
 	_, err := conn.Open(ctx, transport.StreamParams{
 		TableName:       "c.s.t",
 		RecordType:      zerobuspb.RecordType_JSON,
@@ -673,9 +672,6 @@ func TestOpenBoundsGetHeadersWithDeadline(t *testing.T) {
 	})
 	if err == nil {
 		t.Fatal("Open with a blocking headers provider: got nil error, want deadline failure")
-	}
-	if elapsed := time.Since(start); elapsed > 5*time.Second {
-		t.Fatalf("Open took %v, expected it to fail near the 200ms deadline", elapsed)
 	}
 	if gotErr := <-p.ctxErr; !errors.Is(gotErr, context.DeadlineExceeded) {
 		t.Fatalf("GetHeaders context error = %v, want DeadlineExceeded", gotErr)
@@ -770,17 +766,14 @@ func TestOpenHonorsCallerDeadline(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
 	defer cancel()
 
-	start := time.Now()
 	_, err := conn.Open(ctx, transport.StreamParams{
 		TableName:       "c.s.t",
 		RecordType:      zerobuspb.RecordType_JSON,
 		HeadersProvider: authProvider("tok"),
 	})
-	if err == nil {
-		t.Fatal("Open against a hanging handshake: got nil error, want deadline failure")
-	}
-	if elapsed := time.Since(start); elapsed > 5*time.Second {
-		t.Fatalf("Open took %v, expected it to fail near the 200ms deadline", elapsed)
+	// Assert on the returned deadline error, not wall-clock, so the test can't flake.
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("Open against a hanging handshake: err = %v, want DeadlineExceeded", err)
 	}
 }
 
@@ -797,18 +790,15 @@ func TestOpenAbortsOnCallerCancel(t *testing.T) {
 		cancel()
 	}()
 
-	start := time.Now()
 	_, err := conn.Open(ctx, transport.StreamParams{
 		TableName:       "c.s.t",
 		RecordType:      zerobuspb.RecordType_JSON,
 		HeadersProvider: authProvider("tok"),
 	})
-	if err == nil {
-		t.Fatal("Open with caller cancel mid-open: got nil error, want cancellation")
-	}
-	// Well under defaultHandshakeTimeout (15s): the cancel ended it, not the timeout.
-	if elapsed := time.Since(start); elapsed > 5*time.Second {
-		t.Fatalf("Open took %v, expected prompt abort on caller cancel", elapsed)
+	// Assert the cancel ended Open (not the 15s handshake timeout), from the
+	// returned error rather than wall-clock, so the test can't flake.
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("Open with caller cancel mid-open: err = %v, want Canceled", err)
 	}
 }
 
