@@ -14,9 +14,11 @@ import (
 // no deadline, so Open can't hang if the server half-opens the stream.
 const defaultHandshakeTimeout = 15 * time.Second
 
-// defaultDrainTimeout bounds gracefulClose when the caller's context has no
-// deadline, so it can't hang on an unresponsive server. A var so tests can
-// shrink it.
+// defaultDrainTimeout bounds gracefulClose's drain-to-EOF when the caller's
+// context has no deadline, so it can't hang on an unresponsive server. This caps
+// only the clean-close wait (letting the server send END_STREAM rather than an
+// abrupt reset), not any ack wait — ack handling lands in a later layer. A var so
+// tests can shrink it.
 var defaultDrainTimeout = 500 * time.Millisecond
 
 // bidiRPC is the subset of a generated gRPC bidirectional streaming client that
