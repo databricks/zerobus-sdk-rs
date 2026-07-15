@@ -21,7 +21,7 @@ The tool is **packaged within the Zerobus SDK JAR**, so users can run it directl
 ## Requirements
 
 - Java 8 or higher
-- Zerobus SDK JAR (built with `mvn package`)
+- Zerobus SDK JAR (built with `mvn package -Dzerobus.skipNativeLibCheck=true`)
 - OAuth client ID and client secret with access to Unity Catalog
 - Access to a Unity Catalog endpoint
 
