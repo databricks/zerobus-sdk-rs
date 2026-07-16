@@ -35,12 +35,6 @@ pub struct StreamConfigurationOptions {
     /// Default: 1,000,000
     pub max_inflight_requests: usize,
 
-    /// Maximum time in milliseconds an ingest waits for stream capacity to
-    /// become available.
-    ///
-    /// Default: 300,000 (5 minutes)
-    pub capacity_wait_timeout_ms: u64,
-
     /// Whether to enable automatic stream recovery on failure.
     ///
     /// When enabled, the SDK will automatically attempt to reconnect and recover
@@ -181,7 +175,6 @@ impl Default for StreamConfigurationOptions {
     fn default() -> Self {
         Self {
             max_inflight_requests: 1_000_000,
-            capacity_wait_timeout_ms: defaults::CAPACITY_WAIT_TIMEOUT_MS,
             recovery: defaults::RECOVERY,
             recovery_timeout_ms: defaults::RECOVERY_TIMEOUT_MS,
             recovery_backoff_ms: defaults::RECOVERY_BACKOFF_MS,

@@ -25,6 +25,8 @@ use tracing::{error, info, warn};
 
 use crate::{EncodedBatch, EncodedRecord, OffsetId, ZerobusError, ZerobusResult, ZerobusStream};
 
+const CAPACITY_WAIT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+
 /// Number of bits reserved for the stream index.
 /// 6 bits supports up to 64 sub-streams.
 const STREAM_BITS: u32 = 6;
@@ -94,6 +96,8 @@ pub struct MultiplexedStream {
 
 impl MultiplexedStream {
     /// Creates a multiplexed stream over the given sub-streams.
+    ///
+    /// Ingest waits up to 30 seconds for capacity on its selected sub-stream.
     ///
     /// # Panics
     ///
@@ -178,7 +182,7 @@ impl MultiplexedStream {
         let mut backoff_ms = 1u64;
         let mut logged_backpressure = false;
         let started_at = tokio::time::Instant::now();
-        let deadline = started_at + stream.capacity_wait_timeout();
+        let deadline = started_at + CAPACITY_WAIT_TIMEOUT;
 
         loop {
             self.check_closed()?;

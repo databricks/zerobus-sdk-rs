@@ -261,13 +261,6 @@ impl<'a> StreamBuilder<'a> {
         self
     }
 
-    /// Set the maximum time in milliseconds an ingest waits for stream
-    /// capacity to become available.
-    pub fn capacity_wait_timeout_ms(mut self, ms: u64) -> Self {
-        self.grpc_config.capacity_wait_timeout_ms = ms;
-        self
-    }
-
     /// Set the maximum number of in-flight requests (gRPC streams only).
     pub fn max_inflight_requests(mut self, n: usize) -> Self {
         self.grpc_config.max_inflight_requests = n;
@@ -572,7 +565,6 @@ mod tests {
             .recovery_retries(3)
             .server_lack_of_ack_timeout_ms(30_000)
             .flush_timeout_ms(60_000)
-            .capacity_wait_timeout_ms(15_000)
             .max_inflight_requests(500)
             .stream_paused_max_wait_time_ms(Some(5_000))
             .callback_max_wait_time_ms(None);
@@ -583,10 +575,6 @@ mod tests {
         let sdk = test_sdk();
         let builder = sdk.stream_builder().table("t").oauth("a", "b").json();
         assert_eq!(builder.grpc_config.max_inflight_requests, 1_000_000);
-        assert_eq!(
-            builder.grpc_config.capacity_wait_timeout_ms,
-            crate::stream_options::defaults::CAPACITY_WAIT_TIMEOUT_MS
-        );
         assert!(builder.grpc_config.recovery);
         assert_eq!(
             builder.grpc_config.max_ingest_payload_bytes,
