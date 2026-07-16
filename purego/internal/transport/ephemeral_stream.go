@@ -11,7 +11,7 @@ import (
 )
 
 // StreamParams describes the stream to open: which table to ingest into, how
-// records are encoded, and which auth credential to send.
+// records are encoded, and which headers provider supplies its credentials.
 type StreamParams struct {
 	// TableName is the fully-qualified target table (catalog.schema.table).
 	TableName string
@@ -20,10 +20,10 @@ type StreamParams struct {
 	// DescriptorProto is the serialized message descriptor. Required when
 	// RecordType is PROTO and ignored otherwise.
 	DescriptorProto []byte
-	// Token is the credential sent in the authorization header. A bare token is
-	// prefixed with "Bearer "; a value that already carries a known scheme (e.g.
-	// "Bearer ..." or "Basic ...") is sent verbatim. Empty means no header.
-	Token string
+	// HeadersProvider supplies the auth (and any other) metadata headers for the
+	// stream. See HeadersProvider for timeout behavior when GetHeaders may block
+	// (e.g. token mint). When nil, the stream is opened without an auth header.
+	HeadersProvider HeadersProvider
 }
 
 // Stream is an open ephemeral ingestion stream over the proto/JSON
@@ -41,11 +41,12 @@ type Stream struct {
 // Open starts an EphemeralStream, runs the create-stream handshake, and returns
 // the live stream once the server acknowledges it with a stream ID.
 //
-// ctx bounds only opening the stream (RPC start + handshake), not the returned
-// stream's lifetime: cancelling it aborts an in-progress Open promptly, but once
-// Open succeeds the live stream is detached and cancelled only by Close, so a
-// later ctx timeout won't tear it down mid-ingest. Without a deadline, the open
-// attempt is bounded by defaultHandshakeTimeout. ctx's values (including caller
+// ctx bounds opening the stream — GetHeaders (when a HeadersProvider is set),
+// the RPC start, and the handshake — and is defaulted to defaultHandshakeTimeout
+// when it carries no deadline.
+// Cancelling ctx aborts an in-progress Open promptly, but once Open succeeds
+// the live stream is detached and cancelled only by Close, so a later ctx
+// timeout won't tear it down mid-ingest. ctx's values (including caller
 // metadata) carry onto the live stream. The caller must Close the Stream.
 func (c *Conn) Open(ctx context.Context, p StreamParams) (*Stream, error) {
 	// Normalize once so the metadata header and the create request agree, and so
@@ -63,9 +64,9 @@ func (c *Conn) Open(ctx context.Context, p StreamParams) (*Stream, error) {
 	if p.RecordType == zerobuspb.RecordType_PROTO && len(p.DescriptorProto) == 0 {
 		return nil, fmt.Errorf("transport: open %q: descriptor proto required for PROTO records", p.TableName)
 	}
-
-	// openCtx bounds the open attempt: the caller's ctx, defaulted to
-	// defaultHandshakeTimeout when it has no deadline.
+	// openCtx bounds the whole open attempt — GetHeaders (which may block on a
+	// token mint), the RPC start, and the handshake — using the caller's ctx,
+	// defaulted to defaultHandshakeTimeout when it has no deadline.
 	openCtx := ctx
 	if _, ok := ctx.Deadline(); !ok {
 		var cancelOpen context.CancelFunc
@@ -73,9 +74,14 @@ func (c *Conn) Open(ctx context.Context, p StreamParams) (*Stream, error) {
 		defer cancelOpen()
 	}
 
+	headers, err := p.resolveHeaders(openCtx)
+	if err != nil {
+		return nil, err
+	}
+
 	// Detach the live stream from ctx's cancel/deadline (WithoutCancel keeps its
 	// values, so caller metadata survives); Close is its only canceller.
-	streamCtx := withStreamMetadata(context.WithoutCancel(ctx), p.TableName, p.Token)
+	streamCtx := withStreamMetadataHeaders(context.WithoutCancel(ctx), p.TableName, headers)
 	streamCtx, cancelStream := context.WithCancel(streamCtx)
 
 	// Until the handshake succeeds, bridge openCtx to cancelStream so a caller
@@ -85,6 +91,9 @@ func (c *Conn) Open(ctx context.Context, p StreamParams) (*Stream, error) {
 
 	stream, err := c.open(openCtx, streamCtx, cancelStream, p)
 	if err != nil {
+		if p.HeadersProvider != nil && isAuthRejection(err) {
+			p.HeadersProvider.Invalidate(ctx, p.TableName)
+		}
 		cancelStream()
 		return nil, err
 	}

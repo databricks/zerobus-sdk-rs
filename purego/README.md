@@ -18,8 +18,9 @@ Implemented packages:
   create-stream handshake, and exposes send/receive operations over the
   bidirectional stream. It validates stream-open inputs (`TableName`,
   `RecordType`, descriptor requirement for `PROTO`) and sets auth metadata from
-  `StreamParams.Token` (`"Bearer <token>"` for bare tokens, verbatim when a
-  known scheme — `Bearer`, `Basic`, or `DPoP` — is already present).
+  the `StreamParams.HeadersProvider`. The authorization value is sent verbatim as
+  the provider formats it (e.g. `"Bearer <token>"`); the transport does not add a
+  scheme prefix.
 
 Planned layers: OAuth/auth, ingest/ack state management, recovery, and the
 public API.
