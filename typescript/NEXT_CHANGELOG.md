@@ -26,9 +26,11 @@
 
 ### Internal Changes
 
+- Bumped the NAPI crate/package metadata to v1.2.0 for the next TypeScript SDK
+  release.
+
 ### Breaking Changes
 
 ### Deprecations
 
 ### API Changes
-
