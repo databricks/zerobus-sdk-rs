@@ -2,6 +2,7 @@ package transport
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"sync"
@@ -11,12 +12,14 @@ import (
 
 // defaultHandshakeTimeout bounds the open attempt when the caller's context has
 // no deadline, so Open can't hang if the server half-opens the stream.
-const defaultHandshakeTimeout = 30 * time.Second
+const defaultHandshakeTimeout = 15 * time.Second
 
-// defaultDrainTimeout bounds gracefulClose when the caller's context has no
-// deadline, so it can't hang on an unresponsive server. A var so tests can
-// shrink it.
-var defaultDrainTimeout = 30 * time.Second
+// defaultDrainTimeout bounds gracefulClose's drain-to-EOF when the caller's
+// context has no deadline, so it can't hang on an unresponsive server. This caps
+// only the clean-close wait (letting the server send END_STREAM rather than an
+// abrupt reset), not any ack wait — ack handling lands in a later layer. A var so
+// tests can shrink it.
+var defaultDrainTimeout = 500 * time.Millisecond
 
 // bidiRPC is the subset of a generated gRPC bidirectional streaming client that
 // rawStream needs. EphemeralStream satisfies it, as will Arrow Flight's DoPut.
@@ -160,7 +163,10 @@ func (s *rawStream[Req, Resp]) handshake(
 	sendSetup func(rpc bidiRPC[Req, Resp]) error,
 	confirmReady func(resp *Resp) (id string, err error),
 ) error {
-	if err := sendSetup(s.rpc); err != nil {
+	// A gRPC Send that fails with io.EOF means the stream aborted server-side; the
+	// real status (e.g. an auth rejection) is on Recv, so fall through to it rather
+	// than returning the opaque EOF and losing the code isAuthRejection keys on.
+	if err := sendSetup(s.rpc); err != nil && !errors.Is(err, io.EOF) {
 		return err
 	}
 

@@ -791,6 +791,148 @@ mod tests {
     // silences LSan on the intentionally-persistent global tokio runtime. Miri
     // can't run these (no multi-threaded tokio support).
 
+    // Ack callback lifetime on failed stream creation
+    // ========================================================================
+    //
+    // When `create_stream` fails, the registered `Arc<CallbackAckCallback>` must
+    // drop (with the builder), not leak to a background task. Observed via the
+    // `#[cfg(test)]` drop hook in `common.rs`. Hermetic failure trigger: JSON +
+    // empty table name registers the Arc in `apply_c_stream_options`, then fails
+    // in `build()` validation before any network I/O.
+    //
+    // The Arc is created internally, so these tests can't hold a `Weak` to
+    // confirm it was ever registered. A drop delta of 0 is therefore ambiguous:
+    // the Arc was registered but leaked to a task, OR it was never registered
+    // (e.g. the registration path or sentinel wiring drifted). The assert
+    // messages spell out both causes.
+
+    use crate::common::{ACK_CALLBACK_DROP_COUNT, ACK_DROP_SENTINEL_CREATE_FAIL_TESTS};
+    use crate::{zerobus_sdk_create_stream, zerobus_sdk_create_stream_with_headers_provider};
+
+    // Global counter, so serialize this pair's before/after sampling window.
+    static ACK_DROP_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    // No-op ack/error callbacks; never invoked (create fails before any ack).
+    extern "C" fn noop_ack(_offset_id: i64, _user_data: *mut std::ffi::c_void) {}
+    extern "C" fn noop_error(
+        _offset_id: i64,
+        _error_message: *const c_char,
+        _user_data: *mut std::ffi::c_void,
+    ) {
+    }
+
+    // JSON config with both ack callbacks set, keyed to this test-only sentinel.
+    fn json_config_with_ack_callback() -> crate::CStreamConfigurationOptions {
+        let mut config = zerobus_get_default_config();
+        config.record_type = 2; // RecordType::Json
+        config.ack_on_ack = Some(noop_ack);
+        config.ack_on_error = Some(noop_error);
+        config.ack_user_data =
+            (&ACK_DROP_SENTINEL_CREATE_FAIL_TESTS as *const u8) as *mut std::ffi::c_void;
+        config
+    }
+
+    // Headers callback for the with-headers-provider path; never invoked (create fails first).
+    extern "C" fn empty_headers(_user_data: *mut std::ffi::c_void) -> CHeaders {
+        CHeaders {
+            headers: ptr::null_mut(),
+            count: 0,
+            error_message: ptr::null_mut(),
+        }
+    }
+
+    #[test]
+    fn test_create_stream_releases_ack_arc_on_failure() {
+        let _guard = ACK_DROP_TEST_LOCK.lock().unwrap();
+
+        let (sdk, sdk_result) =
+            build_via_c_builder("https://workspace.zerobus.databricks.com", "", None, None);
+        assert!(sdk_result.success);
+        assert!(!sdk.is_null());
+
+        let empty_table = CString::new("").unwrap();
+        let client_id = CString::new("client-id").unwrap();
+        let client_secret = CString::new("client-secret").unwrap();
+        let options = json_config_with_ack_callback();
+        let mut result = presumed_success_result();
+
+        // Delta across the single failing call.
+        let before = ACK_CALLBACK_DROP_COUNT.load(AtomicOrdering::SeqCst);
+        let stream = zerobus_sdk_create_stream(
+            sdk,
+            empty_table.as_ptr(),
+            ptr::null(),
+            0,
+            client_id.as_ptr(),
+            client_secret.as_ptr(),
+            &options as *const crate::CStreamConfigurationOptions,
+            &mut result as *mut CResult,
+        );
+        let after = ACK_CALLBACK_DROP_COUNT.load(AtomicOrdering::SeqCst);
+
+        // Creation failed on the empty table (InvalidArgument in build()); the
+        // only invalid field is the table name. Assert failure + a reported
+        // message without pinning the exact wording.
+        assert!(stream.is_null());
+        let (success, _retryable, msg) = drain_result(&mut result);
+        assert!(!success, "expected create_stream to fail on empty table");
+        assert!(!msg.is_empty(), "expected a non-empty error message");
+
+        // Ack callback Arc was released, not retained by a task.
+        assert_eq!(
+            after - before,
+            1,
+            "expected the ack callback Arc to be dropped exactly once on failed \
+             create_stream (0 = leaked to a task OR never registered)"
+        );
+
+        zerobus_sdk_free(sdk);
+    }
+
+    #[test]
+    fn test_create_stream_with_headers_provider_releases_ack_arc_on_failure() {
+        let _guard = ACK_DROP_TEST_LOCK.lock().unwrap();
+
+        let (sdk, sdk_result) =
+            build_via_c_builder("https://workspace.zerobus.databricks.com", "", None, None);
+        assert!(sdk_result.success);
+        assert!(!sdk.is_null());
+
+        let empty_table = CString::new("").unwrap();
+        let options = json_config_with_ack_callback();
+        let mut result = presumed_success_result();
+
+        let before = ACK_CALLBACK_DROP_COUNT.load(AtomicOrdering::SeqCst);
+        let stream = zerobus_sdk_create_stream_with_headers_provider(
+            sdk,
+            empty_table.as_ptr(),
+            ptr::null(),
+            0,
+            empty_headers,
+            ptr::null_mut(),
+            &options as *const crate::CStreamConfigurationOptions,
+            &mut result as *mut CResult,
+        );
+        let after = ACK_CALLBACK_DROP_COUNT.load(AtomicOrdering::SeqCst);
+
+        assert!(stream.is_null());
+        let (success, _retryable, msg) = drain_result(&mut result);
+        assert!(
+            !success,
+            "expected create_stream_with_headers_provider to fail on empty table"
+        );
+        assert!(!msg.is_empty(), "expected a non-empty error message");
+
+        assert_eq!(
+            after - before,
+            1,
+            "expected the ack callback Arc to be dropped exactly once on failed \
+             create_stream_with_headers_provider (0 = leaked to a task OR never registered)"
+        );
+
+        zerobus_sdk_free(sdk);
+    }
+
     // ========================================================================
     // Dynamic protobuf schema tests
     // ========================================================================

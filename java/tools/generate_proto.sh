@@ -19,7 +19,7 @@ SHADED_JAR=$(find "${TARGET_DIR}" -name "databricks-zerobus-ingest-sdk-*-jar-wit
 
 if [ -z "${SHADED_JAR}" ] || [ ! -f "${SHADED_JAR}" ]; then
     echo "Error: Zerobus SDK JAR not found in ${TARGET_DIR}"
-    echo "Please run 'mvn package' first to build the SDK JAR"
+    echo "Please run 'mvn package -Dzerobus.skipNativeLibCheck=true' first to build the SDK JAR"
     exit 1
 fi
 
