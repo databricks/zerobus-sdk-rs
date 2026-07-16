@@ -710,12 +710,13 @@ Also accepts `0` or `no`.
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
 | `max_inflight_requests` | `usize` | 1,000,000 | Maximum unacknowledged requests in flight |
+| `capacity_wait_timeout_ms` | `u64` | 300,000 | Timeout waiting for multiplexed-stream capacity (ms) |
 | `recovery` | `bool` | true | Enable automatic stream recovery on failure |
 | `recovery_timeout_ms` | `u64` | 15,000 | Timeout for recovery operations (ms) |
 | `recovery_backoff_ms` | `u64` | 2,000 | Delay between recovery retry attempts (ms) |
 | `recovery_retries` | `u32` | 4 | Maximum number of recovery attempts |
 | `server_lack_of_ack_timeout_ms` | `u64` | 60,000 | Timeout waiting for server acks (ms) |
-| `flush_timeout_ms` | `u64` | 300,000 | Timeout for flush operations and multiplexed-stream capacity waits (ms) |
+| `flush_timeout_ms` | `u64` | 300,000 | Timeout for flush operations (ms) |
 | `record_type` | `RecordType` | `RecordType::Proto` | Record serialization format (Proto or Json) |
 | `stream_paused_max_wait_time_ms` | `Option<u64>` | `None` | Max time to wait during graceful close (`None` = full server duration, `Some(0)` = immediate, `Some(x)` = min(x, server_duration)) |
 | `ack_callback` | `Option<Arc<dyn AckCallback>>` | `None` | Optional callback for acknowledgment notifications |

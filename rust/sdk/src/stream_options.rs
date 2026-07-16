@@ -17,6 +17,8 @@ pub mod defaults {
     pub const SERVER_LACK_OF_ACK_TIMEOUT_MS: u64 = 60_000;
     /// Default: 5 minutes flush timeout
     pub const FLUSH_TIMEOUT_MS: u64 = 300_000;
+    /// Default: 5 minutes waiting for multiplexed stream capacity
+    pub const CAPACITY_WAIT_TIMEOUT_MS: u64 = 300_000;
     /// Default: 30 seconds connection timeout
     #[cfg(feature = "arrow-flight")]
     pub const CONNECTION_TIMEOUT_MS: u64 = 30_000;

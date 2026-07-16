@@ -245,7 +245,7 @@ impl ZerobusStream {
 
     #[cfg(feature = "testing")]
     pub(crate) fn capacity_wait_timeout(&self) -> std::time::Duration {
-        std::time::Duration::from_millis(self.options.flush_timeout_ms)
+        std::time::Duration::from_millis(self.options.capacity_wait_timeout_ms)
     }
 
     #[cfg(feature = "testing")]

@@ -14,12 +14,14 @@ use utils::{create_test_descriptor_proto, setup_tracing, TestHeadersProvider};
 struct TestOpts {
     max_inflight_requests: usize,
     flush_timeout_ms: Option<u64>,
+    capacity_wait_timeout_ms: Option<u64>,
 }
 
 fn default_options() -> TestOpts {
     TestOpts {
         max_inflight_requests: 100,
         flush_timeout_ms: None,
+        capacity_wait_timeout_ms: None,
     }
 }
 
@@ -47,6 +49,9 @@ async fn create_test_stream(
         .recovery(false);
     if let Some(ms) = opts.flush_timeout_ms {
         builder = builder.flush_timeout_ms(ms);
+    }
+    if let Some(ms) = opts.capacity_wait_timeout_ms {
+        builder = builder.capacity_wait_timeout_ms(ms);
     }
     builder.build().await
 }
@@ -1080,7 +1085,8 @@ mod failure_tests {
             TABLE_OK,
             TestOpts {
                 max_inflight_requests: 1,
-                flush_timeout_ms: Some(100),
+                flush_timeout_ms: None,
+                capacity_wait_timeout_ms: Some(100),
             },
         )
         .await?;
