@@ -222,9 +222,9 @@ func (c *tokenCache) getOrFetch(
 			// Proactive refresh failed transiently; serve the still-valid token.
 			token, resErr = entry.cached.value, nil
 		}
+		// Publish to waiters: writes before close(done) happen-before <-done. The
+		// mutex just brackets the entry-state transition, not the flight publish.
 		flight.token, flight.err = token, resErr
-		// Publish the outcome to waiters under entry.mu, then release them; the
-		// mutex (not the close/write ordering) is what prevents a stale read.
 		close(flight.done)
 		entry.mu.Unlock()
 		return token, resErr

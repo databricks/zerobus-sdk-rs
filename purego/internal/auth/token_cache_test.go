@@ -384,6 +384,49 @@ func TestTokenCacheContextDeadlineRespectedDuringMint(t *testing.T) {
 	}
 }
 
+// TestTokenCacheInvalidateDuringInFlightMint runs invalidate concurrently with
+// an in-flight mint on the same key. The leader's fresh token is what should
+// win: invalidate clears cached mid-mint, and the leader then repopulates it.
+func TestTokenCacheInvalidateDuringInFlightMint(t *testing.T) {
+	c := newTokenCache()
+	// Seed so invalidate has an entry to clear.
+	seedRefreshable(c, "id", "secret", "c.s.t", "old")
+
+	mintStarted := make(chan struct{})
+	releaseMint := make(chan struct{})
+
+	var out string
+	var err error
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		out, err = c.getOrFetch(context.Background(), "id", "secret", "c.s.t",
+			func(_ context.Context, _ mintReason) (fetchedToken, error) {
+				close(mintStarted)
+				<-releaseMint
+				return fetchedToken{token: "fresh", expiresIn: dur(3600)}, nil
+			},
+		)
+	}()
+
+	<-mintStarted
+	c.invalidate("id", "secret", "c.s.t") // clears cached mid-mint
+	close(releaseMint)
+	<-done
+
+	if err != nil || out != "fresh" {
+		t.Fatalf("want fresh/nil, got %q/%v", out, err)
+	}
+	// Leader's fresh token should be the one now cached.
+	entry := c.slot(newTokenKey("id", "secret", "c.s.t"))
+	entry.mu.Lock()
+	cached := entry.cached
+	entry.mu.Unlock()
+	if cached == nil || cached.value != "fresh" {
+		t.Fatalf("want fresh cached after leader completes, got %+v", cached)
+	}
+}
+
 func TestTokenCacheJoinedRetryableErrorFallsBack(t *testing.T) {
 	c := newTokenCache()
 	seedRefreshable(c, "id", "secret", "c.s.t", "valid")
