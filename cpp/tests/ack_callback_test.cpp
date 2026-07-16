@@ -27,9 +27,9 @@ void check(const char* what, bool ok) {
 }
 
 // Records what the trampolines deliver. Fields are non-atomic: safe for these
-// synchronous unit tests. Live-stream teardown (callbacks driven from the core's
-// background thread) is covered by the Rust-side ack-callback teardown tests,
-// which use a thread-safe fixture.
+// synchronous unit tests. Live-stream teardown (callbacks driven from the
+// core's background thread) is covered by the Rust-side ack-callback teardown
+// tests, which use a thread-safe fixture.
 class RecordingCallback : public zerobus::AckCallback {
  public:
   std::int64_t last_ack = -1;
