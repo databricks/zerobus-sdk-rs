@@ -142,7 +142,13 @@ impl MultiplexedStream {
             "MultiplexedStream poisoned due to sub-stream failure"
         );
 
-        let _admission = self.admission.write().await;
+        // Drain any readers already admitted before `is_closed` was set. The
+        // write lock is only a barrier: readers arriving after it is released
+        // will observe the closed state and reject the ingest.
+        {
+            let _admission = self.admission.write().await;
+        }
+
         let flush_results = join_all(self.streams.iter().map(|s| s.flush())).await;
         for (i, result) in flush_results.into_iter().enumerate() {
             if let Err(e) = result {

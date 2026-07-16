@@ -252,6 +252,9 @@ impl<'a> StreamBuilder<'a> {
     }
 
     /// Set the timeout in milliseconds for flush operations.
+    ///
+    /// Multiplexed streams also use this as the maximum time an ingest call may
+    /// wait for sub-stream capacity to become available.
     pub fn flush_timeout_ms(mut self, ms: u64) -> Self {
         self.grpc_config.flush_timeout_ms = ms;
         #[cfg(feature = "arrow-flight")]
