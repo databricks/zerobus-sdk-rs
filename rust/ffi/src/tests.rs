@@ -523,6 +523,12 @@ mod tests {
     // `#[cfg(test)]` drop hook in `common.rs`. Hermetic failure trigger: JSON +
     // empty table name registers the Arc in `apply_c_stream_options`, then fails
     // in `build()` validation before any network I/O.
+    //
+    // The Arc is created internally, so these tests can't hold a `Weak` to
+    // confirm it was ever registered. A drop delta of 0 is therefore ambiguous:
+    // the Arc was registered but leaked to a task, OR it was never registered
+    // (e.g. the registration path or sentinel wiring drifted). The assert
+    // messages spell out both causes.
 
     use crate::common::{ACK_CALLBACK_DROP_COUNT, ACK_DROP_SENTINEL_CREATE_FAIL_TESTS};
     use crate::{zerobus_sdk_create_stream, zerobus_sdk_create_stream_with_headers_provider};
@@ -600,7 +606,8 @@ mod tests {
         assert_eq!(
             after - before,
             1,
-            "expected the ack callback Arc to be dropped exactly once on failed create_stream"
+            "expected the ack callback Arc to be dropped exactly once on failed \
+             create_stream (0 = leaked to a task OR never registered)"
         );
 
         zerobus_sdk_free(sdk);
@@ -644,7 +651,7 @@ mod tests {
             after - before,
             1,
             "expected the ack callback Arc to be dropped exactly once on failed \
-             create_stream_with_headers_provider"
+             create_stream_with_headers_provider (0 = leaked to a task OR never registered)"
         );
 
         zerobus_sdk_free(sdk);
