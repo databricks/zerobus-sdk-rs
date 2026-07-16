@@ -53,8 +53,8 @@ impl<T: Clone> LandingZone<T> {
     /// # Arguments
     ///
     /// * `max_inflight_requests` - Maximum number of requests that can be in the landing zone
-    ///   (both observed and unobserved) at any time. When this limit is reached, `add()`
-    ///   calls will block until items are removed.
+    ///   (both observed and unobserved) at any time. When this limit is reached, capacity
+    ///   reservations will block until items are removed.
     pub fn new(max_inflight_requests: usize) -> Self {
         Self {
             state: Arc::new(std::sync::Mutex::new(LandingZoneState {
@@ -106,14 +106,7 @@ impl<T: Clone> LandingZone<T> {
         self.new_item_notify.notify_one();
     }
 
-    /// Adds an item to the queue.
-    ///
-    /// This method will block if the maximum number of inflight requests has been reached,
-    /// providing automatic backpressure control.
-    ///
-    /// # Arguments
-    ///
-    /// * `request` - The item to add to the queue
+    #[cfg(test)]
     pub async fn add(&self, request: T) {
         let reservation = self.reserve_capacity().await;
         self.enqueue_reserved(request, reservation);

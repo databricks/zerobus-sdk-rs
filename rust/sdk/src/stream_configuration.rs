@@ -35,8 +35,8 @@ pub struct StreamConfigurationOptions {
     /// Default: 1,000,000
     pub max_inflight_requests: usize,
 
-    /// Maximum time in milliseconds a multiplexed-stream ingest waits for
-    /// sub-stream capacity to become available.
+    /// Maximum time in milliseconds an ingest waits for stream capacity to
+    /// become available.
     ///
     /// Default: 300,000 (5 minutes)
     pub capacity_wait_timeout_ms: u64,

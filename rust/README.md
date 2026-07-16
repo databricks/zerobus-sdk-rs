@@ -710,7 +710,7 @@ Also accepts `0` or `no`.
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
 | `max_inflight_requests` | `usize` | 1,000,000 | Maximum unacknowledged requests in flight |
-| `capacity_wait_timeout_ms` | `u64` | 300,000 | Timeout waiting for multiplexed-stream capacity (ms) |
+| `capacity_wait_timeout_ms` | `u64` | 300,000 | Timeout waiting for stream capacity during ingest (ms) |
 | `recovery` | `bool` | true | Enable automatic stream recovery on failure |
 | `recovery_timeout_ms` | `u64` | 15,000 | Timeout for recovery operations (ms) |
 | `recovery_backoff_ms` | `u64` | 2,000 | Delay between recovery retry attempts (ms) |

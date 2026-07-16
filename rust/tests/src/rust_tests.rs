@@ -1985,6 +1985,67 @@ mod concurrency_and_race_condition_tests {
     }
 
     #[tokio::test]
+    async fn test_ingest_times_out_on_inflight_limit_without_consuming_offset(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        setup_tracing();
+
+        const ACK_DELAY_MS: u64 = 250;
+        const CAPACITY_WAIT_TIMEOUT_MS: u64 = 50;
+
+        let (mock_server, server_url) = start_mock_server().await?;
+        mock_server
+            .inject_responses(
+                TABLE_NAME,
+                vec![
+                    MockResponse::CreateStream {
+                        stream_id: "test_stream_capacity_timeout".to_string(),
+                        delay_ms: 0,
+                    },
+                    MockResponse::RecordAck {
+                        ack_up_to_offset: 0,
+                        delay_ms: ACK_DELAY_MS,
+                    },
+                    MockResponse::RecordAck {
+                        ack_up_to_offset: 1,
+                        delay_ms: 0,
+                    },
+                ],
+            )
+            .await;
+
+        let sdk = ZerobusSdk::builder()
+            .endpoint(server_url)
+            .unity_catalog_url("https://mock-uc.com")
+            .tls_config(Arc::new(NoTlsConfig))
+            .build()?;
+        let stream = sdk
+            .stream_builder()
+            .table(TABLE_NAME)
+            .headers_provider(Arc::new(TestHeadersProvider::default()))
+            .compiled_proto(create_test_descriptor_proto().unwrap_or_default())
+            .max_inflight_requests(1)
+            .capacity_wait_timeout_ms(CAPACITY_WAIT_TIMEOUT_MS)
+            .recovery(false)
+            .build()
+            .await?;
+
+        assert_eq!(stream.ingest_record_offset(b"first".to_vec()).await?, 0);
+
+        let result = stream.ingest_record_offset(b"times-out".to_vec()).await;
+        assert!(matches!(result, Err(ZerobusError::ConnectionTimeout(_))));
+
+        stream.wait_for_offset(0).await?;
+        let next_offset = stream.ingest_record_offset(b"next".to_vec()).await?;
+        assert_eq!(next_offset, 1, "Timed-out ingests must not consume offsets");
+        stream.wait_for_offset(next_offset).await?;
+
+        assert_eq!(mock_server.get_write_count().await, 2);
+        assert_eq!(mock_server.get_max_offset_sent().await, 1);
+
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn test_ingest_records_blocks_on_inflight_limit() -> Result<(), Box<dyn std::error::Error>>
     {
         setup_tracing();

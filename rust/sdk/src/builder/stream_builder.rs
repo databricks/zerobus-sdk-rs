@@ -261,8 +261,8 @@ impl<'a> StreamBuilder<'a> {
         self
     }
 
-    /// Set the maximum time in milliseconds a multiplexed-stream ingest waits
-    /// for sub-stream capacity to become available.
+    /// Set the maximum time in milliseconds an ingest waits for stream
+    /// capacity to become available.
     pub fn capacity_wait_timeout_ms(mut self, ms: u64) -> Self {
         self.grpc_config.capacity_wait_timeout_ms = ms;
         self

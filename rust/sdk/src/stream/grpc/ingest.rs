@@ -32,6 +32,7 @@ impl ZerobusStream {
     ///
     /// * `InvalidArgument` - If the record type doesn't match stream configuration
     /// * `StreamClosedError` - If the stream has been closed
+    /// * `ConnectionTimeout` - If stream capacity does not become available in time
     ///
     /// # Examples
     ///
@@ -75,6 +76,7 @@ impl ZerobusStream {
     ///
     /// * `InvalidArgument` - If record types don't match stream configuration
     /// * `StreamClosedError` - If the stream has been closed
+    /// * `ConnectionTimeout` - If stream capacity does not become available in time
     ///
     /// # Examples
     ///
@@ -174,6 +176,7 @@ impl ZerobusStream {
         self.check_open()?;
 
         let _guard = self.sync_mutex.lock().await;
+        let reservation = self.reserve_capacity().await?;
 
         let offset_id = self.logical_offset_id_generator.next();
         debug!(
@@ -188,12 +191,13 @@ impl ZerobusStream {
                 let mut map = self.oneshot_map.lock().await;
                 map.insert(offset_id, tx);
             }
-            self.landing_zone
-                .add(Box::new(IngestRequest {
+            self.landing_zone.enqueue_reserved(
+                Box::new(IngestRequest {
                     payload: encoded_batch,
                     offset_id,
-                }))
-                .await;
+                }),
+                reservation,
+            );
             let stream_id = stream_id.to_string();
             Ok(async move {
                 rx.await.map_err(|err| {
@@ -219,6 +223,7 @@ impl ZerobusStream {
         self.check_open()?;
 
         let _guard = self.sync_mutex.lock().await;
+        let reservation = self.reserve_capacity().await?;
 
         let offset_id = self.logical_offset_id_generator.next();
         debug!(
@@ -226,24 +231,39 @@ impl ZerobusStream {
             record_count = encoded_batch.get_record_count(),
             "Ingesting record(s)"
         );
-        self.landing_zone
-            .add(Box::new(IngestRequest {
+        self.landing_zone.enqueue_reserved(
+            Box::new(IngestRequest {
                 payload: encoded_batch,
                 offset_id,
-            }))
-            .await;
+            }),
+            reservation,
+        );
         Ok(offset_id)
     }
 
-    #[cfg(feature = "testing")]
     pub(crate) async fn reserve_capacity(
         &self,
     ) -> ZerobusResult<crate::landing_zone::CapacityReservation> {
         self.check_open()?;
-        Ok(self.landing_zone.reserve_capacity().await)
+        match tokio::time::timeout(
+            self.capacity_wait_timeout(),
+            self.landing_zone.reserve_capacity(),
+        )
+        .await
+        {
+            Ok(reservation) => {
+                self.check_open()?;
+                Ok(reservation)
+            }
+            Err(_) => {
+                self.check_open()?;
+                Err(ZerobusError::ConnectionTimeout(
+                    "Timed out waiting for stream capacity".to_string(),
+                ))
+            }
+        }
     }
 
-    #[cfg(feature = "testing")]
     pub(crate) fn capacity_wait_timeout(&self) -> std::time::Duration {
         std::time::Duration::from_millis(self.options.capacity_wait_timeout_ms)
     }
