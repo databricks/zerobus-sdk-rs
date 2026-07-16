@@ -7,8 +7,15 @@
 
 import { describe, it, before } from 'node:test';
 import * as assert from 'node:assert';
+import { execFileSync } from 'node:child_process';
+import * as fs from 'node:fs';
+import * as os from 'node:os';
+import * as path from 'node:path';
 import { ZerobusSdk, RecordType, TableProperties, StreamConfigurationOptions, JsAckCallback } from '../index';
 import { HeadersProvider } from '../src/headers_provider';
+import { loadDescriptorProto } from '../utils/descriptor.js';
+
+const descriptor = require('protobufjs/ext/descriptor');
 
 describe('ZerobusSdk', () => {
     describe('constructor', () => {
@@ -143,6 +150,185 @@ describe('HeadersProvider', () => {
         assert.deepStrictEqual(headers[0], ['authorization', 'Bearer test-token']);
         assert.deepStrictEqual(headers[1], ['x-databricks-zerobus-table-name', 'test-table']);
         assert.deepStrictEqual(headers[2], ['x-custom-header', 'custom-value']);
+    });
+});
+
+describe('Descriptor utilities', () => {
+    it('should load DescriptorProto from the CommonJS helper', () => {
+        const descriptorPath = path.join(os.tmpdir(), `zerobus-descriptor-${process.pid}.pb`);
+        const message = descriptor.DescriptorProto.create({
+            name: 'AirQuality',
+            field: [
+                {
+                    name: 'device_name',
+                    number: 1,
+                    label: 1,
+                    type: 9,
+                },
+            ],
+        });
+        const fileDescriptorSet = descriptor.FileDescriptorSet.create({
+            file: [
+                {
+                    name: 'schemas/air_quality.proto',
+                    messageType: [message],
+                },
+            ],
+        });
+
+        fs.writeFileSync(descriptorPath, descriptor.FileDescriptorSet.encode(fileDescriptorSet).finish());
+
+        try {
+            const encoded = loadDescriptorProto({
+                descriptorPath,
+                protoFileName: 'air_quality.proto',
+                messageName: 'AirQuality',
+            });
+            const decoded = descriptor.DescriptorProto.decode(Buffer.from(encoded, 'base64'));
+            assert.strictEqual(decoded.name, 'AirQuality');
+            assert.strictEqual(decoded.field[0].name, 'device_name');
+        } finally {
+            fs.rmSync(descriptorPath, { force: true });
+        }
+    });
+
+    it('should require a path boundary when matching proto file names', () => {
+        const descriptorPath = path.join(os.tmpdir(), `zerobus-descriptor-boundary-${process.pid}.pb`);
+        const shadowMessage = descriptor.DescriptorProto.create({
+            name: 'AirQuality',
+            field: [
+                {
+                    name: 'wrong_field',
+                    number: 1,
+                    label: 1,
+                    type: 9,
+                },
+            ],
+        });
+        const expectedMessage = descriptor.DescriptorProto.create({
+            name: 'AirQuality',
+            field: [
+                {
+                    name: 'device_name',
+                    number: 1,
+                    label: 1,
+                    type: 9,
+                },
+            ],
+        });
+        const fileDescriptorSet = descriptor.FileDescriptorSet.create({
+            file: [
+                {
+                    name: 'schemas/not_air_quality.proto',
+                    messageType: [shadowMessage],
+                },
+                {
+                    name: 'schemas/air_quality.proto',
+                    messageType: [expectedMessage],
+                },
+            ],
+        });
+
+        fs.writeFileSync(descriptorPath, descriptor.FileDescriptorSet.encode(fileDescriptorSet).finish());
+
+        try {
+            const encoded = loadDescriptorProto({
+                descriptorPath,
+                protoFileName: 'air_quality.proto',
+                messageName: 'AirQuality',
+            });
+            const decoded = descriptor.DescriptorProto.decode(Buffer.from(encoded, 'base64'));
+            assert.strictEqual(decoded.field[0].name, 'device_name');
+        } finally {
+            fs.rmSync(descriptorPath, { force: true });
+        }
+    });
+
+    it('should resolve the packed helper from CommonJS, ESM, and NodeNext', { timeout: 120_000 }, () => {
+        const packageRoot = path.resolve(__dirname, '..');
+        const temporaryRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'zerobus-package-test-'));
+        const consumerRoot = path.join(temporaryRoot, 'consumer');
+        const npmCli = process.env.npm_execpath;
+        assert.ok(npmCli, 'npm_execpath must be set when running the npm test script');
+
+        const runNpm = (args: string[], cwd: string): string =>
+            execFileSync(process.execPath, [npmCli, ...args], { cwd, encoding: 'utf8' });
+
+        try {
+            fs.mkdirSync(consumerRoot);
+            fs.writeFileSync(
+                path.join(consumerRoot, 'package.json'),
+                JSON.stringify({ name: 'zerobus-package-test', private: true, type: 'module' }, null, 2)
+            );
+
+            runNpm(['pack', '--pack-destination', temporaryRoot, '--json', '--silent'], packageRoot);
+            const tarballs = fs.readdirSync(temporaryRoot).filter((file) => file.endsWith('.tgz'));
+            assert.strictEqual(tarballs.length, 1, 'npm pack should create exactly one tarball');
+            const tarballPath = path.join(temporaryRoot, tarballs[0]);
+
+            runNpm(
+                [
+                    'install',
+                    '--prefer-offline',
+                    '--ignore-scripts',
+                    '--omit=optional',
+                    '--no-audit',
+                    '--no-fund',
+                    '--package-lock=false',
+                    '--no-save',
+                    tarballPath,
+                ],
+                consumerRoot
+            );
+
+            const packageSubpath = '@databricks/zerobus-ingest-sdk/utils/descriptor.js';
+            execFileSync(
+                process.execPath,
+                [
+                    '--input-type=commonjs',
+                    '-e',
+                    `const helper = require('${packageSubpath}'); if (typeof helper.loadDescriptorProto !== 'function') process.exit(1);`,
+                ],
+                { cwd: consumerRoot }
+            );
+            execFileSync(
+                process.execPath,
+                [
+                    '--input-type=module',
+                    '-e',
+                    `import { loadDescriptorProto } from '${packageSubpath}'; if (typeof loadDescriptorProto !== 'function') process.exit(1);`,
+                ],
+                { cwd: consumerRoot }
+            );
+
+            const typeTestPath = path.join(consumerRoot, 'consumer.mts');
+            fs.writeFileSync(
+                typeTestPath,
+                `import { loadDescriptorProto, type LoadDescriptorOptions } from '${packageSubpath}';\n` +
+                    `const options: LoadDescriptorOptions = { descriptorPath: 'schema.pb', protoFileName: 'schema.proto', messageName: 'Record' };\n` +
+                    `const encoded: string = loadDescriptorProto(options);\n` +
+                    `void encoded;\n`
+            );
+            execFileSync(
+                process.execPath,
+                [
+                    path.join(packageRoot, 'node_modules', 'typescript', 'bin', 'tsc'),
+                    '--noEmit',
+                    '--strict',
+                    '--skipLibCheck',
+                    '--target',
+                    'ES2020',
+                    '--module',
+                    'NodeNext',
+                    '--moduleResolution',
+                    'NodeNext',
+                    typeTestPath,
+                ],
+                { cwd: consumerRoot }
+            );
+        } finally {
+            fs.rmSync(temporaryRoot, { recursive: true, force: true });
+        }
     });
 });
 

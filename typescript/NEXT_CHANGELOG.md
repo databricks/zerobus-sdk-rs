@@ -15,7 +15,19 @@
 
 ### Bug Fixes
 
+- Added published CommonJS and type declaration files for
+  `@databricks/zerobus-ingest-sdk/utils/descriptor.js`, so consumers can import
+  `loadDescriptorProto()` from the npm package without running TypeScript
+  source files directly. The package now installs the helper's `protobufjs`
+  runtime dependency automatically, and the `.js` subpath supports CommonJS,
+  native Node.js ESM, and NodeNext type resolution.
+- Fixed descriptor file lookup so similarly suffixed names such as
+  `not_air_quality.proto` cannot be selected for `air_quality.proto`.
+
 ### Documentation
+
+- Simplified the README quick start to install the published npm package first
+  and moved clone/build instructions into a source-development path.
 
 - Clarified the high-throughput ingestion pattern across the README, API reference, JSDoc
   doc comments (`ingestRecordOffset`, `ingestRecordsOffset`, `waitForOffset`, `flush`), and
