@@ -40,7 +40,8 @@
 //!
 //! | Unity Catalog type            | Proto type | Encoding contract                           |
 //! |-------------------------------|------------|---------------------------------------------|
-//! | `STRING`, `VARIANT`, `DECIMAL`| `string`   | `STRING`/`DECIMAL`: UTF-8 text; `VARIANT`: JSON text for protobuf ingestion |
+//! | `STRING`, `DECIMAL`           | `string`   | UTF-8 text                                  |
+//! | `VARIANT`                     | `string`   | JSON text for protobuf ingestion            |
 //! | `INT`, `INTEGER`              | `int32`    |                                             |
 //! | `LONG`, `BIGINT`              | `int64`    |                                             |
 //! | `SHORT`, `SMALLINT`, `BYTE`, `TINYINT` | `int32` | zero-extended; range-checked by the server |
