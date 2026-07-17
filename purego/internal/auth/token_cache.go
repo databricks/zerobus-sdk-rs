@@ -3,6 +3,7 @@ package auth
 import (
 	"context"
 	"crypto/sha256"
+	"errors"
 	"sync"
 	"time"
 )
@@ -18,8 +19,8 @@ type fetchedToken struct {
 	expiresIn *time.Duration
 }
 
-// mintReason is surfaced in log messages so operators can distinguish a cold
-// start from a proactive refresh from caching being off.
+// mintReason is passed to the mint callback so it can distinguish a cold start
+// from a proactive refresh from caching being off (e.g. for logging or metrics).
 type mintReason int
 
 const (
@@ -123,20 +124,21 @@ type tokenCache struct {
 	disabled      bool // when true, every getOrFetch mints without caching
 }
 
-// CacheOption configures a token cache at construction. See [CacheEnabled] and
-// [CacheRefreshBuffer].
-type CacheOption func(*tokenCache)
+// cacheOption configures a token cache at construction. See [cacheEnabled] and
+// [cacheRefreshBuffer]. Unexported until a public SDK builder needs to surface
+// these knobs.
+type cacheOption func(*tokenCache)
 
-// CacheEnabled toggles token caching. When disabled, every token request mints
+// cacheEnabled toggles token caching. When disabled, every token request mints
 // a fresh token instead of consulting the cache. Caching is enabled by default.
-func CacheEnabled(enabled bool) CacheOption {
+func cacheEnabled(enabled bool) cacheOption {
 	return func(c *tokenCache) { c.disabled = !enabled }
 }
 
-// CacheRefreshBuffer sets the lead time before a token's expiry at which it is
+// cacheRefreshBuffer sets the lead time before a token's expiry at which it is
 // proactively re-minted; it defaults to 5 minutes. A non-positive value is
 // ignored so the default holds.
-func CacheRefreshBuffer(d time.Duration) CacheOption {
+func cacheRefreshBuffer(d time.Duration) cacheOption {
 	return func(c *tokenCache) {
 		if d > 0 {
 			c.refreshBuffer = d
@@ -144,7 +146,7 @@ func CacheRefreshBuffer(d time.Duration) CacheOption {
 	}
 }
 
-func newTokenCache(opts ...CacheOption) *tokenCache {
+func newTokenCache(opts ...cacheOption) *tokenCache {
 	c := &tokenCache{
 		entries:       make(map[tokenKey]*tokenCacheEntry),
 		refreshBuffer: defaultRefreshBuffer,
@@ -161,7 +163,10 @@ func newTokenCache(opts ...CacheOption) *tokenCache {
 // a non-retryable error propagates.
 //
 // mint runs at most once per key at a time; other callers wait for it and share
-// the result, or return ctx.Err() if their own ctx expires while waiting.
+// the result, or return ctx.Err() if their own ctx expires while waiting. If the
+// leader's mint fails because the leader's own context was cancelled, a waiter
+// whose context is still live re-attempts (and usually mints for itself) rather
+// than inheriting a cancellation it never requested.
 func (c *tokenCache) getOrFetch(
 	ctx context.Context,
 	clientID, clientSecret, tableName string,
@@ -176,6 +181,28 @@ func (c *tokenCache) getOrFetch(
 	}
 
 	key := newTokenKey(clientID, clientSecret, tableName)
+
+	for {
+		token, err, retry := c.tryGetOrFetch(ctx, key, mint)
+		if retry {
+			// The leader we parked on failed because its own ctx was cancelled,
+			// but ours is still live. Re-attempt rather than inheriting a cancel
+			// we never asked for; typically we become the next leader and mint.
+			continue
+		}
+		return token, err
+	}
+}
+
+// tryGetOrFetch makes one attempt to serve or mint a token for key. It returns
+// retry == true only when the caller parked on another goroutine's in-flight
+// mint that failed due to that leader's context cancellation while the caller's
+// own context is still live; the caller then loops to re-attempt.
+func (c *tokenCache) tryGetOrFetch(
+	ctx context.Context,
+	key tokenKey,
+	mint func(ctx context.Context, reason mintReason) (fetchedToken, error),
+) (string, error, bool) {
 	entry := c.slot(key)
 
 	entry.mu.Lock()
@@ -183,7 +210,7 @@ func (c *tokenCache) getOrFetch(
 	if entry.cached != nil && !c.needsRefresh(entry.cached) {
 		token := entry.cached.value
 		entry.mu.Unlock()
-		return token, nil
+		return token, nil, false
 	}
 
 	// A mint is already in progress: wait for it (or our own ctx) and share the
@@ -194,9 +221,15 @@ func (c *tokenCache) getOrFetch(
 		entry.mu.Unlock()
 		select {
 		case <-flight.done:
-			return flight.token, flight.err
+			// If the leader failed solely because its own context was cancelled,
+			// don't propagate that cancel to a waiter whose context is still
+			// live; signal a re-attempt so this caller can mint for itself.
+			if flight.err != nil && isContextError(flight.err) && ctx.Err() == nil {
+				return "", nil, true
+			}
+			return flight.token, flight.err, false
 		case <-ctx.Done():
-			return "", ctx.Err()
+			return "", ctx.Err(), false
 		}
 	}
 
@@ -224,10 +257,12 @@ func (c *tokenCache) getOrFetch(
 		}
 		// Publish to waiters: writes before close(done) happen-before <-done. The
 		// mutex just brackets the entry-state transition, not the flight publish.
+		// A context error published here is what lets a live-ctx waiter re-attempt
+		// instead of inheriting our cancellation.
 		flight.token, flight.err = token, resErr
 		close(flight.done)
 		entry.mu.Unlock()
-		return token, resErr
+		return token, resErr, false
 	}
 
 	token := fetched.token
@@ -247,7 +282,14 @@ func (c *tokenCache) getOrFetch(
 	close(flight.done)
 	entry.mu.Unlock()
 
-	return token, nil
+	return token, nil, false
+}
+
+// isContextError reports whether err is (or wraps) a context cancellation or
+// deadline, the signal that a mint failed because its leader's context ended
+// rather than because the token endpoint itself failed.
+func isContextError(err error) bool {
+	return errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded)
 }
 
 // invalidate drops the cached token for the given credentials and table. The
@@ -312,25 +354,30 @@ func (c *tokenCache) needsRefresh(cached *cachedToken) bool {
 }
 
 // isRetryable reports whether the error tree holds a retryable [retryableError],
-// walking both single- and multi-error (errors.Join) unwrap chains.
+// walking both single- and multi-error (errors.Join) unwrap chains. A
+// retryableError that reports IsRetryable() == false does not short-circuit the
+// walk: a wrapper may deny retry while wrapping a retryable cause, so we keep
+// unwrapping until we either find a retryable node or exhaust the tree.
 func isRetryable(err error) bool {
-	switch x := err.(type) {
-	case nil:
-		return false
-	case retryableError:
-		return x.IsRetryable()
-	case interface{ Unwrap() error }:
-		return isRetryable(x.Unwrap())
-	case interface{ Unwrap() []error }:
-		for _, e := range x.Unwrap() {
-			if isRetryable(e) {
-				return true
-			}
+	for err != nil {
+		if re, ok := err.(retryableError); ok && re.IsRetryable() {
+			return true
 		}
-		return false
-	default:
-		return false
+		switch x := err.(type) {
+		case interface{ Unwrap() error }:
+			err = x.Unwrap()
+		case interface{ Unwrap() []error }:
+			for _, e := range x.Unwrap() {
+				if isRetryable(e) {
+					return true
+				}
+			}
+			return false
+		default:
+			return false
+		}
 	}
+	return false
 }
 
 // retryableError is implemented by errors from the mint path that are safe to

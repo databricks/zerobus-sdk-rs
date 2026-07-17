@@ -21,6 +21,15 @@ type fatalErr struct{ msg string }
 func (e *fatalErr) Error() string     { return e.msg }
 func (e *fatalErr) IsRetryable() bool { return false }
 
+// denyingWrapper reports IsRetryable() == false yet wraps another error: it
+// exercises that isRetryable keeps walking past a non-retryable node instead of
+// short-circuiting on it.
+type denyingWrapper struct{ cause error }
+
+func (e *denyingWrapper) Error() string     { return "denied: " + e.cause.Error() }
+func (e *denyingWrapper) IsRetryable() bool { return false }
+func (e *denyingWrapper) Unwrap() error     { return e.cause }
+
 func makeMint(token string, ttlSecs int) func(context.Context, mintReason) (fetchedToken, error) {
 	return func(_ context.Context, _ mintReason) (fetchedToken, error) {
 		ft := fetchedToken{token: token}
@@ -447,8 +456,86 @@ func TestTokenCacheJoinedRetryableErrorFallsBack(t *testing.T) {
 	}
 }
 
+func TestTokenCacheRetryableCauseUnderNonRetryableWrapperFallsBack(t *testing.T) {
+	c := newTokenCache()
+	seedRefreshable(c, "id", "secret", "c.s.t", "valid")
+
+	// The outermost error reports IsRetryable() == false but unwraps a retryable
+	// cause. isRetryable must keep walking and detect the cause, so the cache
+	// falls back to the still-valid token rather than propagating the failure.
+	tok, err := c.getOrFetch(context.Background(), "id", "secret", "c.s.t",
+		func(_ context.Context, _ mintReason) (fetchedToken, error) {
+			return fetchedToken{}, &denyingWrapper{cause: &retryErr{"transient"}}
+		},
+	)
+	if err != nil {
+		t.Fatalf("want fallback to cached token, got error: %v", err)
+	}
+	if tok != "valid" {
+		t.Fatalf("want %q, got %q", "valid", tok)
+	}
+}
+
+// TestTokenCacheWaiterRemintsWhenLeaderContextCancelled verifies that a waiter
+// with a live context does not inherit the leader's context cancellation: it
+// re-attempts and mints for itself instead.
+func TestTokenCacheWaiterRemintsWhenLeaderContextCancelled(t *testing.T) {
+	c := newTokenCache()
+
+	leaderCtx, cancelLeader := context.WithCancel(context.Background())
+	mintStarted := make(chan struct{})
+	var mints atomic.Int64
+
+	// Leader: parks in mint until its own context is cancelled, then returns that
+	// cancellation as its error (as an OAuth mint bounded by ctx would).
+	leaderDone := make(chan struct{})
+	go func() {
+		defer close(leaderDone)
+		_, _ = c.getOrFetch(leaderCtx, "id", "secret", "c.s.t",
+			func(ctx context.Context, _ mintReason) (fetchedToken, error) {
+				mints.Add(1)
+				close(mintStarted)
+				<-ctx.Done()
+				return fetchedToken{}, ctx.Err()
+			},
+		)
+	}()
+
+	<-mintStarted // leader holds the in-flight slot
+
+	// Waiter with a healthy context parks on the leader's flight.
+	waiterResult := make(chan string, 1)
+	waiterErr := make(chan error, 1)
+	go func() {
+		tok, err := c.getOrFetch(context.Background(), "id", "secret", "c.s.t",
+			func(_ context.Context, _ mintReason) (fetchedToken, error) {
+				mints.Add(1)
+				return fetchedToken{token: "waiter-tok", expiresIn: dur(3600)}, nil
+			},
+		)
+		waiterErr <- err
+		waiterResult <- tok
+	}()
+
+	// Give the waiter time to park before cancelling the leader.
+	time.Sleep(50 * time.Millisecond)
+	cancelLeader() // leader's mint fails with context.Canceled
+
+	<-leaderDone
+	if err := <-waiterErr; err != nil {
+		t.Fatalf("waiter with live ctx should not inherit leader cancel, got %v", err)
+	}
+	if tok := <-waiterResult; tok != "waiter-tok" {
+		t.Fatalf("waiter should have re-minted its own token, got %q", tok)
+	}
+	// Leader minted once (and was cancelled); waiter re-minted once.
+	if n := mints.Load(); n != 2 {
+		t.Fatalf("want 2 mints (leader cancelled + waiter re-mint), got %d", n)
+	}
+}
+
 func TestTokenCacheDisabledAlwaysMints(t *testing.T) {
-	c := newTokenCache(CacheEnabled(false))
+	c := newTokenCache(cacheEnabled(false))
 	var calls atomic.Int64
 	reasons := make(chan mintReason, 2)
 	mint := func(_ context.Context, r mintReason) (fetchedToken, error) {
@@ -477,7 +564,7 @@ func TestTokenCacheCustomRefreshBuffer(t *testing.T) {
 	// effect. Compare against the default 5-minute buffer, which would place it
 	// ~55 minutes out.
 	const buffer = 20 * time.Minute
-	c := newTokenCache(CacheRefreshBuffer(buffer))
+	c := newTokenCache(cacheRefreshBuffer(buffer))
 
 	before := time.Now()
 	getOrFetch(t, c, "id", "secret", "c.s.t", makeMint("tok", 3600))
@@ -523,7 +610,7 @@ func TestNewCachedToken(t *testing.T) {
 }
 
 func TestTokenCacheNonPositiveRefreshBufferKeepsDefault(t *testing.T) {
-	c := newTokenCache(CacheRefreshBuffer(-1))
+	c := newTokenCache(cacheRefreshBuffer(-1))
 	if c.refreshBuffer != defaultRefreshBuffer {
 		t.Fatalf("non-positive buffer should be ignored, got %v", c.refreshBuffer)
 	}

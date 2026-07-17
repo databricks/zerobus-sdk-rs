@@ -21,9 +21,11 @@ Implemented packages:
   the `StreamParams.HeadersProvider`. The authorization value is sent verbatim as
   the provider formats it (e.g. `"Bearer <token>"`); the transport does not add a
   scheme prefix.
+- `internal/auth` — the `HeadersProvider` interface and `StaticHeadersProvider`
+  for fixed-header cases, plus a per-`(clientID, secret, table)` token cache
+  with single-flight minting, proactive refresh, and retryable-error fallback.
 
-Planned layers: OAuth/auth, ingest/ack state management, recovery, and the
-public API.
+Planned layers: ingest/ack state management, recovery, and the public API.
 
 ## Regenerating the protobuf bindings
 

@@ -101,6 +101,10 @@ func (c *Conn) Open(ctx context.Context, p StreamParams) (*Stream, error) {
 		if p.HeadersProvider != nil && isAuthRejection(err) {
 			p.HeadersProvider.Invalidate(ctx, p.TableName)
 		}
+		// Deregister the bridge before returning so its AfterFunc doesn't linger
+		// until handshakeCtx ends (which, on the default-budget path, is bounded,
+		// but on a caller-supplied long-lived ctx would otherwise stay pinned).
+		stopBridge()
 		cancelStream()
 		return nil, err
 	}
