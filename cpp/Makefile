@@ -12,6 +12,16 @@ JOBS ?= 4
 SANITIZE ?=
 SANITIZE_FLAG := $(if $(SANITIZE),-DZEROBUS_SANITIZE=$(SANITIZE),)
 
+# address/thread also instrument the Rust FFI (see BuildRustFfi.cmake), which
+# emits LLVM sanitizer runtime calls. GCC's sanitizer runtime can't resolve
+# those, so build the C++ side with clang to match. Override CLANG_CC/CLANG_CXX
+# for a versioned binary (e.g. `make test SANITIZE=thread CLANG_CXX=clang++-18`).
+CLANG_CC ?= clang
+CLANG_CXX ?= clang++
+ifneq ($(filter $(SANITIZE),address thread),)
+SANITIZE_FLAG += -DCMAKE_C_COMPILER=$(CLANG_CC) -DCMAKE_CXX_COMPILER=$(CLANG_CXX)
+endif
+
 # All hand-written C++ sources (excludes the CMake build tree and fetched deps).
 SOURCES := $(shell find include src tests examples -name '*.cpp' -o -name '*.hpp' 2>/dev/null)
 

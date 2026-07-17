@@ -52,7 +52,12 @@ Run from `cpp/`:
 - `make test SANITIZE=address` — Build + run the suite under a sanitizer
   (`address`, `thread`, or `undefined`; CMake option `-DZEROBUS_SANITIZE=`). Off
   by default. Targets the memory/lifetime bugs this FFI wrapper is prone to
-  (use-after-free, double-free) with no added dependency.
+  (use-after-free, double-free). `address`/`thread` also instrument the Rust FFI
+  (nightly `-Zsanitizer` + `-Zbuild-std`), so they need a nightly toolchain with
+  `rust-src` and build the C++ side with clang to match the LLVM sanitizer
+  runtime (`CLANG_CC`/`CLANG_CXX`, default `clang`/`clang++`); GCC can't resolve
+  the instrumented archive's runtime symbols. `undefined` uses the default
+  compiler and a plain FFI build.
 
 CMake builds the FFI library from local Rust source by default
 (`cargo build --release` in `rust/ffi`). To link a prebuilt/vendored library
