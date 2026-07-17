@@ -47,6 +47,9 @@ mod types;
 
 use types::{IngestRequest, OneshotMap, RecordLandingZone};
 
+#[cfg(feature = "testing")]
+pub use callback_handler::CallbackHandlerHarness;
+
 /// Maximum time to wait for the receiver/sender tasks to finish during stream
 /// teardown.
 pub(super) const STREAM_TEARDOWN_DRAIN_TIMEOUT_MS: u64 = 500;
