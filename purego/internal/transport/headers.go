@@ -19,6 +19,10 @@ const (
 )
 
 // HeadersProvider provides gRPC metadata headers for stream authentication.
+//
+// Structurally identical to auth.HeadersProvider; defined here so transport (the
+// lowest layer) does not import auth, which would invert the dependency. An
+// *auth.StaticHeadersProvider satisfies this interface directly.
 type HeadersProvider interface {
 	// GetHeaders returns the metadata headers to attach to the stream. Called
 	// during Open before the RPC handshake starts. Keys are case-folded to
