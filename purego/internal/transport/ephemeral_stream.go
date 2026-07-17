@@ -42,8 +42,9 @@ type Stream struct {
 // the live stream once the server acknowledges it with a stream ID.
 //
 // ctx bounds opening the stream — GetHeaders (when a HeadersProvider is set),
-// the RPC start, and the handshake — and is defaulted to defaultHandshakeTimeout
-// when it carries no deadline.
+// the RPC start, and the handshake. When ctx has no deadline, Open applies
+// default bounds independently to GetHeaders and the handshake so a slow token
+// mint can't consume the entire open budget.
 // Cancelling ctx aborts an in-progress Open promptly, but once Open succeeds
 // the live stream is detached and cancelled only by Close, so a later ctx
 // timeout won't tear it down mid-ingest. ctx's values (including caller
@@ -64,19 +65,25 @@ func (c *Conn) Open(ctx context.Context, p StreamParams) (*Stream, error) {
 	if p.RecordType == zerobuspb.RecordType_PROTO && len(p.DescriptorProto) == 0 {
 		return nil, fmt.Errorf("transport: open %q: descriptor proto required for PROTO records", p.TableName)
 	}
-	// openCtx bounds the whole open attempt — GetHeaders (which may block on a
-	// token mint), the RPC start, and the handshake — using the caller's ctx,
-	// defaulted to defaultHandshakeTimeout when it has no deadline.
-	openCtx := ctx
+	headersCtx := ctx
+	useDefaultBudgets := false
 	if _, ok := ctx.Deadline(); !ok {
-		var cancelOpen context.CancelFunc
-		openCtx, cancelOpen = context.WithTimeout(ctx, defaultHandshakeTimeout)
-		defer cancelOpen()
+		useDefaultBudgets = true
+		var cancelHeaders context.CancelFunc
+		headersCtx, cancelHeaders = context.WithTimeout(ctx, defaultHeadersTimeout)
+		defer cancelHeaders()
 	}
 
-	headers, err := p.resolveHeaders(openCtx)
+	headers, err := p.resolveHeaders(headersCtx)
 	if err != nil {
 		return nil, err
+	}
+
+	handshakeCtx := ctx
+	if useDefaultBudgets {
+		var cancelHandshake context.CancelFunc
+		handshakeCtx, cancelHandshake = context.WithTimeout(ctx, defaultHandshakeTimeout)
+		defer cancelHandshake()
 	}
 
 	// Detach the live stream from ctx's cancel/deadline (WithoutCancel keeps its
@@ -84,16 +91,20 @@ func (c *Conn) Open(ctx context.Context, p StreamParams) (*Stream, error) {
 	streamCtx := withStreamMetadataHeaders(context.WithoutCancel(ctx), p.TableName, headers)
 	streamCtx, cancelStream := context.WithCancel(streamCtx)
 
-	// Until the handshake succeeds, bridge openCtx to cancelStream so a caller
+	// Until the handshake succeeds, bridge handshakeCtx to cancelStream so a caller
 	// cancel/timeout unblocks the in-progress RPC start, first Send, and readiness
 	// wait. stopBridge removes it on success so the live stream is fully detached.
-	stopBridge := context.AfterFunc(openCtx, cancelStream)
+	stopBridge := context.AfterFunc(handshakeCtx, cancelStream)
 
-	stream, err := c.open(openCtx, streamCtx, cancelStream, p)
+	stream, err := c.open(handshakeCtx, streamCtx, cancelStream, p)
 	if err != nil {
 		if p.HeadersProvider != nil && isAuthRejection(err) {
 			p.HeadersProvider.Invalidate(ctx, p.TableName)
 		}
+		// Deregister the bridge before returning so its AfterFunc doesn't linger
+		// until handshakeCtx ends (which, on the default-budget path, is bounded,
+		// but on a caller-supplied long-lived ctx would otherwise stay pinned).
+		stopBridge()
 		cancelStream()
 		return nil, err
 	}
@@ -101,7 +112,7 @@ func (c *Conn) Open(ctx context.Context, p StreamParams) (*Stream, error) {
 	// return one racing cancellation.
 	if !stopBridge() {
 		cancelStream()
-		return nil, fmt.Errorf("transport: open %q: %w", p.TableName, openCtx.Err())
+		return nil, fmt.Errorf("transport: open %q: %w", p.TableName, handshakeCtx.Err())
 	}
 	stream.cancel = cancelStream
 	return stream, nil
