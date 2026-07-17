@@ -1,0 +1,24 @@
+<Project>
+  <!-- Central Package Management disabled for now.
+       To enable: set ManagePackageVersionsCentrally to true and remove
+       Version attributes from all PackageReference items in csproj files. -->
+  <PropertyGroup>
+    <ManagePackageVersionsCentrally>false</ManagePackageVersionsCentrally>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <!-- Main library dependencies -->
+    <PackageVersion Include="Google.Protobuf" Version="3.28.2" />
+    <PackageVersion Include="System.Memory" Version="4.5.5" />
+    <PackageVersion Include="Microsoft.SourceLink.GitHub" Version="8.0.0" />
+
+    <!-- Test dependencies -->
+    <PackageVersion Include="Microsoft.NET.Test.Sdk" Version="17.11.1" />
+    <PackageVersion Include="xunit" Version="2.9.2" />
+    <PackageVersion Include="xunit.runner.visualstudio" Version="2.8.2" />
+    <PackageVersion Include="NSubstitute" Version="5.1.0" />
+
+    <!-- Example dependencies -->
+    <PackageVersion Include="Apache.Arrow" Version="17.0.0" />
+  </ItemGroup>
+</Project>
