@@ -131,7 +131,22 @@ pub extern "C" fn zerobus_sdk_create_stream(
 }
 
 /// Create a stream with a custom headers provider callback
-/// This allows you to provide custom authentication headers via a Go callback function
+/// This allows you to provide custom authentication headers via a Go/C callback function.
+///
+/// Ownership: once this function is called, the FFI owns `user_data`. When
+/// `free_user_data` is set it is invoked exactly once, on every path:
+/// - on success, when the last internal reference to the provider drops — after
+///   any in-flight `get_headers` callback has returned (this is what closes the
+///   recovery-vs-teardown use-after-free);
+/// - on failure (this call returns null), before returning.
+///
+/// The caller must therefore hand ownership across and never free `user_data`
+/// itself, not even when create fails. Pass a null `free_user_data` to opt out
+/// (the caller then owns `user_data` and must keep it alive for the stream's
+/// whole lifetime, including in-flight recovery callbacks).
+///
+/// `free_user_data` may run on an internal SDK thread, so it must be safe to
+/// call from any thread.
 #[no_mangle]
 pub extern "C" fn zerobus_sdk_create_stream_with_headers_provider(
     sdk: *mut CZerobusSdk,
@@ -140,10 +155,27 @@ pub extern "C" fn zerobus_sdk_create_stream_with_headers_provider(
     descriptor_proto_len: usize,
     headers_callback: HeadersProviderCallback,
     user_data: *mut std::ffi::c_void,
+    // Written inline (not via HeadersProviderFreeCallback) so cbindgen emits a
+    // nullable C function pointer instead of an opaque struct.
+    free_user_data: Option<extern "C" fn(user_data: *mut std::ffi::c_void)>,
     options: *const CStreamConfigurationOptions,
     result: *mut CResult,
 ) -> *mut CZerobusStream {
     ffi_guard(result, ptr::null_mut(), move || {
+        // INVARIANT: construct the provider Arc *before* any fallible work. It
+        // owns `user_data`, so on every error path below its Drop invokes
+        // `free_user_data` exactly once. This gives the caller one contract —
+        // the FFI always frees `user_data` once create was called (success or
+        // failure) — so wrappers must never free it themselves. Moving this
+        // after a `?`/early-return would leak on that path; the wrappers rely on
+        // free-on-failure and do not compensate. Guarded by
+        // `test_create_stream_with_headers_provider_frees_user_data_on_failure`.
+        let headers_provider: Arc<dyn HeadersProvider> = Arc::new(CallbackHeadersProvider::new(
+            headers_callback,
+            user_data,
+            free_user_data,
+        ));
+
         let sdk_ref = match validate_sdk_ptr(sdk) {
             Ok(s) => s,
             Err(msg) => {
@@ -173,9 +205,6 @@ pub extern "C" fn zerobus_sdk_create_stream_with_headers_provider(
             let record_type = c_opts
                 .map(|c| c_record_type(c.record_type))
                 .unwrap_or(RecordType::Proto);
-
-            let headers_provider: Arc<dyn HeadersProvider> =
-                Arc::new(CallbackHeadersProvider::new(headers_callback, user_data));
 
             let base = sdk_ref
                 .stream_builder()

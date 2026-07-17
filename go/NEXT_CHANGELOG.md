@@ -8,6 +8,13 @@
 
 ### Bug Fixes
 
+- Fixed a use-after-free in which a custom `HeadersProvider` could be freed while
+  a background worker was still calling into it during connection recovery. The
+  provider's `cgo.Handle` ownership is now handed to the FFI, which releases it
+  (via a new destroy callback) only after any in-flight `GetHeaders` has
+  returned, instead of deleting it on stream close. This removes the per-stream
+  handle registry. No public API change.
+
 ### Documentation
 
 - Clarified throughput guidance in the README, godoc, and examples: ingest records in a loop without waiting and call `Flush()` once, rather than calling `WaitForOffset()` after every record. Documented that the ack watermark is monotonic, so waiting on the last offset confirms all prior records.

@@ -203,19 +203,55 @@ pub struct CHeaders {
 /// The caller is responsible for freeing the returned CHeaders using zerobus_free_headers
 pub type HeadersProviderCallback = extern "C" fn(user_data: *mut std::ffi::c_void) -> CHeaders;
 
-/// Rust struct that wraps a Go callback and implements HeadersProvider
+/// Function pointer type for releasing the headers provider's `user_data`.
+///
+/// The FFI owns `user_data`: this is invoked exactly once, when the last `Arc`
+/// referencing the provider drops. Because the supervisor task holds its own
+/// `Arc` clone across an in-flight `get_headers` call, that drop is guaranteed
+/// to happen only after any synchronous callback has returned — closing the
+/// use-after-free window that a wrapper freeing `user_data` right after
+/// `close()` would otherwise leave open.
+///
+/// May run on an internal SDK thread (a tokio worker, not necessarily the
+/// thread that created the stream), so it must be safe to call from any thread.
+pub type HeadersProviderFreeCallback = extern "C" fn(user_data: *mut std::ffi::c_void);
+
+/// Rust struct that wraps a Go/C callback and implements HeadersProvider.
+///
+/// Owns `user_data` when `free_user_data` is set: the destroy callback fires
+/// from `Drop`, i.e. once every task that could call `get_headers` is gone.
 pub(crate) struct CallbackHeadersProvider {
     callback: HeadersProviderCallback,
     user_data: *mut std::ffi::c_void,
+    free_user_data: Option<HeadersProviderFreeCallback>,
     in_use: AtomicBool, // Track concurrent access to detect thread-safety issues
 }
 
 impl CallbackHeadersProvider {
-    pub(crate) fn new(callback: HeadersProviderCallback, user_data: *mut std::ffi::c_void) -> Self {
+    pub(crate) fn new(
+        callback: HeadersProviderCallback,
+        user_data: *mut std::ffi::c_void,
+        free_user_data: Option<HeadersProviderFreeCallback>,
+    ) -> Self {
         Self {
             callback,
             user_data,
+            free_user_data,
             in_use: AtomicBool::new(false),
+        }
+    }
+}
+
+impl Drop for CallbackHeadersProvider {
+    fn drop(&mut self) {
+        if let Some(free) = self.free_user_data {
+            let user_data = self.user_data;
+            // Contain panics: unwinding across the FFI boundary is UB.
+            if catch_unwind(AssertUnwindSafe(|| free(user_data))).is_err() {
+                tracing::error!(
+                    "headers provider free callback panicked; contained at FFI boundary"
+                );
+            }
         }
     }
 }

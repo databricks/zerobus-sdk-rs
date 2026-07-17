@@ -73,18 +73,23 @@ Go's GC can relocate heap objects. When passing Go memory to C:
 - **Never remove `runtime.Pinner` calls** — doing so causes "cgo argument has Go pointer to unpinned Go pointer" panics.
 - Requires Go 1.21+ (the `runtime.Pinner` API).
 
-### Handle registry for callbacks
+### Handle ownership for callbacks
 
 When using custom `HeadersProvider` (instead of default OAuth):
 - A `cgo.Handle` wraps the Go interface value and prevents GC collection.
-- Handles are stored in `streamHandleRegistry` (mutex-protected map, keyed by stream pointer).
-- **Cleanup sequence**: lock registry → delete handle → remove from map → unlock → free C stream.
+- The handle is passed to the FFI as `user_data`, and its **ownership is handed to
+  the FFI** along with a `free_user_data` destroy callback (`goFreeHeadersProvider`).
+  The FFI invokes it exactly once — after any in-flight `get_headers` returns — and
+  that is where `handle.Delete()` runs. On a failed create (before the provider is
+  installed), the Go side deletes the handle itself.
+- This replaces the older per-stream handle registry: freeing the handle on `close()`
+  could race a recovery `get_headers` still running on a worker thread (use-after-free).
 - Leaking a handle leaks the Go `HeadersProvider` object and any resources it holds.
 
 ### Arrow batch cleanup
 
 - `zerobus_arrow_free_batch_array()` must be called after reading unacknowledged batches.
-- Same handle registry pattern applies for Arrow streams with custom headers.
+- Arrow streams with custom headers use the same FFI-owned handle destroy path.
 
 ## Breaking change rules
 
@@ -103,7 +108,7 @@ Public API is everything exported (capitalized) in the `go/` package:
 
 ## Thread safety
 
-Go SDK is safe for concurrent use from multiple goroutines. Internal synchronization handles concurrent `Ingest` calls. The handle registry uses a mutex.
+Go SDK is safe for concurrent use from multiple goroutines. Internal synchronization handles concurrent `Ingest` calls.
 
 ## Changelog and documentation
 

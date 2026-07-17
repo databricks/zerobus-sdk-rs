@@ -207,6 +207,12 @@ pub extern "C" fn zerobus_sdk_create_arrow_stream(
 /// Creates an Arrow Flight stream with a custom headers provider callback.
 ///
 /// `schema_ipc_bytes` must point to Arrow IPC stream bytes encoding only the schema.
+///
+/// Ownership of `user_data` / `free_user_data` follows
+/// `zerobus_sdk_create_stream_with_headers_provider` — once called the FFI owns
+/// `user_data` and invokes `free_user_data` exactly once on every path (on
+/// success after any in-flight `get_headers` returns; on failure before
+/// returning null). The caller must never free `user_data` itself.
 #[no_mangle]
 pub extern "C" fn zerobus_sdk_create_arrow_stream_with_headers_provider(
     sdk: *mut CZerobusSdk,
@@ -215,10 +221,24 @@ pub extern "C" fn zerobus_sdk_create_arrow_stream_with_headers_provider(
     schema_ipc_len: usize,
     headers_callback: HeadersProviderCallback,
     user_data: *mut std::ffi::c_void,
+    // Written inline (not via HeadersProviderFreeCallback) so cbindgen emits a
+    // nullable C function pointer instead of an opaque struct.
+    free_user_data: Option<extern "C" fn(user_data: *mut std::ffi::c_void)>,
     options: *const CArrowStreamConfigurationOptions,
     result: *mut CResult,
 ) -> *mut CArrowStream {
     ffi_guard(result, ptr::null_mut(), move || {
+        // INVARIANT: construct the provider Arc *before* any fallible work (see
+        // the proto path in stream.rs). It owns `user_data`, so its Drop invokes
+        // `free_user_data` exactly once on every path — the free-once contract
+        // the wrappers rely on. Moving this after an early-return would leak
+        // `user_data`, since the wrappers do not free on failure.
+        let headers_provider: Arc<dyn HeadersProvider> = Arc::new(CallbackHeadersProvider::new(
+            headers_callback,
+            user_data,
+            free_user_data,
+        ));
+
         let sdk_ref = match validate_sdk_ptr(sdk) {
             Ok(s) => s,
             Err(msg) => {
@@ -236,9 +256,6 @@ pub extern "C" fn zerobus_sdk_create_arrow_stream_with_headers_provider(
             let schema_bytes =
                 unsafe { std::slice::from_raw_parts(schema_ipc_bytes, schema_ipc_len) };
             let schema = ipc_bytes_to_schema(schema_bytes).map_err(|e| e.to_string())?;
-
-            let headers_provider: Arc<dyn HeadersProvider> =
-                Arc::new(CallbackHeadersProvider::new(headers_callback, user_data));
 
             let mut builder = sdk_ref
                 .stream_builder()

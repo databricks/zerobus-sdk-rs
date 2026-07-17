@@ -401,7 +401,7 @@ mod tests {
             }
         }
 
-        let provider = CallbackHeadersProvider::new(test_callback, ptr::null_mut());
+        let provider = CallbackHeadersProvider::new(test_callback, ptr::null_mut(), None);
 
         // Sequential calls should work fine
         let rt = tokio::runtime::Runtime::new().unwrap();
@@ -431,7 +431,7 @@ mod tests {
             }
         }
 
-        let provider = CallbackHeadersProvider::new(test_callback, ptr::null_mut());
+        let provider = CallbackHeadersProvider::new(test_callback, ptr::null_mut(), None);
 
         let rt = tokio::runtime::Runtime::new().unwrap();
         let result = rt.block_on(provider.get_headers());
@@ -440,6 +440,133 @@ mod tests {
         let headers = result.unwrap();
         assert_eq!(headers.len(), 1);
         assert!(headers.contains_key("Authorization"));
+    }
+
+    // The provider owns `user_data`: dropping it must invoke `free_user_data`
+    // exactly once. This is the mechanism that closes the recovery-vs-teardown
+    // UAF — the destroy fires from Drop, i.e. after every task that could call
+    // get_headers is gone, not when the wrapper's close() returns.
+    #[test]
+    fn test_headers_provider_free_user_data_called_on_drop() {
+        static FREE_COUNT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+        static FREE_SENTINEL: u8 = 0;
+
+        extern "C" fn callback(_user_data: *mut std::ffi::c_void) -> CHeaders {
+            CHeaders {
+                headers: ptr::null_mut(),
+                count: 0,
+                error_message: ptr::null_mut(),
+            }
+        }
+        extern "C" fn free_user_data(user_data: *mut std::ffi::c_void) {
+            // Only count the sentinel we own, so nothing else perturbs the count.
+            if std::ptr::eq(user_data as *const u8, &FREE_SENTINEL) {
+                FREE_COUNT.fetch_add(1, AtomicOrdering::SeqCst);
+            }
+        }
+
+        let user_data = (&FREE_SENTINEL as *const u8) as *mut std::ffi::c_void;
+        let before = FREE_COUNT.load(AtomicOrdering::SeqCst);
+        {
+            let provider = CallbackHeadersProvider::new(callback, user_data, Some(free_user_data));
+            assert_eq!(
+                FREE_COUNT.load(AtomicOrdering::SeqCst),
+                before,
+                "free must not run while the provider is alive"
+            );
+            drop(provider);
+        }
+        assert_eq!(
+            FREE_COUNT.load(AtomicOrdering::SeqCst) - before,
+            1,
+            "free_user_data must run exactly once when the provider drops"
+        );
+    }
+
+    // Reproduces the recovery-vs-teardown race the fix targets: one Arc clone
+    // (the supervisor task) is inside a blocking synchronous get_headers while
+    // another Arc (the stream's struct field) is dropped by teardown. free must
+    // NOT fire while the callback is in flight, and must fire exactly once once
+    // the in-flight clone finally drops. If free ran on the teardown drop, the
+    // callback would be touching freed user_data — the original UAF.
+    #[test]
+    fn test_headers_provider_free_deferred_until_in_flight_callback_returns() {
+        use std::sync::atomic::AtomicBool;
+        use std::sync::Arc;
+
+        static ENTERED: AtomicBool = AtomicBool::new(false);
+        static RELEASE: AtomicBool = AtomicBool::new(false);
+        static FREE_COUNT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+        static SENTINEL: u8 = 0;
+
+        // Blocks in-flight until the main thread releases it, mirroring a slow
+        // get_headers on a worker thread during recovery.
+        extern "C" fn blocking_callback(_user_data: *mut std::ffi::c_void) -> CHeaders {
+            ENTERED.store(true, AtomicOrdering::SeqCst);
+            while !RELEASE.load(AtomicOrdering::SeqCst) {
+                std::thread::yield_now();
+            }
+            CHeaders {
+                headers: ptr::null_mut(),
+                count: 0,
+                error_message: ptr::null_mut(),
+            }
+        }
+        extern "C" fn free_user_data(user_data: *mut std::ffi::c_void) {
+            if std::ptr::eq(user_data as *const u8, &SENTINEL) {
+                FREE_COUNT.fetch_add(1, AtomicOrdering::SeqCst);
+            }
+        }
+
+        let user_data = (&SENTINEL as *const u8) as *mut std::ffi::c_void;
+        let provider = Arc::new(CallbackHeadersProvider::new(
+            blocking_callback,
+            user_data,
+            Some(free_user_data),
+        ));
+        let in_flight = Arc::clone(&provider); // the "supervisor" clone
+
+        let worker = std::thread::spawn(move || {
+            let rt = tokio::runtime::Runtime::new().unwrap();
+            let _ = rt.block_on(in_flight.get_headers());
+            // in_flight drops here, after the callback returns.
+        });
+
+        // Wait until the callback is in flight, then simulate teardown dropping
+        // the struct-field Arc while the worker still holds its clone.
+        while !ENTERED.load(AtomicOrdering::SeqCst) {
+            std::thread::yield_now();
+        }
+        drop(provider);
+        assert_eq!(
+            FREE_COUNT.load(AtomicOrdering::SeqCst),
+            0,
+            "free must not run while a get_headers callback is in flight"
+        );
+
+        // Let the callback return; the last Arc now drops on the worker.
+        RELEASE.store(true, AtomicOrdering::SeqCst);
+        worker.join().unwrap();
+        assert_eq!(
+            FREE_COUNT.load(AtomicOrdering::SeqCst),
+            1,
+            "free must run exactly once, after the in-flight callback returned"
+        );
+    }
+
+    // A null free_user_data opts out of ownership: Drop must not call anything.
+    #[test]
+    fn test_headers_provider_no_free_callback_is_noop_on_drop() {
+        extern "C" fn callback(_user_data: *mut std::ffi::c_void) -> CHeaders {
+            CHeaders {
+                headers: ptr::null_mut(),
+                count: 0,
+                error_message: ptr::null_mut(),
+            }
+        }
+        // No free callback: dropping must be a no-op (and must not deref user_data).
+        let provider = CallbackHeadersProvider::new(callback, ptr::null_mut(), None);
+        drop(provider);
     }
 
     // ========================================================================
@@ -910,6 +1037,7 @@ mod tests {
             0,
             empty_headers,
             ptr::null_mut(),
+            None,
             &options as *const crate::CStreamConfigurationOptions,
             &mut result as *mut CResult,
         );
@@ -928,6 +1056,53 @@ mod tests {
             1,
             "expected the ack callback Arc to be dropped exactly once on failed \
              create_stream_with_headers_provider (0 = leaked to a task OR never registered)"
+        );
+
+        zerobus_sdk_free(sdk);
+    }
+
+    // The provider owns `user_data`, so a failed create must still invoke
+    // `free_user_data` exactly once (the create-failure path of the free-on-
+    // every-path contract) — otherwise the wrapper's handle would leak.
+    #[test]
+    fn test_create_stream_with_headers_provider_frees_user_data_on_failure() {
+        static FREE_COUNT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+        static FREE_SENTINEL: u8 = 0;
+        extern "C" fn free_user_data(user_data: *mut std::ffi::c_void) {
+            if std::ptr::eq(user_data as *const u8, &FREE_SENTINEL) {
+                FREE_COUNT.fetch_add(1, AtomicOrdering::SeqCst);
+            }
+        }
+
+        let (sdk, sdk_result) =
+            build_via_c_builder("https://workspace.zerobus.databricks.com", "", None, None);
+        assert!(sdk_result.success);
+        assert!(!sdk.is_null());
+
+        let empty_table = CString::new("").unwrap();
+        let options = zerobus_get_default_config();
+        let mut result = presumed_success_result();
+        let user_data = (&FREE_SENTINEL as *const u8) as *mut std::ffi::c_void;
+
+        let before = FREE_COUNT.load(AtomicOrdering::SeqCst);
+        let stream = zerobus_sdk_create_stream_with_headers_provider(
+            sdk,
+            empty_table.as_ptr(),
+            ptr::null(),
+            0,
+            empty_headers,
+            user_data,
+            Some(free_user_data),
+            &options as *const crate::CStreamConfigurationOptions,
+            &mut result as *mut CResult,
+        );
+        let after = FREE_COUNT.load(AtomicOrdering::SeqCst);
+
+        assert!(stream.is_null());
+        assert_eq!(
+            after - before,
+            1,
+            "expected free_user_data to run exactly once on failed create"
         );
 
         zerobus_sdk_free(sdk);

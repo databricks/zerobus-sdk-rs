@@ -131,15 +131,15 @@ class Stream {
 
  private:
   friend class Sdk;
-  Stream(CZerobusStream* handle, std::shared_ptr<HeadersProvider> provider,
+  Stream(CZerobusStream* handle, std::shared_ptr<HeadersProvider> /*unused*/,
          std::shared_ptr<AckCallback> ack_callback)
-      : handle_(handle),
-        provider_(std::move(provider)),
-        ack_callback_(std::move(ack_callback)) {}
+      : handle_(handle), ack_callback_(std::move(ack_callback)) {}
 
   CZerobusStream* handle_;
-  // Kept alive for the stream's lifetime; the core holds a raw pointer to it.
-  std::shared_ptr<HeadersProvider> provider_;
+  // The headers provider (if any) is owned by the FFI, not the Stream: the core
+  // frees it after any in-flight get_headers returns, so the Stream holds no
+  // reference to it (see Sdk::create_stream / headers_provider.hpp).
+  //
   // Also raw-pointed-to by the core (ack user_data), but with a weaker bound: a
   // callback can still run after close(), so dropping this at ~Stream() can
   // free it mid-call (see AckCallback). May be null.

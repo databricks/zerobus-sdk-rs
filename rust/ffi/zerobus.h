@@ -224,6 +224,12 @@ struct CArrowStream *zerobus_sdk_create_arrow_stream(struct CZerobusSdk *sdk,
  * Creates an Arrow Flight stream with a custom headers provider callback.
  *
  * `schema_ipc_bytes` must point to Arrow IPC stream bytes encoding only the schema.
+ *
+ * Ownership of `user_data` / `free_user_data` follows
+ * `zerobus_sdk_create_stream_with_headers_provider` — once called the FFI owns
+ * `user_data` and invokes `free_user_data` exactly once on every path (on
+ * success after any in-flight `get_headers` returns; on failure before
+ * returning null). The caller must never free `user_data` itself.
  */
 struct CArrowStream *zerobus_sdk_create_arrow_stream_with_headers_provider(struct CZerobusSdk *sdk,
                                                                            const char *table_name,
@@ -231,6 +237,7 @@ struct CArrowStream *zerobus_sdk_create_arrow_stream_with_headers_provider(struc
                                                                            uintptr_t schema_ipc_len,
                                                                            HeadersProviderCallback headers_callback,
                                                                            void *user_data,
+                                                                           void (*free_user_data)(void *user_data),
                                                                            const struct CArrowStreamConfigurationOptions *options,
                                                                            struct CResult *result);
 
@@ -395,7 +402,22 @@ struct CZerobusStream *zerobus_sdk_create_stream(struct CZerobusSdk *sdk,
 
 /**
  * Create a stream with a custom headers provider callback
- * This allows you to provide custom authentication headers via a Go callback function
+ * This allows you to provide custom authentication headers via a Go/C callback function.
+ *
+ * Ownership: once this function is called, the FFI owns `user_data`. When
+ * `free_user_data` is set it is invoked exactly once, on every path:
+ * - on success, when the last internal reference to the provider drops — after
+ *   any in-flight `get_headers` callback has returned (this is what closes the
+ *   recovery-vs-teardown use-after-free);
+ * - on failure (this call returns null), before returning.
+ *
+ * The caller must therefore hand ownership across and never free `user_data`
+ * itself, not even when create fails. Pass a null `free_user_data` to opt out
+ * (the caller then owns `user_data` and must keep it alive for the stream's
+ * whole lifetime, including in-flight recovery callbacks).
+ *
+ * `free_user_data` may run on an internal SDK thread, so it must be safe to
+ * call from any thread.
  */
 struct CZerobusStream *zerobus_sdk_create_stream_with_headers_provider(struct CZerobusSdk *sdk,
                                                                        const char *table_name,
@@ -403,6 +425,7 @@ struct CZerobusStream *zerobus_sdk_create_stream_with_headers_provider(struct CZ
                                                                        uintptr_t descriptor_proto_len,
                                                                        HeadersProviderCallback headers_callback,
                                                                        void *user_data,
+                                                                       void (*free_user_data)(void *user_data),
                                                                        const struct CStreamConfigurationOptions *options,
                                                                        struct CResult *result);
 
