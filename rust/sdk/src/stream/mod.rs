@@ -10,3 +10,6 @@
 mod grpc;
 
 pub use grpc::ZerobusStream;
+
+#[cfg(feature = "testing")]
+pub use grpc::CallbackHandlerHarness;

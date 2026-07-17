@@ -515,6 +515,425 @@ mod tests {
     }
 
     // ========================================================================
+    // Ack callback live-stream teardown / use-after-free tests
+    // ========================================================================
+    //
+    // Drive a real `CallbackAckCallback` (over a heap `user_data`) through the
+    // real callback-handler task via `CallbackHandlerHarness`, then tear it down
+    // through the production teardown path. Assert the contract `close()` relies
+    // on: no callback fires after teardown returns, so `user_data` is safe to
+    // free then. Each callback dereferences `user_data`, so a post-teardown call
+    // is a use-after-free ASan catches.
+    //
+    // Scenarios:
+    //   - bounded wait (`Some(ms)`): fast callbacks drain within the budget.
+    //   - unbounded wait (`None`): fast callbacks drain, no budget.
+    //   - a callback still running past the bounded budget: the drain times out
+    //     and the task is aborted. abort() can't preempt synchronous callback
+    //     code, so the callback runs to completion — `user_data` must outlive the
+    //     callback, not merely `teardown()`.
+
+    use databricks_zerobus_ingest_sdk::CallbackHandlerHarness;
+    use std::sync::atomic::{AtomicBool, AtomicU64};
+    use std::sync::Arc;
+
+    // Heap user_data each callback dereferences; a post-free call is a UAF ASan
+    // catches, and `magic` detects a freed/garbage box. `block_ms` lets a callback
+    // stay synchronously in-flight (to outrun a bounded teardown budget); `started`
+    // / `finished` let the test observe a callback's execution window.
+    #[repr(C)]
+    struct AckUserData {
+        magic: u64,
+        calls: AtomicU64,
+        block_ms: u64,
+        started: AtomicBool,
+        finished: AtomicBool,
+    }
+
+    const ACK_MAGIC: u64 = 0x00C0_FFEE_1234_5678;
+
+    // Body shared by the ack/error trampolines: dereference `user_data` at entry
+    // and again after any synchronous block, so a free during the block is a UAF.
+    fn run_live_callback(user_data: *mut std::ffi::c_void) {
+        assert!(!user_data.is_null(), "user_data must be live on callback");
+        let data = unsafe { &*(user_data as *const AckUserData) };
+        assert_eq!(data.magic, ACK_MAGIC, "user_data was freed or corrupted");
+        data.started.store(true, AtomicOrdering::SeqCst);
+        if data.block_ms > 0 {
+            // Synchronous block: abort() can't preempt this, so the callback (and
+            // its `user_data` access below) outlives a bounded teardown budget.
+            std::thread::sleep(std::time::Duration::from_millis(data.block_ms));
+        }
+        assert_eq!(
+            data.magic, ACK_MAGIC,
+            "user_data was freed or corrupted mid-callback"
+        );
+        data.calls.fetch_add(1, AtomicOrdering::SeqCst);
+        data.finished.store(true, AtomicOrdering::SeqCst);
+    }
+
+    // extern "C" callbacks act purely through `user_data`, like a real C consumer.
+    extern "C" fn live_ack(_offset_id: i64, user_data: *mut std::ffi::c_void) {
+        run_live_callback(user_data);
+    }
+
+    extern "C" fn live_error(
+        _offset_id: i64,
+        error_message: *const c_char,
+        user_data: *mut std::ffi::c_void,
+    ) {
+        assert!(!error_message.is_null());
+        run_live_callback(user_data);
+    }
+
+    // Real ack bridge over a fresh heap user_data; returns the raw pointer so the
+    // test frees it after teardown, proving the no-UAF contract. `block_ms` makes
+    // each callback stay synchronously in-flight for that long.
+    fn make_live_callback_blocking(block_ms: u64) -> (Arc<CallbackAckCallback>, *mut AckUserData) {
+        let user_data = Box::into_raw(Box::new(AckUserData {
+            magic: ACK_MAGIC,
+            calls: AtomicU64::new(0),
+            block_ms,
+            started: AtomicBool::new(false),
+            finished: AtomicBool::new(false),
+        }));
+        let cb = CallbackAckCallback::new(
+            Some(live_ack),
+            Some(live_error),
+            user_data as *mut std::ffi::c_void,
+        );
+        (Arc::new(cb), user_data)
+    }
+
+    // Non-blocking callback (the common case).
+    fn make_live_callback() -> (Arc<CallbackAckCallback>, *mut AckUserData) {
+        make_live_callback_blocking(0)
+    }
+
+    // Poll until `expected` callbacks land, instead of a fixed sleep.
+    async fn wait_for_calls(user_data: *const AckUserData, expected: u64) {
+        let data = unsafe { &*user_data };
+        for _ in 0..200 {
+            if data.calls.load(AtomicOrdering::SeqCst) >= expected {
+                return;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+        panic!(
+            "timed out waiting for {expected} callbacks, saw {}",
+            data.calls.load(AtomicOrdering::SeqCst)
+        );
+    }
+
+    // Send `acks` acks and `errors` errors, wait for all to land, tear down in
+    // the given mode, then assert only the pre-teardown callbacks fired and the
+    // task is gone. Shared by the bounded / unbounded fast-callback cases.
+    async fn teardown_after_drain_case(
+        callback_max_wait_time_ms: Option<u64>,
+        acks: &[i64],
+        errors: &[(i64, &str)],
+    ) {
+        let (callback, user_data) = make_live_callback();
+        let mut harness = CallbackHandlerHarness::spawn(callback);
+
+        for &offset in acks {
+            assert!(harness.send_ack(offset), "enqueue must succeed while live");
+        }
+        for &(offset, msg) in errors {
+            assert!(
+                harness.send_error(offset, msg),
+                "enqueue must succeed while live"
+            );
+        }
+        let expected = (acks.len() + errors.len()) as u64;
+        wait_for_calls(user_data, expected).await;
+
+        harness.teardown(callback_max_wait_time_ms).await;
+
+        // Task gone: its receiver is dropped, so no further dispatch is possible.
+        assert!(
+            harness.is_task_gone(),
+            "handler task must be gone after teardown"
+        );
+        assert!(
+            !harness.send_ack(999),
+            "enqueue must be rejected once task is gone"
+        );
+        assert!(!harness.send_error(1000, "late"));
+        assert_eq!(
+            unsafe { &*user_data }.calls.load(AtomicOrdering::SeqCst),
+            expected,
+            "only the pre-teardown callbacks fired"
+        );
+
+        // Safe to free now: a post-teardown callback would be a UAF ASan catches.
+        drop(harness);
+        unsafe {
+            drop(Box::from_raw(user_data));
+        }
+    }
+
+    // Bounded wait (`Some(ms)`): fast callbacks drain well within the budget.
+    #[tokio::test]
+    async fn test_ack_callback_teardown_drain_within_budget() {
+        teardown_after_drain_case(Some(50), &[1, 2], &[(3, "boom")]).await;
+    }
+
+    // Unbounded wait (`None`): fast callbacks drain, no budget.
+    #[tokio::test]
+    async fn test_ack_callback_teardown_wait_indefinitely() {
+        teardown_after_drain_case(None, &[10, 11], &[]).await;
+    }
+
+    // A callback still running when the bounded budget expires. The drain times
+    // out and aborts, but abort() only takes effect at an await — it can't preempt
+    // the synchronous callback body, so the callback runs to completion *after*
+    // `teardown()` returns. This is the lifetime hazard the contract warns about:
+    // `user_data` must outlive the callback, not merely `teardown()`. Freeing it
+    // as soon as `teardown()` returns would be a UAF (ASan catches it here).
+    //
+    // Multi-threaded runtime so the blocking callback on one worker doesn't stall
+    // the teardown timer on another.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn test_ack_callback_teardown_aborts_in_flight_callback() {
+        // Callback blocks far longer than the teardown budget.
+        let (callback, user_data) = make_live_callback_blocking(300);
+        let harness = CallbackHandlerHarness::spawn(callback);
+        let data = unsafe { &*user_data };
+
+        harness.send_ack(1);
+
+        // Wait until the callback is genuinely in-flight before tearing down, so
+        // teardown races a running callback rather than an empty queue.
+        for _ in 0..200 {
+            if data.started.load(AtomicOrdering::SeqCst) {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+        }
+        assert!(
+            data.started.load(AtomicOrdering::SeqCst),
+            "callback must be in-flight before teardown"
+        );
+
+        // Budget far below the callback's block: the drain times out and aborts.
+        let mut harness = harness;
+        harness.teardown(Some(20)).await;
+
+        // teardown returned while the callback is still running: abort() couldn't
+        // preempt the synchronous body. (is_task_gone() is deliberately not
+        // asserted here — the aborted task's receiver only drops once the body
+        // yields at the next await, so it races the in-flight callback.)
+        assert!(
+            !data.finished.load(AtomicOrdering::SeqCst),
+            "callback should still be in-flight after a budget-bounded teardown"
+        );
+
+        // Freeing `user_data` now would be a UAF — the callback still dereferences
+        // it. Wait for it to finish first, proving the callback outlived teardown.
+        for _ in 0..200 {
+            if data.finished.load(AtomicOrdering::SeqCst) {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+        assert!(
+            data.finished.load(AtomicOrdering::SeqCst),
+            "in-flight callback must run to completion"
+        );
+        assert_eq!(data.calls.load(AtomicOrdering::SeqCst), 1);
+
+        drop(harness);
+        unsafe {
+            drop(Box::from_raw(user_data));
+        }
+    }
+
+    // Nothing sent: teardown still completes cleanly, user_data untouched. Both modes.
+    async fn teardown_no_messages_case(callback_max_wait_time_ms: Option<u64>) {
+        let (callback, user_data) = make_live_callback();
+        let mut harness = CallbackHandlerHarness::spawn(callback);
+
+        harness.teardown(callback_max_wait_time_ms).await;
+
+        assert!(
+            harness.is_task_gone(),
+            "handler task must be gone after teardown"
+        );
+        assert_eq!(
+            unsafe { &*user_data }.calls.load(AtomicOrdering::SeqCst),
+            0,
+            "no callbacks should have fired"
+        );
+        drop(harness);
+        unsafe {
+            drop(Box::from_raw(user_data));
+        }
+    }
+
+    #[tokio::test]
+    async fn test_ack_callback_teardown_no_messages_drain_then_abort() {
+        teardown_no_messages_case(Some(50)).await;
+    }
+
+    #[tokio::test]
+    async fn test_ack_callback_teardown_no_messages_wait_indefinitely() {
+        teardown_no_messages_case(None).await;
+    }
+
+    // Run under AddressSanitizer to catch a post-teardown UAF (from `rust/`):
+    //
+    //   RUSTFLAGS="-Zsanitizer=address" ASAN_OPTIONS=detect_leaks=0 \
+    //     cargo +nightly test -p zerobus-ffi \
+    //     --target x86_64-unknown-linux-gnu ack_callback_teardown
+    //
+    // `--target` keeps host build-scripts uninstrumented; `detect_leaks=0`
+    // silences LSan on the intentionally-persistent global tokio runtime. Miri
+    // can't run these (no multi-threaded tokio support).
+
+    // Ack callback lifetime on failed stream creation
+    // ========================================================================
+    //
+    // When `create_stream` fails, the registered `Arc<CallbackAckCallback>` must
+    // drop (with the builder), not leak to a background task. Observed via the
+    // `#[cfg(test)]` drop hook in `common.rs`. Hermetic failure trigger: JSON +
+    // empty table name registers the Arc in `apply_c_stream_options`, then fails
+    // in `build()` validation before any network I/O.
+    //
+    // The Arc is created internally, so these tests can't hold a `Weak` to
+    // confirm it was ever registered. A drop delta of 0 is therefore ambiguous:
+    // the Arc was registered but leaked to a task, OR it was never registered
+    // (e.g. the registration path or sentinel wiring drifted). The assert
+    // messages spell out both causes.
+
+    use crate::common::{ACK_CALLBACK_DROP_COUNT, ACK_DROP_SENTINEL_CREATE_FAIL_TESTS};
+    use crate::{zerobus_sdk_create_stream, zerobus_sdk_create_stream_with_headers_provider};
+
+    // Global counter, so serialize this pair's before/after sampling window.
+    static ACK_DROP_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    // No-op ack/error callbacks; never invoked (create fails before any ack).
+    extern "C" fn noop_ack(_offset_id: i64, _user_data: *mut std::ffi::c_void) {}
+    extern "C" fn noop_error(
+        _offset_id: i64,
+        _error_message: *const c_char,
+        _user_data: *mut std::ffi::c_void,
+    ) {
+    }
+
+    // JSON config with both ack callbacks set, keyed to this test-only sentinel.
+    fn json_config_with_ack_callback() -> crate::CStreamConfigurationOptions {
+        let mut config = zerobus_get_default_config();
+        config.record_type = 2; // RecordType::Json
+        config.ack_on_ack = Some(noop_ack);
+        config.ack_on_error = Some(noop_error);
+        config.ack_user_data =
+            (&ACK_DROP_SENTINEL_CREATE_FAIL_TESTS as *const u8) as *mut std::ffi::c_void;
+        config
+    }
+
+    // Headers callback for the with-headers-provider path; never invoked (create fails first).
+    extern "C" fn empty_headers(_user_data: *mut std::ffi::c_void) -> CHeaders {
+        CHeaders {
+            headers: ptr::null_mut(),
+            count: 0,
+            error_message: ptr::null_mut(),
+        }
+    }
+
+    #[test]
+    fn test_create_stream_releases_ack_arc_on_failure() {
+        let _guard = ACK_DROP_TEST_LOCK.lock().unwrap();
+
+        let (sdk, sdk_result) =
+            build_via_c_builder("https://workspace.zerobus.databricks.com", "", None, None);
+        assert!(sdk_result.success);
+        assert!(!sdk.is_null());
+
+        let empty_table = CString::new("").unwrap();
+        let client_id = CString::new("client-id").unwrap();
+        let client_secret = CString::new("client-secret").unwrap();
+        let options = json_config_with_ack_callback();
+        let mut result = presumed_success_result();
+
+        // Delta across the single failing call.
+        let before = ACK_CALLBACK_DROP_COUNT.load(AtomicOrdering::SeqCst);
+        let stream = zerobus_sdk_create_stream(
+            sdk,
+            empty_table.as_ptr(),
+            ptr::null(),
+            0,
+            client_id.as_ptr(),
+            client_secret.as_ptr(),
+            &options as *const crate::CStreamConfigurationOptions,
+            &mut result as *mut CResult,
+        );
+        let after = ACK_CALLBACK_DROP_COUNT.load(AtomicOrdering::SeqCst);
+
+        // Creation failed on the empty table (InvalidArgument in build()); the
+        // only invalid field is the table name. Assert failure + a reported
+        // message without pinning the exact wording.
+        assert!(stream.is_null());
+        let (success, _retryable, msg) = drain_result(&mut result);
+        assert!(!success, "expected create_stream to fail on empty table");
+        assert!(!msg.is_empty(), "expected a non-empty error message");
+
+        // Ack callback Arc was released, not retained by a task.
+        assert_eq!(
+            after - before,
+            1,
+            "expected the ack callback Arc to be dropped exactly once on failed \
+             create_stream (0 = leaked to a task OR never registered)"
+        );
+
+        zerobus_sdk_free(sdk);
+    }
+
+    #[test]
+    fn test_create_stream_with_headers_provider_releases_ack_arc_on_failure() {
+        let _guard = ACK_DROP_TEST_LOCK.lock().unwrap();
+
+        let (sdk, sdk_result) =
+            build_via_c_builder("https://workspace.zerobus.databricks.com", "", None, None);
+        assert!(sdk_result.success);
+        assert!(!sdk.is_null());
+
+        let empty_table = CString::new("").unwrap();
+        let options = json_config_with_ack_callback();
+        let mut result = presumed_success_result();
+
+        let before = ACK_CALLBACK_DROP_COUNT.load(AtomicOrdering::SeqCst);
+        let stream = zerobus_sdk_create_stream_with_headers_provider(
+            sdk,
+            empty_table.as_ptr(),
+            ptr::null(),
+            0,
+            empty_headers,
+            ptr::null_mut(),
+            &options as *const crate::CStreamConfigurationOptions,
+            &mut result as *mut CResult,
+        );
+        let after = ACK_CALLBACK_DROP_COUNT.load(AtomicOrdering::SeqCst);
+
+        assert!(stream.is_null());
+        let (success, _retryable, msg) = drain_result(&mut result);
+        assert!(
+            !success,
+            "expected create_stream_with_headers_provider to fail on empty table"
+        );
+        assert!(!msg.is_empty(), "expected a non-empty error message");
+
+        assert_eq!(
+            after - before,
+            1,
+            "expected the ack callback Arc to be dropped exactly once on failed \
+             create_stream_with_headers_provider (0 = leaked to a task OR never registered)"
+        );
+
+        zerobus_sdk_free(sdk);
+    }
+
+    // ========================================================================
     // Dynamic protobuf schema tests
     // ========================================================================
 

@@ -40,7 +40,8 @@
 //!
 //! | Unity Catalog type            | Proto type | Encoding contract                           |
 //! |-------------------------------|------------|---------------------------------------------|
-//! | `STRING`, `VARIANT`, `DECIMAL`| `string`   | UTF-8 text                                  |
+//! | `STRING`, `DECIMAL`           | `string`   | UTF-8 text                                  |
+//! | `VARIANT`                     | `string`   | JSON text for protobuf ingestion            |
 //! | `INT`, `INTEGER`              | `int32`    |                                             |
 //! | `LONG`, `BIGINT`              | `int64`    |                                             |
 //! | `SHORT`, `SMALLINT`, `BYTE`, `TINYINT` | `int32` | zero-extended; range-checked by the server |
@@ -247,7 +248,8 @@ fn field_descriptor(
 /// onto its own target representation.
 fn parse_uc_top_level_type(type_name: &str) -> Result<PrimitiveType, SchemaError> {
     Ok(match type_name {
-        "STRING" | "VARIANT" => PrimitiveType::String,
+        "STRING" => PrimitiveType::String,
+        "VARIANT" => PrimitiveType::Variant,
         "INT" | "INTEGER" => PrimitiveType::Integer,
         "LONG" | "BIGINT" => PrimitiveType::Long,
         "SHORT" | "SMALLINT" => PrimitiveType::Short,
@@ -290,6 +292,7 @@ enum PrimitiveType {
     TimestampNtz,
     Date,
     Decimal,
+    Variant,
 }
 
 #[derive(Debug, Clone)]
@@ -397,8 +400,8 @@ fn type_ref_to_complex(tref: &TypeRef, level: usize) -> Result<ComplexType, Stri
 
 fn parse_primitive_type(s: &str) -> Result<PrimitiveType, String> {
     Ok(match s {
-        // VARIANT is carried as an unshredded JSON-encoded string.
-        "string" | "variant" => PrimitiveType::String,
+        "string" => PrimitiveType::String,
+        "variant" => PrimitiveType::Variant,
         "long" => PrimitiveType::Long,
         "integer" => PrimitiveType::Integer,
         "short" => PrimitiveType::Short,
@@ -428,6 +431,7 @@ const fn map_primitive_to_protobuf(p: PrimitiveType) -> ProtoType {
         PrimitiveType::Timestamp | PrimitiveType::TimestampNtz => ProtoType::Int64,
         PrimitiveType::Date => ProtoType::Int32,
         PrimitiveType::Decimal => ProtoType::String,
+        PrimitiveType::Variant => ProtoType::String,
     }
 }
 
@@ -680,7 +684,9 @@ fn sanitize_message_name(name: &str) -> String {
 /// map keys must be integral, bool, or string).
 ///
 /// Notable Arrow choices, all dictated by the Databricks Arrow Flight server:
-/// `STRING` / `VARIANT` / `DECIMAL` → `LargeUtf8`, `BINARY` → `LargeBinary`,
+/// `STRING` / `DECIMAL` → `LargeUtf8`, `VARIANT` →
+/// `Struct<metadata: LargeBinary not null, value: LargeBinary not null>`,
+/// `BINARY` → `LargeBinary`,
 /// `DATE` → `Date32`, `TIMESTAMP` → `Timestamp(Microsecond, Some("UTC"))`,
 /// `TIMESTAMP_NTZ` → `Timestamp(Microsecond, None)`, `ARRAY<T>` → `List` with
 /// item field `"item"`, `MAP<K,V>` → `Map` with entries field `"entries"`
@@ -756,7 +762,31 @@ fn map_primitive_to_arrow(p: PrimitiveType) -> arrow_schema::DataType {
         // `type_text` ("decimal(10,2)") and the `type_json` primitive string,
         // but `PrimitiveType::Decimal` discards them today.
         PrimitiveType::Decimal => DataType::LargeUtf8,
+        PrimitiveType::Variant => variant_arrow_data_type(),
     }
+}
+
+#[cfg(feature = "arrow-flight")]
+fn variant_arrow_data_type() -> arrow_schema::DataType {
+    use arrow_schema::{DataType, Field, Fields};
+
+    DataType::Struct(Fields::from(vec![
+        Field::new("metadata", DataType::LargeBinary, false),
+        Field::new("value", DataType::LargeBinary, false),
+    ]))
+}
+
+#[cfg(feature = "arrow-flight")]
+fn validate_arrow_map_key(key: &ComplexType, path: &str) -> Result<PrimitiveType, SchemaError> {
+    let primitive = validate_map_key(key, path)?;
+    if matches!(primitive, PrimitiveType::Variant) {
+        return Err(SchemaError::Invalid(format!(
+            "unsupported map key type {:?} for field '{}' \
+             (Arrow map keys must be scalar integral, bool, or string values)",
+            primitive, path
+        )));
+    }
+    Ok(primitive)
 }
 
 #[cfg(feature = "arrow-flight")]
@@ -803,7 +833,7 @@ fn complex_type_to_arrow_field(
             ))
         }
         ComplexType::Map { key, value } => {
-            let key_primitive = validate_map_key(key, name)?;
+            let key_primitive = validate_arrow_map_key(key, name)?;
             let value_field = match value.as_ref() {
                 ComplexType::Primitive(p) => Field::new("values", map_primitive_to_arrow(*p), true),
                 ComplexType::Struct(_) => complex_type_to_arrow_field("values", value, true)?,
@@ -871,6 +901,7 @@ mod tests {
             col("created_at", "TIMESTAMP", true, 3),
             col("d", "DATE", false, 4),
             col("data", "BINARY", false, 5),
+            col("attributes", "VARIANT", true, 6),
         ];
         let d = descriptor_from_uc_columns(&cols, "m").unwrap();
         assert_eq!(d.name(), "m");
@@ -881,9 +912,11 @@ mod tests {
         assert_eq!(field(&d, "created_at").r#type(), ProtoType::Int64);
         assert_eq!(field(&d, "d").r#type(), ProtoType::Int32);
         assert_eq!(field(&d, "data").r#type(), ProtoType::Bytes);
+        assert_eq!(field(&d, "attributes").r#type(), ProtoType::String);
         // Field numbers are position + 1 and preserve UC ordering.
         assert_eq!(field(&d, "id").number(), 1);
         assert_eq!(field(&d, "data").number(), 6);
+        assert_eq!(field(&d, "attributes").number(), 7);
     }
 
     #[test]
@@ -974,6 +1007,22 @@ mod tests {
             .find(|n| n.name() == entry_name)
             .expect("map entry message missing");
         assert_eq!(entry.options.as_ref().and_then(|o| o.map_entry), Some(true));
+        assert_eq!(field(entry, "key").r#type(), ProtoType::String);
+        assert_eq!(field(entry, "value").r#type(), ProtoType::Int32);
+    }
+
+    #[test]
+    fn variant_map_key_remains_proto_string() {
+        let type_json =
+            r#"{"type":"map","keyType":"variant","valueType":"integer","valueContainsNull":true}"#;
+        let cols = vec![complex_col("props", "MAP", type_json, 0)];
+        let d = descriptor_from_uc_columns(&cols, "m").unwrap();
+        let entry_name = field(&d, "props").type_name.as_deref().unwrap();
+        let entry = d
+            .nested_type
+            .iter()
+            .find(|n| n.name() == entry_name)
+            .expect("map entry message missing");
         assert_eq!(field(entry, "key").r#type(), ProtoType::String);
         assert_eq!(field(entry, "value").r#type(), ProtoType::Int32);
     }
@@ -1214,6 +1263,21 @@ mod tests {
                 .unwrap_or_else(|_| panic!("field '{}' not found", name))
         }
 
+        fn assert_variant_data_type(data_type: &DataType) {
+            match data_type {
+                DataType::Struct(fields) => {
+                    assert_eq!(fields.len(), 2);
+                    assert_eq!(fields[0].name(), "metadata");
+                    assert_eq!(fields[0].data_type(), &DataType::LargeBinary);
+                    assert!(!fields[0].is_nullable());
+                    assert_eq!(fields[1].name(), "value");
+                    assert_eq!(fields[1].data_type(), &DataType::LargeBinary);
+                    assert!(!fields[1].is_nullable());
+                }
+                other => panic!("expected VARIANT Struct, got {:?}", other),
+            }
+        }
+
         #[test]
         fn scalars_use_proper_arrow_types() {
             let cols = vec![
@@ -1226,6 +1290,7 @@ mod tests {
                 col("data", "BINARY", false, 6),
                 col("flag", "BOOLEAN", true, 7),
                 col("price", "DECIMAL", true, 8),
+                col("attributes", "VARIANT", false, 9),
             ];
             let s = arrow_schema_from_uc_columns(&cols).unwrap();
             assert_eq!(arrow_field(&s, "id").data_type(), &DataType::Int64);
@@ -1246,6 +1311,9 @@ mod tests {
             assert_eq!(arrow_field(&s, "flag").data_type(), &DataType::Boolean);
             // DECIMAL renders as LargeUtf8 (text encoding contract preserved).
             assert_eq!(arrow_field(&s, "price").data_type(), &DataType::LargeUtf8);
+            let attributes = arrow_field(&s, "attributes");
+            assert_variant_data_type(attributes.data_type());
+            assert!(!attributes.is_nullable());
         }
 
         #[test]
@@ -1396,6 +1464,14 @@ mod tests {
         }
 
         #[test]
+        fn rejects_variant_map_key() {
+            let type_json = r#"{"type":"map","keyType":"variant","valueType":"string","valueContainsNull":true}"#;
+            let cols = vec![complex_col("bad", "MAP", type_json, 0)];
+            let err = arrow_schema_from_uc_columns(&cols).unwrap_err();
+            assert!(matches!(err, SchemaError::Invalid(_)), "got {:?}", err);
+        }
+
+        #[test]
         fn rejects_nested_arrays() {
             let type_json = r#"{"type":"array","elementType":{"type":"array","elementType":"integer","containsNull":true},"containsNull":true}"#;
             let cols = vec![complex_col("nested", "ARRAY", type_json, 0)];
@@ -1447,15 +1523,35 @@ mod tests {
         }
 
         #[test]
-        fn nested_variant_maps_to_large_utf8() {
+        fn nested_variant_uses_binary_struct() {
             let type_json = r#"{
                 "type":"struct",
-                "fields":[{"name":"v","type":"variant","nullable":true,"metadata":{}}]
+                "fields":[
+                    {"name":"v","type":"variant","nullable":true,"metadata":{}},
+                    {"name":"tags","type":{"type":"array","elementType":"variant","containsNull":true},"nullable":true,"metadata":{}},
+                    {"name":"props","type":{"type":"map","keyType":"string","valueType":"variant","valueContainsNull":true},"nullable":true,"metadata":{}}
+                ]
             }"#;
             let cols = vec![complex_col("payload", "STRUCT", type_json, 0)];
             let s = arrow_schema_from_uc_columns(&cols).unwrap();
             match arrow_field(&s, "payload").data_type() {
-                DataType::Struct(fs) => assert_eq!(fs[0].data_type(), &DataType::LargeUtf8),
+                DataType::Struct(fs) => {
+                    assert_variant_data_type(fs[0].data_type());
+                    match fs[1].data_type() {
+                        DataType::List(item) => assert_variant_data_type(item.data_type()),
+                        other => panic!("expected List, got {:?}", other),
+                    }
+                    match fs[2].data_type() {
+                        DataType::Map(entries, _) => match entries.data_type() {
+                            DataType::Struct(kv) => {
+                                assert_eq!(kv[0].data_type(), &DataType::LargeUtf8);
+                                assert_variant_data_type(kv[1].data_type());
+                            }
+                            other => panic!("expected Struct inside Map, got {:?}", other),
+                        },
+                        other => panic!("expected Map, got {:?}", other),
+                    }
+                }
                 other => panic!("expected Struct, got {:?}", other),
             }
         }

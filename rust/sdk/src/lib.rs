@@ -83,6 +83,8 @@ pub use record_types::{
     ProtoBytes, ProtoEncodedRecord, ProtoMessage,
 };
 pub use sdk::{ZerobusSdk, DEFAULT_SDK_IDENTIFIER};
+#[cfg(feature = "testing")]
+pub use stream::CallbackHandlerHarness;
 pub use stream::ZerobusStream;
 pub use stream_configuration::StreamConfigurationOptions;
 #[cfg(feature = "testing")]
