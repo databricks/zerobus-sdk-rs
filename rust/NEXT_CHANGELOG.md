@@ -13,6 +13,13 @@
 
 ### Bug Fixes
 
+- Fixed `VARIANT` columns in Arrow Flight schemas generated from Unity Catalog
+  metadata. `arrow_schema_from_uc_columns` / `arrow_schema_from_uc_schema` now
+  project `VARIANT` as `Struct<metadata: LargeBinary not null, value:
+  LargeBinary not null>` instead of `LargeUtf8`, matching the server's expected
+  binary variant representation. Protobuf descriptor generation continues to
+  expose `VARIANT` as `string`.
+
 ### Documentation
 
 ### Internal Changes
