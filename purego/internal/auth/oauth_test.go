@@ -188,6 +188,45 @@ func TestOAuthTokenProviderConnectionRefusedIsRetryable(t *testing.T) {
 	}
 }
 
+func TestOAuthTokenProviderClientTimeoutIsNonRetryable(t *testing.T) {
+	// A handler slower than the client's Timeout drives Do() into a client-level
+	// timeout. http.Client.Timeout surfaces as an error wrapping
+	// context.DeadlineExceeded, so it is classified non-retryable (like the
+	// caller's own ctx deadline) rather than as a transient network timeout —
+	// the cache must not mask it with a stale token.
+	// release is closed before ts.Close() so the parked handler returns and Close
+	// does not block waiting on the outstanding request.
+	release := make(chan struct{})
+	srv := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		select {
+		case <-release:
+		case <-r.Context().Done():
+		}
+	})
+	ts := httptest.NewServer(srv)
+	defer ts.Close()
+	defer close(release)
+
+	client := ts.Client()
+	client.Timeout = 50 * time.Millisecond
+
+	p, err := NewOAuthTokenProvider("id", "secret", "https://ws.zerobus.databricks.com", ts.URL,
+		WithHTTPClient(client),
+	)
+	if err != nil {
+		t.Fatalf("NewOAuthTokenProvider: %v", err)
+	}
+	_, err = p.Token(context.Background(), "c.s.t")
+	if err == nil {
+		t.Fatal("want error for client timeout, got nil")
+	}
+	var te *TokenError
+	if !asTokenError(err, &te) || te.IsRetryable() {
+		t.Fatalf("want non-retryable TokenError for client timeout, got %T (retryable=%v): %v",
+			err, te != nil && te.IsRetryable(), err)
+	}
+}
+
 func TestOAuthTokenProvider429IsNonRetryable(t *testing.T) {
 	srv := &tokenServer{statusCode: http.StatusTooManyRequests}
 	p, ts := newTestProvider(t, srv, "cat.sch.tbl")
@@ -484,6 +523,62 @@ func TestOAuthTokenProviderFetchTokenBypassesCache(t *testing.T) {
 	}
 	if got := srv.calls.Load(); got != 2 {
 		t.Fatalf("Token after FetchToken should hit cache (still 2 calls), got %d", got)
+	}
+}
+
+func TestOAuthHeadersProviderGetHeadersShape(t *testing.T) {
+	srv := &tokenServer{accessToken: "tok", expiresIn: 3600}
+	ts := httptest.NewServer(srv)
+	defer ts.Close()
+
+	p, err := NewOAuthHeadersProvider("id", "secret", "https://ws.zerobus.databricks.com", ts.URL,
+		WithHTTPClient(ts.Client()),
+	)
+	if err != nil {
+		t.Fatalf("NewOAuthHeadersProvider: %v", err)
+	}
+	h, err := p.GetHeaders(context.Background(), "c.s.t")
+	if err != nil {
+		t.Fatalf("GetHeaders: %v", err)
+	}
+	if h["authorization"] != "Bearer tok" {
+		t.Fatalf("want %q, got %q", "Bearer tok", h["authorization"])
+	}
+	if h["x-databricks-zerobus-table-name"] != "c.s.t" {
+		t.Fatalf("want table header %q, got %q", "c.s.t", h["x-databricks-zerobus-table-name"])
+	}
+}
+
+func TestOAuthHeadersProviderInvalidateForcesRemint(t *testing.T) {
+	srv := &tokenServer{accessToken: "tok", expiresIn: 3600}
+	ts := httptest.NewServer(srv)
+	defer ts.Close()
+
+	p, err := NewOAuthHeadersProvider("id", "secret", "https://ws.zerobus.databricks.com", ts.URL,
+		WithHTTPClient(ts.Client()),
+	)
+	if err != nil {
+		t.Fatalf("NewOAuthHeadersProvider: %v", err)
+	}
+
+	if _, err := p.GetHeaders(context.Background(), "c.s.t"); err != nil {
+		t.Fatalf("GetHeaders: %v", err)
+	}
+	// Second call hits the cache (still one mint).
+	if _, err := p.GetHeaders(context.Background(), "c.s.t"); err != nil {
+		t.Fatalf("GetHeaders: %v", err)
+	}
+	if got := srv.calls.Load(); got != 1 {
+		t.Fatalf("want 1 mint before invalidate, got %d", got)
+	}
+
+	// Invalidate must delegate to the underlying cache, forcing a re-mint.
+	p.Invalidate(context.Background(), "c.s.t")
+	if _, err := p.GetHeaders(context.Background(), "c.s.t"); err != nil {
+		t.Fatalf("GetHeaders after Invalidate: %v", err)
+	}
+	if got := srv.calls.Load(); got != 2 {
+		t.Fatalf("want 2 mints after invalidate, got %d", got)
 	}
 }
 

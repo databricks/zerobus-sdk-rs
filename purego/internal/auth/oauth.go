@@ -35,7 +35,6 @@ type OAuthTokenProvider struct {
 	clientID     string
 	clientSecret string
 	workspaceID  string
-	zerobusHost  string
 	ucEndpoint   string // e.g. "https://workspace.databricks.com"
 
 	cache  *tokenCache
@@ -135,7 +134,7 @@ func NewOAuthTokenProvider(
 	if clientSecret == "" {
 		return nil, fmt.Errorf("auth: oauth: clientSecret is required")
 	}
-	workspaceID, zerobusHost, err := deriveWorkspaceIDFromEndpoint(zerobusEndpoint)
+	workspaceID, err := deriveWorkspaceIDFromEndpoint(zerobusEndpoint)
 	if err != nil {
 		return nil, fmt.Errorf("auth: oauth: %w", err)
 	}
@@ -144,7 +143,6 @@ func NewOAuthTokenProvider(
 		clientID:     clientID,
 		clientSecret: clientSecret,
 		workspaceID:  workspaceID,
-		zerobusHost:  zerobusHost,
 		ucEndpoint:   ucEndpoint,
 		client:       &http.Client{Timeout: 30 * time.Second},
 		logger:       slog.New(slog.DiscardHandler),
@@ -244,12 +242,12 @@ func (p *OAuthTokenProvider) mint(ctx context.Context, tableName string, reason 
 // Invalidate drops the cached token for this provider's table so the next
 // Token call re-mints from Unity Catalog. Call this when the server rejects
 // the token with an authentication error.
+//
+// The table name is not re-validated here: it was validated at stream open, and
+// invalidate is a no-op for a key with no cached entry, so an unrecognized name
+// simply clears nothing rather than failing silently.
 func (p *OAuthTokenProvider) Invalidate(_ context.Context, tableName string) {
-	tableName = strings.TrimSpace(tableName)
-	if err := validateTableName(tableName); err != nil {
-		return
-	}
-	p.cache.invalidate(p.clientID, p.clientSecret, tableName)
+	p.cache.invalidate(p.clientID, p.clientSecret, strings.TrimSpace(tableName))
 }
 
 // fetchToken performs the OAuth 2.0 client credentials request against Unity
@@ -417,15 +415,18 @@ func classifyHTTPError(resp *http.Response) error {
 func isHTTPSuccess(code int) bool { return code >= 200 && code < 300 }
 
 // isRetryableTransportError reports whether a transport-level error from the
-// token request is transient and safe to retry. Only timeouts and connection
-// failures qualify; a cancelled context is the caller's own signal, and any
-// other transport error is treated as non-retryable so a genuine failure isn't
-// masked by a stale cached token.
+// token request is transient and safe to retry. Network-level timeouts and
+// connection failures qualify; any other transport error is treated as
+// non-retryable so a genuine failure isn't masked by a stale cached token.
 func isRetryableTransportError(err error) bool {
+	// A context cancel/deadline is the caller's own signal, not a transient
+	// server fault. http.Client.Timeout also surfaces as a wrapped
+	// DeadlineExceeded, so it is caught here (non-retryable) before the
+	// net.Error check below.
 	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 		return false
 	}
-	// Timeouts (client Timeout, dial/read deadlines) are transient.
+	// Network-level timeouts (dial/read deadlines, i/o timeout) are transient.
 	var ne net.Error
 	if errors.As(err, &ne) && ne.Timeout() {
 		return true
@@ -493,27 +494,27 @@ func isLoopbackHost(host string) bool {
 
 // deriveWorkspaceIDFromEndpoint extracts workspace ID from Zerobus endpoint
 // host by taking the first DNS label, matching Rust SDK behavior.
-func deriveWorkspaceIDFromEndpoint(endpoint string) (workspaceID, host string, err error) {
+func deriveWorkspaceIDFromEndpoint(endpoint string) (workspaceID string, err error) {
 	endpoint = strings.TrimSpace(endpoint)
 	if endpoint == "" {
-		return "", "", fmt.Errorf("zerobusEndpoint is required")
+		return "", fmt.Errorf("zerobusEndpoint is required")
 	}
 	if !strings.HasPrefix(endpoint, "https://") && !strings.HasPrefix(endpoint, "http://") {
 		endpoint = "https://" + endpoint
 	}
 	u, err := url.Parse(endpoint)
 	if err != nil {
-		return "", "", fmt.Errorf("zerobusEndpoint is not a valid URL: %w", err)
+		return "", fmt.Errorf("zerobusEndpoint is not a valid URL: %w", err)
 	}
-	host = u.Hostname()
+	host := u.Hostname()
 	if host == "" {
-		return "", "", fmt.Errorf("zerobusEndpoint has no host: %q", endpoint)
+		return "", fmt.Errorf("zerobusEndpoint has no host: %q", endpoint)
 	}
 	workspaceID, _, _ = strings.Cut(host, ".")
 	if workspaceID == "" {
-		return "", "", fmt.Errorf("failed to extract workspaceID from zerobusEndpoint host %q", host)
+		return "", fmt.Errorf("failed to extract workspaceID from zerobusEndpoint host %q", host)
 	}
-	return workspaceID, host, nil
+	return workspaceID, nil
 }
 
 // validateTableName checks that s is a non-empty three-part dotted name.

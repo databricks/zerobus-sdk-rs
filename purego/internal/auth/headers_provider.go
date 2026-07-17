@@ -1,9 +1,10 @@
 // Package auth provides authentication for the Zerobus pure-Go SDK.
 //
 // Authentication is expressed through [HeadersProvider], which supplies the gRPC
-// metadata headers for a stream. [StaticHeadersProvider] returns a fixed headers
-// map, for tests or externally managed credentials; a per-table token cache in
-// this package supports OAuth-based providers built on top of this interface.
+// metadata headers for a stream. Two implementations are provided:
+// [OAuthHeadersProvider] mints Unity Catalog OAuth 2.0 tokens per table (backed
+// by [OAuthTokenProvider]'s cache), and [StaticHeadersProvider] returns a fixed
+// headers map for tests or externally managed credentials.
 package auth
 
 import (
@@ -26,12 +27,16 @@ type HeadersProvider interface {
 	Invalidate(ctx context.Context, tableName string)
 }
 
-// OAuthHeadersProvider bridges OAuth token minting into headers-provider shape.
+// OAuthHeadersProvider adapts an [OAuthTokenProvider] to the [HeadersProvider]
+// seam: it mints per-table Unity Catalog OAuth tokens on demand and formats them
+// as gRPC auth metadata. The token cache and OAuth options are configured at
+// construction via [NewOAuthHeadersProvider].
 type OAuthHeadersProvider struct {
 	tokenProvider *OAuthTokenProvider
 }
 
-// NewOAuthHeadersProvider creates an OAuth-backed headers provider.
+// NewOAuthHeadersProvider creates an OAuth-backed headers provider. The
+// arguments and options are those of [NewOAuthTokenProvider].
 func NewOAuthHeadersProvider(
 	clientID, clientSecret, zerobusEndpoint, ucEndpoint string,
 	opts ...OAuthOption,
@@ -43,7 +48,10 @@ func NewOAuthHeadersProvider(
 	return &OAuthHeadersProvider{tokenProvider: p}, nil
 }
 
-// GetHeaders returns Zerobus auth headers for tableName.
+// GetHeaders mints (or serves a cached) token for tableName and returns it as a
+// "Bearer" authorization header. It may block on the token mint, bounded by ctx.
+// The table-name header is included for cross-SDK parity; transport open treats
+// its own stream-open TableName as authoritative.
 func (p *OAuthHeadersProvider) GetHeaders(ctx context.Context, tableName string) (map[string]string, error) {
 	token, err := p.tokenProvider.Token(ctx, tableName)
 	if err != nil {
@@ -55,7 +63,8 @@ func (p *OAuthHeadersProvider) GetHeaders(ctx context.Context, tableName string)
 	}, nil
 }
 
-// Invalidate drops the cached token for tableName.
+// Invalidate drops the cached token for tableName so the next GetHeaders
+// re-mints. Transport open calls this on a server auth rejection.
 func (p *OAuthHeadersProvider) Invalidate(ctx context.Context, tableName string) {
 	p.tokenProvider.Invalidate(ctx, tableName)
 }
