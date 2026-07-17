@@ -38,28 +38,19 @@ int main() {
   const std::string table_name = env("ZEROBUS_TABLE_NAME");
   const std::string client_id = env("DATABRICKS_CLIENT_ID");
   const std::string client_secret = env("DATABRICKS_CLIENT_SECRET");
+  // Required too: without a record matching the table, flush() would fail with
+  // a schema mismatch, so a half-configured env should skip rather than go red.
+  const std::string record_json = env("ZEROBUS_TEST_RECORD_JSON");
 
-  // Skip (not fail) when any credential is missing.
+  // Skip (not fail) when any required variable is missing.
   if (endpoint.empty() || workspace_url.empty() || table_name.empty() ||
-      client_id.empty() || client_secret.empty()) {
+      client_id.empty() || client_secret.empty() || record_json.empty()) {
     std::printf(
         "SKIP integration_test: set ZEROBUS_SERVER_ENDPOINT, "
         "DATABRICKS_WORKSPACE_URL, ZEROBUS_TABLE_NAME, DATABRICKS_CLIENT_ID, "
-        "and DATABRICKS_CLIENT_SECRET to run it.\n");
+        "DATABRICKS_CLIENT_SECRET, and ZEROBUS_TEST_RECORD_JSON (a record "
+        "matching ZEROBUS_TABLE_NAME) to run it.\n");
     return 0;
-  }
-
-  std::string record_json = env("ZEROBUS_TEST_RECORD_JSON");
-  if (record_json.empty()) {
-    // Fallback record for the common {id, payload} shape. It almost certainly
-    // won't match an arbitrary table's schema, in which case the run fails at
-    // flush() (ingest only queues) with a schema-mismatch error from the
-    // server. Set ZEROBUS_TEST_RECORD_JSON to a record matching
-    // ZEROBUS_TABLE_NAME.
-    record_json = R"({"id": 1, "payload": "zerobus-cpp-integration"})";
-    std::printf(
-        "integration_test: ZEROBUS_TEST_RECORD_JSON unset, using the default "
-        "{id, payload} record; set it to match your table if flush() fails.\n");
   }
 
   try {

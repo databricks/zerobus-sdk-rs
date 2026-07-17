@@ -25,6 +25,10 @@ zerobus_add_test(ack_callback_test)
 zerobus_add_test(error_test)
 zerobus_add_test(record_test)
 zerobus_add_test(version_test)
+# Inject the CMake project version so the test can assert version() against
+# project(... VERSION ...), the release source of truth.
+target_compile_definitions(version_test
+    PRIVATE ZEROBUS_CMAKE_PROJECT_VERSION="${PROJECT_VERSION}")
 zerobus_add_test(proto_schema_test)
 zerobus_add_test(headers_callback_test)
 zerobus_add_test(sdk_test)

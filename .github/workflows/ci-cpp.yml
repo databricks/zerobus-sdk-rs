@@ -97,10 +97,11 @@ jobs:
 
       - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
 
-      # Build + run the suite under ThreadSanitizer. This is aimed at the
-      # concurrency contracts the wrapper exposes (e.g. concurrent readers on a
-      # shared ProtoSchema); it catches data races the ASan job cannot. Debug
-      # build for readable stack traces.
+      # Build + run the suite under ThreadSanitizer as a concurrent-liveness /
+      # consistency smoke test of the wrapper's concurrency contracts (e.g.
+      # concurrent readers on a shared ProtoSchema). Note: the FFI is a plain
+      # `cargo build --release`, so the Rust core is not TSan-instrumented; this
+      # job watches only the C++ side. Debug build for readable stack traces.
       - name: Build + test with ThreadSanitizer
         env:
           # Fail the job on the first race rather than merely printing it.

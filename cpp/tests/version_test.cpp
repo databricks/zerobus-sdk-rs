@@ -1,5 +1,6 @@
-// Pins zerobus::version() to the ZEROBUS_CPP_VERSION macro, catching an
-// accessor/macro divergence.
+// Pins zerobus::version() to the CMake project(... VERSION ...) — the release
+// source of truth, injected as ZEROBUS_CMAKE_PROJECT_VERSION — and to the
+// ZEROBUS_CPP_VERSION macro, catching an accessor/macro/CMake divergence.
 
 #include "zerobus/version.hpp"
 
@@ -21,6 +22,13 @@ int main() {
   if (std::strcmp(zerobus::version(), ZEROBUS_CPP_VERSION) != 0) {
     fail("version() does not match ZEROBUS_CPP_VERSION");
   }
+
+#ifdef ZEROBUS_CMAKE_PROJECT_VERSION
+  // The runtime version must equal the CMake project(VERSION).
+  if (std::strcmp(zerobus::version(), ZEROBUS_CMAKE_PROJECT_VERSION) != 0) {
+    fail("version() does not match CMake project(VERSION)");
+  }
+#endif
 
   // Guard against a blank define.
   if (std::strlen(zerobus::version()) == 0) {
