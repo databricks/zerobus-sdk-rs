@@ -57,7 +57,9 @@ Run from `cpp/`:
   `rust-src` and build the C++ side with clang to match the LLVM sanitizer
   runtime (`CLANG_CC`/`CLANG_CXX`, default `clang`/`clang++`); GCC can't resolve
   the instrumented archive's runtime symbols. `undefined` uses the default
-  compiler and a plain FFI build.
+  compiler and a plain FFI build. Sanitizer builds use their own build dir
+  (`build-<sanitizer>`), so they don't clash with a normal `build/` (CMake
+  caches the compiler per build dir).
 
 CMake builds the FFI library from local Rust source by default
 (`cargo build --release` in `rust/ffi`). To link a prebuilt/vendored library

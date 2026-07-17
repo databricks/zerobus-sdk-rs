@@ -38,11 +38,32 @@ else()
   # need a --target (which relocates the archive under target/<triple>/). ASan
   # and TSan map to the sanitizer runtime; other values (e.g. undefined) fall
   # back to a plain release build.
+  # asan/tsan instrument the Rust core too; other values (e.g. undefined) use a
+  # plain release build.
+  if(ZEROBUS_SANITIZE STREQUAL "thread" OR ZEROBUS_SANITIZE STREQUAL "address")
+    set(_zb_ffi_instrumented TRUE)
+  else()
+    set(_zb_ffi_instrumented FALSE)
+  endif()
+
   set(_zb_cargo "${CARGO_EXECUTABLE}")
   set(_zb_cargo_flags "")
   set(_zb_target_dir "${ZEROBUS_RUST_TARGET_DIR}")
   set(_zb_ffi_lib "${ZEROBUS_RUST_TARGET_DIR}/release/${_zb_ffi_lib_name}")
-  if(ZEROBUS_SANITIZE STREQUAL "thread" OR ZEROBUS_SANITIZE STREQUAL "address")
+  if(_zb_ffi_instrumented)
+    # Instrument the Rust core — otherwise TSan/ASan only watch the thin C++
+    # wrapper and miss races/UAF inside the FFI, where the real work runs.
+    # -Zsanitizer + -Zbuild-std are nightly-only and need a --target (which
+    # relocates the archive under target/<triple>/). +nightly requires cargo to
+    # be the rustup proxy; fail clearly if nightly is unavailable.
+    execute_process(COMMAND "${CARGO_EXECUTABLE}" +nightly --version
+        RESULT_VARIABLE _zb_nightly_rc OUTPUT_QUIET ERROR_QUIET)
+    if(NOT _zb_nightly_rc EQUAL 0)
+      message(FATAL_ERROR
+          "ZEROBUS_SANITIZE=${ZEROBUS_SANITIZE} needs a nightly toolchain with "
+          "rust-src via rustup (cargo +nightly). Install: rustup toolchain "
+          "install nightly && rustup component add rust-src --toolchain nightly")
+    endif()
     execute_process(COMMAND "${CARGO_EXECUTABLE}" -vV
         OUTPUT_VARIABLE _zb_rustc_v OUTPUT_STRIP_TRAILING_WHITESPACE)
     string(REGEX MATCH "host: ([^\n]+)" _zb_host_match "${_zb_rustc_v}")
@@ -75,7 +96,7 @@ else()
 
   # Instrumented builds pass RUSTFLAGS via the environment so they don't leak
   # into unrelated cargo invocations.
-  if(ZEROBUS_SANITIZE STREQUAL "thread" OR ZEROBUS_SANITIZE STREQUAL "address")
+  if(_zb_ffi_instrumented)
     set(_zb_build_cmd ${CMAKE_COMMAND} -E env
         "RUSTFLAGS=-Zsanitizer=${ZEROBUS_SANITIZE}"
         ${_zb_cargo} build ${_zb_cargo_flags} --release)
@@ -88,7 +109,7 @@ else()
       COMMAND ${_zb_build_cmd}
       DEPENDS ${_zb_ffi_rust_sources}
       WORKING_DIRECTORY "${ZEROBUS_FFI_CRATE_DIR}"
-      COMMENT "Building Zerobus C FFI (cargo build --release)"
+      COMMENT "Building Zerobus C FFI"
       VERBATIM)
   add_custom_target(zerobus_ffi_build DEPENDS "${_zb_ffi_lib}")
 
