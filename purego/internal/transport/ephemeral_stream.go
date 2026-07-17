@@ -178,6 +178,26 @@ func confirmCreateStream(resp *zerobuspb.EphemeralStreamResponse) (string, error
 	return id, nil
 }
 
+// StreamRPC is the wire interface that Stream wraps. It is satisfied by the
+// generated gRPC bidirectional streaming client and by test fakes.
+type StreamRPC interface {
+	Send(*zerobuspb.EphemeralStreamRequest) error
+	Recv() (*zerobuspb.EphemeralStreamResponse, error)
+	CloseSend() error
+}
+
+// NewStreamFromRPC wraps an already-established RPC as a Stream, skipping the
+// handshake. Intended for tests that supply a fake RPC implementation.
+// Close calls CloseSend on the underlying RPC so fake implementations that
+// block in Recv on a channel get an io.EOF and unblock.
+func NewStreamFromRPC(rpc StreamRPC) *Stream {
+	s := &Stream{}
+	s.rpc = rpc
+	s.cancel = func() { _ = rpc.CloseSend() }
+	s.setID("fake-stream")
+	return s
+}
+
 // ID returns the server-assigned stream identifier from the handshake.
 func (s *Stream) ID() string { return s.name() }
 
