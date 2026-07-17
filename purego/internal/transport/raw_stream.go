@@ -10,15 +10,23 @@ import (
 	"time"
 )
 
-// defaultHandshakeTimeout bounds the open attempt when the caller's context has
-// no deadline, so Open can't hang if the server half-opens the stream.
-const defaultHandshakeTimeout = 15 * time.Second
+// defaultHeadersTimeout bounds header resolution during Open when the caller's
+// context has no deadline. A var so tests can shrink it via export_test.go;
+// tests that override it therefore must not call t.Parallel().
+var defaultHeadersTimeout = 15 * time.Second
+
+// defaultHandshakeTimeout bounds the create-stream handshake during Open when
+// the caller's context has no deadline, so Open can't hang if the server
+// half-opens the stream. A var so tests can shrink it via export_test.go;
+// tests that override it therefore must not call t.Parallel().
+var defaultHandshakeTimeout = 15 * time.Second
 
 // defaultDrainTimeout bounds gracefulClose's drain-to-EOF when the caller's
 // context has no deadline, so it can't hang on an unresponsive server. This caps
 // only the clean-close wait (letting the server send END_STREAM rather than an
 // abrupt reset), not any ack wait — ack handling lands in a later layer. A var so
-// tests can shrink it.
+// tests can shrink it via export_test.go; tests that override it therefore must
+// not call t.Parallel().
 var defaultDrainTimeout = 500 * time.Millisecond
 
 // bidiRPC is the subset of a generated gRPC bidirectional streaming client that
