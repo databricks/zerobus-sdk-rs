@@ -100,6 +100,7 @@ type tokenCacheEntry struct {
 	mu       sync.Mutex
 	cached   *cachedToken // nil when no valid entry has been stored yet
 	inflight *tokenFlight // non-nil while a mint is in progress
+	minted   bool         // true after the first mint completes; guards pruning
 }
 
 // tokenFlight is a single in-progress mint. The leader records its resolved
@@ -248,6 +249,7 @@ func (c *tokenCache) tryGetOrFetch(
 
 	entry.mu.Lock()
 	entry.inflight = nil
+	entry.minted = true
 
 	if err != nil {
 		token, resErr := "", err
@@ -329,19 +331,19 @@ func (c *tokenCache) slot(key tokenKey) *tokenCacheEntry {
 // pruneExpiredLocked drops cache entries whose token is fully expired and that
 // have no mint in progress. Must be called with c.mu held.
 //
-// A goroutine can still hold a *tokenCacheEntry pointer that this prunes if the
-// entry's cached token is expired and no mint is in flight — a fresh slot() for
-// the same key would then create a second entry and briefly duplicate a mint.
-// The inflight guard keeps this from touching an in-progress mint, and the
-// window only opens for entries with no usable cached token (i.e. no-TTL / fully
-// expired), so in normal TTL'd operation a valid entry is never pruned.
+// Only entries that have completed at least one mint (minted == true) are
+// eligible for eviction: a freshly created entry (minted == false) could still
+// have a goroutine racing to acquire entry.mu and become its first leader.
+// Evicting it would cause a second entry to be created for the same key,
+// briefly duplicating a mint. The minted flag closes that window.
 func (c *tokenCache) pruneExpiredLocked() {
 	for k, e := range c.entries {
 		if e.mu.TryLock() {
-			// Never evict a mint in flight: its leader writes back to this entry.
-			expired := e.inflight == nil && (e.cached == nil || e.cached.isExpired())
+			// Never evict a mint in flight, and never evict an entry whose first
+			// mint has not yet completed — its leader writes back to this entry.
+			pruneable := e.minted && e.inflight == nil && (e.cached == nil || e.cached.isExpired())
 			e.mu.Unlock()
-			if expired {
+			if pruneable {
 				delete(c.entries, k)
 			}
 		}
