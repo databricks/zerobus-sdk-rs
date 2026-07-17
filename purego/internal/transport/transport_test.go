@@ -662,6 +662,52 @@ func TestOpenBoundsGetHeadersWithDeadline(t *testing.T) {
 	}
 }
 
+// delayedHeadersProvider sleeps before returning headers unless ctx is done.
+type delayedHeadersProvider struct {
+	delay time.Duration
+}
+
+func (p *delayedHeadersProvider) GetHeaders(ctx context.Context, _ string) (map[string]string, error) {
+	timer := time.NewTimer(p.delay)
+	defer timer.Stop()
+	select {
+	case <-timer.C:
+		return map[string]string{"authorization": "tok"}, nil
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
+}
+
+func (p *delayedHeadersProvider) Invalidate(context.Context, string) {}
+
+// TestOpenNoDeadlineUsesIndependentHeaderAndHandshakeBudgets verifies that with
+// no caller deadline, Open applies separate default budgets to GetHeaders and to
+// the handshake: a slow (but successful) GetHeaders call does not consume the
+// handshake budget.
+func TestOpenNoDeadlineUsesIndependentHeaderAndHandshakeBudgets(t *testing.T) {
+	defer transport.SetDefaultHeadersTimeout(60 * time.Millisecond)()
+	defer transport.SetDefaultHandshakeTimeout(60 * time.Millisecond)()
+
+	srv := &fakeServer{streamID: "s", seen: make(chan observed, 1), hangHandshake: true}
+	conn := dialFake(t, srv)
+
+	start := time.Now()
+	_, err := conn.Open(context.Background(), transport.StreamParams{
+		TableName:       "c.s.t",
+		RecordType:      zerobuspb.RecordType_JSON,
+		HeadersProvider: &delayedHeadersProvider{delay: 40 * time.Millisecond},
+	})
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("Open with hanging handshake and no caller deadline: err = %v, want DeadlineExceeded", err)
+	}
+	elapsed := time.Since(start)
+	// With split budgets this should be roughly headers delay + handshake timeout.
+	// A single shared budget would fail much earlier.
+	if elapsed < 80*time.Millisecond {
+		t.Fatalf("Open returned too quickly (%v); expected separate header and handshake budgets", elapsed)
+	}
+}
+
 func TestStreamCloseAbortsRecv(t *testing.T) {
 	srv := &fakeServer{streamID: "s", seen: make(chan observed, 1)}
 	conn := dialFake(t, srv)

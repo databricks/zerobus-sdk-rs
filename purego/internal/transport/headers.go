@@ -19,6 +19,10 @@ const (
 )
 
 // HeadersProvider provides gRPC metadata headers for stream authentication.
+//
+// Structurally identical to auth.HeadersProvider; defined here so transport (the
+// lowest layer) does not import auth, which would invert the dependency. An
+// *auth.StaticHeadersProvider satisfies this interface directly.
 type HeadersProvider interface {
 	// GetHeaders returns the metadata headers to attach to the stream. Called
 	// during Open before the RPC handshake starts. Keys are case-folded to
@@ -26,7 +30,7 @@ type HeadersProvider interface {
 	// returned for it is ignored in favor of the stream-open TableName.
 	//
 	// ctx bounds GetHeaders: it is the caller's Open context, or, when that
-	// context has no deadline, one bounded by defaultHandshakeTimeout. A
+	// context has no deadline, one bounded by defaultHeadersTimeout. A
 	// GetHeaders that blocks on network I/O (e.g. a token mint) is therefore
 	// cancelled once the open budget is exhausted rather than hanging forever.
 	GetHeaders(ctx context.Context, tableName string) (map[string]string, error)
