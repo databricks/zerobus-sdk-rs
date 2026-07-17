@@ -29,12 +29,12 @@ type item struct {
 // The semaphore enforces the MaxInflight cap: enqueue blocks once the cap is
 // reached and unblocks as acks arrive and discard releases permits.
 type buffer struct {
-	mu      sync.Mutex
-	cond    *sync.Cond
-	queue   []item // pending: enqueued but not yet observed by the sender
-	flight  []item // in-flight: observed by the sender, waiting for ack
-	closed  bool
-	sem     chan struct{} // capacity = maxInflight; held while item is in queue or flight
+	mu     sync.Mutex
+	cond   *sync.Cond
+	queue  []item // pending: enqueued but not yet observed by the sender
+	flight []item // in-flight: observed by the sender, waiting for ack
+	closed bool
+	sem    chan struct{} // capacity = maxInflight; held while item is in queue or flight
 }
 
 func newBuffer(maxInflight int) *buffer {

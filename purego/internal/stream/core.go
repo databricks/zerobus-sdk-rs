@@ -14,11 +14,11 @@ import (
 
 // Default config constants matching the Rust SDK (stream_options.rs).
 const (
-	DefaultMaxInflight         = 1_000_000
-	DefaultRecoveryRetries     = 4
-	DefaultRecoveryBackoff     = 2 * time.Second
-	DefaultFlushTimeout        = 5 * time.Minute
-	DefaultLackOfAckTimeout    = 60 * time.Second
+	DefaultMaxInflight      = 1_000_000
+	DefaultRecoveryRetries  = 4
+	DefaultRecoveryBackoff  = 2 * time.Second
+	DefaultFlushTimeout     = 5 * time.Minute
+	DefaultLackOfAckTimeout = 60 * time.Second
 )
 
 // Config holds per-stream configuration. All fields have sane defaults via
@@ -312,9 +312,9 @@ func (cs *CoreStream) runOnce(ctx context.Context) error {
 
 	// Wait for the first goroutine to signal; then tear both down.
 	cause := <-errCh
-	cancelSender()  // unblocks sender waiting on buf.next()
-	stream.Close()  // unblocks receiver waiting on Recv()
-	<-errCh         // drain second exit
+	cancelSender() // unblocks sender waiting on buf.next()
+	stream.Close() // unblocks receiver waiting on Recv()
+	<-errCh        // drain second exit
 	return cause
 }
 
