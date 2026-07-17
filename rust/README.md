@@ -106,12 +106,29 @@ See [`examples/README.md`](https://github.com/databricks/zerobus-sdk/blob/main/r
 zerobus_rust_sdk/
 ├── sdk/                                # Core SDK library
 │   ├── src/
-│   │   ├── lib.rs                      # Main SDK and stream implementation
+│   │   ├── lib.rs                      # Crate root and public re-exports
+│   │   ├── sdk.rs                      # Main SDK client implementation
 │   │   ├── builder/                    # Builder pattern for SDK initialization
+│   │   ├── stream/                     # Core gRPC ingestion stream
+│   │   │   ├── mod.rs                  # Stream module entry point
+│   │   │   └── grpc/                   # gRPC stream internals
+│   │   │       ├── mod.rs
+│   │   │       ├── connection.rs       # Connection setup and management
+│   │   │       ├── ingest.rs           # Record ingestion path
+│   │   │       ├── sender.rs           # Outbound request sender
+│   │   │       ├── receiver.rs         # Inbound response receiver
+│   │   │       ├── acks.rs             # Acknowledgement tracking
+│   │   │       ├── callback_handler.rs # Ack/error callback dispatch
+│   │   │       ├── supervisor.rs       # Stream supervision and reconnect
+│   │   │       ├── close.rs            # Graceful close handling
+│   │   │       └── types.rs            # Shared gRPC stream types
+│   │   ├── multiplexed_stream.rs       # Multiplexed stream implementation
 │   │   ├── default_token_factory.rs    # OAuth 2.0 token handling
+│   │   ├── token_cache.rs              # OAuth token caching
 │   │   ├── errors.rs                   # Error types and retryable logic
 │   │   ├── headers_provider.rs         # Trait for custom authentication headers
 │   │   ├── callbacks.rs                # Ack/error callback traits
+│   │   ├── client_warnings.rs          # Client-side warning diagnostics
 │   │   ├── record_types.rs             # Record encoding types (JSON, proto, raw)
 │   │   ├── schema.rs                   # Unity Catalog → proto/Arrow schema generation
 │   │   ├── stream_configuration.rs     # Stream options
@@ -130,7 +147,13 @@ zerobus_rust_sdk/
 │
 ├── ffi/                                # C FFI bindings for other languages
 │   ├── src/
-│   │   ├── lib.rs                      # FFI implementation
+│   │   ├── lib.rs                      # FFI entry point and exports
+│   │   ├── sdk.rs                      # SDK lifecycle FFI
+│   │   ├── stream.rs                   # Stream FFI
+│   │   ├── builder.rs                  # Builder FFI
+│   │   ├── proto_schema.rs             # Proto schema FFI
+│   │   ├── arrow.rs                    # Arrow Flight FFI (feature: arrow-flight)
+│   │   ├── common.rs                   # Shared FFI helpers
 │   │   └── tests.rs                    # FFI unit tests
 │   ├── zerobus.h                       # Generated C header
 │   ├── cbindgen.toml                   # Header generation config
@@ -139,14 +162,25 @@ zerobus_rust_sdk/
 │
 ├── jni/                                # JNI bindings for Java SDK
 │   ├── src/
-│   │   └── lib.rs                      # JNI implementation
+│   │   ├── lib.rs                      # JNI entry point
+│   │   ├── sdk.rs                      # SDK lifecycle JNI
+│   │   ├── stream.rs                   # Stream JNI
+│   │   ├── arrow_stream.rs             # Arrow Flight stream JNI (feature: arrow-flight)
+│   │   ├── async_bridge.rs             # Async runtime bridge
+│   │   ├── callbacks.rs                # Ack/error callback bridge
+│   │   ├── class_cache.rs              # Cached JNI class/method handles
+│   │   ├── errors.rs                   # Error mapping to Java exceptions
+│   │   ├── options.rs                  # Stream/SDK option parsing
+│   │   ├── runtime.rs                  # Tokio runtime management
+│   │   └── test_helper.rs              # JNI test helpers
 │   └── Cargo.toml
 │
 ├── tools/
 │   └── generate_files/                 # Schema generation CLI tool (package `tools`)
 │       ├── src/
 │       │   ├── main.rs                 # CLI entry point
-│       │   └── generate.rs             # Unity Catalog -> Proto conversion
+│       │   ├── generate.rs             # Unity Catalog -> Proto conversion
+│       │   └── token_factory.rs        # OAuth token factory for the CLI
 │       ├── README.md                   # Tool documentation
 │       └── Cargo.toml
 │
@@ -175,9 +209,17 @@ zerobus_rust_sdk/
 │   │   ├── rust_tests.rs               # Core SDK test suite
 │   │   ├── proxy_tests.rs              # HTTP proxy tests
 │   │   ├── arrow_tests.rs              # Arrow Flight test suite
+│   │   ├── multiplexed_stream_tests.rs # Multiplexed stream test suite
 │   │   └── utils.rs                    # Shared test utilities
 │   ├── build.rs
 │   └── Cargo.toml
+│
+├── third_party/
+│   └── arrow-flight/                   # Vendored arrow-flight fork (slice-aware batch-split patch)
+│       ├── src/                        # Fork sources (encode/decode/client/sql/…)
+│       ├── Cargo.toml
+│       ├── regen.sh                    # Re-sync script for the vendored fork
+│       └── README.md
 │
 ├── Cargo.toml                          # Workspace configuration
 └── README.md                           # This file
