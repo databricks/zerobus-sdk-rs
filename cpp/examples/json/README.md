@@ -41,8 +41,8 @@ Both open a JSON stream by setting `StreamOptions::record_type` to
 
 2. Export the OAuth secrets and run:
    ```bash
-   export ZEROBUS_CLIENT_ID="<your_databricks_client_id>"
-   export ZEROBUS_CLIENT_SECRET="<your_databricks_client_secret>"
+   export DATABRICKS_CLIENT_ID="<your_databricks_client_id>"
+   export DATABRICKS_CLIENT_SECRET="<your_databricks_client_secret>"
    ./build/examples/json_single
    ```
 
@@ -90,8 +90,8 @@ zerobus::Stream stream =
 
 2. Export the OAuth secrets and run:
    ```bash
-   export ZEROBUS_CLIENT_ID="<your_databricks_client_id>"
-   export ZEROBUS_CLIENT_SECRET="<your_databricks_client_secret>"
+   export DATABRICKS_CLIENT_ID="<your_databricks_client_id>"
+   export DATABRICKS_CLIENT_SECRET="<your_databricks_client_secret>"
    ./build/examples/json_batch
    ```
 

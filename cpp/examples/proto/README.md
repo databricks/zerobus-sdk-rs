@@ -65,8 +65,8 @@ etc.) are documented in the FFI README / `zerobus.h`.
 
 2. Export the secrets and the table metadata, then run:
    ```bash
-   export ZEROBUS_CLIENT_ID="<your_databricks_client_id>"
-   export ZEROBUS_CLIENT_SECRET="<your_databricks_client_secret>"
+   export DATABRICKS_CLIENT_ID="<your_databricks_client_id>"
+   export DATABRICKS_CLIENT_SECRET="<your_databricks_client_secret>"
    export ZEROBUS_UC_TABLE_JSON="$(curl -s \
      -H "Authorization: Bearer $DATABRICKS_TOKEN" \
      "$WORKSPACE_URL/api/2.1/unity-catalog/tables/<catalog.schema.orders>")"
@@ -120,8 +120,8 @@ zerobus::Stream stream =
 
 2. Export the secrets and the table metadata, then run:
    ```bash
-   export ZEROBUS_CLIENT_ID="<your_databricks_client_id>"
-   export ZEROBUS_CLIENT_SECRET="<your_databricks_client_secret>"
+   export DATABRICKS_CLIENT_ID="<your_databricks_client_id>"
+   export DATABRICKS_CLIENT_SECRET="<your_databricks_client_secret>"
    export ZEROBUS_UC_TABLE_JSON="$(curl -s \
      -H "Authorization: Bearer $DATABRICKS_TOKEN" \
      "$WORKSPACE_URL/api/2.1/unity-catalog/tables/<catalog.schema.orders>")"

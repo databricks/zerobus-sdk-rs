@@ -42,8 +42,8 @@ examples still build. On Debian/Ubuntu, install `libarrow-dev`.
 
 2. Export the OAuth secrets and run:
    ```bash
-   export ZEROBUS_CLIENT_ID="<your_databricks_client_id>"
-   export ZEROBUS_CLIENT_SECRET="<your_databricks_client_secret>"
+   export DATABRICKS_CLIENT_ID="<your_databricks_client_id>"
+   export DATABRICKS_CLIENT_SECRET="<your_databricks_client_secret>"
    ./build/examples/arrow_ingest
    ```
 
@@ -117,13 +117,15 @@ To ingest into your own table, change the Arrow schema and the array values to
 match its columns.
 
 1. **Update the Arrow schema** (must match the Delta table column names and types
-   exactly): Delta `STRING` → `arrow::utf8()`, `INT` → `arrow::int32()`,
+   exactly): Delta `STRING` → `arrow::large_utf8()`, `INT` → `arrow::int32()`,
    `DOUBLE` → `arrow::float64()`, `TIMESTAMP` →
-   `arrow::timestamp(arrow::TimeUnit::MICRO, "UTC")`.
+   `arrow::timestamp(arrow::TimeUnit::MICRO, "UTC")`. These mirror the canonical
+   Arrow schema the Arrow Flight server derives from Delta — note `STRING` maps to
+   `large_utf8` (64-bit offsets), not `utf8`.
    ```cpp
    std::shared_ptr<arrow::Schema> orders_schema() {
      return arrow::schema({
-         arrow::field("your_field_1", arrow::utf8()),
+         arrow::field("your_field_1", arrow::large_utf8()),
          arrow::field("your_field_2", arrow::int32()),
      });
    }

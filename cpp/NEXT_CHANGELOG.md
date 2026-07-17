@@ -27,6 +27,12 @@
 - Documented running the tests in `README.md`: the sanitizer runs
   (`make test SANITIZE=address` / `thread`) and the env-var-gated
   `integration_test` (which variables it needs and that it skips without them).
+- Added runnable examples under `examples/` covering all three record formats —
+  JSON, protobuf (dynamic schema built at runtime from Unity Catalog metadata via
+  `ProtoSchema::from_uc_json`, no `protoc` required), and Arrow Flight (Beta) —
+  each with a single-record and a batch variant. They build with the SDK via
+  `ZEROBUS_BUILD_EXAMPLES` (the Arrow example is skipped when Apache Arrow C++ is
+  not installed). Includes a top-level `examples/README.md` and per-format guides.
 
 ### Internal Changes
 

@@ -102,8 +102,8 @@ The two genuinely secret values are **not** in source; they are read from the
 environment at runtime, so no credential is ever baked in:
 
 ```bash
-export ZEROBUS_CLIENT_ID="<your_databricks_client_id>"
-export ZEROBUS_CLIENT_SECRET="<your_databricks_client_secret>"
+export DATABRICKS_CLIENT_ID="<your_databricks_client_id>"
+export DATABRICKS_CLIENT_SECRET="<your_databricks_client_secret>"
 ```
 
 The proto examples additionally read the Unity Catalog table metadata JSON from
@@ -118,7 +118,7 @@ export ZEROBUS_UC_TABLE_JSON="$(curl -s \
 **How to get these values:**
 - **kWorkspaceUrl** — your Databricks workspace URL (Unity Catalog endpoint).
 - **kTableName** — full table name in the form `catalog.schema.table`.
-- **ZEROBUS_CLIENT_ID / ZEROBUS_CLIENT_SECRET** — OAuth 2.0 credentials from your
+- **DATABRICKS_CLIENT_ID / DATABRICKS_CLIENT_SECRET** — OAuth 2.0 credentials from your
   service principal.
 - **kServerEndpoint** — Zerobus ingestion endpoint (usually
   `https://<shard-id>.zerobus.<region>.cloud.databricks.com`).
@@ -290,7 +290,7 @@ endpoint and workspace URL.
 ### `environment variable ... is not set`
 
 The example exits with code 2 before touching the SDK if a required environment
-variable is missing. Export `ZEROBUS_CLIENT_ID` and `ZEROBUS_CLIENT_SECRET` (and
+variable is missing. Export `DATABRICKS_CLIENT_ID` and `DATABRICKS_CLIENT_SECRET` (and
 `ZEROBUS_UC_TABLE_JSON` for the proto examples).
 
 ### Invalid token

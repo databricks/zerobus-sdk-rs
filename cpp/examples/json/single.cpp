@@ -14,8 +14,8 @@
 //   * The two OAuth secrets are read from the environment so no credential is
 //     ever baked into source:
 //
-//       export ZEROBUS_CLIENT_ID="<your_databricks_client_id>"
-//       export ZEROBUS_CLIENT_SECRET="<your_databricks_client_secret>"
+//       export DATABRICKS_CLIENT_ID="<your_databricks_client_id>"
+//       export DATABRICKS_CLIENT_SECRET="<your_databricks_client_secret>"
 //
 //       ./build/examples/json_single
 //
@@ -52,7 +52,7 @@ std::string require_env(const char* name) {
   const char* value = std::getenv(name);
   if (value == nullptr || *value == '\0') {
     std::cerr << "error: environment variable " << name << " is not set.\n"
-              << "Set ZEROBUS_CLIENT_ID and ZEROBUS_CLIENT_SECRET before "
+              << "Set DATABRICKS_CLIENT_ID and DATABRICKS_CLIENT_SECRET before "
                  "running this example.\n";
     std::exit(2);
   }
@@ -82,8 +82,8 @@ std::string make_order_json(int id, const std::string& customer,
 }  // namespace
 
 int main() {
-  const std::string client_id = require_env("ZEROBUS_CLIENT_ID");
-  const std::string client_secret = require_env("ZEROBUS_CLIENT_SECRET");
+  const std::string client_id = require_env("DATABRICKS_CLIENT_ID");
+  const std::string client_secret = require_env("DATABRICKS_CLIENT_SECRET");
 
   try {
     // 1. Build the SDK — an authenticated connection factory. TLS is on by

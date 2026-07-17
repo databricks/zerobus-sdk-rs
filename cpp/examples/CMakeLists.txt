@@ -4,8 +4,8 @@
 # Each example links the zerobus::zerobus target, which transitively pulls in
 # the Rust C FFI archive and the platform system libraries it needs.
 #
-# Every example reads its two OAuth secrets (ZEROBUS_CLIENT_ID /
-# ZEROBUS_CLIENT_SECRET) from the environment; the proto examples additionally
+# Every example reads its two OAuth secrets (DATABRICKS_CLIENT_ID /
+# DATABRICKS_CLIENT_SECRET) from the environment; the proto examples additionally
 # read the Unity Catalog table metadata JSON (ZEROBUS_UC_TABLE_JSON). All other
 # connection info is placeholder constants at the top of each source file. See
 # each file's header for the variables it expects and a sample invocation.

@@ -21,8 +21,8 @@
 //   * Edit the placeholder constants below to match your workspace and table.
 //   * The two OAuth secrets are read from the environment:
 //
-//       export ZEROBUS_CLIENT_ID="<your_databricks_client_id>"
-//       export ZEROBUS_CLIENT_SECRET="<your_databricks_client_secret>"
+//       export DATABRICKS_CLIENT_ID="<your_databricks_client_id>"
+//       export DATABRICKS_CLIENT_SECRET="<your_databricks_client_secret>"
 //
 //       ./build/examples/arrow_ingest
 //
@@ -69,7 +69,7 @@ std::string require_env(const char* name) {
   const char* value = std::getenv(name);
   if (value == nullptr || *value == '\0') {
     std::cerr << "error: environment variable " << name << " is not set.\n"
-              << "Set ZEROBUS_CLIENT_ID and ZEROBUS_CLIENT_SECRET before "
+              << "Set DATABRICKS_CLIENT_ID and DATABRICKS_CLIENT_SECRET before "
                  "running this example.\n";
     std::exit(2);
   }
@@ -84,7 +84,7 @@ std::int64_t now_micros() {
 
 // The Arrow schema must match the target Delta table's columns by name and
 // type. This mirrors the canonical Arrow schema the Databricks Arrow Flight
-// server derives from a Delta table: Delta STRING -> utf8, INT -> int32,
+// server derives from a Delta table: Delta STRING -> large_utf8, INT -> int32,
 // DOUBLE -> float64, TIMESTAMP -> timestamp(microsecond, "UTC"). The server
 // validates the record-batch schema on the first batch and fails fast with a
 // descriptive error on a mismatch.
@@ -92,11 +92,11 @@ std::shared_ptr<arrow::Schema> orders_schema() {
   auto utc_micros = arrow::timestamp(arrow::TimeUnit::MICRO, "UTC");
   return arrow::schema({
       arrow::field("id", arrow::int32()),
-      arrow::field("customer_name", arrow::utf8()),
-      arrow::field("product_name", arrow::utf8()),
+      arrow::field("customer_name", arrow::large_utf8()),
+      arrow::field("product_name", arrow::large_utf8()),
       arrow::field("quantity", arrow::int32()),
       arrow::field("price", arrow::float64()),
-      arrow::field("status", arrow::utf8()),
+      arrow::field("status", arrow::large_utf8()),
       arrow::field("created_at", utc_micros),
       arrow::field("updated_at", utc_micros),
   });
@@ -114,11 +114,11 @@ std::shared_ptr<arrow::RecordBatch> make_batch(
     const std::shared_ptr<arrow::Schema>& schema, int start_seed, int n,
     std::int64_t ts) {
   arrow::Int32Builder id_b;
-  arrow::StringBuilder customer_b;
-  arrow::StringBuilder product_b;
+  arrow::LargeStringBuilder customer_b;
+  arrow::LargeStringBuilder product_b;
   arrow::Int32Builder quantity_b;
   arrow::DoubleBuilder price_b;
-  arrow::StringBuilder status_b;
+  arrow::LargeStringBuilder status_b;
   arrow::TimestampBuilder created_b(schema->field(6)->type(),
                                     arrow::default_memory_pool());
   arrow::TimestampBuilder updated_b(schema->field(7)->type(),
@@ -188,8 +188,8 @@ std::vector<std::uint8_t> serialize_schema_ipc(
 }  // namespace
 
 int main() {
-  const std::string client_id = require_env("ZEROBUS_CLIENT_ID");
-  const std::string client_secret = require_env("ZEROBUS_CLIENT_SECRET");
+  const std::string client_id = require_env("DATABRICKS_CLIENT_ID");
+  const std::string client_secret = require_env("DATABRICKS_CLIENT_SECRET");
 
   try {
     // 1. Build the SDK.

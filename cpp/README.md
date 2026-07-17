@@ -38,8 +38,8 @@ make build        # configure + build the SDK and tests
 make test         # build + run the test suite
 ```
 
-(`make build` also builds an `examples/` directory once one is added; none
-ships yet.)
+(`make build` also builds the runnable examples under `examples/`; see
+[Examples](#examples).)
 
 Or drive CMake directly:
 
@@ -365,10 +365,15 @@ the FFI defaults.
 
 ## Examples
 
-Runnable examples will live under `examples/`, covering the three ingestion
-paths (JSON, dynamic proto, and static proto). Until they land, the
-[Quickstart](#quickstart) above demonstrates the JSON and dynamic-proto paths
-end to end.
+Runnable examples live under [`examples/`](examples/README.md), covering all
+three record formats — JSON, protobuf (dynamic schema from Unity Catalog), and
+Arrow Flight (Beta) — each with a single-record and a batch variant. Every
+example reads its OAuth secrets (`DATABRICKS_CLIENT_ID` /
+`DATABRICKS_CLIENT_SECRET`) from the environment and keeps its non-secret
+connection info as placeholder constants at the top of the source file. They
+build as part of the top-level CMake build (`ZEROBUS_BUILD_EXAMPLES`, on by
+default) into `build/examples/`. See the [examples README](examples/README.md)
+for setup and per-format guides.
 
 ## A note on credentials
 

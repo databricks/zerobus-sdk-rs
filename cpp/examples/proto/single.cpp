@@ -17,8 +17,8 @@
 //   * The two OAuth secrets and the Unity Catalog table metadata JSON are read
 //     from the environment so no credential is baked into source:
 //
-//       export ZEROBUS_CLIENT_ID="<your_databricks_client_id>"
-//       export ZEROBUS_CLIENT_SECRET="<your_databricks_client_secret>"
+//       export DATABRICKS_CLIENT_ID="<your_databricks_client_id>"
+//       export DATABRICKS_CLIENT_SECRET="<your_databricks_client_secret>"
 //       # JSON body of GET /api/2.1/unity-catalog/tables/{full_name}:
 //       export ZEROBUS_UC_TABLE_JSON="$(curl -s \
 //           -H "Authorization: Bearer $DATABRICKS_TOKEN" \
@@ -87,8 +87,8 @@ std::string make_order_json(int id, const std::string& customer,
 }  // namespace
 
 int main() {
-  const std::string client_id = require_env("ZEROBUS_CLIENT_ID");
-  const std::string client_secret = require_env("ZEROBUS_CLIENT_SECRET");
+  const std::string client_id = require_env("DATABRICKS_CLIENT_ID");
+  const std::string client_secret = require_env("DATABRICKS_CLIENT_SECRET");
   const std::string uc_table_json = require_env("ZEROBUS_UC_TABLE_JSON");
 
   try {
