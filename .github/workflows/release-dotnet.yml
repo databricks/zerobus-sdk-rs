@@ -1,0 +1,199 @@
+# Release .NET SDK
+# Triggered by tag dotnet/v* or manually with an FFI build run ID.
+# Downloads pre-built native FFI libraries, bundles them into the NuGet package,
+# and optionally publishes to NuGet.org.
+name: Release .NET
+
+on:
+  push:
+    tags:
+      - 'dotnet/v*'
+  workflow_dispatch:
+    inputs:
+      ffi-run-id:
+        description: 'Run ID of the release-ffi.yml build (required for manual runs)'
+        type: string
+        required: false
+        default: ''
+      publish-to-nuget:
+        description: 'Publish to NuGet.org (requires NUGET_API_KEY secret)'
+        type: boolean
+        default: false
+
+run-name: Release .NET SDK ${{ github.ref_name }}
+
+env:
+  DOTNET_CLI_TELEMETRY_OPTOUT: '1'
+  DOTNET_NOLOGO: '1'
+
+jobs:
+  # ─── Resolve FFI run ID (auto-detect on tag, use input on manual) ─
+  resolve-ffi:
+    name: Resolve FFI artifacts
+    runs-on: ubuntu-latest
+    outputs:
+      ffi-run-id: ${{ steps.resolve.outputs.ffi-run-id }}
+      package-version: ${{ steps.resolve.outputs.package-version }}
+    steps:
+      - name: Resolve FFI run ID and version
+        id: resolve
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          # Determine FFI run ID
+          if [[ -n "${{ inputs.ffi-run-id }}" ]]; then
+            FFI_RUN_ID="${{ inputs.ffi-run-id }}"
+          else
+            # Auto-detect: latest successful release-ffi workflow run
+            echo "Auto-detecting latest successful release-ffi run..."
+            FFI_RUN_ID=$(gh run list \
+              --repo "${{ github.repository }}" \
+              --workflow release-ffi.yml \
+              --status success \
+              --limit 1 \
+              --json databaseId \
+              --jq '.[0].databaseId')
+            if [[ -z "$FFI_RUN_ID" || "$FFI_RUN_ID" == "null" ]]; then
+              echo "::error::No successful release-ffi run found. Run it first or provide ffi-run-id."
+              exit 1
+            fi
+          fi
+          echo "ffi-run-id=$FFI_RUN_ID" >> "$GITHUB_OUTPUT"
+          echo "Using FFI run: $FFI_RUN_ID"
+
+          # Determine package version
+          if [[ "${{ github.ref_type }}" == "tag" ]]; then
+            # Extract version from tag: dotnet/v1.2.3 → 1.2.3
+            VERSION="${{ github.ref_name }}"
+            VERSION="${VERSION#dotnet/v}"
+          else
+            # Use csproj version for manual runs
+            VERSION=""
+          fi
+          echo "package-version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "Package version: ${VERSION:-<from csproj>}"
+
+  # ─── Download FFI native libraries from release-ffi workflow ─────
+  download-ffi:
+    name: Download FFI artifacts
+    needs: resolve-ffi
+    runs-on: ubuntu-latest
+    outputs:
+      ffi-artifacts-dir: ${{ steps.download.outputs.dir }}
+    steps:
+      - name: Download all FFI artifacts
+        id: download
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          mkdir -p ffi-artifacts
+          gh run download "${{ needs.resolve-ffi.outputs.ffi-run-id }}" \
+            --repo "${{ github.repository }}" \
+            --pattern 'ffi-*' \
+            --dir ffi-artifacts
+          echo "dir=$(pwd)/ffi-artifacts" >> "$GITHUB_OUTPUT"
+          echo "Downloaded artifacts:"
+          find ffi-artifacts -type f -exec ls -lh {} \;
+
+  # ─── Build package with native libs ─────────────────────────────
+  build:
+    name: Build & Pack NuGet
+    needs: [resolve-ffi, download-ffi]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4
+
+      - uses: actions/setup-dotnet@4d6c8fcf3c8baa263966f8c6d72e6f47f76c9559 # v5
+        with:
+          dotnet-version: '8.0.x'
+
+      # Map FFI artifact directories to NuGet runtime identifiers
+      # FFI naming:  linux-x86_64, linux-aarch64, darwin-x86_64, darwin-aarch64, windows-x86_64
+      # NuGet RIDs:  linux-x64,  linux-arm64,   osx-x64,      osx-arm64,      win-x64
+      - name: Place native libraries in runtimes/
+        working-directory: dotnet
+        run: |
+          set -euo pipefail
+          FFI_DIR="${{ needs.download-ffi.outputs.ffi-artifacts-dir }}"
+          RUNTIMES="src/Databricks.Zerobus/runtimes"
+
+          # Mapping: FFI artifact_dir → NuGet RID → native file name
+          declare -A MAP=(
+            ['linux-x86_64']='linux-x64:libzerobus_ffi.so'
+            ['linux-aarch64']='linux-arm64:libzerobus_ffi.so'
+            ['darwin-x86_64']='osx-x64:libzerobus_ffi.dylib'
+            ['darwin-aarch64']='osx-arm64:libzerobus_ffi.dylib'
+            ['windows-x86_64']='win-x64:zerobus_ffi.dll'
+          )
+
+          for ffi_dir in "${!MAP[@]}"; do
+            IFS=':' read -r rid libname <<< "${MAP[$ffi_dir]}"
+            src="$FFI_DIR/ffi-$ffi_dir/$libname"
+            dest="$RUNTIMES/$rid/native/$libname"
+
+            if [[ -f "$src" ]]; then
+              mkdir -p "$(dirname "$dest")"
+              cp -v "$src" "$dest"
+            else
+              echo "::warning::Native lib not found at $src (FFI dir: ffi-$ffi_dir)."
+              echo "::warning::macOS FFI builds currently produce only static libs (.a)."
+              echo "::warning::Dynamic libs for macOS require zigbuild with cdylib crate type."
+            fi
+          done
+
+          echo ""
+          echo "Final runtimes tree:"
+          find "$RUNTIMES" -type f -exec ls -lh {} \;
+
+      # Set version from tag, or keep csproj version for manual runs
+      - name: Set package version
+        if: needs.resolve-ffi.outputs.package-version != ''
+        working-directory: dotnet
+        run: |
+          csproj="src/Databricks.Zerobus/Databricks.Zerobus.csproj"
+          sed -i "s|<Version>[0-9.]*</Version>|<Version>${{ needs.resolve-ffi.outputs.package-version }}</Version>|" "$csproj"
+          grep '<Version>' "$csproj"
+
+      - name: Restore
+        working-directory: dotnet
+        run: dotnet restore --configfile NuGet.Config
+
+      - name: Build
+        working-directory: dotnet
+        run: dotnet build --no-restore --configuration Release
+
+      - name: Test
+        working-directory: dotnet
+        run: dotnet test --no-build --configuration Release
+
+      - name: Pack
+        working-directory: dotnet
+        run: dotnet pack src/Databricks.Zerobus --no-build --configuration Release -o artifacts
+
+      - name: Upload NuGet package
+        uses: actions/upload-artifact@b4b15ac8a8a6516bb370cc420f053ba1b865e6e4 # v4
+        with:
+          name: dotnet-nuget-release
+          path: dotnet/artifacts/*.nupkg
+          if-no-files-found: error
+
+  # TODO: Uncomment when NuGet.org publishing is configured
+  # ─── Publish to NuGet.org ───────────────────────────────────────
+  # publish:
+  #   name: Publish to NuGet.org
+  #   if: inputs.publish-to-nuget
+  #   needs: build
+  #   runs-on: ubuntu-latest
+  #   steps:
+  #     - name: Download package
+  #       uses: actions/download-artifact@fa0bad59f5c22a1081e21447fd2f06f1a42bb61b # v4
+  #       with:
+  #         name: dotnet-nuget-release
+  #         path: packages/
+  #
+  #     - name: Push to NuGet.org
+  #       run: |
+  #         dotnet nuget push packages/*.nupkg \
+  #           --api-key "${{ secrets.NUGET_API_KEY }}" \
+  #           --source https://api.nuget.org/v3/index.json \
+  #           --skip-duplicate

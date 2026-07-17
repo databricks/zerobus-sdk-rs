@@ -22,3 +22,21 @@ Thumbs.db
 # Databricks
 .databricks
 .cargo/
+
+# .NET
+**/bin/
+**/obj/
+*.nupkg
+*.snupkg
+*.DotSettings.user
+*.user
+*.suo
+TestResults/
+artifacts/
+dotnet/.dotnet/
+
+
+# .NET native libraries
+dotnet/src/Databricks.Zerobus/runtimes/*/native/*.dll
+dotnet/src/Databricks.Zerobus/runtimes/*/native/*.so
+dotnet/src/Databricks.Zerobus/runtimes/*/native/*.dylib
