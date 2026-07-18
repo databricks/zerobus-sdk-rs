@@ -68,7 +68,7 @@ internal struct CStreamConfigurationOptions
     public ulong ServerLackOfAckTimeoutMs;     // uint64_t
     public ulong FlushTimeoutMs;               // uint64_t
     public int RecordType;
-    public ulong StreamPausedMaxWaitTimeMs;    // uint64_t
+    public ulong StreamPausedMaxWaitTimeMs;     // uint64_t
     [MarshalAs(UnmanagedType.U1)]
     public bool HasStreamPausedMaxWaitTimeMs;
     public ulong CallbackMaxWaitTimeMs;        // uint64_t
@@ -92,5 +92,5 @@ internal struct CArrowStreamConfigurationOptions
     public ulong FlushTimeoutMs;               // uint64_t
     public ulong ConnectionTimeoutMs;          // uint64_t
     public int IpcCompression;                 // -1=None, 0=LZ4_FRAME, 1=ZSTD
-    public ulong StreamPausedMaxWaitTimeMs;    // uint64_t
+    public long StreamPausedMaxWaitTimeMs;     // int64_t
 }

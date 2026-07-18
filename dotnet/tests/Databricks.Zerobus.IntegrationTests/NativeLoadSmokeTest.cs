@@ -1,4 +1,5 @@
 using System.Runtime.InteropServices;
+using Databricks.Zerobus;
 using Databricks.Zerobus.Native;
 using Xunit;
 
@@ -46,6 +47,39 @@ public class NativeLoadSmokeTest
 
         var config = NativeMethods.zerobus_get_default_config();
         Assert.True(config.MaxInflightRequests > 0);
+    }
+
+    [Fact]
+    public void Defaults_MatchNativeConfig()
+    {
+        if (!NativeLibraryHelper.IsNativeLibraryAvailable())
+            return;
+
+        NativeLibraryResolver.EnsureLoaded();
+
+        var native = NativeMethods.zerobus_get_default_config();
+        Assert.Equal(StreamConfigurationOptions.DefaultMaxInflightRecords, (int)native.MaxInflightRequests);
+        Assert.Equal(StreamConfigurationOptions.DefaultRecovery, native.Recovery);
+        Assert.Equal(StreamConfigurationOptions.DefaultRecoveryTimeoutMs, (int)native.RecoveryTimeoutMs);
+        Assert.Equal(StreamConfigurationOptions.DefaultRecoveryBackoffMs, (int)native.RecoveryBackoffMs);
+        Assert.Equal(StreamConfigurationOptions.DefaultRecoveryRetries, (int)native.RecoveryRetries);
+        Assert.Equal(StreamConfigurationOptions.DefaultServerLackOfAckTimeoutMs, (int)native.ServerLackOfAckTimeoutMs);
+        Assert.Equal(StreamConfigurationOptions.DefaultFlushTimeoutMs, (int)native.FlushTimeoutMs);
+        Assert.True(native.HasCallbackMaxWaitTimeMs, "Native default should have callback max wait time set");
+        Assert.Equal(StreamConfigurationOptions.DefaultCallbackMaxWaitTimeMs, (long)native.CallbackMaxWaitTimeMs);
+    }
+
+    [Fact]
+    public void ArrowDefaults_MatchNativeConfig()
+    {
+        if (!NativeLibraryHelper.IsNativeLibraryAvailable())
+            return;
+
+        NativeLibraryResolver.EnsureLoaded();
+
+        var native = NativeMethods.zerobus_arrow_get_default_config();
+        Assert.Equal(ArrowStreamConfigurationOptions.DefaultMaxInflightBatches, (int)native.MaxInflightBatches);
+        Assert.Equal(ArrowStreamConfigurationOptions.DefaultStreamPausedMaxWaitTimeMs, native.StreamPausedMaxWaitTimeMs);
     }
 
     [Fact]

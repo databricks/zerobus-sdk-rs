@@ -42,6 +42,11 @@ public sealed class StreamConfigurationOptions
     public const int DefaultServerLackOfAckTimeoutMs = 60_000;
 
     /// <summary>
+    /// Default: 5,000 ms (5 seconds).
+    /// </summary>
+    public const int DefaultCallbackMaxWaitTimeMs = 5_000;
+
+    /// <summary>
     /// Maximum number of records that can be in flight.
     /// Higher values improve throughput but use more memory.
     /// </summary>
@@ -145,7 +150,7 @@ public sealed class StreamConfigurationOptions
         internal int FlushTimeoutMs { get; set; } = DefaultFlushTimeoutMs;
         internal int ServerLackOfAckTimeoutMs { get; set; } = DefaultServerLackOfAckTimeoutMs;
         internal long? StreamPausedMaxWaitTimeMs { get; set; }
-        internal long? CallbackMaxWaitTimeMs { get; set; }
+        internal long? CallbackMaxWaitTimeMs { get; set; } = DefaultCallbackMaxWaitTimeMs;
         internal AckOnAckDelegate? OnAck { get; set; }
         internal AckOnErrorDelegate? OnError { get; set; }
         internal object? AckUserData { get; set; }

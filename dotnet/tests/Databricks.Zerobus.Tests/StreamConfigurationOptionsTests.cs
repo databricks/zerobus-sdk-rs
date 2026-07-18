@@ -17,7 +17,7 @@ public class StreamConfigurationOptionsTests
         Assert.Equal(300_000, opts.FlushTimeoutMs);
         Assert.Equal(60_000, opts.ServerLackOfAckTimeoutMs);
         Assert.Null(opts.StreamPausedMaxWaitTimeMs);
-        Assert.Null(opts.CallbackMaxWaitTimeMs);
+        Assert.Equal(5_000, opts.CallbackMaxWaitTimeMs);
         Assert.Null(opts.OnAck);
         Assert.Null(opts.OnError);
     }
