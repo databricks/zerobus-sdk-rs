@@ -8,15 +8,20 @@ namespace Databricks.Zerobus.IntegrationTests;
 /// Each test runs against its own server on a unique port.
 /// Tests auto-skip when the native library (zerobus_ffi) is not available.
 /// </summary>
-[Collection("Integration")]
+// [Collection("Integration")]
 [Trait("Category", "Integration")]
-public class IntegrationTests : IAsyncLifetime
+public class IntegrationTests
 {
-    private readonly MockZerobusServer _server = new();
+    private MockZerobusServer _server = null!;
     private static readonly bool NativeAvailable = NativeLibraryHelper.IsNativeLibraryAvailable();
 
-    public async Task InitializeAsync() => await _server.StartAsync();
-    public Task DisposeAsync() => _server.DisposeAsync().AsTask();
+    public IntegrationTests()
+    {
+        if (NativeAvailable)
+        {
+            _server = new MockZerobusServer();
+        }
+    }
 
     // ================================================================
     // Stream Creation
@@ -27,7 +32,7 @@ public class IntegrationTests : IAsyncLifetime
     {
         if (!NativeAvailable) return;
 
-        using var sdk = CreateSdk();
+        using var sdk = await CreateSdkAsync();
         using var stream = await BuildJsonStream(sdk);
 
         Assert.NotNull(stream);
@@ -40,7 +45,7 @@ public class IntegrationTests : IAsyncLifetime
     {
         if (!NativeAvailable) return;
 
-        using var sdk = CreateSdk();
+        using var sdk = await CreateSdkAsync();
         using var stream = await BuildProtoStream(sdk);
 
         Assert.NotNull(stream);
@@ -55,7 +60,7 @@ public class IntegrationTests : IAsyncLifetime
     {
         if (!NativeAvailable) return;
 
-        using var sdk = CreateSdk();
+        using var sdk = await CreateSdkAsync();
         using var stream = await BuildJsonStream(sdk);
 
         long offset = stream.IngestRecord("{\"id\": 1, \"name\": \"test\"}");
@@ -67,7 +72,7 @@ public class IntegrationTests : IAsyncLifetime
     {
         if (!NativeAvailable) return;
 
-        using var sdk = CreateSdk();
+        using var sdk = await CreateSdkAsync();
         using var stream = await BuildProtoStream(sdk);
 
         var record = new FakeProtoMessage { Id = 42, Name = "test" };
@@ -84,7 +89,7 @@ public class IntegrationTests : IAsyncLifetime
     {
         if (!NativeAvailable) return;
 
-        using var sdk = CreateSdk();
+        using var sdk = await CreateSdkAsync();
         using var stream = await BuildJsonStream(sdk);
 
         var records = new[] { "{\"a\":1}", "{\"b\":2}", "{\"c\":3}" };
@@ -99,7 +104,7 @@ public class IntegrationTests : IAsyncLifetime
     {
         if (!NativeAvailable) return;
 
-        using var sdk = CreateSdk();
+        using var sdk = await CreateSdkAsync();
         using var stream = await BuildProtoStream(sdk);
 
         var records = new List<FakeProtoMessage>
@@ -123,7 +128,7 @@ public class IntegrationTests : IAsyncLifetime
     {
         if (!NativeAvailable) return;
 
-        using var sdk = CreateSdk();
+        using var sdk = await CreateSdkAsync();
         using var stream = await BuildJsonStream(sdk);
 
         stream.IngestRecord("{\"x\":1}");
@@ -135,7 +140,7 @@ public class IntegrationTests : IAsyncLifetime
     {
         if (!NativeAvailable) return;
 
-        using var sdk = CreateSdk();
+        using var sdk = await CreateSdkAsync();
         using var stream = await BuildJsonStream(sdk);
 
         long offset = stream.IngestRecord("{\"x\":1}");
@@ -151,7 +156,7 @@ public class IntegrationTests : IAsyncLifetime
     {
         if (!NativeAvailable) return;
 
-        using var sdk = CreateSdk();
+        using var sdk = await CreateSdkAsync();
         using var stream = await BuildJsonStream(sdk);
 
         Assert.False(stream.IsClosed);
@@ -164,7 +169,7 @@ public class IntegrationTests : IAsyncLifetime
     {
         if (!NativeAvailable) return;
 
-        using var sdk = CreateSdk();
+        using var sdk = await CreateSdkAsync();
         using var stream = await BuildJsonStream(sdk);
 
         stream.Dispose();
@@ -176,7 +181,7 @@ public class IntegrationTests : IAsyncLifetime
     {
         if (!NativeAvailable) return;
 
-        using var sdk = CreateSdk();
+        using var sdk = await CreateSdkAsync();
         using var stream = await BuildJsonStream(sdk);
         stream.Close();
         stream.Dispose();
@@ -193,7 +198,7 @@ public class IntegrationTests : IAsyncLifetime
     {
         if (!NativeAvailable) return;
 
-        using var sdk = CreateSdk();
+        using var sdk = await CreateSdkAsync();
         using var stream = await BuildJsonStream(sdk);
 
         stream.IngestRecord("{\"x\":1}");
@@ -215,7 +220,7 @@ public class IntegrationTests : IAsyncLifetime
     {
         if (!NativeAvailable) return;
 
-        using var sdk = CreateSdk();
+        using var sdk = await CreateSdkAsync();
         var original = await BuildJsonStream(sdk);
         original.Close();
 
@@ -241,7 +246,7 @@ public class IntegrationTests : IAsyncLifetime
 
         if (!NativeAvailable) return;
 
-        using var sdk = CreateSdk();
+        using var sdk = await CreateSdkAsync();
         await Assert.ThrowsAsync<ZerobusException>(() =>
             sdk.StreamBuilder()
                 .Table("bad.table")
@@ -255,7 +260,7 @@ public class IntegrationTests : IAsyncLifetime
     {
         if (!NativeAvailable) return;
 
-        var sdk = CreateSdk();
+        using var sdk = await CreateSdkAsync();
         var stream = await BuildJsonStream(sdk);
         sdk.Dispose();
 
@@ -273,7 +278,7 @@ public class IntegrationTests : IAsyncLifetime
     {
         if (!NativeAvailable) return;
 
-        using var sdk = CreateSdk();
+        using var sdk = await CreateSdkAsync();
         using var stream = await sdk.StreamBuilder()
             .Table("catalog.schema.table")
             .OAuth("id", "secret")
@@ -297,7 +302,7 @@ public class IntegrationTests : IAsyncLifetime
     {
         if (!NativeAvailable) return;
 
-        using var sdk = CreateSdk();
+        using var sdk = await CreateSdkAsync();
         using var stream = await BuildJsonStream(sdk);
 
         var offsets = new long[100];
@@ -316,10 +321,25 @@ public class IntegrationTests : IAsyncLifetime
     // ================================================================
 
     // Helper: create SDK with TLS disabled (mock server uses plain HTTP/2)
-    private ZerobusSdk CreateSdk() =>
-        ZerobusSdk.CreateBuilder(_server.Endpoint, _server.UnityCatalogEndpoint)
+    private async Task EnsureServerAsync()
+    {
+        if (_server == null)
+        {
+            _server = new MockZerobusServer();
+        }
+        if (string.IsNullOrEmpty(_server.Endpoint) || _server.Endpoint.Contains(":0"))
+        {
+            await _server.StartAsync();
+        }
+    }
+
+    private async Task<ZerobusSdk> CreateSdkAsync()
+    {
+        await EnsureServerAsync();
+        return ZerobusSdk.CreateBuilder(_server!.Endpoint, _server.UnityCatalogEndpoint)
             .DisableTls()
             .Build();
+    }
 
     private Task<ZerobusJsonStream> BuildJsonStream(ZerobusSdk sdk) =>
         sdk.StreamBuilder()
@@ -374,3 +394,4 @@ public sealed class FakeProtoMessage : Google.Protobuf.IMessage<FakeProtoMessage
     public Google.Protobuf.MessageParser<FakeProtoMessage> Parser =>
         new(() => new FakeProtoMessage());
 }
+
