@@ -210,10 +210,10 @@ public sealed class ZerobusSdk : IDisposable
         NativeLibraryResolver.EnsureLoaded();
 
         var cOpts = options.ToNative();
+        cOpts.RecordType = 1; // RecordType::Proto per Rust FFI mapping
         CResult result;
-
-        IntPtr descPtr = IntPtr.Zero;
         GCHandle descHandle = default;
+        IntPtr descPtr = IntPtr.Zero;
         if (descriptorProtoBytes != null && descriptorProtoBytes.Length > 0)
         {
             descHandle = GCHandle.Alloc(descriptorProtoBytes, GCHandleType.Pinned);
@@ -256,6 +256,7 @@ public sealed class ZerobusSdk : IDisposable
         NativeLibraryResolver.EnsureLoaded();
 
         var cOpts = options.ToNative();
+        cOpts.RecordType = 2; // RecordType::Json per Rust FFI mapping
         CResult result;
 
         IntPtr stream = NativeMethods.zerobus_sdk_create_stream(
