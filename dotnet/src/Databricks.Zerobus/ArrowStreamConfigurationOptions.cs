@@ -7,14 +7,19 @@ namespace Databricks.Zerobus;
 public sealed class ArrowStreamConfigurationOptions
 {
     /// <summary>
-    /// Default: 10,000 batches.
+    /// Default: 1,000 batches.
     /// </summary>
-    public const int DefaultMaxInflightBatches = 10_000;
+    public const int DefaultMaxInflightBatches = 1_000;
 
     /// <summary>
     /// Default: 30,000 ms (30 seconds).
     /// </summary>
     public const int DefaultConnectionTimeoutMs = 30_000;
+
+    /// <summary>
+    /// Default: -1 (wait full server-specified duration).
+    /// </summary>
+    public const long DefaultStreamPausedMaxWaitTimeMs = -1;
 
     /// <summary>
     /// Maximum number of Arrow batches that can be in flight.
@@ -105,7 +110,7 @@ public sealed class ArrowStreamConfigurationOptions
         internal int FlushTimeoutMs { get; set; } = StreamConfigurationOptions.DefaultFlushTimeoutMs;
         internal int ConnectionTimeoutMs { get; set; } = DefaultConnectionTimeoutMs;
         internal IPCCompressionType IpcCompression { get; set; } = IPCCompressionType.None;
-        internal long StreamPausedMaxWaitTimeMs { get; set; }
+        internal long StreamPausedMaxWaitTimeMs { get; set; } = DefaultStreamPausedMaxWaitTimeMs;
 
         internal Builder() { }
 

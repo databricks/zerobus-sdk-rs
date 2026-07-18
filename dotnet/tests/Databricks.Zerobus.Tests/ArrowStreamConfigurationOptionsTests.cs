@@ -9,9 +9,10 @@ public class ArrowStreamConfigurationOptionsTests
     {
         var opts = ArrowStreamConfigurationOptions.Default;
 
-        Assert.Equal(10_000, opts.MaxInflightBatches);
+        Assert.Equal(1_000, opts.MaxInflightBatches);
         Assert.True(opts.Recovery);
         Assert.Equal(30_000, opts.ConnectionTimeoutMs);
+        Assert.Equal(-1, opts.StreamPausedMaxWaitTimeMs);
         Assert.Equal(IPCCompressionType.None, opts.IpcCompression);
     }
 

@@ -516,7 +516,7 @@ internal static class OptionsExtensions
             FlushTimeoutMs = (ulong)opts.FlushTimeoutMs,
             ConnectionTimeoutMs = (ulong)opts.ConnectionTimeoutMs,
             IpcCompression = (int)opts.IpcCompression,
-            StreamPausedMaxWaitTimeMs = (ulong)opts.StreamPausedMaxWaitTimeMs,
+            StreamPausedMaxWaitTimeMs = opts.StreamPausedMaxWaitTimeMs,
         };
     }
 }
