@@ -756,7 +756,11 @@ mod arrow_flight_tests {
             let offset2 = stream.ingest_batch(batch2).await?;
             assert!(stream.wait_for_offset(offset2).await.is_err());
 
-            let _ = stream.close().await;
+            let close_result = stream.close().await;
+            assert!(
+                close_result.is_err(),
+                "close() must propagate the error when the final flush fails"
+            );
 
             let unacked = stream.get_unacked_batches().await?;
             assert_eq!(unacked.len(), 1, "Should have 1 unacked batch");
