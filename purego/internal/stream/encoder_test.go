@@ -110,6 +110,36 @@ func TestBatchEncodersRejectEmptyBatch(t *testing.T) {
 	}
 }
 
+func TestExtractRecordsReturnsAllBatchRecords(t *testing.T) {
+	// A batch message must yield every record, not just the first, so GetUnacked
+	// doesn't silently drop the tail of an unacked batch.
+	protoMsg, err := protoBatchEncoder{}.encodeBatch(1, [][]byte{{0x01}, {0x02}, {0x03}})
+	if err != nil {
+		t.Fatalf("encodeBatch: %v", err)
+	}
+	if got := extractRecords(protoMsg); len(got) != 3 {
+		t.Fatalf("proto batch: want 3 records extracted, got %d", len(got))
+	}
+
+	jsonMsg, err := jsonBatchEncoder{}.encodeBatch(1, [][]byte{[]byte(`{"a":1}`), []byte(`{"b":2}`)})
+	if err != nil {
+		t.Fatalf("encodeBatch: %v", err)
+	}
+	got := extractRecords(jsonMsg)
+	if len(got) != 2 || string(got[0]) != `{"a":1}` || string(got[1]) != `{"b":2}` {
+		t.Fatalf("json batch: want both records extracted, got %v", got)
+	}
+
+	// A single-record message still yields exactly one entry.
+	single, err := jsonEncoder{}.encode(1, []byte(`{"x":1}`))
+	if err != nil {
+		t.Fatalf("encode: %v", err)
+	}
+	if got := extractRecords(single); len(got) != 1 || string(got[0]) != `{"x":1}` {
+		t.Fatalf("single record: want 1 entry, got %v", got)
+	}
+}
+
 func TestOffsetAckModelParsesIngestResponse(t *testing.T) {
 	am := offsetAckModel{}
 

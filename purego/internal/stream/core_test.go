@@ -84,6 +84,15 @@ func (f *fakeRPC) ack(offset int64) {
 	}
 }
 
+// closeSignal sends a server CloseStreamSignal, asking the client to pause.
+func (f *fakeRPC) closeSignal() {
+	f.recvs <- &zerobuspb.EphemeralStreamResponse{
+		Payload: &zerobuspb.EphemeralStreamResponse_CloseStreamSignal{
+			CloseStreamSignal: &zerobuspb.CloseStreamSignal{},
+		},
+	}
+}
+
 // fakeOpener wraps a fakeRPC as a transport.Opener by building a rawStream
 // from it. Each call to Open returns the same underlying fakeRPC so tests
 // can send acks from it.
@@ -671,5 +680,45 @@ func TestCoreStreamInvalidParamsNotRetried(t *testing.T) {
 
 	if n := fo.openCount(); n != 1 {
 		t.Fatalf("invalid-params open should not be retried, got %d Open attempts", n)
+	}
+}
+
+// TestCoreStreamPauseSignalReconnectsWithoutConsumingRetries verifies that a
+// server CloseStreamSignal is treated as a pause-then-reconnect: the client
+// reconnects on a fresh stream, re-sends the unacked record, and does NOT count
+// the pause against the recovery budget (RecoveryRetries=0 would otherwise make
+// any real failure terminal after one attempt).
+func TestCoreStreamPauseSignalReconnectsWithoutConsumingRetries(t *testing.T) {
+	rpc1 := newFakeRPC()
+	rpc2 := newFakeRPC()
+	fo := newFakeOpener(rpc1, rpc2)
+
+	cfg := testConfig()
+	cfg.RecoveryRetries = 0 // a pause must not consume the (zero) retry budget
+	cs := NewCoreStream(testParams(), cfg, fo, jsonEncoder{}, offsetAckModel{}, nil)
+	t.Cleanup(func() { cs.Close() })
+
+	off, err := cs.Ingest(context.Background(), []byte(`{}`))
+	if err != nil {
+		t.Fatalf("Ingest: %v", err)
+	}
+
+	// Wait for the send to land on rpc1, then tell the client to pause.
+	waitCondition(t, func() bool { return len(rpc1.sends) > 0 }, time.Second)
+	<-rpc1.sends
+	rpc1.closeSignal()
+
+	// The client should reconnect to rpc2 and re-send the unacked record.
+	waitCondition(t, func() bool { return len(rpc2.sends) > 0 }, 2*time.Second)
+	<-rpc2.sends
+	rpc2.ack(off)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	if err := cs.WaitForOffset(ctx, off); err != nil {
+		t.Fatalf("WaitForOffset after pause+reconnect: %v", err)
+	}
+	if cs.IsClosed() {
+		t.Fatal("stream should be live after a pause, not terminal")
 	}
 }

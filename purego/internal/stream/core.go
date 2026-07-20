@@ -63,6 +63,12 @@ type Config struct {
 	// DrainTimeout bounds the orderly drain-to-EOF performed on a clean Close so
 	// the server observes an orderly END_STREAM rather than an abrupt reset.
 	DrainTimeout time.Duration
+	// StreamPausedMaxWait caps how long the client waits after a server
+	// CloseStreamSignal before reconnecting. The effective wait is
+	// min(StreamPausedMaxWait, server-requested duration). A non-positive value
+	// means "no client cap": wait the full server-requested duration. This lets a
+	// caller trade graceful drain (wait longer) against faster recovery.
+	StreamPausedMaxWait time.Duration
 }
 
 // DefaultConfig returns a Config with SDK-standard defaults.
@@ -277,21 +283,29 @@ func (cs *CoreStream) Flush(ctx context.Context) error {
 
 // WaitForOffset blocks until the server has acknowledged all records up to and
 // including offset, or until ctx expires or the stream fails terminally.
+//
+// offset must be one returned by a successful Ingest. Passing an offset that was
+// never enqueued (e.g. a value above the last assigned offset) is a caller error:
+// since the watermark can never reach it, the call blocks until ctx expires (or
+// the stream fails). Prefer Flush, which waits for exactly the records ingested
+// so far.
 func (cs *CoreStream) WaitForOffset(ctx context.Context, offset int64) error {
 	return cs.wm.waitFor(ctx, offset)
 }
 
-// GetUnacked returns records that were ingested but never acknowledged.
-// It closes the stream first (idempotent) to ensure the buffer is fully
-// drained and no new items are added.
+// GetUnacked returns records that were ingested but never acknowledged, one
+// entry per record. A batched buffer item expands to all of its records (not
+// just the first), so no unacked record is silently dropped. It closes the
+// stream first (idempotent) to ensure the buffer is fully drained and no new
+// items are added.
 func (cs *CoreStream) GetUnacked() [][]byte {
 	cs.Close()
 	items := cs.buf.drain()
-	out := make([][]byte, len(items))
-	for i, it := range items {
-		// Re-extract the raw bytes from the encoded message so callers get
-		// back the original record content.
-		out[i] = extractBytes(it.payload)
+	out := make([][]byte, 0, len(items))
+	for _, it := range items {
+		// Re-extract the raw record bytes from the encoded message so callers get
+		// back the original record content; a batch yields all its records.
+		out = append(out, extractRecords(it.payload)...)
 	}
 	return out
 }
@@ -378,9 +392,16 @@ func (cs *CoreStream) runOnce(ctx context.Context) error {
 	// orderly server-observed END_STREAM. On failure we hard-abort instead.
 	cause := <-errCh
 	cancelSender() // unblocks sender waiting on buf.next()
-	if ctx.Err() != nil {
+	var ps pauseSignal
+	switch {
+	case ctx.Err() != nil:
 		cs.gracefulTeardown(stream, errCh)
-	} else {
+	case errors.As(cause, &ps):
+		// Server-requested pause: the receiver already closed the stream to
+		// unblock its Recv, so just reap the sender. Requeue happens on reconnect.
+		stream.Close()
+		<-errCh
+	default:
 		// Failure/recovery path: the stream is already broken, so hard-abort to
 		// unblock the receiver's Recv immediately.
 		stream.Close()
@@ -480,9 +501,21 @@ func (cs *CoreStream) receiver(stream *transport.Stream, errCh chan<- error) {
 		}
 		resp := r.resp
 
+		// A server CloseStreamSignal is a flow-control request, not noise: the
+		// server is about to close this stream and wants the client to pause
+		// (stop sending, keep buffering and draining acks) then reconnect. Report
+		// it as a pause so the supervisor waits the requested window and
+		// reconnects without counting it against the recovery budget. This
+		// iteration's Recv goroutine already delivered (via r above), so there is
+		// nothing to drain; runOnce owns tearing the stream down.
+		if sig := resp.GetCloseStreamSignal(); sig != nil {
+			errCh <- pauseSignal{duration: sig.GetDuration().AsDuration()}
+			return
+		}
+
 		offset, ok := cs.ackMdl.parse(resp)
 		if !ok {
-			// Non-ack response (e.g. close signal); ignore.
+			// Some other non-ack response; ignore.
 			continue
 		}
 
@@ -506,24 +539,31 @@ func (cs *CoreStream) receiver(stream *transport.Stream, errCh chan<- error) {
 	}
 }
 
-// extractBytes recovers the raw record bytes from an encoded wire message.
-// Used by GetUnacked to return original content to the caller.
-func extractBytes(msg encodedMsg) []byte {
+// extractRecords recovers the raw record bytes from an encoded wire message.
+// A single-record message yields one entry; a batch yields all of its records
+// so GetUnacked never silently drops the tail of an unacked batch. Used by
+// GetUnacked to return original content to the caller.
+func extractRecords(msg encodedMsg) [][]byte {
 	if msg == nil {
 		return nil
 	}
 	if ir := msg.GetIngestRecord(); ir != nil {
 		if b := ir.GetProtoEncodedRecord(); b != nil {
-			return b
+			return [][]byte{b}
 		}
-		return []byte(ir.GetJsonRecord())
+		return [][]byte{[]byte(ir.GetJsonRecord())}
 	}
 	if ib := msg.GetIngestRecordBatch(); ib != nil {
-		if pb := ib.GetProtoEncodedBatch(); pb != nil && len(pb.GetRecords()) > 0 {
-			return pb.GetRecords()[0]
+		if pb := ib.GetProtoEncodedBatch(); pb != nil {
+			return pb.GetRecords()
 		}
-		if jb := ib.GetJsonBatch(); jb != nil && len(jb.GetRecords()) > 0 {
-			return []byte(jb.GetRecords()[0])
+		if jb := ib.GetJsonBatch(); jb != nil {
+			recs := jb.GetRecords()
+			out := make([][]byte, len(recs))
+			for i, r := range recs {
+				out[i] = []byte(r)
+			}
+			return out
 		}
 	}
 	return nil

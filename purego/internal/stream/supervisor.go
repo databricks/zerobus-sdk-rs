@@ -43,6 +43,21 @@ func (cs *CoreStream) supervise(ctx context.Context) {
 		if ctx.Err() != nil {
 			return
 		}
+
+		// A server-requested pause (CloseStreamSignal) is not a failure: wait the
+		// requested window, then reconnect without consuming the recovery budget.
+		// Ingest keeps buffering meanwhile; unacked records are requeued on the
+		// next attempt. Decrement attempt so this iteration isn't counted.
+		var ps pauseSignal
+		if errors.As(runErr, &ps) {
+			if !cs.waitPause(ctx, ps.duration) {
+				return // Close cancelled ctx during the pause.
+			}
+			cs.buf.requeue()
+			attempt--
+			continue
+		}
+
 		if runErr == nil {
 			// Server closed the stream cleanly (EOF). Treat as a retryable
 			// disconnect and recover, matching Rust's behaviour.
@@ -73,6 +88,29 @@ func (cs *CoreStream) supervise(ctx context.Context) {
 		// No callback: just close the buffer so enqueue callers unblock. The
 		// items remain retrievable via GetUnacked, which calls drain() itself.
 		cs.buf.close()
+	}
+}
+
+// waitPause sleeps for the server-requested pause window before reconnecting,
+// capped by StreamPausedMaxWait (min of the two; a non-positive cap means "no
+// client cap"). Returns false if ctx was cancelled (Close) during the wait, so
+// the caller stops instead of reconnecting. A non-positive effective wait
+// reconnects immediately.
+func (cs *CoreStream) waitPause(ctx context.Context, serverDuration time.Duration) bool {
+	wait := serverDuration
+	if cap := cs.cfg.StreamPausedMaxWait; cap > 0 && (wait <= 0 || cap < wait) {
+		wait = cap
+	}
+	if wait <= 0 {
+		return ctx.Err() == nil
+	}
+	timer := time.NewTimer(wait)
+	defer timer.Stop()
+	select {
+	case <-timer.C:
+		return true
+	case <-ctx.Done():
+		return false
 	}
 }
 
