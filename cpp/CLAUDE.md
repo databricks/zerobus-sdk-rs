@@ -53,7 +53,9 @@ Run from `cpp/`:
   (`address`, `thread`, or `undefined`; CMake option `-DZEROBUS_SANITIZE=`). Off
   by default. Targets the memory/lifetime bugs this FFI wrapper is prone to
   (use-after-free, double-free). `address`/`thread` also instrument the Rust FFI
-  (nightly `-Zsanitizer` + `-Zbuild-std`), so they need a nightly toolchain with
+  (nightly `-Zsanitizer` + `-Zbuild-std`) — a sanitizer only observes code
+  compiled with it, so leaving the core uninstrumented would miss the races/UAF
+  that live inside the FFI. This needs a nightly toolchain with
   `rust-src` and build the C++ side with clang to match the LLVM sanitizer
   runtime (`CLANG_CC`/`CLANG_CXX`, default `clang`/`clang++`); GCC can't resolve
   the instrumented archive's runtime symbols. `undefined` uses the default
@@ -151,6 +153,10 @@ callback](#ack-callback)).
   be thread-safe with respect to their own state.
 - A single `ProtoSchema` may be used by concurrent readers
   (`descriptor_bytes`, `encode_json`); destruction must not race those calls.
+  `tests/concurrency_test.cpp` exercises this under ThreadSanitizer (which
+  instruments the Rust core too), so a race in the read path is caught in CI.
+  The destruction-vs-read contract, though, is not tested — it is the caller's
+  responsibility, not something the TSan job enforces.
 
 ## Breaking change rules
 
