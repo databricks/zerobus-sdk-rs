@@ -268,6 +268,149 @@ public sealed class ZerobusSdk : IDisposable
         return new ZerobusStream(streamPtr);
     }
 
+    // ──── Arrow Flight streams ─────────────────────────────────────────────
+
+    /// <summary>
+    /// Creates an Arrow Flight ingestion stream with OAuth 2.0 client credentials.
+    /// </summary>
+    /// <param name="tableName">Fully qualified table name in the form <c>catalog.schema.table</c>.</param>
+    /// <param name="schemaIpcBytes">The Arrow schema serialized as IPC format bytes.</param>
+    /// <param name="clientId">OAuth 2.0 client ID.</param>
+    /// <param name="clientSecret">OAuth 2.0 client secret.</param>
+    /// <param name="options">Optional Arrow stream configuration overrides.</param>
+    /// <returns>A new <see cref="ZerobusArrowStream"/> ready for batch ingestion.</returns>
+    /// <exception cref="ZerobusException">Thrown if the stream cannot be created.</exception>
+    /// <exception cref="ObjectDisposedException">Thrown if the SDK has been disposed.</exception>
+    /// <remarks>
+    /// <b>Beta:</b> The Arrow Flight ingestion API is in beta and may change in future releases.
+    /// </remarks>
+    public ZerobusArrowStream CreateArrowStream(
+        string tableName,
+        byte[] schemaIpcBytes,
+        string clientId,
+        string clientSecret,
+        ArrowStreamConfigurationOptions? options = null)
+    {
+        ObjectDisposedException.ThrowIf(_disposed != 0, this);
+        ArgumentNullException.ThrowIfNull(tableName);
+        ArgumentNullException.ThrowIfNull(schemaIpcBytes);
+        ArgumentNullException.ThrowIfNull(clientId);
+        ArgumentNullException.ThrowIfNull(clientSecret);
+
+        return CreateArrowStreamCore(tableName, schemaIpcBytes, clientId, clientSecret, options);
+    }
+
+    /// <summary>
+    /// Creates an Arrow Flight ingestion stream asynchronously.
+    /// </summary>
+    public Task<ZerobusArrowStream> CreateArrowStreamAsync(
+        string tableName,
+        byte[] schemaIpcBytes,
+        string clientId,
+        string clientSecret,
+        ArrowStreamConfigurationOptions? options = null)
+    {
+        ObjectDisposedException.ThrowIf(_disposed != 0, this);
+        ArgumentNullException.ThrowIfNull(tableName);
+        ArgumentNullException.ThrowIfNull(schemaIpcBytes);
+        ArgumentNullException.ThrowIfNull(clientId);
+        ArgumentNullException.ThrowIfNull(clientSecret);
+
+        return Task.Run(() => CreateArrowStreamCore(tableName, schemaIpcBytes, clientId, clientSecret, options));
+    }
+
+    /// <summary>
+    /// Creates an Arrow Flight ingestion stream with a custom headers provider.
+    /// </summary>
+    /// <param name="tableName">Fully qualified table name in the form <c>catalog.schema.table</c>.</param>
+    /// <param name="schemaIpcBytes">The Arrow schema serialized as IPC format bytes.</param>
+    /// <param name="headersProvider">Custom implementation of <see cref="IHeadersProvider"/>.</param>
+    /// <param name="options">Optional Arrow stream configuration overrides.</param>
+    /// <returns>A new <see cref="ZerobusArrowStream"/> ready for batch ingestion.</returns>
+    public ZerobusArrowStream CreateArrowStreamWithHeadersProvider(
+        string tableName,
+        byte[] schemaIpcBytes,
+        IHeadersProvider headersProvider,
+        ArrowStreamConfigurationOptions? options = null)
+    {
+        ObjectDisposedException.ThrowIf(_disposed != 0, this);
+        ArgumentNullException.ThrowIfNull(tableName);
+        ArgumentNullException.ThrowIfNull(schemaIpcBytes);
+        ArgumentNullException.ThrowIfNull(headersProvider);
+
+        return CreateArrowStreamWithHeadersProviderCore(tableName, schemaIpcBytes, headersProvider, options);
+    }
+
+    /// <summary>
+    /// Creates an Arrow Flight ingestion stream with a custom headers provider asynchronously.
+    /// </summary>
+    public Task<ZerobusArrowStream> CreateArrowStreamWithHeadersProviderAsync(
+        string tableName,
+        byte[] schemaIpcBytes,
+        IHeadersProvider headersProvider,
+        ArrowStreamConfigurationOptions? options = null)
+    {
+        ObjectDisposedException.ThrowIf(_disposed != 0, this);
+        ArgumentNullException.ThrowIfNull(tableName);
+        ArgumentNullException.ThrowIfNull(schemaIpcBytes);
+        ArgumentNullException.ThrowIfNull(headersProvider);
+
+        return Task.Run(() =>
+            CreateArrowStreamWithHeadersProviderCore(tableName, schemaIpcBytes, headersProvider, options));
+    }
+
+    private ZerobusArrowStream CreateArrowStreamCore(
+        string tableName,
+        byte[] schemaIpcBytes,
+        string clientId,
+        string clientSecret,
+        ArrowStreamConfigurationOptions? options)
+    {
+        var nativeOpts = NativeInterop.ConvertArrowConfig(options ?? ArrowStreamConfigurationOptions.Default);
+
+        var streamPtr = NativeInterop.SdkCreateArrowStream(
+            _ptr,
+            tableName,
+            schemaIpcBytes,
+            clientId,
+            clientSecret,
+            ref nativeOpts);
+
+        return new ZerobusArrowStream(streamPtr);
+    }
+
+    private ZerobusArrowStream CreateArrowStreamWithHeadersProviderCore(
+        string tableName,
+        byte[] schemaIpcBytes,
+        IHeadersProvider headersProvider,
+        ArrowStreamConfigurationOptions? options)
+    {
+        var nativeOpts = NativeInterop.ConvertArrowConfig(options ?? ArrowStreamConfigurationOptions.Default);
+
+        var bridge = new HeadersProviderBridge(headersProvider);
+        var callback = new HeadersProviderCallback(bridge.NativeCallback);
+        var handle = GCHandle.Alloc(bridge);
+
+        IntPtr streamPtr;
+        try
+        {
+            streamPtr = NativeInterop.SdkCreateArrowStreamWithHeadersProvider(
+                _ptr,
+                tableName,
+                schemaIpcBytes,
+                callback,
+                GCHandle.ToIntPtr(handle),
+                ref nativeOpts);
+        }
+        catch
+        {
+            handle.Free();
+            throw;
+        }
+
+        return new ZerobusArrowStream(streamPtr);
+    }
+
     /// <summary>
     /// Creates a new bidirectional gRPC stream using a custom headers provider.
     /// Use this for custom authentication logic (managed identity, vaults, etc.).

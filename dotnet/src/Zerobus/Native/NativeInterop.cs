@@ -1053,4 +1053,292 @@ internal static class NativeInterop
 
         return ptr;
     }
+
+    // ──── Arrow stream API ─────────────────────────────────────────────────
+
+    /// <summary>
+    /// Creates an Arrow Flight stream with OAuth credentials.
+    /// </summary>
+    public static unsafe IntPtr SdkCreateArrowStream(
+        IntPtr sdkPtr,
+        string tableName,
+        ReadOnlySpan<byte> schemaIpcBytes,
+        string clientId,
+        string clientSecret,
+        ref CArrowStreamConfigurationOptions options)
+    {
+        var result = new CResult();
+        IntPtr ptr;
+
+        fixed (byte* schemaPtr = schemaIpcBytes)
+        {
+            ptr = NativeMethods.SdkCreateArrowStream(
+                sdkPtr,
+                tableName,
+                schemaPtr,
+                (nuint)schemaIpcBytes.Length,
+                clientId,
+                clientSecret,
+                ref options,
+                ref result);
+        }
+
+        if (ptr == IntPtr.Zero)
+        {
+            var ex = ToException(ref result);
+            throw ex ?? new ZerobusException("Failed to create Arrow stream", isRetryable: false);
+        }
+
+        return ptr;
+    }
+
+    /// <summary>
+    /// Creates an Arrow Flight stream with a custom headers provider callback.
+    /// </summary>
+    public static unsafe IntPtr SdkCreateArrowStreamWithHeadersProvider(
+        IntPtr sdkPtr,
+        string tableName,
+        ReadOnlySpan<byte> schemaIpcBytes,
+        HeadersProviderCallback callback,
+        IntPtr userData,
+        ref CArrowStreamConfigurationOptions options)
+    {
+        var result = new CResult();
+        IntPtr ptr;
+
+        fixed (byte* schemaPtr = schemaIpcBytes)
+        {
+            ptr = NativeMethods.SdkCreateArrowStreamWithHeadersProvider(
+                sdkPtr,
+                tableName,
+                schemaPtr,
+                (nuint)schemaIpcBytes.Length,
+                callback,
+                userData,
+                ref options,
+                ref result);
+        }
+
+        if (ptr == IntPtr.Zero)
+        {
+            var ex = ToException(ref result);
+            throw ex ?? new ZerobusException("Failed to create Arrow stream with headers provider", isRetryable: false);
+        }
+
+        return ptr;
+    }
+
+    /// <summary>
+    /// Ingests a single Arrow IPC-encoded batch and returns the offset.
+    /// </summary>
+    public static unsafe long ArrowStreamIngestBatch(IntPtr streamPtr, ReadOnlySpan<byte> ipcBytes)
+    {
+        if (ipcBytes.IsEmpty)
+            throw new ZerobusException("empty batch data", isRetryable: false);
+
+        var result = new CResult();
+        long offset;
+
+        fixed (byte* dataPtr = ipcBytes)
+        {
+            offset = NativeMethods.ArrowStreamIngestBatch(
+                streamPtr,
+                dataPtr,
+                (nuint)ipcBytes.Length,
+                ref result);
+        }
+
+        if (offset < 0)
+        {
+            ThrowIfFailed(ref result);
+            throw new ZerobusException("Arrow batch ingest failed with unknown error", isRetryable: false);
+        }
+
+        return offset;
+    }
+
+    /// <summary>
+    /// Waits for a specific batch offset to be acknowledged.
+    /// </summary>
+    public static void ArrowStreamWaitForOffset(IntPtr streamPtr, long offset)
+    {
+        var result = new CResult();
+        var success = NativeMethods.ArrowStreamWaitForOffset(streamPtr, offset, ref result);
+
+        if (!success)
+            ThrowIfFailed(ref result);
+    }
+
+    /// <summary>
+    /// Flushes all pending Arrow batches.
+    /// </summary>
+    public static void ArrowStreamFlush(IntPtr streamPtr)
+    {
+        var result = new CResult();
+        var success = NativeMethods.ArrowStreamFlush(streamPtr, ref result);
+
+        if (!success)
+            ThrowIfFailed(ref result);
+    }
+
+    /// <summary>
+    /// Closes the Arrow stream gracefully.
+    /// </summary>
+    public static void ArrowStreamClose(IntPtr streamPtr)
+    {
+        var result = new CResult();
+        var success = NativeMethods.ArrowStreamClose(streamPtr, ref result);
+
+        if (!success)
+            ThrowIfFailed(ref result);
+    }
+
+    /// <summary>
+    /// Retrieves all unacknowledged Arrow batches from a closed/failed stream.
+    /// </summary>
+    public static ArrowBatchInfo[] ArrowStreamGetUnackedBatches(IntPtr streamPtr)
+    {
+        var result = new CResult();
+        var array = NativeMethods.ArrowStreamGetUnackedBatches(streamPtr, ref result);
+
+        if (array.Batches == IntPtr.Zero)
+        {
+            if ((nuint)array.Count == 0)
+            {
+                var ex = ToException(ref result);
+                if (ex is not null) throw ex;
+                return [];
+            }
+
+            ThrowIfFailed(ref result);
+            return [];
+        }
+
+        if ((nuint)array.Count == 0)
+            return [];
+
+        try
+        {
+            var batches = new ArrowBatchInfo[(nuint)array.Count];
+
+            for (var i = 0; i < batches.Length; i++)
+            {
+                var batchPtr = Marshal.ReadIntPtr(array.Batches, i * IntPtr.Size);
+                var lenPtr = array.Lengths == IntPtr.Zero
+                    ? IntPtr.Zero
+                    : Marshal.ReadIntPtr(array.Lengths, i * IntPtr.Size);
+
+                var len = lenPtr != IntPtr.Zero ? (int)(nuint)lenPtr : 0;
+                var data = new byte[len];
+
+                if (batchPtr != IntPtr.Zero && len > 0)
+                {
+                    Marshal.Copy(batchPtr, data, 0, len);
+                }
+
+                batches[i] = new ArrowBatchInfo(data);
+            }
+
+            return batches;
+        }
+        finally
+        {
+            NativeMethods.ArrowFreeBatchArray(array);
+        }
+    }
+
+    /// <summary>
+    /// Converts managed <see cref="ArrowStreamConfigurationOptions"/> to the native struct,
+    /// applying defaults for unset values.
+    /// </summary>
+    public static CArrowStreamConfigurationOptions ConvertArrowConfig(ArrowStreamConfigurationOptions options)
+    {
+        if (options is null)
+            return NativeMethods.ArrowGetDefaultConfig();
+
+        var config = NativeMethods.ArrowGetDefaultConfig();
+
+        if (options.MaxInflightBatches.HasValue)
+            config.MaxInflightBatches = (nuint)options.MaxInflightBatches.Value;
+        config.Recovery = options.Recovery;
+        if (options.RecoveryTimeoutMs.HasValue)
+            config.RecoveryTimeoutMs = options.RecoveryTimeoutMs.Value;
+        if (options.RecoveryBackoffMs.HasValue)
+            config.RecoveryBackoffMs = options.RecoveryBackoffMs.Value;
+        if (options.RecoveryRetries.HasValue)
+            config.RecoveryRetries = options.RecoveryRetries.Value;
+        if (options.ServerLackOfAckTimeoutMs.HasValue)
+            config.ServerLackOfAckTimeoutMs = options.ServerLackOfAckTimeoutMs.Value;
+        if (options.FlushTimeoutMs.HasValue)
+            config.FlushTimeoutMs = options.FlushTimeoutMs.Value;
+        if (options.ConnectionTimeoutMs.HasValue)
+            config.ConnectionTimeoutMs = options.ConnectionTimeoutMs.Value;
+        config.IpcCompression = (int)options.IpcCompression;
+        config.StreamPausedMaxWaitTimeMs = options.StreamPausedMaxWaitTimeMs;
+
+        return config;
+    }
+
+    // ──── ProtoSchema API ──────────────────────────────────────────────────
+
+    /// <summary>
+    /// Creates a proto schema from Unity Catalog table JSON metadata.
+    /// Returns a native pointer that must be freed with <see cref="NativeMethods.ProtoSchemaFree"/>.
+    /// </summary>
+    public static IntPtr ProtoSchemaFromUcJson(string ucTableJson)
+    {
+        var result = new CResult();
+        var ptr = NativeMethods.ProtoSchemaFromUcJson(ucTableJson, ref result);
+
+        if (ptr == IntPtr.Zero)
+        {
+            var ex = ToException(ref result);
+            throw ex ?? new ZerobusException("Failed to create proto schema from UC JSON", isRetryable: false);
+        }
+
+        return ptr;
+    }
+
+    /// <summary>
+    /// Gets the serialized descriptor bytes from a proto schema handle.
+    /// The returned bytes are a copy; the caller owns them.
+    /// </summary>
+    public static unsafe byte[] ProtoSchemaDescriptorBytes(IntPtr schema)
+    {
+        var bytes = NativeMethods.ProtoSchemaDescriptorBytes(schema, out var len);
+
+        if (bytes == null || len == 0)
+            throw new ZerobusException("Failed to get descriptor bytes from proto schema", isRetryable: false);
+
+        var result = new byte[(int)len];
+        Marshal.Copy((IntPtr)bytes, result, 0, result.Length);
+        return result;
+    }
+
+    /// <summary>
+    /// Encodes a JSON string to protobuf bytes using the given schema handle.
+    /// The returned bytes are owned by the caller and must be freed with
+    /// <see cref="NativeMethods.FreeProtoBytes"/> after use.
+    /// </summary>
+    public static unsafe byte[] ProtoSchemaEncodeJson(IntPtr schema, string recordJson)
+    {
+        var result = new CResult();
+        byte* outData;
+        nuint outLen;
+
+        var success = NativeMethods.ProtoSchemaEncodeJson(
+            schema, recordJson, out outData, out outLen, ref result);
+
+        if (!success || outData == null)
+        {
+            var ex = ToException(ref result);
+            throw ex ?? new ZerobusException("Failed to encode JSON to protobuf", isRetryable: false);
+        }
+
+        var bytes = new byte[(int)outLen];
+        Marshal.Copy((IntPtr)outData, bytes, 0, bytes.Length);
+        NativeMethods.FreeProtoBytes(outData, outLen);
+
+        return bytes;
+    }
 }
