@@ -41,7 +41,7 @@ func (s *tokenServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	_ = json.NewEncoder(w).Encode(resp)
 }
 
-func newTestProvider(t *testing.T, srv *tokenServer, table string) (*OAuthTokenProvider, *httptest.Server) {
+func newTestProvider(t *testing.T, srv *tokenServer) (*OAuthTokenProvider, *httptest.Server) {
 	t.Helper()
 	ts := httptest.NewServer(srv)
 	p, err := NewOAuthTokenProvider("clientID", "clientSecret", "https://ws123.zerobus.databricks.com", ts.URL,
@@ -55,7 +55,7 @@ func newTestProvider(t *testing.T, srv *tokenServer, table string) (*OAuthTokenP
 
 func TestOAuthTokenProviderHappyPath(t *testing.T) {
 	srv := &tokenServer{accessToken: "eyJtb2NrfQ", expiresIn: 3600}
-	p, ts := newTestProvider(t, srv, "cat.sch.tbl")
+	p, ts := newTestProvider(t, srv)
 	defer ts.Close()
 
 	tok, err := p.Token(context.Background(), "cat.sch.tbl")
@@ -69,7 +69,7 @@ func TestOAuthTokenProviderHappyPath(t *testing.T) {
 
 func TestOAuthTokenProviderCachesToken(t *testing.T) {
 	srv := &tokenServer{accessToken: "tok", expiresIn: 3600}
-	p, ts := newTestProvider(t, srv, "cat.sch.tbl")
+	p, ts := newTestProvider(t, srv)
 	defer ts.Close()
 
 	if _, err := p.Token(context.Background(), "cat.sch.tbl"); err != nil {
@@ -85,7 +85,7 @@ func TestOAuthTokenProviderCachesToken(t *testing.T) {
 
 func TestOAuthTokenProviderInvalidateForcesRemint(t *testing.T) {
 	srv := &tokenServer{accessToken: "tok", expiresIn: 3600}
-	p, ts := newTestProvider(t, srv, "cat.sch.tbl")
+	p, ts := newTestProvider(t, srv)
 	defer ts.Close()
 
 	if _, err := p.Token(context.Background(), "cat.sch.tbl"); err != nil {
@@ -102,7 +102,7 @@ func TestOAuthTokenProviderInvalidateForcesRemint(t *testing.T) {
 
 func TestOAuthTokenProvider5xxIsRetryable(t *testing.T) {
 	srv := &tokenServer{statusCode: http.StatusInternalServerError}
-	p, ts := newTestProvider(t, srv, "cat.sch.tbl")
+	p, ts := newTestProvider(t, srv)
 	defer ts.Close()
 
 	_, err := p.Token(context.Background(), "cat.sch.tbl")
@@ -117,7 +117,7 @@ func TestOAuthTokenProvider5xxIsRetryable(t *testing.T) {
 
 func TestOAuthTokenProvider4xxIsNonRetryable(t *testing.T) {
 	srv := &tokenServer{statusCode: http.StatusUnauthorized}
-	p, ts := newTestProvider(t, srv, "cat.sch.tbl")
+	p, ts := newTestProvider(t, srv)
 	defer ts.Close()
 
 	_, err := p.Token(context.Background(), "cat.sch.tbl")
@@ -318,7 +318,7 @@ func TestOAuthTokenProviderSharedCacheKeyedByWorkspace(t *testing.T) {
 
 func TestOAuthTokenProvider429IsNonRetryable(t *testing.T) {
 	srv := &tokenServer{statusCode: http.StatusTooManyRequests}
-	p, ts := newTestProvider(t, srv, "cat.sch.tbl")
+	p, ts := newTestProvider(t, srv)
 	defer ts.Close()
 
 	_, err := p.Token(context.Background(), "cat.sch.tbl")
@@ -334,7 +334,7 @@ func TestOAuthTokenProvider429IsNonRetryable(t *testing.T) {
 
 func TestOAuthTokenProvider408IsNonRetryable(t *testing.T) {
 	srv := &tokenServer{statusCode: http.StatusRequestTimeout}
-	p, ts := newTestProvider(t, srv, "cat.sch.tbl")
+	p, ts := newTestProvider(t, srv)
 	defer ts.Close()
 
 	_, err := p.Token(context.Background(), "cat.sch.tbl")
@@ -414,7 +414,7 @@ func TestOAuthTokenProviderNilOptionsKeepDefaults(t *testing.T) {
 
 func TestClassifyHTTPErrorPreservesBody(t *testing.T) {
 	srv := &tokenServer{statusCode: http.StatusUnauthorized}
-	p, ts := newTestProvider(t, srv, "cat.sch.tbl")
+	p, ts := newTestProvider(t, srv)
 	defer ts.Close()
 
 	_, err := p.Token(context.Background(), "cat.sch.tbl")
@@ -592,7 +592,7 @@ func TestSharedTokenCacheDisabled(t *testing.T) {
 
 func TestOAuthTokenProviderFetchTokenBypassesCache(t *testing.T) {
 	srv := &tokenServer{accessToken: "tok", expiresIn: 3600}
-	p, ts := newTestProvider(t, srv, "cat.sch.tbl")
+	p, ts := newTestProvider(t, srv)
 	defer ts.Close()
 
 	// Warm the cache.

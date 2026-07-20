@@ -160,8 +160,8 @@ func NewOAuthTokenProvider(
 
 // NewSharedTokenCache allocates a token cache that can be passed to multiple
 // [OAuthTokenProvider] instances via [WithSharedTokenCache]. Sharing a cache
-// ensures tokens for the same (clientID, secret, table) are reused across
-// providers rather than each minting independently.
+// ensures tokens for the same (clientID, secret, table, workspace audience) are
+// reused across providers rather than each minting independently.
 //
 // Configure it with [CacheEnabled] and [CacheRefreshBuffer].
 func NewSharedTokenCache(opts ...CacheOption) *SharedTokenCache {

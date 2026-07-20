@@ -81,7 +81,9 @@ type cachedToken struct {
 }
 
 func (c *cachedToken) isExpired() bool {
-	return time.Now().After(c.expiresAt)
+	// Expired at or after expiresAt: at the exact instant the token is already
+	// unusable, so treat it as expired rather than serving it.
+	return !time.Now().Before(c.expiresAt)
 }
 
 // newCachedToken builds an entry for a token whose TTL started at mintedAt
@@ -125,7 +127,7 @@ type tokenFlight struct {
 	err   error         // resolved error (nil on success)
 }
 
-// tokenCache caches OAuth tokens per (clientID, secret, tableName).
+// tokenCache caches OAuth tokens per (clientID, secret, tableName, audience).
 //
 // It is safe for concurrent use. Construct one with [newTokenCache]; the
 // methods do not guard against a nil receiver.
