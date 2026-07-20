@@ -1287,7 +1287,7 @@ mod tests {
     // messages spell out both causes.
 
     use crate::common::{ACK_CALLBACK_DROP_COUNT, ACK_DROP_SENTINEL_CREATE_FAIL_TESTS};
-    use crate::{zerobus_sdk_create_stream, zerobus_sdk_create_stream_with_headers_provider};
+    use crate::zerobus_sdk_create_stream_with_headers_provider;
 
     // Global counter, so serialize this pair's before/after sampling window.
     static ACK_DROP_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
