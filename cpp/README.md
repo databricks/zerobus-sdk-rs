@@ -366,8 +366,8 @@ the FFI defaults.
 ## Examples
 
 Runnable examples live under [`examples/`](examples/README.md), covering all
-three record formats — JSON, protobuf (dynamic schema from Unity Catalog), and
-Arrow Flight (Beta) — each with a single-record and a batch variant. Every
+three record formats — JSON and protobuf (dynamic schema from Unity Catalog),
+each with a single-record and a batch variant, plus Arrow Flight (Beta). Every
 example reads its OAuth secrets (`DATABRICKS_CLIENT_ID` /
 `DATABRICKS_CLIENT_SECRET`) from the environment and keeps its non-secret
 connection info as placeholder constants at the top of the source file. They

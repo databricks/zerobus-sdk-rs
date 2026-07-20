@@ -26,7 +26,7 @@ cpp/
 │   ├── headers_callback.cpp  # extern "C" trampoline for HeadersProvider
 │   └── detail/           # Internal: ffi_util, config_convert, headers_callback, ack_callback
 ├── tests/                # Dependency-free unit tests (plain executables)
-├── examples/             # Runnable usage examples (forthcoming)
+├── examples/             # Runnable usage examples (JSON, proto, Arrow)
 ├── cmake/
 │   ├── BuildRustFfi.cmake       # Builds libzerobus_ffi from local Rust source
 │   └── zerobus-config.cmake.in  # find_package(zerobus) package-config template
@@ -42,8 +42,8 @@ implementation detail of the SDK.
 
 Run from `cpp/`:
 
-- `make build` — Configure (CMake) and build the SDK and tests (also builds an
-  `examples/` directory once one is added; none ships yet)
+- `make build` — Configure (CMake) and build the SDK, tests, and the examples
+  under `examples/` (gated on `ZEROBUS_BUILD_EXAMPLES`, on by default)
 - `make build-ffi` — Build only the Rust C FFI static library
 - `make test` — Build and run the test suite (`ctest`)
 - `make lint` — Formatting check + compiler warnings (`-Wall -Wextra`)
