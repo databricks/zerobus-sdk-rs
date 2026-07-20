@@ -22,10 +22,12 @@ help:
 
 build: build-rust build-dotnet
 
+# Invoke via `bash` explicitly: on Windows, make resolves a bare `./build_native.sh`
+# through a shell where `bash` is the WSL launcher (no distro installed) and fails.
 build-rust:
-	./build_native.sh
+	bash ./build_native.sh
 build-rust-force:
-	./build_native.sh --force
+	bash ./build_native.sh --force
 
 build-dotnet: build-rust
 	@echo "Building .NET SDK..."
