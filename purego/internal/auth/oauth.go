@@ -200,9 +200,9 @@ func (p *OAuthTokenProvider) tokenAudience() string {
 }
 
 // FetchToken mints a token directly from Unity Catalog, bypassing the cache. It
-// neither reads nor writes the cache, so callers get a guaranteed-fresh token;
-// most callers should use [OAuthTokenProvider.Token] instead so tokens are
-// reused across streams.
+// neither reads nor writes the cache and does not invalidate any existing cached
+// entry, so callers get a guaranteed-fresh token; most callers should use
+// [OAuthTokenProvider.Token] instead so tokens are reused across streams.
 func (p *OAuthTokenProvider) FetchToken(ctx context.Context, tableName string) (string, error) {
 	tableName = strings.TrimSpace(tableName)
 	if err := validateTableName(tableName); err != nil {
@@ -291,11 +291,14 @@ func (p *OAuthTokenProvider) fetchToken(ctx context.Context, tableName string) (
 	if err != nil {
 		return fetchedToken{}, &TokenError{msg: fmt.Sprintf("token request: %v", err), retryable: isRetryableTransportError(ctx, err), cause: err}
 	}
-	// Drain any unread bytes before closing so the keep-alive connection can be
+	// Drain unread bytes before closing so the keep-alive connection can be
 	// reused: json.Decode stops at the end of the JSON value and classifyHTTPError
-	// caps its read, either of which can leave a trailing tail on the body.
+	// caps its read, either of which can leave a trailing tail on the body. The
+	// drain is itself capped so a server appending an unbounded tail after a valid
+	// response can't force an arbitrarily long read; past the cap the connection
+	// is simply closed instead of reused.
 	defer func() {
-		_, _ = io.Copy(io.Discard, resp.Body)
+		_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 4096))
 		resp.Body.Close()
 	}()
 
@@ -501,7 +504,7 @@ func isRetryableTransportError(ctx context.Context, err error) bool {
 // authorization header value. gRPC metadata rejects values with ASCII control
 // characters (bytes 0–31 and DEL).
 //
-// Note: transport.isUsableAsHeader applies the same character check but
+// Note: transport.isUsableAsHeaderValue applies the same character check but
 // intentionally treats the empty string as usable ("no header"); this copy
 // returns false for empty because a minted token must be non-empty. Keep the
 // character logic in sync if either is changed.
@@ -570,6 +573,14 @@ func deriveWorkspaceIDFromEndpoint(endpoint string) (workspaceID string, err err
 	host := u.Hostname()
 	if host == "" {
 		return "", fmt.Errorf("zerobusEndpoint has no host: %q", endpoint)
+	}
+	// A real Zerobus endpoint always carries the workspace as the first DNS label
+	// (e.g. "ws.zerobus.databricks.com"). A single-label host has no workspace
+	// subdomain — almost always the workspace URL passed by mistake — and would
+	// otherwise yield a syntactically valid but wrong audience whose every mint
+	// 401s with an opaque error. Reject it here so the misconfig fails fast.
+	if !strings.Contains(host, ".") && !isLoopbackHost(host) {
+		return "", fmt.Errorf("zerobusEndpoint host %q has no workspace subdomain", host)
 	}
 	workspaceID, _, _ = strings.Cut(host, ".")
 	if workspaceID == "" {

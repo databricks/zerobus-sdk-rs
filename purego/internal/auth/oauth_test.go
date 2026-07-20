@@ -450,6 +450,7 @@ func TestNewOAuthTokenProviderValidation(t *testing.T) {
 		{"bad table (2 parts)", "id", "s", "https://ws.zerobus.databricks.com", "https://host", "c.s"},
 		{"bad table (empty schema)", "id", "s", "https://ws.zerobus.databricks.com", "https://host", "c..t"},
 		{"bad zerobus endpoint host", "id", "s", "https://", "https://host", "c.s.t"},
+		{"dotless zerobus host (no workspace subdomain)", "id", "s", "https://ws1", "https://host", "c.s.t"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
