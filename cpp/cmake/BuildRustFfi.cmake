@@ -32,14 +32,8 @@ else()
   find_program(CARGO_EXECUTABLE cargo REQUIRED
       DOC "Path to the cargo build tool")
 
-  # When a sanitizer is requested, instrument the Rust core too — otherwise TSan
-  # / ASan only watch the thin C++ wrapper and miss races/UAF inside the FFI,
-  # where the real work runs. -Zsanitizer + -Zbuild-std are nightly-only and
-  # need a --target (which relocates the archive under target/<triple>/). ASan
-  # and TSan map to the sanitizer runtime; other values (e.g. undefined) fall
-  # back to a plain release build.
-  # asan/tsan instrument the Rust core too; other values (e.g. undefined) use a
-  # plain release build.
+  # asan/tsan instrument the Rust core too (see below); other values (e.g.
+  # undefined) fall back to a plain release build.
   if(ZEROBUS_SANITIZE STREQUAL "thread" OR ZEROBUS_SANITIZE STREQUAL "address")
     set(_zb_ffi_instrumented TRUE)
   else()
