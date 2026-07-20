@@ -72,7 +72,7 @@ jobs:
 
       - name: Upload test results
         if: always()
-        uses: actions/upload-artifact@b4b15ac8a8a6516bb370cc420f053ba1b865e6e4 # v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: test-results-${{ matrix.os }}-dotnet${{ inputs.artifact_suffix }}
           path: |
@@ -102,7 +102,7 @@ jobs:
         run: dotnet pack src/Databricks.Zerobus --no-restore --configuration Release -o artifacts
 
       - name: Upload NuGet package
-        uses: actions/upload-artifact@b4b15ac8a8a6516bb370cc420f053ba1b865e6e4 # v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: dotnet-nuget${{ inputs.artifact_suffix }}
           path: dotnet/artifacts/*.nupkg
