@@ -18,6 +18,10 @@ const (
 	DefaultRecoveryBackoff  = 2 * time.Second
 	DefaultFlushTimeout     = 5 * time.Minute
 	DefaultLackOfAckTimeout = 60 * time.Second
+	// DefaultDrainTimeout bounds the orderly drain-to-EOF on a clean Close so a
+	// wedged sender or an unresponsive server can't hang teardown. Matches the
+	// transport's teardown drain budget; the long ack wait lives in Flush.
+	DefaultDrainTimeout = 500 * time.Millisecond
 )
 
 // Config holds per-stream configuration. All fields have sane defaults via
@@ -36,6 +40,9 @@ type Config struct {
 	// LackOfAckTimeout is how long the receiver waits for a server ack before
 	// treating silence as a stream failure.
 	LackOfAckTimeout time.Duration
+	// DrainTimeout bounds the orderly drain-to-EOF performed on a clean Close so
+	// the server observes an orderly END_STREAM rather than an abrupt reset.
+	DrainTimeout time.Duration
 }
 
 // DefaultConfig returns a Config with SDK-standard defaults.
@@ -47,6 +54,7 @@ func DefaultConfig() Config {
 		RecoveryBackoff:  DefaultRecoveryBackoff,
 		FlushTimeout:     DefaultFlushTimeout,
 		LackOfAckTimeout: DefaultLackOfAckTimeout,
+		DrainTimeout:     DefaultDrainTimeout,
 	}
 }
 
@@ -326,14 +334,50 @@ func (cs *CoreStream) runOnce(ctx context.Context) error {
 	errCh := make(chan error, 2)
 
 	go cs.sender(senderCtx, stream, errCh)
-	go cs.receiver(ctx, stream, errCh)
+	go cs.receiver(stream, errCh)
 
-	// Wait for the first goroutine to signal; then tear both down.
+	// Wait for the first goroutine to signal, then tear both down. On clean
+	// shutdown (Close cancelled ctx) only the sender exits first — the receiver
+	// keeps draining acks — so we half-close and let it drain to EOF for an
+	// orderly server-observed END_STREAM. On failure we hard-abort instead.
 	cause := <-errCh
 	cancelSender() // unblocks sender waiting on buf.next()
-	stream.Close() // unblocks receiver waiting on Recv()
-	<-errCh        // drain second exit
+	if ctx.Err() != nil {
+		cs.gracefulTeardown(stream, errCh)
+	} else {
+		// Failure/recovery path: the stream is already broken, so hard-abort to
+		// unblock the receiver's Recv immediately.
+		stream.Close()
+		<-errCh // drain second exit
+	}
 	return cause
+}
+
+// gracefulTeardown closes a healthy stream in an orderly fashion after the
+// sender has stopped: half-close the send side so the server flushes any
+// remaining acks and ends the stream, let the still-running receiver drain to
+// io.EOF (advancing the watermark for late acks), then release resources.
+// DrainTimeout bounds the wait so a wedged server can't hang Close; on expiry we
+// hard-abort. This mirrors transport.GracefulClose, done cooperatively because
+// the receiver goroutine — not this one — owns Recv.
+func (cs *CoreStream) gracefulTeardown(stream *transport.Stream, errCh <-chan error) {
+	if err := stream.CloseSend(); err != nil {
+		// Send side already broken; fall back to a hard abort.
+		stream.Close()
+		<-errCh
+		return
+	}
+	timer := time.NewTimer(cs.cfg.DrainTimeout)
+	defer timer.Stop()
+	select {
+	case <-errCh:
+		// Receiver drained to EOF; release resources (Close is idempotent).
+		stream.Close()
+	case <-timer.C:
+		// Drain budget exceeded; force the receiver out and reap it.
+		stream.Close()
+		<-errCh
+	}
 }
 
 // sender pulls items from the buffer and writes them to stream. Exits when
@@ -354,15 +398,17 @@ func (cs *CoreStream) sender(senderCtx context.Context, stream *transport.Stream
 	}
 }
 
-// receiver reads ack responses from stream and advances the watermark.
-// Exits on io.EOF (server closed cleanly), a receive error, or ctx cancel.
+// receiver reads ack responses from stream and advances the watermark. It runs
+// until io.EOF (server closed cleanly, including after a graceful half-close),
+// a receive error, the lack-of-ack timeout, or the stream being Closed out from
+// under it (which surfaces as a Recv error). Teardown is coordinated by runOnce,
+// so the receiver does not watch the supervisor context itself.
 //
-// Each Recv call runs on its own goroutine so we can race it against
-// ctx.Done(). This mirrors Rust's tokio::select! pattern in the receiver task
-// and ensures the receiver unblocks promptly on Close/recovery even when the
-// underlying transport Recv is blocking (e.g. a fake in tests, or a stalled
-// server before the lack-of-ack timer fires).
-func (cs *CoreStream) receiver(ctx context.Context, stream *transport.Stream, errCh chan<- error) {
+// Each Recv call runs on its own goroutine so we can race it against the
+// lack-of-ack timer even when the underlying transport Recv is blocking (e.g. a
+// fake in tests, or a stalled server). This mirrors Rust's tokio::select!
+// pattern in the receiver task.
+func (cs *CoreStream) receiver(stream *transport.Stream, errCh chan<- error) {
 	type recvResult struct {
 		resp *zerobuspb.EphemeralStreamResponse
 		err  error
@@ -380,11 +426,6 @@ func (cs *CoreStream) receiver(ctx context.Context, stream *transport.Stream, er
 
 		var r recvResult
 		select {
-		case <-ctx.Done():
-			stream.Close() // unblock the recv goroutine above
-			<-ch
-			errCh <- nil
-			return
 		case <-lackTimer.C:
 			stream.Close()
 			<-ch

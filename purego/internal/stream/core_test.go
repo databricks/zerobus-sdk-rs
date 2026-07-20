@@ -112,6 +112,93 @@ func (fo *fakeOpener) Open(_ context.Context, _ transport.StreamParams) (*transp
 	return transport.NewStreamFromRPC(rpc), nil
 }
 
+// gracefulFakeRPC models real gRPC teardown semantics more faithfully than
+// fakeRPC by distinguishing the two teardown verbs:
+//   - CloseSend half-closes the send side (signalling closeSent) but leaves Recv
+//     open, so a test can deliver late acks after the half-close and assert the
+//     receiver drains them.
+//   - Abort models Close/context-cancel: it unblocks a blocked Recv with an error
+//     and drops any further acks, as an abrupt reset would.
+//
+// serverEnd closes recvs to produce the io.EOF that ends a graceful drain.
+type gracefulFakeRPC struct {
+	sends     chan *zerobuspb.EphemeralStreamRequest
+	recvs     chan *zerobuspb.EphemeralStreamResponse
+	closeSent chan struct{}
+	aborted   chan struct{}
+	closeOnce sync.Once
+	abortOnce sync.Once
+	endOnce   sync.Once
+	ended     atomic.Bool
+}
+
+func newGracefulFakeRPC() *gracefulFakeRPC {
+	return &gracefulFakeRPC{
+		sends:     make(chan *zerobuspb.EphemeralStreamRequest, 64),
+		recvs:     make(chan *zerobuspb.EphemeralStreamResponse, 64),
+		closeSent: make(chan struct{}),
+		aborted:   make(chan struct{}),
+	}
+}
+
+func (f *gracefulFakeRPC) Send(req *zerobuspb.EphemeralStreamRequest) error {
+	f.sends <- req
+	return nil
+}
+
+func (f *gracefulFakeRPC) Recv() (*zerobuspb.EphemeralStreamResponse, error) {
+	select {
+	case resp, ok := <-f.recvs:
+		if !ok {
+			return nil, io.EOF
+		}
+		return resp, nil
+	case <-f.aborted:
+		return nil, io.ErrClosedPipe
+	}
+}
+
+// CloseSend half-closes the send side without ending Recv, matching gRPC.
+func (f *gracefulFakeRPC) CloseSend() error {
+	f.closeOnce.Do(func() { close(f.closeSent) })
+	return nil
+}
+
+// Abort models Stream.Close/context-cancel: it unblocks Recv with an error.
+func (f *gracefulFakeRPC) Abort() {
+	f.abortOnce.Do(func() {
+		f.ended.Store(true)
+		close(f.aborted)
+	})
+}
+
+// serverEnd ends the stream from the server side so the drain sees io.EOF.
+func (f *gracefulFakeRPC) serverEnd() {
+	f.endOnce.Do(func() {
+		f.ended.Store(true)
+		close(f.recvs)
+	})
+}
+
+func (f *gracefulFakeRPC) ack(offset int64) {
+	if f.ended.Load() {
+		return
+	}
+	f.recvs <- &zerobuspb.EphemeralStreamResponse{
+		Payload: &zerobuspb.EphemeralStreamResponse_IngestRecordResponse{
+			IngestRecordResponse: &zerobuspb.IngestRecordResponse{
+				DurabilityAckUpToOffset: proto.Int64(offset),
+			},
+		},
+	}
+}
+
+type gracefulOpener struct{ rpc *gracefulFakeRPC }
+
+func (o *gracefulOpener) Open(_ context.Context, _ transport.StreamParams) (*transport.Stream, error) {
+	return transport.NewStreamFromRPC(o.rpc), nil
+}
+
 // ---- recording ack callback ------------------------------------------------
 
 type recordingCallback struct {
@@ -291,6 +378,50 @@ func TestCoreStreamCloseIsIdempotent(t *testing.T) {
 	cs := newTestStream(t, newFakeOpener(rpc))
 	cs.Close()
 	cs.Close() // must not panic or block
+}
+
+// TestCoreStreamCloseDrainsGracefully verifies that a clean Close half-closes
+// the send side (CloseSend) and keeps the receiver draining acks to io.EOF,
+// rather than abruptly aborting the stream. An ack delivered after the
+// half-close must still advance the watermark; an abrupt teardown would drop it.
+func TestCoreStreamCloseDrainsGracefully(t *testing.T) {
+	rpc := newGracefulFakeRPC()
+	cb := &recordingCallback{}
+	cs := NewCoreStream(testParams(), testConfig(), &gracefulOpener{rpc: rpc},
+		jsonEncoder{}, offsetAckModel{}, cb)
+
+	off, err := cs.Ingest(context.Background(), []byte(`{}`))
+	if err != nil {
+		t.Fatalf("Ingest: %v", err)
+	}
+	waitCondition(t, func() bool { return len(rpc.sends) > 0 }, time.Second)
+	<-rpc.sends
+
+	// Close in the background; it blocks until the graceful drain completes.
+	done := make(chan struct{})
+	go func() { cs.Close(); close(done) }()
+
+	// Close must half-close the send side rather than hard-abort.
+	select {
+	case <-rpc.closeSent:
+	case <-time.After(time.Second):
+		t.Fatal("Close did not half-close the send side (CloseSend) — it hard-aborted")
+	}
+
+	// Deliver a late ack after the half-close, then end the stream. A graceful
+	// drain observes this ack; an abrupt teardown would have dropped it.
+	rpc.ack(off)
+	rpc.serverEnd()
+
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("Close did not return after the server ended the stream")
+	}
+
+	if got := cb.ackCount(); got != 1 {
+		t.Fatalf("want the post-half-close ack drained (ackCount=1), got %d", got)
+	}
 }
 
 func TestCoreStreamIsClosed(t *testing.T) {

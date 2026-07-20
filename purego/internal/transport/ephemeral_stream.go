@@ -188,12 +188,20 @@ type StreamRPC interface {
 
 // NewStreamFromRPC wraps an already-established RPC as a Stream, skipping the
 // handshake. Intended for tests that supply a fake RPC implementation.
-// Close calls CloseSend on the underlying RPC so fake implementations that
-// block in Recv on a channel get an io.EOF and unblock.
+//
+// Close cancels the stream (abrupt abort). If the RPC implements an Abort()
+// method it is used so the fake can model gRPC's context-cancel — distinct from
+// CloseSend's half-close — and unblock a Recv blocked on a channel. Otherwise
+// Close falls back to CloseSend, which suffices for fakes whose Recv returns
+// io.EOF once the send side is half-closed.
 func NewStreamFromRPC(rpc StreamRPC) *Stream {
 	s := &Stream{}
 	s.rpc = rpc
-	s.cancel = func() { _ = rpc.CloseSend() }
+	if a, ok := rpc.(interface{ Abort() }); ok {
+		s.cancel = a.Abort
+	} else {
+		s.cancel = func() { _ = rpc.CloseSend() }
+	}
 	s.setID("fake-stream")
 	return s
 }
