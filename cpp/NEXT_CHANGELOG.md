@@ -34,9 +34,9 @@
   reads its connection settings from the environment (`ZEROBUS_SERVER_ENDPOINT`,
   `DATABRICKS_WORKSPACE_URL`, `ZEROBUS_TABLE_NAME`, `DATABRICKS_CLIENT_ID`,
   `DATABRICKS_CLIENT_SECRET`). They build with
-  the SDK via `ZEROBUS_BUILD_EXAMPLES` (the Arrow examples are skipped when
-  Apache Arrow C++ is not installed). Includes a top-level `examples/README.md`
-  and per-format guides.
+  the SDK via `ZEROBUS_BUILD_EXAMPLES` (the Arrow example is skipped when Apache
+  Arrow C++ is not installed). Includes a top-level `examples/README.md` and
+  per-format guides.
 - The examples also demonstrate advanced features inline: an async ack callback
   (`StreamOptions::ack_callback`) and a custom `HeadersProvider` in
   `examples/json/batch.cpp`, recovery of unacknowledged records
