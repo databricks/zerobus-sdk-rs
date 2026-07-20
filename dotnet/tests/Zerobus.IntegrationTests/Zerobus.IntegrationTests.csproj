@@ -9,6 +9,9 @@
   </PropertyGroup>
 
   <ItemGroup>
+    <PackageReference Include="Apache.Arrow" />
+    <PackageReference Include="Apache.Arrow.Flight" />
+    <PackageReference Include="Apache.Arrow.Flight.AspNetCore" />
     <PackageReference Include="Microsoft.NET.Test.Sdk" />
     <PackageReference Include="NUnit" />
     <PackageReference Include="NUnit3TestAdapter" />

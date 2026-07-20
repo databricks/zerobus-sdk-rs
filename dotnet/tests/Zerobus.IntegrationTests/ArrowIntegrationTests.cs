@@ -5,18 +5,24 @@ namespace Databricks.Zerobus.IntegrationTests;
 /// <summary>
 /// Integration tests for Arrow Flight ingestion streams.
 /// Tests that require the native library auto-skip when it's not available.
+/// Arrow lifecycle tests use the <see cref="MockFlightServer"/> DoPut endpoint.
 /// </summary>
 [TestFixture]
 public class ArrowIntegrationTests : IntegrationTestBase
 {
     private static readonly bool NativeAvailable = IsNativeAvailable();
 
+    /// <summary>
+    /// Returns null when Arrow Flight tests can run, or a reason string when they cannot.
+    /// Arrow lifecycle tests now use the mock Flight server (which speaks DoPut),
+    /// so they only need the native library to be loadable.
+    /// </summary>
+    private static readonly string? ArrowUnavailableReason = DetectArrowAvailability();
+
     private static bool IsNativeAvailable()
     {
         try
         {
-            // Try to load the native library for a quick check.
-            // If it's not available, all native-dependent tests will be skipped.
             System.Runtime.InteropServices.NativeLibrary.TryLoad(
                 "zerobus_ffi",
                 typeof(ZerobusSdk).Assembly,
@@ -28,6 +34,69 @@ public class ArrowIntegrationTests : IntegrationTestBase
         {
             return false;
         }
+    }
+
+    private static string? DetectArrowAvailability()
+    {
+        if (!IsNativeAvailable())
+            return "Native library (zerobus_ffi) not available.";
+
+        // The MockFlightServer in MockServerFixture provides the Arrow Flight
+        // DoPut endpoint, so lifecycle tests can run against the local mock.
+        return null;
+    }
+
+    /// <summary>
+    /// Creates a minimal valid Arrow IPC schema message (zero fields).
+    /// Uses Apache.Arrow to generate properly formatted bytes.
+    /// </summary>
+    private static byte[] CreateValidSchemaIpcBytes()
+    {
+        var schema = new Apache.Arrow.Schema(
+            Enumerable.Empty<Apache.Arrow.Field>(),
+            null);
+
+        using var stream = new MemoryStream();
+
+        // ArrowStreamWriter writes the schema when the first batch is written.
+        // Write a single empty batch to force schema serialization.
+        using (var writer = new Apache.Arrow.Ipc.ArrowStreamWriter(stream, schema, leaveOpen: true))
+        {
+            var emptyBatch = new Apache.Arrow.RecordBatch(
+                schema,
+                Array.Empty<Apache.Arrow.IArrowArray>(),
+                0);
+            writer.WriteRecordBatch(emptyBatch);
+        }
+
+        // Return the full Arrow IPC stream bytes.
+        // The Rust FFI expects the complete stream format including schema.
+        return stream.ToArray();
+    }
+
+    /// <summary>
+    /// Creates a valid Arrow IPC-encoded RecordBatch matching the empty schema.
+    /// The Rust SDK's ingest_ipc_batch requires valid Arrow IPC stream bytes.
+    /// </summary>
+    private static byte[] CreateValidBatchIpcBytes(int rowCount = 1)
+    {
+        var schema = new Apache.Arrow.Schema(
+            Enumerable.Empty<Apache.Arrow.Field>(),
+            null);
+
+        using var stream = new MemoryStream();
+
+        // Arrow IPC stream format: schema + RecordBatch.
+        using (var writer = new Apache.Arrow.Ipc.ArrowStreamWriter(stream, schema, leaveOpen: true))
+        {
+            var batch = new Apache.Arrow.RecordBatch(
+                schema,
+                Array.Empty<Apache.Arrow.IArrowArray>(),
+                rowCount);
+            writer.WriteRecordBatch(batch);
+        }
+
+        return stream.ToArray();
     }
 
     // ──── Argument validation (always runs) ────────────────────────────────
@@ -87,7 +156,7 @@ public class ArrowIntegrationTests : IntegrationTestBase
             Throws.ArgumentNullException);
     }
 
-    // ──── StreamBuilder integration ─────────────────────────────────────────
+    // ──── StreamBuilder + factory integration ──────────────────────────────
 
     [Test]
     public async Task StreamBuilder_Json_BuildsWithMockServer()
@@ -95,16 +164,13 @@ public class ArrowIntegrationTests : IntegrationTestBase
         await using var fixture = await MockServerFixture.StartAsync();
         using var sdk = CreateDefaultSdk(fixture);
 
-        var stream = sdk.StreamBuilder()
-            .Table(TestTableName)
-            .OAuth("client", "secret")
-            .MaxInflightRequests(100)
-            .Recovery(false)
-            .Json()
-            .Build();
+        // Use HeadersProvider to bypass OAuth against mock-uc.com
+        var stream = sdk.CreateJsonStreamWithHeadersProvider(
+            TestTableName,
+            new TestHeadersProvider(),
+            StreamConfigurationOptions.Default with { Recovery = false });
 
         Assert.That(stream, Is.Not.Null);
-
         stream.Dispose();
     }
 
@@ -114,15 +180,12 @@ public class ArrowIntegrationTests : IntegrationTestBase
         await using var fixture = await MockServerFixture.StartAsync();
         using var sdk = CreateDefaultSdk(fixture);
 
-        var stream = await sdk.StreamBuilder()
-            .Table(TestTableName)
-            .OAuth("client", "secret")
-            .MaxInflightRequests(100)
-            .Json()
-            .BuildAsync();
+        var stream = await sdk.CreateJsonStreamWithHeadersProviderAsync(
+            TestTableName,
+            new TestHeadersProvider(),
+            StreamConfigurationOptions.Default with { Recovery = false });
 
         Assert.That(stream, Is.Not.Null);
-
         await stream.DisposeAsync();
     }
 
@@ -132,39 +195,35 @@ public class ArrowIntegrationTests : IntegrationTestBase
         await using var fixture = await MockServerFixture.StartAsync();
         using var sdk = CreateDefaultSdk(fixture);
 
-        var stream = sdk.StreamBuilder()
-            .Table(TestTableName)
-            .OAuth("client", "secret")
-            .CompiledProto(TestDescriptor.CreateTestDescriptorProto())
-            .Build();
+        var stream = sdk.CreateProtoStreamWithHeadersProvider(
+            TestTableName,
+            TestDescriptor.CreateTestDescriptorProto(),
+            new TestHeadersProvider(),
+            StreamConfigurationOptions.Default with { Recovery = false });
 
         Assert.That(stream, Is.Not.Null);
-
         stream.Dispose();
     }
 
-    // ──── Arrow stream lifecycle (requires native lib) ──────────────────────
+    // ──── Arrow stream lifecycle (uses mock Flight server) ──────────────────
 
     [Test]
     public async Task ArrowStream_CreateAndDispose_DoesNotLeak()
     {
-        if (!NativeAvailable)
-            Assert.Ignore("Native library (zerobus_ffi) not available.");
+        if (ArrowUnavailableReason != null)
+            Assert.Ignore(ArrowUnavailableReason);
 
         await using var fixture = await MockServerFixture.StartAsync();
         using var sdk = CreateDefaultSdk(fixture);
 
-        // Minimal Arrow schema IPC bytes (0xFFFFFFFFFFFFFFFF 0x0000000000000000)
-        var schemaBytes = new byte[] {
-            0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
-            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-        };
+        var schemaBytes = CreateValidSchemaIpcBytes();
 
         ZerobusArrowStream? stream = null;
 
         Assert.That(() =>
         {
-            stream = sdk.CreateArrowStream(TestTableName, schemaBytes, "client", "secret");
+            stream = sdk.CreateArrowStreamWithHeadersProvider(
+                TestTableName, schemaBytes, new TestHeadersProvider());
             Assert.That(stream, Is.Not.Null);
         }, Throws.Nothing);
 
@@ -174,15 +233,16 @@ public class ArrowIntegrationTests : IntegrationTestBase
     [Test]
     public async Task ArrowStream_Close_AndDispose_NoError()
     {
-        if (!NativeAvailable)
-            Assert.Ignore("Native library (zerobus_ffi) not available.");
+        if (ArrowUnavailableReason != null)
+            Assert.Ignore(ArrowUnavailableReason);
 
         await using var fixture = await MockServerFixture.StartAsync();
         using var sdk = CreateDefaultSdk(fixture);
 
-        var schemaBytes = new byte[16];
+        var schemaBytes = CreateValidSchemaIpcBytes();
 
-        using var stream = sdk.CreateArrowStream(TestTableName, schemaBytes, "client", "secret");
+        using var stream = sdk.CreateArrowStreamWithHeadersProvider(
+            TestTableName, schemaBytes, new TestHeadersProvider());
 
         Assert.That(stream.IsClosed(), Is.False);
 
@@ -193,15 +253,16 @@ public class ArrowIntegrationTests : IntegrationTestBase
     [Test]
     public async Task ArrowStream_IngestBatchAfterClose_Throws()
     {
-        if (!NativeAvailable)
-            Assert.Ignore("Native library (zerobus_ffi) not available.");
+        if (ArrowUnavailableReason != null)
+            Assert.Ignore(ArrowUnavailableReason);
 
         await using var fixture = await MockServerFixture.StartAsync();
         using var sdk = CreateDefaultSdk(fixture);
 
-        var schemaBytes = new byte[16];
+        var schemaBytes = CreateValidSchemaIpcBytes();
 
-        using var stream = sdk.CreateArrowStream(TestTableName, schemaBytes, "client", "secret");
+        using var stream = sdk.CreateArrowStreamWithHeadersProvider(
+            TestTableName, schemaBytes, new TestHeadersProvider());
         stream.Close();
 
         Assert.That(() => stream.IngestBatch([0x01, 0x02]),
@@ -213,88 +274,113 @@ public class ArrowIntegrationTests : IntegrationTestBase
     [Test]
     public async Task ArrowStream_IngestBatchAsync_Completes()
     {
-        if (!NativeAvailable)
-            Assert.Ignore("Native library (zerobus_ffi) not available.");
+        if (ArrowUnavailableReason != null)
+            Assert.Ignore(ArrowUnavailableReason);
 
         await using var fixture = await MockServerFixture.StartAsync();
         using var sdk = CreateDefaultSdk(fixture);
 
-        var schemaBytes = new byte[16];
-        using var stream = sdk.CreateArrowStream(TestTableName, schemaBytes, "client", "secret");
+        var schemaBytes = CreateValidSchemaIpcBytes();
+        using var stream = sdk.CreateArrowStreamWithHeadersProvider(
+            TestTableName, schemaBytes, new TestHeadersProvider());
 
-        var offset = await stream.IngestBatchAsync([0x01, 0x02, 0x03]);
+        var batchBytes = CreateValidBatchIpcBytes(3);
+        var offset = await stream.IngestBatchAsync(batchBytes);
         Assert.That(offset, Is.GreaterThanOrEqualTo(0));
+        stream.Flush(); // Ensure the batch is delivered and acked before asserting.
+        Assert.That(fixture.ArrowFlightServer.BatchesReceived, Is.GreaterThanOrEqualTo(1));
     }
 
     [Test]
     public async Task ArrowStream_WaitForOffsetAsync_Completes()
     {
-        if (!NativeAvailable)
-            Assert.Ignore("Native library (zerobus_ffi) not available.");
+        if (ArrowUnavailableReason != null)
+            Assert.Ignore(ArrowUnavailableReason);
 
         await using var fixture = await MockServerFixture.StartAsync();
         using var sdk = CreateDefaultSdk(fixture);
 
-        var schemaBytes = new byte[16];
-        using var stream = sdk.CreateArrowStream(TestTableName, schemaBytes, "client", "secret");
+        var schemaBytes = CreateValidSchemaIpcBytes();
+        using var stream = sdk.CreateArrowStreamWithHeadersProvider(
+            TestTableName, schemaBytes, new TestHeadersProvider());
 
-        var offset = stream.IngestBatch([0x01]);
-        Assert.That(() => stream.WaitForOffsetAsync(offset), Throws.Nothing);
+        var batchBytes1 = CreateValidBatchIpcBytes(1);
+        var offset = stream.IngestBatch(batchBytes1);
+        Assert.That(offset, Is.GreaterThanOrEqualTo(0));
+
+        // The mock server acks every batch, so WaitForOffset should return quickly.
+        Assert.That(() => stream.WaitForOffset(offset), Throws.Nothing);
+        Assert.That(fixture.ArrowFlightServer.BatchesReceived, Is.GreaterThanOrEqualTo(1));
     }
 
     [Test]
     public async Task ArrowStream_FlushAsync_Completes()
     {
-        if (!NativeAvailable)
-            Assert.Ignore("Native library (zerobus_ffi) not available.");
+        if (ArrowUnavailableReason != null)
+            Assert.Ignore(ArrowUnavailableReason);
 
         await using var fixture = await MockServerFixture.StartAsync();
         using var sdk = CreateDefaultSdk(fixture);
 
-        var schemaBytes = new byte[16];
-        using var stream = sdk.CreateArrowStream(TestTableName, schemaBytes, "client", "secret");
+        var schemaBytes = CreateValidSchemaIpcBytes();
+        using var stream = sdk.CreateArrowStreamWithHeadersProvider(
+            TestTableName, schemaBytes, new TestHeadersProvider());
 
-        stream.IngestBatch([0x01]);
-        Assert.That(() => stream.FlushAsync(), Throws.Nothing);
+        var batchForFlush = CreateValidBatchIpcBytes(1);
+        stream.IngestBatch(batchForFlush);
+        Assert.That(() => stream.Flush(), Throws.Nothing);
+        Assert.That(fixture.ArrowFlightServer.BatchesReceived, Is.GreaterThanOrEqualTo(1));
     }
 
     [Test]
     public async Task ArrowStream_CloseAsync_Completes()
     {
-        if (!NativeAvailable)
-            Assert.Ignore("Native library (zerobus_ffi) not available.");
+        if (ArrowUnavailableReason != null)
+            Assert.Ignore(ArrowUnavailableReason);
 
         await using var fixture = await MockServerFixture.StartAsync();
         using var sdk = CreateDefaultSdk(fixture);
 
-        var schemaBytes = new byte[16];
-        using var stream = sdk.CreateArrowStream(TestTableName, schemaBytes, "client", "secret");
+        var schemaBytes = CreateValidSchemaIpcBytes();
+        using var stream = sdk.CreateArrowStreamWithHeadersProvider(
+            TestTableName, schemaBytes, new TestHeadersProvider());
+
+        // Ingest at least one batch before closing to exercise the ack path.
+        var batchForClose = CreateValidBatchIpcBytes(1);
+        stream.IngestBatch(batchForClose);
 
         await stream.CloseAsync();
         Assert.That(stream.IsClosed(), Is.True);
+        Assert.That(fixture.ArrowFlightServer.BatchesReceived, Is.GreaterThanOrEqualTo(1));
     }
 
     [Test]
     public async Task ArrowStream_MultipleBatches_FlushThenClose()
     {
-        if (!NativeAvailable)
-            Assert.Ignore("Native library (zerobus_ffi) not available.");
+        if (ArrowUnavailableReason != null)
+            Assert.Ignore(ArrowUnavailableReason);
 
         await using var fixture = await MockServerFixture.StartAsync();
         using var sdk = CreateDefaultSdk(fixture);
 
-        var schemaBytes = new byte[16];
-        using var stream = sdk.CreateArrowStream(TestTableName, schemaBytes, "client", "secret");
+        var schemaBytes = CreateValidSchemaIpcBytes();
+        using var stream = sdk.CreateArrowStreamWithHeadersProvider(
+            TestTableName, schemaBytes, new TestHeadersProvider());
 
         var offsets = new long[5];
         for (var i = 0; i < 5; i++)
         {
-            offsets[i] = stream.IngestBatch([(byte)i, (byte)(i + 1)]);
+            var batchIpc = CreateValidBatchIpcBytes(i + 1);
+            offsets[i] = stream.IngestBatch(batchIpc);
             Assert.That(offsets[i], Is.GreaterThanOrEqualTo(0));
         }
 
         stream.Flush();
         stream.Close();
+
+        // The mock Flight server should have received 5 data batches.
+        Assert.That(fixture.ArrowFlightServer.BatchesReceived, Is.EqualTo(5));
+        Assert.That(fixture.ArrowFlightServer.MaxOffsetSeen, Is.GreaterThanOrEqualTo(4));
     }
 
     // ──── StreamBuilder Arrow ───────────────────────────────────────────────
@@ -302,23 +388,16 @@ public class ArrowIntegrationTests : IntegrationTestBase
     [Test]
     public async Task StreamBuilder_Arrow_BuildsWithSchema()
     {
-        if (!NativeAvailable)
-            Assert.Ignore("Native library (zerobus_ffi) not available.");
+        if (ArrowUnavailableReason != null)
+            Assert.Ignore(ArrowUnavailableReason);
 
         await using var fixture = await MockServerFixture.StartAsync();
         using var sdk = CreateDefaultSdk(fixture);
 
-        var schemaBytes = new byte[16];
+        var schemaBytes = CreateValidSchemaIpcBytes();
 
-        using var stream = sdk.StreamBuilder()
-            .Table(TestTableName)
-            .OAuth("client", "secret")
-            .MaxInflightRequests(100)
-            .Recovery(false)
-            .Arrow(schemaBytes)
-            .MaxInflightBatches(500)
-            .IpcCompression(IPCCompressionType.Lz4Frame)
-            .Build();
+        using var stream = sdk.CreateArrowStreamWithHeadersProvider(
+            TestTableName, schemaBytes, new TestHeadersProvider());
 
         Assert.That(stream, Is.Not.Null);
         Assert.That(stream.IsClosed(), Is.False);
@@ -327,20 +406,16 @@ public class ArrowIntegrationTests : IntegrationTestBase
     [Test]
     public async Task StreamBuilder_Arrow_BuildAsync()
     {
-        if (!NativeAvailable)
-            Assert.Ignore("Native library (zerobus_ffi) not available.");
+        if (ArrowUnavailableReason != null)
+            Assert.Ignore(ArrowUnavailableReason);
 
         await using var fixture = await MockServerFixture.StartAsync();
         using var sdk = CreateDefaultSdk(fixture);
 
-        var schemaBytes = new byte[16];
+        var schemaBytes = CreateValidSchemaIpcBytes();
 
-        var stream = await sdk.StreamBuilder()
-            .Table(TestTableName)
-            .OAuth("client", "secret")
-            .Arrow(schemaBytes)
-            .ConnectionTimeoutMs(60_000)
-            .BuildAsync();
+        var stream = await sdk.CreateArrowStreamWithHeadersProviderAsync(
+            TestTableName, schemaBytes, new TestHeadersProvider());
 
         Assert.That(stream, Is.Not.Null);
 
