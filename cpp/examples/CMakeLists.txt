@@ -33,49 +33,29 @@ target_link_libraries(proto_single PRIVATE zerobus::zerobus)
 add_executable(proto_batch proto/batch.cpp)
 target_link_libraries(proto_batch PRIVATE zerobus::zerobus)
 
-# ---------------------------------------------------------------------------
-# Advanced examples (ack callback, recovery, custom headers provider)
-# ---------------------------------------------------------------------------
-add_executable(advanced_ack_callback advanced/ack_callback.cpp)
-target_link_libraries(advanced_ack_callback PRIVATE zerobus::zerobus)
-
-add_executable(advanced_recovery advanced/recovery.cpp)
-target_link_libraries(advanced_recovery PRIVATE zerobus::zerobus)
-
-add_executable(advanced_headers_provider advanced/headers_provider.cpp)
-target_link_libraries(advanced_headers_provider PRIVATE zerobus::zerobus)
-
 if(DEFINED ZEROBUS_FFI_BUILD_TARGET)
   add_dependencies(json_single ${ZEROBUS_FFI_BUILD_TARGET})
   add_dependencies(json_batch ${ZEROBUS_FFI_BUILD_TARGET})
   add_dependencies(proto_single ${ZEROBUS_FFI_BUILD_TARGET})
   add_dependencies(proto_batch ${ZEROBUS_FFI_BUILD_TARGET})
-  add_dependencies(advanced_ack_callback ${ZEROBUS_FFI_BUILD_TARGET})
-  add_dependencies(advanced_recovery ${ZEROBUS_FFI_BUILD_TARGET})
-  add_dependencies(advanced_headers_provider ${ZEROBUS_FFI_BUILD_TARGET})
 endif()
 
 # ---------------------------------------------------------------------------
-# Arrow Flight examples (arrow_ingest, arrow_compression) — Beta
+# Arrow Flight example (arrow_ingest) — Beta
 # ---------------------------------------------------------------------------
-# Use the Apache Arrow C++ library to build RecordBatches and serialize them to
+# Uses the Apache Arrow C++ library to build RecordBatches and serialize them to
 # Arrow IPC bytes for ArrowStream::ingest_batch. Skipped if Arrow is not
 # installed — a machine without libarrow still gets every other example.
 find_package(Arrow QUIET)
 if(Arrow_FOUND)
   add_executable(arrow_ingest arrow/arrow_ingest.cpp)
   target_link_libraries(arrow_ingest PRIVATE zerobus::zerobus Arrow::arrow_shared)
-
-  add_executable(arrow_compression arrow/compression.cpp)
-  target_link_libraries(arrow_compression PRIVATE zerobus::zerobus Arrow::arrow_shared)
-
   if(DEFINED ZEROBUS_FFI_BUILD_TARGET)
     add_dependencies(arrow_ingest ${ZEROBUS_FFI_BUILD_TARGET})
-    add_dependencies(arrow_compression ${ZEROBUS_FFI_BUILD_TARGET})
   endif()
 else()
   message(STATUS
-      "Zerobus examples: Apache Arrow C++ not found; skipping arrow_ingest and "
-      "arrow_compression examples (install libarrow-dev to enable). The JSON, "
-      "proto, and advanced examples still build.")
+      "Zerobus examples: Apache Arrow C++ not found; skipping arrow_ingest "
+      "example (install libarrow-dev to enable). The JSON and proto examples "
+      "still build.")
 endif()

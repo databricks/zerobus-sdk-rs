@@ -26,8 +26,11 @@ table's columns by name.
 - Great for quick prototyping
 
 **Available examples:**
-- **`single.cpp`** — ingest records one at a time using `ingest_json_record()`
-- **`batch.cpp`** — ingest multiple records at once using `ingest_json_records()`
+- **`single.cpp`** — ingest records one at a time using `ingest_json_record()`,
+  and recover unacknowledged records after a failure with `get_unacked_records()`
+- **`batch.cpp`** — ingest multiple records at once using
+  `ingest_json_records()`, with an async ack callback and a custom
+  `HeadersProvider` (shown commented out)
 
 Both open a JSON stream by setting `StreamOptions::record_type` to
 `RecordType::Json` and leaving `TableProperties::descriptor_proto` empty.
@@ -56,8 +59,7 @@ Both open a JSON stream by setting `StreamOptions::record_type` to
 Record 1 queued with offset ID: 0
 Record 2 queued with offset ID: 1
 Record 3 queued with offset ID: 2
-All records acknowledged.
-Stream closed successfully.
+All records acknowledged. Stream closed successfully.
 ```
 
 ### Code Highlights
@@ -86,6 +88,32 @@ zerobus::Stream stream =
     sdk.create_stream(props, client_id, client_secret, options);
 ```
 
+**Recovering unacknowledged records.** The SDK recovers transparently from
+transient disconnects. If a stream fails *terminally*, `flush()`/`close()`
+throws — and a failed `close()` keeps the handle alive so you can drain whatever
+was never acknowledged with `get_unacked_records()` and re-ingest it on a fresh
+stream. (After a *successful* `close()` the handle is freed, so that call would
+throw instead — recovery belongs on the failure path only.)
+
+```cpp
+try {
+  stream.flush();
+  stream.close();
+} catch (const zerobus::ZerobusException& e) {
+  std::vector<zerobus::UnackedRecord> unacked = stream.get_unacked_records();
+  zerobus::Stream retry = open_stream(...);
+  for (const auto& record : unacked) {
+    retry.ingest_json_record(record.as_string());   // loop — no per-record wait
+  }
+  retry.flush();                                     // then flush once
+  retry.close();
+}
+```
+
+Each `UnackedRecord` exposes `is_json()`, the raw `data()` bytes, and
+`as_string()`. Arrow streams have the mirror API,
+`ArrowStream::get_unacked_batches()`.
+
 ## Batch Example
 
 ### Running the Example
@@ -102,7 +130,7 @@ zerobus::Stream stream =
 ```
 Batch of 3 records queued; last offset ID: 2
 Batch acknowledged through offset ID: 2
-Stream closed successfully.
+Stream closed successfully. Callback observed 3 acknowledgements.
 ```
 
 ### Code Highlights
@@ -127,6 +155,35 @@ if (last_offset >= 0) {
 
 In a hot path you would queue **many** batches and `flush()` once, rather than
 waiting after each batch.
+
+**Async ack callback.** Register an `AckCallback` via
+`StreamOptions::ack_callback` to observe acknowledgements on a background task
+without ever blocking the ingest loop — for progress reporting or reacting to
+failures. `AckCallback::from()` adapts two lambdas, so there is no subclass to
+write:
+
+```cpp
+options.ack_callback = zerobus::AckCallback::from(
+    [&acked](std::int64_t offset) noexcept { acked.fetch_add(1); },
+    [](std::int64_t offset, const std::string& msg) noexcept { /* on error */ });
+options.callback_wait_policy = zerobus::CallbackWaitPolicy::forever();
+```
+
+Both handlers are `noexcept` (an escaping exception calls `std::terminate`), run
+serialized on another thread (synchronize shared state — the example uses
+`std::atomic`), and must not call back into the `Stream`. `forever()` makes
+`close()` wait for every in-flight callback, so none can touch captured state
+after it goes out of scope. See
+[`ack_callback.hpp`](../../include/zerobus/ack_callback.hpp) for the full
+contract.
+
+**Custom authentication.** Instead of OAuth client credentials, implement
+`HeadersProvider` and pass it to the `create_stream()` overload that takes one
+(shown commented out in `batch.cpp`). `get_headers()` returns the headers the
+endpoint expects — at minimum an `authorization` bearer token and
+`x-databricks-zerobus-table-name`. When a provider supplies auth,
+`unity_catalog_url()` is optional on the builder. See
+[`headers_provider.hpp`](../../include/zerobus/headers_provider.hpp).
 
 ## Adapting for Your Custom Table
 

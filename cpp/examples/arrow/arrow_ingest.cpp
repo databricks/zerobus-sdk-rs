@@ -190,12 +190,16 @@ int main() {
                            .build();
 
     // 2. Open an Arrow stream. The schema-only IPC bytes tell the server what
-    //    the record batches will look like. Optional IPC compression trades
-    //    client CPU for fewer bytes on the wire; enable it only when network
-    //    bandwidth limits throughput:
+    //    the record batches will look like.
+    //
+    //    Optional IPC compression trades client CPU for fewer bytes on the
+    //    wire; enable it only when network bandwidth limits throughput. Pass
+    //    ArrowStreamOptions to create_arrow_stream to turn it on:
     //      zerobus::ArrowStreamOptions opts;
     //      opts.ipc_compression = zerobus::IpcCompression::Zstd;  // or
-    //      Lz4Frame
+    //      Lz4Frame stream = sdk.create_arrow_stream(table_name, schema_ipc,
+    //      client_id,
+    //                                       client_secret, opts);
     const std::shared_ptr<arrow::Schema> schema = orders_schema();
     const std::vector<std::uint8_t> schema_ipc = serialize_schema_ipc(schema);
 

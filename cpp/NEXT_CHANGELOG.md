@@ -37,11 +37,11 @@
   the SDK via `ZEROBUS_BUILD_EXAMPLES` (the Arrow examples are skipped when
   Apache Arrow C++ is not installed). Includes a top-level `examples/README.md`
   and per-format guides.
-- Added advanced examples under `examples/advanced/` (async ack callback via
-  `StreamOptions::ack_callback`, recovery of unacknowledged records via
-  `Stream::get_unacked_records()`, and custom authentication via a
-  `HeadersProvider`), plus an Arrow IPC compression example
-  (`examples/arrow/compression.cpp`).
+- The examples also demonstrate advanced features inline: an async ack callback
+  (`StreamOptions::ack_callback`) and a custom `HeadersProvider` in
+  `examples/json/batch.cpp`, recovery of unacknowledged records
+  (`Stream::get_unacked_records()`) in `examples/json/single.cpp`, and Arrow IPC
+  compression in `examples/arrow/arrow_ingest.cpp`.
 
 ### Internal Changes
 

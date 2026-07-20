@@ -9,6 +9,12 @@
 // The batch call returns the offset of the LAST record in the batch. Because
 // acks are monotonic, waiting on that single offset confirms the whole batch.
 //
+// It also demonstrates two optional features:
+//   - An async ack callback (StreamOptions::ack_callback) that observes
+//     acknowledgements on a background task without blocking the ingest loop.
+//   - A custom HeadersProvider for authentication (shown commented out at
+//     stream creation), the alternative to OAuth client credentials.
+//
 // Configuration — every connection setting is read from the environment. Export
 // these before running (see ../README.md for what each one is and the full
 // copy-pasteable block):
@@ -22,10 +28,13 @@
 //          price DOUBLE, status STRING, created_at TIMESTAMP, updated_at
 //          TIMESTAMP)
 
+#include <atomic>
 #include <chrono>
 #include <cstdint>
 #include <cstdlib>
 #include <iostream>
+#include <map>
+#include <memory>
 #include <string>
 #include <vector>
 
@@ -61,6 +70,31 @@ std::string make_order_json(int id, const std::string& customer,
          ", \"updated_at\": " + std::to_string(ts) + "}";
 }
 
+// A custom HeadersProvider is the alternative to OAuth client credentials: the
+// core calls get_headers() whenever it needs fresh headers (possibly from
+// another thread), and you return whatever the endpoint expects — at minimum an
+// "authorization" bearer token and "x-databricks-zerobus-table-name". Throwing
+// surfaces the message to the core as a headers-provider error. The provider
+// must outlive the Stream (which holds a shared_ptr to it). See
+// include/zerobus/headers_provider.hpp for the full contract. Used in the
+// commented-out create_stream() call below.
+class BearerTokenProvider : public zerobus::HeadersProvider {
+ public:
+  BearerTokenProvider(std::string table_name, std::string token)
+      : table_name_(std::move(table_name)), token_(std::move(token)) {}
+
+  std::map<std::string, std::string> get_headers() override {
+    return {
+        {"authorization", "Bearer " + token_},
+        {"x-databricks-zerobus-table-name", table_name_},
+    };
+  }
+
+ private:
+  std::string table_name_;
+  std::string token_;
+};
+
 }  // namespace
 
 int main() {
@@ -69,6 +103,10 @@ int main() {
   const std::string table_name = require_env("ZEROBUS_TABLE_NAME");
   const std::string client_id = require_env("DATABRICKS_CLIENT_ID");
   const std::string client_secret = require_env("DATABRICKS_CLIENT_SECRET");
+
+  // Counter the ack callback updates. Declared before the Stream so it outlives
+  // every callback invocation (see the lifetime note below).
+  std::atomic<std::int64_t> acked{0};
 
   try {
     // 1. Build the SDK.
@@ -85,8 +123,33 @@ int main() {
     zerobus::StreamOptions options;
     options.record_type = zerobus::RecordType::Json;
 
+    // Optional: an async ack callback observes acknowledgements on a background
+    // task, so you can track durability without ever blocking the ingest loop.
+    // AckCallback::from() adapts lambdas; both handlers must be noexcept, run
+    // on another thread (synchronize shared state — here a std::atomic), and
+    // must not call back into the Stream. forever() makes close() wait for
+    // every in-flight callback, so none can touch `acked` after it goes out of
+    // scope. See include/zerobus/ack_callback.hpp for the full contract.
+    options.ack_callback = zerobus::AckCallback::from(
+        [&acked](std::int64_t offset) noexcept {
+          acked.fetch_add(1, std::memory_order_relaxed);
+          (void)offset;
+        },
+        [](std::int64_t offset, const std::string& msg) noexcept {
+          std::cerr << "record at offset " << offset << " failed: " << msg
+                    << "\n";
+        });
+    options.callback_wait_policy = zerobus::CallbackWaitPolicy::forever();
+
     zerobus::Stream stream =
         sdk.create_stream(props, client_id, client_secret, options);
+
+    // Alternative: authenticate with a custom HeadersProvider instead of OAuth
+    // client credentials. The provider supplies auth itself, so the builder's
+    // unity_catalog_url() is optional in that path.
+    //   auto provider =
+    //       std::make_shared<BearerTokenProvider>(table_name, my_token);
+    //   zerobus::Stream stream = sdk.create_stream(props, provider, options);
 
     const std::int64_t now = now_micros();
 
@@ -116,10 +179,12 @@ int main() {
     }
 
     // 5. flush() drains anything still pending, then close at a controlled
-    //    point.
+    //    point. The ack callback keeps firing during flush()/close(); forever()
+    //    ensures close() waits for the last one.
     stream.flush();
     stream.close();
-    std::cout << "Stream closed successfully.\n";
+    std::cout << "Stream closed successfully. Callback observed "
+              << acked.load() << " acknowledgements.\n";
   } catch (const zerobus::ZerobusException& e) {
     std::cerr << "Zerobus error: " << e.what()
               << " (retryable=" << (e.is_retryable() ? "true" : "false")

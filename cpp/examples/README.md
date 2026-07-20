@@ -9,7 +9,6 @@ ingest data into Databricks Delta tables.
 - [JSON Examples](json/README.md)
 - [Protocol Buffers Examples](proto/README.md)
 - [Arrow Flight Examples](arrow/README.md) (Beta)
-- [Advanced Examples](advanced/README.md)
 - [Prerequisites](#prerequisites)
   - [Create a Databricks Table](#1-create-a-databricks-table)
   - [Set Up OAuth Service Principal](#2-set-up-oauth-service-principal)
@@ -34,9 +33,11 @@ columnar `ArrowStream`:
 - **[Arrow Flight](arrow/README.md)** (Beta) — Columnar Arrow `RecordBatch`
   ingestion over the Arrow Flight protocol.
 
-Beyond the three formats, the **[Advanced](advanced/README.md)** examples cover
-async ack callbacks, recovering unacknowledged records after a failure, custom
-authentication via `HeadersProvider`, and Arrow IPC compression.
+Beyond the basic ingestion flow, several examples also demonstrate advanced
+features inline: an async ack callback and a custom `HeadersProvider` in
+[`json/batch.cpp`](json/batch.cpp), recovering unacknowledged records after a
+failure in [`json/single.cpp`](json/single.cpp), and Arrow IPC compression in
+[`arrow/arrow_ingest.cpp`](arrow/arrow_ingest.cpp).
 
 **Ingestion Methods:**
 - **Single-record** (`ingest_json_record` / `ingest_proto_record`) — ingest
@@ -56,10 +57,6 @@ authentication via `HeadersProvider`, and Arrow IPC compression.
 | [Proto Single](proto/README.md#single-record-example) | Protocol Buffers | Single-record | `proto_single` |
 | [Proto Batch](proto/README.md#batch-example) | Protocol Buffers | Batch | `proto_batch` |
 | [Arrow](arrow/README.md) | Arrow Flight (Beta) | `RecordBatch` | `arrow_ingest` |
-| [Arrow Compression](arrow/README.md#ipc-compression) | Arrow Flight (Beta) | `RecordBatch` (Zstd IPC) | `arrow_compression` |
-| [Ack Callback](advanced/README.md#ack-callback) | JSON | Async ack tracking | `advanced_ack_callback` |
-| [Recovery](advanced/README.md#recovery) | JSON | `get_unacked_records()` | `advanced_recovery` |
-| [Headers Provider](advanced/README.md#custom-headers-provider) | JSON | Custom auth | `advanced_headers_provider` |
 
 ## Prerequisites
 
@@ -149,17 +146,12 @@ The binaries land in `build/examples/`:
 ./build/examples/json_batch
 ./build/examples/proto_single
 ./build/examples/proto_batch
-./build/examples/advanced_ack_callback
-./build/examples/advanced_recovery
-./build/examples/advanced_headers_provider
-./build/examples/arrow_ingest        # only if Apache Arrow C++ is installed
-./build/examples/arrow_compression   # only if Apache Arrow C++ is installed
+./build/examples/arrow_ingest      # only if Apache Arrow C++ is installed
 ```
 
-The JSON, proto, and advanced examples need no extra dependencies. The Arrow
-examples require the Apache Arrow C++ library (`find_package(Arrow)`); if it is
-not installed the `arrow_ingest` and `arrow_compression` targets are skipped and
-the others still build.
+The JSON and proto examples need no extra dependencies. The Arrow example
+requires the Apache Arrow C++ library (`find_package(Arrow)`); if it is not
+installed the `arrow_ingest` target is skipped and the other four still build.
 
 ## Common Code Patterns
 
