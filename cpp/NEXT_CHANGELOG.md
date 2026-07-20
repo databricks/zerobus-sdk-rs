@@ -47,6 +47,12 @@
   `concurrency_test` that exercises the documented "concurrent readers on a
   shared `ProtoSchema`" contract under many threads, catching data races the
   AddressSanitizer job cannot.
+- The `address`/`thread` sanitizer builds now instrument the Rust FFI too
+  (nightly `-Zsanitizer` + `-Zbuild-std`), so races/UAF inside the core are
+  visible rather than only in the C++ wrapper. These builds require a nightly
+  toolchain with `rust-src` and link the C++ side with clang (LLVM sanitizer
+  runtime); each sanitizer uses an isolated cargo target dir. The default build
+  is unchanged (GCC, plain FFI).
 
 ### Breaking Changes
 
