@@ -30,6 +30,15 @@ func (e *denyingWrapper) Error() string     { return "denied: " + e.cause.Error(
 func (e *denyingWrapper) IsRetryable() bool { return false }
 func (e *denyingWrapper) Unwrap() error     { return e.cause }
 
+// timeoutRetryErr is retryable and unwraps to context.DeadlineExceeded, mirroring
+// the TokenError a client-Timeout mint produces: the request timed out (transient,
+// retryable) even though a context deadline is in the cause chain.
+type timeoutRetryErr struct{}
+
+func (e *timeoutRetryErr) Error() string     { return "request timeout" }
+func (e *timeoutRetryErr) IsRetryable() bool { return true }
+func (e *timeoutRetryErr) Unwrap() error     { return context.DeadlineExceeded }
+
 func makeMint(token string, ttlSecs int) func(context.Context, mintReason) (fetchedToken, error) {
 	return func(_ context.Context, _ mintReason) (fetchedToken, error) {
 		ft := fetchedToken{token: token}
@@ -45,7 +54,7 @@ func getOrFetch(t *testing.T, c *tokenCache, clientID, secret, table string,
 	mint func(context.Context, mintReason) (fetchedToken, error),
 ) string {
 	t.Helper()
-	tok, err := c.getOrFetch(context.Background(), clientID, secret, table, mint)
+	tok, err := c.getOrFetch(context.Background(), clientID, secret, table, "", mint)
 	if err != nil {
 		t.Fatalf("getOrFetch: %v", err)
 	}
@@ -134,7 +143,7 @@ func TestTokenCacheInvalidateForcesMintOnNextCall(t *testing.T) {
 	}
 
 	getOrFetch(t, c, "id", "secret", "c.s.t", mint)
-	c.invalidate("id", "secret", "c.s.t")
+	c.invalidate("id", "secret", "c.s.t", "")
 	getOrFetch(t, c, "id", "secret", "c.s.t", mint)
 
 	if n := calls.Load(); n != 2 {
@@ -146,7 +155,7 @@ func TestTokenCacheWithinRefreshBufferRemints(t *testing.T) {
 	c := newTokenCache()
 	// A cached token past its refresh point is re-minted on the next call, and
 	// the fresh long-TTL result is then cached and reused.
-	seedRefreshable(c, "id", "secret", "c.s.t", "stale")
+	seedRefreshable(c, "id", "secret", "c.s.t", "", "stale")
 
 	var calls atomic.Int64
 	mint := func(_ context.Context, _ mintReason) (fetchedToken, error) {
@@ -168,10 +177,10 @@ func TestTokenCacheWithinRefreshBufferRemints(t *testing.T) {
 func TestTokenCacheRetryableRefreshFailureFallsBack(t *testing.T) {
 	c := newTokenCache()
 	// Seed a token that is valid but due for proactive refresh.
-	seedRefreshable(c, "id", "secret", "c.s.t", "valid")
+	seedRefreshable(c, "id", "secret", "c.s.t", "", "valid")
 
 	// Retryable refresh error: should fall back to the still-valid cached token.
-	tok, err := c.getOrFetch(context.Background(), "id", "secret", "c.s.t",
+	tok, err := c.getOrFetch(context.Background(), "id", "secret", "c.s.t", "",
 		func(_ context.Context, _ mintReason) (fetchedToken, error) {
 			return fetchedToken{}, &retryErr{"transient"}
 		},
@@ -186,9 +195,9 @@ func TestTokenCacheRetryableRefreshFailureFallsBack(t *testing.T) {
 
 func TestTokenCacheNonRetryableRefreshErrorPropagates(t *testing.T) {
 	c := newTokenCache()
-	seedRefreshable(c, "id", "secret", "c.s.t", "valid")
+	seedRefreshable(c, "id", "secret", "c.s.t", "", "valid")
 
-	_, err := c.getOrFetch(context.Background(), "id", "secret", "c.s.t",
+	_, err := c.getOrFetch(context.Background(), "id", "secret", "c.s.t", "",
 		func(_ context.Context, _ mintReason) (fetchedToken, error) {
 			return fetchedToken{}, &fatalErr{"revoked"}
 		},
@@ -207,7 +216,7 @@ func TestTokenCacheColdMissFailureLeavesNoEntry(t *testing.T) {
 
 	// A failed cold-miss mint must not cache anything: the error propagates and a
 	// retry re-mints rather than serving a phantom token.
-	_, err := c.getOrFetch(context.Background(), "id", "secret", "c.s.t",
+	_, err := c.getOrFetch(context.Background(), "id", "secret", "c.s.t", "",
 		func(_ context.Context, _ mintReason) (fetchedToken, error) {
 			return fetchedToken{}, &fatalErr{"boom"}
 		},
@@ -231,7 +240,7 @@ func TestTokenCacheColdMissFailureLeavesNoEntry(t *testing.T) {
 func TestTokenCacheNoTTLResponseKeepsExistingCachedToken(t *testing.T) {
 	c := newTokenCache()
 	// Seed a token that is due for refresh (refreshAt already in the past).
-	seedRefreshable(c, "id", "secret", "c.s.t", "valid")
+	seedRefreshable(c, "id", "secret", "c.s.t", "", "valid")
 
 	// A refresh returns a token with no TTL; caller gets the fresh token but the
 	// existing valid cached token is retained (Rust parity).
@@ -246,7 +255,7 @@ func TestTokenCacheNoTTLResponseKeepsExistingCachedToken(t *testing.T) {
 
 	// A subsequent retryable refresh failure should still fall back to the
 	// original valid cached token, proving it was retained.
-	tok, err := c.getOrFetch(context.Background(), "id", "secret", "c.s.t",
+	tok, err := c.getOrFetch(context.Background(), "id", "secret", "c.s.t", "",
 		func(_ context.Context, _ mintReason) (fetchedToken, error) {
 			return fetchedToken{}, &retryErr{"blip"}
 		},
@@ -271,7 +280,7 @@ func TestTokenCacheSingleFlightMintOnce(t *testing.T) {
 	for i := range goroutines {
 		go func(i int) {
 			defer wg.Done()
-			tok, err := c.getOrFetch(context.Background(), "id", "secret", "c.s.t",
+			tok, err := c.getOrFetch(context.Background(), "id", "secret", "c.s.t", "",
 				func(_ context.Context, _ mintReason) (fetchedToken, error) {
 					calls.Add(1)
 					time.Sleep(20 * time.Millisecond) // hold lock so others queue up
@@ -315,7 +324,7 @@ func TestTokenCacheConcurrentMintFailureSharesError(t *testing.T) {
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		_, errs[0] = c.getOrFetch(context.Background(), "id", "secret", "c.s.t",
+		_, errs[0] = c.getOrFetch(context.Background(), "id", "secret", "c.s.t", "",
 			func(_ context.Context, _ mintReason) (fetchedToken, error) {
 				calls.Add(1)
 				close(leaderMinting)
@@ -331,7 +340,7 @@ func TestTokenCacheConcurrentMintFailureSharesError(t *testing.T) {
 	for i := range waiters {
 		go func(i int) {
 			defer wg.Done()
-			_, errs[i+1] = c.getOrFetch(context.Background(), "id", "secret", "c.s.t",
+			_, errs[i+1] = c.getOrFetch(context.Background(), "id", "secret", "c.s.t", "",
 				func(_ context.Context, _ mintReason) (fetchedToken, error) {
 					calls.Add(1) // a waiter reaching here means single-flight broke
 					return fetchedToken{}, &fatalErr{"boom"}
@@ -369,7 +378,7 @@ func TestTokenCacheContextDeadlineRespectedDuringMint(t *testing.T) {
 
 	// Leader holds the mint open until release is closed.
 	go func() {
-		_, _ = c.getOrFetch(context.Background(), "id", "s", "c.s.t",
+		_, _ = c.getOrFetch(context.Background(), "id", "s", "c.s.t", "",
 			func(_ context.Context, _ mintReason) (fetchedToken, error) {
 				close(started)
 				<-release
@@ -384,7 +393,7 @@ func TestTokenCacheContextDeadlineRespectedDuringMint(t *testing.T) {
 	defer cancel()
 
 	start := time.Now()
-	_, err := c.getOrFetch(ctx, "id", "s", "c.s.t", makeMint("tok2", 3600))
+	_, err := c.getOrFetch(ctx, "id", "s", "c.s.t", "", makeMint("tok2", 3600))
 	if !errors.Is(err, context.DeadlineExceeded) {
 		t.Fatalf("want DeadlineExceeded, got %v", err)
 	}
@@ -399,7 +408,7 @@ func TestTokenCacheContextDeadlineRespectedDuringMint(t *testing.T) {
 func TestTokenCacheInvalidateDuringInFlightMint(t *testing.T) {
 	c := newTokenCache()
 	// Seed so invalidate has an entry to clear.
-	seedRefreshable(c, "id", "secret", "c.s.t", "old")
+	seedRefreshable(c, "id", "secret", "c.s.t", "", "old")
 
 	mintStarted := make(chan struct{})
 	releaseMint := make(chan struct{})
@@ -409,7 +418,7 @@ func TestTokenCacheInvalidateDuringInFlightMint(t *testing.T) {
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		out, err = c.getOrFetch(context.Background(), "id", "secret", "c.s.t",
+		out, err = c.getOrFetch(context.Background(), "id", "secret", "c.s.t", "",
 			func(_ context.Context, _ mintReason) (fetchedToken, error) {
 				close(mintStarted)
 				<-releaseMint
@@ -419,7 +428,7 @@ func TestTokenCacheInvalidateDuringInFlightMint(t *testing.T) {
 	}()
 
 	<-mintStarted
-	c.invalidate("id", "secret", "c.s.t") // clears cached mid-mint
+	c.invalidate("id", "secret", "c.s.t", "") // clears cached mid-mint
 	close(releaseMint)
 	<-done
 
@@ -427,7 +436,7 @@ func TestTokenCacheInvalidateDuringInFlightMint(t *testing.T) {
 		t.Fatalf("want fresh/nil, got %q/%v", out, err)
 	}
 	// Leader's fresh token should be the one now cached.
-	entry := c.slot(newTokenKey("id", "secret", "c.s.t"))
+	entry := c.slot(newTokenKey("id", "secret", "c.s.t", ""))
 	entry.mu.Lock()
 	cached := entry.cached
 	entry.mu.Unlock()
@@ -438,11 +447,11 @@ func TestTokenCacheInvalidateDuringInFlightMint(t *testing.T) {
 
 func TestTokenCacheJoinedRetryableErrorFallsBack(t *testing.T) {
 	c := newTokenCache()
-	seedRefreshable(c, "id", "secret", "c.s.t", "valid")
+	seedRefreshable(c, "id", "secret", "c.s.t", "", "valid")
 
 	// A retryable error buried inside errors.Join must still be detected so the
 	// cache falls back to the still-valid token.
-	tok, err := c.getOrFetch(context.Background(), "id", "secret", "c.s.t",
+	tok, err := c.getOrFetch(context.Background(), "id", "secret", "c.s.t", "",
 		func(_ context.Context, _ mintReason) (fetchedToken, error) {
 			joined := errors.Join(errors.New("context note"), &retryErr{"transient"})
 			return fetchedToken{}, joined
@@ -458,12 +467,12 @@ func TestTokenCacheJoinedRetryableErrorFallsBack(t *testing.T) {
 
 func TestTokenCacheRetryableCauseUnderNonRetryableWrapperFallsBack(t *testing.T) {
 	c := newTokenCache()
-	seedRefreshable(c, "id", "secret", "c.s.t", "valid")
+	seedRefreshable(c, "id", "secret", "c.s.t", "", "valid")
 
 	// The outermost error reports IsRetryable() == false but unwraps a retryable
 	// cause. isRetryable must keep walking and detect the cause, so the cache
 	// falls back to the still-valid token rather than propagating the failure.
-	tok, err := c.getOrFetch(context.Background(), "id", "secret", "c.s.t",
+	tok, err := c.getOrFetch(context.Background(), "id", "secret", "c.s.t", "",
 		func(_ context.Context, _ mintReason) (fetchedToken, error) {
 			return fetchedToken{}, &denyingWrapper{cause: &retryErr{"transient"}}
 		},
@@ -491,7 +500,7 @@ func TestTokenCacheWaiterRemintsWhenLeaderContextCancelled(t *testing.T) {
 	leaderDone := make(chan struct{})
 	go func() {
 		defer close(leaderDone)
-		_, _ = c.getOrFetch(leaderCtx, "id", "secret", "c.s.t",
+		_, _ = c.getOrFetch(leaderCtx, "id", "secret", "c.s.t", "",
 			func(ctx context.Context, _ mintReason) (fetchedToken, error) {
 				mints.Add(1)
 				close(mintStarted)
@@ -507,7 +516,7 @@ func TestTokenCacheWaiterRemintsWhenLeaderContextCancelled(t *testing.T) {
 	waiterResult := make(chan string, 1)
 	waiterErr := make(chan error, 1)
 	go func() {
-		tok, err := c.getOrFetch(context.Background(), "id", "secret", "c.s.t",
+		tok, err := c.getOrFetch(context.Background(), "id", "secret", "c.s.t", "",
 			func(_ context.Context, _ mintReason) (fetchedToken, error) {
 				mints.Add(1)
 				return fetchedToken{token: "waiter-tok", expiresIn: dur(3600)}, nil
@@ -531,6 +540,73 @@ func TestTokenCacheWaiterRemintsWhenLeaderContextCancelled(t *testing.T) {
 	// Leader minted once (and was cancelled); waiter re-minted once.
 	if n := mints.Load(); n != 2 {
 		t.Fatalf("want 2 mints (leader cancelled + waiter re-mint), got %d", n)
+	}
+}
+
+// TestTokenCacheWaiterSharesLeaderRetryableTimeout verifies that when the
+// leader's mint times out on its own (a retryable error that also wraps a
+// context deadline, as a client-Timeout does), waiters share that one outcome
+// instead of each re-minting. This is the single-flight guarantee: a slow
+// endpoint must not turn one mint into N. It is the counterpart to
+// TestTokenCacheWaiterRemintsWhenLeaderContextCancelled, which covers genuine
+// caller cancellation (non-retryable) where re-attempt IS wanted.
+func TestTokenCacheWaiterSharesLeaderRetryableTimeout(t *testing.T) {
+	c := newTokenCache()
+	var mints atomic.Int64
+
+	leaderMinting := make(chan struct{})
+	release := make(chan struct{})
+
+	// timeoutErr is retryable AND unwraps to a context deadline, mirroring the
+	// TokenError a client-Timeout mint produces after the isRetryableTransportError
+	// fix (retryable=true, cause wraps context.DeadlineExceeded).
+	leaderErr := &timeoutRetryErr{}
+
+	const waiters = 10
+	var wg sync.WaitGroup
+	errs := make([]error, waiters+1)
+
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		_, errs[0] = c.getOrFetch(context.Background(), "id", "secret", "c.s.t", "",
+			func(_ context.Context, _ mintReason) (fetchedToken, error) {
+				mints.Add(1)
+				close(leaderMinting)
+				<-release
+				return fetchedToken{}, leaderErr
+			},
+		)
+	}()
+
+	<-leaderMinting
+
+	wg.Add(waiters)
+	for i := range waiters {
+		go func(i int) {
+			defer wg.Done()
+			_, errs[i+1] = c.getOrFetch(context.Background(), "id", "secret", "c.s.t", "",
+				func(_ context.Context, _ mintReason) (fetchedToken, error) {
+					mints.Add(1) // a waiter minting here means single-flight broke
+					return fetchedToken{}, leaderErr
+				},
+			)
+		}(i)
+	}
+
+	time.Sleep(100 * time.Millisecond)
+	close(release)
+	wg.Wait()
+
+	// One mint total — the leader's. Waiters shared its retryable failure rather
+	// than each re-attempting on the wrapped deadline.
+	if n := mints.Load(); n != 1 {
+		t.Fatalf("retryable leader timeout should mint once, got %d mints", n)
+	}
+	for i, err := range errs {
+		if !errors.Is(err, context.DeadlineExceeded) {
+			t.Errorf("goroutine %d: want shared timeout error, got %v", i, err)
+		}
 	}
 }
 
@@ -570,7 +646,7 @@ func TestTokenCacheCustomRefreshBuffer(t *testing.T) {
 	getOrFetch(t, c, "id", "secret", "c.s.t", makeMint("tok", 3600))
 	after := time.Now()
 
-	entry := c.slot(newTokenKey("id", "secret", "c.s.t"))
+	entry := c.slot(newTokenKey("id", "secret", "c.s.t", ""))
 	entry.mu.Lock()
 	cached := entry.cached
 	entry.mu.Unlock()
@@ -626,8 +702,8 @@ func dur(secs int) *time.Duration {
 // its refresh point (refreshAt in the past, expiresAt in the future). This is
 // the "due for proactive refresh yet safe to fall back to" state; seeding it
 // explicitly avoids depending on TTL/buffer arithmetic that clamping changes.
-func seedRefreshable(c *tokenCache, clientID, secret, table, value string) {
-	key := newTokenKey(clientID, secret, table)
+func seedRefreshable(c *tokenCache, clientID, secret, table, audience, value string) {
+	key := newTokenKey(clientID, secret, table, audience)
 	entry := c.slot(key)
 	now := time.Now()
 	entry.mu.Lock()

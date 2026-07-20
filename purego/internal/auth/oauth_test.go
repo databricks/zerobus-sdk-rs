@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -188,12 +189,13 @@ func TestOAuthTokenProviderConnectionRefusedIsRetryable(t *testing.T) {
 	}
 }
 
-func TestOAuthTokenProviderClientTimeoutIsNonRetryable(t *testing.T) {
+func TestOAuthTokenProviderClientTimeoutIsRetryable(t *testing.T) {
 	// A handler slower than the client's Timeout drives Do() into a client-level
 	// timeout. http.Client.Timeout surfaces as an error wrapping
-	// context.DeadlineExceeded, so it is classified non-retryable (like the
-	// caller's own ctx deadline) rather than as a transient network timeout —
-	// the cache must not mask it with a stale token.
+	// context.DeadlineExceeded, but the caller's own context is still live, so it
+	// is the request that timed out, not the caller cancelling. That is a
+	// transient fault and must be classified retryable so a proactive refresh can
+	// fall back to a still-valid cached token instead of failing the open.
 	// release is closed before ts.Close() so the parked handler returns and Close
 	// does not block waiting on the outstanding request.
 	release := make(chan struct{})
@@ -216,14 +218,101 @@ func TestOAuthTokenProviderClientTimeoutIsNonRetryable(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewOAuthTokenProvider: %v", err)
 	}
+	// Pass a context with no deadline so the timeout can only come from the
+	// client, not the caller — the case the classification must get right.
 	_, err = p.Token(context.Background(), "c.s.t")
 	if err == nil {
 		t.Fatal("want error for client timeout, got nil")
 	}
 	var te *TokenError
-	if !asTokenError(err, &te) || te.IsRetryable() {
-		t.Fatalf("want non-retryable TokenError for client timeout, got %T (retryable=%v): %v",
+	if !asTokenError(err, &te) || !te.IsRetryable() {
+		t.Fatalf("want retryable TokenError for client timeout, got %T (retryable=%v): %v",
 			err, te != nil && te.IsRetryable(), err)
+	}
+}
+
+func TestOAuthTokenProviderClientTimeoutRefreshServesCachedToken(t *testing.T) {
+	// End-to-end: a token that is still valid but due for proactive refresh, whose
+	// refresh mint trips the client timeout, must fall back to the cached token
+	// rather than failing. This is the payoff of classifying a client timeout as
+	// retryable: transport.Open (which adds its own header budget) still succeeds.
+	release := make(chan struct{})
+	srv := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		select {
+		case <-release:
+		case <-r.Context().Done():
+		}
+	})
+	ts := httptest.NewServer(srv)
+	defer ts.Close()
+	defer close(release)
+
+	client := ts.Client()
+	client.Timeout = 50 * time.Millisecond
+
+	p, err := NewOAuthTokenProvider("id", "secret", "https://ws.zerobus.databricks.com", ts.URL,
+		WithHTTPClient(client),
+	)
+	if err != nil {
+		t.Fatalf("NewOAuthTokenProvider: %v", err)
+	}
+	// Seed a still-valid-but-refresh-due token under the provider's real audience.
+	seedRefreshable(p.cache, "id", "secret", "c.s.t", p.tokenAudience(), "cached-valid")
+
+	tok, err := p.Token(context.Background(), "c.s.t")
+	if err != nil {
+		t.Fatalf("want fallback to cached token on client-timeout refresh, got error: %v", err)
+	}
+	if tok != "cached-valid" {
+		t.Fatalf("want cached token served, got %q", tok)
+	}
+}
+
+func TestOAuthTokenProviderSharedCacheKeyedByWorkspace(t *testing.T) {
+	// Two providers with the same credentials and table but different workspaces
+	// share a cache. Because a minted token is bound to its workspace audience,
+	// they must NOT collide on one entry — the second must mint its own token
+	// rather than being served the first's workspace-scoped one.
+	var mu sync.Mutex
+	seen := map[string]string{} // resource audience -> token minted for it
+	srv := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = r.ParseForm()
+		res := r.FormValue("resource")
+		mu.Lock()
+		tok, ok := seen[res]
+		if !ok {
+			tok = "tok-for-" + res
+			seen[res] = tok
+		}
+		mu.Unlock()
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{"access_token": tok, "expires_in": 3600})
+	})
+	ts := httptest.NewServer(srv)
+	defer ts.Close()
+
+	shared := NewSharedTokenCache()
+	p1, err := NewOAuthTokenProvider("id", "secret", "https://ws1.zerobus.databricks.com", ts.URL,
+		WithHTTPClient(ts.Client()), WithSharedTokenCache(shared))
+	if err != nil {
+		t.Fatalf("provider 1: %v", err)
+	}
+	p2, err := NewOAuthTokenProvider("id", "secret", "https://ws2.zerobus.databricks.com", ts.URL,
+		WithHTTPClient(ts.Client()), WithSharedTokenCache(shared))
+	if err != nil {
+		t.Fatalf("provider 2: %v", err)
+	}
+
+	t1, err := p1.Token(context.Background(), "c.s.t")
+	if err != nil {
+		t.Fatalf("p1.Token: %v", err)
+	}
+	t2, err := p2.Token(context.Background(), "c.s.t")
+	if err != nil {
+		t.Fatalf("p2.Token: %v", err)
+	}
+	if t1 == t2 {
+		t.Fatalf("providers for different workspaces shared a cached token %q; audience must be part of the key", t1)
 	}
 }
 

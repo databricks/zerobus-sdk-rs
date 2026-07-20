@@ -49,17 +49,25 @@ func (r mintReason) String() string {
 // SHA-256 digest so the raw credential is never kept in the map: distinct
 // secrets still yield distinct keys (collision resistance), and a rotated
 // secret gets a fresh entry.
+//
+// audience scopes the entry to the token's target audience (the workspace the
+// minted token is bound to). Two providers with the same credentials and table
+// but different workspaces mint tokens that are not interchangeable, so they
+// must not share an entry; without audience in the key the second provider would
+// be served the first's workspace-scoped token and rejected on audience mismatch.
 type tokenKey struct {
 	clientID     string
 	secretDigest [sha256.Size]byte
 	tableName    string
+	audience     string
 }
 
-func newTokenKey(clientID, clientSecret, tableName string) tokenKey {
+func newTokenKey(clientID, clientSecret, tableName, audience string) tokenKey {
 	return tokenKey{
 		clientID:     clientID,
 		secretDigest: sha256.Sum256([]byte(clientSecret)),
 		tableName:    tableName,
+		audience:     audience,
 	}
 }
 
@@ -172,7 +180,7 @@ func newTokenCache(opts ...CacheOption) *tokenCache {
 // than inheriting a cancellation it never requested.
 func (c *tokenCache) getOrFetch(
 	ctx context.Context,
-	clientID, clientSecret, tableName string,
+	clientID, clientSecret, tableName, audience string,
 	mint func(ctx context.Context, reason mintReason) (fetchedToken, error),
 ) (string, error) {
 	if c.disabled {
@@ -183,7 +191,7 @@ func (c *tokenCache) getOrFetch(
 		return fetched.token, nil
 	}
 
-	key := newTokenKey(clientID, clientSecret, tableName)
+	key := newTokenKey(clientID, clientSecret, tableName, audience)
 
 	for {
 		token, err, retry := c.tryGetOrFetch(ctx, key, mint)
@@ -224,10 +232,15 @@ func (c *tokenCache) tryGetOrFetch(
 		entry.mu.Unlock()
 		select {
 		case <-flight.done:
-			// If the leader failed solely because its own context was cancelled,
-			// don't propagate that cancel to a waiter whose context is still
-			// live; signal a re-attempt so this caller can mint for itself.
-			if flight.err != nil && isContextError(flight.err) && ctx.Err() == nil {
+			// If the leader failed solely because its own caller cancelled its
+			// context, don't propagate that cancel to a waiter whose context is
+			// still live; signal a re-attempt so this caller can mint for itself.
+			//
+			// A leader mint that timed out on its own (a slow endpoint tripping a
+			// client/transport deadline) is reported retryable, not a cancellation,
+			// so it is excluded here: the waiter shares that one outcome instead of
+			// each re-minting, which is what single-flight is for.
+			if flight.err != nil && isContextError(flight.err) && !isRetryable(flight.err) && ctx.Err() == nil {
 				return "", nil, true
 			}
 			return flight.token, flight.err, false
@@ -296,10 +309,10 @@ func isContextError(err error) bool {
 	return errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded)
 }
 
-// invalidate drops the cached token for the given credentials and table. The
-// next getOrFetch call will re-mint from scratch.
-func (c *tokenCache) invalidate(clientID, clientSecret, tableName string) {
-	key := newTokenKey(clientID, clientSecret, tableName)
+// invalidate drops the cached token for the given credentials, table, and
+// audience. The next getOrFetch call will re-mint from scratch.
+func (c *tokenCache) invalidate(clientID, clientSecret, tableName, audience string) {
+	key := newTokenKey(clientID, clientSecret, tableName, audience)
 
 	c.mu.Lock()
 	entry, ok := c.entries[key]

@@ -183,11 +183,18 @@ func (p *OAuthTokenProvider) Token(ctx context.Context, tableName string) (strin
 	if err := validateTableName(tableName); err != nil {
 		return "", fmt.Errorf("auth: oauth: %w", err)
 	}
-	return p.cache.getOrFetch(ctx, p.clientID, p.clientSecret, tableName,
+	return p.cache.getOrFetch(ctx, p.clientID, p.clientSecret, tableName, p.tokenAudience(),
 		func(ctx context.Context, reason mintReason) (fetchedToken, error) {
 			return p.mint(ctx, tableName, reason)
 		},
 	)
+}
+
+// tokenAudience is the resource audience a minted token is bound to. It depends
+// on the workspace, so it is part of the cache key: tokens for the same
+// credentials and table but different workspaces are not interchangeable.
+func (p *OAuthTokenProvider) tokenAudience() string {
+	return fmt.Sprintf("api://databricks/workspaces/%s/zerobusDirectWriteApi", p.workspaceID)
 }
 
 // FetchToken mints a token directly from Unity Catalog, bypassing the cache. It
@@ -247,7 +254,7 @@ func (p *OAuthTokenProvider) mint(ctx context.Context, tableName string, reason 
 // invalidate is a no-op for a key with no cached entry, so an unrecognized name
 // simply clears nothing rather than failing silently.
 func (p *OAuthTokenProvider) Invalidate(_ context.Context, tableName string) {
-	p.cache.invalidate(p.clientID, p.clientSecret, strings.TrimSpace(tableName))
+	p.cache.invalidate(p.clientID, p.clientSecret, strings.TrimSpace(tableName), p.tokenAudience())
 }
 
 // fetchToken performs the OAuth 2.0 client credentials request against Unity
@@ -266,7 +273,7 @@ func (p *OAuthTokenProvider) fetchToken(ctx context.Context, tableName string) (
 	form := url.Values{
 		"grant_type":            {"client_credentials"},
 		"scope":                 {"all-apis"},
-		"resource":              {fmt.Sprintf("api://databricks/workspaces/%s/zerobusDirectWriteApi", p.workspaceID)},
+		"resource":              {p.tokenAudience()},
 		"authorization_details": {authDetails},
 	}
 
@@ -280,7 +287,7 @@ func (p *OAuthTokenProvider) fetchToken(ctx context.Context, tableName string) (
 
 	resp, err := p.client.Do(req)
 	if err != nil {
-		return fetchedToken{}, &TokenError{msg: fmt.Sprintf("token request: %v", err), retryable: isRetryableTransportError(err), cause: err}
+		return fetchedToken{}, &TokenError{msg: fmt.Sprintf("token request: %v", err), retryable: isRetryableTransportError(ctx, err), cause: err}
 	}
 	// Drain any unread bytes before closing so the keep-alive connection can be
 	// reused: json.Decode stops at the end of the JSON value and classifyHTTPError
@@ -381,10 +388,16 @@ func buildAuthorizationDetails(catalog, schema, fullTable string) (string, error
 // It carries a retryability flag so the cache can decide whether to suppress
 // the error and serve a still-valid cached token, and wraps the underlying
 // cause (if any) so callers can inspect it with [errors.Is]/[errors.As].
+//
+// For an HTTP error response, Error() reports the status and the structured
+// OAuth error / error_description fields (RFC 6749 §5.2) rather than the raw
+// body. The raw body is retained on ResponseBody for diagnostics without
+// widening the logged message.
 type TokenError struct {
-	msg       string
-	retryable bool
-	cause     error
+	msg          string
+	retryable    bool
+	cause        error
+	ResponseBody string // raw (bounded) HTTP error body, empty for non-HTTP failures
 }
 
 func (e *TokenError) Error() string     { return "auth: oauth: " + e.msg }
@@ -404,12 +417,23 @@ func classifyHTTPError(resp *http.Response) error {
 	// Best-effort read of the error payload, bounded so a misbehaving server
 	// can't stream an unbounded body into the error message.
 	body, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
-	detail := strings.TrimSpace(string(body))
+	raw := strings.TrimSpace(string(body))
+
+	// Prefer the structured OAuth error fields (RFC 6749 §5.2) for the message so
+	// the log carries a clean, parseable summary rather than the raw body; the
+	// raw body is retained on the error type for diagnostics.
 	msg := fmt.Sprintf("HTTP %d", resp.StatusCode)
-	if detail != "" {
-		msg += ": " + detail
+	var oauthErr struct {
+		Error       string `json:"error"`
+		Description string `json:"error_description"`
 	}
-	return &TokenError{msg: msg, retryable: isRetryableStatus(resp.StatusCode)}
+	if err := json.Unmarshal(body, &oauthErr); err == nil && oauthErr.Error != "" {
+		msg += ": " + oauthErr.Error
+		if oauthErr.Description != "" {
+			msg += ": " + oauthErr.Description
+		}
+	}
+	return &TokenError{msg: msg, retryable: isRetryableStatus(resp.StatusCode), ResponseBody: raw}
 }
 
 func isHTTPSuccess(code int) bool { return code >= 200 && code < 300 }
@@ -418,13 +442,20 @@ func isHTTPSuccess(code int) bool { return code >= 200 && code < 300 }
 // token request is transient and safe to retry. Network-level timeouts and
 // connection failures qualify; any other transport error is treated as
 // non-retryable so a genuine failure isn't masked by a stale cached token.
-func isRetryableTransportError(err error) bool {
-	// A context cancel/deadline is the caller's own signal, not a transient
-	// server fault. http.Client.Timeout also surfaces as a wrapped
-	// DeadlineExceeded, so it is caught here (non-retryable) before the
-	// net.Error check below.
+//
+// ctx is the caller's context. A mint request that times out on its own (a slow
+// UC endpoint tripping http.Client.Timeout, or an internal transport deadline)
+// is transient and retryable, so a proactive refresh can fall back to the
+// still-valid cached token. Only a cancel/deadline that came from the caller's
+// own context is non-retryable — that is the caller's signal to stop, not a
+// server fault. Both surface as a wrapped context error, so they are told apart
+// by whether ctx itself is done.
+func isRetryableTransportError(ctx context.Context, err error) bool {
 	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
-		return false
+		// The caller's own context ended: honor it and don't retry. Otherwise the
+		// deadline came from the request itself (client Timeout / transport
+		// deadline), which is a transient fault we can retry.
+		return ctx.Err() == nil
 	}
 	// Network-level timeouts (dial/read deadlines, i/o timeout) are transient.
 	var ne net.Error
