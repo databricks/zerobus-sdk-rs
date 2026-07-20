@@ -2,6 +2,7 @@ package transport
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 
@@ -9,6 +10,13 @@ import (
 
 	"github.com/databricks/zerobus-sdk/purego/internal/zerobuspb"
 )
+
+// ErrInvalidParams marks an Open failure caused by invalid stream parameters
+// (empty table name, unsupported record type, missing descriptor). These are
+// deterministic: reopening with the same params reproduces the failure, so
+// higher layers can use errors.Is to treat them as non-retryable rather than
+// reconnecting in a loop.
+var ErrInvalidParams = errors.New("transport: invalid stream parameters")
 
 // StreamParams describes the stream to open: which table to ingest into, how
 // records are encoded, and which headers provider supplies its credentials.
@@ -54,16 +62,16 @@ func (c *Conn) Open(ctx context.Context, p StreamParams) (*Stream, error) {
 	// the validation below also governs the value actually sent.
 	p.TableName = strings.TrimSpace(p.TableName)
 	if p.TableName == "" {
-		return nil, fmt.Errorf("transport: open: table name is required")
+		return nil, fmt.Errorf("transport: open: table name is required: %w", ErrInvalidParams)
 	}
 	switch p.RecordType {
 	case zerobuspb.RecordType_PROTO, zerobuspb.RecordType_JSON:
 		// Supported.
 	default:
-		return nil, fmt.Errorf("transport: open %q: unsupported record type %v", p.TableName, p.RecordType)
+		return nil, fmt.Errorf("transport: open %q: unsupported record type %v: %w", p.TableName, p.RecordType, ErrInvalidParams)
 	}
 	if p.RecordType == zerobuspb.RecordType_PROTO && len(p.DescriptorProto) == 0 {
-		return nil, fmt.Errorf("transport: open %q: descriptor proto required for PROTO records", p.TableName)
+		return nil, fmt.Errorf("transport: open %q: descriptor proto required for PROTO records: %w", p.TableName, ErrInvalidParams)
 	}
 	headersCtx := ctx
 	useDefaultBudgets := false

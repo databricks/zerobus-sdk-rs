@@ -88,19 +88,27 @@ func (f *fakeRPC) ack(offset int64) {
 // from it. Each call to Open returns the same underlying fakeRPC so tests
 // can send acks from it.
 type fakeOpener struct {
-	mu      sync.Mutex
-	rpcs    []*fakeRPC
-	idx     int
-	openErr error // if non-nil, all opens fail with this error
+	mu       sync.Mutex
+	rpcs     []*fakeRPC
+	idx      int
+	openErr  error // if non-nil, all opens fail with this error
+	attempts int   // number of Open calls, for asserting retry behavior
 }
 
 func newFakeOpener(rpcs ...*fakeRPC) *fakeOpener {
 	return &fakeOpener{rpcs: rpcs}
 }
 
+func (fo *fakeOpener) openCount() int {
+	fo.mu.Lock()
+	defer fo.mu.Unlock()
+	return fo.attempts
+}
+
 func (fo *fakeOpener) Open(_ context.Context, _ transport.StreamParams) (*transport.Stream, error) {
 	fo.mu.Lock()
 	defer fo.mu.Unlock()
+	fo.attempts++
 	if fo.openErr != nil {
 		return nil, fo.openErr
 	}
@@ -440,7 +448,7 @@ func TestCoreStreamGetUnackedReturnsItems(t *testing.T) {
 	// Use a fakeOpener that always fails to open so all items stay unacked.
 	fo := &fakeOpener{openErr: fmt.Errorf("connection refused")}
 	cfg := testConfig()
-	cfg.RecoveryEnabled = false
+	cfg.Recovery = RecoveryDisabled
 	cs := NewCoreStream(testParams(), cfg, fo, jsonEncoder{}, offsetAckModel{}, nil)
 
 	// Ingest with a context that will eventually succeed (the buffer blocks,
@@ -609,7 +617,7 @@ func TestCoreStreamCloseUnblocksEnqueueAtCapacity(t *testing.T) {
 func TestCoreStreamGetUnackedWithoutCallback(t *testing.T) {
 	fo := &fakeOpener{openErr: fmt.Errorf("connection refused")}
 	cfg := testConfig()
-	cfg.RecoveryEnabled = false
+	cfg.Recovery = RecoveryDisabled
 	cs := NewCoreStream(testParams(), cfg, fo, jsonEncoder{}, offsetAckModel{}, nil)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
@@ -627,7 +635,7 @@ func TestCoreStreamNonRetryableErrorTerminates(t *testing.T) {
 	fo := &fakeOpener{openErr: nonRetryable}
 
 	cfg := testConfig()
-	cfg.RecoveryEnabled = false
+	cfg.Recovery = RecoveryDisabled
 	cs := NewCoreStream(testParams(), cfg, fo, jsonEncoder{}, offsetAckModel{}, nil)
 	t.Cleanup(func() { cs.Close() })
 
@@ -643,5 +651,25 @@ func TestCoreStreamNonRetryableErrorTerminates(t *testing.T) {
 	flushErr := cs.Flush(context.Background())
 	if flushErr == nil {
 		t.Fatal("want error from Flush after terminal failure, got nil")
+	}
+}
+
+// TestCoreStreamInvalidParamsNotRetried verifies that an Open failure caused by
+// transport.ErrInvalidParams is treated as non-retryable: the supervisor gives
+// up after a single attempt rather than burning the recovery budget on a
+// deterministic failure. Recovery is left enabled to prove the classification,
+// not the disabled path, is what stops the retries.
+func TestCoreStreamInvalidParamsNotRetried(t *testing.T) {
+	fo := &fakeOpener{openErr: fmt.Errorf("stream: open: bad table: %w", transport.ErrInvalidParams)}
+
+	cfg := testConfig()
+	cfg.RecoveryRetries = 5 // would retry 5x if this were classified retryable
+	cs := NewCoreStream(testParams(), cfg, fo, jsonEncoder{}, offsetAckModel{}, nil)
+	t.Cleanup(func() { cs.Close() })
+
+	waitCondition(t, cs.IsClosed, 2*time.Second)
+
+	if n := fo.openCount(); n != 1 {
+		t.Fatalf("invalid-params open should not be retried, got %d Open attempts", n)
 	}
 }

@@ -2,6 +2,7 @@ package stream
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"sync"
@@ -24,13 +25,32 @@ const (
 	DefaultDrainTimeout = 500 * time.Millisecond
 )
 
+// RecoverySetting controls whether a stream reconnects on failure. It is an enum
+// rather than a bool so its zero value is the safe default (recovery enabled): a
+// zero-valued Config recovers, and disabling is an explicit opt-out. This avoids
+// the bool zero-value footgun where Config{...} silently disables recovery.
+type RecoverySetting int
+
+const (
+	// RecoveryEnabled reconnects on failure. It is the zero value, so a Config
+	// that never sets Recovery still recovers.
+	RecoveryEnabled RecoverySetting = iota
+	// RecoveryDisabled fails the stream on the first unrecoverable error without
+	// attempting to reconnect.
+	RecoveryDisabled
+)
+
+// enabled reports whether recovery should be attempted.
+func (r RecoverySetting) enabled() bool { return r == RecoveryEnabled }
+
 // Config holds per-stream configuration. All fields have sane defaults via
 // DefaultConfig(); override individual fields before passing to NewCoreStream.
 type Config struct {
 	// MaxInflight is the maximum number of unacknowledged records in the buffer.
 	MaxInflight int
-	// RecoveryEnabled controls whether stream reconnection is attempted on failure.
-	RecoveryEnabled bool
+	// Recovery controls whether stream reconnection is attempted on failure. The
+	// zero value (RecoveryEnabled) recovers; set RecoveryDisabled to opt out.
+	Recovery RecoverySetting
 	// RecoveryRetries is the maximum number of reconnect attempts before giving up.
 	RecoveryRetries int
 	// RecoveryBackoff is the fixed wait between reconnect attempts.
@@ -48,8 +68,8 @@ type Config struct {
 // DefaultConfig returns a Config with SDK-standard defaults.
 func DefaultConfig() Config {
 	return Config{
-		MaxInflight:      DefaultMaxInflight,
-		RecoveryEnabled:  true,
+		MaxInflight: DefaultMaxInflight,
+		// Recovery left as its zero value, RecoveryEnabled.
 		RecoveryRetries:  DefaultRecoveryRetries,
 		RecoveryBackoff:  DefaultRecoveryBackoff,
 		FlushTimeout:     DefaultFlushTimeout,
@@ -276,7 +296,16 @@ func (cs *CoreStream) GetUnacked() [][]byte {
 	return out
 }
 
-// Close flushes and then terminates the stream. It is idempotent.
+// Close terminates the stream and releases its resources. It is idempotent and
+// blocks until teardown completes.
+//
+// Close does NOT wait for pending records to be acknowledged: any records still
+// in flight when Close is called are abandoned (retrievable via GetUnacked, or
+// reported through the AckCallback's OnError). Callers that need durability must
+// Flush first, then Close — the standard loop-then-Flush pattern. On this clean
+// shutdown the live stream is torn down gracefully (half-close, then drain any
+// straggling acks to EOF, bounded by DrainTimeout) so the server observes an
+// orderly END_STREAM rather than an abrupt reset; see gracefulTeardown.
 func (cs *CoreStream) Close() {
 	cs.closeOnce.Do(func() {
 		cs.cancelSupervisor()
@@ -319,6 +348,13 @@ func (cs *CoreStream) setTerminalErr(err error) {
 func (cs *CoreStream) runOnce(ctx context.Context) error {
 	stream, err := cs.opener.Open(ctx, cs.params)
 	if err != nil {
+		// Invalid params (bad table name, unsupported record type, missing
+		// descriptor) are deterministic — reconnecting reproduces them — so mark
+		// them non-retryable rather than burning the recovery budget on a failure
+		// that can't succeed.
+		if errors.Is(err, transport.ErrInvalidParams) {
+			return wrapValidation(fmt.Errorf("stream: open: %w", err))
+		}
 		return fmt.Errorf("stream: open: %w", err)
 	}
 
@@ -460,15 +496,9 @@ func (cs *CoreStream) receiver(stream *transport.Stream, errCh chan<- error) {
 		lackTimer.Reset(cs.cfg.LackOfAckTimeout)
 
 		cs.wm.advance(offset)
-		// Discard all buffer items that are now acknowledged.
-		cs.buf.mu.Lock()
-		for len(cs.buf.flight) > 0 && cs.buf.flight[0].offset <= offset {
-			cs.buf.flight = cs.buf.flight[1:]
-			cs.buf.mu.Unlock()
-			<-cs.buf.sem
-			cs.buf.mu.Lock()
-		}
-		cs.buf.mu.Unlock()
+		// Discard all buffer items that are now acknowledged, freeing their
+		// backpressure slots for waiting enqueue callers.
+		cs.buf.discardThrough(offset)
 
 		if cs.callback != nil {
 			cs.callback.OnAck(offset)
@@ -497,21 +527,4 @@ func extractBytes(msg encodedMsg) []byte {
 		}
 	}
 	return nil
-}
-
-// newAckModelForParams constructs the ackModel matching the stream's RecordType.
-func newAckModelForParams(p StreamParams) (ackModel, error) {
-	return newAckModel(p.RecordType)
-}
-
-// newEncoderForParams constructs the encoder matching the stream's RecordType.
-func newEncoderForParams(p StreamParams) (encoder, error) {
-	switch p.RecordType {
-	case zerobuspb.RecordType_PROTO:
-		return protoEncoder{}, nil
-	case zerobuspb.RecordType_JSON:
-		return jsonEncoder{}, nil
-	default:
-		return nil, fmt.Errorf("stream: unsupported record type %v", p.RecordType)
-	}
 }

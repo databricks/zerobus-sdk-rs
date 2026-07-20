@@ -22,7 +22,7 @@ func (cs *CoreStream) supervise(ctx context.Context) {
 
 		if attempt > 0 {
 			// Log-friendly: caller can observe via IsClosed / GetUnacked.
-			if !cs.cfg.RecoveryEnabled || attempt > cs.cfg.RecoveryRetries {
+			if !cs.cfg.Recovery.enabled() || attempt > cs.cfg.RecoveryRetries {
 				err = fmt.Errorf("stream: recovery exhausted after %d attempt(s): %w",
 					attempt, err)
 				break

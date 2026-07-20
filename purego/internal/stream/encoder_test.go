@@ -44,9 +44,9 @@ func TestJSONEncoderSetsOffsetAndPayload(t *testing.T) {
 
 func TestProtoBatchEncoderSetsOffsetAndPayload(t *testing.T) {
 	enc := protoBatchEncoder{}
-	msg, err := enc.encode(3, []byte{0x01, 0x02})
+	msg, err := enc.encodeBatch(3, [][]byte{{0x01, 0x02}, {0x03, 0x04}, {0x05}})
 	if err != nil {
-		t.Fatalf("encode: %v", err)
+		t.Fatalf("encodeBatch: %v", err)
 	}
 	ib := msg.GetIngestRecordBatch()
 	if ib == nil {
@@ -55,16 +55,21 @@ func TestProtoBatchEncoderSetsOffsetAndPayload(t *testing.T) {
 	if ib.GetOffsetId() != 3 {
 		t.Fatalf("want offset 3, got %d", ib.GetOffsetId())
 	}
-	if ib.GetProtoEncodedBatch() == nil {
+	pb := ib.GetProtoEncodedBatch()
+	if pb == nil {
 		t.Fatal("want ProtoEncodedBatch, got nil")
+	}
+	// The batch must carry all three records, not one concatenated blob.
+	if got := len(pb.GetRecords()); got != 3 {
+		t.Fatalf("want 3 records in batch, got %d", got)
 	}
 }
 
 func TestJSONBatchEncoderSetsOffsetAndPayload(t *testing.T) {
 	enc := jsonBatchEncoder{}
-	msg, err := enc.encode(5, []byte(`{"a":1}`))
+	msg, err := enc.encodeBatch(5, [][]byte{[]byte(`{"a":1}`), []byte(`{"b":2}`)})
 	if err != nil {
-		t.Fatalf("encode: %v", err)
+		t.Fatalf("encodeBatch: %v", err)
 	}
 	ib := msg.GetIngestRecordBatch()
 	if ib == nil {
@@ -73,18 +78,34 @@ func TestJSONBatchEncoderSetsOffsetAndPayload(t *testing.T) {
 	if ib.GetOffsetId() != 5 {
 		t.Fatalf("want offset 5, got %d", ib.GetOffsetId())
 	}
-	if ib.GetJsonBatch() == nil {
+	jb := ib.GetJsonBatch()
+	if jb == nil {
 		t.Fatal("want JsonBatch, got nil")
+	}
+	if got := jb.GetRecords(); len(got) != 2 || got[0] != `{"a":1}` || got[1] != `{"b":2}` {
+		t.Fatalf("want 2 json records preserved, got %v", got)
 	}
 }
 
 func TestEncodersRejectEmptyRecord(t *testing.T) {
-	for _, enc := range []encoder{protoEncoder{}, jsonEncoder{}, protoBatchEncoder{}, jsonBatchEncoder{}} {
+	for _, enc := range []encoder{protoEncoder{}, jsonEncoder{}} {
 		if _, err := enc.encode(1, nil); err == nil {
 			t.Errorf("%T: want error for empty record, got nil", enc)
 		}
 		if _, err := enc.encode(1, []byte{}); err == nil {
 			t.Errorf("%T: want error for zero-length record, got nil", enc)
+		}
+	}
+}
+
+func TestBatchEncodersRejectEmptyBatch(t *testing.T) {
+	for _, enc := range []batchEncoder{protoBatchEncoder{}, jsonBatchEncoder{}} {
+		if _, err := enc.encodeBatch(1, nil); err == nil {
+			t.Errorf("%T: want error for empty batch, got nil", enc)
+		}
+		// A batch containing an empty record is rejected too.
+		if _, err := enc.encodeBatch(1, [][]byte{[]byte("ok"), {}}); err == nil {
+			t.Errorf("%T: want error for empty record within batch, got nil", enc)
 		}
 	}
 }

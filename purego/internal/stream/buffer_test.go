@@ -72,10 +72,11 @@ func TestBufferBackpressure(t *testing.T) {
 	}
 
 	// Observe and discard one item to free a slot.
-	if _, err := b.next(context.Background()); err != nil {
+	it, err := b.next(context.Background())
+	if err != nil {
 		t.Fatalf("next: %v", err)
 	}
-	b.discard()
+	b.discardThrough(it.offset)
 
 	// Now the blocked enqueue should complete.
 	deadline := time.Now().Add(200 * time.Millisecond)
@@ -198,8 +199,7 @@ func TestBufferConcurrentEnqueueDiscard(t *testing.T) {
 			if err != nil {
 				return
 			}
-			_ = it
-			b.discard()
+			b.discardThrough(it.offset)
 		}
 	}()
 

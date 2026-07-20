@@ -13,11 +13,21 @@ import (
 // Encoding is eager so the buffer never retains live user objects.
 type encodedMsg = *zerobuspb.EphemeralStreamRequest
 
-// encoder turns a user record into a wire message for the given offset.
+// encoder turns a single user record into a wire message for the given offset.
 // The offset is stamped into the message here so re-sends after recovery use
 // the same logical offset the server already saw.
 type encoder interface {
 	encode(offset int64, record []byte) (encodedMsg, error)
+}
+
+// batchEncoder turns a batch of already-encoded records into one wire message.
+// All records in the batch share a single offset and are atomic to the server
+// (it acks the whole batch or none of it), so the batch occupies exactly one
+// logical offset in the core's buffer. Records are passed as a slice — one
+// element per record — rather than a single concatenated blob, so the batch is
+// represented as the N records it actually contains.
+type batchEncoder interface {
+	encodeBatch(offset int64, records [][]byte) (encodedMsg, error)
 }
 
 // protoEncoder builds EphemeralStreamRequest_IngestRecord payloads for
@@ -61,18 +71,21 @@ func (jsonEncoder) encode(offset int64, record []byte) (encodedMsg, error) {
 // the server.
 type protoBatchEncoder struct{}
 
-func (protoBatchEncoder) encode(offset int64, batch []byte) (encodedMsg, error) {
-	if len(batch) == 0 {
+func (protoBatchEncoder) encodeBatch(offset int64, records [][]byte) (encodedMsg, error) {
+	if len(records) == 0 {
 		return nil, fmt.Errorf("stream: proto batch must not be empty")
 	}
-	// batch is a length-delimited sequence of serialized proto records packed
-	// by the caller; we send it as a ProtoEncodedRecordBatch.
+	for i, r := range records {
+		if len(r) == 0 {
+			return nil, fmt.Errorf("stream: proto batch record %d must not be empty", i)
+		}
+	}
 	return &zerobuspb.EphemeralStreamRequest{
 		Payload: &zerobuspb.EphemeralStreamRequest_IngestRecordBatch{
 			IngestRecordBatch: &zerobuspb.IngestRecordBatchRequest{
 				OffsetId: proto.Int64(offset),
 				Batch: &zerobuspb.IngestRecordBatchRequest_ProtoEncodedBatch{
-					ProtoEncodedBatch: &zerobuspb.ProtoEncodedRecordBatch{Records: [][]byte{batch}},
+					ProtoEncodedBatch: &zerobuspb.ProtoEncodedRecordBatch{Records: records},
 				},
 			},
 		},
@@ -83,17 +96,23 @@ func (protoBatchEncoder) encode(offset int64, batch []byte) (encodedMsg, error) 
 // for a batch of JSON records.
 type jsonBatchEncoder struct{}
 
-func (jsonBatchEncoder) encode(offset int64, batch []byte) (encodedMsg, error) {
-	if len(batch) == 0 {
+func (jsonBatchEncoder) encodeBatch(offset int64, records [][]byte) (encodedMsg, error) {
+	if len(records) == 0 {
 		return nil, fmt.Errorf("stream: json batch must not be empty")
 	}
-	// batch is a newline-delimited JSON payload; one record per line.
+	jsonRecords := make([]string, len(records))
+	for i, r := range records {
+		if len(r) == 0 {
+			return nil, fmt.Errorf("stream: json batch record %d must not be empty", i)
+		}
+		jsonRecords[i] = string(r)
+	}
 	return &zerobuspb.EphemeralStreamRequest{
 		Payload: &zerobuspb.EphemeralStreamRequest_IngestRecordBatch{
 			IngestRecordBatch: &zerobuspb.IngestRecordBatchRequest{
 				OffsetId: proto.Int64(offset),
 				Batch: &zerobuspb.IngestRecordBatchRequest_JsonBatch{
-					JsonBatch: &zerobuspb.JsonRecordBatch{Records: []string{string(batch)}},
+					JsonBatch: &zerobuspb.JsonRecordBatch{Records: jsonRecords},
 				},
 			},
 		},

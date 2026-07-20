@@ -19,15 +19,19 @@ type item struct {
 // buffer is the bounded, offset-assigning queue between the caller's Ingest
 // calls and the sender goroutine. It is the Go equivalent of Rust's
 // LandingZone: callers enqueue already-encoded messages; the sender observes
-// them (moves to in-flight); acks cause the sender to discard them.
+// them (moves to in-flight); acks cause them to be discarded.
 //
 // Concurrency model:
 //   - Many goroutines may call enqueue concurrently.
-//   - Exactly one sender goroutine calls next/requeue/discard.
+//   - Exactly one sender goroutine calls next/requeue.
+//   - Exactly one receiver goroutine calls discardThrough as acks arrive.
 //   - Exactly one goroutine (the supervisor) calls drain.
 //
+// All state (queue, flight, sem, cond) is private; the sender and receiver
+// interact only through these methods, never by touching the fields directly.
+//
 // The semaphore enforces the MaxInflight cap: enqueue blocks once the cap is
-// reached and unblocks as acks arrive and discard releases permits.
+// reached and unblocks as acks arrive and discardThrough releases permits.
 type buffer struct {
 	mu       sync.Mutex
 	cond     *sync.Cond
@@ -40,9 +44,11 @@ type buffer struct {
 }
 
 func newBuffer(maxInflight int) *buffer {
+	// queue/flight grow on demand; don't preallocate to maxInflight, which with
+	// the default 1M cap would reserve tens of MB per stream before a single
+	// record is ingested. Only the semaphore is sized to the cap, since it is the
+	// backpressure gate and its capacity defines the bound.
 	b := &buffer{
-		queue:  make([]item, 0, maxInflight),
-		flight: make([]item, 0, maxInflight),
 		sem:    make(chan struct{}, maxInflight),
 		doneCh: make(chan struct{}),
 	}
@@ -110,16 +116,26 @@ func (b *buffer) next(ctx context.Context) (item, error) {
 	return it, nil
 }
 
-// discard removes the oldest in-flight item (acknowledged by the server) and
-// releases its semaphore slot so a new enqueue can proceed.
-func (b *buffer) discard() {
+// discardThrough removes every in-flight item whose offset is <= offset (all
+// now acknowledged by the server) and releases one semaphore slot per removed
+// item so blocked enqueue callers can proceed. It is the sender/receiver's only
+// hook for ack-driven eviction, keeping the buffer's internals (flight, sem,
+// cond) private. Returns the number of items discarded.
+func (b *buffer) discardThrough(offset int64) int {
 	b.mu.Lock()
-	if len(b.flight) > 0 {
+	n := 0
+	for len(b.flight) > 0 && b.flight[0].offset <= offset {
 		b.flight = b.flight[1:]
+		n++
 	}
 	b.mu.Unlock()
-	<-b.sem
-	b.cond.Signal()
+	for range n {
+		<-b.sem
+	}
+	if n > 0 {
+		b.cond.Broadcast()
+	}
+	return n
 }
 
 // requeue moves all in-flight items back to the front of the pending queue so
