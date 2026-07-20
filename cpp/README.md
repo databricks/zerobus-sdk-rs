@@ -370,10 +370,10 @@ three record formats — JSON and protobuf (dynamic schema from Unity Catalog),
 each with a single-record and a batch variant, plus Arrow Flight (Beta). Every
 example reads its connection settings from the environment
 (`ZEROBUS_SERVER_ENDPOINT`, `DATABRICKS_WORKSPACE_URL`, `ZEROBUS_TABLE_NAME`,
-`DATABRICKS_CLIENT_ID`, `DATABRICKS_CLIENT_SECRET`) — the same names the other
-SDK examples use. They build as part of the top-level CMake build
-(`ZEROBUS_BUILD_EXAMPLES`, on by default) into `build/examples/`. See the
-[examples README](examples/README.md) for setup and per-format guides.
+`DATABRICKS_CLIENT_ID`, `DATABRICKS_CLIENT_SECRET`). They build as part of the
+top-level CMake build (`ZEROBUS_BUILD_EXAMPLES`, on by default) into
+`build/examples/`. See the [examples README](examples/README.md) for setup and
+per-format guides.
 
 ## A note on credentials
 

@@ -33,10 +33,15 @@
   single-record and a batch variant, plus Arrow Flight (Beta). Every example
   reads its connection settings from the environment (`ZEROBUS_SERVER_ENDPOINT`,
   `DATABRICKS_WORKSPACE_URL`, `ZEROBUS_TABLE_NAME`, `DATABRICKS_CLIENT_ID`,
-  `DATABRICKS_CLIENT_SECRET`), matching the other SDK examples. They build with
-  the SDK via `ZEROBUS_BUILD_EXAMPLES` (the Arrow example is skipped when Apache
-  Arrow C++ is not installed). Includes a top-level `examples/README.md` and
-  per-format guides.
+  `DATABRICKS_CLIENT_SECRET`). They build with
+  the SDK via `ZEROBUS_BUILD_EXAMPLES` (the Arrow examples are skipped when
+  Apache Arrow C++ is not installed). Includes a top-level `examples/README.md`
+  and per-format guides.
+- Added advanced examples under `examples/advanced/` (async ack callback via
+  `StreamOptions::ack_callback`, recovery of unacknowledged records via
+  `Stream::get_unacked_records()`, and custom authentication via a
+  `HeadersProvider`), plus an Arrow IPC compression example
+  (`examples/arrow/compression.cpp`).
 
 ### Internal Changes
 

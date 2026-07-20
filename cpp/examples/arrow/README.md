@@ -116,6 +116,14 @@ zerobus::ArrowStream stream = sdk.create_arrow_stream(
 - `Zstd` — higher compression ratio, more CPU per batch.
 - `NoCompression` (the default) — no compression.
 
+A complete runnable version is in [`compression.cpp`](compression.cpp) — it is
+`arrow_ingest.cpp` with `ipc_compression` set to `Zstd`. Build and run it the
+same way:
+
+```bash
+./build/examples/arrow_compression
+```
+
 ## Adapting for Your Custom Table
 
 To ingest into your own table, change the Arrow schema and the array values to
