@@ -29,12 +29,14 @@ type item struct {
 // The semaphore enforces the MaxInflight cap: enqueue blocks once the cap is
 // reached and unblocks as acks arrive and discard releases permits.
 type buffer struct {
-	mu     sync.Mutex
-	cond   *sync.Cond
-	queue  []item // pending: enqueued but not yet observed by the sender
-	flight []item // in-flight: observed by the sender, waiting for ack
-	closed bool
-	sem    chan struct{} // capacity = maxInflight; held while item is in queue or flight
+	mu       sync.Mutex
+	cond     *sync.Cond
+	queue    []item // pending: enqueued but not yet observed by the sender
+	flight   []item // in-flight: observed by the sender, waiting for ack
+	closed   bool
+	sem      chan struct{} // capacity = maxInflight; held while item is in queue or flight
+	doneOnce sync.Once
+	doneCh   chan struct{} // closed when the buffer is closed/drained; unblocks sem waiters
 }
 
 func newBuffer(maxInflight int) *buffer {
@@ -42,9 +44,14 @@ func newBuffer(maxInflight int) *buffer {
 		queue:  make([]item, 0, maxInflight),
 		flight: make([]item, 0, maxInflight),
 		sem:    make(chan struct{}, maxInflight),
+		doneCh: make(chan struct{}),
 	}
 	b.cond = sync.NewCond(&b.mu)
 	return b
+}
+
+func (b *buffer) closeDone() {
+	b.doneOnce.Do(func() { close(b.doneCh) })
 }
 
 // enqueue adds an already-encoded message to the pending queue, blocking until
@@ -58,6 +65,8 @@ func (b *buffer) enqueue(ctx context.Context, offset int64, msg encodedMsg) erro
 	case b.sem <- struct{}{}:
 	case <-ctx.Done():
 		return ctx.Err()
+	case <-b.doneCh:
+		return errClosed
 	}
 
 	b.mu.Lock()
@@ -129,24 +138,26 @@ func (b *buffer) requeue() {
 // supervisor has given up and the caller wants unacked records.
 func (b *buffer) drain() []item {
 	b.mu.Lock()
-	defer b.mu.Unlock()
 	all := make([]item, 0, len(b.flight)+len(b.queue))
 	all = append(all, b.flight...)
 	all = append(all, b.queue...)
 	b.queue = nil
 	b.flight = nil
 	b.closed = true
+	b.mu.Unlock()
 	b.cond.Broadcast()
+	b.closeDone()
 	return all
 }
 
-// close marks the buffer closed and wakes any blocked next calls. Pending
-// items are not discarded — drain must be called to retrieve them.
+// close marks the buffer closed and wakes any blocked next or enqueue calls.
+// Pending items are not discarded — drain must be called to retrieve them.
 func (b *buffer) close() {
 	b.mu.Lock()
 	b.closed = true
 	b.mu.Unlock()
 	b.cond.Broadcast()
+	b.closeDone()
 }
 
 // len returns the total number of items in the buffer (pending + in-flight).

@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"io"
 	"sync"
-	"sync/atomic"
 	"time"
 
 	"github.com/databricks/zerobus-sdk/purego/internal/transport"
@@ -146,10 +145,17 @@ type CoreStream struct {
 	wm       *watermark
 	callback AckCallback
 
-	// nextOffset is the monotonically increasing logical offset counter.
-	// Accessed under buf.mu via the enqueue path, so we use atomic for the
-	// rare concurrent read from ID().
-	nextOffset atomic.Int64
+	// ingestMu serializes offset assignment + enqueue so that nextOffset only
+	// advances for records that were successfully queued. Without this, a failed
+	// enqueue (e.g. ctx-cancelled backpressure) would consume an offset that is
+	// never sent, making Flush wait forever for an offset the server never sees.
+	ingestMu sync.Mutex
+	// nextOffset is the next logical offset to assign. Protected by ingestMu.
+	nextOffset int64
+	// lastEnqueued is the highest offset successfully enqueued; -1 until the
+	// first successful Ingest. Flush targets this, not nextOffset-1, so a
+	// failed Ingest can't create a permanent gap.
+	lastEnqueued int64
 
 	// done is closed when the supervisor exits (terminal state).
 	done chan struct{}
@@ -183,6 +189,7 @@ func NewCoreStream(
 		buf:              newBuffer(cfg.MaxInflight),
 		wm:               newWatermark(),
 		callback:         callback,
+		lastEnqueued:     -1,
 		done:             make(chan struct{}),
 		cancelSupervisor: cancel,
 	}
@@ -195,12 +202,19 @@ func NewCoreStream(
 // record; pass it to WaitForOffset to confirm durability.
 func (cs *CoreStream) Ingest(ctx context.Context, record []byte) (int64, error) {
 	if cs.isClosed() {
-		return 0, cs.terminalErr()
+		if err := cs.terminalErr(); err != nil {
+			return 0, err
+		}
+		return 0, errClosed
 	}
-	// Assign offset atomically so callers that call Ingest concurrently still
-	// get monotonically increasing offsets. AddInt64 returns the new value.
-	offset := cs.nextOffset.Add(1) - 1
+	// ingestMu serializes offset assignment + enqueue so that nextOffset only
+	// advances for records that actually make it into the buffer. A failed
+	// enqueue (encode error or ctx-cancelled backpressure) must not consume an
+	// offset; otherwise Flush would wait for an offset the server never sees.
+	cs.ingestMu.Lock()
+	defer cs.ingestMu.Unlock()
 
+	offset := cs.nextOffset
 	msg, err := cs.enc.encode(offset, record)
 	if err != nil {
 		return 0, err
@@ -208,6 +222,8 @@ func (cs *CoreStream) Ingest(ctx context.Context, record []byte) (int64, error) 
 	if err := cs.buf.enqueue(ctx, offset, msg); err != nil {
 		return 0, err
 	}
+	cs.nextOffset++
+	cs.lastEnqueued = offset
 	return offset, nil
 }
 
@@ -217,9 +233,11 @@ func (cs *CoreStream) Ingest(ctx context.Context, record []byte) (int64, error) 
 //
 // When ctx has no deadline, Flush applies DefaultFlushTimeout.
 func (cs *CoreStream) Flush(ctx context.Context) error {
-	target := cs.nextOffset.Load() - 1
+	cs.ingestMu.Lock()
+	target := cs.lastEnqueued
+	cs.ingestMu.Unlock()
 	if target < 0 {
-		return nil // nothing ingested yet
+		return nil // nothing successfully ingested yet
 	}
 	if _, ok := ctx.Deadline(); !ok {
 		var cancel context.CancelFunc

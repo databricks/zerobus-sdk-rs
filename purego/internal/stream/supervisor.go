@@ -55,15 +55,24 @@ func (cs *CoreStream) supervise(ctx context.Context) {
 		}
 	}
 
-	// Terminal failure path: drain the watermark and buffer.
+	// Terminal failure path.
 	cs.wm.fail(err)
 	cs.setTerminalErr(err)
-	cs.buf.close()
 
 	if cs.callback != nil {
+		// Drain the buffer and fire OnError for each unacked item. drain() also
+		// closes the buffer and unblocks any enqueue callers, so we must call it
+		// here rather than close() + a separate drain in GetUnacked. GetUnacked
+		// documents that it is mutually exclusive with AckCallback: when a
+		// callback is set, the supervisor owns the drain; when it is nil,
+		// GetUnacked drains on demand.
 		for _, it := range cs.buf.drain() {
 			cs.callback.OnError(it.offset, err)
 		}
+	} else {
+		// No callback: just close the buffer so enqueue callers unblock. The
+		// items remain retrievable via GetUnacked, which calls drain() itself.
+		cs.buf.close()
 	}
 }
 

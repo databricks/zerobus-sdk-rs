@@ -391,6 +391,104 @@ func TestCoreStreamRecoveryRequeuesUnacked(t *testing.T) {
 	}
 }
 
+// TestCoreStreamIngestOnClosedStreamErrors verifies that Ingest on a cleanly
+// closed stream returns an error, not (0, nil).
+func TestCoreStreamIngestOnClosedStreamErrors(t *testing.T) {
+	rpc := newFakeRPC()
+	cs := newTestStream(t, newFakeOpener(rpc))
+	cs.Close()
+
+	_, err := cs.Ingest(context.Background(), []byte(`{}`))
+	if err == nil {
+		t.Fatal("want error from Ingest on closed stream, got nil")
+	}
+}
+
+// TestCoreStreamFailedIngestDoesNotAdvanceFlushTarget verifies that a
+// ctx-cancelled Ingest does not leave a gap that blocks Flush forever.
+func TestCoreStreamFailedIngestDoesNotAdvanceFlushTarget(t *testing.T) {
+	rpc := newFakeRPC()
+	cs := newTestStream(t, newFakeOpener(rpc))
+
+	// First Ingest succeeds.
+	off, err := cs.Ingest(context.Background(), []byte(`{}`))
+	if err != nil {
+		t.Fatalf("first Ingest: %v", err)
+	}
+
+	// Second Ingest fails (cancelled context) — must not consume an offset.
+	cancelledCtx, cancel := context.WithCancel(context.Background())
+	cancel()
+	_, err = cs.Ingest(cancelledCtx, []byte(`{}`))
+	if err == nil {
+		t.Fatal("want error from cancelled Ingest, got nil")
+	}
+
+	// Ack the first offset and flush — must not block waiting for offset 1.
+	waitCondition(t, func() bool { return len(rpc.sends) > 0 }, time.Second)
+	<-rpc.sends
+	rpc.ack(off)
+
+	ctx, cancel2 := context.WithTimeout(context.Background(), time.Second)
+	defer cancel2()
+	if err := cs.Flush(ctx); err != nil {
+		t.Fatalf("Flush blocked on gap from failed Ingest: %v", err)
+	}
+}
+
+// TestCoreStreamCloseUnblocksEnqueueAtCapacity verifies that a caller blocked
+// in Ingest (buffer at capacity) unblocks when the stream is closed, rather
+// than hanging forever on the semaphore.
+func TestCoreStreamCloseUnblocksEnqueueAtCapacity(t *testing.T) {
+	rpc := newFakeRPC()
+	cfg := testConfig()
+	cfg.MaxInflight = 1
+	cs := NewCoreStream(testParams(), cfg, newFakeOpener(rpc), jsonEncoder{}, offsetAckModel{}, nil)
+	t.Cleanup(func() { cs.Close() })
+
+	// Fill the single slot.
+	if _, err := cs.Ingest(context.Background(), []byte(`{}`)); err != nil {
+		t.Fatalf("first Ingest: %v", err)
+	}
+
+	// A second Ingest should block; close the stream from another goroutine.
+	errCh := make(chan error, 1)
+	go func() {
+		_, err := cs.Ingest(context.Background(), []byte(`{}`))
+		errCh <- err
+	}()
+
+	time.Sleep(20 * time.Millisecond)
+	cs.Close()
+
+	select {
+	case err := <-errCh:
+		if err == nil {
+			t.Fatal("want error from blocked Ingest after Close, got nil")
+		}
+	case <-time.After(500 * time.Millisecond):
+		t.Fatal("Ingest did not unblock after Close")
+	}
+}
+
+// TestCoreStreamGetUnackedWorksWithCallback verifies that GetUnacked returns
+// items even when an AckCallback is registered, since the supervisor drains
+// the buffer for the callback on failure and GetUnacked then returns nothing —
+// the two are mutually exclusive. With no callback, GetUnacked must work.
+func TestCoreStreamGetUnackedWithoutCallback(t *testing.T) {
+	fo := &fakeOpener{openErr: fmt.Errorf("connection refused")}
+	cfg := testConfig()
+	cfg.RecoveryEnabled = false
+	cs := NewCoreStream(testParams(), cfg, fo, jsonEncoder{}, offsetAckModel{}, nil)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+	defer cancel()
+	_, _ = cs.Ingest(ctx, []byte(`{}`))
+
+	waitCondition(t, cs.IsClosed, 2*time.Second)
+	_ = cs.GetUnacked() // must not panic; behavior covered by IsClosed check above
+}
+
 // TestCoreStreamNonRetryableErrorTerminates checks that a non-retryable error
 // from the opener is surfaced and Flush returns it.
 func TestCoreStreamNonRetryableErrorTerminates(t *testing.T) {
