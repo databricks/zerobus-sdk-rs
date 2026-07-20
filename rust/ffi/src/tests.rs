@@ -6,12 +6,20 @@ mod tests {
         zerobus_get_default_config, zerobus_sdk_builder_application_name,
         zerobus_sdk_builder_build, zerobus_sdk_builder_disable_tls, zerobus_sdk_builder_endpoint,
         zerobus_sdk_builder_free, zerobus_sdk_builder_new, zerobus_sdk_builder_sdk_identifier,
-        zerobus_sdk_builder_unity_catalog_url, zerobus_sdk_free, CHeaders, CRecordArray, CResult,
+        zerobus_sdk_builder_unity_catalog_url, zerobus_sdk_create_stream,
+        zerobus_sdk_create_stream_async, zerobus_sdk_create_stream_with_headers_provider_async,
+        zerobus_sdk_free, zerobus_sdk_recreate_stream_async, zerobus_stream_close_async,
+        zerobus_stream_flush_async, zerobus_stream_get_unacked_records_async,
+        zerobus_stream_ingest_json_record_async, zerobus_stream_ingest_json_records_async,
+        zerobus_stream_ingest_proto_record_async, zerobus_stream_ingest_proto_records_async,
+        zerobus_stream_wait_for_offset_async, CHeaders, CRecordArray, CResult,
         CallbackHeadersProvider, RecordType, ZerobusError,
     };
     use databricks_zerobus_ingest_sdk::HeadersProvider;
     use std::ffi::{CStr, CString};
     use std::ptr;
+    use std::sync::mpsc;
+    use std::time::Duration;
 
     // Helper for c_str_to_string since it's private
     unsafe fn test_c_str_to_string(
@@ -339,6 +347,478 @@ mod tests {
         // Verify it returns reasonable defaults
         assert!(config.max_inflight_requests > 0);
         assert_eq!(config.record_type, 1); // Proto
+    }
+
+    #[test]
+    fn test_create_stream_retryable_error_sets_retryable_flag() {
+        // Build an SDK that points to an unreachable local endpoint so stream
+        // creation fails with a retryable transport/setup error.
+        let endpoint_c = CString::new("http://127.0.0.1:1").unwrap();
+        let uc_c = CString::new("http://127.0.0.1:1").unwrap();
+        let builder = zerobus_sdk_builder_new();
+        zerobus_sdk_builder_endpoint(builder, endpoint_c.as_ptr());
+        zerobus_sdk_builder_unity_catalog_url(builder, uc_c.as_ptr());
+        zerobus_sdk_builder_disable_tls(builder);
+
+        let mut build_result = CResult {
+            success: false,
+            error_message: ptr::null_mut(),
+            is_retryable: false,
+        };
+        let sdk = zerobus_sdk_builder_build(builder, &mut build_result as *mut CResult);
+        assert!(build_result.success, "SDK build should succeed");
+        assert!(!sdk.is_null(), "SDK pointer should be non-null");
+
+        let table = CString::new("main.default.events").unwrap();
+        let client_id = CString::new("client-id").unwrap();
+        let client_secret = CString::new("client-secret").unwrap();
+        let mut opts = zerobus_get_default_config();
+        opts.record_type = 2; // JSON stream: no proto descriptor required.
+
+        let mut create_result = CResult {
+            success: true,
+            error_message: ptr::null_mut(),
+            is_retryable: false,
+        };
+
+        let stream = zerobus_sdk_create_stream(
+            sdk,
+            table.as_ptr(),
+            ptr::null(),
+            0,
+            client_id.as_ptr(),
+            client_secret.as_ptr(),
+            &opts as *const _,
+            &mut create_result as *mut CResult,
+        );
+
+        assert!(stream.is_null(), "create_stream should fail");
+        assert!(!create_result.success, "result should indicate failure");
+        assert!(
+            create_result.is_retryable,
+            "retryable create failures must set is_retryable=true"
+        );
+
+        zerobus_free_error_message(create_result.error_message);
+        zerobus_sdk_free(sdk);
+    }
+
+    #[test]
+    fn test_create_stream_async_reports_completion_error_via_callback() {
+        extern "C" fn create_callback(
+            stream: *mut crate::CZerobusStream,
+            result: *const CResult,
+            user_data: *mut std::ffi::c_void,
+        ) {
+            let sender =
+                unsafe { &*(user_data as *const mpsc::Sender<(bool, bool, bool, String)>) };
+            let result_ref = unsafe { &*result };
+            let error_message = if result_ref.error_message.is_null() {
+                String::new()
+            } else {
+                unsafe { CStr::from_ptr(result_ref.error_message) }
+                    .to_string_lossy()
+                    .into_owned()
+            };
+            sender
+                .send((
+                    stream.is_null(),
+                    result_ref.success,
+                    result_ref.is_retryable,
+                    error_message,
+                ))
+                .unwrap();
+        }
+
+        let endpoint_c = CString::new("http://127.0.0.1:1").unwrap();
+        let uc_c = CString::new("http://127.0.0.1:1").unwrap();
+        let builder = zerobus_sdk_builder_new();
+        zerobus_sdk_builder_endpoint(builder, endpoint_c.as_ptr());
+        zerobus_sdk_builder_unity_catalog_url(builder, uc_c.as_ptr());
+        zerobus_sdk_builder_disable_tls(builder);
+
+        let mut build_result = CResult {
+            success: false,
+            error_message: ptr::null_mut(),
+            is_retryable: false,
+        };
+        let sdk = zerobus_sdk_builder_build(builder, &mut build_result as *mut CResult);
+        assert!(build_result.success, "SDK build should succeed");
+        assert!(!sdk.is_null(), "SDK pointer should be non-null");
+
+        let table = CString::new("main.default.events").unwrap();
+        let client_id = CString::new("client-id").unwrap();
+        let client_secret = CString::new("client-secret").unwrap();
+        let mut create_result = CResult {
+            success: false,
+            error_message: ptr::null_mut(),
+            is_retryable: false,
+        };
+        let (sender, receiver): (
+            mpsc::Sender<(bool, bool, bool, String)>,
+            mpsc::Receiver<(bool, bool, bool, String)>,
+        ) = mpsc::channel();
+        let sender = Box::new(sender);
+
+        let started = zerobus_sdk_create_stream_async(
+            sdk,
+            table.as_ptr(),
+            ptr::null(),
+            0,
+            client_id.as_ptr(),
+            client_secret.as_ptr(),
+            ptr::null(),
+            create_callback,
+            Box::as_ref(&sender) as *const _ as *mut std::ffi::c_void,
+            &mut create_result as *mut CResult,
+        );
+
+        assert!(started, "create_stream_async should schedule the task");
+        assert!(create_result.success, "scheduling result should succeed");
+
+        let (stream_is_null, callback_success, callback_retryable, callback_message) = receiver
+            .recv_timeout(Duration::from_secs(2))
+            .expect("callback should be invoked");
+        assert!(
+            stream_is_null,
+            "callback should receive a null stream on failure"
+        );
+        assert!(!callback_success, "callback result should indicate failure");
+        assert!(
+            !callback_retryable,
+            "missing proto descriptor should be reported as a non-retryable error"
+        );
+        assert!(
+            callback_message.contains("Proto descriptor is required for Proto record type"),
+            "callback should surface the create error"
+        );
+
+        drop(sender);
+        zerobus_sdk_free(sdk);
+    }
+
+    #[test]
+    fn test_create_stream_with_headers_provider_async_reports_completion_error_via_callback() {
+        extern "C" fn headers_callback(_user_data: *mut std::ffi::c_void) -> CHeaders {
+            CHeaders {
+                headers: ptr::null_mut(),
+                count: 0,
+                error_message: ptr::null_mut(),
+            }
+        }
+
+        extern "C" fn create_callback(
+            stream: *mut crate::CZerobusStream,
+            result: *const CResult,
+            user_data: *mut std::ffi::c_void,
+        ) {
+            let sender =
+                unsafe { &*(user_data as *const mpsc::Sender<(bool, bool, bool, String)>) };
+            let result_ref = unsafe { &*result };
+            let error_message = if result_ref.error_message.is_null() {
+                String::new()
+            } else {
+                unsafe { CStr::from_ptr(result_ref.error_message) }
+                    .to_string_lossy()
+                    .into_owned()
+            };
+            sender
+                .send((
+                    stream.is_null(),
+                    result_ref.success,
+                    result_ref.is_retryable,
+                    error_message,
+                ))
+                .unwrap();
+        }
+
+        let endpoint_c = CString::new("http://127.0.0.1:1").unwrap();
+        let uc_c = CString::new("http://127.0.0.1:1").unwrap();
+        let builder = zerobus_sdk_builder_new();
+        zerobus_sdk_builder_endpoint(builder, endpoint_c.as_ptr());
+        zerobus_sdk_builder_unity_catalog_url(builder, uc_c.as_ptr());
+        zerobus_sdk_builder_disable_tls(builder);
+
+        let mut build_result = CResult {
+            success: false,
+            error_message: ptr::null_mut(),
+            is_retryable: false,
+        };
+        let sdk = zerobus_sdk_builder_build(builder, &mut build_result as *mut CResult);
+        assert!(build_result.success, "SDK build should succeed");
+        assert!(!sdk.is_null(), "SDK pointer should be non-null");
+
+        let table = CString::new("main.default.events").unwrap();
+        let mut create_result = CResult {
+            success: false,
+            error_message: ptr::null_mut(),
+            is_retryable: false,
+        };
+        let (sender, receiver): (
+            mpsc::Sender<(bool, bool, bool, String)>,
+            mpsc::Receiver<(bool, bool, bool, String)>,
+        ) = mpsc::channel();
+        let sender = Box::new(sender);
+
+        let started = zerobus_sdk_create_stream_with_headers_provider_async(
+            sdk,
+            table.as_ptr(),
+            ptr::null(),
+            0,
+            headers_callback,
+            ptr::null_mut(),
+            ptr::null(),
+            create_callback,
+            Box::as_ref(&sender) as *const _ as *mut std::ffi::c_void,
+            &mut create_result as *mut CResult,
+        );
+
+        assert!(
+            started,
+            "create_stream_with_headers_provider_async should schedule the task"
+        );
+        assert!(create_result.success, "scheduling result should succeed");
+
+        let (stream_is_null, callback_success, callback_retryable, callback_message) = receiver
+            .recv_timeout(Duration::from_secs(2))
+            .expect("callback should be invoked");
+        assert!(
+            stream_is_null,
+            "callback should receive a null stream on failure"
+        );
+        assert!(!callback_success, "callback result should indicate failure");
+        assert!(
+            !callback_retryable,
+            "missing proto descriptor should be reported as a non-retryable error"
+        );
+        assert!(
+            callback_message.contains("Proto descriptor is required for Proto record type"),
+            "callback should surface the create error"
+        );
+
+        drop(sender);
+        zerobus_sdk_free(sdk);
+    }
+
+    #[test]
+    fn test_async_overloads_fail_fast_on_invalid_input() {
+        extern "C" fn stream_cb(
+            _stream: *mut crate::CZerobusStream,
+            _result: *const CResult,
+            _user_data: *mut std::ffi::c_void,
+        ) {
+        }
+
+        extern "C" fn offset_cb(
+            _offset: i64,
+            _result: *const CResult,
+            _user_data: *mut std::ffi::c_void,
+        ) {
+        }
+
+        extern "C" fn bool_cb(
+            _value: bool,
+            _result: *const CResult,
+            _user_data: *mut std::ffi::c_void,
+        ) {
+        }
+
+        extern "C" fn records_cb(
+            _records: CRecordArray,
+            _result: *const CResult,
+            _user_data: *mut std::ffi::c_void,
+        ) {
+        }
+
+        extern "C" fn headers_cb(_user_data: *mut std::ffi::c_void) -> CHeaders {
+            CHeaders {
+                headers: ptr::null_mut(),
+                count: 0,
+                error_message: ptr::null_mut(),
+            }
+        }
+
+        let mut r = CResult {
+            success: true,
+            error_message: ptr::null_mut(),
+            is_retryable: false,
+        };
+
+        let table = CString::new("main.default.events").unwrap();
+        let client_id = CString::new("cid").unwrap();
+        let client_secret = CString::new("secret").unwrap();
+        let json = CString::new("{}").unwrap();
+
+        assert!(!zerobus_sdk_create_stream_async(
+            ptr::null_mut(),
+            table.as_ptr(),
+            ptr::null(),
+            0,
+            client_id.as_ptr(),
+            client_secret.as_ptr(),
+            ptr::null(),
+            stream_cb,
+            ptr::null_mut(),
+            &mut r as *mut CResult,
+        ));
+        assert!(!r.success);
+        zerobus_free_error_message(r.error_message);
+
+        r = CResult {
+            success: true,
+            error_message: ptr::null_mut(),
+            is_retryable: false,
+        };
+        assert!(!zerobus_sdk_create_stream_with_headers_provider_async(
+            ptr::null_mut(),
+            table.as_ptr(),
+            ptr::null(),
+            0,
+            headers_cb,
+            ptr::null_mut(),
+            ptr::null(),
+            stream_cb,
+            ptr::null_mut(),
+            &mut r as *mut CResult,
+        ));
+        assert!(!r.success);
+        zerobus_free_error_message(r.error_message);
+
+        r = CResult {
+            success: true,
+            error_message: ptr::null_mut(),
+            is_retryable: false,
+        };
+        assert!(!zerobus_sdk_recreate_stream_async(
+            ptr::null_mut(),
+            ptr::null_mut(),
+            stream_cb,
+            ptr::null_mut(),
+            &mut r as *mut CResult,
+        ));
+        assert!(!r.success);
+        zerobus_free_error_message(r.error_message);
+
+        r = CResult {
+            success: true,
+            error_message: ptr::null_mut(),
+            is_retryable: false,
+        };
+        assert!(!zerobus_stream_ingest_proto_record_async(
+            ptr::null_mut(),
+            ptr::null(),
+            0,
+            offset_cb,
+            ptr::null_mut(),
+            &mut r as *mut CResult,
+        ));
+        assert!(!r.success);
+        zerobus_free_error_message(r.error_message);
+
+        r = CResult {
+            success: true,
+            error_message: ptr::null_mut(),
+            is_retryable: false,
+        };
+        assert!(!zerobus_stream_ingest_json_record_async(
+            ptr::null_mut(),
+            json.as_ptr(),
+            offset_cb,
+            ptr::null_mut(),
+            &mut r as *mut CResult,
+        ));
+        assert!(!r.success);
+        zerobus_free_error_message(r.error_message);
+
+        r = CResult {
+            success: true,
+            error_message: ptr::null_mut(),
+            is_retryable: false,
+        };
+        assert!(!zerobus_stream_ingest_proto_records_async(
+            ptr::null_mut(),
+            ptr::null(),
+            ptr::null(),
+            1,
+            offset_cb,
+            ptr::null_mut(),
+            &mut r as *mut CResult,
+        ));
+        assert!(!r.success);
+        zerobus_free_error_message(r.error_message);
+
+        r = CResult {
+            success: true,
+            error_message: ptr::null_mut(),
+            is_retryable: false,
+        };
+        assert!(!zerobus_stream_ingest_json_records_async(
+            ptr::null_mut(),
+            ptr::null(),
+            1,
+            offset_cb,
+            ptr::null_mut(),
+            &mut r as *mut CResult,
+        ));
+        assert!(!r.success);
+        zerobus_free_error_message(r.error_message);
+
+        r = CResult {
+            success: true,
+            error_message: ptr::null_mut(),
+            is_retryable: false,
+        };
+        assert!(!zerobus_stream_wait_for_offset_async(
+            ptr::null_mut(),
+            1,
+            bool_cb,
+            ptr::null_mut(),
+            &mut r as *mut CResult,
+        ));
+        assert!(!r.success);
+        zerobus_free_error_message(r.error_message);
+
+        r = CResult {
+            success: true,
+            error_message: ptr::null_mut(),
+            is_retryable: false,
+        };
+        assert!(!zerobus_stream_flush_async(
+            ptr::null_mut(),
+            bool_cb,
+            ptr::null_mut(),
+            &mut r as *mut CResult,
+        ));
+        assert!(!r.success);
+        zerobus_free_error_message(r.error_message);
+
+        r = CResult {
+            success: true,
+            error_message: ptr::null_mut(),
+            is_retryable: false,
+        };
+        assert!(!zerobus_stream_get_unacked_records_async(
+            ptr::null_mut(),
+            records_cb,
+            ptr::null_mut(),
+            &mut r as *mut CResult,
+        ));
+        assert!(!r.success);
+        zerobus_free_error_message(r.error_message);
+
+        r = CResult {
+            success: true,
+            error_message: ptr::null_mut(),
+            is_retryable: false,
+        };
+        assert!(!zerobus_stream_close_async(
+            ptr::null_mut(),
+            bool_cb,
+            ptr::null_mut(),
+            &mut r as *mut CResult,
+        ));
+        assert!(!r.success);
+        zerobus_free_error_message(r.error_message);
     }
 
     // ========================================================================
@@ -807,7 +1287,7 @@ mod tests {
     // messages spell out both causes.
 
     use crate::common::{ACK_CALLBACK_DROP_COUNT, ACK_DROP_SENTINEL_CREATE_FAIL_TESTS};
-    use crate::{zerobus_sdk_create_stream, zerobus_sdk_create_stream_with_headers_provider};
+    use crate::zerobus_sdk_create_stream_with_headers_provider;
 
     // Global counter, so serialize this pair's before/after sampling window.
     static ACK_DROP_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
