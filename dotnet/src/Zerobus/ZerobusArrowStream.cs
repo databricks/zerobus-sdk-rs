@@ -69,6 +69,16 @@ public sealed class ZerobusArrowStream : IDisposable, IAsyncDisposable
         return NativeInterop.ArrowStreamIngestBatch(GetNativePointerForCall(), ipcBytes);
     }
 
+    /// <summary>
+    /// Ingests a single Arrow IPC-encoded RecordBatch asynchronously and returns its offset.
+    /// </summary>
+    /// <param name="ipcBytes">The IPC-serialized Arrow RecordBatch bytes.</param>
+    /// <returns>A task resolving to the offset of the ingested batch.</returns>
+    public Task<long> IngestBatchAsync(byte[] ipcBytes)
+    {
+        return Task.Run(() => IngestBatch(ipcBytes));
+    }
+
     // ── Acknowledgment / flush ───────────────────────────────────────────
 
     /// <summary>
@@ -82,6 +92,12 @@ public sealed class ZerobusArrowStream : IDisposable, IAsyncDisposable
         WithReadLock(ptr => NativeInterop.ArrowStreamWaitForOffset(ptr, offset));
     }
 
+    /// <inheritdoc cref="WaitForOffset(long)"/>
+    public Task WaitForOffsetAsync(long offset)
+    {
+        return Task.Run(() => WaitForOffset(offset));
+    }
+
     /// <summary>
     /// Blocks until all pending batches have been acknowledged by the server.
     /// </summary>
@@ -90,6 +106,12 @@ public sealed class ZerobusArrowStream : IDisposable, IAsyncDisposable
     public void Flush()
     {
         WithReadLock(NativeInterop.ArrowStreamFlush);
+    }
+
+    /// <inheritdoc cref="Flush"/>
+    public Task FlushAsync()
+    {
+        return Task.Run(Flush);
     }
 
     // ── Unacknowledged batches ───────────────────────────────────────────
@@ -111,6 +133,12 @@ public sealed class ZerobusArrowStream : IDisposable, IAsyncDisposable
         return WithReadLock(NativeInterop.ArrowStreamGetUnackedBatches);
     }
 
+    /// <inheritdoc cref="GetUnackedBatches"/>
+    public Task<ArrowBatchInfo[]> GetUnackedBatchesAsync()
+    {
+        return Task.Run(GetUnackedBatches);
+    }
+
     // ── Close / Dispose ──────────────────────────────────────────────────
 
     /// <summary>
@@ -130,6 +158,12 @@ public sealed class ZerobusArrowStream : IDisposable, IAsyncDisposable
         if (NativeMethods.ArrowStreamIsClosed(ptr)) return;
 
         NativeInterop.ArrowStreamClose(ptr);
+    }
+
+    /// <inheritdoc cref="Close"/>
+    public Task CloseAsync()
+    {
+        return Task.Run(Close);
     }
 
     /// <inheritdoc />

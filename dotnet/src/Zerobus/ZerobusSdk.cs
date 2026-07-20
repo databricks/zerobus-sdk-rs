@@ -61,6 +61,24 @@ public sealed class ZerobusSdk : IDisposable
     public static ZerobusSdkBuilder CreateBuilder() => new();
 
     /// <summary>
+    /// Returns a new fluent stream builder bound to this SDK instance.
+    /// This is the recommended way to create ingestion streams with a
+    /// self-documenting, type-safe API.
+    /// </summary>
+    /// <returns>A <see cref="StreamBuilder"/> ready to configure and build.</returns>
+    /// <example>
+    /// <code>
+    /// await using var stream = await sdk.StreamBuilder()
+    ///     .Table("catalog.schema.table")
+    ///     .OAuth("client-id", "client-secret")
+    ///     .MaxInflightRequests(50_000)
+    ///     .Json()
+    ///     .BuildAsync();
+    /// </code>
+    /// </example>
+    public StreamBuilder StreamBuilder() => new(this);
+
+    /// <summary>
     /// Creates a new bidirectional gRPC stream for ingesting records into a Databricks table.
     /// Uses OAuth 2.0 client credentials flow for authentication.
     /// </summary>
