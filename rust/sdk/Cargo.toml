@@ -32,6 +32,7 @@ tokio-stream.workspace = true
 tokio-util = { workspace = true, features = ["rt"] }
 tonic = { workspace = true, features = ["tls-native-roots", "transport"] }
 tonic-prost.workspace = true
+tonic-types.workspace = true
 tracing.workspace = true
 hyper-http-proxy.workspace = true
 hyper-util.workspace = true

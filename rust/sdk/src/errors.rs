@@ -1,4 +1,55 @@
 use thiserror::Error;
+use tonic_types::StatusExt;
+
+/// The `google.rpc.ErrorInfo.reason` the Zerobus server sets on a schema
+/// validation failure. Presence of this reason (in the gRPC status details) is
+/// what distinguishes a schema mismatch from any other `InvalidArgument`.
+const SCHEMA_VALIDATION_REASON: &str = "SCHEMA_VALIDATION_FAILED";
+
+/// A machine-readable cause of a schema-validation rejection, reported by the
+/// server in the gRPC `ErrorInfo` metadata (as stable string tokens) and
+/// decoded here into typed variants.
+///
+/// A single rejection can carry several distinct causes at once (see
+/// [`ZerobusError::InvalidSchema`]). The SDK reports the raw causes and does
+/// not interpret them: whether a given mismatch is recoverable — e.g. by
+/// re-resolving the table schema and rebuilding the stream — is a caller-side
+/// policy decision.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum SchemaValidationCause {
+    /// The client sent a field that does not exist in the Delta table schema
+    /// (e.g. a column was dropped from the table).
+    FieldNotInTable,
+    /// The client omitted a non-nullable Delta column (e.g. a required column
+    /// was added to the table).
+    MissingRequiredColumn,
+    /// The client's fields do not follow the Delta schema column order.
+    FieldOutOfOrder,
+    /// A client field's type is incompatible with the Delta column type.
+    TypeIncompatible,
+    /// The client field count does not match the Delta schema.
+    FieldCountMismatch,
+    /// A cause token the server sent that this SDK version does not recognize.
+    /// Carries the raw wire token so newer server causes are surfaced rather
+    /// than silently dropped.
+    Unknown(String),
+}
+
+impl SchemaValidationCause {
+    /// Decode a wire token (as sent in the server's `ErrorInfo` metadata) into
+    /// a typed cause. Unrecognized tokens map to [`SchemaValidationCause::Unknown`].
+    fn from_wire(token: &str) -> Self {
+        match token {
+            "FIELD_NOT_IN_TABLE" => SchemaValidationCause::FieldNotInTable,
+            "MISSING_REQUIRED_COLUMN" => SchemaValidationCause::MissingRequiredColumn,
+            "FIELD_OUT_OF_ORDER" => SchemaValidationCause::FieldOutOfOrder,
+            "TYPE_INCOMPATIBLE" => SchemaValidationCause::TypeIncompatible,
+            "FIELD_COUNT_MISMATCH" => SchemaValidationCause::FieldCountMismatch,
+            other => SchemaValidationCause::Unknown(other.to_string()),
+        }
+    }
+}
 
 /// Represents all possible errors that can occur when using Zerobus.
 #[derive(Error, Debug, Clone)]
@@ -31,6 +82,25 @@ pub enum ZerobusError {
     /// Returned when the client provided an invalid argument.
     #[error("Invalid argument: {0}.")]
     InvalidArgument(String),
+    /// Returned when the server rejected the stream because the client's Arrow
+    /// schema does not match the target Delta table (e.g. a column was added to
+    /// or dropped from the table). Distinguished from the generic
+    /// [`ZerobusError::CreateStreamError`] via the structured `ErrorInfo` the
+    /// server attaches to the gRPC status.
+    ///
+    /// `causes` carries the raw, machine-readable causes the server reported
+    /// (e.g. [`SchemaValidationCause::FieldNotInTable`]); a single rejection can
+    /// list several. The SDK deliberately does not interpret them: whether a
+    /// mismatch is recoverable — e.g. by re-resolving the table schema and
+    /// rebuilding the stream — is a caller-side policy decision. Per-field
+    /// detail (offending column names) is carried in `message` for diagnostics,
+    /// not structurally. This error is not SDK-retryable, since the SDK holds a
+    /// fixed schema and its recovery loop would re-send the same rejected schema.
+    #[error("Arrow schema does not match the target table: {message}.")]
+    InvalidSchema {
+        message: String,
+        causes: Vec<SchemaValidationCause>,
+    },
     /// Returned when the server returned an unexpected response.
     #[error("Unexpected response from server. Response: {0}")]
     UnexpectedStreamResponseError(String),
@@ -56,6 +126,36 @@ const UNRETRIABLE_STATUS_CODES: &[tonic::Code] = &[
 ];
 
 impl ZerobusError {
+    /// Classify a `tonic::Status` returned by the server during stream setup.
+    ///
+    /// If the server attached a schema-validation `ErrorInfo` detail (reason
+    /// `SCHEMA_VALIDATION_FAILED`), returns [`ZerobusError::InvalidSchema`]
+    /// carrying the structured `causes` the server reported.
+    /// Otherwise falls back to [`ZerobusError::CreateStreamError`], preserving
+    /// the original status (and its gRPC code) for retry/auth classification.
+    pub(crate) fn from_setup_status(status: tonic::Status) -> Self {
+        if let Some(info) = status.get_details_error_info() {
+            if info.reason == SCHEMA_VALIDATION_REASON {
+                // Comma-separated tokens; an absent key means no causes.
+                let causes = info
+                    .metadata
+                    .get("causes")
+                    .map(|v| {
+                        v.split(',')
+                            .filter(|s| !s.is_empty())
+                            .map(SchemaValidationCause::from_wire)
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                return ZerobusError::InvalidSchema {
+                    message: status.message().to_string(),
+                    causes,
+                };
+            }
+        }
+        ZerobusError::CreateStreamError(status)
+    }
+
     /// Determines whether this error can be automatically recovered through stream recovery.
     ///
     /// Retryable errors typically indicate transient issues like network failures or
@@ -68,6 +168,7 @@ impl ZerobusError {
     pub fn is_retryable(&self) -> bool {
         match self {
             ZerobusError::InvalidArgument(_) => false,
+            ZerobusError::InvalidSchema { .. } => false,
             ZerobusError::StreamClosedError(status) => {
                 !UNRETRIABLE_STATUS_CODES.contains(&status.code())
             }
@@ -147,5 +248,106 @@ mod tests {
         let non_auth: tonic::Status =
             FlightError::Tonic(Box::new(tonic::Status::unavailable("blip"))).into();
         assert!(!ZerobusError::CreateStreamError(non_auth).is_auth_rejection());
+    }
+
+    /// Build an InvalidArgument status carrying the server's schema-validation
+    /// ErrorInfo, mirroring what Shinkansen sends on a schema mismatch.
+    fn schema_validation_status(causes: &str) -> tonic::Status {
+        use std::collections::HashMap;
+        use tonic_types::ErrorDetails;
+
+        let mut metadata = HashMap::new();
+        metadata.insert("error_code".to_string(), "8001".to_string());
+        metadata.insert("causes".to_string(), causes.to_string());
+        tonic::Status::with_error_details(
+            tonic::Code::InvalidArgument,
+            "Arrow Flight schema validation failed: ...",
+            ErrorDetails::with_error_info(
+                "SCHEMA_VALIDATION_FAILED",
+                "zerobus.databricks.com",
+                metadata,
+            ),
+        )
+    }
+
+    #[test]
+    fn setup_status_with_schema_error_info_classifies_as_invalid_schema() {
+        let status = schema_validation_status("FIELD_NOT_IN_TABLE,TYPE_INCOMPATIBLE");
+        let err = ZerobusError::from_setup_status(status);
+        match err {
+            ZerobusError::InvalidSchema { causes, .. } => {
+                assert_eq!(
+                    causes,
+                    vec![
+                        SchemaValidationCause::FieldNotInTable,
+                        SchemaValidationCause::TypeIncompatible,
+                    ]
+                );
+            }
+            other => panic!("expected InvalidSchema, got {other:?}"),
+        }
+    }
+
+    /// A cause token this SDK version does not recognize is surfaced as
+    /// `Unknown` rather than dropped, so newer server causes still reach callers.
+    #[test]
+    fn setup_status_maps_unknown_cause_token() {
+        let status = schema_validation_status("FIELD_NOT_IN_TABLE,BRAND_NEW_CAUSE");
+        match ZerobusError::from_setup_status(status) {
+            ZerobusError::InvalidSchema { causes, .. } => {
+                assert_eq!(
+                    causes,
+                    vec![
+                        SchemaValidationCause::FieldNotInTable,
+                        SchemaValidationCause::Unknown("BRAND_NEW_CAUSE".to_string()),
+                    ]
+                );
+            }
+            other => panic!("expected InvalidSchema, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn invalid_schema_is_not_retryable() {
+        let err = ZerobusError::from_setup_status(schema_validation_status("FIELD_NOT_IN_TABLE"));
+        assert!(!err.is_retryable());
+    }
+
+    #[test]
+    fn setup_status_without_error_info_falls_back_to_create_stream_error() {
+        // A plain InvalidArgument with no schema ErrorInfo stays a CreateStreamError.
+        let status = tonic::Status::invalid_argument("some other bad argument");
+        let err = ZerobusError::from_setup_status(status);
+        assert!(matches!(err, ZerobusError::CreateStreamError(_)));
+    }
+
+    #[test]
+    fn setup_status_preserves_grpc_code_on_fallback() {
+        // Non-schema setup failures keep their original code for retry/auth
+        // classification (e.g. Unauthenticated remains an auth rejection).
+        let err = ZerobusError::from_setup_status(tonic::Status::unauthenticated("denied"));
+        assert!(err.is_auth_rejection());
+    }
+
+    /// Absent metadata keys yield empty lists rather than panicking.
+    #[test]
+    fn invalid_schema_tolerates_missing_metadata() {
+        use tonic_types::ErrorDetails;
+
+        let status = tonic::Status::with_error_details(
+            tonic::Code::InvalidArgument,
+            "schema mismatch",
+            ErrorDetails::with_error_info(
+                "SCHEMA_VALIDATION_FAILED",
+                "zerobus.databricks.com",
+                std::collections::HashMap::new(),
+            ),
+        );
+        match ZerobusError::from_setup_status(status) {
+            ZerobusError::InvalidSchema { causes, .. } => {
+                assert!(causes.is_empty());
+            }
+            other => panic!("expected InvalidSchema, got {other:?}"),
+        }
     }
 }

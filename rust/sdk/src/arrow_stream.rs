@@ -574,7 +574,9 @@ impl ZerobusArrowStream {
             Ok(Some(Err(flight_error))) => {
                 // Server sent an error during setup (auth failed, schema mismatch, blocked table, etc.)
                 error!("Stream setup failed: {:?}", flight_error);
-                return Err(ZerobusError::CreateStreamError(flight_error.into()));
+                // Classify so a schema mismatch surfaces as ZerobusError::InvalidSchema
+                // rather than a generic CreateStreamError.
+                return Err(ZerobusError::from_setup_status(flight_error.into()));
             }
             Ok(None) => {
                 // Server closed the stream without sending anything.
@@ -873,7 +875,9 @@ impl ZerobusArrowStream {
             }
             Ok(Some(Err(flight_error))) => {
                 error!("Reconnection setup failed: {:?}", flight_error);
-                return Err(ZerobusError::CreateStreamError(flight_error.into()));
+                // Classify so a schema mismatch surfaces as ZerobusError::InvalidSchema
+                // rather than a generic CreateStreamError.
+                return Err(ZerobusError::from_setup_status(flight_error.into()));
             }
             Ok(None) => {
                 error!("Server closed stream during reconnect without response");
