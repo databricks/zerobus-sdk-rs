@@ -50,7 +50,7 @@ Fetch the metadata JSON once and pass it via the environment:
 ```bash
 export ZEROBUS_UC_TABLE_JSON="$(curl -s \
   -H "Authorization: Bearer $DATABRICKS_TOKEN" \
-  "$WORKSPACE_URL/api/2.1/unity-catalog/tables/<catalog.schema.orders>")"
+  "$DATABRICKS_WORKSPACE_URL/api/2.1/unity-catalog/tables/$ZEROBUS_TABLE_NAME")"
 ```
 
 Per-column value shaping rules (DATE/TIMESTAMP as integers, BINARY as base64,
@@ -60,16 +60,21 @@ etc.) are documented in the FFI README / `zerobus.h`.
 
 ### Running the Example
 
-1. Edit the placeholder constants at the top of `single.cpp` — see
-   [Prerequisites](../README.md#prerequisites).
-
-2. Export the secrets and the table metadata, then run:
+1. Export the connection settings and the table metadata — see
+   [Prerequisites](../README.md#prerequisites) for what each one is:
    ```bash
+   export ZEROBUS_SERVER_ENDPOINT="https://<your-shard-id>.zerobus.<region>.cloud.databricks.com"
+   export DATABRICKS_WORKSPACE_URL="https://<your-workspace>.cloud.databricks.com"
+   export ZEROBUS_TABLE_NAME="catalog.schema.orders"
    export DATABRICKS_CLIENT_ID="<your_databricks_client_id>"
    export DATABRICKS_CLIENT_SECRET="<your_databricks_client_secret>"
    export ZEROBUS_UC_TABLE_JSON="$(curl -s \
      -H "Authorization: Bearer $DATABRICKS_TOKEN" \
-     "$WORKSPACE_URL/api/2.1/unity-catalog/tables/<catalog.schema.orders>")"
+     "$DATABRICKS_WORKSPACE_URL/api/2.1/unity-catalog/tables/$ZEROBUS_TABLE_NAME")"
+   ```
+
+2. Run:
+   ```bash
    ./build/examples/proto_single
    ```
 
@@ -101,7 +106,7 @@ stream.flush();   // the single wait point — confirm all queued records at onc
 **Building a Protocol Buffers stream:**
 ```cpp
 zerobus::TableProperties props;
-props.table_name = kTableName;
+props.table_name = table_name;
 props.descriptor_proto = schema.descriptor_bytes();
 
 zerobus::StreamOptions options;
@@ -115,16 +120,11 @@ zerobus::Stream stream =
 
 ### Running the Example
 
-1. Edit the placeholder constants at the top of `batch.cpp` — see
-   [Prerequisites](../README.md#prerequisites).
+1. Export the connection settings and the table metadata as shown for the
+   single-record example above (see [Prerequisites](../README.md#prerequisites)).
 
-2. Export the secrets and the table metadata, then run:
+2. Run:
    ```bash
-   export DATABRICKS_CLIENT_ID="<your_databricks_client_id>"
-   export DATABRICKS_CLIENT_SECRET="<your_databricks_client_secret>"
-   export ZEROBUS_UC_TABLE_JSON="$(curl -s \
-     -H "Authorization: Bearer $DATABRICKS_TOKEN" \
-     "$WORKSPACE_URL/api/2.1/unity-catalog/tables/<catalog.schema.orders>")"
    ./build/examples/proto_batch
    ```
 
@@ -173,8 +173,8 @@ table needs no code changes to the encoding:
 2. **Update the record shape.** Change the JSON your records produce (the
    `make_order_json` helper) so its fields match your table's columns; unknown
    keys are ignored by `encode_json()`.
-3. **Update the constants** at the top of the source file: `kTableName`,
-   `kWorkspaceUrl`, and `kServerEndpoint`.
+3. **Point the environment at your table**: set `ZEROBUS_TABLE_NAME`,
+   `DATABRICKS_WORKSPACE_URL`, and `ZEROBUS_SERVER_ENDPOINT` to your values.
 
 > **Note on static proto.** These examples use the dynamic path only, which needs
 > no protobuf toolchain. If you instead want compile-time typing and no runtime

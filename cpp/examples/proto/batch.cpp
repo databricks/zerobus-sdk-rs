@@ -11,17 +11,12 @@
 // unit. The call returns the offset of the LAST record; because acks are
 // monotonic, waiting on that single offset confirms the whole batch.
 //
-// Configuration:
-//   * Edit the placeholder constants below to match your workspace and table.
-//   * Secrets and the Unity Catalog table metadata JSON are read from the
-//     environment:
-//
-//       export DATABRICKS_CLIENT_ID="<your_databricks_client_id>"
-//       export DATABRICKS_CLIENT_SECRET="<your_databricks_client_secret>"
-//       # JSON body of GET /api/2.1/unity-catalog/tables/{full_name}:
-//       export ZEROBUS_UC_TABLE_JSON="$(curl -s \
-//           -H "Authorization: Bearer $DATABRICKS_TOKEN" \
-//           "$WORKSPACE_URL/api/2.1/unity-catalog/tables/<catalog.schema.orders>")"
+// Configuration — every connection setting, plus the Unity Catalog table
+// metadata JSON, is read from the environment. Export these before running (see
+// ../README.md for what each one is and the full copy-pasteable block,
+// including the ZEROBUS_UC_TABLE_JSON curl command):
+//   ZEROBUS_SERVER_ENDPOINT, DATABRICKS_WORKSPACE_URL, ZEROBUS_TABLE_NAME,
+//   DATABRICKS_CLIENT_ID, DATABRICKS_CLIENT_SECRET, ZEROBUS_UC_TABLE_JSON
 //
 //       ./build/examples/proto_batch
 //
@@ -40,17 +35,6 @@
 #include "zerobus/zerobus.hpp"
 
 namespace {
-
-// Change these constants to match your workspace and table.
-constexpr const char* kTableName =
-    "<your_table_name>";  // catalog.schema.orders
-
-// The values below are for AWS. For Azure, replace the
-// `.cloud.databricks.com` hosts with `.azuredatabricks.net`.
-constexpr const char* kWorkspaceUrl =
-    "https://<your-workspace>.cloud.databricks.com";
-constexpr const char* kServerEndpoint =
-    "https://<your-shard-id>.zerobus.<region>.cloud.databricks.com";
 
 std::string require_env(const char* name) {
   const char* value = std::getenv(name);
@@ -83,6 +67,9 @@ std::string make_order_json(int id, const std::string& customer,
 }  // namespace
 
 int main() {
+  const std::string server_endpoint = require_env("ZEROBUS_SERVER_ENDPOINT");
+  const std::string workspace_url = require_env("DATABRICKS_WORKSPACE_URL");
+  const std::string table_name = require_env("ZEROBUS_TABLE_NAME");
   const std::string client_id = require_env("DATABRICKS_CLIENT_ID");
   const std::string client_secret = require_env("DATABRICKS_CLIENT_SECRET");
   const std::string uc_table_json = require_env("ZEROBUS_UC_TABLE_JSON");
@@ -94,14 +81,14 @@ int main() {
 
     // 2. Build the SDK.
     zerobus::Sdk sdk = zerobus::Sdk::builder()
-                           .endpoint(kServerEndpoint)
-                           .unity_catalog_url(kWorkspaceUrl)
+                           .endpoint(server_endpoint)
+                           .unity_catalog_url(workspace_url)
                            .application_name("proto-batch")
                            .build();
 
     // 3. Open a proto stream, passing the descriptor.
     zerobus::TableProperties props;
-    props.table_name = kTableName;
+    props.table_name = table_name;
     props.descriptor_proto = schema.descriptor_bytes();
 
     zerobus::StreamOptions options;

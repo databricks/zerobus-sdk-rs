@@ -37,13 +37,18 @@ examples still build. On Debian/Ubuntu, install `libarrow-dev`.
 
 ## Running the Example
 
-1. Edit the placeholder constants at the top of `arrow_ingest.cpp` (table,
-   endpoint, workspace URL) — see [Prerequisites](../README.md#prerequisites).
-
-2. Export the OAuth secrets and run:
+1. Export the connection settings — see [Prerequisites](../README.md#prerequisites)
+   for what each one is:
    ```bash
+   export ZEROBUS_SERVER_ENDPOINT="https://<your-shard-id>.zerobus.<region>.cloud.databricks.com"
+   export DATABRICKS_WORKSPACE_URL="https://<your-workspace>.cloud.databricks.com"
+   export ZEROBUS_TABLE_NAME="catalog.schema.orders"
    export DATABRICKS_CLIENT_ID="<your_databricks_client_id>"
    export DATABRICKS_CLIENT_SECRET="<your_databricks_client_secret>"
+   ```
+
+2. Run:
+   ```bash
    ./build/examples/arrow_ingest
    ```
 
@@ -68,7 +73,7 @@ std::shared_ptr<arrow::Schema> schema = orders_schema();
 std::vector<std::uint8_t> schema_ipc = serialize_schema_ipc(schema);
 
 zerobus::ArrowStream stream =
-    sdk.create_arrow_stream(kTableName, schema_ipc, client_id, client_secret);
+    sdk.create_arrow_stream(table_name, schema_ipc, client_id, client_secret);
 ```
 
 **Ingest many `RecordBatch`es, then flush once.** Each `ingest_batch()` queues
@@ -104,7 +109,7 @@ zerobus::ArrowStreamOptions opts;
 opts.ipc_compression = zerobus::IpcCompression::Zstd;   // or Lz4Frame
 
 zerobus::ArrowStream stream = sdk.create_arrow_stream(
-    kTableName, schema_ipc, client_id, client_secret, opts);
+    table_name, schema_ipc, client_id, client_secret, opts);
 ```
 
 - `Lz4Frame` — fast, low CPU overhead, modest compression ratio.
@@ -131,5 +136,5 @@ match its columns.
    }
    ```
 2. **Update `make_batch`** to populate builders matching the new schema.
-3. **Update the constants** at the top of the source file: `kTableName`,
-   `kWorkspaceUrl`, and `kServerEndpoint`.
+3. **Point the environment at your table**: set `ZEROBUS_TABLE_NAME`,
+   `DATABRICKS_WORKSPACE_URL`, and `ZEROBUS_SERVER_ENDPOINT` to your values.

@@ -85,26 +85,19 @@ Replace `catalog.schema.orders` with your actual catalog, schema, and table name
 
 ### 3. Configure Credentials
 
-Each example keeps its non-secret connection info as placeholder constants at
-the top of the source file. Edit them to match your workspace:
-
-```cpp
-constexpr const char* kTableName    = "<your_table_name>";  // catalog.schema.orders
-constexpr const char* kWorkspaceUrl = "https://<your-workspace>.cloud.databricks.com";
-constexpr const char* kServerEndpoint =
-    "https://<your-shard-id>.zerobus.<region>.cloud.databricks.com";
-```
-
-Each file has a commented Azure variant alongside the AWS default — uncomment
-the pair for your cloud.
-
-The two genuinely secret values are **not** in source; they are read from the
-environment at runtime, so no credential is ever baked in:
+Every example reads its connection settings from the environment, so no value is
+ever baked into source. Export these five variables before running any example
+(the same names the Go, TypeScript, Java, and Python SDK examples use):
 
 ```bash
+export ZEROBUS_SERVER_ENDPOINT="https://<your-shard-id>.zerobus.<region>.cloud.databricks.com"
+export DATABRICKS_WORKSPACE_URL="https://<your-workspace>.cloud.databricks.com"
+export ZEROBUS_TABLE_NAME="catalog.schema.orders"
 export DATABRICKS_CLIENT_ID="<your_databricks_client_id>"
 export DATABRICKS_CLIENT_SECRET="<your_databricks_client_secret>"
 ```
+
+For Azure, use `.azuredatabricks.net` hosts in the endpoint and workspace URL.
 
 The proto examples additionally read the Unity Catalog table metadata JSON from
 the environment (see the [Protocol Buffers README](proto/README.md)):
@@ -112,16 +105,16 @@ the environment (see the [Protocol Buffers README](proto/README.md)):
 ```bash
 export ZEROBUS_UC_TABLE_JSON="$(curl -s \
   -H "Authorization: Bearer $DATABRICKS_TOKEN" \
-  "$WORKSPACE_URL/api/2.1/unity-catalog/tables/<catalog.schema.orders>")"
+  "$DATABRICKS_WORKSPACE_URL/api/2.1/unity-catalog/tables/$ZEROBUS_TABLE_NAME")"
 ```
 
 **How to get these values:**
-- **kWorkspaceUrl** — your Databricks workspace URL (Unity Catalog endpoint).
-- **kTableName** — full table name in the form `catalog.schema.table`.
+- **ZEROBUS_SERVER_ENDPOINT** — Zerobus ingestion endpoint (usually
+  `https://<shard-id>.zerobus.<region>.cloud.databricks.com`).
+- **DATABRICKS_WORKSPACE_URL** — your Databricks workspace URL (Unity Catalog endpoint).
+- **ZEROBUS_TABLE_NAME** — full table name in the form `catalog.schema.table`.
 - **DATABRICKS_CLIENT_ID / DATABRICKS_CLIENT_SECRET** — OAuth 2.0 credentials from your
   service principal.
-- **kServerEndpoint** — Zerobus ingestion endpoint (usually
-  `https://<shard-id>.zerobus.<region>.cloud.databricks.com`).
 
 ## Building the Examples
 
@@ -161,9 +154,11 @@ All examples follow the same general flow.
 ### 1. Initialize the SDK
 
 ```cpp
+// server_endpoint, workspace_url, and table_name are read from the environment
+// (ZEROBUS_SERVER_ENDPOINT / DATABRICKS_WORKSPACE_URL / ZEROBUS_TABLE_NAME).
 zerobus::Sdk sdk = zerobus::Sdk::builder()
-                       .endpoint(kServerEndpoint)
-                       .unity_catalog_url(kWorkspaceUrl)
+                       .endpoint(server_endpoint)
+                       .unity_catalog_url(workspace_url)
                        .application_name("my-app")
                        .build();
 ```
@@ -173,7 +168,7 @@ zerobus::Sdk sdk = zerobus::Sdk::builder()
 **JSON:**
 ```cpp
 zerobus::TableProperties props;
-props.table_name = kTableName;         // empty descriptor => JSON stream
+props.table_name = table_name;         // empty descriptor => JSON stream
 
 zerobus::StreamOptions options;
 options.record_type = zerobus::RecordType::Json;
@@ -187,7 +182,7 @@ zerobus::Stream stream =
 zerobus::ProtoSchema schema = zerobus::ProtoSchema::from_uc_json(uc_table_json);
 
 zerobus::TableProperties props;
-props.table_name = kTableName;
+props.table_name = table_name;
 props.descriptor_proto = schema.descriptor_bytes();
 
 zerobus::StreamOptions options;
@@ -200,7 +195,7 @@ zerobus::Stream stream =
 **Arrow Flight (Beta):**
 ```cpp
 zerobus::ArrowStream stream =
-    sdk.create_arrow_stream(kTableName, schema_ipc_bytes, client_id,
+    sdk.create_arrow_stream(table_name, schema_ipc_bytes, client_id,
                             client_secret);
 ```
 
@@ -290,7 +285,8 @@ endpoint and workspace URL.
 ### `environment variable ... is not set`
 
 The example exits with code 2 before touching the SDK if a required environment
-variable is missing. Export `DATABRICKS_CLIENT_ID` and `DATABRICKS_CLIENT_SECRET` (and
+variable is missing. Export `ZEROBUS_SERVER_ENDPOINT`, `DATABRICKS_WORKSPACE_URL`,
+`ZEROBUS_TABLE_NAME`, `DATABRICKS_CLIENT_ID`, and `DATABRICKS_CLIENT_SECRET` (and
 `ZEROBUS_UC_TABLE_JSON` for the proto examples).
 
 ### Invalid token

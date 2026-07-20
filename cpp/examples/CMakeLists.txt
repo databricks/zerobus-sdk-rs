@@ -4,11 +4,11 @@
 # Each example links the zerobus::zerobus target, which transitively pulls in
 # the Rust C FFI archive and the platform system libraries it needs.
 #
-# Every example reads its two OAuth secrets (DATABRICKS_CLIENT_ID /
-# DATABRICKS_CLIENT_SECRET) from the environment; the proto examples additionally
-# read the Unity Catalog table metadata JSON (ZEROBUS_UC_TABLE_JSON). All other
-# connection info is placeholder constants at the top of each source file. See
-# each file's header for the variables it expects and a sample invocation.
+# Every example reads its connection settings from the environment
+# (ZEROBUS_SERVER_ENDPOINT, DATABRICKS_WORKSPACE_URL, ZEROBUS_TABLE_NAME,
+# DATABRICKS_CLIENT_ID, DATABRICKS_CLIENT_SECRET); the proto examples additionally
+# read the Unity Catalog table metadata JSON (ZEROBUS_UC_TABLE_JSON). See each
+# file's header for the variables it expects and a sample invocation.
 #
 # The JSON and proto examples need no protobuf toolchain: the proto examples use
 # dynamic ProtoSchema::from_uc_json(), which builds the descriptor at runtime.

@@ -30,10 +30,13 @@
 - Added runnable examples under `examples/` covering all three record formats —
   JSON and protobuf (dynamic schema built at runtime from Unity Catalog metadata
   via `ProtoSchema::from_uc_json`, no `protoc` required), each with a
-  single-record and a batch variant, plus Arrow Flight (Beta). They build with
-  the SDK via
-  `ZEROBUS_BUILD_EXAMPLES` (the Arrow example is skipped when Apache Arrow C++ is
-  not installed). Includes a top-level `examples/README.md` and per-format guides.
+  single-record and a batch variant, plus Arrow Flight (Beta). Every example
+  reads its connection settings from the environment (`ZEROBUS_SERVER_ENDPOINT`,
+  `DATABRICKS_WORKSPACE_URL`, `ZEROBUS_TABLE_NAME`, `DATABRICKS_CLIENT_ID`,
+  `DATABRICKS_CLIENT_SECRET`), matching the other SDK examples. They build with
+  the SDK via `ZEROBUS_BUILD_EXAMPLES` (the Arrow example is skipped when Apache
+  Arrow C++ is not installed). Includes a top-level `examples/README.md` and
+  per-format guides.
 
 ### Internal Changes
 

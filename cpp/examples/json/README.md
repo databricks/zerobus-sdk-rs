@@ -36,13 +36,18 @@ Both open a JSON stream by setting `StreamOptions::record_type` to
 
 ### Running the Example
 
-1. Edit the placeholder constants at the top of `single.cpp` (table, endpoint,
-   workspace URL) — see [Prerequisites](../README.md#prerequisites).
-
-2. Export the OAuth secrets and run:
+1. Export the connection settings — see [Prerequisites](../README.md#prerequisites)
+   for what each one is:
    ```bash
+   export ZEROBUS_SERVER_ENDPOINT="https://<your-shard-id>.zerobus.<region>.cloud.databricks.com"
+   export DATABRICKS_WORKSPACE_URL="https://<your-workspace>.cloud.databricks.com"
+   export ZEROBUS_TABLE_NAME="catalog.schema.orders"
    export DATABRICKS_CLIENT_ID="<your_databricks_client_id>"
    export DATABRICKS_CLIENT_SECRET="<your_databricks_client_secret>"
+   ```
+
+2. Run:
+   ```bash
    ./build/examples/json_single
    ```
 
@@ -72,7 +77,7 @@ stream.flush();   // the single wait point — confirm all queued records at onc
 **Building a JSON stream:**
 ```cpp
 zerobus::TableProperties props;
-props.table_name = kTableName;         // empty descriptor => JSON stream
+props.table_name = table_name;         // empty descriptor => JSON stream
 
 zerobus::StreamOptions options;
 options.record_type = zerobus::RecordType::Json;
@@ -85,13 +90,11 @@ zerobus::Stream stream =
 
 ### Running the Example
 
-1. Edit the placeholder constants at the top of `batch.cpp` — see
-   [Prerequisites](../README.md#prerequisites).
+1. Export the connection settings as shown for the single-record example above
+   (see [Prerequisites](../README.md#prerequisites)).
 
-2. Export the OAuth secrets and run:
+2. Run:
    ```bash
-   export DATABRICKS_CLIENT_ID="<your_databricks_client_id>"
-   export DATABRICKS_CLIENT_SECRET="<your_databricks_client_secret>"
    ./build/examples/json_batch
    ```
 
@@ -135,8 +138,8 @@ JSON examples require no schema generation. To use your own table:
    ```cpp
    std::string record = R"({"your_field_1": "value", "your_field_2": 123})";
    ```
-2. **Update the constants** at the top of the source file: `kTableName`,
-   `kWorkspaceUrl`, and `kServerEndpoint`.
+2. **Point the environment at your table**: set `ZEROBUS_TABLE_NAME`,
+   `DATABRICKS_WORKSPACE_URL`, and `ZEROBUS_SERVER_ENDPOINT` to your values.
 
 > **Tip.** Delta `TIMESTAMP` columns are int64 microseconds since the Unix epoch
 > (UTC) — the examples fill them with `now_micros()`.

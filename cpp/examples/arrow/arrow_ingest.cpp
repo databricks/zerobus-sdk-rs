@@ -17,12 +17,11 @@
 // (one round-trip each collapses throughput). See the cardinal rule in
 // zerobus.hpp.
 //
-// Configuration:
-//   * Edit the placeholder constants below to match your workspace and table.
-//   * The two OAuth secrets are read from the environment:
-//
-//       export DATABRICKS_CLIENT_ID="<your_databricks_client_id>"
-//       export DATABRICKS_CLIENT_SECRET="<your_databricks_client_secret>"
+// Configuration — every connection setting is read from the environment. Export
+// these before running (see ../README.md for what each one is and the full
+// copy-pasteable block):
+//   ZEROBUS_SERVER_ENDPOINT, DATABRICKS_WORKSPACE_URL, ZEROBUS_TABLE_NAME,
+//   DATABRICKS_CLIENT_ID, DATABRICKS_CLIENT_SECRET
 //
 //       ./build/examples/arrow_ingest
 //
@@ -51,17 +50,6 @@
 
 namespace {
 
-// Change these constants to match your workspace and table.
-constexpr const char* kTableName =
-    "<your_table_name>";  // catalog.schema.orders
-
-// The values below are for AWS. For Azure, replace the
-// `.cloud.databricks.com` hosts with `.azuredatabricks.net`.
-constexpr const char* kWorkspaceUrl =
-    "https://<your-workspace>.cloud.databricks.com";
-constexpr const char* kServerEndpoint =
-    "https://<your-shard-id>.zerobus.<region>.cloud.databricks.com";
-
 constexpr int kBatches = 10;
 constexpr int kRowsPerBatch = 100;
 
@@ -69,8 +57,7 @@ std::string require_env(const char* name) {
   const char* value = std::getenv(name);
   if (value == nullptr || *value == '\0') {
     std::cerr << "error: environment variable " << name << " is not set.\n"
-              << "Set DATABRICKS_CLIENT_ID and DATABRICKS_CLIENT_SECRET before "
-                 "running this example.\n";
+              << "See the header of this file for the required variables.\n";
     std::exit(2);
   }
   return value;
@@ -188,14 +175,17 @@ std::vector<std::uint8_t> serialize_schema_ipc(
 }  // namespace
 
 int main() {
+  const std::string server_endpoint = require_env("ZEROBUS_SERVER_ENDPOINT");
+  const std::string workspace_url = require_env("DATABRICKS_WORKSPACE_URL");
+  const std::string table_name = require_env("ZEROBUS_TABLE_NAME");
   const std::string client_id = require_env("DATABRICKS_CLIENT_ID");
   const std::string client_secret = require_env("DATABRICKS_CLIENT_SECRET");
 
   try {
     // 1. Build the SDK.
     zerobus::Sdk sdk = zerobus::Sdk::builder()
-                           .endpoint(kServerEndpoint)
-                           .unity_catalog_url(kWorkspaceUrl)
+                           .endpoint(server_endpoint)
+                           .unity_catalog_url(workspace_url)
                            .application_name("arrow-ingest")
                            .build();
 
@@ -210,7 +200,7 @@ int main() {
     const std::vector<std::uint8_t> schema_ipc = serialize_schema_ipc(schema);
 
     zerobus::ArrowStream stream = sdk.create_arrow_stream(
-        kTableName, schema_ipc, client_id, client_secret);
+        table_name, schema_ipc, client_id, client_secret);
 
     // 3. Ingest a series of multi-row batches. Each ingest_batch() queues one
     //    Arrow IPC stream and returns immediately with the assigned offset —
