@@ -88,8 +88,9 @@ pub struct MockFlightServer {
     row_count: Arc<Mutex<u64>>,
     /// Track response index across connection attempts
     response_indices: Arc<Mutex<HashMap<String, usize>>>,
-    /// Track expected offset per table (must be strictly sequential starting from 0)
-    expected_offsets: Arc<Mutex<HashMap<String, i64>>>,
+    /// Observation of every `ack_up_to_records` value emitted on the auto-ack path,
+    /// in emission order. Used by tests to assert acks are connection-relative.
+    auto_ack_records: Arc<Mutex<Vec<u64>>>,
 }
 
 impl MockFlightServer {
@@ -100,7 +101,7 @@ impl MockFlightServer {
             batch_count: Arc::new(Mutex::new(0)),
             row_count: Arc::new(Mutex::new(0)),
             response_indices: Arc::new(Mutex::new(HashMap::new())),
-            expected_offsets: Arc::new(Mutex::new(HashMap::new())),
+            auto_ack_records: Arc::new(Mutex::new(Vec::new())),
         }
     }
 
@@ -128,6 +129,12 @@ impl MockFlightServer {
         *self.row_count.lock().await
     }
 
+    /// Get every `ack_up_to_records` value emitted on the auto-ack path, in order.
+    #[allow(dead_code)]
+    pub async fn get_auto_ack_records(&self) -> Vec<u64> {
+        self.auto_ack_records.lock().await.clone()
+    }
+
     /// Reset the server state
     #[allow(dead_code)]
     pub async fn reset(&self) {
@@ -138,8 +145,7 @@ impl MockFlightServer {
         *self.max_offset_received.lock().await = -1;
         *self.batch_count.lock().await = 0;
         *self.row_count.lock().await = 0;
-        let mut expected_offsets = self.expected_offsets.lock().await;
-        expected_offsets.clear();
+        self.auto_ack_records.lock().await.clear();
     }
 }
 
@@ -219,11 +225,18 @@ impl FlightService for MockFlightServer {
         let batch_count = Arc::clone(&self.batch_count);
         let row_count = Arc::clone(&self.row_count);
         let response_indices = Arc::clone(&self.response_indices);
-        let expected_offsets = Arc::clone(&self.expected_offsets);
+        let auto_ack_records = Arc::clone(&self.auto_ack_records);
 
         tokio::spawn(async move {
             let mut stream_responses: Vec<MockFlightResponse> = Vec::new();
             let mut is_first_message = true;
+            // Per-connection state, owned as locals like the real server (fresh per
+            // DoPut connection). These must not leak across reconnects or concurrent
+            // same-table streams: `expected_offset` validates wire ordering, and
+            // `connection_record_count` is the cumulative-record tracker that drives
+            // auto-acks (the server derives ack_up_to_records per connection).
+            let mut expected_offset: i64 = 0;
+            let mut connection_record_count: u64 = 0;
 
             // Load configured responses
             {
@@ -239,12 +252,6 @@ impl FlightService for MockFlightServer {
                 let indices = response_indices.lock().await;
                 *indices.get(&table_name).unwrap_or(&0)
             };
-
-            // Reset expected offset to 0 for each new connection
-            {
-                let mut offsets = expected_offsets.lock().await;
-                offsets.insert(table_name.clone(), 0);
-            }
 
             while let Ok(Some(flight_data)) = stream.message().await {
                 // Handle schema message (first message has no app_metadata or empty app_metadata)
@@ -278,30 +285,23 @@ impl FlightService for MockFlightServer {
                 if let Some(metadata) = &metadata {
                     debug!("Received batch with offset_id: {}", metadata.offset_id);
 
-                    // Validate offset is strictly sequential
-                    let expected = {
-                        let offsets = expected_offsets.lock().await;
-                        *offsets.get(&table_name).unwrap_or(&0)
-                    };
-                    if metadata.offset_id != expected {
+                    // Validate offset is strictly sequential (connection-local).
+                    if metadata.offset_id != expected_offset {
                         error!(
                             "Non-incremental offset: expected {}, got {}",
-                            expected, metadata.offset_id
+                            expected_offset, metadata.offset_id
                         );
                         let _ = tx
                             .send(Err(Status::invalid_argument(format!(
                                 "Non-incremental offset: expected {}, actual {}",
-                                expected, metadata.offset_id
+                                expected_offset, metadata.offset_id
                             ))))
                             .await;
                         return;
                     }
 
-                    // Update expected offset for next batch
-                    {
-                        let mut offsets = expected_offsets.lock().await;
-                        offsets.insert(table_name.clone(), metadata.offset_id + 1);
-                    }
+                    // Update expected offset for next batch.
+                    expected_offset = metadata.offset_id + 1;
 
                     // Update max offset
                     {
@@ -324,6 +324,10 @@ impl FlightService for MockFlightServer {
                         .map(|rb| rb.length() as u64)
                         .unwrap_or(0);
                     if rows > 0 {
+                        // Connection-local counter drives acks (mirrors the server's
+                        // per-connection cumulative tracker); the global row_count is
+                        // kept only as a cross-connection observation metric.
+                        connection_record_count += rows;
                         let mut count = row_count.lock().await;
                         *count += rows;
                     }
@@ -446,10 +450,10 @@ impl FlightService for MockFlightServer {
                 } else {
                     // Auto-ack if no more configured responses
                     if let Some(metadata) = metadata {
-                        let records = {
-                            let count = row_count.lock().await;
-                            *count
-                        };
+                        // Use the connection-local record count so acks are
+                        // connection-relative, matching the real server.
+                        let records = connection_record_count;
+                        auto_ack_records.lock().await.push(records);
                         let ack_metadata = FlightAckMetadata {
                             ack_up_to_offset: metadata.offset_id,
                             ack_up_to_records: records,
@@ -511,7 +515,7 @@ pub async fn start_mock_flight_server(
         batch_count: Arc::clone(&mock_server.batch_count),
         row_count: Arc::clone(&mock_server.row_count),
         response_indices: Arc::clone(&mock_server.response_indices),
-        expected_offsets: Arc::clone(&mock_server.expected_offsets),
+        auto_ack_records: Arc::clone(&mock_server.auto_ack_records),
     };
 
     let addr: std::net::SocketAddr = "127.0.0.1:0".parse()?;
