@@ -18,7 +18,7 @@ import (
 //
 // GetHeaders returns headers for the given tableName. The transport layer will
 // always enforce the authoritative table-name header from stream-open params.
-// Implementations may include it for parity with other SDKs.
+// Implementations may include it as well.
 //
 // Invalidate is called on server auth rejection so any cached credentials can
 // be dropped before the next open attempt.

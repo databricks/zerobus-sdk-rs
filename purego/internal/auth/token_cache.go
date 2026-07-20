@@ -77,7 +77,7 @@ func (c *cachedToken) isExpired() bool {
 }
 
 // newCachedToken builds an entry for a token whose TTL started at mintedAt
-// (response-receipt time, matching the Rust SDK). ttl must be positive.
+// (response-receipt time). ttl must be positive.
 //
 // The effective refresh lead time is clamped to at most half the TTL: with the
 // default 5-minute buffer a 10-minute token would otherwise be due for refresh

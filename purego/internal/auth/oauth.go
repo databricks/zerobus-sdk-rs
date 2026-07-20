@@ -115,7 +115,7 @@ func WithLogger(l *slog.Logger) OAuthOption {
 // client credentials flow.
 //
 // zerobusEndpoint is the Zerobus service URL. The workspace ID used in OAuth
-// resource audience is derived from its host prefix (matching the Rust SDK).
+// resource audience is derived from its host prefix.
 // ucEndpoint is the workspace URL (e.g. "https://my-workspace.databricks.com").
 func NewOAuthTokenProvider(
 	clientID, clientSecret, zerobusEndpoint, ucEndpoint string,
@@ -177,7 +177,7 @@ func NewSharedTokenCache(opts ...CacheOption) *SharedTokenCache {
 //
 // A successful mint is cached only when UC reports a usable expires_in. If UC
 // omits expires_in (or reports a non-positive value), the token is returned but
-// not cached to match Rust SDK behavior.
+// not cached.
 func (p *OAuthTokenProvider) Token(ctx context.Context, tableName string) (string, error) {
 	tableName = strings.TrimSpace(tableName)
 	if err := validateTableName(tableName); err != nil {
@@ -395,7 +395,7 @@ func (e *TokenError) Unwrap() error { return e.cause }
 
 // isRetryableStatus reports whether an HTTP status is a transient failure worth
 // suppressing when a cached token can be served. Only 5xx responses qualify;
-// all 4xx (including 429 and 408) are non-retryable, matching the Rust SDK.
+// all 4xx (including 429 and 408) are non-retryable.
 func isRetryableStatus(code int) bool {
 	return code >= 500
 }
@@ -493,7 +493,7 @@ func isLoopbackHost(host string) bool {
 }
 
 // deriveWorkspaceIDFromEndpoint extracts workspace ID from Zerobus endpoint
-// host by taking the first DNS label, matching Rust SDK behavior.
+// host by taking the first DNS label.
 func deriveWorkspaceIDFromEndpoint(endpoint string) (workspaceID string, err error) {
 	endpoint = strings.TrimSpace(endpoint)
 	if endpoint == "" {
