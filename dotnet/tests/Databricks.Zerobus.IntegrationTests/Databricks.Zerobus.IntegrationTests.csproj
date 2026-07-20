@@ -1,0 +1,36 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net8.0</TargetFramework>
+    <RootNamespace>Databricks.Zerobus.IntegrationTests</RootNamespace>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <IsPackable>false</IsPackable>
+    <IsTestProject>true</IsTestProject>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Google.Protobuf" Version="3.28.2" />
+    <PackageReference Include="Grpc.AspNetCore" Version="2.66.0" />
+    <PackageReference Include="Grpc.Tools" Version="2.67.0" PrivateAssets="All" />
+    <PackageReference Include="Microsoft.NET.Test.Sdk" Version="17.11.1" />
+    <PackageReference Include="xunit" Version="2.9.2" />
+    <PackageReference Include="xunit.runner.visualstudio" Version="2.8.2">
+      <IncludeAssets>runtime; build; native; contentfiles; analyzers; buildtransitive</IncludeAssets>
+      <PrivateAssets>all</PrivateAssets>
+    </PackageReference>
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\..\src\Databricks.Zerobus\Databricks.Zerobus.csproj" />
+  </ItemGroup>
+
+  <!-- Proto compilation: generate C# gRPC client and server stubs -->
+  <ItemGroup>
+    <Protobuf Include="Protos\zerobus_service.proto"
+              GrpcServices="Both"
+              ProtoRoot="Protos"
+              AdditionalImportDirs="$(Protobuf_WellKnownTypes)" />
+  </ItemGroup>
+
+</Project>

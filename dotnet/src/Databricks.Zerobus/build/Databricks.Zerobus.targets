@@ -1,0 +1,43 @@
+<Project>
+  <!-- Copy native library to output directory based on runtime identifier -->
+  <Target Name="CopyZerobusNativeLibs" BeforeTargets="Build" Condition="'$(ZerobusNativeLoaded)' != 'true'">
+    <PropertyGroup>
+      <ZerobusNativeLoaded>true</ZerobusNativeLoaded>
+    </PropertyGroup>
+
+    <!-- Default RID detection if not explicitly set -->
+    <PropertyGroup Condition="'$(RuntimeIdentifier)' == ''">
+      <ZerobusRidOs Condition="$([MSBuild]::IsOSPlatform('Windows'))">win</ZerobusRidOs>
+      <ZerobusRidOs Condition="$([MSBuild]::IsOSPlatform('Linux'))">linux</ZerobusRidOs>
+      <ZerobusRidOs Condition="$([MSBuild]::IsOSPlatform('OSX'))">osx</ZerobusRidOs>
+      <ZerobusRidArch Condition="$([System.Runtime.InteropServices.RuntimeInformation]::ProcessArchitecture) == 'Arm64'">arm64</ZerobusRidArch>
+      <ZerobusRidArch Condition="'$(ZerobusRidArch)' == ''">x64</ZerobusRidArch>
+      <DetectedRid>$(ZerobusRidOs)-$(ZerobusRidArch)</DetectedRid>
+    </PropertyGroup>
+
+    <PropertyGroup Condition="'$(RuntimeIdentifier)' != ''">
+      <DetectedRid>$(RuntimeIdentifier)</DetectedRid>
+    </PropertyGroup>
+
+    <!-- Determine native library name -->
+    <PropertyGroup>
+      <NativeLibName Condition="$([MSBuild]::IsOSPlatform('Windows'))">zerobus_ffi.dll</NativeLibName>
+      <NativeLibName Condition="$([MSBuild]::IsOSPlatform('Linux'))">libzerobus_ffi.so</NativeLibName>
+      <NativeLibName Condition="$([MSBuild]::IsOSPlatform('OSX'))">libzerobus_ffi.dylib</NativeLibName>
+    </PropertyGroup>
+
+    <ItemGroup>
+      <NativeLibs Include="$(MSBuildThisFileDirectory)..\runtimes\$(DetectedRid)\native\$(NativeLibName)"
+                  Condition="Exists('$(MSBuildThisFileDirectory)..\runtimes\$(DetectedRid)\native\$(NativeLibName)')" />
+    </ItemGroup>
+
+    <Copy SourceFiles="@(NativeLibs)"
+          DestinationFolder="$(OutputPath)"
+          SkipUnchangedFiles="true"
+          Condition="'@(NativeLibs)' != ''" />
+
+    <Message Importance="high"
+             Condition="'@(NativeLibs)' == ''"
+             Text="Warning: Zerobus native library not found for RID '$(DetectedRid)'. Place $(NativeLibName) in runtimes/$(DetectedRid)/native/." />
+  </Target>
+</Project>

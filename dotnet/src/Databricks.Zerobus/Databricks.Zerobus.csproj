@@ -1,0 +1,67 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFrameworks>net8.0;netstandard2.0</TargetFrameworks>
+    <RootNamespace>Databricks.Zerobus</RootNamespace>
+    <AssemblyName>Databricks.Zerobus</AssemblyName>
+
+    <!-- NuGet package metadata -->
+    <PackageId>Databricks.Zerobus.Ingest</PackageId>
+    <Title>Databricks Zerobus Ingest SDK</Title>
+    <Description>High-throughput streaming ingestion SDK for Databricks Delta tables. Provides JSON, Protocol Buffers, and Apache Arrow Flight ingestion over gRPC.</Description>
+    <Authors>Databricks</Authors>
+    <PackageLicenseExpression>Apache-2.0</PackageLicenseExpression>
+    <PackageProjectUrl>https://github.com/databricks/zerobus-sdk</PackageProjectUrl>
+    <RepositoryUrl>https://github.com/databricks/zerobus-sdk</RepositoryUrl>
+    <PackageTags>databricks;zerobus;streaming;ingestion;grpc;arrow;protobuf;delta</PackageTags>
+    <Version>0.1.0</Version>
+    <GenerateDocumentationFile>true</GenerateDocumentationFile>
+
+    <!-- SourceLink for debugging -->
+    <PublishRepositoryUrl>true</PublishRepositoryUrl>
+    <EmbedUntrackedSources>true</EmbedUntrackedSources>
+    <IncludeSymbols>true</IncludeSymbols>
+    <SymbolPackageFormat>snupkg</SymbolPackageFormat>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <InternalsVisibleTo Include="Databricks.Zerobus.Tests" />
+    <InternalsVisibleTo Include="Databricks.Zerobus.IntegrationTests" />
+  </ItemGroup>
+
+  <!-- NuGet dependencies -->
+  <ItemGroup>
+    <PackageReference Include="Google.Protobuf" Version="3.28.2" />
+  </ItemGroup>
+
+  <ItemGroup Condition="'$(TargetFramework)' == 'netstandard2.0'">
+    <PackageReference Include="System.Memory" Version="4.5.5" />
+  </ItemGroup>
+
+  <ItemGroup Condition="'$(TargetFramework)' == 'net8.0'">
+    <PackageReference Include="Microsoft.SourceLink.GitHub" Version="8.0.0" PrivateAssets="All" />
+  </ItemGroup>
+
+  <!-- Native binaries for each RID -->
+  <ItemGroup>
+    <None Include="runtimes\win-x64\native\zerobus_ffi.dll"
+          Pack="true" PackagePath="runtimes\win-x64\native\zerobus_ffi.dll" />
+    <None Include="runtimes\linux-x64\native\libzerobus_ffi.so"
+          Pack="true" PackagePath="runtimes\linux-x64\native\libzerobus_ffi.so" />
+    <None Include="runtimes\linux-arm64\native\libzerobus_ffi.so"
+          Pack="true" PackagePath="runtimes\linux-arm64\native\libzerobus_ffi.so" />
+    <None Include="runtimes\osx-x64\native\libzerobus_ffi.dylib"
+          Pack="true" PackagePath="runtimes\osx-x64\native\libzerobus_ffi.dylib" />
+    <None Include="runtimes\osx-arm64\native\libzerobus_ffi.dylib"
+          Pack="true" PackagePath="runtimes\osx-arm64\native\libzerobus_ffi.dylib" />
+  </ItemGroup>
+
+  <!-- MSBuild targets for native library resolution -->
+  <ItemGroup>
+    <None Include="build\Databricks.Zerobus.targets"
+          Pack="true" PackagePath="build\Databricks.Zerobus.targets" />
+    <None Include="build\Databricks.Zerobus.props"
+          Pack="true" PackagePath="build\Databricks.Zerobus.props" />
+  </ItemGroup>
+
+</Project>

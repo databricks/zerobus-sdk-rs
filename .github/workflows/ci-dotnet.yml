@@ -1,0 +1,109 @@
+# Build .NET SDK — CI
+# Called from push.yml (path-filtered) and cross-sdk (on rust/** changes).
+# Also invocable manually via workflow_dispatch.
+name: Build .NET
+
+on:
+  workflow_call:
+    inputs:
+      use_local_sdk:
+        description: 'Ignored — .NET uses pre-built FFI binaries, not local Rust compilation.'
+        type: boolean
+        default: false
+      artifact_suffix:
+        description: 'Suffix appended to artifact names for uniqueness'
+        type: string
+        default: ''
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  DOTNET_CLI_TELEMETRY_OPTOUT: '1'
+  DOTNET_NOLOGO: '1'
+
+jobs:
+  # ─── Format check ────────────────────────────────────────────────
+  fmt:
+    name: Format Check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4
+      - uses: actions/setup-dotnet@4d6c8fcf3c8baa263966f8c6d72e6f47f76c9559 # v5
+        with:
+          dotnet-version: '8.0.x'
+      - name: Check formatting
+        working-directory: dotnet
+        run: |
+          dotnet format --verify-no-changes --verbosity detailed || {
+            echo "::error::Code formatting violations found. Run 'dotnet format' locally to fix."
+            exit 1
+          }
+
+  # ─── Build & Test (matrix) ──────────────────────────────────────
+  test:
+    name: Test (${{ matrix.os }})
+    needs: fmt
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4
+
+      - uses: actions/setup-dotnet@4d6c8fcf3c8baa263966f8c6d72e6f47f76c9559 # v5
+        with:
+          dotnet-version: '8.0.x'
+
+      - name: Restore dependencies
+        working-directory: dotnet
+        run: dotnet restore --configfile NuGet.Config
+
+      - name: Build
+        working-directory: dotnet
+        run: dotnet build --no-restore --configuration Release
+
+      - name: Test
+        working-directory: dotnet
+        run: dotnet test --no-build --configuration Release --logger "trx;LogFileName=test-results.trx"
+
+      - name: Upload test results
+        if: always()
+        uses: actions/upload-artifact@b4b15ac8a8a6516bb370cc420f053ba1b865e6e4 # v4
+        with:
+          name: test-results-${{ matrix.os }}-dotnet${{ inputs.artifact_suffix }}
+          path: |
+            dotnet/tests/**/TestResults/*.trx
+            dotnet/tests/**/TestResults/*.xml
+          retention-days: 7
+          if-no-files-found: ignore
+
+  # ─── Pack (Linux only — single platform for NuGet) ──────────────
+  pack:
+    name: Pack NuGet
+    needs: test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4
+
+      - uses: actions/setup-dotnet@4d6c8fcf3c8baa263966f8c6d72e6f47f76c9559 # v5
+        with:
+          dotnet-version: '8.0.x'
+
+      - name: Restore
+        working-directory: dotnet
+        run: dotnet restore --configfile NuGet.Config
+
+      - name: Pack
+        working-directory: dotnet
+        run: dotnet pack src/Databricks.Zerobus --no-restore --configuration Release -o artifacts
+
+      - name: Upload NuGet package
+        uses: actions/upload-artifact@b4b15ac8a8a6516bb370cc420f053ba1b865e6e4 # v4
+        with:
+          name: dotnet-nuget${{ inputs.artifact_suffix }}
+          path: dotnet/artifacts/*.nupkg
+          if-no-files-found: error

@@ -1,0 +1,17 @@
+<Solution>
+  <Folder Name="/examples/">
+    <Project Path="examples/ArrowIngestion/ArrowIngestion.csproj" />
+    <Project Path="examples/JsonIngestion/JsonIngestion.csproj" />
+    <Project Path="examples/ProtoIngestion/ProtoIngestion.csproj" />
+  </Folder>
+  <Folder Name="/src/">
+    <Project Path="src/Databricks.Zerobus/Databricks.Zerobus.csproj" />
+  </Folder>
+  <Folder Name="/tests/">
+    <Project Path="tests/Databricks.Zerobus.IntegrationTests/Databricks.Zerobus.IntegrationTests.csproj" />
+    <Project Path="tests/Databricks.Zerobus.Tests/Databricks.Zerobus.Tests.csproj" />
+  </Folder>
+  <Folder Name="/tools/">
+    <Project Path="tools/GenerateProto/GenerateProto.csproj" />
+  </Folder>
+</Solution>
