@@ -451,11 +451,10 @@ func isHTTPSuccess(code int) bool { return code >= 200 && code < 300 }
 // server fault. Both surface as a wrapped context error, so they are told apart
 // by whether ctx itself is done.
 func isRetryableTransportError(ctx context.Context, err error) bool {
-	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
-		// The caller's own context ended: honor it and don't retry. Otherwise the
-		// deadline came from the request itself (client Timeout / transport
-		// deadline), which is a transient fault we can retry.
-		return ctx.Err() == nil
+	if isContextError(err) {
+		// A context error is retryable only when it came from the request itself
+		// (client Timeout / transport deadline), not from the caller's own context.
+		return !isCallerCancellation(ctx, err)
 	}
 	// Network-level timeouts (dial/read deadlines, i/o timeout) are transient.
 	var ne net.Error

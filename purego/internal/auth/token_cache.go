@@ -303,10 +303,22 @@ func (c *tokenCache) tryGetOrFetch(
 }
 
 // isContextError reports whether err is (or wraps) a context cancellation or
-// deadline, the signal that a mint failed because its leader's context ended
-// rather than because the token endpoint itself failed.
+// deadline. This alone does not say where the cancellation came from: an
+// http.Client.Timeout or transport deadline surfaces as a wrapped context error
+// just as a caller's own cancellation does. Use [isCallerCancellation] to tell
+// the two apart when the request context is in hand.
 func isContextError(err error) bool {
 	return errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded)
+}
+
+// isCallerCancellation reports whether err is a context error that originated
+// from ctx — the caller cancelled or its deadline fired — rather than from the
+// request itself. It is the caller's signal to stop: such a failure must not be
+// retried or masked by serving a cached token. A context error seen while ctx is
+// still live came from the request (a client/transport timeout) and is a
+// transient, retryable fault instead.
+func isCallerCancellation(ctx context.Context, err error) bool {
+	return isContextError(err) && ctx.Err() != nil
 }
 
 // invalidate drops the cached token for the given credentials, table, and
