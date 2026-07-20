@@ -8,12 +8,12 @@ mod tests {
         zerobus_sdk_builder_free, zerobus_sdk_builder_new, zerobus_sdk_builder_sdk_identifier,
         zerobus_sdk_builder_unity_catalog_url, zerobus_sdk_create_stream,
         zerobus_sdk_create_stream_async, zerobus_sdk_create_stream_with_headers_provider_async,
-        zerobus_sdk_recreate_stream_async,
-        zerobus_sdk_free, CHeaders, CRecordArray, CResult, CallbackHeadersProvider, RecordType,
-        ZerobusError, zerobus_stream_close_async, zerobus_stream_flush_async,
-        zerobus_stream_get_unacked_records_async, zerobus_stream_ingest_json_record_async,
-        zerobus_stream_ingest_json_records_async, zerobus_stream_ingest_proto_record_async,
-        zerobus_stream_ingest_proto_records_async, zerobus_stream_wait_for_offset_async,
+        zerobus_sdk_free, zerobus_sdk_recreate_stream_async, zerobus_stream_close_async,
+        zerobus_stream_flush_async, zerobus_stream_get_unacked_records_async,
+        zerobus_stream_ingest_json_record_async, zerobus_stream_ingest_json_records_async,
+        zerobus_stream_ingest_proto_record_async, zerobus_stream_ingest_proto_records_async,
+        zerobus_stream_wait_for_offset_async, CHeaders, CRecordArray, CResult,
+        CallbackHeadersProvider, RecordType, ZerobusError,
     };
     use databricks_zerobus_ingest_sdk::HeadersProvider;
     use std::ffi::{CStr, CString};
@@ -410,7 +410,8 @@ mod tests {
             result: *const CResult,
             user_data: *mut std::ffi::c_void,
         ) {
-            let sender = unsafe { &*(user_data as *const mpsc::Sender<(bool, bool, bool, String)>) };
+            let sender =
+                unsafe { &*(user_data as *const mpsc::Sender<(bool, bool, bool, String)>) };
             let result_ref = unsafe { &*result };
             let error_message = if result_ref.error_message.is_null() {
                 String::new()
@@ -478,7 +479,10 @@ mod tests {
         let (stream_is_null, callback_success, callback_retryable, callback_message) = receiver
             .recv_timeout(Duration::from_secs(2))
             .expect("callback should be invoked");
-        assert!(stream_is_null, "callback should receive a null stream on failure");
+        assert!(
+            stream_is_null,
+            "callback should receive a null stream on failure"
+        );
         assert!(!callback_success, "callback result should indicate failure");
         assert!(
             !callback_retryable,
@@ -508,7 +512,8 @@ mod tests {
             result: *const CResult,
             user_data: *mut std::ffi::c_void,
         ) {
-            let sender = unsafe { &*(user_data as *const mpsc::Sender<(bool, bool, bool, String)>) };
+            let sender =
+                unsafe { &*(user_data as *const mpsc::Sender<(bool, bool, bool, String)>) };
             let result_ref = unsafe { &*result };
             let error_message = if result_ref.error_message.is_null() {
                 String::new()
@@ -577,7 +582,10 @@ mod tests {
         let (stream_is_null, callback_success, callback_retryable, callback_message) = receiver
             .recv_timeout(Duration::from_secs(2))
             .expect("callback should be invoked");
-        assert!(stream_is_null, "callback should receive a null stream on failure");
+        assert!(
+            stream_is_null,
+            "callback should receive a null stream on failure"
+        );
         assert!(!callback_success, "callback result should indicate failure");
         assert!(
             !callback_retryable,

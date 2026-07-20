@@ -225,21 +225,15 @@ pub type CreateStreamAsyncCallback = extern "C" fn(
 ///
 /// `result` points to a `CResult` valid only for the duration of the call; copy
 /// any error text during the callback if you need to retain it.
-pub type OffsetAsyncCallback = extern "C" fn(
-    offset: i64,
-    result: *const CResult,
-    user_data: *mut std::ffi::c_void,
-);
+pub type OffsetAsyncCallback =
+    extern "C" fn(offset: i64, result: *const CResult, user_data: *mut std::ffi::c_void);
 
 /// Function pointer type for async bool-returning operations.
 ///
 /// `result` points to a `CResult` valid only for the duration of the call; copy
 /// any error text during the callback if you need to retain it.
-pub type BoolAsyncCallback = extern "C" fn(
-    value: bool,
-    result: *const CResult,
-    user_data: *mut std::ffi::c_void,
-);
+pub type BoolAsyncCallback =
+    extern "C" fn(value: bool, result: *const CResult, user_data: *mut std::ffi::c_void);
 
 /// Function pointer type for async `CRecordArray`-returning operations.
 ///
@@ -247,11 +241,8 @@ pub type BoolAsyncCallback = extern "C" fn(
 /// must free it with `zerobus_free_record_array`. `result` points to a `CResult`
 /// valid only for the duration of the call; copy any error text during the
 /// callback if you need to retain it.
-pub type RecordArrayAsyncCallback = extern "C" fn(
-    records: CRecordArray,
-    result: *const CResult,
-    user_data: *mut std::ffi::c_void,
-);
+pub type RecordArrayAsyncCallback =
+    extern "C" fn(records: CRecordArray, result: *const CResult, user_data: *mut std::ffi::c_void);
 
 /// Rust struct that wraps a Go callback and implements HeadersProvider
 pub(crate) struct CallbackHeadersProvider {

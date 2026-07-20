@@ -6,8 +6,8 @@ use databricks_zerobus_ingest_sdk::{
     EncodedRecord, HeadersProvider, StreamBuilder, ZerobusError, ZerobusStream,
 };
 use prost::Message;
-use std::mem::ManuallyDrop;
 use std::ffi::CString;
+use std::mem::ManuallyDrop;
 use std::os::raw::c_char;
 use std::ptr;
 use std::sync::Arc;
@@ -101,8 +101,9 @@ async fn build_stream_from_parts(
             headers_callback,
             user_data,
         } => {
-            let headers_provider: Arc<dyn HeadersProvider> =
-                Arc::new(CallbackHeadersProvider::new(headers_callback, user_data.get()));
+            let headers_provider: Arc<dyn HeadersProvider> = Arc::new(
+                CallbackHeadersProvider::new(headers_callback, user_data.get()),
+            );
             sdk_ref
                 .stream_builder()
                 .table(table_name)
@@ -173,7 +174,10 @@ fn invoke_offset_async_callback(
     }))
     .is_err()
     {
-        tracing::error!(offset, "async offset callback panicked; contained at FFI boundary");
+        tracing::error!(
+            offset,
+            "async offset callback panicked; contained at FFI boundary"
+        );
     }
 
     if !callback_result.error_message.is_null() {
@@ -197,7 +201,10 @@ fn invoke_bool_async_callback(
     }))
     .is_err()
     {
-        tracing::error!(value, "async bool callback panicked; contained at FFI boundary");
+        tracing::error!(
+            value,
+            "async bool callback panicked; contained at FFI boundary"
+        );
     }
 
     if !callback_result.error_message.is_null() {
@@ -218,7 +225,11 @@ fn invoke_record_array_async_callback(
     let callback_records = ManuallyDrop::new(records);
 
     let panicked = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| unsafe {
-        callback(ptr::read(&*callback_records), callback_result_ptr, user_data)
+        callback(
+            ptr::read(&*callback_records),
+            callback_result_ptr,
+            user_data,
+        )
     }))
     .is_err();
     if panicked {
@@ -403,9 +414,8 @@ pub extern "C" fn zerobus_sdk_create_stream_async(
         };
 
         let descriptor_proto = if !descriptor_proto_bytes.is_null() && descriptor_proto_len > 0 {
-            let bytes = unsafe {
-                std::slice::from_raw_parts(descriptor_proto_bytes, descriptor_proto_len)
-            };
+            let bytes =
+                unsafe { std::slice::from_raw_parts(descriptor_proto_bytes, descriptor_proto_len) };
             match prost_types::DescriptorProto::decode(bytes) {
                 Ok(desc) => Some(desc),
                 Err(e) => {
@@ -583,9 +593,8 @@ pub extern "C" fn zerobus_sdk_create_stream_with_headers_provider_async(
         };
 
         let descriptor_proto = if !descriptor_proto_bytes.is_null() && descriptor_proto_len > 0 {
-            let bytes = unsafe {
-                std::slice::from_raw_parts(descriptor_proto_bytes, descriptor_proto_len)
-            };
+            let bytes =
+                unsafe { std::slice::from_raw_parts(descriptor_proto_bytes, descriptor_proto_len) };
             match prost_types::DescriptorProto::decode(bytes) {
                 Ok(desc) => Some(desc),
                 Err(e) => {
@@ -948,7 +957,10 @@ pub extern "C" fn zerobus_stream_ingest_json_record_async(
         let stream_arc = unsafe { clone_stream_arc(stream) };
         let callback_user_data = SendPtr::new(user_data);
         RUNTIME.spawn(async move {
-            match stream_arc.ingest_record_offset(EncodedRecord::Json(json_str)).await {
+            match stream_arc
+                .ingest_record_offset(EncodedRecord::Json(json_str))
+                .await
+            {
                 Ok(offset) => invoke_offset_async_callback(
                     callback,
                     offset,
@@ -1782,12 +1794,7 @@ pub extern "C" fn zerobus_stream_close_async(
                 },
             };
 
-            invoke_bool_async_callback(
-                callback,
-                false,
-                callback_result,
-                callback_user_data.get(),
-            );
+            invoke_bool_async_callback(callback, false, callback_result, callback_user_data.get());
         });
 
         write_success_result(result);
@@ -1800,14 +1807,12 @@ pub extern "C" fn zerobus_stream_close_async(
 pub extern "C" fn zerobus_stream_is_closed(stream: *mut CZerobusStream) -> bool {
     // No CResult out-param; on a caught panic return `true` (treat as closed),
     // matching the answer for an invalid handle.
-    ffi_guard(
-        ptr::null_mut(),
-        true,
-        move || match validate_stream_ptr(stream) {
+    ffi_guard(ptr::null_mut(), true, move || {
+        match validate_stream_ptr(stream) {
             Ok(s) => s.is_closed(),
             Err(_) => true,
-        },
-    )
+        }
+    })
 }
 
 /// Free error message string
