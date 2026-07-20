@@ -825,6 +825,84 @@ mod arrow_flight_tests {
     mod recovery_tests {
         use super::*;
 
+        /// Regression test for the mock contract: `ack_up_to_records` must be
+        /// connection-relative. A retriable error forces a second DoPut connection
+        /// for the same table; the auto-ack on that connection must count only the
+        /// rows replayed on it, NOT the cumulative rows across both connections.
+        /// Under the old global row counter the auto-ack would be 6 (3 + 3) and this
+        /// test would fail, masking slicing/replay bugs.
+        #[tokio::test]
+        async fn test_auto_ack_is_connection_relative() -> Result<(), Box<dyn std::error::Error>> {
+            setup_tracing();
+            info!("Starting test_auto_ack_is_connection_relative");
+
+            let (mock_server, server_url) = start_mock_flight_server().await?;
+            let schema = create_test_arrow_schema();
+
+            // First connection errors (retriable) after the batch is decoded; the
+            // batch stays unacked and is replayed on the recovered connection, where
+            // responses are exhausted so it hits the auto-ack path.
+            mock_server
+                .inject_responses(
+                    TABLE_NAME,
+                    vec![MockFlightResponse::Error {
+                        status: tonic::Status::unavailable("Temporary network issue"),
+                        delay_ms: 0,
+                    }],
+                )
+                .await;
+
+            let sdk = ZerobusSdk::builder()
+                .endpoint(server_url.clone())
+                .unity_catalog_url("https://mock-uc.com")
+                .tls_config(Arc::new(NoTlsConfig))
+                .build()?;
+
+            let stream = sdk
+                .stream_builder()
+                .table(TABLE_NAME)
+                .headers_provider(Arc::new(TestHeadersProvider::default()))
+                .arrow(schema.clone())
+                .recovery(true)
+                .recovery_timeout_ms(5000)
+                .recovery_backoff_ms(100)
+                .recovery_retries(3)
+                .build_arrow()
+                .await?;
+
+            // One 3-row batch. It is decoded on connection 1 (errors), then replayed
+            // and decoded again on connection 2 (auto-acked).
+            let batch = create_test_record_batch(
+                schema.clone(),
+                vec![1, 2, 3],
+                vec![Some("a"), Some("b"), Some("c")],
+            );
+            let offset = stream.ingest_batch(batch).await?;
+            stream.wait_for_offset(offset).await?;
+
+            // Both connections decoded the 3-row batch, so the GLOBAL observation is 6.
+            assert_eq!(
+                mock_server.get_total_records_received().await,
+                6,
+                "both connections should have decoded the batch (global observation)"
+            );
+
+            // But every auto-ack must be connection-relative: exactly the 3 rows
+            // replayed on the recovered connection, never the cumulative 6.
+            let acks = mock_server.get_auto_ack_records().await;
+            assert!(
+                !acks.is_empty(),
+                "expected an auto-ack on the recovered connection"
+            );
+            assert!(
+                acks.iter().all(|&r| r == 3),
+                "auto-ack must exclude rows from the first connection (expected all == 3), got {:?}",
+                acks
+            );
+
+            Ok(())
+        }
+
         #[tokio::test]
         async fn test_supervisor_recovery_after_retriable_error(
         ) -> Result<(), Box<dyn std::error::Error>> {
