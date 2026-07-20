@@ -1309,6 +1309,10 @@ impl ZerobusArrowStream {
 
         // Acquire the backpressure permit BEFORE ingest_mutex: reconnect() holds that
         // mutex, so blocking on a permit while holding it could stall recovery.
+        // `inflight` is never closed, so the map_err is unreachable defensive code; a
+        // close during the wait is handled by the is_closed re-check below (not by
+        // semaphore closure), and permit-blocked ingests wake when acks or
+        // move_pending_to_failed free permits.
         let permit = Arc::clone(&self.inflight)
             .acquire_owned()
             .await
@@ -1359,6 +1363,11 @@ impl ZerobusArrowStream {
         let sender = match sender {
             Some(s) => s,
             None => {
+                // Narrow recovery-handoff window (sender nulled before reconnect). The
+                // batch intentionally stays in pending_batches (holding its permit) so
+                // it remains recoverable/replayable, even though this attempt returns
+                // an error. Permit is freed when the batch is later acked, moved to the
+                // failed set, or the stream closes.
                 if let Some(server_error) = self.server_error_rx.borrow().clone() {
                     return Err(server_error);
                 }
