@@ -114,6 +114,7 @@ type tokenCacheEntry struct {
 	cached   *cachedToken // nil when no valid entry has been stored yet
 	inflight *tokenFlight // non-nil while a mint is in progress
 	minted   bool         // true after the first mint completes; guards pruning
+	pruned   bool         // true once evicted from the map; caller must re-slot
 }
 
 // tokenFlight is a single in-progress mint. The leader records its resolved
@@ -198,9 +199,10 @@ func (c *tokenCache) getOrFetch(
 	for {
 		token, err, retry := c.tryGetOrFetch(ctx, key, mint)
 		if retry {
-			// The leader we parked on failed because its own ctx was cancelled,
-			// but ours is still live. Re-attempt rather than inheriting a cancel
-			// we never asked for; typically we become the next leader and mint.
+			// Re-attempt. Either the leader we parked on failed because its own
+			// ctx was cancelled while ours is still live (don't inherit a cancel we
+			// never asked for), or our entry was pruned out from under us before we
+			// could use it. Loop to re-slot and typically mint as the next leader.
 			continue
 		}
 		return token, err
@@ -208,9 +210,10 @@ func (c *tokenCache) getOrFetch(
 }
 
 // tryGetOrFetch makes one attempt to serve or mint a token for key. It returns
-// retry == true only when the caller parked on another goroutine's in-flight
-// mint that failed due to that leader's context cancellation while the caller's
-// own context is still live; the caller then loops to re-attempt.
+// retry == true when the caller should loop and re-attempt: either the entry it
+// slotted was pruned before it could be used, or it parked on another
+// goroutine's in-flight mint that failed due to that leader's context
+// cancellation while the caller's own context is still live.
 func (c *tokenCache) tryGetOrFetch(
 	ctx context.Context,
 	key tokenKey,
@@ -219,6 +222,15 @@ func (c *tokenCache) tryGetOrFetch(
 	entry := c.slot(key)
 
 	entry.mu.Lock()
+
+	// The entry was evicted by a concurrent prune between slot() releasing the
+	// map lock and us acquiring entry.mu. It is no longer in the map, so a new
+	// leader would attach to a stale slot while others attach to the replacement,
+	// splitting the single-flight into two mints. Re-slot instead.
+	if entry.pruned {
+		entry.mu.Unlock()
+		return "", nil, true
+	}
 
 	if entry.cached != nil && !c.needsRefresh(entry.cached) {
 		token := entry.cached.value
@@ -371,6 +383,12 @@ func (c *tokenCache) pruneExpiredLocked() {
 			// Never evict a mint in flight, and never evict an entry whose first
 			// mint has not yet completed — its leader writes back to this entry.
 			pruneable := e.minted && e.inflight == nil && (e.cached == nil || e.cached.isExpired())
+			if pruneable {
+				// Mark before deleting: a caller that already holds a pointer to
+				// this entry (returned by slot() before it locked entry.mu) sees
+				// pruned and re-slots instead of minting against a detached entry.
+				e.pruned = true
+			}
 			e.mu.Unlock()
 			if pruneable {
 				delete(c.entries, k)

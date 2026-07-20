@@ -692,6 +692,91 @@ func TestTokenCacheNonPositiveRefreshBufferKeepsDefault(t *testing.T) {
 	}
 }
 
+// pruneExpiredLocked must mark an evicted entry pruned before removing it from
+// the map, so a caller still holding that entry's pointer (returned by slot()
+// before it locked entry.mu) can detect the eviction and re-slot instead of
+// minting against a detached entry — which would split single-flight into two
+// mints for one key.
+func TestTokenCachePruneMarksEntryPruned(t *testing.T) {
+	c := newTokenCache()
+	key := newTokenKey("id", "secret", "c.s.t", "")
+	entry := c.slot(key)
+
+	// A completed-mint entry whose token has expired: exactly what prune evicts.
+	entry.mu.Lock()
+	entry.minted = true
+	entry.cached = &cachedToken{value: "stale", expiresAt: time.Now().Add(-time.Second)}
+	entry.mu.Unlock()
+
+	c.mu.Lock()
+	c.pruneExpiredLocked()
+	_, stillInMap := c.entries[key]
+	c.mu.Unlock()
+
+	if stillInMap {
+		t.Fatal("expired entry should have been pruned from the map")
+	}
+	entry.mu.Lock()
+	pruned := entry.pruned
+	entry.mu.Unlock()
+	if !pruned {
+		t.Fatal("pruned entry must be marked so a stale holder re-slots instead of minting")
+	}
+
+	// A caller re-slotting after the prune gets a fresh, unpruned entry and mints.
+	var calls atomic.Int64
+	mint := func(_ context.Context, _ mintReason) (fetchedToken, error) {
+		calls.Add(1)
+		return fetchedToken{token: "fresh", expiresIn: dur(3600)}, nil
+	}
+	if tok := getOrFetch(t, c, "id", "secret", "c.s.t", mint); tok != "fresh" {
+		t.Fatalf("want fresh after re-slot, got %q", tok)
+	}
+	if n := calls.Load(); n != 1 {
+		t.Fatalf("want 1 mint after re-slot, got %d", n)
+	}
+}
+
+// Stress the prune-vs-mint interaction under -race: many short-lived keys churn
+// the map (driving pruneExpiredLocked) while a hot key is minted concurrently.
+// The hot key must always resolve to a valid token with no data race.
+func TestTokenCacheConcurrentPruneAndMint(t *testing.T) {
+	c := newTokenCache()
+	mint := func(_ context.Context, _ mintReason) (fetchedToken, error) {
+		return fetchedToken{token: "tok", expiresIn: dur(3600)}, nil
+	}
+	// A mint that yields an already-expired token, so its entry becomes prunable
+	// the moment it is stored — maximizing prune activity on the next miss.
+	expiredMint := func(_ context.Context, _ mintReason) (fetchedToken, error) {
+		d := time.Nanosecond
+		return fetchedToken{token: "tok", expiresIn: &d}, nil
+	}
+
+	const workers = 24
+	var wg sync.WaitGroup
+	wg.Add(workers)
+	for i := range workers {
+		go func(i int) {
+			defer wg.Done()
+			for j := 0; j < 200; j++ {
+				if i%2 == 0 {
+					// Churn distinct, immediately-expired keys to trigger pruning.
+					tbl := "c.s.t" + string(rune('a'+(j%16)))
+					_, _ = c.getOrFetch(context.Background(), "id", "secret", tbl, "", expiredMint)
+				} else {
+					// Hammer one hot key that a prune could race to evict.
+					tok, err := c.getOrFetch(context.Background(), "id", "secret", "hot.k.t", "", mint)
+					if err != nil || tok != "tok" {
+						t.Errorf("hot key: got (%q, %v), want (tok, nil)", tok, err)
+						return
+					}
+				}
+			}
+		}(i)
+	}
+	wg.Wait()
+}
+
 // dur returns a pointer to a Duration of d seconds, for test readability.
 func dur(secs int) *time.Duration {
 	d := time.Duration(secs) * time.Second

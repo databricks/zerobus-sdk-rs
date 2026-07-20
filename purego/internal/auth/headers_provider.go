@@ -50,8 +50,8 @@ func NewOAuthHeadersProvider(
 
 // GetHeaders mints (or serves a cached) token for tableName and returns it as a
 // "Bearer" authorization header. It may block on the token mint, bounded by ctx.
-// The table-name header is included for cross-SDK parity; transport open treats
-// its own stream-open TableName as authoritative.
+// The table-name header is included as a convenience; transport open treats its
+// own stream-open TableName as authoritative and overwrites it.
 func (p *OAuthHeadersProvider) GetHeaders(ctx context.Context, tableName string) (map[string]string, error) {
 	token, err := p.tokenProvider.Token(ctx, tableName)
 	if err != nil {
@@ -59,7 +59,7 @@ func (p *OAuthHeadersProvider) GetHeaders(ctx context.Context, tableName string)
 	}
 	return map[string]string{
 		"authorization":                   "Bearer " + token,
-		"x-databricks-zerobus-table-name": tableName,
+		"x-databricks-zerobus-table-name": strings.TrimSpace(tableName),
 	}, nil
 }
 

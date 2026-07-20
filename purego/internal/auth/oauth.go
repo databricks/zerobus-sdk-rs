@@ -11,6 +11,7 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 	"time"
 	"unicode"
@@ -66,9 +67,10 @@ func WithHTTPClient(c *http.Client) OAuthOption {
 // [NewSharedTokenCache]. It exposes no methods and is safe for concurrent use.
 type SharedTokenCache = tokenCache
 
-// WithSharedTokenCache installs a shared token cache. Use this when multiple
-// OAuthTokenProviders are created for the same credentials but different tables
-// so they share one cache map rather than each allocating their own.
+// WithSharedTokenCache installs a shared token cache. A single provider already
+// caches all of its tables; use this only when multiple OAuthTokenProvider
+// instances should pool their tokens in one cache rather than each allocating
+// its own (a single provider serves many tables on its own).
 //
 // Obtain a cache with [NewSharedTokenCache]. A nil cache is ignored so the
 // provider's own default cache is preserved.
@@ -246,9 +248,9 @@ func (p *OAuthTokenProvider) mint(ctx context.Context, tableName string, reason 
 	return fetched, err
 }
 
-// Invalidate drops the cached token for this provider's table so the next
-// Token call re-mints from Unity Catalog. Call this when the server rejects
-// the token with an authentication error.
+// Invalidate drops the cached token for the given table so the next Token call
+// re-mints from Unity Catalog. Call this when the server rejects the token with
+// an authentication error.
 //
 // The table name is not re-validated here: it was validated at stream open, and
 // invalidate is a no-op for a key with no cached entry, so an unrecognized name
@@ -303,8 +305,10 @@ func (p *OAuthTokenProvider) fetchToken(ctx context.Context, tableName string) (
 
 	var body struct {
 		AccessToken string `json:"access_token"`
-		// RFC 6749 §4.2.2 defines expires_in as an integer number of seconds.
-		ExpiresIn int64 `json:"expires_in"`
+		// RFC 6749 §4.2.2 defines expires_in as an integer number of seconds. It
+		// is captured raw and parsed tolerantly (see parseExpiresIn) so a server
+		// that sends it as a string or float doesn't fail the whole mint.
+		ExpiresIn json.RawMessage `json:"expires_in"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
 		return fetchedToken{}, &TokenError{
@@ -321,10 +325,37 @@ func (p *OAuthTokenProvider) fetchToken(ctx context.Context, tableName string) (
 	}
 
 	ft := fetchedToken{token: body.AccessToken}
-	if d, ok := secondsToDuration(body.ExpiresIn); ok {
+	if d, ok := secondsToDuration(parseExpiresIn(body.ExpiresIn)); ok {
 		ft.expiresIn = &d
 	}
 	return ft, nil
+}
+
+// parseExpiresIn tolerantly reads an OAuth expires_in value. RFC 6749 specifies
+// an integer number of seconds, but some servers send a JSON string or float;
+// all are accepted. A missing, null, or unparseable value yields 0, which
+// secondsToDuration treats as "no usable TTL" so the token is still returned
+// (just not cached) rather than failing the mint on a cosmetic type mismatch.
+func parseExpiresIn(raw json.RawMessage) int64 {
+	s := strings.TrimSpace(string(raw))
+	if s == "" || s == "null" {
+		return 0
+	}
+	// Unwrap a quoted JSON string ("3600") to its inner value before parsing.
+	if unquoted, err := strconv.Unquote(s); err == nil {
+		s = unquoted
+	}
+	if n, err := strconv.ParseInt(s, 10, 64); err == nil {
+		return n
+	}
+	if f, err := strconv.ParseFloat(s, 64); err == nil && f >= 0 {
+		// Truncate toward zero; sub-second precision is irrelevant for a TTL.
+		if f > float64(math.MaxInt64) {
+			return math.MaxInt64
+		}
+		return int64(f)
+	}
+	return 0
 }
 
 // maxExpiresInSeconds bounds a server-reported expires_in so the seconds→

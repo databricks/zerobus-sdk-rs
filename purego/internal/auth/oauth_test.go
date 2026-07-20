@@ -17,8 +17,9 @@ import (
 // tokenServer is a minimal OAuth 2.0 token endpoint stub.
 type tokenServer struct {
 	accessToken string
-	expiresIn   int // 0 means omit expires_in
-	statusCode  int // 0 defaults to 200
+	expiresIn   int    // 0 means omit expires_in
+	rawExpires  string // when non-empty, emitted verbatim as expires_in (overrides expiresIn)
+	statusCode  int    // 0 defaults to 200
 	calls       atomic.Int32
 }
 
@@ -32,6 +33,11 @@ func (s *tokenServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(code)
 	if code != http.StatusOK {
 		_ = json.NewEncoder(w).Encode(map[string]string{"error": "test_error"})
+		return
+	}
+	if s.rawExpires != "" {
+		// Emit a hand-built body so expires_in can be a non-integer JSON type.
+		_, _ = w.Write([]byte(`{"access_token":"` + s.accessToken + `","expires_in":` + s.rawExpires + `}`))
 		return
 	}
 	resp := map[string]any{"access_token": s.accessToken}
@@ -421,10 +427,11 @@ func TestClassifyHTTPErrorPreservesBody(t *testing.T) {
 	if err == nil {
 		t.Fatal("want error for 401, got nil")
 	}
-	// The server error payload (`{"error":"test_error"}`) must survive into the
-	// error message so on-call has something to debug with.
+	// The structured OAuth error field (`{"error":"test_error"}`) must survive
+	// into the message so on-call has something to debug with; the raw body is
+	// retained separately on TokenError.ResponseBody.
 	if !strings.Contains(err.Error(), "test_error") {
-		t.Fatalf("error message dropped server body: %q", err.Error())
+		t.Fatalf("error message dropped OAuth error field: %q", err.Error())
 	}
 	if !strings.Contains(err.Error(), "401") {
 		t.Fatalf("error message dropped status code: %q", err.Error())
@@ -470,6 +477,98 @@ func TestSecondsToDuration(t *testing.T) {
 	d, ok := secondsToDuration(1 << 60)
 	if !ok || d <= 0 {
 		t.Fatalf("secondsToDuration(1<<60) = (%v, %v), want a positive clamped duration", d, ok)
+	}
+}
+
+func TestParseExpiresIn(t *testing.T) {
+	cases := []struct {
+		in   string
+		want int64
+	}{
+		{`3600`, 3600},   // RFC 6749 integer
+		{`"3600"`, 3600}, // quoted string
+		{`3600.0`, 3600}, // float
+		{`3600.9`, 3600}, // float truncates toward zero
+		{`0`, 0},         // zero → no TTL
+		{`-5`, -5},       // negative int passes through; secondsToDuration rejects it
+		{`null`, 0},      // JSON null
+		{``, 0},          // absent
+		{`"nope"`, 0},    // unparseable string
+		{`{}`, 0},        // wrong type
+		{` "42" `, 42},   // surrounding whitespace
+		{`"-5"`, -5},     // quoted negative
+	}
+	for _, tc := range cases {
+		if got := parseExpiresIn(json.RawMessage(tc.in)); got != tc.want {
+			t.Errorf("parseExpiresIn(%q) = %d, want %d", tc.in, got, tc.want)
+		}
+	}
+}
+
+// A non-integer expires_in must not fail the mint: the token is returned, and
+// (being unparseable/absent) not cached, so a second call mints again.
+func TestOAuthTokenProviderToleratesNonIntExpiresIn(t *testing.T) {
+	for _, raw := range []string{`"3600"`, `3600.0`} {
+		t.Run(raw, func(t *testing.T) {
+			srv := &tokenServer{accessToken: "tok", rawExpires: raw}
+			p, ts := newTestProvider(t, srv)
+			defer ts.Close()
+
+			tok, err := p.Token(context.Background(), "cat.sch.tbl")
+			if err != nil {
+				t.Fatalf("Token: %v", err)
+			}
+			if tok != "tok" {
+				t.Fatalf("want %q, got %q", "tok", tok)
+			}
+			// A parseable TTL caches; a second call is served from cache.
+			if _, err := p.Token(context.Background(), "cat.sch.tbl"); err != nil {
+				t.Fatalf("second Token: %v", err)
+			}
+			if got := srv.calls.Load(); got != 1 {
+				t.Fatalf("want 1 server call (cached), got %d", got)
+			}
+		})
+	}
+}
+
+// An unparseable expires_in keeps the token but skips caching, so every call
+// mints afresh instead of failing.
+func TestOAuthTokenProviderUnparseableExpiresInIsNotCached(t *testing.T) {
+	srv := &tokenServer{accessToken: "tok", rawExpires: `"not-a-number"`}
+	p, ts := newTestProvider(t, srv)
+	defer ts.Close()
+
+	if _, err := p.Token(context.Background(), "cat.sch.tbl"); err != nil {
+		t.Fatalf("first Token: %v", err)
+	}
+	if _, err := p.Token(context.Background(), "cat.sch.tbl"); err != nil {
+		t.Fatalf("second Token: %v", err)
+	}
+	if got := srv.calls.Load(); got != 2 {
+		t.Fatalf("want 2 server calls (uncached), got %d", got)
+	}
+}
+
+// Omitting expires_in entirely returns the token but leaves the cache empty, so
+// a second call mints again.
+func TestOAuthTokenProviderOmittedExpiresInIsNotCached(t *testing.T) {
+	srv := &tokenServer{accessToken: "tok"} // expiresIn 0 → omitted
+	p, ts := newTestProvider(t, srv)
+	defer ts.Close()
+
+	tok, err := p.Token(context.Background(), "cat.sch.tbl")
+	if err != nil {
+		t.Fatalf("first Token: %v", err)
+	}
+	if tok != "tok" {
+		t.Fatalf("want %q, got %q", "tok", tok)
+	}
+	if _, err := p.Token(context.Background(), "cat.sch.tbl"); err != nil {
+		t.Fatalf("second Token: %v", err)
+	}
+	if got := srv.calls.Load(); got != 2 {
+		t.Fatalf("want 2 server calls (uncached), got %d", got)
 	}
 }
 
