@@ -31,6 +31,11 @@ which also encodes each record's JSON into protobuf bytes.
 - **`single.cpp`** — ingest records one at a time using `ingest_proto_record()`
 - **`batch.cpp`** — ingest multiple records at once using `ingest_proto_records()`
 
+Ack callbacks, a custom `HeadersProvider`, and unacked-record recovery apply
+identically to proto streams — see the JSON examples
+([`json/single.cpp`](../json/single.cpp),
+[`json/batch.cpp`](../json/batch.cpp)) for worked demonstrations.
+
 The `orders.proto` file in this directory is a **human-readable reference** for
 the table's shape (and a starting point if you prefer the static-proto path). The
 examples do not compile or use it.
