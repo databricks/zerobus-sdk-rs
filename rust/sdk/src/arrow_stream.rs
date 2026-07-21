@@ -727,9 +727,14 @@ impl ZerobusArrowStream {
                                 max_retries = options.recovery_retries,
                                 "Supervisor: Max recovery retries exceeded"
                             );
-                            is_closed.store(true, Ordering::Relaxed);
-                            // Move pending batches to failed and fail the ack futures.
-                            Self::move_pending_to_failed(&pending_batches, &failed_batches).await;
+                            Self::fail_and_close(
+                                error,
+                                &is_closed,
+                                &headers_provider,
+                                &pending_batches,
+                                &failed_batches,
+                            )
+                            .await;
                             return result;
                         }
 
@@ -784,10 +789,42 @@ impl ZerobusArrowStream {
                                 // Loop continues with new stream.
                             }
                             Ok(Err(e)) => {
-                                // Mirror the initial-connect path: drop the cached
-                                // token on auth rejection so recovery re-mints.
                                 if e.is_auth_rejection() {
+                                    // Mirror the initial-connect path: drop the cached
+                                    // token on auth rejection so recovery re-mints, then
+                                    // fall through to retry with the fresh token.
                                     headers_provider.invalidate().await;
+                                } else if !e.is_retryable() {
+                                    // A non-retriable reconnection failure (e.g. the
+                                    // table schema changed) will never succeed on retry:
+                                    // retrying would just burn the recovery budget and
+                                    // bury the real cause under a generic "Reconnection
+                                    // failed". Terminate now and surface the real error
+                                    // to waiters.
+                                    error!(
+                                        "Supervisor: Non-retriable reconnection error, closing stream: {}",
+                                        e
+                                    );
+                                    // Terminate first so `is_closed` is set, then publish
+                                    // the error. wait_for_offset_internal only returns the
+                                    // published error once it observes `is_closed`, and it
+                                    // won't wake again after this single error_rx change —
+                                    // so the store must precede the send. Unlike the
+                                    // terminal arm below (whose error came from
+                                    // process_acks, which already published it), this error
+                                    // is generated in reconnect() and was never sent on
+                                    // this channel; the pre-reconnect send(None) above also
+                                    // cleared any prior error.
+                                    Self::fail_and_close(
+                                        &e,
+                                        &is_closed,
+                                        &headers_provider,
+                                        &pending_batches,
+                                        &failed_batches,
+                                    )
+                                    .await;
+                                    let _ = server_error_tx.send(Some(e.clone()));
+                                    return Err(e);
                                 }
                                 warn!("Supervisor: Reconnection failed: {}", e);
                                 // Loop continues, will retry if retries remain.
@@ -812,14 +849,14 @@ impl ZerobusArrowStream {
                     Err(error) => {
                         // Non-retriable error or recovery disabled.
                         error!("Supervisor: Non-retriable error, closing stream: {}", error);
-                        is_closed.store(true, Ordering::Relaxed);
-                        // A mid-stream auth rejection means the cached token is no
-                        // longer accepted; drop it so the next stream re-mints.
-                        if error.is_auth_rejection() {
-                            headers_provider.invalidate().await;
-                        }
-                        // Move pending batches to failed and fail the ack futures.
-                        Self::move_pending_to_failed(&pending_batches, &failed_batches).await;
+                        Self::fail_and_close(
+                            &error,
+                            &is_closed,
+                            &headers_provider,
+                            &pending_batches,
+                            &failed_batches,
+                        )
+                        .await;
                         return Err(error);
                     }
                 }
@@ -1095,6 +1132,28 @@ impl ZerobusArrowStream {
         for pb in pending {
             failed.push(pb.batch);
         }
+    }
+
+    /// Terminally shuts the stream down after an unrecoverable failure.
+    ///
+    /// Marks the stream closed, drops cached credentials on an auth rejection so
+    /// the next stream re-mints them, and moves any pending batches to the failed
+    /// set (failing their ack futures, retrievable via `get_unacked_batches()`).
+    /// Callers log their own context and return the originating error.
+    async fn fail_and_close(
+        error: &ZerobusError,
+        is_closed: &Arc<AtomicBool>,
+        headers_provider: &Arc<dyn HeadersProvider>,
+        pending_batches: &Arc<Mutex<Vec<PendingBatch>>>,
+        failed_batches: &Arc<Mutex<Vec<RecordBatch>>>,
+    ) {
+        is_closed.store(true, Ordering::Relaxed);
+        // A mid-stream auth rejection means the cached token is no longer
+        // accepted; drop it so the next stream re-mints.
+        if error.is_auth_rejection() {
+            headers_provider.invalidate().await;
+        }
+        Self::move_pending_to_failed(pending_batches, failed_batches).await;
     }
 
     /// Processes acknowledgments from the server response stream.

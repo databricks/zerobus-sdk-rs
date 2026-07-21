@@ -1272,6 +1272,94 @@ mod arrow_flight_tests {
             Ok(())
         }
 
+        /// A *non-retriable* failure on the reconnect path must terminate the
+        /// stream immediately and surface the real error to a blocked
+        /// `wait_for_offset`, rather than retrying with a dummy stream until the
+        /// recovery budget drains. Sequence on the one table: ack batch 0 → drop
+        /// the connection (retriable, triggers recovery) → reject the reconnect
+        /// during setup with a non-retriable `InvalidArgument`.
+        #[tokio::test]
+        async fn test_non_retriable_reconnect_error_terminates_immediately(
+        ) -> Result<(), Box<dyn std::error::Error>> {
+            setup_tracing();
+            info!("Starting test_non_retriable_reconnect_error_terminates_immediately");
+
+            let (mock_server, server_url) = start_mock_flight_server().await?;
+            let schema = create_test_arrow_schema();
+
+            mock_server
+                .inject_responses(
+                    TABLE_NAME,
+                    vec![
+                        // First connection: ack batch 0, then drop the connection
+                        // (retriable) to trigger recovery.
+                        MockFlightResponse::BatchAck {
+                            ack_up_to_offset: 0,
+                            delay_ms: 0,
+                            ack_up_to_records: 1,
+                        },
+                        MockFlightResponse::CloseStream { delay_ms: 0 },
+                        // Second connection (the reconnect): reject during setup
+                        // with a non-retriable InvalidArgument.
+                        MockFlightResponse::SetupError {
+                            status: tonic::Status::invalid_argument("schema changed"),
+                        },
+                    ],
+                )
+                .await;
+
+            let sdk = ZerobusSdk::builder()
+                .endpoint(server_url.clone())
+                .unity_catalog_url("https://mock-uc.com")
+                .tls_config(Arc::new(NoTlsConfig))
+                .build()?;
+
+            // Generous retry budget + backoff: if the supervisor wrongly retried
+            // the non-retriable error, the wait would either succeed or block for
+            // seconds. Terminating immediately means it returns well under that.
+            let stream = sdk
+                .stream_builder()
+                .table(TABLE_NAME)
+                .headers_provider(Arc::new(TestHeadersProvider::default()))
+                .arrow(schema.clone())
+                .recovery(true)
+                .recovery_timeout_ms(5000)
+                .recovery_backoff_ms(1000)
+                .recovery_retries(5)
+                .build_arrow()
+                .await?;
+
+            // Batch 0 is acked on the first connection.
+            let batch1 = create_test_record_batch(schema.clone(), vec![1], vec![Some("first")]);
+            let offset1 = stream.ingest_batch(batch1).await?;
+            stream.wait_for_offset(offset1).await?;
+
+            // Batch 1 is in flight when the connection drops; recovery reconnects
+            // and is rejected with the non-retriable error.
+            let batch2 = create_test_record_batch(schema.clone(), vec![2], vec![Some("second")]);
+            let offset2 = stream.ingest_batch(batch2).await?;
+
+            let start = std::time::Instant::now();
+            let result = stream.wait_for_offset(offset2).await;
+            let elapsed = start.elapsed();
+
+            assert!(
+                result.is_err(),
+                "Expected non-retriable reconnect error, got Ok"
+            );
+            // Terminated on the first reconnect failure: one backoff (1s) at most,
+            // nowhere near the 5-retry budget (~5s) or the flush timeout.
+            assert!(
+                elapsed < std::time::Duration::from_secs(3),
+                "Expected immediate termination, took {:?} (looks like it retried)",
+                elapsed
+            );
+            // The stream is closed and the un-acked batch is retained for the caller.
+            assert!(stream.is_closed());
+
+            Ok(())
+        }
+
         #[tokio::test]
         async fn test_recreate_arrow_stream() -> Result<(), Box<dyn std::error::Error>> {
             setup_tracing();

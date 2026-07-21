@@ -59,6 +59,12 @@ pub enum MockFlightResponse {
     },
     /// Error response - sent immediately when a batch arrives.
     Error { status: Status, delay_ms: u64 },
+    /// Error response sent *during stream setup*, before the ready signal — in
+    /// place of confirming the stream. Models the real server rejecting setup
+    /// (auth failure, schema mismatch, blocked table), which the SDK classifies
+    /// on the setup / reconnect paths. Unlike [`MockFlightResponse::Error`], this
+    /// fires on the schema message rather than on the first data batch.
+    SetupError { status: Status },
     /// Close stream (drop the connection) - useful for testing recovery.
     CloseStream { delay_ms: u64 },
     /// Graceful close signal - sends a close signal with grace period duration.
@@ -258,6 +264,25 @@ impl FlightService for MockFlightServer {
                 if is_first_message {
                     is_first_message = false;
                     if flight_data.app_metadata.is_empty() {
+                        // If the next configured response is a setup-time error,
+                        // fail the stream now instead of confirming it — mirrors
+                        // the real server rejecting during setup (auth, schema
+                        // mismatch, blocked table). Consumes the response so the
+                        // next connection (e.g. a reconnect) advances past it.
+                        if let Some(MockFlightResponse::SetupError { status }) =
+                            stream_responses.get(response_index)
+                        {
+                            info!("Sending setup error response: {:?}", status);
+                            let status = status.clone();
+                            response_index += 1;
+                            {
+                                let mut indices = response_indices.lock().await;
+                                indices.insert(table_name.clone(), response_index);
+                            }
+                            let _ = tx.send(Err(status)).await;
+                            return;
+                        }
+
                         debug!("Received schema message, sending ready signal");
                         // Send ready signal to confirm setup succeeded.
                         // This mirrors real server behavior where the server sends this after
@@ -445,6 +470,17 @@ impl FlightService for MockFlightServer {
                             // Continue processing - the main loop waits for more batches.
                             // During grace period the client won't send new batches,
                             // so this effectively waits until the client disconnects.
+                        }
+                        MockFlightResponse::SetupError { .. } => {
+                            // Only meaningful at setup (handled on the schema
+                            // message above). If it reaches the batch loop it was
+                            // misconfigured after a successful setup; skip it.
+                            warn!("SetupError encountered in batch loop; skipping");
+                            response_index += 1;
+                            {
+                                let mut indices = response_indices.lock().await;
+                                indices.insert(table_name.clone(), response_index);
+                            }
                         }
                     }
                 } else {
