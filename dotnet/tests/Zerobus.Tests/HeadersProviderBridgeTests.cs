@@ -1,3 +1,4 @@
+using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 using Databricks.Zerobus;
 using Databricks.Zerobus.Native;
@@ -24,15 +25,34 @@ public class HeadersProviderBridgeTests
     [Test]
     public void NativeFree_ReleasesHandle()
     {
-        var bridge = new HeadersProviderBridge(new MapProvider());
-        var handle = GCHandle.Alloc(bridge);
-        var userData = GCHandle.ToIntPtr(handle);
+        // The GCHandle is the only strong root keeping the bridge alive, mirroring
+        // ownership transfer to the FFI. After NativeFree releases that root the
+        // bridge must become collectable.
+        //
+        // Note: we cannot assert on `handle.IsAllocated` here — GCHandle is a
+        // struct wrapping an IntPtr, so NativeFree frees the runtime handle via
+        // its own reconstructed copy (GCHandle.FromIntPtr) and cannot zero this
+        // local's field. A WeakReference observes the actual release instead.
+        var (userData, weak) = AllocBridgeHandle();
 
-        // The FFI's destroy callback releases the handle.
         HeadersProviderBridge.NativeFree(userData);
 
-        Assert.That(handle.IsAllocated, Is.False,
-            "NativeFree must free the GCHandle it is handed");
+        GC.Collect();
+        GC.WaitForPendingFinalizers();
+        GC.Collect();
+
+        Assert.That(weak.IsAlive, Is.False,
+            "NativeFree must free the GCHandle so the bridge can be collected");
+    }
+
+    // Separate non-inlined method so the bridge has no lingering local/JIT root
+    // on the caller's frame once it returns.
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    private static (IntPtr userData, WeakReference weak) AllocBridgeHandle()
+    {
+        var bridge = new HeadersProviderBridge(new MapProvider());
+        var handle = GCHandle.Alloc(bridge);
+        return (GCHandle.ToIntPtr(handle), new WeakReference(bridge));
     }
 
     [Test]
