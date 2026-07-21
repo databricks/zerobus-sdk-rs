@@ -1,0 +1,48 @@
+Copyright (2025) Databricks, Inc.
+
+This Software includes software developed at Databricks (https://www.databricks.com/) and its use is subject to the included LICENSE file.
+
+---
+
+This Software includes the following open source components:
+
+## Rust Dependencies (via FFI)
+
+This .NET SDK wraps the Zerobus Rust SDK, which includes the following open source components subject to the MIT License and Apache License 2.0:
+
+### MIT License
+
+- **tokio**: Copyright (c) 2021 Tokio Contributors (https://github.com/tokio-rs/tokio)
+- **tonic**: Copyright (c) 2019-2021, Luc Perkins and contributors (https://github.com/hyperium/tonic)
+- **tokio-stream**: Copyright (c) 2019 Tokio Contributors (https://github.com/tokio-rs/tokio)
+- **tracing**: Copyright (c) 2019-2021, The `tracing` project authors (https://github.com/tokio-rs/tracing)
+
+### Apache License 2.0
+
+- **prost**: Copyright 2017, Dan Burkert (https://github.com/tokio-rs/prost)
+- **prost-types**: Copyright 2017, Dan Burkert (https://github.com/tokio-rs/prost)
+- **tokio-retry**: Copyright 2018, App-Tech-Crew (https://github.com/app-tech-crew/tokio-retry)
+- **reqwest**: Copyright (c) 2016-2021, Sean McArthur (https://github.com/seanmonstar/reqwest)
+- **serde_json**: Copyright (c) 2014-2021, David Tolnay (https://github.com/serde-rs/json)
+- **thiserror**: Copyright (c) 2019-2021, David Tolnay (https://github.com/dtolnay/thiserror)
+
+## .NET Ecosystem Dependencies
+
+This SDK and its integration test infrastructure use the following open source components:
+
+### Apache License 2.0
+
+- **Grpc.AspNetCore**: Copyright 2014 gRPC authors (https://github.com/grpc/grpc-dotnet)
+- **Grpc.Tools**: Copyright 2014 gRPC authors (https://github.com/grpc/grpc)
+
+### BSD 3-Clause License
+
+- **Google.Protobuf**: Copyright 2008 Google Inc. (https://github.com/protocolbuffers/protobuf)
+- **NSubstitute**: Copyright (c) 2010-2024, NSubstitute Contributors (https://github.com/nsubstitute/NSubstitute)
+
+### MIT License
+
+- **Microsoft.SourceLink.GitHub**: Copyright (c) .NET Foundation and Contributors (https://github.com/dotnet/sourcelink)
+- **Microsoft.NET.Test.Sdk**: Copyright (c) .NET Foundation and Contributors (https://github.com/microsoft/vstest)
+- **NUnit**: Copyright (c) NUnit contributors (https://github.com/nunit/nunit)
+- **NUnit3TestAdapter**: Copyright (c) NUnit contributors (https://github.com/nunit/nunit3-vs-adapter)

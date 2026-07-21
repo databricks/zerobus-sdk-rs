@@ -1,11 +1,9 @@
-// Concurrent-liveness / consistency smoke test for the documented contract that
-// a single ProtoSchema supports concurrent readers (descriptor_bytes /
-// encode_json are const). Run under ThreadSanitizer (`make test
-// SANITIZE=thread`), but note TSan only instruments the C++ side: the work runs
-// in the Rust FFI, which is built without sanitizer RUSTFLAGS, so this asserts
-// consistent results across threads rather than detecting a Rust-side race.
-// Hermetic, so it runs in CI. No concurrent-Stream case: a Stream is not safe
-// for concurrent use, so that would test misuse.
+// Concurrency test for the documented contract that a single ProtoSchema
+// supports concurrent readers (descriptor_bytes / encode_json are const). Run
+// under ThreadSanitizer (`make test SANITIZE=thread`), which instruments the
+// Rust FFI too, so a race inside the core's read path would be detected, not
+// just C++-side races. Hermetic, so it runs in CI. No concurrent-Stream case: a
+// Stream is not safe for concurrent use, so that would test misuse.
 
 #include <cstddef>
 #include <cstdio>

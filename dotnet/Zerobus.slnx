@@ -1,0 +1,14 @@
+<Solution>
+  <Folder Name="/examples/">
+    <Project Path="examples/JsonBatch/JsonBatch.csproj" />
+    <Project Path="examples/JsonSingle/JsonSingle.csproj" />
+    <Project Path="examples/ProtoSingle/ProtoSingle.csproj" />
+  </Folder>
+  <Folder Name="/src/">
+    <Project Path="src/Zerobus/Zerobus.csproj" />
+  </Folder>
+  <Folder Name="/tests/">
+    <Project Path="tests/Zerobus.Tests/Zerobus.Tests.csproj" />
+    <Project Path="tests/Zerobus.IntegrationTests/Zerobus.IntegrationTests.csproj" />
+  </Folder>
+</Solution>

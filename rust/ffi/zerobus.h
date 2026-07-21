@@ -147,6 +147,36 @@ typedef struct CStreamConfigurationOptions {
 } CStreamConfigurationOptions;
 
 /**
+ * Function pointer type for async stream creation completion.
+ *
+ * `stream` is non-null on success and null on failure. `result` points to a
+ * `CResult` valid only for the duration of the call; copy any error text during
+ * the callback if you need to retain it.
+ *
+ * Invoked from a background task, so it must be thread-safe and must not
+ * unwind across the FFI boundary.
+ */
+typedef void (*CreateStreamAsyncCallback)(struct CZerobusStream *stream,
+                                          const struct CResult *result,
+                                          void *user_data);
+
+/**
+ * Function pointer type for async offset-returning operations.
+ *
+ * `result` points to a `CResult` valid only for the duration of the call; copy
+ * any error text during the callback if you need to retain it.
+ */
+typedef void (*OffsetAsyncCallback)(int64_t offset, const struct CResult *result, void *user_data);
+
+/**
+ * Function pointer type for async bool-returning operations.
+ *
+ * `result` points to a `CResult` valid only for the duration of the call; copy
+ * any error text during the callback if you need to retain it.
+ */
+typedef void (*BoolAsyncCallback)(bool value, const struct CResult *result, void *user_data);
+
+/**
  * Represents a single record (either Proto or JSON)
  */
 typedef struct CRecord {
@@ -162,6 +192,18 @@ typedef struct CRecordArray {
   struct CRecord *records;
   uintptr_t len;
 } CRecordArray;
+
+/**
+ * Function pointer type for async `CRecordArray`-returning operations.
+ *
+ * On success, ownership of `records` transfers to the callback recipient, who
+ * must free it with `zerobus_free_record_array`. `result` points to a `CResult`
+ * valid only for the duration of the call; copy any error text during the
+ * callback if you need to retain it.
+ */
+typedef void (*RecordArrayAsyncCallback)(struct CRecordArray records,
+                                         const struct CResult *result,
+                                         void *user_data);
 
 /**
  * Opaque handle to a table's protobuf schema: its serialized descriptor plus a
@@ -401,6 +443,25 @@ struct CZerobusStream *zerobus_sdk_create_stream(struct CZerobusSdk *sdk,
                                                  struct CResult *result);
 
 /**
+ * Create a stream with OAuth authentication on a background task.
+ *
+ * Returns `true` once the request has been validated and scheduled. The
+ * callback is invoked exactly once with either a non-null stream pointer and a
+ * success result, or a null stream pointer and a failure result. The SDK
+ * handle must remain valid until the callback runs.
+ */
+bool zerobus_sdk_create_stream_async(struct CZerobusSdk *sdk,
+                                     const char *table_name,
+                                     const uint8_t *descriptor_proto_bytes,
+                                     uintptr_t descriptor_proto_len,
+                                     const char *client_id,
+                                     const char *client_secret,
+                                     const struct CStreamConfigurationOptions *options,
+                                     CreateStreamAsyncCallback callback,
+                                     void *user_data,
+                                     struct CResult *result);
+
+/**
  * Create a stream with a custom headers provider callback
  * This allows you to provide custom authentication headers via a Go/C callback function.
  *
@@ -430,6 +491,42 @@ struct CZerobusStream *zerobus_sdk_create_stream_with_headers_provider(struct CZ
                                                                        struct CResult *result);
 
 /**
+ * Create a stream with a custom headers provider callback on a background task.
+ *
+ * Returns `true` once the request has been validated and scheduled. The
+ * callback is invoked exactly once with either a non-null stream pointer and a
+ * success result, or a null stream pointer and a failure result. The SDK
+ * handle must remain valid until the callback runs.
+ */
+bool zerobus_sdk_create_stream_with_headers_provider_async(struct CZerobusSdk *sdk,
+                                                           const char *table_name,
+                                                           const uint8_t *descriptor_proto_bytes,
+                                                           uintptr_t descriptor_proto_len,
+                                                           HeadersProviderCallback headers_callback,
+                                                           void *user_data,
+                                                           const struct CStreamConfigurationOptions *options,
+                                                           CreateStreamAsyncCallback callback,
+                                                           void *callback_user_data,
+                                                           struct CResult *result);
+
+/**
+ * Recreate a stream from an existing stream
+ * This is used for recovery scenarios where the stream needs to be re-established
+ */
+struct CZerobusStream *zerobus_sdk_recreate_stream(struct CZerobusSdk *sdk,
+                                                   struct CZerobusStream *stream,
+                                                   struct CResult *result);
+
+/**
+ * Recreate a stream from an existing stream on a background task.
+ */
+bool zerobus_sdk_recreate_stream_async(struct CZerobusSdk *sdk,
+                                       struct CZerobusStream *stream,
+                                       CreateStreamAsyncCallback callback,
+                                       void *user_data,
+                                       struct CResult *result);
+
+/**
  * Free a stream instance
  */
 void zerobus_stream_free(struct CZerobusStream *stream);
@@ -445,6 +542,16 @@ int64_t zerobus_stream_ingest_proto_record(struct CZerobusStream *stream,
                                            struct CResult *result);
 
 /**
+ * Ingest a protobuf record on a background task and report the assigned offset via callback.
+ */
+bool zerobus_stream_ingest_proto_record_async(struct CZerobusStream *stream,
+                                              const uint8_t *data,
+                                              uintptr_t data_len,
+                                              OffsetAsyncCallback callback,
+                                              void *user_data,
+                                              struct CResult *result);
+
+/**
  * Ingest a JSON record
  * Returns the offset directly
  * Returns -1 on error
@@ -452,6 +559,15 @@ int64_t zerobus_stream_ingest_proto_record(struct CZerobusStream *stream,
 int64_t zerobus_stream_ingest_json_record(struct CZerobusStream *stream,
                                           const char *json_data,
                                           struct CResult *result);
+
+/**
+ * Ingest a JSON record on a background task and report the assigned offset via callback.
+ */
+bool zerobus_stream_ingest_json_record_async(struct CZerobusStream *stream,
+                                             const char *json_data,
+                                             OffsetAsyncCallback callback,
+                                             void *user_data,
+                                             struct CResult *result);
 
 /**
  * Ingest a batch of protobuf records
@@ -465,6 +581,17 @@ int64_t zerobus_stream_ingest_proto_records(struct CZerobusStream *stream,
                                             struct CResult *result);
 
 /**
+ * Ingest a batch of protobuf records on a background task and report the last offset via callback.
+ */
+bool zerobus_stream_ingest_proto_records_async(struct CZerobusStream *stream,
+                                               const uint8_t *const *records,
+                                               const uintptr_t *record_lens,
+                                               uintptr_t num_records,
+                                               OffsetAsyncCallback callback,
+                                               void *user_data,
+                                               struct CResult *result);
+
+/**
  * Ingest a batch of JSON records
  * Returns the offset of the last record in the batch, or -1 on error
  * Returns -2 if batch is empty
@@ -473,6 +600,16 @@ int64_t zerobus_stream_ingest_json_records(struct CZerobusStream *stream,
                                            const char *const *json_records,
                                            uintptr_t num_records,
                                            struct CResult *result);
+
+/**
+ * Ingest a batch of JSON records on a background task and report the last offset via callback.
+ */
+bool zerobus_stream_ingest_json_records_async(struct CZerobusStream *stream,
+                                              const char *const *json_records,
+                                              uintptr_t num_records,
+                                              OffsetAsyncCallback callback,
+                                              void *user_data,
+                                              struct CResult *result);
 
 /**
  * Ingest a protobuf record without waiting for the record to be queued (fire-and-forget).
@@ -538,9 +675,26 @@ bool zerobus_stream_wait_for_offset(struct CZerobusStream *stream,
                                     struct CResult *result);
 
 /**
+ * Wait for an offset on a background task and report completion via callback.
+ */
+bool zerobus_stream_wait_for_offset_async(struct CZerobusStream *stream,
+                                          int64_t offset,
+                                          BoolAsyncCallback callback,
+                                          void *user_data,
+                                          struct CResult *result);
+
+/**
  * Flush all pending records
  */
 bool zerobus_stream_flush(struct CZerobusStream *stream, struct CResult *result);
+
+/**
+ * Flush all pending records on a background task and report completion via callback.
+ */
+bool zerobus_stream_flush_async(struct CZerobusStream *stream,
+                                BoolAsyncCallback callback,
+                                void *user_data,
+                                struct CResult *result);
 
 /**
  * Get unacknowledged records from a closed stream
@@ -548,6 +702,14 @@ bool zerobus_stream_flush(struct CZerobusStream *stream, struct CResult *result)
  */
 struct CRecordArray zerobus_stream_get_unacked_records(struct CZerobusStream *stream,
                                                        struct CResult *result);
+
+/**
+ * Get unacknowledged records from a closed stream on a background task.
+ */
+bool zerobus_stream_get_unacked_records_async(struct CZerobusStream *stream,
+                                              RecordArrayAsyncCallback callback,
+                                              void *user_data,
+                                              struct CResult *result);
 
 /**
  * Free a CRecordArray returned by zerobus_stream_get_unacked_records
@@ -558,6 +720,19 @@ void zerobus_free_record_array(struct CRecordArray array);
  * Close the stream gracefully
  */
 bool zerobus_stream_close(struct CZerobusStream *stream, struct CResult *result);
+
+/**
+ * Close the stream gracefully on a background task.
+ */
+bool zerobus_stream_close_async(struct CZerobusStream *stream,
+                                BoolAsyncCallback callback,
+                                void *user_data,
+                                struct CResult *result);
+
+/**
+ * Returns whether the stream has been closed.
+ */
+bool zerobus_stream_is_closed(struct CZerobusStream *stream);
 
 /**
  * Free error message string

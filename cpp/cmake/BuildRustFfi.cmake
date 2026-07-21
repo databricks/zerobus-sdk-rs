@@ -32,7 +32,48 @@ else()
   find_program(CARGO_EXECUTABLE cargo REQUIRED
       DOC "Path to the cargo build tool")
 
+  # asan/tsan instrument the Rust core too (see below); other values (e.g.
+  # undefined) fall back to a plain release build.
+  if(ZEROBUS_SANITIZE STREQUAL "thread" OR ZEROBUS_SANITIZE STREQUAL "address")
+    set(_zb_ffi_instrumented TRUE)
+  else()
+    set(_zb_ffi_instrumented FALSE)
+  endif()
+
+  set(_zb_cargo "${CARGO_EXECUTABLE}")
+  set(_zb_cargo_flags "")
+  set(_zb_target_dir "${ZEROBUS_RUST_TARGET_DIR}")
   set(_zb_ffi_lib "${ZEROBUS_RUST_TARGET_DIR}/release/${_zb_ffi_lib_name}")
+  if(_zb_ffi_instrumented)
+    # Instrument the Rust core — otherwise TSan/ASan only watch the thin C++
+    # wrapper and miss races/UAF inside the FFI, where the real work runs.
+    # -Zsanitizer + -Zbuild-std are nightly-only and need a --target (which
+    # relocates the archive under target/<triple>/). +nightly requires cargo to
+    # be the rustup proxy; fail clearly if nightly is unavailable.
+    execute_process(COMMAND "${CARGO_EXECUTABLE}" +nightly --version
+        RESULT_VARIABLE _zb_nightly_rc OUTPUT_QUIET ERROR_QUIET)
+    if(NOT _zb_nightly_rc EQUAL 0)
+      message(FATAL_ERROR
+          "ZEROBUS_SANITIZE=${ZEROBUS_SANITIZE} needs a nightly toolchain with "
+          "rust-src via rustup (cargo +nightly). Install: rustup toolchain "
+          "install nightly && rustup component add rust-src --toolchain nightly")
+    endif()
+    execute_process(COMMAND "${CARGO_EXECUTABLE}" -vV
+        OUTPUT_VARIABLE _zb_rustc_v OUTPUT_STRIP_TRAILING_WHITESPACE)
+    string(REGEX MATCH "host: ([^\n]+)" _zb_host_match "${_zb_rustc_v}")
+    set(_zb_host "${CMAKE_MATCH_1}")
+    # Per-sanitizer target dir: the --target output path is the same for asan and
+    # tsan, and changing only RUSTFLAGS does not invalidate cargo's cache, so a
+    # shared dir would link a stale archive built for the other sanitizer.
+    set(_zb_target_dir "${ZEROBUS_RUST_TARGET_DIR}/sanitize-${ZEROBUS_SANITIZE}")
+    set(_zb_cargo "${CARGO_EXECUTABLE}" "+nightly")
+    set(_zb_cargo_flags -Z build-std --target "${_zb_host}"
+        --target-dir "${_zb_target_dir}")
+    set(_zb_ffi_lib
+        "${_zb_target_dir}/${_zb_host}/release/${_zb_ffi_lib_name}")
+    message(STATUS
+        "Zerobus: building FFI with -Zsanitizer=${ZEROBUS_SANITIZE} (nightly, build-std)")
+  endif()
 
   # Track the Rust sources the archive is built from so editing rust/ffi or
   # rust/sdk re-invokes cargo. Without DEPENDS, CMake treats the archive as
@@ -47,12 +88,22 @@ else()
       "${ZEROBUS_REPO_ROOT}/rust/sdk/Cargo.toml"
       "${ZEROBUS_REPO_ROOT}/rust/Cargo.toml")
 
+  # Instrumented builds pass RUSTFLAGS via the environment so they don't leak
+  # into unrelated cargo invocations.
+  if(_zb_ffi_instrumented)
+    set(_zb_build_cmd ${CMAKE_COMMAND} -E env
+        "RUSTFLAGS=-Zsanitizer=${ZEROBUS_SANITIZE}"
+        ${_zb_cargo} build ${_zb_cargo_flags} --release)
+  else()
+    set(_zb_build_cmd ${_zb_cargo} build --release)
+  endif()
+
   add_custom_command(
       OUTPUT "${_zb_ffi_lib}"
-      COMMAND "${CARGO_EXECUTABLE}" build --release
+      COMMAND ${_zb_build_cmd}
       DEPENDS ${_zb_ffi_rust_sources}
       WORKING_DIRECTORY "${ZEROBUS_FFI_CRATE_DIR}"
-      COMMENT "Building Zerobus C FFI (cargo build --release)"
+      COMMENT "Building Zerobus C FFI"
       VERBATIM)
   add_custom_target(zerobus_ffi_build DEPENDS "${_zb_ffi_lib}")
 
