@@ -790,6 +790,33 @@ func TestTokenCacheDoesNotCacheAlreadyExpiredToken(t *testing.T) {
 	}
 }
 
+// When a proactive refresh mints a token that is already expired on arrival but
+// a still-valid token is cached, the caller must receive the cached token, not
+// the dead mint — and the live cache entry must be retained.
+func TestTokenCacheRefreshExpiredMintServesExistingCachedToken(t *testing.T) {
+	c := newTokenCache()
+	seedRefreshable(c, "id", "secret", "c.s.t", "", "valid")
+
+	// Refresh returns a token whose receipt-anchored TTL already elapsed.
+	receivedAt := time.Now().Add(-time.Hour)
+	ttl := time.Second
+	tok := getOrFetch(t, c, "id", "secret", "c.s.t",
+		func(context.Context, mintReason) (fetchedToken, error) {
+			return fetchedToken{token: "dead", expiresIn: &ttl, receivedAt: receivedAt}, nil
+		})
+	if tok != "valid" {
+		t.Fatalf("want still-valid cached token served, got %q", tok)
+	}
+	// The valid entry must still be cached (not overwritten by the dead mint).
+	entry := c.slot(newTokenKey("id", "secret", "c.s.t", ""))
+	entry.mu.Lock()
+	cached := entry.cached
+	entry.mu.Unlock()
+	if cached == nil || cached.value != "valid" {
+		t.Fatalf("valid cached token must be retained, got %+v", cached)
+	}
+}
+
 func TestTokenCacheNonPositiveRefreshBufferKeepsDefault(t *testing.T) {
 	c := newTokenCache(CacheRefreshBuffer(-1))
 	if c.refreshBuffer != defaultRefreshBuffer {

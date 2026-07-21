@@ -315,23 +315,32 @@ func (c *tokenCache) tryGetOrFetch(
 	// Anchor the TTL to when the response was received, not now: a slow custom
 	// logger between receipt and here must not extend the lifetime. That same
 	// delay can also consume the whole TTL, so a short-lived token may already be
-	// expired by the time we publish; treat that like a no-TTL response (return
-	// the token to this caller but don't cache a dead entry) rather than storing
-	// something isExpired would immediately reject.
+	// expired by the time we publish; treat that like a no-TTL response (don't
+	// cache a dead entry) rather than storing something isExpired would reject.
 	mintedAt := fetched.receivedAt
 	if mintedAt.IsZero() {
 		mintedAt = time.Now()
 	}
 	usableTTL := fetched.expiresIn != nil && *fetched.expiresIn > 0
 	alreadyExpired := usableTTL && !time.Now().Before(mintedAt.Add(*fetched.expiresIn))
-	if usableTTL && !alreadyExpired {
+	keepExisting := entry.cached != nil && !entry.cached.isExpired()
+	switch {
+	case usableTTL && !alreadyExpired:
+		// Live TTL: cache it and serve it.
 		entry.cached = newCachedToken(token, *fetched.expiresIn, c.refreshBuffer, mintedAt)
-	} else {
-		keepExisting := entry.cached != nil && !entry.cached.isExpired()
-		if !keepExisting {
-			entry.cached = nil
-		}
+	case alreadyExpired && keepExisting:
+		// The mint is dead on arrival but a still-valid token is cached (a
+		// proactive refresh whose TTL elapsed before publication). Serve the
+		// cached token, not the dead mint — returning the mint would hand the
+		// caller a token we already know is expired while discarding a good one.
+		token = entry.cached.value
+	case !keepExisting:
+		// No usable TTL and no live cache to keep: a no-expires_in token is still
+		// returned to this caller (uncached), and a dead mint leaves nothing.
+		entry.cached = nil
 	}
+	// Remaining case (no usable TTL but keepExisting): a valid no-expires_in token
+	// is returned as-is while the existing cache entry is retained untouched.
 	flight.token, flight.err = token, nil
 	close(flight.done)
 	entry.mu.Unlock()
@@ -361,6 +370,11 @@ func isContextError(err error) bool {
 // other cause means an intermediate context (e.g. transport's own bounded open
 // budget) fired via WithTimeoutCause — that is not the caller giving up, so it
 // stays retryable and a still-valid cached token can be served.
+//
+// A caller that cancels via context.WithCancelCause with its own custom cause is
+// therefore not seen as a caller stop here. In practice that is moot: such a
+// cancellation makes the HTTP client wrap the custom cause (not context.Canceled),
+// so err is not a context error and this function is never reached for it.
 func isCallerCancellation(ctx context.Context, err error) bool {
 	if !isContextError(err) || ctx.Err() == nil {
 		return false
