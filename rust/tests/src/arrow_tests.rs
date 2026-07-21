@@ -1136,6 +1136,79 @@ mod arrow_flight_tests {
             Ok(())
         }
 
+        /// close() while a reconnect is parked at the rebuild barrier must tear the stream
+        /// down and move pending batches to the failed set, without panicking or hanging
+        /// beyond the flush timeout.
+        #[tokio::test]
+        async fn test_close_during_reconnect_window_moves_pending_to_failed(
+        ) -> Result<(), Box<dyn std::error::Error>> {
+            setup_tracing();
+            info!("Starting test_close_during_reconnect_window_moves_pending_to_failed");
+
+            let (mock_server, server_url) = start_mock_flight_server().await?;
+            let schema = create_test_arrow_schema();
+
+            // A retriable error triggers the reconnect we park at the rebuild barrier.
+            mock_server
+                .inject_responses(
+                    TABLE_NAME,
+                    vec![MockFlightResponse::Error {
+                        status: tonic::Status::unavailable("Connection lost"),
+                        delay_ms: 0,
+                    }],
+                )
+                .await;
+
+            let sdk = ZerobusSdk::builder()
+                .endpoint(server_url.clone())
+                .unity_catalog_url("https://mock-uc.com")
+                .tls_config(Arc::new(NoTlsConfig))
+                .build()?;
+
+            let mut stream = sdk
+                .stream_builder()
+                .table(TABLE_NAME)
+                .headers_provider(Arc::new(TestHeadersProvider::default()))
+                .arrow(schema.clone())
+                .recovery(true)
+                .recovery_backoff_ms(0)
+                .recovery_retries(5)
+                .flush_timeout_ms(200)
+                .build_arrow()
+                .await?;
+
+            // Park the reconnect; do not release it — close() reaps it instead.
+            let (reached, _proceed) = stream.arm_reconnect_rebuild_barrier().await;
+
+            let batch = create_test_record_batch(schema.clone(), vec![1], vec![Some("a")]);
+            stream.ingest_batch(batch).await?;
+
+            tokio::time::timeout(std::time::Duration::from_secs(5), reached.notified())
+                .await
+                .expect("reconnect should reach the rebuild barrier");
+
+            // close() must return (its flush times out at 200ms) without hanging or
+            // panicking, reaping the parked supervisor along the way.
+            let close_result =
+                tokio::time::timeout(std::time::Duration::from_secs(5), stream.close())
+                    .await
+                    .expect("close() must not hang while a reconnect is parked");
+            assert!(
+                close_result.is_err(),
+                "close() should surface the flush timeout"
+            );
+
+            // The un-acked batch was moved to the failed set and is retrievable.
+            let unacked = stream.get_unacked_batches().await?;
+            assert_eq!(
+                unacked.len(),
+                1,
+                "pending batch must be moved to the failed set"
+            );
+
+            Ok(())
+        }
+
         #[tokio::test]
         async fn test_supervisor_recovery_after_retriable_error(
         ) -> Result<(), Box<dyn std::error::Error>> {

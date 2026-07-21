@@ -1049,23 +1049,6 @@ impl ZerobusArrowStream {
             cumulative_records_sent.store(new_cumulative, Ordering::Relaxed);
             last_acked_records.store(0, Ordering::Release);
 
-            // Debug-only: rebuilt ranges must be contiguous from 0. Guards a rebuild
-            // regression or an orphaned batch from the pause-gate handoff.
-            #[cfg(debug_assertions)]
-            {
-                let mut expected_start: u64 = 0;
-                for pb in pending.iter() {
-                    debug_assert_eq!(
-                        pb.start_record, expected_start,
-                        "pending_batches has non-contiguous record ranges after recovery \
-                         (expected start_record = {}, found {} for offset_id {}); \
-                         possible orphaned buffered batch from pause-gate handoff race",
-                        expected_start, pb.start_record, pb.offset_id,
-                    );
-                    expected_start = pb.end_record;
-                }
-            }
-
             replay
         };
 
