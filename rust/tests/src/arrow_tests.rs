@@ -775,7 +775,11 @@ mod arrow_flight_tests {
             let joined = tokio::time::timeout(std::time::Duration::from_secs(3), handle)
                 .await
                 .expect("2nd ingest_batch should unblock after the ack frees a permit")?;
-            assert!(joined.is_ok(), "2nd ingest_batch failed: {:?}", joined.err());
+            assert!(
+                joined.is_ok(),
+                "2nd ingest_batch failed: {:?}",
+                joined.err()
+            );
 
             Ok(())
         }

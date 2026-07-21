@@ -56,9 +56,6 @@ pub(crate) struct ArrowTableProperties {
 }
 
 /// A pending batch waiting for acknowledgment.
-///
-/// Not `Clone`: owns an `inflight` permit released (RAII) when the batch leaves
-/// `pending_batches`.
 struct PendingBatch {
     batch: RecordBatch,
     /// Offset ID assigned by the client for this batch.
@@ -1259,9 +1256,10 @@ impl ZerobusArrowStream {
 
     /// Ingests a single Arrow RecordBatch into the stream.
     ///
-    /// This method queues the batch for transmission and returns the assigned offset
-    /// immediately. Use `wait_for_offset()` to explicitly wait for server acknowledgment
-    /// of this batch when needed.
+    /// Queues the batch for transmission and returns its assigned offset. This applies
+    /// backpressure: it blocks once `max_inflight_batches` batches are awaiting
+    /// acknowledgment, resuming when an ack frees a slot. Use `wait_for_offset()` to
+    /// explicitly wait for server acknowledgment of this batch when needed.
     ///
     /// # Arguments
     ///
@@ -1806,7 +1804,11 @@ mod tests {
     }
 
     fn one_col_schema() -> Arc<ArrowSchema> {
-        Arc::new(ArrowSchema::new(vec![Field::new("id", DataType::Int32, false)]))
+        Arc::new(ArrowSchema::new(vec![Field::new(
+            "id",
+            DataType::Int32,
+            false,
+        )]))
     }
 
     fn batch_with_rows(schema: &Arc<ArrowSchema>, n: i32) -> RecordBatch {
@@ -1840,7 +1842,11 @@ mod tests {
             pending_batch(&sem, batch_with_rows(&schema, 3), 0, 0, 3),
             pending_batch(&sem, batch_with_rows(&schema, 2), 1, 3, 5),
         ]));
-        assert_eq!(sem.available_permits(), 2, "two permits held by pending batches");
+        assert_eq!(
+            sem.available_permits(),
+            2,
+            "two permits held by pending batches"
+        );
 
         // Stale value that must be overwritten with the reinstalled ranges' total.
         let cumulative = Arc::new(AtomicU64::new(999));
@@ -1849,12 +1855,15 @@ mod tests {
         let (tx, rx) = mpsc::channel::<Result<RecordBatch, FlightError>>(4);
         drop(rx);
 
-        let res =
-            ZerobusArrowStream::replay_pending_batches(&tx, &pending, &cumulative, 0).await;
+        let res = ZerobusArrowStream::replay_pending_batches(&tx, &pending, &cumulative, 0).await;
         assert!(res.is_err(), "replay must surface the send failure");
 
         let guard = pending.lock().await;
-        assert_eq!(guard.len(), 2, "pending must retain all batches on replay failure");
+        assert_eq!(
+            guard.len(),
+            2,
+            "pending must retain all batches on replay failure"
+        );
         assert_eq!((guard[0].start_record, guard[0].end_record), (0, 3));
         assert_eq!((guard[1].start_record, guard[1].end_record), (3, 5));
         drop(guard);
@@ -1885,8 +1894,7 @@ mod tests {
 
         let (tx, mut rx) = mpsc::channel::<Result<RecordBatch, FlightError>>(4);
 
-        let res =
-            ZerobusArrowStream::replay_pending_batches(&tx, &pending, &cumulative, 0).await;
+        let res = ZerobusArrowStream::replay_pending_batches(&tx, &pending, &cumulative, 0).await;
         assert!(res.is_ok());
 
         assert_eq!(pending.lock().await.len(), 2);
@@ -1915,8 +1923,7 @@ mod tests {
         let cumulative = Arc::new(AtomicU64::new(0));
         let (tx, mut rx) = mpsc::channel::<Result<RecordBatch, FlightError>>(4);
 
-        let res =
-            ZerobusArrowStream::replay_pending_batches(&tx, &pending, &cumulative, 4).await;
+        let res = ZerobusArrowStream::replay_pending_batches(&tx, &pending, &cumulative, 4).await;
         assert!(res.is_ok());
 
         // Only the partially-acked batch remains, rebuilt from cumulative 0.
