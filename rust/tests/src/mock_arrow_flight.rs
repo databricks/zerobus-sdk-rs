@@ -276,6 +276,7 @@ impl FlightService for MockFlightServer {
                             let _ = tx.send(Err(status)).await;
                             return;
                         }
+
                         debug!("Received schema message, sending ready signal");
                         // Send ready signal to confirm setup succeeded.
                         // This mirrors real server behavior where the server sends this after

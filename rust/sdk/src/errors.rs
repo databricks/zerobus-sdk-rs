@@ -1,10 +1,20 @@
 use thiserror::Error;
+#[cfg(feature = "arrow-flight")]
 use tonic_types::StatusExt;
 
 /// The `google.rpc.ErrorInfo.reason` the Zerobus server sets on a schema
 /// validation failure. Presence of this reason (in the gRPC status details) is
 /// what distinguishes a schema mismatch from any other `InvalidArgument`.
+#[cfg(feature = "arrow-flight")]
 const SCHEMA_VALIDATION_REASON: &str = "SCHEMA_VALIDATION_FAILED";
+
+/// The `google.rpc.ErrorInfo.domain` the Zerobus server scopes its schema
+/// validation detail under. Requiring the domain (in addition to the reason)
+/// before specializing keeps an unrelated status that happens to reuse the same
+/// reason token from being misclassified as a schema mismatch. An empty domain
+/// is accepted for forward-compatibility with servers that omit it.
+#[cfg(feature = "arrow-flight")]
+const SCHEMA_VALIDATION_DOMAIN: &str = "zerobus.databricks.com";
 
 /// A machine-readable cause of a schema-validation rejection, reported by the
 /// server in the gRPC `ErrorInfo` metadata (as stable string tokens) and
@@ -39,6 +49,7 @@ pub enum SchemaValidationCause {
 impl SchemaValidationCause {
     /// Decode a wire token (as sent in the server's `ErrorInfo` metadata) into
     /// a typed cause. Unrecognized tokens map to [`SchemaValidationCause::Unknown`].
+    #[cfg(feature = "arrow-flight")]
     fn from_wire(token: &str) -> Self {
         match token {
             "FIELD_NOT_IN_TABLE" => SchemaValidationCause::FieldNotInTable,
@@ -94,12 +105,19 @@ pub enum ZerobusError {
     /// mismatch is recoverable — e.g. by re-resolving the table schema and
     /// rebuilding the stream — is a caller-side policy decision. Per-field
     /// detail (offending column names) is carried in `message` for diagnostics,
-    /// not structurally. This error is not SDK-retryable, since the SDK holds a
-    /// fixed schema and its recovery loop would re-send the same rejected schema.
+    /// not structurally. `error_code` is the server's numeric Shinkansen code
+    /// (e.g. `"8001"`) when present, useful for telemetry correlation. This
+    /// error is not SDK-retryable, since the SDK holds a fixed schema and its
+    /// recovery loop would re-send the same rejected schema.
+    ///
+    /// `#[non_exhaustive]` so additional server-reported detail (e.g. the gRPC
+    /// code or domain) can be added later without a breaking change.
     #[error("Arrow schema does not match the target table: {message}.")]
+    #[non_exhaustive]
     InvalidSchema {
         message: String,
         causes: Vec<SchemaValidationCause>,
+        error_code: Option<String>,
     },
     /// Returned when the server returned an unexpected response.
     #[error("Unexpected response from server. Response: {0}")]
@@ -129,13 +147,19 @@ impl ZerobusError {
     /// Classify a `tonic::Status` returned by the server during stream setup.
     ///
     /// If the server attached a schema-validation `ErrorInfo` detail (reason
-    /// `SCHEMA_VALIDATION_FAILED`), returns [`ZerobusError::InvalidSchema`]
-    /// carrying the structured `causes` the server reported.
+    /// `SCHEMA_VALIDATION_FAILED` scoped to the `zerobus.databricks.com`
+    /// domain), returns [`ZerobusError::InvalidSchema`] carrying the structured
+    /// `causes` the server reported.
     /// Otherwise falls back to [`ZerobusError::CreateStreamError`], preserving
     /// the original status (and its gRPC code) for retry/auth classification.
+    #[cfg(feature = "arrow-flight")]
     pub(crate) fn from_setup_status(status: tonic::Status) -> Self {
         if let Some(info) = status.get_details_error_info() {
-            if info.reason == SCHEMA_VALIDATION_REASON {
+            // Require both the reason and the server's domain (empty domain
+            // accepted for forward-compat) so an unrelated status reusing the
+            // reason token is not misread as a schema mismatch.
+            let domain_ok = info.domain == SCHEMA_VALIDATION_DOMAIN || info.domain.is_empty();
+            if info.reason == SCHEMA_VALIDATION_REASON && domain_ok {
                 // Comma-separated tokens; an absent key means no causes.
                 let causes = info
                     .metadata
@@ -150,6 +174,7 @@ impl ZerobusError {
                 return ZerobusError::InvalidSchema {
                     message: status.message().to_string(),
                     causes,
+                    error_code: info.metadata.get("error_code").cloned(),
                 };
             }
         }
@@ -250,8 +275,39 @@ mod tests {
         assert!(!ZerobusError::CreateStreamError(non_auth).is_auth_rejection());
     }
 
+    /// Pins the invariant the whole `InvalidSchema` feature rests on: the
+    /// server's `ErrorInfo` detail survives the `FlightError::Tonic -> tonic::Status`
+    /// conversion. Production never sees the raw `Status` — the Arrow setup and
+    /// reconnect paths (`arrow_stream.rs`) call `from_setup_status(flight_error.into())`,
+    /// so the details must round-trip through this `From` for schema-mismatch
+    /// classification to work at all. Building a `Status` directly (as the other
+    /// tests do) would skip this conversion and mask a regression here.
+    #[cfg(feature = "arrow-flight")]
+    #[test]
+    fn schema_error_info_survives_flight_error_conversion() {
+        use arrow_flight::error::FlightError;
+
+        let status = schema_validation_status("FIELD_NOT_IN_TABLE,TYPE_INCOMPATIBLE");
+        // Mirror the production path: server error arrives as a FlightError and
+        // is converted to a Status before from_setup_status classifies it.
+        let converted: tonic::Status = FlightError::Tonic(Box::new(status)).into();
+        match ZerobusError::from_setup_status(converted) {
+            ZerobusError::InvalidSchema { causes, .. } => {
+                assert_eq!(
+                    causes,
+                    vec![
+                        SchemaValidationCause::FieldNotInTable,
+                        SchemaValidationCause::TypeIncompatible,
+                    ]
+                );
+            }
+            other => panic!("expected InvalidSchema after FlightError conversion, got {other:?}"),
+        }
+    }
+
     /// Build an InvalidArgument status carrying the server's schema-validation
     /// ErrorInfo, mirroring what Shinkansen sends on a schema mismatch.
+    #[cfg(feature = "arrow-flight")]
     fn schema_validation_status(causes: &str) -> tonic::Status {
         use std::collections::HashMap;
         use tonic_types::ErrorDetails;
@@ -270,12 +326,15 @@ mod tests {
         )
     }
 
+    #[cfg(feature = "arrow-flight")]
     #[test]
     fn setup_status_with_schema_error_info_classifies_as_invalid_schema() {
         let status = schema_validation_status("FIELD_NOT_IN_TABLE,TYPE_INCOMPATIBLE");
         let err = ZerobusError::from_setup_status(status);
         match err {
-            ZerobusError::InvalidSchema { causes, .. } => {
+            ZerobusError::InvalidSchema {
+                causes, error_code, ..
+            } => {
                 assert_eq!(
                     causes,
                     vec![
@@ -283,6 +342,8 @@ mod tests {
                         SchemaValidationCause::TypeIncompatible,
                     ]
                 );
+                // The server's numeric code is carried for telemetry.
+                assert_eq!(error_code.as_deref(), Some("8001"));
             }
             other => panic!("expected InvalidSchema, got {other:?}"),
         }
@@ -290,6 +351,7 @@ mod tests {
 
     /// A cause token this SDK version does not recognize is surfaced as
     /// `Unknown` rather than dropped, so newer server causes still reach callers.
+    #[cfg(feature = "arrow-flight")]
     #[test]
     fn setup_status_maps_unknown_cause_token() {
         let status = schema_validation_status("FIELD_NOT_IN_TABLE,BRAND_NEW_CAUSE");
@@ -307,12 +369,14 @@ mod tests {
         }
     }
 
+    #[cfg(feature = "arrow-flight")]
     #[test]
     fn invalid_schema_is_not_retryable() {
         let err = ZerobusError::from_setup_status(schema_validation_status("FIELD_NOT_IN_TABLE"));
         assert!(!err.is_retryable());
     }
 
+    #[cfg(feature = "arrow-flight")]
     #[test]
     fn setup_status_without_error_info_falls_back_to_create_stream_error() {
         // A plain InvalidArgument with no schema ErrorInfo stays a CreateStreamError.
@@ -321,6 +385,31 @@ mod tests {
         assert!(matches!(err, ZerobusError::CreateStreamError(_)));
     }
 
+    /// A status carrying the schema reason but a *different* domain is not a
+    /// Zerobus schema mismatch and must stay a `CreateStreamError`, so an
+    /// unrelated service reusing the reason token can't be misclassified.
+    #[cfg(feature = "arrow-flight")]
+    #[test]
+    fn setup_status_with_wrong_domain_falls_back_to_create_stream_error() {
+        use std::collections::HashMap;
+        use tonic_types::ErrorDetails;
+
+        let mut metadata = HashMap::new();
+        metadata.insert("causes".to_string(), "FIELD_NOT_IN_TABLE".to_string());
+        let status = tonic::Status::with_error_details(
+            tonic::Code::InvalidArgument,
+            "schema mismatch from some other service",
+            ErrorDetails::with_error_info(
+                "SCHEMA_VALIDATION_FAILED",
+                "someone.else.example.com",
+                metadata,
+            ),
+        );
+        let err = ZerobusError::from_setup_status(status);
+        assert!(matches!(err, ZerobusError::CreateStreamError(_)));
+    }
+
+    #[cfg(feature = "arrow-flight")]
     #[test]
     fn setup_status_preserves_grpc_code_on_fallback() {
         // Non-schema setup failures keep their original code for retry/auth
@@ -330,6 +419,7 @@ mod tests {
     }
 
     /// Absent metadata keys yield empty lists rather than panicking.
+    #[cfg(feature = "arrow-flight")]
     #[test]
     fn invalid_schema_tolerates_missing_metadata() {
         use tonic_types::ErrorDetails;
@@ -344,8 +434,11 @@ mod tests {
             ),
         );
         match ZerobusError::from_setup_status(status) {
-            ZerobusError::InvalidSchema { causes, .. } => {
+            ZerobusError::InvalidSchema {
+                causes, error_code, ..
+            } => {
                 assert!(causes.is_empty());
+                assert!(error_code.is_none());
             }
             other => panic!("expected InvalidSchema, got {other:?}"),
         }

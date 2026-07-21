@@ -836,6 +836,37 @@ impl ZerobusArrowStream {
                                 response_stream = Some(new_response_stream);
                             }
                             Ok(Err(e)) => {
+                                if matches!(e, ZerobusError::InvalidSchema { .. }) {
+                                    // The table schema changed, so the server now rejects
+                                    // our fixed schema. This can never succeed on retry:
+                                    // the SDK holds a fixed schema and would just re-send
+                                    // the same rejected one until the recovery budget
+                                    // drains, burying the real cause under a generic
+                                    // "Reconnection failed". Surface it to waiters
+                                    // immediately so callers (e.g. Vector) can re-resolve
+                                    // their schema and rebuild the stream.
+                                    error!(
+                                        "Supervisor: Schema mismatch on reconnect, closing stream: {}",
+                                        e
+                                    );
+                                    // Publish the classified error before and after
+                                    // finalization (so a waiter checking is_closed right
+                                    // after already sees the real error, and parked waiters
+                                    // are woken). The reconnect error is generated inside
+                                    // reconnect() and, unlike the initial-disconnect path,
+                                    // was never pre-published in process_acks.
+                                    let _ = server_error_tx.send(Some(e.clone()));
+                                    Self::finalize_closed(
+                                        &ingest_mutex,
+                                        &is_closed,
+                                        &pending_batches,
+                                        &failed_batches,
+                                        &last_acked_records,
+                                    )
+                                    .await;
+                                    let _ = server_error_tx.send(Some(e.clone()));
+                                    return Err(e);
+                                }
                                 warn!("Supervisor: Reconnection failed: {}", e);
                                 // Ask the provider to invalidate cached authentication
                                 // state after an auth rejection, then retry even though
