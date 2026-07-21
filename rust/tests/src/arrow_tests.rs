@@ -698,6 +698,131 @@ mod arrow_flight_tests {
         }
     }
 
+    mod backpressure_tests {
+        use super::*;
+
+        /// #6: `max_inflight_batches` bounds batches awaiting ACK, not just batches
+        /// buffered before the encoder drains. With capacity 1 the second ingest must
+        /// block until the first is acked.
+        #[tokio::test]
+        async fn test_max_inflight_batches_blocks_until_ack(
+        ) -> Result<(), Box<dyn std::error::Error>> {
+            setup_tracing();
+            info!("Starting test_max_inflight_batches_blocks_until_ack");
+
+            let (mock_server, server_url) = start_mock_flight_server().await?;
+            let schema = create_test_arrow_schema();
+
+            // Ack for offset 0 is delayed; until it arrives the single permit stays held.
+            mock_server
+                .inject_responses(
+                    TABLE_NAME,
+                    vec![MockFlightResponse::BatchAck {
+                        ack_up_to_offset: 0,
+                        delay_ms: 500,
+                        ack_up_to_records: 1,
+                    }],
+                )
+                .await;
+
+            let sdk = ZerobusSdk::builder()
+                .endpoint(server_url.clone())
+                .unity_catalog_url("https://mock-uc.com")
+                .tls_config(Arc::new(NoTlsConfig))
+                .build()?;
+
+            let stream = Arc::new(
+                sdk.stream_builder()
+                    .table(TABLE_NAME)
+                    .headers_provider(Arc::new(TestHeadersProvider::default()))
+                    .arrow(schema.clone())
+                    .max_inflight_batches(1)
+                    .recovery(false)
+                    .build_arrow()
+                    .await?,
+            );
+
+            // First batch takes the only permit; held until the delayed ack.
+            let batch1 = create_test_record_batch(schema.clone(), vec![1], vec![Some("a")]);
+            stream.ingest_batch(batch1).await?;
+
+            // Wait until the mock received batch 1 (encoder freed the channel slot), so
+            // a later block is attributable to the permit, not channel capacity.
+            let mut waited_ms = 0;
+            while mock_server.get_batch_count().await < 1 {
+                tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+                waited_ms += 5;
+                assert!(waited_ms < 2000, "mock never received the first batch");
+            }
+
+            // Second ingest must block on the permit (not just the encoder drain).
+            let stream2 = Arc::clone(&stream);
+            let schema2 = schema.clone();
+            let mut handle = tokio::spawn(async move {
+                let batch2 = create_test_record_batch(schema2, vec![2], vec![Some("b")]);
+                stream2.ingest_batch(batch2).await
+            });
+
+            // Well under the 500ms ack delay it should still be blocked.
+            tokio::select! {
+                res = &mut handle => {
+                    panic!("2nd ingest_batch should block until the 1st is acked, returned: {:?}", res)
+                }
+                _ = tokio::time::sleep(std::time::Duration::from_millis(150)) => {}
+            }
+
+            // Once the ack frees the permit, the second ingest completes.
+            let joined = tokio::time::timeout(std::time::Duration::from_secs(3), handle)
+                .await
+                .expect("2nd ingest_batch should unblock after the ack frees a permit")?;
+            assert!(
+                joined.is_ok(),
+                "2nd ingest_batch failed: {:?}",
+                joined.err()
+            );
+
+            Ok(())
+        }
+
+        /// `max_inflight_batches == 0` must be rejected by `build_arrow` (a zero bound
+        /// would deadlock every ingest / panic the zero-capacity channel). This is
+        /// Arrow-only validation; JSON/proto `build()` is unaffected.
+        #[tokio::test]
+        async fn test_max_inflight_batches_zero_rejected() -> Result<(), Box<dyn std::error::Error>>
+        {
+            setup_tracing();
+            info!("Starting test_max_inflight_batches_zero_rejected");
+
+            let schema = create_test_arrow_schema();
+            let sdk = ZerobusSdk::builder()
+                .endpoint("http://127.0.0.1:1")
+                .unity_catalog_url("https://mock-uc.com")
+                .tls_config(Arc::new(NoTlsConfig))
+                .build()?;
+
+            // Rejected before any connection attempt.
+            let result = sdk
+                .stream_builder()
+                .table(TABLE_NAME)
+                .headers_provider(Arc::new(TestHeadersProvider::default()))
+                .arrow(schema)
+                .max_inflight_batches(0)
+                .build_arrow()
+                .await;
+
+            assert!(
+                matches!(
+                    result,
+                    Err(databricks_zerobus_ingest_sdk::ZerobusError::InvalidArgument(_))
+                ),
+                "expected InvalidArgument for max_inflight_batches(0), got {:?}",
+                result.err()
+            );
+
+            Ok(())
+        }
+    }
+
     mod unacked_tests {
         use super::*;
 
