@@ -5,6 +5,10 @@
 // descriptor are needed for a JSON stream — the server maps each record's JSON
 // fields onto the table's columns by name.
 //
+// It also demonstrates recovery: if the stream fails terminally, the records it
+// never acknowledged can be recovered via get_unacked_records() and re-ingested
+// on a fresh stream.
+//
 // Non-secret connection info (endpoint, workspace URL, table) lives in
 // demo_config.hpp so it can be checked in. Only the two secrets come from the
 // environment, so no credential is ever baked into source:
@@ -43,6 +47,18 @@ std::string require_env(const char* name) {
   return value;
 }
 
+// Open a JSON stream to the table. Factored out so recovery can open a fresh
+// stream with the same settings.
+zerobus::Stream open_stream(zerobus::Sdk& sdk, const std::string& table,
+                            const std::string& client_id,
+                            const std::string& client_secret) {
+  zerobus::TableProperties props;
+  props.table_name = table;  // descriptor_proto left empty for JSON.
+  zerobus::StreamOptions options;
+  options.record_type = zerobus::RecordType::Json;
+  return sdk.create_stream(props, client_id, client_secret, options);
+}
+
 }  // namespace
 
 int main() {
@@ -64,14 +80,8 @@ int main() {
 
     // 2. Open a JSON stream to the table. record_type must be Json to match the
     //    JSON payloads we ingest below.
-    zerobus::TableProperties props;
-    props.table_name = table;  // descriptor_proto left empty for JSON.
-
-    zerobus::StreamOptions options;
-    options.record_type = zerobus::RecordType::Json;
-
     zerobus::Stream stream =
-        sdk.create_stream(props, client_id, client_secret, options);
+        open_stream(sdk, table, client_id, client_secret);
 
     // 3. Ingest. Build the batch, then hand it over in one call. Note there is
     //    NO per-record wait here: ingest queues the records and returns; the
@@ -85,16 +95,40 @@ int main() {
     std::cout << "Queued " << records.size()
               << " record(s); last offset = " << last_offset << "\n";
 
-    // 4. Flush once at the end: block until every queued record is durably
-    //    acknowledged by the server. This is the single wait point.
-    stream.flush();
-    std::cout << "Flushed — all records acknowledged.\n";
+    // 4. Flush once, then close — both at a controlled point. close() surfaces
+    //    any final error by throwing; ~Stream() would swallow it.
+    //
+    //    Guard these with a nested try/catch to demonstrate recovery. The SDK
+    //    recovers transparently from transient disconnects; only a TERMINAL
+    //    failure throws here, and a failed close() keeps the handle alive so
+    //    get_unacked_records() can hand back whatever was never acknowledged.
+    //    (After a *successful* close the handle is freed, so that call would
+    //    throw instead — recovery belongs on the failure path only.)
+    try {
+      stream.flush();
+      std::cout << "Flushed — all records acknowledged.\n";
+      stream.close();
+      std::cout << "Stream closed cleanly.\n";
+    } catch (const zerobus::ZerobusException& e) {
+      std::cerr << "Stream failed: " << e.what() << "\n";
 
-    // 5. Close at a controlled point rather than leaving it to the destructor.
-    //    close() surfaces any final error by throwing; ~Stream() would swallow
-    //    it.
-    stream.close();
-    std::cout << "Stream closed cleanly.\n";
+      std::vector<zerobus::UnackedRecord> unacked =
+          stream.get_unacked_records();
+      std::cout << "Recovering " << unacked.size()
+                << " unacknowledged record(s) on a fresh stream.\n";
+
+      if (!unacked.empty()) {
+        zerobus::Stream retry =
+            open_stream(sdk, table, client_id, client_secret);
+        // Re-ingest, then flush once — the same loop-then-flush pattern.
+        for (const zerobus::UnackedRecord& record : unacked) {
+          retry.ingest_json_record(record.as_string());
+        }
+        retry.flush();
+        retry.close();
+        std::cout << "Recovered records re-ingested and acknowledged.\n";
+      }
+    }
   } catch (const zerobus::ZerobusException& e) {
     std::cerr << "Zerobus error: " << e.what()
               << " (retryable=" << (e.is_retryable() ? "true" : "false")

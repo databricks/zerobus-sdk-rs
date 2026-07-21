@@ -151,11 +151,20 @@ int main() {
 
     // 2. Open an Arrow stream. The schema-only IPC bytes tell the server what
     //    the record batches will look like.
+    //
+    //    Optional IPC compression trades client CPU for fewer bytes on the
+    //    wire; enable it only when network bandwidth limits throughput. Here we
+    //    turn on Zstd via ArrowStreamOptions (Lz4Frame is the other codec) and
+    //    pass the options to create_arrow_stream.
     const std::shared_ptr<arrow::Schema> schema = air_quality_schema();
     const std::vector<std::uint8_t> schema_ipc = serialize_schema_ipc(schema);
 
-    zerobus::ArrowStream stream = sdk.create_arrow_stream(
-        zerobus_demo::table_name(), schema_ipc, client_id, client_secret);
+    zerobus::ArrowStreamOptions arrow_options;
+    arrow_options.ipc_compression = zerobus::IpcCompression::Zstd;
+
+    zerobus::ArrowStream stream =
+        sdk.create_arrow_stream(zerobus_demo::table_name(), schema_ipc,
+                                client_id, client_secret, arrow_options);
 
     // 3. Ingest a series of batches. Each ingest_batch queues one Arrow IPC
     //    stream (schema + one record batch) and returns immediately with the

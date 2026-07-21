@@ -9,6 +9,12 @@
 //   * flush() periodically rather than per record — the pattern for
 //     continuous/unbounded streams.
 //
+// It also demonstrates two optional features:
+//   * An async ack callback (StreamOptions::ack_callback) that observes
+//     acknowledgements on a background task without blocking the ingest loop.
+//   * A custom HeadersProvider for authentication (shown commented out at stream
+//     creation), the alternative to OAuth client credentials.
+//
 // Non-secret connection info (endpoint, workspace URL, table, record) lives in
 // demo_config.hpp. Two secrets plus the Unity Catalog table metadata come from
 // the environment, so no credential is baked into source:
@@ -26,10 +32,13 @@
 //   device_name STRING, temp INT, humidity INT
 // (shinkansen.default.air_quality_zlata). Edit demo_config.hpp to change it.
 
+#include <atomic>
 #include <chrono>
 #include <cstdint>
 #include <cstdlib>
 #include <iostream>
+#include <map>
+#include <memory>
 #include <string>
 #include <thread>
 #include <vector>
@@ -48,6 +57,31 @@ std::string require_env(const char* name) {
   }
   return value;
 }
+
+// A custom HeadersProvider is the alternative to OAuth client credentials: the
+// core calls get_headers() whenever it needs fresh headers (possibly from
+// another thread), and you return whatever the endpoint expects — at minimum an
+// "authorization" bearer token and "x-databricks-zerobus-table-name". Throwing
+// surfaces the message to the core as a headers-provider error. The provider
+// must outlive the Stream (which holds a shared_ptr to it). See
+// include/zerobus/headers_provider.hpp for the full contract. Used in the
+// commented-out create_stream() call below.
+class BearerTokenProvider : public zerobus::HeadersProvider {
+ public:
+  BearerTokenProvider(std::string table_name, std::string token)
+      : table_name_(std::move(table_name)), token_(std::move(token)) {}
+
+  std::map<std::string, std::string> get_headers() override {
+    return {
+        {"authorization", "Bearer " + token_},
+        {"x-databricks-zerobus-table-name", table_name_},
+    };
+  }
+
+ private:
+  std::string table_name_;
+  std::string token_;
+};
 
 }  // namespace
 
@@ -82,8 +116,34 @@ int main() {
     zerobus::StreamOptions options;
     options.record_type = zerobus::RecordType::Proto;
 
+    // Optional: an async ack callback observes acknowledgements on a background
+    // task, so durability is tracked without ever blocking the ingest loop.
+    // AckCallback::from() adapts lambdas; both handlers must be noexcept, run on
+    // another thread (synchronize shared state — here a std::atomic), and must
+    // not call back into the Stream. forever() makes close() wait for every
+    // in-flight callback, so none can touch `acked` after it goes out of scope.
+    // See include/zerobus/ack_callback.hpp for the full contract.
+    std::atomic<std::int64_t> acked{0};
+    options.ack_callback = zerobus::AckCallback::from(
+        [&acked](std::int64_t offset) noexcept {
+          acked.fetch_add(1, std::memory_order_relaxed);
+          (void)offset;
+        },
+        [](std::int64_t offset, const std::string& msg) noexcept {
+          std::cerr << "record at offset " << offset << " failed: " << msg
+                    << "\n";
+        });
+    options.callback_wait_policy = zerobus::CallbackWaitPolicy::forever();
+
     zerobus::Stream stream =
         sdk.create_stream(props, client_id, client_secret, options);
+
+    // Alternative: authenticate with a custom HeadersProvider instead of OAuth
+    // client credentials. The provider supplies auth itself, so the builder's
+    // unity_catalog_url() is optional in that path.
+    //   auto provider =
+    //       std::make_shared<BearerTokenProvider>(table, my_token);
+    //   zerobus::Stream stream = sdk.create_stream(props, provider, options);
 
     // 4. Stream continuously: emit one reading per tick for the configured
     //    duration. Each iteration encodes the record's JSON to proto and
@@ -116,12 +176,14 @@ int main() {
     }
 
     // 5. Final flush to block until every remaining record is acknowledged,
-    //    then close.
+    //    then close. The ack callback keeps firing during flush()/close();
+    //    forever() ensures close() waits for the last one before `acked` dies.
     stream.flush();
     stream.close();
 
     std::cout << "Done. sent " << sent << " records; last offset "
-              << last_offset << "\n";
+              << last_offset << "; callback observed " << acked.load()
+              << " acknowledgements.\n";
   } catch (const zerobus::ZerobusException& e) {
     std::cerr << "Zerobus error: " << e.what()
               << " (retryable=" << (e.is_retryable() ? "true" : "false")
