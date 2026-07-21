@@ -681,7 +681,15 @@ impl ZerobusArrowStream {
     ) -> tokio::task::JoinHandle<ZerobusResult<()>> {
         tokio::spawn(async move {
             let ack_timeout = Duration::from_millis(options.server_lack_of_ack_timeout_ms);
-            let mut response_stream = initial_response_stream;
+            let mut response_stream = Some(initial_response_stream);
+            // Carries a failed reconnect's real error into the next iteration's handling
+            // instead of round-tripping a synthetic error through a dummy stream.
+            let mut pending_error: Option<ZerobusError> = None;
+            // True when `pending_error` is a reconnect auth rejection: the cached token was
+            // invalidated and we want to retry (mint a fresh one) even though auth errors
+            // classify as non-retryable — while still surfacing the original error if
+            // retries are ultimately exhausted.
+            let mut reconnect_auth_retry = false;
 
             loop {
                 if is_closed.load(Ordering::Relaxed) {
@@ -689,21 +697,29 @@ impl ZerobusArrowStream {
                     return Ok(());
                 }
 
-                // Run process_acks until it returns (error or stream closed).
-                let result = Self::process_acks(
-                    response_stream,
-                    Arc::clone(&is_closed),
-                    last_ack_tx.clone(),
-                    Arc::clone(&pending_batches),
-                    ack_timeout,
-                    server_error_tx.clone(),
-                    Arc::clone(&last_acked_records),
-                    Arc::clone(&is_paused),
-                    &options,
-                    #[cfg(feature = "test-hooks")]
-                    Arc::clone(&ack_applied_gate),
-                )
-                .await;
+                // Run process_acks until it returns — unless a prior reconnect attempt
+                // failed, in which case carry that real error into the handling below
+                // (preserving its message and retry classification).
+                let result = if let Some(e) = pending_error.take() {
+                    Err(e)
+                } else {
+                    Self::process_acks(
+                        response_stream
+                            .take()
+                            .expect("response_stream present when no pending reconnect error"),
+                        Arc::clone(&is_closed),
+                        last_ack_tx.clone(),
+                        Arc::clone(&pending_batches),
+                        ack_timeout,
+                        server_error_tx.clone(),
+                        Arc::clone(&last_acked_records),
+                        Arc::clone(&is_paused),
+                        &options,
+                        #[cfg(feature = "test-hooks")]
+                        Arc::clone(&ack_applied_gate),
+                    )
+                    .await
+                };
 
                 // Check if stream was closed during processing.
                 if is_closed.load(Ordering::Relaxed) {
@@ -718,8 +734,12 @@ impl ZerobusArrowStream {
                         debug!("Supervisor: process_acks completed successfully");
                         return Ok(());
                     }
-                    Err(ref error) if error.is_retryable() && options.recovery => {
-                        // Retriable error - attempt recovery.
+                    Err(ref error)
+                        if (error.is_retryable() || reconnect_auth_retry) && options.recovery =>
+                    {
+                        // Retriable error (or a reconnect auth rejection we've chosen to
+                        // retry with re-minted credentials) - attempt recovery.
+                        reconnect_auth_retry = false;
                         let attempts = recovery_attempts.fetch_add(1, Ordering::Relaxed);
                         if attempts >= options.recovery_retries {
                             error!(
@@ -727,9 +747,22 @@ impl ZerobusArrowStream {
                                 max_retries = options.recovery_retries,
                                 "Supervisor: Max recovery retries exceeded"
                             );
-                            is_closed.store(true, Ordering::Relaxed);
-                            // Move pending batches to failed and fail the ack futures.
-                            Self::move_pending_to_failed(&pending_batches, &failed_batches).await;
+                            // Publish the terminal error before finalization (so a waiter
+                            // checking is_closed right after it already sees the real error;
+                            // reconnect-failure errors carried via pending_error are never
+                            // pre-published in process_acks) and again after (to wake
+                            // already-parked waiters). finalize_closed also drains pending
+                            // under ingest_mutex so a concurrent ingest can't be omitted.
+                            let _ = server_error_tx.send(Some(error.clone()));
+                            Self::finalize_closed(
+                                &ingest_mutex,
+                                &is_closed,
+                                &pending_batches,
+                                &failed_batches,
+                                &last_acked_records,
+                            )
+                            .await;
+                            let _ = server_error_tx.send(Some(error.clone()));
                             return result;
                         }
 
@@ -780,46 +813,59 @@ impl ZerobusArrowStream {
                                 info!("Supervisor: Recovery successful, resuming");
                                 recovery_attempts.store(0, Ordering::Relaxed);
                                 // is_paused was already cleared inside reconnect().
-                                response_stream = new_response_stream;
+                                response_stream = Some(new_response_stream);
                                 // Loop continues with new stream.
                             }
                             Ok(Err(e)) => {
-                                // Mirror the initial-connect path: drop the cached
-                                // token on auth rejection so recovery re-mints.
+                                warn!("Supervisor: Reconnection failed: {}", e);
+                                // On an auth rejection the cached token is likely expired:
+                                // invalidate it and retry so the next attempt mints a fresh
+                                // one (auth errors are otherwise non-retryable). Non-auth
+                                // errors are carried as-is and classified normally. Either
+                                // way the real error is preserved as the final cause if
+                                // retries are ultimately exhausted.
                                 if e.is_auth_rejection() {
                                     headers_provider.invalidate().await;
+                                    reconnect_auth_retry = true;
                                 }
-                                warn!("Supervisor: Reconnection failed: {}", e);
-                                // Loop continues, will retry if retries remain.
-                                // Create a dummy stream that immediately errors.
-                                response_stream = Box::pin(futures::stream::once(async move {
-                                    Err(FlightError::Tonic(Box::new(tonic::Status::unavailable(
-                                        "Reconnection failed",
-                                    ))))
-                                }));
+                                pending_error = Some(e);
                             }
                             Err(_timeout) => {
                                 warn!("Supervisor: Reconnection timed out");
-                                // Loop continues, will retry if retries remain.
-                                response_stream = Box::pin(futures::stream::once(async move {
-                                    Err(FlightError::Tonic(Box::new(
-                                        tonic::Status::deadline_exceeded("Reconnection timed out"),
-                                    )))
-                                }));
+                                pending_error = Some(ZerobusError::ConnectionTimeout(format!(
+                                    "Reconnection timed out after {}ms",
+                                    options.recovery_timeout_ms
+                                )));
                             }
                         }
                     }
                     Err(error) => {
                         // Non-retriable error or recovery disabled.
                         error!("Supervisor: Non-retriable error, closing stream: {}", error);
-                        is_closed.store(true, Ordering::Relaxed);
-                        // A mid-stream auth rejection means the cached token is no
-                        // longer accepted; drop it so the next stream re-mints.
+                        // Publish the terminal error before finalization (so a waiter
+                        // checking is_closed right after it already sees the real error;
+                        // reconnect-failure errors carried via pending_error are never
+                        // pre-published in process_acks) and again after (to wake
+                        // already-parked waiters). finalize_closed drains pending under
+                        // ingest_mutex so a concurrent ingest can't be omitted.
+                        let _ = server_error_tx.send(Some(error.clone()));
+                        Self::finalize_closed(
+                            &ingest_mutex,
+                            &is_closed,
+                            &pending_batches,
+                            &failed_batches,
+                            &last_acked_records,
+                        )
+                        .await;
+                        let _ = server_error_tx.send(Some(error.clone()));
+                        // Drop cached credentials on an auth rejection so the next stream
+                        // re-mints. Done last (after finalization) so a slow/hanging
+                        // user-defined invalidate() can't keep the failed stream open and
+                        // accepting ingests. (The reconnect arm also invalidates on an auth
+                        // rejection it retries; those paths are mutually exclusive.)
                         if error.is_auth_rejection() {
                             headers_provider.invalidate().await;
                         }
-                        // Move pending batches to failed and fail the ack futures.
-                        Self::move_pending_to_failed(&pending_batches, &failed_batches).await;
                         return Err(error);
                     }
                 }
@@ -1086,15 +1132,39 @@ impl ZerobusArrowStream {
     async fn move_pending_to_failed(
         pending_batches: &Arc<Mutex<Vec<PendingBatch>>>,
         failed_batches: &Arc<Mutex<Vec<RecordBatch>>>,
+        last_acked_records: &Arc<AtomicU64>,
     ) {
-        let pending: Vec<PendingBatch> = {
-            let mut pending_guard = pending_batches.lock().await;
-            std::mem::take(&mut *pending_guard)
-        };
+        // Lock failed first and hold it across the pending drain so this serializes with
+        // get_unacked_batches (which uses the same order): whichever runs first drains
+        // pending; the other then sees an empty pending and the same failed snapshot.
+        // Lock order is always failed -> pending; no path takes them in the reverse.
         let mut failed = failed_batches.lock().await;
-        for pb in pending {
-            failed.push(pb.batch);
+        let mut pending = pending_batches.lock().await;
+        let acked = last_acked_records.load(Ordering::Acquire);
+        for pb in pending.drain(..) {
+            // Slice off any durably-acked prefix so a manual retry via
+            // get_unacked_batches doesn't re-send already-persisted records.
+            if let Some(batch) = slice_batch_for_recovery(&pb, acked) {
+                failed.push(batch);
+            }
         }
+    }
+
+    /// Publishes stream closure and drains pending -> failed atomically with respect to
+    /// `ingest_batch`. Holding `ingest_mutex` across the `is_closed` store and the drain
+    /// means an ingest either finishes its append before this runs (and is drained here)
+    /// or observes `is_closed` after the mutex is released (and refuses to append), so a
+    /// retrieval snapshot can never omit an accepted batch that a later call reveals.
+    async fn finalize_closed(
+        ingest_mutex: &Arc<Mutex<()>>,
+        is_closed: &Arc<AtomicBool>,
+        pending_batches: &Arc<Mutex<Vec<PendingBatch>>>,
+        failed_batches: &Arc<Mutex<Vec<RecordBatch>>>,
+        last_acked_records: &Arc<AtomicU64>,
+    ) {
+        let _guard = ingest_mutex.lock().await;
+        is_closed.store(true, Ordering::Relaxed);
+        Self::move_pending_to_failed(pending_batches, failed_batches, last_acked_records).await;
     }
 
     /// Processes acknowledgments from the server response stream.
@@ -1291,6 +1361,8 @@ impl ZerobusArrowStream {
                     let error = ZerobusError::StreamClosedError(tonic::Status::unknown(
                         "Server closed the stream",
                     ));
+                    // Returned to the supervisor, which publishes it (before + after
+                    // finalization) in its terminal branch.
                     return Err(error);
                 }
                 Err(_timeout) => {
@@ -1308,6 +1380,8 @@ impl ZerobusArrowStream {
                         let error = ZerobusError::StreamClosedError(
                             tonic::Status::deadline_exceeded("Server ack timeout"),
                         );
+                        // Returned to the supervisor, which publishes it (before + after
+                        // finalization) in its terminal branch.
                         return Err(error);
                     }
                 }
@@ -1516,12 +1590,9 @@ impl ZerobusArrowStream {
 
         let wait_future = async {
             loop {
-                if self.is_closed.load(Ordering::Relaxed) {
-                    return Err(ZerobusError::StreamClosedError(tonic::Status::internal(
-                        format!("Stream closed during {}", operation_name.to_lowercase()),
-                    )));
-                }
-
+                // Check the ack watermark FIRST so a target acknowledged just before
+                // closure/error resolves as Ok(()) — an ack must win over closure to avoid
+                // a spurious error (and a duplicate retry of a durable batch).
                 let current_ack = *offset_rx.borrow_and_update();
                 if let Some(ack_offset) = current_ack {
                     if ack_offset >= offset_to_wait {
@@ -1540,7 +1611,28 @@ impl ZerobusArrowStream {
                     );
                 }
 
-                // Race between offset updates and server errors
+                // Only after confirming the target isn't acked, honor closure. Re-read the
+                // watermark first: an ack can land between the read above and observing
+                // closure. Closure guarantees no further acks are processed, so this read
+                // is final — an acked target still resolves Ok. Otherwise prefer the real
+                // terminal error over a generic one.
+                if self.is_closed.load(Ordering::Relaxed) {
+                    if let Some(ack_offset) = *offset_rx.borrow_and_update() {
+                        if ack_offset >= offset_to_wait {
+                            return Ok(());
+                        }
+                    }
+                    if let Some(server_error) = error_rx.borrow().clone() {
+                        return Err(server_error);
+                    }
+                    return Err(ZerobusError::StreamClosedError(tonic::Status::internal(
+                        format!("Stream closed during {}", operation_name.to_lowercase()),
+                    )));
+                }
+
+                // Wait for either watch to change, then loop to re-check the watermark
+                // (ack precedence) and closure. Neither arm returns directly, so a late
+                // ack still wins over a concurrently-published error.
                 tokio::select! {
                     result = offset_rx.changed() => {
                         if result.is_err() {
@@ -1551,18 +1643,8 @@ impl ZerobusArrowStream {
                                 ),
                             )));
                         }
-                        // Loop continues to check new offset value
                     }
-                    _ = error_rx.changed() => {
-                        // Server error occurred - return it immediately if stream is closed
-                        if let Some(server_error) = error_rx.borrow().clone() {
-                            if self.is_closed.load(Ordering::Relaxed) {
-                                return Err(server_error);
-                            }
-                            // Stream still active, recovery might succeed - keep waiting
-                        }
-                        // Error channel updated but no error (cleared by recovery) - continue waiting
-                    }
+                    _ = error_rx.changed() => {}
                 }
             }
         };
@@ -1611,21 +1693,27 @@ impl ZerobusArrowStream {
     /// ```
     #[instrument(level = "debug", skip_all, fields(table_name = %self.table_properties.table_name))]
     pub async fn flush(&self) -> ZerobusResult<()> {
-        // Check if stream is closed first, before checking for batches.
-        if self.is_closed.load(Ordering::Relaxed) {
-            return Err(ZerobusError::StreamClosedError(tonic::Status::internal(
-                "Cannot flush: stream is closed",
-            )));
-        }
-
         let target_offset = match self.offset_generator.last() {
             Some(offset) => offset,
             None => {
+                // Nothing was ingested: report closure if closed, otherwise nothing to do.
+                // Prefer the real terminal error over a generic closed message.
+                if self.is_closed.load(Ordering::Relaxed) {
+                    if let Some(server_error) = self.server_error_rx.borrow().clone() {
+                        return Err(server_error);
+                    }
+                    return Err(ZerobusError::StreamClosedError(tonic::Status::internal(
+                        "Cannot flush: stream is closed",
+                    )));
+                }
                 debug!("No batches to flush");
                 return Ok(());
             }
         };
 
+        // Defer to the waiter (no early is_closed check): it applies ack-vs-closure
+        // precedence, so a target acknowledged just before closure resolves as Ok(())
+        // instead of a generic "stream is closed" error.
         self.wait_for_offset_internal(target_offset, "Flush").await
     }
 
@@ -1708,67 +1796,81 @@ impl ZerobusArrowStream {
             "Closing Arrow Flight stream"
         );
 
-        // Flush pending batches. Capture the result so the stream is still torn
-        // down on failure, then propagate it to the caller.
+        // Flush pending batches while the supervisor is still alive to receive acks.
+        // Capture the result so teardown still runs on failure, then propagate it.
         let flush_result = self.flush().await;
         if let Err(e) = &flush_result {
             warn!(
-                "Flush failed during close: {}. Moving pending batches to failed.",
+                "Flush failed during close: {}. Draining pending batches to the failed set.",
                 e
             );
-            // Move pending batches to failed (drain to avoid duplicates in get_unacked_batches).
-            Self::move_pending_to_failed(&self.pending_batches, &self.failed_batches).await;
         }
 
-        // Mark as closed.
-        self.is_closed.store(true, Ordering::Relaxed);
+        // Reap the supervisor (abort + await) BEFORE clearing the sender, so an in-flight
+        // reconnect can't reinstall batch_tx after we clear it, and no process_acks /
+        // reconnect mutates pending_batches or last_acked_records while we drain. Join in
+        // place and only clear receiver_task once the join completes, so a close()
+        // cancelled during the await doesn't drop the handle — a retry re-joins it.
+        {
+            let mut task = self.receiver_task.lock().await;
+            if let Some(handle) = task.as_mut() {
+                handle.abort();
+                let _ = handle.await;
+            }
+            *task = None;
+        }
 
-        // Drop the batch sender to signal end of stream.
+        // Detach the sender now that nothing can reinstall it.
         {
             let mut tx = self.batch_tx.lock().await;
             *tx = None;
         }
 
-        // Abort the receiver task.
-        {
-            let mut task = self.receiver_task.lock().await;
-            if let Some(t) = task.take() {
-                t.abort();
-            }
-        }
+        // Publish closure and drain pending -> failed under ingest_mutex. is_closed is set
+        // only here, at the end of teardown, so a close() cancelled earlier leaves it
+        // false: retrieval stays disabled and a retry re-runs teardown instead of
+        // short-circuiting. finalize_closed also serializes the drain with ingest_batch.
+        Self::finalize_closed(
+            &self.ingest_mutex,
+            &self.is_closed,
+            &self.pending_batches,
+            &self.failed_batches,
+            &self.last_acked_records,
+        )
+        .await;
 
         flush_result
     }
 
-    /// Returns all batches that were ingested but not acknowledged by the server.
+    /// Returns the un-acknowledged batches after the stream has been closed, for manual
+    /// retry or persistence.
     ///
-    /// This method should only be called after a stream has failed or been closed.
-    /// It's useful for implementing custom retry logic or persisting failed batches.
-    ///
-    /// # Returns
-    ///
-    /// A vector of `RecordBatch` items that were not acknowledged.
+    /// A partially-acknowledged batch (an auto-chunked batch whose prefix was durably
+    /// stored) is sliced to its un-acknowledged suffix, so retrying it does not re-send
+    /// already-persisted records. The call drains any still-pending batches into the
+    /// failed set and returns the consolidated snapshot; repeated calls return the same
+    /// snapshot (idempotent).
     ///
     /// # Errors
     ///
-    /// * `InvalidStateError` - If the stream is still active
+    /// * `InvalidStateError` - If the stream is still active (call `close()` first).
     ///
     /// # Examples
     ///
     /// ```no_run
     /// # use databricks_zerobus_ingest_sdk::*;
     /// # async fn example(sdk: ZerobusSdk, mut stream: ZerobusArrowStream) -> Result<(), ZerobusError> {
-    /// match stream.flush().await {
-    ///     Err(_) => {
-    ///         let failed_batches = stream.get_unacked_batches().await?;
-    ///         println!("Failed to send {} batches", failed_batches.len());
-    ///         // You can recreate the stream and retry these batches
-    ///         let new_stream = sdk.recreate_arrow_stream(&stream).await?;
-    ///         for batch in failed_batches {
-    ///             new_stream.ingest_batch(batch).await?;
-    ///         }
-    ///     }
-    ///     Ok(_) => println!("All batches acknowledged"),
+    /// // Do NOT treat close() == Ok(()) as "all acknowledged": if a background terminal
+    /// // failure already closed the stream, close() early-returns Ok(()). Always inspect
+    /// // the un-acked batches after closing.
+    /// stream.close().await.ok();
+    /// let failed_batches = stream.get_unacked_batches().await?;
+    /// if !failed_batches.is_empty() {
+    ///     println!("Retrying {} un-acked batches", failed_batches.len());
+    ///     // recreate_arrow_stream() re-ingests the un-acked batches on the new stream,
+    ///     // so just flush it — don't re-ingest them yourself.
+    ///     let new_stream = sdk.recreate_arrow_stream(&stream).await?;
+    ///     new_stream.flush().await?;
     /// }
     /// # Ok(())
     /// # }
@@ -1785,21 +1887,17 @@ impl ZerobusArrowStream {
             ));
         }
 
-        let mut result = Vec::new();
-
-        {
-            let pending = self.pending_batches.lock().await;
-            for pb in pending.iter() {
-                result.push(pb.batch.clone());
-            }
-        }
-
-        {
-            let failed = self.failed_batches.lock().await;
-            result.extend(failed.iter().cloned());
-        }
-
-        Ok(result)
+        // Drain any still-pending batches (sliced to their un-acked suffix) into the
+        // failed set, then return the consolidated snapshot. move_pending_to_failed locks
+        // failed first, so this serializes with a concurrent terminal drain and repeated
+        // calls are idempotent (pending is already empty on the second call).
+        Self::move_pending_to_failed(
+            &self.pending_batches,
+            &self.failed_batches,
+            &self.last_acked_records,
+        )
+        .await;
+        Ok(self.failed_batches.lock().await.clone())
     }
 
     /// Returns whether the stream has been closed.
@@ -1859,10 +1957,9 @@ impl ZerobusArrowStream {
 impl Drop for ZerobusArrowStream {
     fn drop(&mut self) {
         self.is_closed.store(true, Ordering::Relaxed);
-        // Abort the background supervisor task to prevent zombie tasks.
-        // This is a hard abort, but outstanding oneshot receivers will get
-        // RecvError when their senders are dropped, and pending batches can
-        // still be retrieved via get_unacked_batches() before drop.
+        // Hard-abort the background supervisor task to prevent a zombie task. This does
+        // not drain pending batches into the failed set, so to retrieve un-acked batches
+        // call close() (or let recovery reach a terminal failure) before dropping.
         if let Ok(mut guard) = self.receiver_task.try_lock() {
             if let Some(handle) = guard.take() {
                 handle.abort();
@@ -2085,5 +2182,64 @@ mod tests {
             .expect("pause_and_detach_sender should proceed after ingest_mutex is released");
         assert!(is_paused.load(Ordering::Relaxed));
         assert!(batch_tx.lock().await.is_none());
+    }
+
+    /// `finalize_closed` must serialize with an in-flight ingest: while an ingest holds
+    /// `ingest_mutex` (past its closed check, about to append), finalization blocks and
+    /// does not publish `is_closed`; a batch appended just before the mutex is released is
+    /// still drained into the failed set, so a retrieval snapshot never omits it.
+    #[tokio::test]
+    async fn finalize_closed_waits_for_in_flight_ingest() {
+        let ingest_mutex = Arc::new(Mutex::new(()));
+        let is_closed = Arc::new(AtomicBool::new(false));
+        let sem = Arc::new(Semaphore::new(4));
+        let pending = Arc::new(Mutex::new(Vec::new()));
+        let failed = Arc::new(Mutex::new(Vec::new()));
+        let last_acked = Arc::new(AtomicU64::new(0));
+
+        // Represent an ingest in its critical section (past its second is_closed check,
+        // about to append): hold ingest_mutex.
+        let guard = ingest_mutex.lock().await;
+
+        let fut = ZerobusArrowStream::finalize_closed(
+            &ingest_mutex,
+            &is_closed,
+            &pending,
+            &failed,
+            &last_acked,
+        );
+        tokio::pin!(fut);
+
+        // Finalization must block while the ingest holds ingest_mutex, and must not
+        // publish is_closed while blocked.
+        assert!(
+            futures::poll!(fut.as_mut()).is_pending(),
+            "finalize_closed must wait for the in-flight ingest"
+        );
+        assert!(
+            !is_closed.load(Ordering::Relaxed),
+            "is_closed must not be published mid-ingest"
+        );
+
+        // The ingest appends its batch, then releases the mutex.
+        let schema = one_col_schema();
+        pending
+            .lock()
+            .await
+            .push(pending_batch(&sem, batch_with_rows(&schema, 2), 0, 0, 2));
+        drop(guard);
+
+        tokio::time::timeout(Duration::from_secs(1), fut)
+            .await
+            .expect("finalize_closed should proceed after ingest_mutex is released");
+
+        // The batch appended just before the mutex release is in the drained snapshot.
+        assert!(is_closed.load(Ordering::Relaxed));
+        assert_eq!(
+            failed.lock().await.len(),
+            1,
+            "batch appended before mutex release must be drained into failed"
+        );
+        assert!(pending.lock().await.is_empty());
     }
 }

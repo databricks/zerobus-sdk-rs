@@ -10,10 +10,24 @@ mod arrow_flight_tests {
     use crate::mock_arrow_flight::{start_mock_flight_server, MockFlightResponse};
     use crate::utils::{
         create_test_arrow_schema, create_test_dict_record_batch, create_test_dict_schema,
-        create_test_record_batch, record_batch_to_ipc_bytes, setup_tracing, TestHeadersProvider,
+        create_test_record_batch, record_batch_to_ipc_bytes, setup_tracing,
+        CountingHeadersProvider, TestHeadersProvider,
     };
 
     const TABLE_NAME: &str = "test_catalog.test_schema.test_table";
+
+    /// Extracts the `id` (Int64) column values from a test batch, for asserting that a
+    /// recovered/sliced batch contains the expected rows (not just the right row count).
+    fn batch_ids(batch: &arrow_array::RecordBatch) -> Vec<i64> {
+        use arrow_array::{Array, Int64Array};
+        batch
+            .column(0)
+            .as_any()
+            .downcast_ref::<Int64Array>()
+            .expect("id column is Int64")
+            .values()
+            .to_vec()
+    }
 
     mod stream_creation_tests {
         use super::*;
@@ -179,6 +193,125 @@ mod arrow_flight_tests {
     mod flush_and_close_tests {
         use super::*;
 
+        /// An ack that lands before the stream closes must resolve wait_for_offset() as
+        /// Ok(()), not a spurious closed error — otherwise a caller could retry a batch
+        /// the server already acknowledged. The waiter checks the ack watermark before
+        /// is_closed, so a durable target wins over closure.
+        #[tokio::test]
+        async fn test_wait_for_offset_ok_when_acked_before_close(
+        ) -> Result<(), Box<dyn std::error::Error>> {
+            setup_tracing();
+            info!("Starting test_wait_for_offset_ok_when_acked_before_close");
+
+            let (mock_server, server_url) = start_mock_flight_server().await?;
+            let schema = create_test_arrow_schema();
+
+            mock_server
+                .inject_responses(
+                    TABLE_NAME,
+                    vec![MockFlightResponse::BatchAck {
+                        ack_up_to_offset: 0,
+                        delay_ms: 0,
+                        ack_up_to_records: 1,
+                    }],
+                )
+                .await;
+
+            let sdk = ZerobusSdk::builder()
+                .endpoint(server_url.clone())
+                .unity_catalog_url("https://mock-uc.com")
+                .tls_config(Arc::new(NoTlsConfig))
+                .build()?;
+
+            let mut stream = sdk
+                .stream_builder()
+                .table(TABLE_NAME)
+                .headers_provider(Arc::new(TestHeadersProvider::default()))
+                .arrow(schema.clone())
+                .build_arrow()
+                .await?;
+
+            let batch = create_test_record_batch(schema, vec![1], vec![Some("a")]);
+            let offset = stream.ingest_batch(batch).await?;
+
+            // close() flushes (the batch is acked), so is_closed is set with the ack
+            // watermark already covering the target offset.
+            stream.close().await?;
+
+            // The target was acknowledged before closure -> Ok, not a closed error.
+            stream.wait_for_offset(offset).await?;
+
+            Ok(())
+        }
+
+        /// After the stream terminally closes, an already-acknowledged offset must still
+        /// resolve as Ok (the ack wins over closure — the waiter re-reads the watermark
+        /// after observing closure), while an un-acked offset returns the real terminal
+        /// error.
+        #[tokio::test]
+        async fn test_wait_for_offset_acked_wins_over_terminal_close(
+        ) -> Result<(), Box<dyn std::error::Error>> {
+            setup_tracing();
+            info!("Starting test_wait_for_offset_acked_wins_over_terminal_close");
+
+            let (mock_server, server_url) = start_mock_flight_server().await?;
+            let schema = create_test_arrow_schema();
+
+            // A is acked (1 record); B then triggers a terminal error, closing the stream.
+            mock_server
+                .inject_responses(
+                    TABLE_NAME,
+                    vec![
+                        MockFlightResponse::BatchAck {
+                            ack_up_to_offset: 0,
+                            delay_ms: 0,
+                            ack_up_to_records: 1,
+                        },
+                        MockFlightResponse::Error {
+                            status: tonic::Status::invalid_argument("boom"),
+                            delay_ms: 0,
+                        },
+                    ],
+                )
+                .await;
+
+            let sdk = ZerobusSdk::builder()
+                .endpoint(server_url.clone())
+                .unity_catalog_url("https://mock-uc.com")
+                .tls_config(Arc::new(NoTlsConfig))
+                .build()?;
+
+            let stream = sdk
+                .stream_builder()
+                .table(TABLE_NAME)
+                .headers_provider(Arc::new(TestHeadersProvider::default()))
+                .arrow(schema.clone())
+                .recovery(false)
+                .build_arrow()
+                .await?;
+
+            let batch_a = create_test_record_batch(schema.clone(), vec![1], vec![Some("a")]);
+            let a_offset = stream.ingest_batch(batch_a).await?;
+            let batch_b = create_test_record_batch(schema.clone(), vec![2], vec![Some("b")]);
+            let b_offset = stream.ingest_batch(batch_b).await?;
+
+            // B drives the stream to a terminal close and surfaces the real error.
+            let b_err = stream
+                .wait_for_offset(b_offset)
+                .await
+                .expect_err("un-acked B must fail with the terminal error");
+            assert!(
+                b_err.to_string().contains("boom"),
+                "un-acked offset must return the real terminal error, got: {}",
+                b_err
+            );
+
+            // A was acknowledged before the close -> Ok, not the terminal error.
+            stream.wait_for_offset(a_offset).await?;
+
+            Ok(())
+        }
+
         #[tokio::test]
         async fn test_flush_waits_for_acks() -> Result<(), Box<dyn std::error::Error>> {
             setup_tracing();
@@ -324,6 +457,542 @@ mod arrow_flight_tests {
             Ok(())
         }
 
+        /// A terminal server error must reach a blocked wait_for_offset()/flush() as the
+        /// real error, not a generic close/timeout. process_acks publishes the error while
+        /// is_closed is still false (the waiter keeps waiting), so the supervisor
+        /// re-publishes it after finalization to wake the waiter with the real error.
+        #[tokio::test]
+        async fn test_wait_for_offset_returns_real_error_on_terminal_failure(
+        ) -> Result<(), Box<dyn std::error::Error>> {
+            setup_tracing();
+            info!("Starting test_wait_for_offset_returns_real_error_on_terminal_failure");
+
+            let (mock_server, server_url) = start_mock_flight_server().await?;
+            let schema = create_test_arrow_schema();
+
+            mock_server
+                .inject_responses(
+                    TABLE_NAME,
+                    vec![MockFlightResponse::Error {
+                        status: Status::invalid_argument("Permanent failure"),
+                        delay_ms: 0,
+                    }],
+                )
+                .await;
+
+            let sdk = ZerobusSdk::builder()
+                .endpoint(server_url.clone())
+                .unity_catalog_url("https://mock-uc.com")
+                .tls_config(Arc::new(NoTlsConfig))
+                .build()?;
+
+            let stream = sdk
+                .stream_builder()
+                .table(TABLE_NAME)
+                .headers_provider(Arc::new(TestHeadersProvider::default()))
+                .arrow(schema.clone())
+                .recovery(false)
+                // Long enough that a regressed waiter would surface the flush deadline
+                // instead of the real error, so this assertion catches the regression.
+                .flush_timeout_ms(3000)
+                .build_arrow()
+                .await?;
+
+            let batch = create_test_record_batch(schema, vec![1], vec![Some("test")]);
+            let offset = stream.ingest_batch(batch).await?;
+
+            let err = stream
+                .wait_for_offset(offset)
+                .await
+                .expect_err("terminal failure must surface as an error");
+            let msg = err.to_string();
+            assert!(
+                msg.contains("Permanent failure"),
+                "waiter must return the real server error, got: {}",
+                msg
+            );
+
+            Ok(())
+        }
+
+        /// Stream-end (server closes without ack -> `Ok(None)`) is a terminal arm that does
+        /// not pre-populate the error watch from `process_acks`, unlike a mid-stream error.
+        /// A blocked waiter must still get the real stream-end error, not a generic
+        /// close/flush deadline.
+        #[tokio::test]
+        async fn test_wait_for_offset_returns_real_error_on_stream_end(
+        ) -> Result<(), Box<dyn std::error::Error>> {
+            setup_tracing();
+            info!("Starting test_wait_for_offset_returns_real_error_on_stream_end");
+
+            let (mock_server, server_url) = start_mock_flight_server().await?;
+            let schema = create_test_arrow_schema();
+
+            mock_server
+                .inject_responses(
+                    TABLE_NAME,
+                    vec![MockFlightResponse::CloseStream { delay_ms: 0 }],
+                )
+                .await;
+
+            let sdk = ZerobusSdk::builder()
+                .endpoint(server_url.clone())
+                .unity_catalog_url("https://mock-uc.com")
+                .tls_config(Arc::new(NoTlsConfig))
+                .build()?;
+
+            let stream = sdk
+                .stream_builder()
+                .table(TABLE_NAME)
+                .headers_provider(Arc::new(TestHeadersProvider::default()))
+                .arrow(schema.clone())
+                .recovery(false)
+                // Long enough that a regressed waiter would surface the flush deadline
+                // instead of the real error, so this assertion catches the regression.
+                .flush_timeout_ms(3000)
+                .build_arrow()
+                .await?;
+
+            let batch = create_test_record_batch(schema, vec![1], vec![Some("test")]);
+            let offset = stream.ingest_batch(batch).await?;
+
+            let err = stream
+                .wait_for_offset(offset)
+                .await
+                .expect_err("stream end must surface as an error");
+            let msg = err.to_string();
+            assert!(
+                msg.contains("Server closed the stream"),
+                "waiter must return the real stream-end error, got: {}",
+                msg
+            );
+
+            Ok(())
+        }
+
+        /// A non-retryable, non-auth reconnect failure must terminate the stream with the
+        /// real error, not a synthetic "Reconnection failed" retried to exhaustion.
+        #[tokio::test]
+        async fn test_non_auth_non_retryable_reconnect_failure_terminates(
+        ) -> Result<(), Box<dyn std::error::Error>> {
+            setup_tracing();
+            info!("Starting test_non_auth_non_retryable_reconnect_failure_terminates");
+
+            let (mock_server, server_url) = start_mock_flight_server().await?;
+            let schema = create_test_arrow_schema();
+
+            // conn1: a retriable error triggers recovery. conn2 (reconnect): setup rejected
+            // with a non-retryable, non-auth error, which must terminate the stream.
+            mock_server
+                .inject_responses(
+                    TABLE_NAME,
+                    vec![
+                        MockFlightResponse::Error {
+                            status: Status::unavailable("Connection lost"),
+                            delay_ms: 0,
+                        },
+                        MockFlightResponse::FailSetup {
+                            status: Status::invalid_argument("Reconnect rejected"),
+                        },
+                    ],
+                )
+                .await;
+
+            let sdk = ZerobusSdk::builder()
+                .endpoint(server_url.clone())
+                .unity_catalog_url("https://mock-uc.com")
+                .tls_config(Arc::new(NoTlsConfig))
+                .build()?;
+
+            let stream = sdk
+                .stream_builder()
+                .table(TABLE_NAME)
+                .headers_provider(Arc::new(TestHeadersProvider::default()))
+                .arrow(schema.clone())
+                .recovery(true)
+                .recovery_backoff_ms(0)
+                // Even with retries available, a non-retryable reconnect failure must
+                // terminate immediately rather than retry to exhaustion.
+                .recovery_retries(5)
+                .flush_timeout_ms(5000)
+                .build_arrow()
+                .await?;
+
+            let batch = create_test_record_batch(schema, vec![1], vec![Some("a")]);
+            let offset = stream.ingest_batch(batch).await?;
+
+            let err = stream
+                .wait_for_offset(offset)
+                .await
+                .expect_err("non-retryable reconnect failure must surface as an error");
+            assert!(
+                err.to_string().contains("Reconnect rejected"),
+                "waiter must surface the real reconnect error, got: {}",
+                err
+            );
+            // The original error's classification is preserved, not flattened into a
+            // synthetic retryable "Reconnection failed".
+            assert!(
+                !err.is_retryable(),
+                "the surfaced error must keep its non-retryable classification, got: {}",
+                err
+            );
+
+            Ok(())
+        }
+
+        /// A retryable, non-auth reconnect failure is carried through `pending_error` and
+        /// retried until the budget is exhausted, then surfaces the real (retryable) error
+        /// rather than a synthetic one.
+        #[tokio::test]
+        async fn test_retryable_reconnect_failure_exhausted_surfaces_real_error(
+        ) -> Result<(), Box<dyn std::error::Error>> {
+            setup_tracing();
+            info!("Starting test_retryable_reconnect_failure_exhausted_surfaces_real_error");
+
+            let (mock_server, server_url) = start_mock_flight_server().await?;
+            let schema = create_test_arrow_schema();
+
+            // conn1: retriable error -> recovery. conn2 & conn3: setup rejected with a
+            // retryable error. With 2 retries, both reconnect attempts fail and the stream
+            // terminates with that error carried through pending_error.
+            mock_server
+                .inject_responses(
+                    TABLE_NAME,
+                    vec![
+                        MockFlightResponse::Error {
+                            status: Status::unavailable("Connection lost"),
+                            delay_ms: 0,
+                        },
+                        MockFlightResponse::FailSetup {
+                            status: Status::unavailable("Reconnect unavailable"),
+                        },
+                        MockFlightResponse::FailSetup {
+                            status: Status::unavailable("Reconnect unavailable"),
+                        },
+                    ],
+                )
+                .await;
+
+            let sdk = ZerobusSdk::builder()
+                .endpoint(server_url.clone())
+                .unity_catalog_url("https://mock-uc.com")
+                .tls_config(Arc::new(NoTlsConfig))
+                .build()?;
+
+            let stream = sdk
+                .stream_builder()
+                .table(TABLE_NAME)
+                .headers_provider(Arc::new(TestHeadersProvider::default()))
+                .arrow(schema.clone())
+                .recovery(true)
+                .recovery_backoff_ms(0)
+                .recovery_retries(2)
+                .flush_timeout_ms(5000)
+                .build_arrow()
+                .await?;
+
+            let batch = create_test_record_batch(schema, vec![1], vec![Some("a")]);
+            let offset = stream.ingest_batch(batch).await?;
+
+            let err = stream
+                .wait_for_offset(offset)
+                .await
+                .expect_err("exhausted retries must surface an error");
+            assert!(
+                err.to_string().contains("Reconnect unavailable"),
+                "must surface the real reconnect error, got: {}",
+                err
+            );
+            assert!(
+                err.is_retryable(),
+                "the surfaced error must keep its retryable classification, got: {}",
+                err
+            );
+
+            Ok(())
+        }
+
+        /// A reconnect auth rejection must invalidate cached credentials and retry (so the
+        /// next attempt can mint a fresh token) rather than terminating the stream.
+        #[tokio::test]
+        async fn test_reconnect_auth_rejection_invalidates_and_retries(
+        ) -> Result<(), Box<dyn std::error::Error>> {
+            setup_tracing();
+            info!("Starting test_reconnect_auth_rejection_invalidates_and_retries");
+
+            let (mock_server, server_url) = start_mock_flight_server().await?;
+            let schema = create_test_arrow_schema();
+
+            // conn1: retriable error -> recovery. conn2: auth-rejected setup -> invalidate +
+            // retry. conn3: no scripted response -> setup succeeds -> the stream recovers.
+            mock_server
+                .inject_responses(
+                    TABLE_NAME,
+                    vec![
+                        MockFlightResponse::Error {
+                            status: Status::unavailable("Connection lost"),
+                            delay_ms: 0,
+                        },
+                        MockFlightResponse::FailSetup {
+                            status: Status::unauthenticated("Token expired"),
+                        },
+                    ],
+                )
+                .await;
+
+            let invalidations = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+            let provider = Arc::new(CountingHeadersProvider {
+                invalidations: Arc::clone(&invalidations),
+            });
+
+            let sdk = ZerobusSdk::builder()
+                .endpoint(server_url.clone())
+                .unity_catalog_url("https://mock-uc.com")
+                .tls_config(Arc::new(NoTlsConfig))
+                .build()?;
+
+            let stream = sdk
+                .stream_builder()
+                .table(TABLE_NAME)
+                .headers_provider(provider)
+                .arrow(schema.clone())
+                .recovery(true)
+                .recovery_backoff_ms(0)
+                .recovery_retries(5)
+                .flush_timeout_ms(5000)
+                .build_arrow()
+                .await?;
+
+            let batch = create_test_record_batch(schema, vec![1], vec![Some("a")]);
+            let offset = stream.ingest_batch(batch).await?;
+
+            // The auth rejection must not terminate the stream: recovery re-mints and the
+            // batch is eventually acknowledged.
+            tokio::time::timeout(
+                std::time::Duration::from_secs(5),
+                stream.wait_for_offset(offset),
+            )
+            .await
+            .expect("recovery after auth re-mint should complete")?;
+
+            // Exactly one invalidation: the single auth rejection on conn2 (conn1's
+            // retriable error and conn3's successful setup must not invalidate).
+            assert_eq!(
+                invalidations.load(std::sync::atomic::Ordering::SeqCst),
+                1,
+                "auth rejection must invalidate cached credentials exactly once"
+            );
+
+            Ok(())
+        }
+
+        /// If reconnect auth rejections persist past the retry budget, the stream must
+        /// terminate with the original auth error rather than a synthetic one.
+        #[tokio::test]
+        async fn test_reconnect_auth_rejection_exhausted_surfaces_original(
+        ) -> Result<(), Box<dyn std::error::Error>> {
+            setup_tracing();
+            info!("Starting test_reconnect_auth_rejection_exhausted_surfaces_original");
+
+            let (mock_server, server_url) = start_mock_flight_server().await?;
+            let schema = create_test_arrow_schema();
+
+            // conn1: retriable error -> recovery. conn2 & conn3: auth-rejected setup. With
+            // 2 retries, both reconnect attempts fail auth and the stream terminates.
+            mock_server
+                .inject_responses(
+                    TABLE_NAME,
+                    vec![
+                        MockFlightResponse::Error {
+                            status: Status::unavailable("Connection lost"),
+                            delay_ms: 0,
+                        },
+                        MockFlightResponse::FailSetup {
+                            status: Status::unauthenticated("Token expired"),
+                        },
+                        MockFlightResponse::FailSetup {
+                            status: Status::unauthenticated("Token expired"),
+                        },
+                    ],
+                )
+                .await;
+
+            let invalidations = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+            let provider = Arc::new(CountingHeadersProvider {
+                invalidations: Arc::clone(&invalidations),
+            });
+
+            let sdk = ZerobusSdk::builder()
+                .endpoint(server_url.clone())
+                .unity_catalog_url("https://mock-uc.com")
+                .tls_config(Arc::new(NoTlsConfig))
+                .build()?;
+
+            let stream = sdk
+                .stream_builder()
+                .table(TABLE_NAME)
+                .headers_provider(provider)
+                .arrow(schema.clone())
+                .recovery(true)
+                .recovery_backoff_ms(0)
+                .recovery_retries(2)
+                .flush_timeout_ms(5000)
+                .build_arrow()
+                .await?;
+
+            let batch = create_test_record_batch(schema, vec![1], vec![Some("a")]);
+            let offset = stream.ingest_batch(batch).await?;
+
+            let err = stream
+                .wait_for_offset(offset)
+                .await
+                .expect_err("exhausted auth retries must surface an error");
+            assert!(
+                err.to_string().contains("Token expired"),
+                "must surface the original auth error, got: {}",
+                err
+            );
+            assert!(
+                !err.is_retryable(),
+                "the surfaced auth error must keep its non-retryable classification, got: {}",
+                err
+            );
+            // Each of the two auth-rejected reconnect attempts invalidates once.
+            assert_eq!(
+                invalidations.load(std::sync::atomic::Ordering::SeqCst),
+                2,
+                "each auth-rejected reconnect attempt must invalidate credentials"
+            );
+
+            Ok(())
+        }
+
+        /// The auth-retry override must not leak: an auth rejection (which invalidates and
+        /// retries) followed by a non-auth, non-retryable reconnect failure must terminate
+        /// immediately on the second failure rather than being retried.
+        #[tokio::test]
+        async fn test_reconnect_auth_retry_flag_does_not_leak(
+        ) -> Result<(), Box<dyn std::error::Error>> {
+            setup_tracing();
+            info!("Starting test_reconnect_auth_retry_flag_does_not_leak");
+
+            let (mock_server, server_url) = start_mock_flight_server().await?;
+            let schema = create_test_arrow_schema();
+
+            // conn1: retriable error -> recovery. conn2: auth rejection (invalidate + retry).
+            // conn3: non-auth, non-retryable rejection -> must terminate immediately.
+            mock_server
+                .inject_responses(
+                    TABLE_NAME,
+                    vec![
+                        MockFlightResponse::Error {
+                            status: Status::unavailable("Connection lost"),
+                            delay_ms: 0,
+                        },
+                        MockFlightResponse::FailSetup {
+                            status: Status::unauthenticated("Token expired"),
+                        },
+                        MockFlightResponse::FailSetup {
+                            status: Status::invalid_argument("Reconnect rejected"),
+                        },
+                    ],
+                )
+                .await;
+
+            let invalidations = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+            let provider = Arc::new(CountingHeadersProvider {
+                invalidations: Arc::clone(&invalidations),
+            });
+
+            let sdk = ZerobusSdk::builder()
+                .endpoint(server_url.clone())
+                .unity_catalog_url("https://mock-uc.com")
+                .tls_config(Arc::new(NoTlsConfig))
+                .build()?;
+
+            let stream = sdk
+                .stream_builder()
+                .table(TABLE_NAME)
+                .headers_provider(provider)
+                .arrow(schema.clone())
+                .recovery(true)
+                .recovery_backoff_ms(0)
+                // Generous budget: termination must come from the non-retryable
+                // classification, not from exhausting retries.
+                .recovery_retries(5)
+                .flush_timeout_ms(5000)
+                .build_arrow()
+                .await?;
+
+            let batch = create_test_record_batch(schema, vec![1], vec![Some("a")]);
+            let offset = stream.ingest_batch(batch).await?;
+
+            let err = stream
+                .wait_for_offset(offset)
+                .await
+                .expect_err("non-retryable reconnect failure after an auth retry must terminate");
+            assert!(
+                err.to_string().contains("Reconnect rejected"),
+                "must surface the non-auth reconnect error, got: {}",
+                err
+            );
+            assert!(
+                !err.is_retryable(),
+                "the non-auth error must terminate (retry override did not leak), got: {}",
+                err
+            );
+            // Only the auth rejection invalidated; the non-auth failure did not.
+            assert_eq!(
+                invalidations.load(std::sync::atomic::Ordering::SeqCst),
+                1,
+                "only the auth-rejected attempt should invalidate credentials"
+            );
+
+            Ok(())
+        }
+
+        /// flush() on a closed stream with nothing ingested returns a closed-stream error
+        /// rather than panicking or hanging.
+        #[tokio::test]
+        async fn test_flush_on_closed_empty_stream_errors() -> Result<(), Box<dyn std::error::Error>>
+        {
+            setup_tracing();
+            info!("Starting test_flush_on_closed_empty_stream_errors");
+
+            let (mock_server, server_url) = start_mock_flight_server().await?;
+            let schema = create_test_arrow_schema();
+            mock_server.inject_responses(TABLE_NAME, vec![]).await;
+
+            let sdk = ZerobusSdk::builder()
+                .endpoint(server_url.clone())
+                .unity_catalog_url("https://mock-uc.com")
+                .tls_config(Arc::new(NoTlsConfig))
+                .build()?;
+
+            let mut stream = sdk
+                .stream_builder()
+                .table(TABLE_NAME)
+                .headers_provider(Arc::new(TestHeadersProvider::default()))
+                .arrow(schema.clone())
+                .build_arrow()
+                .await?;
+
+            // Nothing ingested; close, then flush must report the closed stream.
+            stream.close().await?;
+            let err = stream
+                .flush()
+                .await
+                .expect_err("flush on a closed stream must error");
+            assert!(
+                err.to_string().contains("closed"),
+                "expected a closed-stream error, got: {}",
+                err
+            );
+
+            Ok(())
+        }
+
         #[tokio::test]
         async fn test_schema_mismatch_rejected() -> Result<(), Box<dyn std::error::Error>> {
             setup_tracing();
@@ -411,10 +1080,16 @@ mod arrow_flight_tests {
             let (mock_server, server_url) = start_mock_flight_server().await?;
             let schema = create_test_arrow_schema();
 
+            // Delay the ack far past the ack timeout so the client's ack-timeout branch
+            // fires (rather than scripting an EOF/close, which is a different terminal arm).
             mock_server
                 .inject_responses(
                     TABLE_NAME,
-                    vec![MockFlightResponse::CloseStream { delay_ms: 0 }],
+                    vec![MockFlightResponse::BatchAck {
+                        ack_up_to_offset: 0,
+                        delay_ms: 10_000,
+                        ack_up_to_records: 1,
+                    }],
                 )
                 .await;
 
@@ -438,8 +1113,15 @@ mod arrow_flight_tests {
             let batch = create_test_record_batch(schema, vec![1], vec![Some("test")]);
             let offset = stream.ingest_batch(batch).await?;
 
-            let result = stream.wait_for_offset(offset).await;
-            assert!(result.is_err(), "Expected timeout error");
+            let err = stream
+                .wait_for_offset(offset)
+                .await
+                .expect_err("Expected ack-timeout error");
+            assert!(
+                err.to_string().contains("Server ack timeout"),
+                "expected the ack-timeout error, got: {}",
+                err
+            );
 
             Ok(())
         }
@@ -945,10 +1627,262 @@ mod arrow_flight_tests {
 
             Ok(())
         }
+
+        /// A partially-acked (auto-chunked) batch must be returned as only its un-acked
+        /// suffix on terminal failure, not the whole batch — otherwise manual retry
+        /// re-sends the already-durable prefix.
+        #[tokio::test]
+        async fn test_get_unacked_batches_slices_partially_acked(
+        ) -> Result<(), Box<dyn std::error::Error>> {
+            setup_tracing();
+            info!("Starting test_get_unacked_batches_slices_partially_acked");
+
+            let (mock_server, server_url) = start_mock_flight_server().await?;
+            let schema = create_test_arrow_schema();
+
+            // Batch A (offset 0, 3 rows): only 1 record acked. Batch B (offset 1)
+            // arrival triggers a permanent error, closing the stream (recovery off).
+            mock_server
+                .inject_responses(
+                    TABLE_NAME,
+                    vec![
+                        MockFlightResponse::BatchAck {
+                            ack_up_to_offset: 0,
+                            delay_ms: 0,
+                            ack_up_to_records: 1,
+                        },
+                        MockFlightResponse::Error {
+                            status: tonic::Status::invalid_argument("Permanent failure"),
+                            delay_ms: 0,
+                        },
+                    ],
+                )
+                .await;
+
+            let sdk = ZerobusSdk::builder()
+                .endpoint(server_url.clone())
+                .unity_catalog_url("https://mock-uc.com")
+                .tls_config(Arc::new(NoTlsConfig))
+                .build()?;
+
+            let mut stream = sdk
+                .stream_builder()
+                .table(TABLE_NAME)
+                .headers_provider(Arc::new(TestHeadersProvider::default()))
+                .arrow(schema.clone())
+                .recovery(false)
+                .build_arrow()
+                .await?;
+
+            let batch_a = create_test_record_batch(
+                schema.clone(),
+                vec![1, 2, 3],
+                vec![Some("a"), Some("b"), Some("c")],
+            );
+            stream.ingest_batch(batch_a).await?;
+            let batch_b = create_test_record_batch(schema.clone(), vec![4], vec![Some("d")]);
+            let offset_b = stream.ingest_batch(batch_b).await?;
+
+            // Wait until the terminal error closes the stream, then retrieve unacked.
+            let _ = stream.wait_for_offset(offset_b).await;
+            let _ = stream.close().await;
+
+            let unacked = stream.get_unacked_batches().await?;
+            // Batch A ([1,2,3]) had 1 record acked -> un-acked suffix is ids [2, 3].
+            // Batch B is fully un-acked -> id [4].
+            assert_eq!(unacked.len(), 2, "expected sliced A suffix + full B");
+            assert_eq!(
+                batch_ids(&unacked[0]),
+                vec![2, 3],
+                "batch A must be sliced to its un-acked suffix (ids [2, 3])"
+            );
+            assert_eq!(
+                batch_ids(&unacked[1]),
+                vec![4],
+                "batch B must be fully retained"
+            );
+
+            Ok(())
+        }
+
+        /// Retrieval must be idempotent: because `get_unacked_batches` drains still-pending
+        /// batches into the failed set, calling it repeatedly must return the same sliced
+        /// snapshot rather than dropping batches on the second call.
+        #[tokio::test]
+        async fn test_get_unacked_batches_idempotent() -> Result<(), Box<dyn std::error::Error>> {
+            setup_tracing();
+            info!("Starting test_get_unacked_batches_idempotent");
+
+            let (mock_server, server_url) = start_mock_flight_server().await?;
+            let schema = create_test_arrow_schema();
+
+            mock_server
+                .inject_responses(
+                    TABLE_NAME,
+                    vec![
+                        MockFlightResponse::BatchAck {
+                            ack_up_to_offset: 0,
+                            delay_ms: 0,
+                            ack_up_to_records: 1,
+                        },
+                        MockFlightResponse::Error {
+                            status: tonic::Status::invalid_argument("Permanent failure"),
+                            delay_ms: 0,
+                        },
+                    ],
+                )
+                .await;
+
+            let sdk = ZerobusSdk::builder()
+                .endpoint(server_url.clone())
+                .unity_catalog_url("https://mock-uc.com")
+                .tls_config(Arc::new(NoTlsConfig))
+                .build()?;
+
+            let mut stream = sdk
+                .stream_builder()
+                .table(TABLE_NAME)
+                .headers_provider(Arc::new(TestHeadersProvider::default()))
+                .arrow(schema.clone())
+                .recovery(false)
+                .build_arrow()
+                .await?;
+
+            let batch_a = create_test_record_batch(
+                schema.clone(),
+                vec![1, 2, 3],
+                vec![Some("a"), Some("b"), Some("c")],
+            );
+            stream.ingest_batch(batch_a).await?;
+            let batch_b = create_test_record_batch(schema.clone(), vec![4], vec![Some("d")]);
+            let offset_b = stream.ingest_batch(batch_b).await?;
+            let _ = stream.wait_for_offset(offset_b).await;
+            let _ = stream.close().await;
+
+            let first: Vec<Vec<i64>> = stream
+                .get_unacked_batches()
+                .await?
+                .iter()
+                .map(batch_ids)
+                .collect();
+            let second: Vec<Vec<i64>> = stream
+                .get_unacked_batches()
+                .await?
+                .iter()
+                .map(batch_ids)
+                .collect();
+
+            assert_eq!(
+                first,
+                vec![vec![2, 3], vec![4]],
+                "first snapshot should be sliced A suffix (ids [2,3]) + full B (id [4])"
+            );
+            assert_eq!(
+                first, second,
+                "repeated get_unacked_batches must be idempotent"
+            );
+
+            Ok(())
+        }
     }
 
     mod recovery_tests {
         use super::*;
+
+        /// close() during the reconnect rebuild window must slice with the pre-reconnect
+        /// watermark. A barrier parks reconnect after the new connection is established but
+        /// before pending ranges/watermark are rebuilt; close() then reaps the parked
+        /// supervisor and drains with the pre-reconnect watermark/ranges, so A is sliced to
+        /// its un-acked suffix (ids [2, 3]) and B is retained whole.
+        #[tokio::test]
+        async fn test_close_during_reconnect_rebuild_window_slices_correctly(
+        ) -> Result<(), Box<dyn std::error::Error>> {
+            setup_tracing();
+            info!("Starting test_close_during_reconnect_rebuild_window_slices_correctly");
+
+            let (mock_server, server_url) = start_mock_flight_server().await?;
+            let schema = create_test_arrow_schema();
+
+            // Partially ack A (1 of 3 records), then a retriable error on B triggers the
+            // reconnect we park at the rebuild barrier.
+            mock_server
+                .inject_responses(
+                    TABLE_NAME,
+                    vec![
+                        MockFlightResponse::BatchAck {
+                            ack_up_to_offset: 0,
+                            delay_ms: 0,
+                            ack_up_to_records: 1,
+                        },
+                        MockFlightResponse::Error {
+                            status: tonic::Status::unavailable("Connection lost"),
+                            delay_ms: 0,
+                        },
+                    ],
+                )
+                .await;
+
+            let sdk = ZerobusSdk::builder()
+                .endpoint(server_url.clone())
+                .unity_catalog_url("https://mock-uc.com")
+                .tls_config(Arc::new(NoTlsConfig))
+                .build()?;
+
+            let mut stream = sdk
+                .stream_builder()
+                .table(TABLE_NAME)
+                .headers_provider(Arc::new(TestHeadersProvider::default()))
+                .arrow(schema.clone())
+                .recovery(true)
+                .recovery_backoff_ms(0)
+                .recovery_retries(5)
+                // Short flush timeout so close()'s flush returns quickly while parked.
+                .flush_timeout_ms(200)
+                .build_arrow()
+                .await?;
+
+            // Arm two seams: one to confirm A's partial ack has been applied, one to park
+            // the next reconnect right before it rebuilds pending ranges.
+            let ack_applied = stream.arm_ack_applied_notify().await;
+            let (reached, _proceed) = stream.arm_reconnect_rebuild_barrier().await;
+
+            let batch_a = create_test_record_batch(
+                schema.clone(),
+                vec![1, 2, 3],
+                vec![Some("a"), Some("b"), Some("c")],
+            );
+            stream.ingest_batch(batch_a).await?;
+
+            // Wait until A's partial ack (1 of 3 records) is applied, so
+            // last_acked_records == 1 before the error triggers reconnect. Otherwise the
+            // ack and error can arrive back-to-back and the drain would see watermark 0.
+            tokio::time::timeout(std::time::Duration::from_secs(5), ack_applied.notified())
+                .await
+                .expect("A's partial ack should be applied");
+
+            let batch_b = create_test_record_batch(schema.clone(), vec![4], vec![Some("d")]);
+            stream.ingest_batch(batch_b).await?;
+
+            // Wait until reconnect is parked at the rebuild barrier: connection is up, but
+            // ranges/watermark are not yet rebuilt (watermark still the pre-reconnect 1).
+            tokio::time::timeout(std::time::Duration::from_secs(5), reached.notified())
+                .await
+                .expect("reconnect should reach the rebuild barrier");
+
+            // close() reaps the parked supervisor and drains with the pre-rebuild state.
+            let _ = stream.close().await;
+
+            let unacked = stream.get_unacked_batches().await?;
+            assert_eq!(unacked.len(), 2, "expected sliced A suffix + full B");
+            assert_eq!(
+                batch_ids(&unacked[0]),
+                vec![2, 3],
+                "A must be sliced with the pre-reconnect watermark (ids [2, 3])"
+            );
+            assert_eq!(batch_ids(&unacked[1]), vec![4], "B fully retained");
+
+            Ok(())
+        }
 
         /// Regression test for the mock contract: `ack_up_to_records` must be
         /// connection-relative. A retriable error forces a second DoPut connection

@@ -26,6 +26,28 @@ impl HeadersProvider for TestHeadersProvider {
     }
 }
 
+/// A headers provider that counts `invalidate()` calls, for asserting credential re-mint
+/// behavior on auth failures.
+#[derive(Default)]
+pub struct CountingHeadersProvider {
+    pub invalidations: Arc<std::sync::atomic::AtomicUsize>,
+}
+
+#[async_trait]
+impl HeadersProvider for CountingHeadersProvider {
+    async fn get_headers(&self) -> ZerobusResult<HashMap<&'static str, String>> {
+        let mut headers = HashMap::new();
+        headers.insert("authorization", "Bearer test_token".to_string());
+        headers.insert("x-databricks-zerobus-table-name", "test_table".to_string());
+        Ok(headers)
+    }
+
+    async fn invalidate(&self) {
+        self.invalidations
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    }
+}
+
 /// Helper function to create a simple descriptor proto for testing.
 pub fn create_test_descriptor_proto() -> Option<prost_types::DescriptorProto> {
     Some(prost_types::DescriptorProto {
