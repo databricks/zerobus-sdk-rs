@@ -436,6 +436,14 @@ impl<'a> StreamBuilder<'a> {
     pub async fn build_arrow(self) -> ZerobusResult<ZerobusArrowStream> {
         self.validate()?;
 
+        // Arrow-only: a zero bound deadlocks ingest / panics the channel. Not in the
+        // shared validate() since it's irrelevant to JSON/proto build().
+        if self.arrow_config.max_inflight_batches == 0 {
+            return Err(ZerobusError::InvalidArgument(
+                "max_inflight_batches must be greater than 0".into(),
+            ));
+        }
+
         // `max_ingest_payload_bytes` only applies to gRPC streams; warn if the
         // user changed it from the default before building an Arrow stream.
         if self.grpc_config.max_ingest_payload_bytes
