@@ -17,9 +17,9 @@ type item struct {
 }
 
 // buffer is the bounded, offset-assigning queue between the caller's Ingest
-// calls and the sender goroutine. It is the Go equivalent of Rust's
-// LandingZone: callers enqueue already-encoded messages; the sender observes
-// them (moves to in-flight); acks cause them to be discarded.
+// calls and the sender goroutine. Callers enqueue already-encoded messages;
+// the sender observes them (moves to in-flight); acks cause them to be
+// discarded.
 //
 // Concurrency model:
 //   - Many goroutines may call enqueue concurrently.

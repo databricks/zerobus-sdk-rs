@@ -12,7 +12,7 @@ import (
 	"github.com/databricks/zerobus-sdk/purego/internal/zerobuspb"
 )
 
-// Default config constants matching the Rust SDK (stream_options.rs).
+// Default config constants for the ingestion core.
 const (
 	DefaultMaxInflight      = 1_000_000
 	DefaultRecoveryRetries  = 4
@@ -463,8 +463,7 @@ func (cs *CoreStream) sender(senderCtx context.Context, stream *transport.Stream
 //
 // Each Recv call runs on its own goroutine so we can race it against the
 // lack-of-ack timer even when the underlying transport Recv is blocking (e.g. a
-// fake in tests, or a stalled server). This mirrors Rust's tokio::select!
-// pattern in the receiver task.
+// fake in tests, or a stalled server).
 func (cs *CoreStream) receiver(stream *transport.Stream, errCh chan<- error) {
 	type recvResult struct {
 		resp *zerobuspb.EphemeralStreamResponse

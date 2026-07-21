@@ -186,23 +186,24 @@ func confirmCreateStream(resp *zerobuspb.EphemeralStreamResponse) (string, error
 	return id, nil
 }
 
-// StreamRPC is the wire interface that Stream wraps. It is satisfied by the
-// generated gRPC bidirectional streaming client and by test fakes.
-type StreamRPC interface {
+// FakeStreamRPC is the wire interface a test fake must satisfy to be wrapped by
+// [NewFakeStreamForTesting]. It exists only for tests in other internal
+// packages that must supply a fake RPC; production callers do not use it.
+type FakeStreamRPC interface {
 	Send(*zerobuspb.EphemeralStreamRequest) error
 	Recv() (*zerobuspb.EphemeralStreamResponse, error)
 	CloseSend() error
 }
 
-// NewStreamFromRPC wraps an already-established RPC as a Stream, skipping the
-// handshake. Intended for tests that supply a fake RPC implementation.
+// NewFakeStreamForTesting wraps a test fake as a Stream, skipping the handshake.
+// It is exported because Go tests in other internal packages cannot reach
+// Stream's unexported fields; production code must not use it.
 //
-// Close cancels the stream (abrupt abort). If the RPC implements an Abort()
-// method it is used so the fake can model gRPC's context-cancel — distinct from
-// CloseSend's half-close — and unblock a Recv blocked on a channel. Otherwise
-// Close falls back to CloseSend, which suffices for fakes whose Recv returns
-// io.EOF once the send side is half-closed.
-func NewStreamFromRPC(rpc StreamRPC) *Stream {
+// Close cancels the stream (abrupt abort). If the RPC implements Abort() the
+// fake can model gRPC's context-cancel (distinct from CloseSend's half-close)
+// and unblock a Recv parked on a channel. Otherwise Close falls back to
+// CloseSend, which suffices for fakes whose Recv returns io.EOF on half-close.
+func NewFakeStreamForTesting(rpc FakeStreamRPC) *Stream {
 	s := &Stream{}
 	s.rpc = rpc
 	if a, ok := rpc.(interface{ Abort() }); ok {

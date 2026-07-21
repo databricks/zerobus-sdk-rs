@@ -60,7 +60,7 @@ func (cs *CoreStream) supervise(ctx context.Context) {
 
 		if runErr == nil {
 			// Server closed the stream cleanly (EOF). Treat as a retryable
-			// disconnect and recover, matching Rust's behaviour.
+			// disconnect and recover.
 			runErr = fmt.Errorf("stream: server closed the stream")
 		}
 
@@ -114,10 +114,20 @@ func (cs *CoreStream) waitPause(ctx context.Context, serverDuration time.Duratio
 	}
 }
 
+// retryableError is any error that self-classifies its retryability. Errors
+// from the transport and auth layers (e.g. TokenError from an OAuth mint)
+// implement it; the supervisor honors their verdict rather than blindly
+// retrying every non-context error. Structural so we don't have to import
+// auth or transport just to name their concrete types.
+type retryableError interface {
+	IsRetryable() bool
+}
+
 // isRetryable reports whether err represents a transient failure that warrants
-// a stream reconnect. Context cancellation and stream-open validation errors
-// (wrong table name, bad record type) are not retryable; transport-level
-// failures (connection reset, server going away) are.
+// a stream reconnect. Context cancellation, stream-open validation errors
+// (wrong table name, bad record type), and errors that self-report as
+// non-retryable (e.g. a revoked-credentials OAuth mint failure) are not
+// retryable; transport-level failures (connection reset, server going away) are.
 func isRetryable(err error) bool {
 	if err == nil {
 		return false
@@ -135,6 +145,12 @@ func isRetryable(err error) bool {
 	var ve *validationError
 	if errors.As(err, &ve) {
 		return false
+	}
+	// Honor any layer's self-reported retryability verdict (e.g. OAuth
+	// TokenError). Walk the unwrap chain so a wrapped mint failure is still seen.
+	var re retryableError
+	if errors.As(err, &re) {
+		return re.IsRetryable()
 	}
 	// All other errors (network failures, server resets, auth rejections after
 	// the stream was open) are considered retryable; the supervisor's retry cap

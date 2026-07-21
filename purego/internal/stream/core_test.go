@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"google.golang.org/protobuf/proto"
+	"google.golang.org/protobuf/types/known/durationpb"
 
 	"github.com/databricks/zerobus-sdk/purego/internal/transport"
 	"github.com/databricks/zerobus-sdk/purego/internal/zerobuspb"
@@ -18,7 +19,7 @@ import (
 
 // ---- fake transport helpers ------------------------------------------------
 
-// fakeRPC is a minimal in-process bidi stream satisfying transport.StreamRPC.
+// fakeRPC is a minimal in-process bidi stream satisfying transport.FakeStreamRPC.
 // It lets tests control exactly what acks the receiver sees without a real
 // gRPC server. close() closes the recvs channel so Recv returns io.EOF,
 // unblocking the receiver goroutine just like a real gRPC stream close would.
@@ -93,6 +94,18 @@ func (f *fakeRPC) closeSignal() {
 	}
 }
 
+// closeSignalWithDuration sends a CloseStreamSignal carrying the given
+// server-requested pause duration.
+func (f *fakeRPC) closeSignalWithDuration(d time.Duration) {
+	f.recvs <- &zerobuspb.EphemeralStreamResponse{
+		Payload: &zerobuspb.EphemeralStreamResponse_CloseStreamSignal{
+			CloseStreamSignal: &zerobuspb.CloseStreamSignal{
+				Duration: durationpb.New(d),
+			},
+		},
+	}
+}
+
 // fakeOpener wraps a fakeRPC as a transport.Opener by building a rawStream
 // from it. Each call to Open returns the same underlying fakeRPC so tests
 // can send acks from it.
@@ -126,7 +139,7 @@ func (fo *fakeOpener) Open(_ context.Context, _ transport.StreamParams) (*transp
 	}
 	rpc := fo.rpcs[fo.idx]
 	fo.idx++
-	return transport.NewStreamFromRPC(rpc), nil
+	return transport.NewFakeStreamForTesting(rpc), nil
 }
 
 // gracefulFakeRPC models real gRPC teardown semantics more faithfully than
@@ -213,7 +226,7 @@ func (f *gracefulFakeRPC) ack(offset int64) {
 type gracefulOpener struct{ rpc *gracefulFakeRPC }
 
 func (o *gracefulOpener) Open(_ context.Context, _ transport.StreamParams) (*transport.Stream, error) {
-	return transport.NewStreamFromRPC(o.rpc), nil
+	return transport.NewFakeStreamForTesting(o.rpc), nil
 }
 
 // ---- recording ack callback ------------------------------------------------
@@ -683,6 +696,32 @@ func TestCoreStreamInvalidParamsNotRetried(t *testing.T) {
 	}
 }
 
+// nonRetryableSelfClassifying is an Open error that self-reports non-retryable
+// via the IsRetryable() interface — mirroring how the auth layer's TokenError
+// signals a permanent failure (revoked creds, invalid_client).
+type nonRetryableSelfClassifying struct{ msg string }
+
+func (e *nonRetryableSelfClassifying) Error() string     { return e.msg }
+func (e *nonRetryableSelfClassifying) IsRetryable() bool { return false }
+
+// A layer-reported non-retryable error (e.g. an OAuth TokenError with
+// retryable=false) must stop the supervisor rather than burn the recovery
+// budget on a failure that can't succeed on retry.
+func TestCoreStreamSelfClassifiedNonRetryableErrorTerminates(t *testing.T) {
+	fo := &fakeOpener{openErr: &nonRetryableSelfClassifying{msg: "auth: oauth: HTTP 401: invalid_client"}}
+
+	cfg := testConfig()
+	cfg.RecoveryRetries = 5 // would retry 5x if this were classified retryable
+	cs := NewCoreStream(testParams(), cfg, fo, jsonEncoder{}, offsetAckModel{}, nil)
+	t.Cleanup(func() { cs.Close() })
+
+	waitCondition(t, cs.IsClosed, 2*time.Second)
+
+	if n := fo.openCount(); n != 1 {
+		t.Fatalf("self-classified non-retryable error should not be retried, got %d Open attempts", n)
+	}
+}
+
 // TestCoreStreamPauseSignalReconnectsWithoutConsumingRetries verifies that a
 // server CloseStreamSignal is treated as a pause-then-reconnect: the client
 // reconnects on a fresh stream, re-sends the unacked record, and does NOT count
@@ -720,5 +759,51 @@ func TestCoreStreamPauseSignalReconnectsWithoutConsumingRetries(t *testing.T) {
 	}
 	if cs.IsClosed() {
 		t.Fatal("stream should be live after a pause, not terminal")
+	}
+}
+
+// StreamPausedMaxWait caps the pause honored on a server CloseStreamSignal to
+// min(cap, server-requested). A large server-requested duration paired with a
+// small client cap must yield a reconnect within the cap, not the server value.
+func TestCoreStreamPauseSignalRespectsStreamPausedMaxWaitCap(t *testing.T) {
+	rpc1 := newFakeRPC()
+	rpc2 := newFakeRPC()
+	fo := newFakeOpener(rpc1, rpc2)
+
+	cfg := testConfig()
+	cfg.RecoveryBackoff = 0
+	// Server will ask for a long pause; the client cap is much smaller.
+	cfg.StreamPausedMaxWait = 25 * time.Millisecond
+	serverPause := 5 * time.Second
+
+	cs := NewCoreStream(testParams(), cfg, fo, jsonEncoder{}, offsetAckModel{}, nil)
+	t.Cleanup(func() { cs.Close() })
+
+	off, err := cs.Ingest(context.Background(), []byte(`{}`))
+	if err != nil {
+		t.Fatalf("Ingest: %v", err)
+	}
+	waitCondition(t, func() bool { return len(rpc1.sends) > 0 }, time.Second)
+	<-rpc1.sends
+
+	// Server signals a very long pause; cap must win.
+	start := time.Now()
+	rpc1.closeSignalWithDuration(serverPause)
+
+	// Reconnect (rpc2 receives the re-sent record) must land close to the cap,
+	// well before the server's requested duration.
+	waitCondition(t, func() bool { return len(rpc2.sends) > 0 }, time.Second)
+	elapsed := time.Since(start)
+	if elapsed >= serverPause/4 {
+		t.Fatalf("reconnect took %v; cap of %v was not honored (server asked %v)",
+			elapsed, cfg.StreamPausedMaxWait, serverPause)
+	}
+	<-rpc2.sends
+	rpc2.ack(off)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	if err := cs.WaitForOffset(ctx, off); err != nil {
+		t.Fatalf("WaitForOffset: %v", err)
 	}
 }
