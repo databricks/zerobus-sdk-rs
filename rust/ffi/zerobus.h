@@ -497,6 +497,15 @@ struct CZerobusStream *zerobus_sdk_create_stream_with_headers_provider(struct CZ
  * callback is invoked exactly once with either a non-null stream pointer and a
  * success result, or a null stream pointer and a failure result. The SDK
  * handle must remain valid until the callback runs.
+ *
+ * OWNERSHIP: unlike the synchronous `zerobus_sdk_create_stream_with_headers_provider`,
+ * this variant exposes no `free_user_data` callback, so it does NOT take
+ * ownership of `user_data` — the provider is built with `free_user_data = None`
+ * and the caller stays responsible for freeing `user_data` (only after the
+ * completion callback has fired, since a recovery `get_headers` may still run).
+ * No wrapper currently calls this; before one adopts it, add a `free_user_data`
+ * parameter and hand ownership across (as the sync path does), or it will
+ * reintroduce the recovery-vs-teardown use-after-free this change fixes.
  */
 bool zerobus_sdk_create_stream_with_headers_provider_async(struct CZerobusSdk *sdk,
                                                            const char *table_name,

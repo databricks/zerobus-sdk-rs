@@ -427,6 +427,14 @@ func goGetHeaders(userData unsafe.Pointer, headers **C.CHeader, count *C.uintptr
 func goFreeHeadersProvider(userData unsafe.Pointer) {
 	// The FFI owns the provider handle and calls this once, after any in-flight
 	// get_headers has returned. Delete the cgo.Handle to release the Go object.
+	//
+	// A zero handle can't occur on the ownership-transfer path (cgo.NewHandle
+	// never returns 0, and we only pass real handles to the FFI), but guard
+	// anyway: Delete() panics on a zero/invalid handle, which would unwind
+	// across the C boundary.
+	if userData == nil {
+		return
+	}
 	cgo.Handle(userData).Delete()
 }
 
