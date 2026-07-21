@@ -515,8 +515,8 @@ func TestParseExpiresIn(t *testing.T) {
 	}
 }
 
-// A non-integer expires_in must not fail the mint: the token is returned, and
-// (being unparseable/absent) not cached, so a second call mints again.
+// A non-integer but parseable expires_in (quoted string, float) must not fail
+// the mint, and must be cached like a regular integer TTL.
 func TestOAuthTokenProviderToleratesNonIntExpiresIn(t *testing.T) {
 	for _, raw := range []string{`"3600"`, `3600.0`} {
 		t.Run(raw, func(t *testing.T) {
@@ -557,6 +557,18 @@ func TestOAuthTokenProviderUnparseableExpiresInIsNotCached(t *testing.T) {
 	}
 	if got := srv.calls.Load(); got != 2 {
 		t.Fatalf("want 2 server calls (uncached), got %d", got)
+	}
+}
+
+// A whitespace-only access_token is unusable: it must be rejected rather than
+// shipped as "Bearer    ".
+func TestOAuthTokenProviderRejectsBlankAccessToken(t *testing.T) {
+	srv := &tokenServer{accessToken: "   ", expiresIn: 3600}
+	p, ts := newTestProvider(t, srv)
+	defer ts.Close()
+
+	if _, err := p.Token(context.Background(), "cat.sch.tbl"); err == nil {
+		t.Fatal("want error for whitespace-only access_token, got nil")
 	}
 }
 
@@ -602,12 +614,45 @@ func TestValidateEndpoint(t *testing.T) {
 		"://nonsense",
 		"https://",  // scheme but no host
 		"https:///", // no host, only a path
-		"https://workspace.databricks.com?tenant=x", // query would swallow the /oidc/v1/token suffix
-		"https://workspace.databricks.com#frag",     // fragment would drop the suffix
+		"https://workspace.databricks.com?tenant=x",  // query would swallow the /oidc/v1/token suffix
+		"https://workspace.databricks.com#frag",      // fragment would drop the suffix
+		"https://user:pass@workspace.databricks.com", // userinfo would collide with basic-auth creds
 	}
 	for _, e := range bad {
 		if err := validateEndpoint(e); err == nil {
 			t.Errorf("validateEndpoint(%q): want error, got nil", e)
+		}
+	}
+}
+
+func TestDeriveWorkspaceIDFromEndpoint(t *testing.T) {
+	ok := []struct {
+		in, want string
+	}{
+		{"https://ws.zerobus.databricks.com", "ws"},
+		{"ws.zerobus.databricks.com", "ws"},         // scheme supplied by default
+		{"HTTPS://ws.zerobus.databricks.com", "ws"}, // scheme is case-insensitive
+		{"HTTP://ws.zerobus.databricks.com", "ws"},
+	}
+	for _, tc := range ok {
+		got, err := deriveWorkspaceIDFromEndpoint(tc.in)
+		if err != nil {
+			t.Errorf("deriveWorkspaceIDFromEndpoint(%q): unexpected error: %v", tc.in, err)
+			continue
+		}
+		if got != tc.want {
+			t.Errorf("deriveWorkspaceIDFromEndpoint(%q) = %q, want %q", tc.in, got, tc.want)
+		}
+	}
+
+	bad := []string{
+		"",            // required
+		"https://",    // no host
+		"https://ws1", // dotless host, no workspace subdomain
+	}
+	for _, in := range bad {
+		if _, err := deriveWorkspaceIDFromEndpoint(in); err == nil {
+			t.Errorf("deriveWorkspaceIDFromEndpoint(%q): want error, got nil", in)
 		}
 	}
 }

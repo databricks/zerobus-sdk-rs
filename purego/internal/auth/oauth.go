@@ -163,6 +163,7 @@ func NewOAuthTokenProvider(
 	if p.cache == nil {
 		p.cache = newTokenCache(p.cacheOpts...)
 	}
+	p.cacheOpts = nil // closures are consumed; don't pin them on the provider.
 	return p, nil
 }
 
@@ -269,7 +270,7 @@ func (p *OAuthTokenProvider) mint(ctx context.Context, tableName string, reason 
 //
 // The table name is not re-validated here: it was validated at stream open, and
 // invalidate is a no-op for a key with no cached entry, so an unrecognized name
-// simply clears nothing rather than failing silently.
+// simply does nothing.
 func (p *OAuthTokenProvider) Invalidate(_ context.Context, tableName string) {
 	p.cache.invalidate(p.clientID, p.clientSecret, strings.TrimSpace(tableName), p.tokenAudience())
 }
@@ -312,6 +313,9 @@ func (p *OAuthTokenProvider) fetchToken(ctx context.Context, tableName string) (
 	if err != nil {
 		return fetchedToken{}, &TokenError{msg: fmt.Sprintf("token request: %v", err), retryable: isRetryableTransportError(ctx, err), cause: err}
 	}
+	// Anchor the token's TTL to response receipt so post-receipt work (JSON
+	// decode, the synchronous mint logger) can't inflate its cached lifetime.
+	receivedAt := time.Now()
 	// Drain unread bytes before closing so the keep-alive connection can be
 	// reused: json.Decode stops at the end of the JSON value and classifyHTTPError
 	// caps its read, either of which can leave a trailing tail on the body. The
@@ -343,14 +347,14 @@ func (p *OAuthTokenProvider) fetchToken(ctx context.Context, tableName string) (
 			cause:     err,
 		}
 	}
-	if body.AccessToken == "" {
+	if strings.TrimSpace(body.AccessToken) == "" {
 		return fetchedToken{}, &TokenError{msg: "token response missing access_token", retryable: false}
 	}
 	if !isUsableAsHeader(body.AccessToken) {
 		return fetchedToken{}, &TokenError{msg: "access token contains invalid header characters", retryable: false}
 	}
 
-	ft := fetchedToken{token: body.AccessToken}
+	ft := fetchedToken{token: body.AccessToken, receivedAt: receivedAt}
 	if d, ok := secondsToDuration(parseExpiresIn(body.ExpiresIn)); ok {
 		ft.expiresIn = &d
 	}
@@ -553,6 +557,12 @@ func validateEndpoint(endpoint string) error {
 	if u.Hostname() == "" {
 		return fmt.Errorf("ucEndpoint has no host: %q", endpoint)
 	}
+	// Userinfo (user:pass@host) would be carried into the token URL and collide
+	// with the SetBasicAuth client credentials, silently overriding them or
+	// leaking creds in the URL. Reject it so the endpoint stays scheme://host.
+	if u.User != nil {
+		return fmt.Errorf("ucEndpoint must not contain userinfo: %q", endpoint)
+	}
 	// The token URL is formed by appending "/oidc/v1/token" to the endpoint
 	// string. A query or fragment would make that suffix part of the query data
 	// (or drop it entirely), silently posting client credentials to the wrong
@@ -596,7 +606,11 @@ func deriveWorkspaceIDFromEndpoint(endpoint string) (workspaceID string, err err
 	if endpoint == "" {
 		return "", fmt.Errorf("zerobusEndpoint is required")
 	}
-	if !strings.HasPrefix(endpoint, "https://") && !strings.HasPrefix(endpoint, "http://") {
+	// URL schemes are case-insensitive (RFC 3986), so match them that way before
+	// deciding whether to supply a default scheme; otherwise a valid uppercase
+	// "HTTPS://host" would get a second scheme prepended and be misparsed.
+	lower := strings.ToLower(endpoint)
+	if !strings.HasPrefix(lower, "https://") && !strings.HasPrefix(lower, "http://") {
 		endpoint = "https://" + endpoint
 	}
 	u, err := url.Parse(endpoint)

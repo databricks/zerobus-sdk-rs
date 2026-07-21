@@ -66,20 +66,20 @@ func (p StreamParams) resolveHeaders(ctx context.Context) (map[string]string, er
 	}
 	seenNormalizedKeys := make(map[string]struct{}, len(snapshot))
 	for k, v := range snapshot {
-		normalized := normalizeHeaderKey(k)
-		if normalized != "" {
-			if _, exists := seenNormalizedKeys[normalized]; exists {
-				return nil, fmt.Errorf("transport: open %q: duplicate header key %q after normalization", p.TableName, normalized)
-			}
-			seenNormalizedKeys[normalized] = struct{}{}
-		}
-		// Reject at the wire boundary; gRPC would otherwise fail opaquely.
+		// Reject at the wire boundary before deduping; gRPC would otherwise fail
+		// opaquely, and validating first means a doubled invalid key reports as
+		// invalid rather than misleadingly as a duplicate.
 		if !isUsableAsHeaderKey(k) {
 			return nil, fmt.Errorf("transport: open %q: header key %q is not a valid gRPC metadata key", p.TableName, strings.TrimSpace(k))
 		}
 		if !isUsableAsHeaderValue(v) {
 			return nil, fmt.Errorf("transport: open %q: header %q contains invalid value characters", p.TableName, strings.TrimSpace(k))
 		}
+		normalized := normalizeHeaderKey(k)
+		if _, exists := seenNormalizedKeys[normalized]; exists {
+			return nil, fmt.Errorf("transport: open %q: duplicate header key %q after normalization", p.TableName, normalized)
+		}
+		seenNormalizedKeys[normalized] = struct{}{}
 	}
 	return snapshot, nil
 }

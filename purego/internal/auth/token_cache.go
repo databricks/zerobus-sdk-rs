@@ -14,9 +14,14 @@ const defaultRefreshBuffer = 5 * time.Minute
 
 // fetchedToken is the raw result of a mint: the token string plus its
 // server-reported lifetime (nil when the OAuth server omits expires_in).
+//
+// receivedAt anchors the TTL to when the response was received, so slow
+// post-mint work (e.g. a custom slog handler) can't inflate the cached
+// lifetime. It is zero when the mint failed; the cache falls back to time.Now.
 type fetchedToken struct {
-	token     string
-	expiresIn *time.Duration
+	token      string
+	expiresIn  *time.Duration
+	receivedAt time.Time
 }
 
 // mintReason is passed to the mint callback so it can distinguish a cold start
@@ -301,7 +306,12 @@ func (c *tokenCache) tryGetOrFetch(
 	// Cache only tokens with a usable TTL. If refresh returned no expires_in,
 	// keep any existing still-valid token rather than discarding it.
 	if fetched.expiresIn != nil && *fetched.expiresIn > 0 {
-		mintedAt := time.Now()
+		// Anchor the TTL to when the response was received, not now: a slow
+		// custom logger between receipt and here must not extend the lifetime.
+		mintedAt := fetched.receivedAt
+		if mintedAt.IsZero() {
+			mintedAt = time.Now()
+		}
 		entry.cached = newCachedToken(token, *fetched.expiresIn, c.refreshBuffer, mintedAt)
 	} else {
 		keepExisting := entry.cached != nil && !entry.cached.isExpired()

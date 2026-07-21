@@ -685,6 +685,31 @@ func TestNewCachedToken(t *testing.T) {
 	}
 }
 
+// getOrFetch must anchor a cached token's expiry to the mint's receivedAt, not
+// to when getOrFetch finishes storing it. A mint that reports receipt in the
+// past (standing in for slow post-receipt work such as a blocking logger) must
+// yield a correspondingly earlier expiresAt.
+func TestTokenCacheAnchorsExpiryToReceivedAt(t *testing.T) {
+	c := newTokenCache()
+	receivedAt := time.Now().Add(-30 * time.Minute)
+	d := time.Hour
+	_, err := c.getOrFetch(context.Background(), "id", "secret", "c.s.t", "",
+		func(context.Context, mintReason) (fetchedToken, error) {
+			return fetchedToken{token: "tok", expiresIn: &d, receivedAt: receivedAt}, nil
+		})
+	if err != nil {
+		t.Fatalf("getOrFetch: %v", err)
+	}
+	entry := c.slot(newTokenKey("id", "secret", "c.s.t", ""))
+	entry.mu.Lock()
+	got := entry.cached.expiresAt
+	entry.mu.Unlock()
+	want := receivedAt.Add(d)
+	if diff := got.Sub(want); diff < -time.Second || diff > time.Second {
+		t.Fatalf("expiresAt = %v, want ~%v (anchored to receivedAt+ttl)", got, want)
+	}
+}
+
 func TestTokenCacheNonPositiveRefreshBufferKeepsDefault(t *testing.T) {
 	c := newTokenCache(CacheRefreshBuffer(-1))
 	if c.refreshBuffer != defaultRefreshBuffer {

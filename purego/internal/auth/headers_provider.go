@@ -29,6 +29,11 @@ type HeadersProvider interface {
 	Invalidate(ctx context.Context, tableName string)
 }
 
+var (
+	_ HeadersProvider = (*OAuthHeadersProvider)(nil)
+	_ HeadersProvider = (*StaticHeadersProvider)(nil)
+)
+
 // OAuthHeadersProvider adapts an [OAuthTokenProvider] to the [HeadersProvider]
 // seam: it mints per-table Unity Catalog OAuth tokens on demand and formats them
 // as gRPC auth metadata. The token cache and OAuth options are configured at
