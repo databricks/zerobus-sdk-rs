@@ -10,11 +10,9 @@ import (
 	"time"
 )
 
-// errHeadersBudgetExceeded is the cause set on the internal header-resolution
-// budget (see defaultHeadersTimeout). It lets a HeadersProvider tell the SDK's
-// own open budget firing apart from the caller cancelling their context:
-// context.Cause reports this sentinel for the former and the plain
-// context.Canceled/DeadlineExceeded for the latter.
+// errHeadersBudgetExceeded tags the internal header-resolution budget (see
+// defaultHeadersTimeout) so a HeadersProvider can distinguish the SDK's own
+// budget firing from a caller-owned cancel via context.Cause.
 var errHeadersBudgetExceeded = errors.New("transport: open header budget exceeded")
 
 // defaultHeadersTimeout bounds header resolution during Open when the caller's

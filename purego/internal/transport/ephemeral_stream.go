@@ -70,9 +70,8 @@ func (c *Conn) Open(ctx context.Context, p StreamParams) (*Stream, error) {
 	if _, ok := ctx.Deadline(); !ok {
 		useDefaultBudgets = true
 		var cancelHeaders context.CancelFunc
-		// Tag the budget with an explicit cause so a HeadersProvider (e.g. an OAuth
-		// token mint) can distinguish this internal timeout from a caller-driven
-		// cancel and still serve a valid cached token rather than failing the open.
+		// Tag the budget so a HeadersProvider can tell this internal timeout
+		// apart from a caller cancel via context.Cause.
 		headersCtx, cancelHeaders = context.WithTimeoutCause(ctx, defaultHeadersTimeout, errHeadersBudgetExceeded)
 		defer cancelHeaders()
 	}

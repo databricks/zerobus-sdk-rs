@@ -168,11 +168,9 @@ func NewOAuthTokenProvider(
 }
 
 // NewSharedTokenCache allocates a token cache that can be passed to multiple
-// [OAuthTokenProvider] instances via [WithSharedTokenCache]. Sharing a cache
-// ensures tokens for the same (clientID, secret, table, workspace audience, and
-// UC endpoint) are reused across providers rather than each minting
-// independently; providers differing in workspace or UC endpoint keep separate
-// entries.
+// [OAuthTokenProvider] instances via [WithSharedTokenCache]. Providers pool
+// tokens across matching (clientID, secret, table, workspace audience, UC
+// endpoint); any difference in workspace or endpoint keeps a separate entry.
 //
 // Configure it with [CacheEnabled] and [CacheRefreshBuffer].
 func NewSharedTokenCache(opts ...CacheOption) *SharedTokenCache {
@@ -208,10 +206,8 @@ func (p *OAuthTokenProvider) tokenAudience() string {
 }
 
 // cacheScope discriminates cache entries that share credentials and table but
-// are not interchangeable. It combines the token audience (workspace binding)
-// with the issuing UC endpoint: a token minted for one workspace is rejected by
-// another, and two providers pointed at different UC endpoints mint through
-// different issuers, so a shared cache must not serve one's token to the other.
+// are not interchangeable: tokens minted for different workspace audiences or
+// through different UC endpoints must not be reused across a shared cache.
 func (p *OAuthTokenProvider) cacheScope() string {
 	return p.tokenAudience() + "\x00" + p.ucEndpoint
 }
@@ -510,17 +506,10 @@ func classifyHTTPError(resp *http.Response) error {
 func isHTTPSuccess(code int) bool { return code >= 200 && code < 300 }
 
 // isRetryableTransportError reports whether a transport-level error from the
-// token request is transient and safe to retry. Network-level timeouts and
-// connection failures qualify; any other transport error is treated as
-// non-retryable so a genuine failure isn't masked by a stale cached token.
-//
-// ctx is the caller's context. A mint request that times out on its own (a slow
-// UC endpoint tripping http.Client.Timeout, or an SDK-internal open budget) is
-// transient and retryable, so a proactive refresh can fall back to the
-// still-valid cached token. Only a cancel/deadline that came from the caller's
-// own context is non-retryable — that is the caller's signal to stop, not a
-// server fault. All surface as a wrapped context error; isCallerCancellation
-// tells the caller's own cancel apart from a request or budget timeout.
+// token request is transient and safe to retry. Network timeouts, dial
+// failures, and request/budget timeouts qualify; a caller-owned cancel or
+// deadline does not — that is the caller's signal to stop, not a server fault.
+// isCallerCancellation tells the two apart when the error is a context error.
 func isRetryableTransportError(ctx context.Context, err error) bool {
 	if isContextError(err) {
 		// A context error is retryable only when it came from the request itself
