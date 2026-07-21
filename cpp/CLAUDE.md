@@ -198,30 +198,19 @@ everything from source (needs Rust) via `add_subdirectory` / `FetchContent` /
 `find_package`, or points `-DZEROBUS_FFI_LIBRARY=` at the matching prebuilt FFI
 archive from a release and builds only the C++ (no Rust needed).
 
-Releases follow the same two-repo split as the other SDKs:
-
-- **Builder** — `.github/workflows/release-cpp.yml` (this repo). Manually
-  dispatched; for each target platform it cross-builds the Rust C FFI archive
-  (`cargo-zigbuild`, mirroring `release-ffi.yml`) and bundles it with the
-  platform-neutral C++ source tree into one artifact. No C++ cross-compilation.
-  Produces artifacts only — no GitHub Release.
-- **Orchestrator** — `release-zerobus-sdk-cpp.yml` in
-  `databricks/secure-public-registry-releases-eng`. Validates the `cpp/v*` tag
-  against `ZEROBUS_CPP_VERSION`, triggers the builder, downloads the artifacts,
-  runs the mandatory security scan, and creates the GitHub Release on
-  `databricks/zerobus-sdk` with a per-platform `tar.gz` attached and notes from
-  `cpp/CHANGELOG.md`.
-
+- Tag: `cpp/v<semver>` → `release-cpp.yml` builds the per-platform bundles (the
+  Rust C FFI archive cross-built with `cargo-zigbuild`, plus the platform-neutral
+  C++ source tree) → creates a GitHub Release with a per-platform `tar.gz`
+  attached and notes from `cpp/CHANGELOG.md`.
 - Version source: `cpp/include/zerobus/version.hpp` (`ZEROBUS_CPP_VERSION`) and
   the `project(... VERSION ...)` line in `cpp/CMakeLists.txt` — keep them in
-  sync (CMake fails configuration if they disagree).
-- Tag pattern: `cpp/v<semver>`. The orchestrator is dispatched with that tag as
-  its `ref` input (a `dry-run` input defaults to true).
+  sync (CMake fails configuration if they disagree). The release validates the
+  tag version against `ZEROBUS_CPP_VERSION`.
 - The C++ SDK links the FFI static library. If Rust FFI code changed, an FFI
   release (`ffi/v*`) must happen first; for source builds the workspace must be
   present.
 - On version bump PR: move `NEXT_CHANGELOG.md` contents to `CHANGELOG.md` under a
-  `## Release v<semver>` heading (the orchestrator's changelog extractor matches
+  `## Release v<semver>` heading (the release notes are extracted by matching
   that heading), reset `NEXT_CHANGELOG.md`.
 
 ## Config / requirements
