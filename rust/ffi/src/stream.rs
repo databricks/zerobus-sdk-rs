@@ -644,9 +644,11 @@ pub extern "C" fn zerobus_sdk_create_stream_with_headers_provider_async(
         // async attempt. This entry point does not expose a `free_user_data`
         // callback, so it opts out of ownership (None) — the caller retains
         // responsibility for freeing `user_data` after the completion callback.
-        let headers_provider: Arc<dyn HeadersProvider> = Arc::new(
-            CallbackHeadersProvider::new(headers_callback, user_data, None),
-        );
+        let headers_provider: Arc<dyn HeadersProvider> = Arc::new(CallbackHeadersProvider::new(
+            headers_callback,
+            user_data,
+            None,
+        ));
 
         let sdk_ptr = SendPtr::new(sdk);
         let callback_user_data = SendPtr::new(callback_user_data);
