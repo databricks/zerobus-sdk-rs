@@ -21,7 +21,9 @@ import (
 // Implementations may include it as well.
 //
 // Invalidate is called on server auth rejection so any cached credentials can
-// be dropped before the next open attempt.
+// be dropped before the next open attempt. It must not block on network I/O:
+// transport Open calls it synchronously on the failure path, and the ctx it
+// receives may already be cancelled.
 type HeadersProvider interface {
 	GetHeaders(ctx context.Context, tableName string) (map[string]string, error)
 	Invalidate(ctx context.Context, tableName string)

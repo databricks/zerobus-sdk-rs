@@ -348,7 +348,13 @@ func (c *tokenCache) invalidate(clientID, clientSecret, tableName, audience stri
 		return
 	}
 	entry.mu.Lock()
-	entry.cached = nil
+	// If the entry was pruned between the map read and this lock, it is detached:
+	// a fresh entry (with no cached token) already replaced it in the map, so
+	// clearing this stale one would be a silent no-op on the live entry. The
+	// replacement starts empty, so no re-invalidation is needed.
+	if !entry.pruned {
+		entry.cached = nil
+	}
 	entry.mu.Unlock()
 }
 

@@ -436,6 +436,15 @@ func TestClassifyHTTPErrorPreservesBody(t *testing.T) {
 	if !strings.Contains(err.Error(), "401") {
 		t.Fatalf("error message dropped status code: %q", err.Error())
 	}
+	// The raw body must be retained on ResponseBody for diagnostics — and kept
+	// out of Error() so a %+v log of the wrapped error can't re-expose it.
+	var te *TokenError
+	if !errors.As(err, &te) {
+		t.Fatalf("want *TokenError, got %T", err)
+	}
+	if !strings.Contains(te.ResponseBody, "test_error") {
+		t.Fatalf("raw body not retained on ResponseBody: %q", te.ResponseBody)
+	}
 }
 
 func TestNewOAuthTokenProviderValidation(t *testing.T) {
@@ -593,6 +602,8 @@ func TestValidateEndpoint(t *testing.T) {
 		"://nonsense",
 		"https://",  // scheme but no host
 		"https:///", // no host, only a path
+		"https://workspace.databricks.com?tenant=x", // query would swallow the /oidc/v1/token suffix
+		"https://workspace.databricks.com#frag",     // fragment would drop the suffix
 	}
 	for _, e := range bad {
 		if err := validateEndpoint(e); err == nil {
@@ -687,6 +698,44 @@ func TestSharedTokenCacheDisabled(t *testing.T) {
 	}
 	if got := srv.calls.Load(); got != 2 {
 		t.Fatalf("want 2 calls with disabled shared cache, got %d", got)
+	}
+}
+
+func TestWithSharedTokenCacheZeroValueIsIgnored(t *testing.T) {
+	// A zero-value SharedTokenCache holds no usable cache. It must be ignored
+	// (falling back to the provider's own cache) rather than installed, which
+	// would previously panic on a nil map at the first Token call.
+	srv := &tokenServer{accessToken: "tok", expiresIn: 3600}
+	ts := httptest.NewServer(srv)
+	defer ts.Close()
+
+	p, err := NewOAuthTokenProvider("id", "secret", "https://ws.zerobus.databricks.com", ts.URL,
+		WithHTTPClient(ts.Client()),
+		WithSharedTokenCache(&SharedTokenCache{}),
+	)
+	if err != nil {
+		t.Fatalf("NewOAuthTokenProvider: %v", err)
+	}
+	if p.cache == nil {
+		t.Fatal("zero-value shared cache left provider without a cache")
+	}
+	if _, err := p.Token(context.Background(), "c.s.t"); err != nil {
+		t.Fatalf("Token with zero-value shared cache: %v", err)
+	}
+}
+
+func TestFetchTokenValidatesTableName(t *testing.T) {
+	// FetchToken must reject a malformed table name before contacting UC, just
+	// like Token does.
+	srv := &tokenServer{accessToken: "tok", expiresIn: 3600}
+	p, ts := newTestProvider(t, srv)
+	defer ts.Close()
+
+	if _, err := p.FetchToken(context.Background(), "c..t"); err == nil {
+		t.Fatal("FetchToken with invalid table name: want error, got nil")
+	}
+	if got := srv.calls.Load(); got != 0 {
+		t.Fatalf("FetchToken must not contact UC for an invalid table (0 calls), got %d", got)
 	}
 }
 

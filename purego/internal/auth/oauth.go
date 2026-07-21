@@ -65,19 +65,25 @@ func WithHTTPClient(c *http.Client) OAuthOption {
 // SharedTokenCache is an OAuth token cache shared across multiple
 // [OAuthTokenProvider] instances via [WithSharedTokenCache]. Obtain one with
 // [NewSharedTokenCache]. It exposes no methods and is safe for concurrent use.
-type SharedTokenCache = tokenCache
+//
+// It is an opaque wrapper rather than an alias to the internal cache: a
+// zero-value SharedTokenCache holds no usable cache and is ignored by
+// [WithSharedTokenCache], so it cannot be mis-constructed into a nil-map panic.
+type SharedTokenCache struct {
+	c *tokenCache
+}
 
 // WithSharedTokenCache installs a shared token cache. A single provider already
 // caches all of its tables; use this only when multiple OAuthTokenProvider
 // instances should pool their tokens in one cache rather than each allocating
 // its own (a single provider serves many tables on its own).
 //
-// Obtain a cache with [NewSharedTokenCache]. A nil cache is ignored so the
-// provider's own default cache is preserved.
+// Obtain a cache with [NewSharedTokenCache]. A nil or zero-value (uninitialized)
+// cache is ignored so the provider's own default cache is preserved.
 func WithSharedTokenCache(cache *SharedTokenCache) OAuthOption {
 	return func(p *OAuthTokenProvider) {
-		if cache != nil {
-			p.cache = cache
+		if cache != nil && cache.c != nil {
+			p.cache = cache.c
 		}
 	}
 }
@@ -167,7 +173,7 @@ func NewOAuthTokenProvider(
 //
 // Configure it with [CacheEnabled] and [CacheRefreshBuffer].
 func NewSharedTokenCache(opts ...CacheOption) *SharedTokenCache {
-	return newTokenCache(opts...)
+	return &SharedTokenCache{c: newTokenCache(opts...)}
 }
 
 // Token returns a valid bearer token for tableName, minting a new one via
@@ -232,7 +238,16 @@ func (p *OAuthTokenProvider) mint(ctx context.Context, tableName string, reason 
 			slog.String("error", err.Error()),
 		)
 	case fetched.expiresIn == nil:
-		p.logger.LogAttrs(ctx, slog.LevelWarn, "minted UC OAuth token but UC returned no expires_in; token will not be cached",
+		// A direct mint (FetchToken) intentionally bypasses the cache, so a
+		// missing expires_in is expected there — log it at info, not as a warning
+		// about an unusable cache response.
+		level := slog.LevelWarn
+		msg := "minted UC OAuth token but UC returned no expires_in; token will not be cached"
+		if reason == mintReasonDirect {
+			level = slog.LevelInfo
+			msg = "minted UC OAuth token (direct, uncached)"
+		}
+		p.logger.LogAttrs(ctx, level, msg,
 			slog.String("table", tableName),
 			slog.String("reason", reason.String()),
 			slog.Duration("elapsed", elapsed),
@@ -258,6 +273,12 @@ func (p *OAuthTokenProvider) mint(ctx context.Context, tableName string, reason 
 func (p *OAuthTokenProvider) Invalidate(_ context.Context, tableName string) {
 	p.cache.invalidate(p.clientID, p.clientSecret, strings.TrimSpace(tableName), p.tokenAudience())
 }
+
+// maxTokenResponseBytes bounds how much of an OAuth token response body is read,
+// both for the success JSON and for a best-effort error payload, so a
+// misbehaving server can't force an unbounded read or allocation. A legitimate
+// token response is far smaller.
+const maxTokenResponseBytes = 4096
 
 // fetchToken performs the OAuth 2.0 client credentials request against Unity
 // Catalog's OIDC token endpoint.
@@ -298,7 +319,7 @@ func (p *OAuthTokenProvider) fetchToken(ctx context.Context, tableName string) (
 	// response can't force an arbitrarily long read; past the cap the connection
 	// is simply closed instead of reused.
 	defer func() {
-		_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 4096))
+		_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, maxTokenResponseBytes))
 		resp.Body.Close()
 	}()
 
@@ -313,7 +334,9 @@ func (p *OAuthTokenProvider) fetchToken(ctx context.Context, tableName string) (
 		// that sends it as a string or float doesn't fail the whole mint.
 		ExpiresIn json.RawMessage `json:"expires_in"`
 	}
-	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
+	// Bound the decode so a misbehaving server can't stream an unbounded body and
+	// force arbitrary allocation. A well-formed token response is well under this.
+	if err := json.NewDecoder(io.LimitReader(resp.Body, maxTokenResponseBytes)).Decode(&body); err != nil {
 		return fetchedToken{}, &TokenError{
 			msg:       fmt.Sprintf("parse token response: %v", err),
 			retryable: false,
@@ -450,7 +473,7 @@ func isRetryableStatus(code int) bool {
 func classifyHTTPError(resp *http.Response) error {
 	// Best-effort read of the error payload, bounded so a misbehaving server
 	// can't stream an unbounded body into the error message.
-	body, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+	body, _ := io.ReadAll(io.LimitReader(resp.Body, maxTokenResponseBytes))
 	raw := strings.TrimSpace(string(body))
 
 	// Prefer the structured OAuth error fields (RFC 6749 §5.2) for the message so
@@ -529,6 +552,16 @@ func validateEndpoint(endpoint string) error {
 	// here so misconfiguration fails fast in the constructor.
 	if u.Hostname() == "" {
 		return fmt.Errorf("ucEndpoint has no host: %q", endpoint)
+	}
+	// The token URL is formed by appending "/oidc/v1/token" to the endpoint
+	// string. A query or fragment would make that suffix part of the query data
+	// (or drop it entirely), silently posting client credentials to the wrong
+	// path. Reject them so the endpoint is a plain scheme://host[:port][/path].
+	if u.RawQuery != "" || u.ForceQuery {
+		return fmt.Errorf("ucEndpoint must not contain a query string: %q", endpoint)
+	}
+	if u.Fragment != "" {
+		return fmt.Errorf("ucEndpoint must not contain a fragment: %q", endpoint)
 	}
 	switch u.Scheme {
 	case "https":

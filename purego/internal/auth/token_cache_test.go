@@ -243,7 +243,7 @@ func TestTokenCacheNoTTLResponseKeepsExistingCachedToken(t *testing.T) {
 	seedRefreshable(c, "id", "secret", "c.s.t", "", "valid")
 
 	// A refresh returns a token with no TTL; caller gets the fresh token but the
-	// existing valid cached token is retained (Rust parity).
+	// existing valid cached token is retained.
 	fresh := getOrFetch(t, c, "id", "secret", "c.s.t",
 		func(_ context.Context, _ mintReason) (fetchedToken, error) {
 			return fetchedToken{token: "nottl"}, nil
