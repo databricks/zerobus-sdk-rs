@@ -67,6 +67,9 @@ arrow-flight = ["dep:arrow-flight", "dep:arrow-array", "dep:arrow-schema", "dep:
 # Zero-copy protobuf parser.
 zeroparser = ["dep:self_cell", "dep:prost-build"]
 testing = ["dep:futures"]
+# Test-only deterministic seams (barriers/notifies) for the Arrow stream. Zero footprint
+# unless enabled; never enabled by FFI/production builds.
+test-hooks = ["arrow-flight"]
 
 [[test]]
 name = "zeroparser_e2e"
