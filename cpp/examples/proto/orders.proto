@@ -1,0 +1,30 @@
+// Protobuf schema for the example `orders` table:
+//   orders(id INT, customer_name STRING, product_name STRING, quantity INT,
+//          price DOUBLE, status STRING, created_at TIMESTAMP, updated_at TIMESTAMP)
+//
+// NOTE: the C++ examples in this directory (single.cpp / batch.cpp) do NOT use
+// this file. They build the descriptor at runtime from Unity Catalog table
+// metadata via ProtoSchema::from_uc_json(), so no .proto file and no protoc are
+// required to run them. This file is kept as a human-readable reference for the
+// table's shape and as a starting point if you prefer the static-proto path
+// (compile it with protoc and build the descriptor from the generated class).
+//
+// Field numbers map to the table's column ordinals (1-based, declaration order).
+// proto2 is used so nullable columns can be `optional` (proto3 has no explicit
+// presence for scalars). INT -> int32, STRING -> string, DOUBLE -> double,
+// TIMESTAMP -> int64 microseconds since the Unix epoch (UTC).
+
+syntax = "proto2";
+
+package zerobus_examples;
+
+message Order {
+  optional int32 id = 1;
+  optional string customer_name = 2;
+  optional string product_name = 3;
+  optional int32 quantity = 4;
+  optional double price = 5;
+  optional string status = 6;
+  optional int64 created_at = 7;
+  optional int64 updated_at = 8;
+}

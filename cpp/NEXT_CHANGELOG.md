@@ -27,6 +27,21 @@
 - Documented running the tests in `README.md`: the sanitizer runs
   (`make test SANITIZE=address` / `thread`) and the env-var-gated
   `integration_test` (which variables it needs and that it skips without them).
+- Added runnable examples under `examples/` covering all three record formats —
+  JSON and protobuf (dynamic schema built at runtime from Unity Catalog metadata
+  via `ProtoSchema::from_uc_json`, no `protoc` required), each with a
+  single-record and a batch variant, plus Arrow Flight (Beta). Every example
+  reads its connection settings from the environment (`ZEROBUS_SERVER_ENDPOINT`,
+  `DATABRICKS_WORKSPACE_URL`, `ZEROBUS_TABLE_NAME`, `DATABRICKS_CLIENT_ID`,
+  `DATABRICKS_CLIENT_SECRET`). They build with
+  the SDK via `ZEROBUS_BUILD_EXAMPLES` (the Arrow example is skipped when Apache
+  Arrow C++ is not installed). Includes a top-level `examples/README.md` and
+  per-format guides.
+- The examples also demonstrate advanced features inline: an async ack callback
+  (`StreamOptions::ack_callback`) and a custom `HeadersProvider` in
+  `examples/json/batch.cpp`, recovery of unacknowledged records
+  (`Stream::get_unacked_records()`) in `examples/json/single.cpp`, and Arrow IPC
+  compression in `examples/arrow/arrow_ingest.cpp`.
 
 ### Internal Changes
 
