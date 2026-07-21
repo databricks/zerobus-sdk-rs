@@ -193,6 +193,36 @@ func TestTokenCacheRetryableRefreshFailureFallsBack(t *testing.T) {
 	}
 }
 
+// A proactive refresh that fails with a context deadline/cancel must still fall
+// back to the still-valid cached token. Transport bounds a deadline-less open
+// with its own internal budget, so a mint that trips that budget surfaces as a
+// context error even though the caller never gave up; failing the open here
+// (when a usable token is in hand) would be a spurious outage. Regression for
+// the transport-budget case that the isCallerCancellation heuristic can't tell
+// apart from a genuine caller cancel.
+func TestTokenCacheContextErrorRefreshFailureFallsBack(t *testing.T) {
+	c := newTokenCache()
+	seedRefreshable(c, "id", "secret", "c.s.t", "", "valid")
+
+	// A mint failure carrying a context deadline, classified non-retryable (as a
+	// mint bounded by the transport open budget produces when that budget fires).
+	tok, err := c.getOrFetch(context.Background(), "id", "secret", "c.s.t", "",
+		func(_ context.Context, _ mintReason) (fetchedToken, error) {
+			return fetchedToken{}, &TokenError{
+				msg:       "token request: context deadline exceeded",
+				retryable: false,
+				cause:     context.DeadlineExceeded,
+			}
+		},
+	)
+	if err != nil {
+		t.Fatalf("want fallback to cached token on context-error refresh failure, got: %v", err)
+	}
+	if tok != "valid" {
+		t.Fatalf("want %q, got %q", "valid", tok)
+	}
+}
+
 func TestTokenCacheNonRetryableRefreshErrorPropagates(t *testing.T) {
 	c := newTokenCache()
 	seedRefreshable(c, "id", "secret", "c.s.t", "", "valid")

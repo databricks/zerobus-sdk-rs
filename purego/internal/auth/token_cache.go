@@ -287,8 +287,12 @@ func (c *tokenCache) tryGetOrFetch(
 
 	if err != nil {
 		token, resErr := "", err
-		if entry.cached != nil && !entry.cached.isExpired() && isRetryable(err) {
-			// Proactive refresh failed transiently; serve the still-valid token.
+		if entry.cached != nil && !entry.cached.isExpired() && (isRetryable(err) || isContextError(err)) {
+			// Proactive refresh failed but the old token is still valid; serve it.
+			// Any context error counts, not just retryable ones: transport bounds a
+			// deadline-less open with its own budget, so a budget timeout looks like
+			// caller cancellation here. Serving the valid token is safe — a genuine
+			// caller cancel is re-checked by the downstream handshake, which aborts.
 			token, resErr = entry.cached.value, nil
 		}
 		// Publish to waiters: writes before close(done) happen-before <-done. The
