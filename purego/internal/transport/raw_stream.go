@@ -10,6 +10,13 @@ import (
 	"time"
 )
 
+// errHeadersBudgetExceeded is the cause set on the internal header-resolution
+// budget (see defaultHeadersTimeout). It lets a HeadersProvider tell the SDK's
+// own open budget firing apart from the caller cancelling their context:
+// context.Cause reports this sentinel for the former and the plain
+// context.Canceled/DeadlineExceeded for the latter.
+var errHeadersBudgetExceeded = errors.New("transport: open header budget exceeded")
+
 // defaultHeadersTimeout bounds header resolution during Open when the caller's
 // context has no deadline. A var so tests can shrink it via export_test.go;
 // tests that override it therefore must not call t.Parallel().

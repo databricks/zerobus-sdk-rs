@@ -55,24 +55,26 @@ func (r mintReason) String() string {
 // secrets still yield distinct keys (collision resistance), and a rotated
 // secret gets a fresh entry.
 //
-// audience scopes the entry to the token's target audience (the workspace the
-// minted token is bound to). Two providers with the same credentials and table
-// but different workspaces mint tokens that are not interchangeable, so they
-// must not share an entry; without audience in the key the second provider would
-// be served the first's workspace-scoped token and rejected on audience mismatch.
+// scope discriminates entries that share credentials and table but are not
+// interchangeable. The provider derives it from both the token's target
+// audience (the workspace the minted token is bound to) and the issuing UC
+// endpoint. Two providers with the same credentials and table but a different
+// workspace mint audience-scoped tokens that would be rejected on mismatch; two
+// providers with a different UC endpoint mint through different issuers. Either
+// difference must yield a distinct entry, so both feed the shared cache key.
 type tokenKey struct {
 	clientID     string
 	secretDigest [sha256.Size]byte
 	tableName    string
-	audience     string
+	scope        string
 }
 
-func newTokenKey(clientID, clientSecret, tableName, audience string) tokenKey {
+func newTokenKey(clientID, clientSecret, tableName, scope string) tokenKey {
 	return tokenKey{
 		clientID:     clientID,
 		secretDigest: sha256.Sum256([]byte(clientSecret)),
 		tableName:    tableName,
-		audience:     audience,
+		scope:        scope,
 	}
 }
 
@@ -133,7 +135,7 @@ type tokenFlight struct {
 	err   error         // resolved error (nil on success)
 }
 
-// tokenCache caches OAuth tokens per (clientID, secret, tableName, audience).
+// tokenCache caches OAuth tokens per (clientID, secret, tableName, scope).
 //
 // It is safe for concurrent use. Construct one with [newTokenCache]; the
 // methods do not guard against a nil receiver.
@@ -188,7 +190,7 @@ func newTokenCache(opts ...CacheOption) *tokenCache {
 // than inheriting a cancellation it never requested.
 func (c *tokenCache) getOrFetch(
 	ctx context.Context,
-	clientID, clientSecret, tableName, audience string,
+	clientID, clientSecret, tableName, scope string,
 	mint func(ctx context.Context, reason mintReason) (fetchedToken, error),
 ) (string, error) {
 	if c.disabled {
@@ -199,7 +201,7 @@ func (c *tokenCache) getOrFetch(
 		return fetched.token, nil
 	}
 
-	key := newTokenKey(clientID, clientSecret, tableName, audience)
+	key := newTokenKey(clientID, clientSecret, tableName, scope)
 
 	for {
 		token, err, retry := c.tryGetOrFetch(ctx, key, mint)
@@ -287,18 +289,18 @@ func (c *tokenCache) tryGetOrFetch(
 
 	if err != nil {
 		token, resErr := "", err
-		if entry.cached != nil && !entry.cached.isExpired() && (isRetryable(err) || isContextError(err)) {
-			// Proactive refresh failed but the old token is still valid; serve it.
-			// Any context error counts, not just retryable ones: transport bounds a
-			// deadline-less open with its own budget, so a budget timeout looks like
-			// caller cancellation here. Serving the valid token is safe — a genuine
-			// caller cancel is re-checked by the downstream handshake, which aborts.
+		if entry.cached != nil && !entry.cached.isExpired() && isRetryable(err) {
+			// Proactive refresh failed transiently; serve the still-valid token. A
+			// genuine caller cancellation is not retryable (see isRetryableTransport
+			// Error / isCallerCancellation), so it is not masked here and propagates,
+			// honoring the Token(ctx) contract. The transport's own bounded open
+			// budget is classified retryable, so it falls back to the cached token.
 			token, resErr = entry.cached.value, nil
 		}
 		// Publish to waiters: writes before close(done) happen-before <-done. The
 		// mutex just brackets the entry-state transition, not the flight publish.
-		// A context error published here is what lets a live-ctx waiter re-attempt
-		// instead of inheriting our cancellation.
+		// A caller-cancellation error published here is what lets a live-ctx waiter
+		// re-attempt instead of inheriting a cancellation it never requested.
 		flight.token, flight.err = token, resErr
 		close(flight.done)
 		entry.mu.Unlock()
@@ -309,13 +311,20 @@ func (c *tokenCache) tryGetOrFetch(
 
 	// Cache only tokens with a usable TTL. If refresh returned no expires_in,
 	// keep any existing still-valid token rather than discarding it.
-	if fetched.expiresIn != nil && *fetched.expiresIn > 0 {
-		// Anchor the TTL to when the response was received, not now: a slow
-		// custom logger between receipt and here must not extend the lifetime.
-		mintedAt := fetched.receivedAt
-		if mintedAt.IsZero() {
-			mintedAt = time.Now()
-		}
+	//
+	// Anchor the TTL to when the response was received, not now: a slow custom
+	// logger between receipt and here must not extend the lifetime. That same
+	// delay can also consume the whole TTL, so a short-lived token may already be
+	// expired by the time we publish; treat that like a no-TTL response (return
+	// the token to this caller but don't cache a dead entry) rather than storing
+	// something isExpired would immediately reject.
+	mintedAt := fetched.receivedAt
+	if mintedAt.IsZero() {
+		mintedAt = time.Now()
+	}
+	usableTTL := fetched.expiresIn != nil && *fetched.expiresIn > 0
+	alreadyExpired := usableTTL && !time.Now().Before(mintedAt.Add(*fetched.expiresIn))
+	if usableTTL && !alreadyExpired {
 		entry.cached = newCachedToken(token, *fetched.expiresIn, c.refreshBuffer, mintedAt)
 	} else {
 		keepExisting := entry.cached != nil && !entry.cached.isExpired()
@@ -340,19 +349,30 @@ func isContextError(err error) bool {
 }
 
 // isCallerCancellation reports whether err is a context error that originated
-// from ctx — the caller cancelled or its deadline fired — rather than from the
-// request itself. It is the caller's signal to stop: such a failure must not be
-// retried or masked by serving a cached token. A context error seen while ctx is
-// still live came from the request (a client/transport timeout) and is a
-// transient, retryable fault instead.
+// from the caller stopping — the caller cancelled or its own deadline fired —
+// rather than from the request or an SDK-internal budget. It is the caller's
+// signal to stop: such a failure must not be retried or masked by serving a
+// cached token.
+//
+// A context error seen while ctx is still live came from the request (a
+// client/transport timeout) and is a transient, retryable fault. When ctx is
+// done, context.Cause distinguishes the two remaining cases: a plain
+// context.Canceled/DeadlineExceeded cause is the caller stopping, whereas any
+// other cause means an intermediate context (e.g. transport's own bounded open
+// budget) fired via WithTimeoutCause — that is not the caller giving up, so it
+// stays retryable and a still-valid cached token can be served.
 func isCallerCancellation(ctx context.Context, err error) bool {
-	return isContextError(err) && ctx.Err() != nil
+	if !isContextError(err) || ctx.Err() == nil {
+		return false
+	}
+	cause := context.Cause(ctx)
+	return cause == context.Canceled || cause == context.DeadlineExceeded
 }
 
 // invalidate drops the cached token for the given credentials, table, and
-// audience. The next getOrFetch call will re-mint from scratch.
-func (c *tokenCache) invalidate(clientID, clientSecret, tableName, audience string) {
-	key := newTokenKey(clientID, clientSecret, tableName, audience)
+// scope. The next getOrFetch call will re-mint from scratch.
+func (c *tokenCache) invalidate(clientID, clientSecret, tableName, scope string) {
+	key := newTokenKey(clientID, clientSecret, tableName, scope)
 
 	c.mu.Lock()
 	entry, ok := c.entries[key]

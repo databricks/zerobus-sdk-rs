@@ -193,30 +193,52 @@ func TestTokenCacheRetryableRefreshFailureFallsBack(t *testing.T) {
 	}
 }
 
-// A proactive refresh that fails with a context deadline/cancel must still fall
-// back to the still-valid cached token. Transport bounds a deadline-less open
-// with its own internal budget, so a mint that trips that budget surfaces as a
-// context error even though the caller never gave up; failing the open here
-// (when a usable token is in hand) would be a spurious outage. Regression for
-// the transport-budget case that the isCallerCancellation heuristic can't tell
-// apart from a genuine caller cancel.
-func TestTokenCacheContextErrorRefreshFailureFallsBack(t *testing.T) {
+// A genuine caller cancellation during a proactive refresh must propagate, not
+// be masked by serving the cached token: Token(ctx) is contractually bound by
+// ctx. The mint reports it non-retryable (as isRetryableTransportError does for
+// a caller-owned cancel), so the still-valid cached token is NOT served.
+func TestTokenCacheCallerCancelRefreshFailurePropagates(t *testing.T) {
 	c := newTokenCache()
 	seedRefreshable(c, "id", "secret", "c.s.t", "", "valid")
 
-	// A mint failure carrying a context deadline, classified non-retryable (as a
-	// mint bounded by the transport open budget produces when that budget fires).
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel() // caller has given up
+
+	tok, err := c.getOrFetch(ctx, "id", "secret", "c.s.t", "",
+		func(_ context.Context, _ mintReason) (fetchedToken, error) {
+			// A caller cancel surfaces as a non-retryable context error.
+			return fetchedToken{}, &TokenError{
+				msg:       "token request: context canceled",
+				retryable: false,
+				cause:     context.Canceled,
+			}
+		},
+	)
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("caller cancellation must propagate, got tok=%q err=%v", tok, err)
+	}
+}
+
+// A proactive refresh that fails because the SDK's own bounded open budget
+// fired (a retryable request timeout, not a caller cancel) must fall back to the
+// still-valid cached token rather than failing the open spuriously.
+func TestTokenCacheBudgetTimeoutRefreshFailureFallsBack(t *testing.T) {
+	c := newTokenCache()
+	seedRefreshable(c, "id", "secret", "c.s.t", "", "valid")
+
+	// The transport open budget surfaces as a retryable timeout (see
+	// isRetryableTransportError classifying a non-caller context error retryable).
 	tok, err := c.getOrFetch(context.Background(), "id", "secret", "c.s.t", "",
 		func(_ context.Context, _ mintReason) (fetchedToken, error) {
 			return fetchedToken{}, &TokenError{
 				msg:       "token request: context deadline exceeded",
-				retryable: false,
+				retryable: true,
 				cause:     context.DeadlineExceeded,
 			}
 		},
 	)
 	if err != nil {
-		t.Fatalf("want fallback to cached token on context-error refresh failure, got: %v", err)
+		t.Fatalf("want fallback to cached token on budget-timeout refresh, got: %v", err)
 	}
 	if tok != "valid" {
 		t.Fatalf("want %q, got %q", "valid", tok)
@@ -737,6 +759,34 @@ func TestTokenCacheAnchorsExpiryToReceivedAt(t *testing.T) {
 	want := receivedAt.Add(d)
 	if diff := got.Sub(want); diff < -time.Second || diff > time.Second {
 		t.Fatalf("expiresAt = %v, want ~%v (anchored to receivedAt+ttl)", got, want)
+	}
+}
+
+// A token whose receipt-anchored TTL has already elapsed by the time the cache
+// publishes it (e.g. a slow custom logger consumed the whole short TTL) must not
+// be cached: the caller still gets the token, but a dead entry is not stored.
+func TestTokenCacheDoesNotCacheAlreadyExpiredToken(t *testing.T) {
+	c := newTokenCache()
+	// Received well in the past with a tiny TTL: expired before publication.
+	receivedAt := time.Now().Add(-time.Hour)
+	ttl := time.Second
+	tok, err := c.getOrFetch(context.Background(), "id", "secret", "c.s.t", "",
+		func(context.Context, mintReason) (fetchedToken, error) {
+			return fetchedToken{token: "stale", expiresIn: &ttl, receivedAt: receivedAt}, nil
+		})
+	if err != nil {
+		t.Fatalf("getOrFetch: %v", err)
+	}
+	if tok != "stale" {
+		t.Fatalf("caller must still receive the minted token, got %q", tok)
+	}
+	// Nothing usable should be cached.
+	entry := c.slot(newTokenKey("id", "secret", "c.s.t", ""))
+	entry.mu.Lock()
+	cached := entry.cached
+	entry.mu.Unlock()
+	if cached != nil {
+		t.Fatalf("expired-on-arrival token must not be cached, got %+v", cached)
 	}
 }
 

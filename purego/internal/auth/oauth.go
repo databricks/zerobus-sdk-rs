@@ -192,7 +192,7 @@ func (p *OAuthTokenProvider) Token(ctx context.Context, tableName string) (strin
 	if err := validateTableName(tableName); err != nil {
 		return "", fmt.Errorf("auth: oauth: %w", err)
 	}
-	return p.cache.getOrFetch(ctx, p.clientID, p.clientSecret, tableName, p.tokenAudience(),
+	return p.cache.getOrFetch(ctx, p.clientID, p.clientSecret, tableName, p.cacheScope(),
 		func(ctx context.Context, reason mintReason) (fetchedToken, error) {
 			return p.mint(ctx, tableName, reason)
 		},
@@ -200,10 +200,18 @@ func (p *OAuthTokenProvider) Token(ctx context.Context, tableName string) (strin
 }
 
 // tokenAudience is the resource audience a minted token is bound to. It depends
-// on the workspace, so it is part of the cache key: tokens for the same
-// credentials and table but different workspaces are not interchangeable.
+// on the workspace and is sent as the OAuth request's resource field.
 func (p *OAuthTokenProvider) tokenAudience() string {
 	return fmt.Sprintf("api://databricks/workspaces/%s/zerobusDirectWriteApi", p.workspaceID)
+}
+
+// cacheScope discriminates cache entries that share credentials and table but
+// are not interchangeable. It combines the token audience (workspace binding)
+// with the issuing UC endpoint: a token minted for one workspace is rejected by
+// another, and two providers pointed at different UC endpoints mint through
+// different issuers, so a shared cache must not serve one's token to the other.
+func (p *OAuthTokenProvider) cacheScope() string {
+	return p.tokenAudience() + "\x00" + p.ucEndpoint
 }
 
 // FetchToken mints a token directly from Unity Catalog, bypassing the cache. It
@@ -272,7 +280,7 @@ func (p *OAuthTokenProvider) mint(ctx context.Context, tableName string, reason 
 // invalidate is a no-op for a key with no cached entry, so an unrecognized name
 // simply does nothing.
 func (p *OAuthTokenProvider) Invalidate(_ context.Context, tableName string) {
-	p.cache.invalidate(p.clientID, p.clientSecret, strings.TrimSpace(tableName), p.tokenAudience())
+	p.cache.invalidate(p.clientID, p.clientSecret, strings.TrimSpace(tableName), p.cacheScope())
 }
 
 // maxTokenResponseBytes bounds how much of an OAuth token response body is read,
@@ -505,12 +513,12 @@ func isHTTPSuccess(code int) bool { return code >= 200 && code < 300 }
 // non-retryable so a genuine failure isn't masked by a stale cached token.
 //
 // ctx is the caller's context. A mint request that times out on its own (a slow
-// UC endpoint tripping http.Client.Timeout, or an internal transport deadline)
-// is transient and retryable, so a proactive refresh can fall back to the
+// UC endpoint tripping http.Client.Timeout, or an SDK-internal open budget) is
+// transient and retryable, so a proactive refresh can fall back to the
 // still-valid cached token. Only a cancel/deadline that came from the caller's
 // own context is non-retryable — that is the caller's signal to stop, not a
-// server fault. Both surface as a wrapped context error, so they are told apart
-// by whether ctx itself is done.
+// server fault. All surface as a wrapped context error; isCallerCancellation
+// tells the caller's own cancel apart from a request or budget timeout.
 func isRetryableTransportError(ctx context.Context, err error) bool {
 	if isContextError(err) {
 		// A context error is retryable only when it came from the request itself

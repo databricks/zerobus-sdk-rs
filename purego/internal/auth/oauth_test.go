@@ -263,7 +263,7 @@ func TestOAuthTokenProviderClientTimeoutRefreshServesCachedToken(t *testing.T) {
 		t.Fatalf("NewOAuthTokenProvider: %v", err)
 	}
 	// Seed a still-valid-but-refresh-due token under the provider's real audience.
-	seedRefreshable(p.cache, "id", "secret", "c.s.t", p.tokenAudience(), "cached-valid")
+	seedRefreshable(p.cache, "id", "secret", "c.s.t", p.cacheScope(), "cached-valid")
 
 	tok, err := p.Token(context.Background(), "c.s.t")
 	if err != nil {
@@ -319,6 +319,48 @@ func TestOAuthTokenProviderSharedCacheKeyedByWorkspace(t *testing.T) {
 	}
 	if t1 == t2 {
 		t.Fatalf("providers for different workspaces shared a cached token %q; audience must be part of the key", t1)
+	}
+}
+
+func TestOAuthTokenProviderSharedCacheKeyedByEndpoint(t *testing.T) {
+	// Two providers with the same credentials, table, and workspace audience but
+	// DIFFERENT UC endpoints (issuers) share a cache. They must NOT collide: each
+	// endpoint issues its own token, so the second provider must mint against its
+	// own endpoint rather than be served the first issuer's token.
+	newIssuer := func(label string) *httptest.Server {
+		return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(map[string]any{"access_token": "tok-from-" + label, "expires_in": 3600})
+		}))
+	}
+	ts1 := newIssuer("issuer1")
+	defer ts1.Close()
+	ts2 := newIssuer("issuer2")
+	defer ts2.Close()
+
+	shared := NewSharedTokenCache()
+	// Same zerobusEndpoint (same workspace audience) for both, different ucEndpoint.
+	p1, err := NewOAuthTokenProvider("id", "secret", "https://ws.zerobus.databricks.com", ts1.URL,
+		WithHTTPClient(ts1.Client()), WithSharedTokenCache(shared))
+	if err != nil {
+		t.Fatalf("provider 1: %v", err)
+	}
+	p2, err := NewOAuthTokenProvider("id", "secret", "https://ws.zerobus.databricks.com", ts2.URL,
+		WithHTTPClient(ts2.Client()), WithSharedTokenCache(shared))
+	if err != nil {
+		t.Fatalf("provider 2: %v", err)
+	}
+
+	t1, err := p1.Token(context.Background(), "c.s.t")
+	if err != nil {
+		t.Fatalf("p1.Token: %v", err)
+	}
+	t2, err := p2.Token(context.Background(), "c.s.t")
+	if err != nil {
+		t.Fatalf("p2.Token: %v", err)
+	}
+	if t1 == t2 {
+		t.Fatalf("providers with different UC endpoints shared a token %q; issuer must be part of the key", t1)
 	}
 }
 
@@ -388,6 +430,39 @@ func TestTokenErrorUnwrapsContextCancellation(t *testing.T) {
 	var te *TokenError
 	if asTokenError(err, &te) && te.IsRetryable() {
 		t.Fatal("context deadline must not be classified as retryable")
+	}
+}
+
+// isCallerCancellation must classify only the caller's own cancel/deadline as
+// caller cancellation. An SDK-internal budget wrapping a live caller context via
+// WithTimeoutCause carries a custom cause, so it is a request/budget timeout —
+// retryable — not the caller giving up.
+func TestIsCallerCancellationDistinguishesBudgetFromCaller(t *testing.T) {
+	// Caller cancelled their own context.
+	cancelledCtx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if !isCallerCancellation(cancelledCtx, context.Canceled) {
+		t.Error("caller cancel must be classified as caller cancellation")
+	}
+
+	// SDK-internal budget with a custom cause over a still-live caller context.
+	budgetCause := errors.New("open budget exceeded")
+	budgetCtx, cancelBudget := context.WithTimeoutCause(context.Background(), time.Nanosecond, budgetCause)
+	defer cancelBudget()
+	<-budgetCtx.Done() // budget fires; underlying caller context never cancelled
+	if isCallerCancellation(budgetCtx, context.DeadlineExceeded) {
+		t.Error("internal budget timeout must NOT be classified as caller cancellation")
+	}
+	if !isRetryableTransportError(budgetCtx, context.DeadlineExceeded) {
+		t.Error("internal budget timeout must be retryable so a cached token can be served")
+	}
+
+	// A caller's own plain deadline (no custom cause) is caller cancellation.
+	deadlineCtx, cancelDeadline := context.WithTimeout(context.Background(), time.Nanosecond)
+	defer cancelDeadline()
+	<-deadlineCtx.Done()
+	if !isCallerCancellation(deadlineCtx, context.DeadlineExceeded) {
+		t.Error("caller's own deadline must be classified as caller cancellation")
 	}
 }
 
