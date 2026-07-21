@@ -208,6 +208,7 @@ internal static class NativeInterop
         ReadOnlySpan<byte> descriptorProto,
         HeadersProviderCallback callback,
         IntPtr userData,
+        HeadersProviderFreeCallback freeUserData,
         ref CStreamConfigurationOptions options)
     {
         var result = new CResult();
@@ -222,6 +223,7 @@ internal static class NativeInterop
                 (nuint)descriptorProto.Length,
                 callback,
                 userData,
+                freeUserData,
                 ref options,
                 ref result);
         }

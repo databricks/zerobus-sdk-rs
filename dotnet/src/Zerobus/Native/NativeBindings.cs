@@ -125,6 +125,19 @@ internal struct CRecordArray
 internal delegate CHeaders HeadersProviderCallback(IntPtr userData);
 
 /// <summary>
+/// Callback that releases the headers provider's user_data.
+/// Matches: void (*HeadersProviderFreeCallback)(void* user_data)
+/// </summary>
+/// <remarks>
+/// The FFI owns user_data and invokes this exactly once, after any in-flight
+/// GetHeaders callback has returned — so it is safe to free the provider here.
+/// May run on an internal SDK worker thread, so it must not throw across the
+/// native boundary.
+/// </remarks>
+[UnmanagedFunctionPointer(CallingConvention.Cdecl)]
+internal delegate void HeadersProviderFreeCallback(IntPtr userData);
+
+/// <summary>
 /// Callback for async stream creation completion.
 /// Matches: void (*CreateStreamAsyncCallback)(CZerobusStream* stream, const CResult* result, void* user_data)
 /// </summary>
@@ -226,6 +239,7 @@ internal static partial class NativeMethods
         nuint descriptorProtoLen,
         HeadersProviderCallback headersCallback,
         IntPtr userData,
+        HeadersProviderFreeCallback? freeUserData,
         ref CStreamConfigurationOptions options,
         ref CResult result);
 

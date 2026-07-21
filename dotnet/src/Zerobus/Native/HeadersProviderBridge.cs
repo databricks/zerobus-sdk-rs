@@ -1,6 +1,7 @@
 // Bridges the managed IHeadersProvider interface to the native callback expected by Rust.
 // This is the .NET equivalent of the goGetHeaders / cHeadersCallback pattern in ffi.go.
 
+using System.Runtime.InteropServices;
 using System.Text;
 
 namespace Databricks.Zerobus.Native;
@@ -13,9 +14,49 @@ internal sealed class HeadersProviderBridge
 {
     private readonly IHeadersProvider _provider;
 
+    // Delegate instances are held here so their native thunks stay alive exactly
+    // as long as this bridge does. On the ownership-transfer (sync) path the
+    // bridge is rooted only by the GCHandle handed to the FFI, so rooting the
+    // delegates through the bridge keeps both callbacks valid until the FFI
+    // releases that handle via NativeFree.
+    public HeadersProviderCallback Callback { get; }
+    public HeadersProviderFreeCallback FreeCallback { get; }
+
     public HeadersProviderBridge(IHeadersProvider provider)
     {
         _provider = provider;
+        Callback = NativeCallback;
+        FreeCallback = NativeFree;
+    }
+
+    /// <summary>
+    /// Native destroy callback matching <see cref="HeadersProviderFreeCallback"/>.
+    /// The FFI owns <paramref name="userData"/> (a <see cref="GCHandle"/> to the
+    /// bridge) and invokes this exactly once — after any in-flight
+    /// <see cref="NativeCallback"/> has returned — so freeing the handle here
+    /// cannot race a live callback. This is what closes the recovery-vs-teardown
+    /// use-after-free; it is the .NET equivalent of goFreeHeadersProvider /
+    /// zerobus_cpp_headers_free. Must not throw across the native boundary.
+    /// </summary>
+    public static void NativeFree(IntPtr userData)
+    {
+        if (userData == IntPtr.Zero)
+        {
+            return;
+        }
+
+        try
+        {
+            var handle = GCHandle.FromIntPtr(userData);
+            if (handle.IsAllocated)
+            {
+                handle.Free();
+            }
+        }
+        catch
+        {
+            // Never let an exception unwind across the native boundary.
+        }
     }
 
     /// <summary>

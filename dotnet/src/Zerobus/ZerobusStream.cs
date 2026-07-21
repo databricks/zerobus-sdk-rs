@@ -35,7 +35,11 @@ public sealed class ZerobusStream : IDisposable, IAsyncDisposable
     private int _inflightAsyncOperations;
     private readonly ManualResetEventSlim _asyncOperationsDrained = new(initialState: true);
 
-    // Prevent the GCHandle / delegate from being collected while the native code holds a reference.
+    // Only set on the ASYNC headers-provider path, which still borrows the
+    // provider: the stream owns the GCHandle / delegate and frees them on
+    // dispose. The sync path transfers provider ownership to the FFI (freed via
+    // a destroy callback after any in-flight GetHeaders returns), so those
+    // streams leave these at default/null and never free the handle here.
     // Not readonly: GCHandle is not a readonly struct, so calling Free() on a readonly field
     // creates a defensive copy — the field is never actually mutated, causing double-free.
     private GCHandle _bridgeHandle;
@@ -46,6 +50,7 @@ public sealed class ZerobusStream : IDisposable, IAsyncDisposable
         _ptr = ptr;
     }
 
+    // Async headers-provider path: the stream owns the provider handle/delegate.
     internal ZerobusStream(IntPtr ptr, GCHandle bridgeHandle, HeadersProviderCallback callbackRef)
     {
         _ptr = ptr;
@@ -420,8 +425,10 @@ public sealed class ZerobusStream : IDisposable, IAsyncDisposable
     }
 
     /// <summary>
-    /// Attempts to retrieve the bridge handle and callback reference for the stream.
-    /// Internal use only.
+    /// Transfers this stream's native pointer and any provider handle to a new
+    /// wrapper around <paramref name="newPtr"/>, disposing this one. On the async
+    /// headers-provider path the owned bridge handle moves to the new wrapper; the
+    /// sync path owns no handle, so only the pointer moves. Internal use only.
     /// </summary>
     internal ZerobusStream Recreate(IntPtr newPtr)
     {

@@ -5,6 +5,14 @@ namespace Databricks.Zerobus;
 /// Implement this interface to supply custom authentication logic
 /// (e.g. fetching tokens from a vault, using managed identity, etc.).
 /// </summary>
+/// <remarks>
+/// Lifetime: the SDK owns the provider for the stream's lifetime and releases it
+/// only after any in-flight <see cref="GetHeaders"/> call (including one during
+/// connection recovery) has returned, so you do not need to keep your own
+/// reference alive past stream creation. <see cref="GetHeaders"/> may be invoked
+/// from an internal SDK worker thread, not the thread that created the stream, so
+/// implementations must be safe to call from any thread.
+/// </remarks>
 /// <example>
 /// <code>
 /// public class CustomHeadersProvider : IHeadersProvider
