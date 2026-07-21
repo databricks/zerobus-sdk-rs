@@ -29,6 +29,7 @@ tokio = { workspace = true, features = ["macros", "rt-multi-thread", "sync", "ti
 tokio-stream = { workspace = true, features = ["net"] }
 tonic = { workspace = true, features = ["tls-native-roots", "transport"] }
 tonic-prost.workspace = true
+tonic-types.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
 databricks-zerobus-ingest-sdk = { path = "../sdk", features = ["testing", "arrow-flight", "zeroparser"] }

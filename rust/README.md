@@ -797,9 +797,47 @@ Require manual intervention:
 - `InvalidUCTokenError` - Invalid OAuth credentials
 - `InvalidTableName` - Table doesn't exist or invalid format
 - `InvalidArgument` - Invalid parameters, schema mismatch, or payload too large (see [Payload Size Limit](#payload-size-limit))
+- `InvalidSchema` *(Arrow Flight, Beta)* - The client's Arrow schema does not match the target Delta table (see [Schema Mismatch](#schema-mismatch-arrow-flight))
 - `Code::Unauthenticated` - Authentication failure
 - `Code::PermissionDenied` - Insufficient table permissions
 - `ChannelCreationError` - Failed to establish TLS connection
+
+### Schema Mismatch (Arrow Flight)
+
+*(Beta; requires `features = ["arrow-flight"]`.)*
+
+When the server rejects an Arrow Flight stream because the client's schema no longer matches the target Delta table — for example, a column was added to or dropped from the table — the SDK surfaces a structured `ZerobusError::InvalidSchema` rather than an opaque `CreateStreamError`. This applies both to initial stream setup (`build_arrow()`) and to mid-stream reconnects: a schema change detected during recovery is surfaced immediately (via `wait_for_offset` / `flush`) instead of being retried until the recovery budget drains.
+
+`InvalidSchema` carries the raw, machine-readable facts the server reported so you can branch programmatically instead of parsing the message string. The SDK deliberately does not decide whether a mismatch is recoverable — that policy is yours (for example, re-resolving the table schema from Unity Catalog and rebuilding the stream):
+
+```rust
+use databricks_zerobus_ingest_sdk::{SchemaValidationCause, ZerobusError};
+
+match stream.wait_for_offset(offset).await {
+    Ok(()) => { /* durable */ }
+    // `InvalidSchema` is #[non_exhaustive], so match with `..`.
+    Err(ZerobusError::InvalidSchema { causes, error_code, message, .. }) => {
+        // `causes` are typed tokens (e.g. FieldNotInTable, MissingRequiredColumn);
+        // `error_code` is the server's numeric code (e.g. "8001") for telemetry;
+        // `message` carries per-field detail for diagnostics.
+        let drift_only = !causes.is_empty()
+            && causes.iter().all(|c| matches!(
+                c,
+                SchemaValidationCause::FieldNotInTable
+                    | SchemaValidationCause::MissingRequiredColumn
+            ));
+        if drift_only {
+            // Re-resolve the table schema and rebuild the stream, then replay.
+        } else {
+            // e.g. TypeIncompatible — a re-resolve won't help; surface to the operator.
+        }
+        let _ = (error_code, message);
+    }
+    Err(e) => { /* handle other errors */ }
+}
+```
+
+`SchemaValidationCause` is `#[non_exhaustive]` and includes an `Unknown(String)` variant, so a newer server cause the SDK doesn't recognize is still surfaced rather than dropped.
 
 ### Payload Size Limit
 

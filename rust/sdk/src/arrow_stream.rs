@@ -731,10 +731,34 @@ impl ZerobusArrowStream {
                                 // Loop continues with new stream.
                             }
                             Ok(Err(e)) => {
-                                // Mirror the initial-connect path: drop the cached
-                                // token on auth rejection so recovery re-mints.
                                 if e.is_auth_rejection() {
+                                    // Mirror the initial-connect path: drop the cached
+                                    // token on auth rejection so recovery re-mints, then
+                                    // fall through to retry with the fresh token.
                                     headers_provider.invalidate().await;
+                                } else if matches!(e, ZerobusError::InvalidSchema { .. }) {
+                                    // The table schema changed, so the server now rejects
+                                    // our fixed schema. This can never succeed on retry:
+                                    // the SDK holds a fixed schema and would just re-send
+                                    // the same rejected one until the recovery budget
+                                    // drains, burying the real cause under a generic
+                                    // "Reconnection failed". Surface it to waiters
+                                    // immediately so callers (e.g. Vector) can re-resolve
+                                    // their schema and rebuild the stream.
+                                    error!(
+                                        "Supervisor: Schema mismatch on reconnect, closing stream: {}",
+                                        e
+                                    );
+                                    is_closed.store(true, Ordering::Relaxed);
+                                    // Publish the classified error so a blocked
+                                    // wait_for_offset returns it (the reconnect error is
+                                    // generated inside reconnect() and, unlike the
+                                    // initial-disconnect path, was never sent on this
+                                    // channel).
+                                    let _ = server_error_tx.send(Some(e.clone()));
+                                    Self::move_pending_to_failed(&pending_batches, &failed_batches)
+                                        .await;
+                                    return Err(e);
                                 }
                                 warn!("Supervisor: Reconnection failed: {}", e);
                                 // Loop continues, will retry if retries remain.
