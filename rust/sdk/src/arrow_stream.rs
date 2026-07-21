@@ -19,9 +19,9 @@ use arrow_flight::{FlightClient, PutResult};
 use arrow_ipc::writer::IpcWriteOptions;
 use bytes::Bytes;
 use futures::{Stream, StreamExt};
-use tokio::sync::{mpsc, watch, Mutex, OwnedSemaphorePermit, Semaphore};
 #[cfg(feature = "test-hooks")]
 use tokio::sync::Notify;
+use tokio::sync::{mpsc, watch, Mutex, OwnedSemaphorePermit, Semaphore};
 use tokio::time::{sleep, Duration};
 use tokio_retry::strategy::FixedInterval;
 use tokio_retry::RetryIf;
@@ -2086,8 +2086,14 @@ mod tests {
             futures::poll!(fut.as_mut()).is_pending(),
             "pause_and_detach_sender must block while an ingest holds ingest_mutex"
         );
-        assert!(!is_paused.load(Ordering::Relaxed), "is_paused flipped mid-ingest");
-        assert!(batch_tx.lock().await.is_some(), "sender detached mid-ingest");
+        assert!(
+            !is_paused.load(Ordering::Relaxed),
+            "is_paused flipped mid-ingest"
+        );
+        assert!(
+            batch_tx.lock().await.is_some(),
+            "sender detached mid-ingest"
+        );
 
         // Once the ingest leaves its critical section, the transition completes.
         drop(guard);
