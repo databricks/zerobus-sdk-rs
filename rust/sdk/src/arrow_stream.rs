@@ -25,6 +25,7 @@ use tokio::sync::{mpsc, watch, Mutex, OwnedSemaphorePermit, Semaphore};
 use tokio::time::{sleep, Duration};
 use tokio_retry::strategy::FixedInterval;
 use tokio_retry::RetryIf;
+use tonic::metadata::MetadataValue;
 use tonic::transport::Channel;
 use tracing::{debug, error, info, instrument, warn};
 
@@ -525,6 +526,7 @@ impl ZerobusArrowStream {
         // Add headers from the provider first, filtering out reserved headers.
         // The table name header is authoritative and must not be overridden.
         const TABLE_NAME_HEADER: &str = "x-databricks-zerobus-table-name";
+        const AUTHORIZATION_HEADER: &str = "authorization";
         let headers = headers_provider.get_headers().await?;
         for (key, value) in headers {
             if key.eq_ignore_ascii_case(TABLE_NAME_HEADER) {
@@ -532,6 +534,19 @@ impl ZerobusArrowStream {
                     "HeadersProvider attempted to set reserved header '{}', ignoring",
                     TABLE_NAME_HEADER
                 );
+                continue;
+            }
+            if key.eq_ignore_ascii_case(AUTHORIZATION_HEADER) {
+                let mut auth_value = MetadataValue::try_from(value.as_str()).map_err(|_| {
+                    error!(table_name = %table_properties.table_name, "authorization token is not a valid HTTP header value");
+                    ZerobusError::InvalidUCTokenError(
+                        "authorization token is not a valid HTTP header value".to_string(),
+                    )
+                })?;
+                auth_value.set_sensitive(true);
+                client
+                    .metadata_mut()
+                    .insert(AUTHORIZATION_HEADER, auth_value);
                 continue;
             }
             client.add_header(key, &value).map_err(|e| {
@@ -2084,6 +2099,31 @@ mod tests {
     use super::*;
     use arrow_array::Int32Array;
     use arrow_schema::{DataType, Field};
+    use async_trait::async_trait;
+    use std::collections::HashMap;
+
+    struct PassthroughTlsConfig;
+
+    impl TlsConfig for PassthroughTlsConfig {
+        fn configure_endpoint(
+            &self,
+            endpoint: tonic::transport::Endpoint,
+        ) -> ZerobusResult<tonic::transport::Endpoint> {
+            Ok(endpoint)
+        }
+    }
+
+    struct TestHeadersProvider;
+
+    #[async_trait]
+    impl HeadersProvider for TestHeadersProvider {
+        async fn get_headers(&self) -> ZerobusResult<HashMap<&'static str, String>> {
+            Ok(HashMap::from([
+                ("authorization", "Bearer secret-token".to_string()),
+                ("x-custom-header", "custom-value".to_string()),
+            ]))
+        }
+    }
 
     #[test]
     fn test_arrow_table_properties() {
@@ -2351,5 +2391,42 @@ mod tests {
             "batch appended before mutex release must be drained into failed"
         );
         assert!(pending.lock().await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn authorization_metadata_is_sensitive() {
+        let table_properties = ArrowTableProperties {
+            table_name: "catalog.schema.table".to_string(),
+            schema: Arc::new(ArrowSchema::empty()),
+        };
+        let tls_config: Arc<dyn TlsConfig> = Arc::new(PassthroughTlsConfig);
+        let headers_provider: Arc<dyn HeadersProvider> = Arc::new(TestHeadersProvider);
+        let client = ZerobusArrowStream::create_flight_client(
+            "http://127.0.0.1:1",
+            &tls_config,
+            &table_properties,
+            &ArrowStreamConfigurationOptions::default(),
+            &headers_provider,
+            "test-sdk",
+        )
+        .await
+        .unwrap();
+
+        let authorization = client.metadata().get("authorization").unwrap();
+        assert!(authorization.is_sensitive());
+        assert_eq!(authorization.to_str().unwrap(), "Bearer secret-token");
+
+        let custom_header = client.metadata().get("x-custom-header").unwrap();
+        assert!(!custom_header.is_sensitive());
+        assert_eq!(custom_header.to_str().unwrap(), "custom-value");
+        assert_eq!(
+            client
+                .metadata()
+                .get("x-databricks-zerobus-table-name")
+                .unwrap()
+                .to_str()
+                .unwrap(),
+            "catalog.schema.table"
+        );
     }
 }
