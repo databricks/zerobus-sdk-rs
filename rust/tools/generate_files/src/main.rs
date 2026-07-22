@@ -12,7 +12,10 @@ use clap::Parser;
 
 mod generate;
 use generate::{
-    clean_filename, fetch_table_info, generate_proto_file, generate_rust_and_descriptor,
+    clean_filename,
+    fetch_table_info,
+    generate_proto_file,
+    generate_rust_and_descriptor,
 };
 mod token_factory;
 
@@ -82,19 +85,10 @@ async fn main() -> Result<()> {
 
     let proto_output_path = args.output_dir.join(&output);
 
-    generate_proto_file(
-        &msg_name,
-        &table_info.columns,
-        &proto_output_path,
-        &args.output_dir,
-    )
-    .context("failed to write proto file")?;
+    generate_proto_file(&msg_name, &table_info.columns, &proto_output_path, &args.output_dir)
+        .context("failed to write proto file")?;
 
-    generate_rust_and_descriptor(
-        proto_output_path.to_str().unwrap(),
-        &msg_name,
-        &args.output_dir,
-    )?;
+    generate_rust_and_descriptor(proto_output_path.to_str().unwrap(), &msg_name, &args.output_dir)?;
 
     Ok(())
 }

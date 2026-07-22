@@ -65,9 +65,10 @@ impl ZerobusStream {
                     if let Some(server_error) = error_rx.borrow().clone() {
                         return Err(server_error);
                     }
-                    return Err(ZerobusError::StreamClosedError(tonic::Status::internal(
-                        format!("Stream closed during {}", operation_name.to_lowercase()),
-                    )));
+                    return Err(ZerobusError::StreamClosedError(tonic::Status::internal(format!(
+                        "Stream closed during {}",
+                        operation_name.to_lowercase()
+                    ))));
                 }
                 // Race between offset updates and server errors.
                 tokio::select! {
@@ -102,9 +103,10 @@ impl ZerobusStream {
                 }
             }
 
-            Err(ZerobusError::StreamClosedError(tonic::Status::internal(
-                format!("Stream closed during {}", operation_name.to_lowercase()),
-            )))
+            Err(ZerobusError::StreamClosedError(tonic::Status::internal(format!(
+                "Stream closed during {}",
+                operation_name.to_lowercase()
+            ))))
         };
 
         match tokio::time::timeout(
@@ -121,9 +123,10 @@ impl ZerobusStream {
                 } else {
                     error!(table_name = %self.table_properties.table_name, "{} timed out", operation_name);
                 }
-                Err(ZerobusError::StreamClosedError(
-                    tonic::Status::deadline_exceeded(format!("{} timed out", operation_name)),
-                ))
+                Err(ZerobusError::StreamClosedError(tonic::Status::deadline_exceeded(format!(
+                    "{} timed out",
+                    operation_name
+                ))))
             }
         }
     }

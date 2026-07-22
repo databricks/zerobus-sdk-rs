@@ -17,13 +17,13 @@
 
 //! [`FallibleRequestStream`] and [`FallibleTonicResponseStream`] adapters
 
-use crate::error::FlightError;
-use futures::{
-    FutureExt, Stream, StreamExt,
-    channel::oneshot::{Receiver, Sender},
-};
 use std::pin::Pin;
-use std::task::{Poll, ready};
+use std::task::{ready, Poll};
+
+use futures::channel::oneshot::{Receiver, Sender};
+use futures::{FutureExt, Stream, StreamExt};
+
+use crate::error::FlightError;
 
 /// Wrapper around a fallible stream (one that returns errors) that makes it infallible.
 ///

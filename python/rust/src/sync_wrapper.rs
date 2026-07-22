@@ -1,20 +1,27 @@
 use std::sync::Arc;
 
+use databricks_zerobus_ingest_sdk::{
+    StreamBuilder,
+    ZerobusSdk as RustSdk,
+    ZerobusStream as RustStream,
+};
 use pyo3::prelude::*;
 use pyo3::types::PyBytes;
 use tokio::runtime::Runtime;
 use tokio::sync::RwLock;
 
-use databricks_zerobus_ingest_sdk::{
-    StreamBuilder, ZerobusSdk as RustSdk, ZerobusStream as RustStream,
-};
-
 use crate::arrow;
 use crate::arrow::{ArrowStreamConfigurationOptions, ZerobusArrowStream};
 use crate::auth::HeadersProviderWrapper;
 use crate::common::{
-    apply_grpc_options, encoded_record_to_pybytes, extract_record_payload, extract_record_payloads,
-    map_error, StreamConfigurationOptions, TableProperties, SDK_IDENTIFIER_PREFIX,
+    apply_grpc_options,
+    encoded_record_to_pybytes,
+    extract_record_payload,
+    extract_record_payloads,
+    map_error,
+    StreamConfigurationOptions,
+    TableProperties,
+    SDK_IDENTIFIER_PREFIX,
 };
 
 // =============================================================================

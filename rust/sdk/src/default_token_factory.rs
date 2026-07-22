@@ -181,11 +181,8 @@ impl DefaultTokenFactory {
             ("scope", "all-apis".to_string()),
             (
                 "resource",
-                format!(
-                    "api://databricks/workspaces/{}/zerobusDirectWriteApi",
-                    workspace_id
-                )
-                .to_string(),
+                format!("api://databricks/workspaces/{}/zerobusDirectWriteApi", workspace_id)
+                    .to_string(),
             ),
             ("authorization_details", authorization_details.to_string()),
         ];
@@ -320,19 +317,13 @@ impl DefaultTokenFactory {
         let table = parts[2];
 
         if catalog.is_empty() {
-            return Err(ZerobusError::InvalidTableName(
-                "Catalog name cannot be empty".to_string(),
-            ));
+            return Err(ZerobusError::InvalidTableName("Catalog name cannot be empty".to_string()));
         }
         if schema.is_empty() {
-            return Err(ZerobusError::InvalidTableName(
-                "Schema name cannot be empty".to_string(),
-            ));
+            return Err(ZerobusError::InvalidTableName("Schema name cannot be empty".to_string()));
         }
         if table.is_empty() {
-            return Err(ZerobusError::InvalidTableName(
-                "Table name cannot be empty".to_string(),
-            ));
+            return Err(ZerobusError::InvalidTableName("Table name cannot be empty".to_string()));
         }
 
         Ok((catalog.to_string(), schema.to_string(), table.to_string()))

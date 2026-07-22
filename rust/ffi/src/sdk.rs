@@ -1,9 +1,11 @@
 //! Top-level SDK lifecycle FFI surface.
 
-use crate::common::*;
-use databricks_zerobus_ingest_sdk::ZerobusSdk;
 use std::os::raw::c_char;
 use std::ptr;
+
+use databricks_zerobus_ingest_sdk::ZerobusSdk;
+
+use crate::common::*;
 
 /// Creates a new ZerobusSdk with default user-agent and TLS settings.
 ///

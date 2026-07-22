@@ -79,8 +79,15 @@ pub use multiplexed_stream::{MessageId, MultiplexedStream};
 pub use offset_generator::{OffsetId, OffsetIdGenerator};
 pub use proxy::{ConnectorFactory, ProxyConnector};
 pub use record_types::{
-    EncodedBatch, EncodedBatchIter, EncodedRecord, JsonEncodedRecord, JsonString, JsonValue,
-    ProtoBytes, ProtoEncodedRecord, ProtoMessage,
+    EncodedBatch,
+    EncodedBatchIter,
+    EncodedRecord,
+    JsonEncodedRecord,
+    JsonString,
+    JsonValue,
+    ProtoBytes,
+    ProtoEncodedRecord,
+    ProtoMessage,
 };
 pub use sdk::{ZerobusSdk, DEFAULT_SDK_IDENTIFIER};
 #[cfg(feature = "testing")]

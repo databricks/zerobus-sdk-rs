@@ -20,27 +20,64 @@
 use std::fmt::{Display, Formatter};
 use std::pin::Pin;
 
-use super::{
-    ActionBeginSavepointRequest, ActionBeginSavepointResult, ActionBeginTransactionRequest,
-    ActionBeginTransactionResult, ActionCancelQueryRequest, ActionCancelQueryResult,
-    ActionClosePreparedStatementRequest, ActionCreatePreparedStatementRequest,
-    ActionCreatePreparedStatementResult, ActionCreatePreparedSubstraitPlanRequest,
-    ActionEndSavepointRequest, ActionEndTransactionRequest, Any, Command, CommandGetCatalogs,
-    CommandGetCrossReference, CommandGetDbSchemas, CommandGetExportedKeys, CommandGetImportedKeys,
-    CommandGetPrimaryKeys, CommandGetSqlInfo, CommandGetTableTypes, CommandGetTables,
-    CommandGetXdbcTypeInfo, CommandPreparedStatementQuery, CommandPreparedStatementUpdate,
-    CommandStatementIngest, CommandStatementQuery, CommandStatementSubstraitPlan,
-    CommandStatementUpdate, DoPutPreparedStatementResult, DoPutUpdateResult, ProstMessageExt,
-    SqlInfo, TicketStatementQuery,
-};
-use crate::{
-    Action, ActionType, Criteria, Empty, FlightData, FlightDescriptor, FlightInfo,
-    HandshakeRequest, HandshakeResponse, PutResult, SchemaResult, Ticket,
-    flight_service_server::FlightService, r#gen::PollInfo,
-};
-use futures::{Stream, StreamExt, stream::Peekable};
+use futures::stream::Peekable;
+use futures::{Stream, StreamExt};
 use prost::Message;
 use tonic::{Request, Response, Status, Streaming};
+
+use super::{
+    ActionBeginSavepointRequest,
+    ActionBeginSavepointResult,
+    ActionBeginTransactionRequest,
+    ActionBeginTransactionResult,
+    ActionCancelQueryRequest,
+    ActionCancelQueryResult,
+    ActionClosePreparedStatementRequest,
+    ActionCreatePreparedStatementRequest,
+    ActionCreatePreparedStatementResult,
+    ActionCreatePreparedSubstraitPlanRequest,
+    ActionEndSavepointRequest,
+    ActionEndTransactionRequest,
+    Any,
+    Command,
+    CommandGetCatalogs,
+    CommandGetCrossReference,
+    CommandGetDbSchemas,
+    CommandGetExportedKeys,
+    CommandGetImportedKeys,
+    CommandGetPrimaryKeys,
+    CommandGetSqlInfo,
+    CommandGetTableTypes,
+    CommandGetTables,
+    CommandGetXdbcTypeInfo,
+    CommandPreparedStatementQuery,
+    CommandPreparedStatementUpdate,
+    CommandStatementIngest,
+    CommandStatementQuery,
+    CommandStatementSubstraitPlan,
+    CommandStatementUpdate,
+    DoPutPreparedStatementResult,
+    DoPutUpdateResult,
+    ProstMessageExt,
+    SqlInfo,
+    TicketStatementQuery,
+};
+use crate::flight_service_server::FlightService;
+use crate::r#gen::PollInfo;
+use crate::{
+    Action,
+    ActionType,
+    Criteria,
+    Empty,
+    FlightData,
+    FlightDescriptor,
+    FlightInfo,
+    HandshakeRequest,
+    HandshakeResponse,
+    PutResult,
+    SchemaResult,
+    Ticket,
+};
 
 pub(crate) static CREATE_PREPARED_STATEMENT: &str = "CreatePreparedStatement";
 pub(crate) static CLOSE_PREPARED_STATEMENT: &str = "ClosePreparedStatement";
@@ -66,9 +103,7 @@ pub trait FlightSqlService: Sync + Send + Sized + 'static {
         Response<Pin<Box<dyn Stream<Item = Result<HandshakeResponse, Status>> + Send>>>,
         Status,
     > {
-        Err(Status::unimplemented(
-            "Handshake has no default implementation",
-        ))
+        Err(Status::unimplemented("Handshake has no default implementation"))
     }
 
     /// Implementors may override to handle additional calls to do_get()
@@ -89,9 +124,7 @@ pub trait FlightSqlService: Sync + Send + Sized + 'static {
         _query: CommandStatementQuery,
         _request: Request<FlightDescriptor>,
     ) -> Result<Response<FlightInfo>, Status> {
-        Err(Status::unimplemented(
-            "get_flight_info_statement has no default implementation",
-        ))
+        Err(Status::unimplemented("get_flight_info_statement has no default implementation"))
     }
 
     /// Get a FlightInfo for executing a substrait plan.
@@ -100,9 +133,7 @@ pub trait FlightSqlService: Sync + Send + Sized + 'static {
         _query: CommandStatementSubstraitPlan,
         _request: Request<FlightDescriptor>,
     ) -> Result<Response<FlightInfo>, Status> {
-        Err(Status::unimplemented(
-            "get_flight_info_substrait_plan has no default implementation",
-        ))
+        Err(Status::unimplemented("get_flight_info_substrait_plan has no default implementation"))
     }
 
     /// Get a FlightInfo for executing an already created prepared statement.
@@ -122,9 +153,7 @@ pub trait FlightSqlService: Sync + Send + Sized + 'static {
         _query: CommandGetCatalogs,
         _request: Request<FlightDescriptor>,
     ) -> Result<Response<FlightInfo>, Status> {
-        Err(Status::unimplemented(
-            "get_flight_info_catalogs has no default implementation",
-        ))
+        Err(Status::unimplemented("get_flight_info_catalogs has no default implementation"))
     }
 
     /// Get a FlightInfo for listing schemas.
@@ -133,9 +162,7 @@ pub trait FlightSqlService: Sync + Send + Sized + 'static {
         _query: CommandGetDbSchemas,
         _request: Request<FlightDescriptor>,
     ) -> Result<Response<FlightInfo>, Status> {
-        Err(Status::unimplemented(
-            "get_flight_info_schemas has no default implementation",
-        ))
+        Err(Status::unimplemented("get_flight_info_schemas has no default implementation"))
     }
 
     /// Get a FlightInfo for listing tables.
@@ -144,9 +171,7 @@ pub trait FlightSqlService: Sync + Send + Sized + 'static {
         _query: CommandGetTables,
         _request: Request<FlightDescriptor>,
     ) -> Result<Response<FlightInfo>, Status> {
-        Err(Status::unimplemented(
-            "get_flight_info_tables has no default implementation",
-        ))
+        Err(Status::unimplemented("get_flight_info_tables has no default implementation"))
     }
 
     /// Get a FlightInfo to extract information about the table types.
@@ -155,9 +180,7 @@ pub trait FlightSqlService: Sync + Send + Sized + 'static {
         _query: CommandGetTableTypes,
         _request: Request<FlightDescriptor>,
     ) -> Result<Response<FlightInfo>, Status> {
-        Err(Status::unimplemented(
-            "get_flight_info_table_types has no default implementation",
-        ))
+        Err(Status::unimplemented("get_flight_info_table_types has no default implementation"))
     }
 
     /// Get a FlightInfo for retrieving other information (See SqlInfo).
@@ -166,9 +189,7 @@ pub trait FlightSqlService: Sync + Send + Sized + 'static {
         _query: CommandGetSqlInfo,
         _request: Request<FlightDescriptor>,
     ) -> Result<Response<FlightInfo>, Status> {
-        Err(Status::unimplemented(
-            "get_flight_info_sql_info has no default implementation",
-        ))
+        Err(Status::unimplemented("get_flight_info_sql_info has no default implementation"))
     }
 
     /// Get a FlightInfo to extract information about primary and foreign keys.
@@ -177,9 +198,7 @@ pub trait FlightSqlService: Sync + Send + Sized + 'static {
         _query: CommandGetPrimaryKeys,
         _request: Request<FlightDescriptor>,
     ) -> Result<Response<FlightInfo>, Status> {
-        Err(Status::unimplemented(
-            "get_flight_info_primary_keys has no default implementation",
-        ))
+        Err(Status::unimplemented("get_flight_info_primary_keys has no default implementation"))
     }
 
     /// Get a FlightInfo to extract information about exported keys.
@@ -188,9 +207,7 @@ pub trait FlightSqlService: Sync + Send + Sized + 'static {
         _query: CommandGetExportedKeys,
         _request: Request<FlightDescriptor>,
     ) -> Result<Response<FlightInfo>, Status> {
-        Err(Status::unimplemented(
-            "get_flight_info_exported_keys has no default implementation",
-        ))
+        Err(Status::unimplemented("get_flight_info_exported_keys has no default implementation"))
     }
 
     /// Get a FlightInfo to extract information about imported keys.
@@ -199,9 +216,7 @@ pub trait FlightSqlService: Sync + Send + Sized + 'static {
         _query: CommandGetImportedKeys,
         _request: Request<FlightDescriptor>,
     ) -> Result<Response<FlightInfo>, Status> {
-        Err(Status::unimplemented(
-            "get_flight_info_imported_keys has no default implementation",
-        ))
+        Err(Status::unimplemented("get_flight_info_imported_keys has no default implementation"))
     }
 
     /// Get a FlightInfo to extract information about cross reference.
@@ -210,9 +225,7 @@ pub trait FlightSqlService: Sync + Send + Sized + 'static {
         _query: CommandGetCrossReference,
         _request: Request<FlightDescriptor>,
     ) -> Result<Response<FlightInfo>, Status> {
-        Err(Status::unimplemented(
-            "get_flight_info_cross_reference has no default implementation",
-        ))
+        Err(Status::unimplemented("get_flight_info_cross_reference has no default implementation"))
     }
 
     /// Get a FlightInfo to extract information about the supported XDBC types.
@@ -221,9 +234,7 @@ pub trait FlightSqlService: Sync + Send + Sized + 'static {
         _query: CommandGetXdbcTypeInfo,
         _request: Request<FlightDescriptor>,
     ) -> Result<Response<FlightInfo>, Status> {
-        Err(Status::unimplemented(
-            "get_flight_info_xdbc_type_info has no default implementation",
-        ))
+        Err(Status::unimplemented("get_flight_info_xdbc_type_info has no default implementation"))
     }
 
     /// Implementors may override to handle additional calls to get_flight_info()
@@ -246,9 +257,7 @@ pub trait FlightSqlService: Sync + Send + Sized + 'static {
         _ticket: TicketStatementQuery,
         _request: Request<Ticket>,
     ) -> Result<Response<<Self as FlightService>::DoGetStream>, Status> {
-        Err(Status::unimplemented(
-            "do_get_statement has no default implementation",
-        ))
+        Err(Status::unimplemented("do_get_statement has no default implementation"))
     }
 
     /// Get a FlightDataStream containing the prepared statement query results.
@@ -257,9 +266,7 @@ pub trait FlightSqlService: Sync + Send + Sized + 'static {
         _query: CommandPreparedStatementQuery,
         _request: Request<Ticket>,
     ) -> Result<Response<<Self as FlightService>::DoGetStream>, Status> {
-        Err(Status::unimplemented(
-            "do_get_prepared_statement has no default implementation",
-        ))
+        Err(Status::unimplemented("do_get_prepared_statement has no default implementation"))
     }
 
     /// Get a FlightDataStream containing the list of catalogs.
@@ -268,9 +275,7 @@ pub trait FlightSqlService: Sync + Send + Sized + 'static {
         _query: CommandGetCatalogs,
         _request: Request<Ticket>,
     ) -> Result<Response<<Self as FlightService>::DoGetStream>, Status> {
-        Err(Status::unimplemented(
-            "do_get_catalogs has no default implementation",
-        ))
+        Err(Status::unimplemented("do_get_catalogs has no default implementation"))
     }
 
     /// Get a FlightDataStream containing the list of schemas.
@@ -279,9 +284,7 @@ pub trait FlightSqlService: Sync + Send + Sized + 'static {
         _query: CommandGetDbSchemas,
         _request: Request<Ticket>,
     ) -> Result<Response<<Self as FlightService>::DoGetStream>, Status> {
-        Err(Status::unimplemented(
-            "do_get_schemas has no default implementation",
-        ))
+        Err(Status::unimplemented("do_get_schemas has no default implementation"))
     }
 
     /// Get a FlightDataStream containing the list of tables.
@@ -290,9 +293,7 @@ pub trait FlightSqlService: Sync + Send + Sized + 'static {
         _query: CommandGetTables,
         _request: Request<Ticket>,
     ) -> Result<Response<<Self as FlightService>::DoGetStream>, Status> {
-        Err(Status::unimplemented(
-            "do_get_tables has no default implementation",
-        ))
+        Err(Status::unimplemented("do_get_tables has no default implementation"))
     }
 
     /// Get a FlightDataStream containing the data related to the table types.
@@ -301,9 +302,7 @@ pub trait FlightSqlService: Sync + Send + Sized + 'static {
         _query: CommandGetTableTypes,
         _request: Request<Ticket>,
     ) -> Result<Response<<Self as FlightService>::DoGetStream>, Status> {
-        Err(Status::unimplemented(
-            "do_get_table_types has no default implementation",
-        ))
+        Err(Status::unimplemented("do_get_table_types has no default implementation"))
     }
 
     /// Get a FlightDataStream containing the list of SqlInfo results.
@@ -312,9 +311,7 @@ pub trait FlightSqlService: Sync + Send + Sized + 'static {
         _query: CommandGetSqlInfo,
         _request: Request<Ticket>,
     ) -> Result<Response<<Self as FlightService>::DoGetStream>, Status> {
-        Err(Status::unimplemented(
-            "do_get_sql_info has no default implementation",
-        ))
+        Err(Status::unimplemented("do_get_sql_info has no default implementation"))
     }
 
     /// Get a FlightDataStream containing the data related to the primary and foreign keys.
@@ -323,9 +320,7 @@ pub trait FlightSqlService: Sync + Send + Sized + 'static {
         _query: CommandGetPrimaryKeys,
         _request: Request<Ticket>,
     ) -> Result<Response<<Self as FlightService>::DoGetStream>, Status> {
-        Err(Status::unimplemented(
-            "do_get_primary_keys has no default implementation",
-        ))
+        Err(Status::unimplemented("do_get_primary_keys has no default implementation"))
     }
 
     /// Get a FlightDataStream containing the data related to the exported keys.
@@ -334,9 +329,7 @@ pub trait FlightSqlService: Sync + Send + Sized + 'static {
         _query: CommandGetExportedKeys,
         _request: Request<Ticket>,
     ) -> Result<Response<<Self as FlightService>::DoGetStream>, Status> {
-        Err(Status::unimplemented(
-            "do_get_exported_keys has no default implementation",
-        ))
+        Err(Status::unimplemented("do_get_exported_keys has no default implementation"))
     }
 
     /// Get a FlightDataStream containing the data related to the imported keys.
@@ -345,9 +338,7 @@ pub trait FlightSqlService: Sync + Send + Sized + 'static {
         _query: CommandGetImportedKeys,
         _request: Request<Ticket>,
     ) -> Result<Response<<Self as FlightService>::DoGetStream>, Status> {
-        Err(Status::unimplemented(
-            "do_get_imported_keys has no default implementation",
-        ))
+        Err(Status::unimplemented("do_get_imported_keys has no default implementation"))
     }
 
     /// Get a FlightDataStream containing the data related to the cross reference.
@@ -356,9 +347,7 @@ pub trait FlightSqlService: Sync + Send + Sized + 'static {
         _query: CommandGetCrossReference,
         _request: Request<Ticket>,
     ) -> Result<Response<<Self as FlightService>::DoGetStream>, Status> {
-        Err(Status::unimplemented(
-            "do_get_cross_reference has no default implementation",
-        ))
+        Err(Status::unimplemented("do_get_cross_reference has no default implementation"))
     }
 
     /// Get a FlightDataStream containing the data related to the supported XDBC types.
@@ -367,9 +356,7 @@ pub trait FlightSqlService: Sync + Send + Sized + 'static {
         _query: CommandGetXdbcTypeInfo,
         _request: Request<Ticket>,
     ) -> Result<Response<<Self as FlightService>::DoGetStream>, Status> {
-        Err(Status::unimplemented(
-            "do_get_xdbc_type_info has no default implementation",
-        ))
+        Err(Status::unimplemented("do_get_xdbc_type_info has no default implementation"))
     }
 
     // do_put
@@ -401,9 +388,7 @@ pub trait FlightSqlService: Sync + Send + Sized + 'static {
         _ticket: CommandStatementUpdate,
         _request: Request<PeekableFlightDataStream>,
     ) -> Result<i64, Status> {
-        Err(Status::unimplemented(
-            "do_put_statement_update has no default implementation",
-        ))
+        Err(Status::unimplemented("do_put_statement_update has no default implementation"))
     }
 
     /// Execute a bulk ingestion.
@@ -412,9 +397,7 @@ pub trait FlightSqlService: Sync + Send + Sized + 'static {
         _ticket: CommandStatementIngest,
         _request: Request<PeekableFlightDataStream>,
     ) -> Result<i64, Status> {
-        Err(Status::unimplemented(
-            "do_put_statement_ingest has no default implementation",
-        ))
+        Err(Status::unimplemented("do_put_statement_ingest has no default implementation"))
     }
 
     /// Bind parameters to given prepared statement.
@@ -427,9 +410,7 @@ pub trait FlightSqlService: Sync + Send + Sized + 'static {
         _query: CommandPreparedStatementQuery,
         _request: Request<PeekableFlightDataStream>,
     ) -> Result<DoPutPreparedStatementResult, Status> {
-        Err(Status::unimplemented(
-            "do_put_prepared_statement_query has no default implementation",
-        ))
+        Err(Status::unimplemented("do_put_prepared_statement_query has no default implementation"))
     }
 
     /// Execute an update SQL prepared statement.
@@ -438,9 +419,7 @@ pub trait FlightSqlService: Sync + Send + Sized + 'static {
         _query: CommandPreparedStatementUpdate,
         _request: Request<PeekableFlightDataStream>,
     ) -> Result<i64, Status> {
-        Err(Status::unimplemented(
-            "do_put_prepared_statement_update has no default implementation",
-        ))
+        Err(Status::unimplemented("do_put_prepared_statement_update has no default implementation"))
     }
 
     /// Execute a substrait plan
@@ -449,9 +428,7 @@ pub trait FlightSqlService: Sync + Send + Sized + 'static {
         _query: CommandStatementSubstraitPlan,
         _request: Request<PeekableFlightDataStream>,
     ) -> Result<i64, Status> {
-        Err(Status::unimplemented(
-            "do_put_substrait_plan has no default implementation",
-        ))
+        Err(Status::unimplemented("do_put_substrait_plan has no default implementation"))
     }
 
     // do_action
@@ -511,9 +488,7 @@ pub trait FlightSqlService: Sync + Send + Sized + 'static {
         _query: ActionBeginTransactionRequest,
         _request: Request<Action>,
     ) -> Result<ActionBeginTransactionResult, Status> {
-        Err(Status::unimplemented(
-            "do_action_begin_transaction has no default implementation",
-        ))
+        Err(Status::unimplemented("do_action_begin_transaction has no default implementation"))
     }
 
     /// End a transaction
@@ -522,9 +497,7 @@ pub trait FlightSqlService: Sync + Send + Sized + 'static {
         _query: ActionEndTransactionRequest,
         _request: Request<Action>,
     ) -> Result<(), Status> {
-        Err(Status::unimplemented(
-            "do_action_end_transaction has no default implementation",
-        ))
+        Err(Status::unimplemented("do_action_end_transaction has no default implementation"))
     }
 
     /// Begin a savepoint
@@ -533,9 +506,7 @@ pub trait FlightSqlService: Sync + Send + Sized + 'static {
         _query: ActionBeginSavepointRequest,
         _request: Request<Action>,
     ) -> Result<ActionBeginSavepointResult, Status> {
-        Err(Status::unimplemented(
-            "do_action_begin_savepoint has no default implementation",
-        ))
+        Err(Status::unimplemented("do_action_begin_savepoint has no default implementation"))
     }
 
     /// End a savepoint
@@ -544,9 +515,7 @@ pub trait FlightSqlService: Sync + Send + Sized + 'static {
         _query: ActionEndSavepointRequest,
         _request: Request<Action>,
     ) -> Result<(), Status> {
-        Err(Status::unimplemented(
-            "do_action_end_savepoint has no default implementation",
-        ))
+        Err(Status::unimplemented("do_action_end_savepoint has no default implementation"))
     }
 
     /// Cancel a query
@@ -555,9 +524,7 @@ pub trait FlightSqlService: Sync + Send + Sized + 'static {
         _query: ActionCancelQueryRequest,
         _request: Request<Action>,
     ) -> Result<ActionCancelQueryResult, Status> {
-        Err(Status::unimplemented(
-            "do_action_cancel_query has no default implementation",
-        ))
+        Err(Status::unimplemented("do_action_cancel_query has no default implementation"))
     }
 
     /// do_exchange

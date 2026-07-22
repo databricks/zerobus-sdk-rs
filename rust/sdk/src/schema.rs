@@ -367,10 +367,7 @@ fn parse_type_json(type_json: &str) -> Result<ComplexType, String> {
 
 fn type_ref_to_complex(tref: &TypeRef, level: usize) -> Result<ComplexType, String> {
     if level > MAX_NESTING_DEPTH {
-        return Err(format!(
-            "nesting level exceeds maximum depth of {}",
-            MAX_NESTING_DEPTH
-        ));
+        return Err(format!("nesting level exceeds maximum depth of {}", MAX_NESTING_DEPTH));
     }
     match tref {
         TypeRef::Primitive(s) => parse_primitive_type(s).map(ComplexType::Primitive),
@@ -385,9 +382,9 @@ fn type_ref_to_complex(tref: &TypeRef, level: usize) -> Result<ComplexType, Stri
             }
             Ok(ComplexType::Struct(StructType { fields: out }))
         }
-        TypeRef::Complex(ComplexTypeJson::Array { element_type }) => Ok(ComplexType::Array(
-            Box::new(type_ref_to_complex(element_type, level + 1)?),
-        )),
+        TypeRef::Complex(ComplexTypeJson::Array { element_type }) => {
+            Ok(ComplexType::Array(Box::new(type_ref_to_complex(element_type, level + 1)?)))
+        }
         TypeRef::Complex(ComplexTypeJson::Map {
             key_type,
             value_type,
@@ -436,10 +433,7 @@ const fn map_primitive_to_protobuf(p: PrimitiveType) -> ProtoType {
 }
 
 const fn is_valid_map_key(p: PrimitiveType) -> bool {
-    !matches!(
-        p,
-        PrimitiveType::Double | PrimitiveType::Float | PrimitiveType::Binary
-    )
+    !matches!(p, PrimitiveType::Double | PrimitiveType::Float | PrimitiveType::Binary)
 }
 
 fn validate_map_key(key: &ComplexType, path: &str) -> Result<PrimitiveType, SchemaError> {
@@ -562,10 +556,7 @@ fn generate_struct_message(
         let path = format!("{}_{}", message_name, f.name);
         let (field_type, type_name) =
             map_complex_type_to_protobuf(&f.field_type, &path, &mut local)?;
-        let is_repeated = matches!(
-            f.field_type,
-            ComplexType::Array(_) | ComplexType::Map { .. }
-        );
+        let is_repeated = matches!(f.field_type, ComplexType::Array(_) | ComplexType::Map { .. });
         fields.push(field_descriptor(
             &f.name,
             (index + 1) as i32,
@@ -733,11 +724,7 @@ fn uc_column_to_arrow_field(column: &UcColumn) -> Result<arrow_schema::Field, Sc
         complex_type_to_arrow_field(&column.name, &complex, column.nullable)
     } else {
         let p = parse_uc_top_level_type(&column.type_name)?;
-        Ok(arrow_schema::Field::new(
-            &column.name,
-            map_primitive_to_arrow(p),
-            column.nullable,
-        ))
+        Ok(arrow_schema::Field::new(&column.name, map_primitive_to_arrow(p), column.nullable))
     }
 }
 
@@ -795,8 +782,9 @@ fn complex_type_to_arrow_field(
     ct: &ComplexType,
     nullable: bool,
 ) -> Result<arrow_schema::Field, SchemaError> {
-    use arrow_schema::{DataType, Field, Fields};
     use std::sync::Arc;
+
+    use arrow_schema::{DataType, Field, Fields};
 
     match ct {
         ComplexType::Primitive(p) => Ok(Field::new(name, map_primitive_to_arrow(*p), nullable)),
@@ -804,17 +792,9 @@ fn complex_type_to_arrow_field(
             let mut child_fields = Vec::with_capacity(st.fields.len());
             for f in &st.fields {
                 validate_field_name(&f.name)?;
-                child_fields.push(complex_type_to_arrow_field(
-                    &f.name,
-                    &f.field_type,
-                    f.nullable,
-                )?);
+                child_fields.push(complex_type_to_arrow_field(&f.name, &f.field_type, f.nullable)?);
             }
-            Ok(Field::new(
-                name,
-                DataType::Struct(Fields::from(child_fields)),
-                nullable,
-            ))
+            Ok(Field::new(name, DataType::Struct(Fields::from(child_fields)), nullable))
         }
         ComplexType::Array(element) => {
             // UC's `containsNull` is not surfaced in our AST; default to
@@ -826,11 +806,7 @@ fn complex_type_to_arrow_field(
                 ComplexType::Array(_) => return Err(shape_unsupported("nested arrays", name)),
                 ComplexType::Map { .. } => return Err(shape_unsupported("arrays of maps", name)),
             };
-            Ok(Field::new(
-                name,
-                DataType::List(Arc::new(item_field)),
-                nullable,
-            ))
+            Ok(Field::new(name, DataType::List(Arc::new(item_field)), nullable))
         }
         ComplexType::Map { key, value } => {
             let key_primitive = validate_arrow_map_key(key, name)?;
@@ -1100,20 +1076,14 @@ mod tests {
         // should bail out with an InvalidTypeJson rather than overflowing the stack.
         let mut type_json = String::from("\"integer\"");
         for _ in 0..MAX_NESTING_DEPTH + 2 {
-            type_json = format!(
-                r#"{{"type":"array","elementType":{},"containsNull":true}}"#,
-                type_json
-            );
+            type_json =
+                format!(r#"{{"type":"array","elementType":{},"containsNull":true}}"#, type_json);
         }
         let cols = vec![complex_col("deep", "ARRAY", &type_json, 0)];
         let err = descriptor_from_uc_columns(&cols, "m").unwrap_err();
         match err {
             SchemaError::InvalidTypeJson { reason, .. } => {
-                assert!(
-                    reason.contains("maximum depth"),
-                    "unexpected reason: {}",
-                    reason
-                );
+                assert!(reason.contains("maximum depth"), "unexpected reason: {}", reason);
             }
             other => panic!("expected InvalidTypeJson, got {:?}", other),
         }
@@ -1251,8 +1221,9 @@ mod tests {
 
     #[cfg(feature = "arrow-flight")]
     mod arrow {
-        use super::*;
         use arrow_schema::{DataType, TimeUnit};
+
+        use super::*;
 
         fn arrow_field<'a>(
             schema: &'a arrow_schema::Schema,

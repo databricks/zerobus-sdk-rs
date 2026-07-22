@@ -276,10 +276,7 @@ mod tests {
         let lz = Arc::new(LandingZone::<String>::new(10));
 
         let result = lz.remove_observed();
-        assert!(matches!(
-            result,
-            Err(LandingZoneError::RemovingNonObservedElement)
-        ));
+        assert!(matches!(result, Err(LandingZoneError::RemovingNonObservedElement)));
     }
 
     #[tokio::test]

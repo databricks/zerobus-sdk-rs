@@ -1,14 +1,16 @@
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, OnceLock};
 
+use databricks_zerobus_ingest_sdk::{
+    AckCallback as RustAckCallback,
+    EncodedRecord,
+    OffsetId,
+    StreamBuilder,
+};
 use prost::Message;
 use pyo3::exceptions::{PyException, PyValueError};
 use pyo3::prelude::*;
 use pyo3::types::{PyBytes, PyDict, PyList, PyTuple};
-
-use databricks_zerobus_ingest_sdk::{
-    AckCallback as RustAckCallback, EncodedRecord, OffsetId, StreamBuilder,
-};
 
 /// User-agent prefix emitted by this wrapper SDK. Combined with the wrapper
 /// crate version via `env!("CARGO_PKG_VERSION")` at the call site.
@@ -273,24 +275,16 @@ impl StreamConfigurationOptions {
     /// Validate that all numeric fields are non-negative before casting to unsigned types.
     pub fn validate(&self) -> PyResult<()> {
         if self.max_inflight_records < 0 {
-            return Err(PyValueError::new_err(
-                "max_inflight_records must be non-negative",
-            ));
+            return Err(PyValueError::new_err("max_inflight_records must be non-negative"));
         }
         if self.recovery_timeout_ms < 0 {
-            return Err(PyValueError::new_err(
-                "recovery_timeout_ms must be non-negative",
-            ));
+            return Err(PyValueError::new_err("recovery_timeout_ms must be non-negative"));
         }
         if self.recovery_backoff_ms < 0 {
-            return Err(PyValueError::new_err(
-                "recovery_backoff_ms must be non-negative",
-            ));
+            return Err(PyValueError::new_err("recovery_backoff_ms must be non-negative"));
         }
         if self.recovery_retries < 0 {
-            return Err(PyValueError::new_err(
-                "recovery_retries must be non-negative",
-            ));
+            return Err(PyValueError::new_err("recovery_retries must be non-negative"));
         }
         if self.server_lack_of_ack_timeout_ms < 0 {
             return Err(PyValueError::new_err(
@@ -298,9 +292,7 @@ impl StreamConfigurationOptions {
             ));
         }
         if self.flush_timeout_ms < 0 {
-            return Err(PyValueError::new_err(
-                "flush_timeout_ms must be non-negative",
-            ));
+            return Err(PyValueError::new_err("flush_timeout_ms must be non-negative"));
         }
         if let Some(v) = self.stream_paused_max_wait_time_ms {
             if v < 0 {
@@ -454,9 +446,7 @@ pub(crate) fn extract_record_payloads(payloads: &PyAny) -> PyResult<Vec<EncodedR
             out.push(EncodedRecord::Json(json));
         }
     } else {
-        return Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(
-            "Payloads must be a list",
-        ));
+        return Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>("Payloads must be a list"));
     }
 
     Ok(out)

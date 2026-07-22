@@ -86,8 +86,9 @@ pub trait AckCallback<Id = OffsetId>: Send + Sync {
 #[allow(dead_code)]
 #[cfg(test)]
 mod tests {
-    use super::*;
     use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
+
+    use super::*;
 
     struct TestCallback {
         last_ack: AtomicI64,

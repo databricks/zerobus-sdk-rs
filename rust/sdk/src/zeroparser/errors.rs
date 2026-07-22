@@ -95,11 +95,7 @@ impl fmt::Display for ParseError {
             }
             ParseError::InvalidWireType(wt) => write!(f, "Invalid wire type: {}", wt),
             ParseError::MaxNestingDepthExceeded { max } => {
-                write!(
-                    f,
-                    "Message nesting depth exceeds maximum allowed limit of {} levels",
-                    max
-                )
+                write!(f, "Message nesting depth exceeds maximum allowed limit of {} levels", max)
             }
             ParseError::TruncatedVarint => write!(f, "Truncated varint"),
             ParseError::TypeMismatch {

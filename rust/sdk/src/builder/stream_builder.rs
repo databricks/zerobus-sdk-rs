@@ -21,6 +21,10 @@
 use std::fmt;
 use std::sync::Arc;
 
+#[cfg(feature = "arrow-flight")]
+use crate::arrow_configuration::ArrowStreamConfigurationOptions;
+#[cfg(feature = "arrow-flight")]
+use crate::arrow_stream::{ArrowSchema, ArrowTableProperties, ZerobusArrowStream};
 use crate::callbacks::AckCallback;
 use crate::databricks::zerobus::RecordType;
 #[cfg(feature = "testing")]
@@ -28,11 +32,6 @@ use crate::headers_provider::NoAuthHeadersProvider;
 use crate::headers_provider::{HeadersProvider, OAuthHeadersProvider};
 use crate::stream_configuration::StreamConfigurationOptions;
 use crate::{TableProperties, ZerobusError, ZerobusResult, ZerobusSdk, ZerobusStream};
-
-#[cfg(feature = "arrow-flight")]
-use crate::arrow_configuration::ArrowStreamConfigurationOptions;
-#[cfg(feature = "arrow-flight")]
-use crate::arrow_stream::{ArrowSchema, ArrowTableProperties, ZerobusArrowStream};
 
 /// Internal representation of the authentication configuration.
 enum AuthConfig {
@@ -490,8 +489,9 @@ impl<'a> StreamBuilder<'a> {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use std::collections::HashMap;
+
+    use super::*;
 
     fn test_sdk() -> ZerobusSdk {
         ZerobusSdk::new_with_config(
@@ -600,10 +600,7 @@ mod tests {
             .oauth("a", "b")
             .json()
             .max_ingest_payload_bytes(5 * 1024 * 1024);
-        assert_eq!(
-            builder.grpc_config.max_ingest_payload_bytes,
-            5 * 1024 * 1024
-        );
+        assert_eq!(builder.grpc_config.max_ingest_payload_bytes, 5 * 1024 * 1024);
     }
 
     #[tokio::test]
@@ -733,11 +730,7 @@ mod tests {
         use arrow_schema::{DataType, Field, Schema as ArrowSchema};
 
         let sdk = test_sdk();
-        let schema = Arc::new(ArrowSchema::new(vec![Field::new(
-            "id",
-            DataType::Int32,
-            false,
-        )]));
+        let schema = Arc::new(ArrowSchema::new(vec![Field::new("id", DataType::Int32, false)]));
         let _builder = sdk
             .stream_builder()
             .table("t")
@@ -753,11 +746,7 @@ mod tests {
         use arrow_schema::{DataType, Field, Schema as ArrowSchema};
 
         let sdk = test_sdk();
-        let schema = Arc::new(ArrowSchema::new(vec![Field::new(
-            "id",
-            DataType::Int32,
-            false,
-        )]));
+        let schema = Arc::new(ArrowSchema::new(vec![Field::new("id", DataType::Int32, false)]));
         let builder = sdk
             .stream_builder()
             .table("t")
@@ -776,9 +765,6 @@ mod tests {
         assert_eq!(builder.arrow_config.recovery_retries, 2);
         assert_eq!(builder.arrow_config.server_lack_of_ack_timeout_ms, 10_000);
         assert_eq!(builder.arrow_config.flush_timeout_ms, 20_000);
-        assert_eq!(
-            builder.arrow_config.stream_paused_max_wait_time_ms,
-            Some(5_000)
-        );
+        assert_eq!(builder.arrow_config.stream_paused_max_wait_time_ms, Some(5_000));
     }
 }

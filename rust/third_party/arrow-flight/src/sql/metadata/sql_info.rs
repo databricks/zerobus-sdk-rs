@@ -30,8 +30,15 @@ use std::sync::Arc;
 use arrow_arith::boolean::or;
 use arrow_array::array::{Array, UInt32Array, UnionArray};
 use arrow_array::builder::{
-    ArrayBuilder, BooleanBuilder, Int8Builder, Int32Builder, Int64Builder, ListBuilder, MapBuilder,
-    StringBuilder, UInt32Builder,
+    ArrayBuilder,
+    BooleanBuilder,
+    Int32Builder,
+    Int64Builder,
+    Int8Builder,
+    ListBuilder,
+    MapBuilder,
+    StringBuilder,
+    UInt32Builder,
 };
 use arrow_array::{RecordBatch, Scalar};
 use arrow_data::ArrayData;
@@ -495,10 +502,7 @@ mod tests {
         // bool
         builder.append(SqlInfo::SqlDdlCatalog, false);
         // i32
-        builder.append(
-            SqlInfo::SqlNullOrdering,
-            SqlNullOrdering::SqlNullsSortedHigh as i32,
-        );
+        builder.append(SqlInfo::SqlNullOrdering, SqlNullOrdering::SqlNullsSortedHigh as i32);
         // i64
         builder.append(SqlInfo::SqlMaxBinaryLiteralLength, i32::MAX as i64);
         // [str]

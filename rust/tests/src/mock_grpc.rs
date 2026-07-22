@@ -8,11 +8,14 @@ pub mod databricks {
         tonic::include_proto!("databricks.zerobus");
     }
 }
+use databricks::zerobus::ephemeral_stream_request::Payload as RequestPayload;
+use databricks::zerobus::ephemeral_stream_response::Payload as ResponsePayload;
+use databricks::zerobus::zerobus_server::{Zerobus, ZerobusServer};
 use databricks::zerobus::{
-    ephemeral_stream_request::Payload as RequestPayload,
-    ephemeral_stream_response::Payload as ResponsePayload,
-    zerobus_server::{Zerobus, ZerobusServer},
-    CloseStreamSignal, CreateIngestStreamResponse, EphemeralStreamRequest, EphemeralStreamResponse,
+    CloseStreamSignal,
+    CreateIngestStreamResponse,
+    EphemeralStreamRequest,
+    EphemeralStreamResponse,
     IngestRecordResponse,
 };
 use prost_types::Duration as ProtobufDuration;
@@ -426,11 +429,9 @@ async fn handle_mock_response(
                     request_type, ack_up_to_offset
                 );
                 let response = EphemeralStreamResponse {
-                    payload: Some(ResponsePayload::IngestRecordResponse(
-                        IngestRecordResponse {
-                            durability_ack_up_to_offset: Some(*ack_up_to_offset),
-                        },
-                    )),
+                    payload: Some(ResponsePayload::IngestRecordResponse(IngestRecordResponse {
+                        durability_ack_up_to_offset: Some(*ack_up_to_offset),
+                    })),
                 };
                 if tx.send(Ok(response)).await.is_err() {
                     return (false, current_index);
@@ -447,10 +448,7 @@ async fn handle_mock_response(
             if *delay_ms > 0 {
                 sleep(Duration::from_millis(*delay_ms)).await;
             }
-            info!(
-                "Sending CloseStreamSignal with duration: {}s",
-                duration_seconds
-            );
+            info!("Sending CloseStreamSignal with duration: {}s", duration_seconds);
             let response = EphemeralStreamResponse {
                 payload: Some(ResponsePayload::CloseStreamSignal(CloseStreamSignal {
                     duration: Some(ProtobufDuration {

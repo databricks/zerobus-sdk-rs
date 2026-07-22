@@ -22,10 +22,12 @@
 use std::sync::Arc;
 
 use arrow_arith::boolean::and;
-use arrow_array::{ArrayRef, RecordBatch, StringArray, builder::StringBuilder};
+use arrow_array::builder::StringBuilder;
+use arrow_array::{ArrayRef, RecordBatch, StringArray};
 use arrow_ord::cmp::eq;
 use arrow_schema::{DataType, Field, Schema, SchemaRef};
-use arrow_select::{filter::filter_record_batch, take::take};
+use arrow_select::filter::filter_record_batch;
+use arrow_select::take::take;
 use arrow_string::like::like;
 use once_cell::sync::Lazy;
 
@@ -139,10 +141,7 @@ impl GetDbSchemasBuilder {
 
         let batch = RecordBatch::try_new(
             schema,
-            vec![
-                Arc::new(catalog_name) as ArrayRef,
-                Arc::new(db_schema_name) as ArrayRef,
-            ],
+            vec![Arc::new(catalog_name) as ArrayRef, Arc::new(db_schema_name) as ArrayRef],
         )?;
 
         // Apply the filters if needed
@@ -184,8 +183,9 @@ static GET_DB_SCHEMAS_SCHEMA: Lazy<SchemaRef> = Lazy::new(|| {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use arrow_array::{StringArray, UInt32Array};
+
+    use super::*;
 
     fn get_ref_batch() -> RecordBatch {
         RecordBatch::try_new(
@@ -197,9 +197,8 @@ mod tests {
                     "b_catalog",
                     "b_catalog",
                 ])) as ArrayRef,
-                Arc::new(StringArray::from(vec![
-                    "a_schema", "b_schema", "a_schema", "b_schema",
-                ])) as ArrayRef,
+                Arc::new(StringArray::from(vec!["a_schema", "b_schema", "a_schema", "b_schema"]))
+                    as ArrayRef,
             ],
         )
         .unwrap()

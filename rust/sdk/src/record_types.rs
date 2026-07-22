@@ -12,11 +12,15 @@
 use prost::Message;
 use smallvec::{smallvec, SmallVec};
 
+use crate::databricks::zerobus::ephemeral_stream_request::Payload as RequestPayload;
+use crate::databricks::zerobus::ingest_record_batch_request::Batch as IngestRequestBatch;
+use crate::databricks::zerobus::ingest_record_request::Record as IngestRequestRecord;
 use crate::databricks::zerobus::{
-    ephemeral_stream_request::Payload as RequestPayload,
-    ingest_record_batch_request::Batch as IngestRequestBatch,
-    ingest_record_request::Record as IngestRequestRecord, IngestRecordBatchRequest,
-    IngestRecordRequest, JsonRecordBatch, ProtoEncodedRecordBatch, RecordType,
+    IngestRecordBatchRequest,
+    IngestRecordRequest,
+    JsonRecordBatch,
+    ProtoEncodedRecordBatch,
+    RecordType,
 };
 use crate::OffsetId;
 
@@ -191,28 +195,26 @@ impl EncodedBatch {
 
         match record_type {
             RecordType::Json => batch_iter
-                .try_fold(
-                    SmallVec::with_capacity(size_hint),
-                    |mut vec, record| match record.into() {
+                .try_fold(SmallVec::with_capacity(size_hint), |mut vec, record| {
+                    match record.into() {
                         EncodedRecord::Json(value) => {
                             vec.push(value);
                             Some(vec)
                         }
                         _ => None,
-                    },
-                )
+                    }
+                })
                 .map(EncodedBatch::Json),
             RecordType::Proto => batch_iter
-                .try_fold(
-                    SmallVec::with_capacity(size_hint),
-                    |mut vec, record| match record.into() {
+                .try_fold(SmallVec::with_capacity(size_hint), |mut vec, record| {
+                    match record.into() {
                         EncodedRecord::Proto(value) => {
                             vec.push(value);
                             Some(vec)
                         }
                         _ => None,
-                    },
-                )
+                    }
+                })
                 .map(EncodedBatch::Proto),
             _ => None,
         }
@@ -230,11 +232,9 @@ impl EncodedBatch {
             }
             EncodedBatch::Proto(records) => {
                 RequestPayload::IngestRecordBatch(IngestRecordBatchRequest {
-                    batch: Some(IngestRequestBatch::ProtoEncodedBatch(
-                        ProtoEncodedRecordBatch {
-                            records: records.into_vec(),
-                        },
-                    )),
+                    batch: Some(IngestRequestBatch::ProtoEncodedBatch(ProtoEncodedRecordBatch {
+                        records: records.into_vec(),
+                    })),
                     offset_id: Some(offset_id),
                 })
             }
@@ -315,10 +315,11 @@ impl Iterator for EncodedBatchIter {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use prost::Message as ProstMessage;
     use serde::Serialize;
     use smallvec::smallvec;
+
+    use super::*;
 
     #[derive(Clone, PartialEq, ProstMessage)]
     struct TestMessage {

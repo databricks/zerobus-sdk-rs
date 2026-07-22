@@ -65,14 +65,8 @@ fn build_connector(proxy_uri: &str) -> Result<ProxiedConnector, ZerobusError> {
 pub type ConnectorFactory = Arc<dyn Fn(&str) -> Option<ProxyConnector> + Send + Sync>;
 
 /// Env var names checked for proxy URL, in gRPC core precedence order.
-const PROXY_ENV_VARS: &[&str] = &[
-    "grpc_proxy",
-    "GRPC_PROXY",
-    "https_proxy",
-    "HTTPS_PROXY",
-    "http_proxy",
-    "HTTP_PROXY",
-];
+const PROXY_ENV_VARS: &[&str] =
+    &["grpc_proxy", "GRPC_PROXY", "https_proxy", "HTTPS_PROXY", "http_proxy", "HTTP_PROXY"];
 
 /// Env var names checked for no-proxy list, in gRPC core precedence order.
 const NO_PROXY_ENV_VARS: &[&str] = &["no_grpc_proxy", "NO_GRPC_PROXY", "no_proxy", "NO_PROXY"];
@@ -161,10 +155,7 @@ mod tests {
 
     #[test]
     fn no_proxy_suffix_match() {
-        assert!(host_matches_no_proxy(
-            "workspace.cloud.databricks.com",
-            "databricks.com"
-        ));
+        assert!(host_matches_no_proxy("workspace.cloud.databricks.com", "databricks.com"));
         assert!(host_matches_no_proxy("foo.example.com", "example.com"));
         // Must be a subdomain, not just a string suffix
         assert!(!host_matches_no_proxy("notexample.com", "example.com"));
@@ -188,9 +179,6 @@ mod tests {
     #[test]
     fn no_proxy_whitespace_handling() {
         assert!(host_matches_no_proxy("example.com", "  example.com  "));
-        assert!(host_matches_no_proxy(
-            "example.com",
-            "other.com , example.com , more.com"
-        ));
+        assert!(host_matches_no_proxy("example.com", "other.com , example.com , more.com"));
     }
 }

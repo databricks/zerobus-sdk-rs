@@ -303,9 +303,6 @@ mod tests {
 
     #[test]
     fn churn_unknown_table_returns_zero() {
-        assert_eq!(
-            open_count_in_window_for_testing("cat.sch.churn_unknown_xyz"),
-            0
-        );
+        assert_eq!(open_count_in_window_for_testing("cat.sch.churn_unknown_xyz"), 0);
     }
 }

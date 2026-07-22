@@ -2,21 +2,25 @@
 //!
 //! This module provides JNI functions for creating and managing ZerobusSdk instances.
 
-use crate::arrow_stream::NativeArrowStreamHandle;
-use crate::async_bridge::{create_completable_future, spawn_and_complete};
-use crate::errors::{throw_from_zerobus_error, throw_zerobus_exception};
-use crate::options::{
-    apply_arrow_stream_options, apply_stream_options, extract_arrow_stream_options,
-    extract_stream_options,
-};
-use crate::runtime::block_on;
-use crate::stream::NativeStreamHandle;
+use std::sync::Arc;
+
 use databricks_zerobus_ingest_sdk::databricks::zerobus::RecordType;
 use databricks_zerobus_ingest_sdk::ZerobusSdk;
 use jni::objects::{JByteArray, JClass, JObject, JString};
 use jni::sys::{jboolean, jlong, JNI_FALSE};
 use jni::JNIEnv;
-use std::sync::Arc;
+
+use crate::arrow_stream::NativeArrowStreamHandle;
+use crate::async_bridge::{create_completable_future, spawn_and_complete};
+use crate::errors::{throw_from_zerobus_error, throw_zerobus_exception};
+use crate::options::{
+    apply_arrow_stream_options,
+    apply_stream_options,
+    extract_arrow_stream_options,
+    extract_stream_options,
+};
+use crate::runtime::block_on;
+use crate::stream::NativeStreamHandle;
 
 /// Native SDK handle stored in Java.
 pub struct NativeSdkHandle {
@@ -268,11 +272,9 @@ pub extern "system" fn Java_com_databricks_zerobus_ZerobusSdk_nativeCreateStream
                 }
                 RecordType::Json => base.json(),
                 RecordType::Unspecified => {
-                    return Err(
-                        databricks_zerobus_ingest_sdk::ZerobusError::InvalidArgument(
-                            "Record type is not specified".to_string(),
-                        ),
-                    );
+                    return Err(databricks_zerobus_ingest_sdk::ZerobusError::InvalidArgument(
+                        "Record type is not specified".to_string(),
+                    ));
                 }
             };
             if let Some(opts) = extracted_options {
@@ -281,11 +283,7 @@ pub extern "system" fn Java_com_databricks_zerobus_ZerobusSdk_nativeCreateStream
 
             let stream = builder.build().await?;
 
-            Ok(NativeStreamHandle::new(
-                stream,
-                credentials.0,
-                credentials.1,
-            ))
+            Ok(NativeStreamHandle::new(stream, credentials.0, credentials.1))
         },
         |handle| handle.into_raw(),
     );
@@ -351,11 +349,7 @@ pub extern "system" fn Java_com_databricks_zerobus_ZerobusSdk_nativeRecreateStre
         future_ref,
         async move {
             let new_stream = sdk_arc.recreate_stream(&old_stream).await?;
-            Ok(NativeStreamHandle::new(
-                new_stream,
-                client_id,
-                client_secret,
-            ))
+            Ok(NativeStreamHandle::new(new_stream, client_id, client_secret))
         },
         |handle| handle.into_raw(),
     );
@@ -483,11 +477,7 @@ pub extern "system" fn Java_com_databricks_zerobus_ZerobusSdk_nativeCreateArrowS
 
             let stream = builder.build_arrow().await?;
 
-            Ok(NativeArrowStreamHandle::new(
-                stream,
-                credentials.0,
-                credentials.1,
-            ))
+            Ok(NativeArrowStreamHandle::new(stream, credentials.0, credentials.1))
         },
         |handle| handle.into_raw(),
     );
@@ -553,11 +543,7 @@ pub extern "system" fn Java_com_databricks_zerobus_ZerobusSdk_nativeRecreateArro
         future_ref,
         async move {
             let new_stream = sdk_arc.recreate_arrow_stream(&old_stream).await?;
-            Ok(NativeArrowStreamHandle::new(
-                new_stream,
-                client_id,
-                client_secret,
-            ))
+            Ok(NativeArrowStreamHandle::new(new_stream, client_id, client_secret))
         },
         |handle| handle.into_raw(),
     );

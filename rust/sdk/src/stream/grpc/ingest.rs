@@ -7,6 +7,7 @@
 
 use std::future::Future;
 use std::sync::atomic::Ordering;
+
 use tracing::{debug, error};
 
 use super::types::IngestRequest;
@@ -130,9 +131,7 @@ impl ZerobusStream {
     ) -> ZerobusResult<impl Future<Output = ZerobusResult<OffsetId>>> {
         if self.is_closed.load(Ordering::Relaxed) {
             error!(table_name = %self.table_properties.table_name, "Stream closed");
-            return Err(ZerobusError::StreamClosedError(tonic::Status::internal(
-                "Stream closed",
-            )));
+            return Err(ZerobusError::StreamClosedError(tonic::Status::internal("Stream closed")));
         }
 
         let _guard = self.sync_mutex.lock().await;
@@ -167,9 +166,7 @@ impl ZerobusStream {
             })
         } else {
             error!("Stream ID is None");
-            Err(ZerobusError::StreamClosedError(tonic::Status::internal(
-                "Stream ID is None",
-            )))
+            Err(ZerobusError::StreamClosedError(tonic::Status::internal("Stream ID is None")))
         }
     }
 
@@ -188,9 +185,7 @@ impl ZerobusStream {
 
         if self.is_closed.load(Ordering::Relaxed) {
             error!(table_name = %self.table_properties.table_name, "Stream closed");
-            return Err(ZerobusError::StreamClosedError(tonic::Status::internal(
-                "Stream closed",
-            )));
+            return Err(ZerobusError::StreamClosedError(tonic::Status::internal("Stream closed")));
         }
 
         let _guard = self.sync_mutex.lock().await;

@@ -26,7 +26,8 @@ use arrow_array::builder::{BinaryBuilder, StringBuilder};
 use arrow_array::{ArrayRef, RecordBatch, StringArray};
 use arrow_ord::cmp::eq;
 use arrow_schema::{DataType, Field, Schema, SchemaRef};
-use arrow_select::{filter::filter_record_batch, take::take};
+use arrow_select::filter::filter_record_batch;
+use arrow_select::take::take;
 use arrow_string::like::like;
 use once_cell::sync::Lazy;
 
@@ -311,8 +312,9 @@ static GET_TABLES_SCHEMA_WITH_TABLE_SCHEMA: Lazy<SchemaRef> = Lazy::new(|| {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use arrow_array::{StringArray, UInt32Array};
+
+    use super::*;
 
     fn get_ref_batch() -> RecordBatch {
         RecordBatch::try_new(
@@ -371,13 +373,7 @@ mod tests {
         );
         for (catalog_name, schema_name, table_name, table_type) in tables {
             builder
-                .append(
-                    catalog_name,
-                    schema_name,
-                    table_name,
-                    table_type,
-                    &dummy_schema,
-                )
+                .append(catalog_name, schema_name, table_name, table_type, &dummy_schema)
                 .unwrap();
         }
         builder
@@ -461,13 +457,7 @@ mod tests {
         );
         for (catalog_name, schema_name, table_name, table_type) in tables {
             builder
-                .append(
-                    catalog_name,
-                    schema_name,
-                    table_name,
-                    table_type,
-                    &dummy_schema,
-                )
+                .append(catalog_name, schema_name, table_name, table_type, &dummy_schema)
                 .unwrap();
         }
         let table_batch = builder.build().unwrap();

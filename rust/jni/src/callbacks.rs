@@ -3,10 +3,12 @@
 //! This module provides a Rust implementation of the SDK's AckCallback trait
 //! that delegates to a Java AckCallback object.
 
-use crate::runtime::get_jvm;
+use std::sync::Arc;
+
 use databricks_zerobus_ingest_sdk::{AckCallback, OffsetId};
 use jni::objects::{GlobalRef, JValue};
-use std::sync::Arc;
+
+use crate::runtime::get_jvm;
 
 /// A JNI bridge that implements the Rust AckCallback trait by delegating
 /// to a Java AckCallback object.

@@ -47,15 +47,17 @@
 // The unused_crate_dependencies lint does not work well for crates defining additional examples/bin targets
 #![allow(unused_crate_dependencies)]
 
-use arrow_ipc::{convert, writer, writer::EncodedData, writer::IpcWriteOptions};
-use arrow_schema::{ArrowError, Schema};
+use std::fmt;
+use std::ops::Deref;
 
 use arrow_ipc::convert::try_schema_from_ipc_buffer;
-use base64::Engine;
+use arrow_ipc::writer::{EncodedData, IpcWriteOptions};
+use arrow_ipc::{convert, writer};
+use arrow_schema::{ArrowError, Schema};
 use base64::prelude::BASE64_STANDARD;
+use base64::Engine;
 use bytes::Bytes;
 use prost_types::Timestamp;
-use std::{fmt, ops::Deref};
 
 type ArrowResult<T> = std::result::Result<T, ArrowError>;
 
@@ -68,22 +70,24 @@ mod r#gen {
 
 /// Defines a `Flight` for generation or retrieval.
 pub mod flight_descriptor {
-    use super::r#gen;
     pub use r#gen::flight_descriptor::DescriptorType;
+
+    use super::r#gen;
 }
 
 /// Low Level [tonic] [`FlightServiceClient`](gen::flight_service_client::FlightServiceClient).
 pub mod flight_service_client {
-    use super::r#gen;
     pub use r#gen::flight_service_client::FlightServiceClient;
+
+    use super::r#gen;
 }
 
 /// Low Level [tonic] [`FlightServiceServer`](gen::flight_service_server::FlightServiceServer)
 /// and [`FlightService`](gen::flight_service_server::FlightService).
 pub mod flight_service_server {
+    pub use r#gen::flight_service_server::{FlightService, FlightServiceServer};
+
     use super::r#gen;
-    pub use r#gen::flight_service_server::FlightService;
-    pub use r#gen::flight_service_server::FlightServiceServer;
 }
 
 /// Mid Level [`FlightClient`]
@@ -101,27 +105,29 @@ pub mod encode;
 /// Common error types
 pub mod error;
 
-pub use r#gen::Action;
-pub use r#gen::ActionType;
-pub use r#gen::BasicAuth;
-pub use r#gen::CancelFlightInfoRequest;
-pub use r#gen::CancelFlightInfoResult;
-pub use r#gen::CancelStatus;
-pub use r#gen::Criteria;
-pub use r#gen::Empty;
-pub use r#gen::FlightData;
-pub use r#gen::FlightDescriptor;
-pub use r#gen::FlightEndpoint;
-pub use r#gen::FlightInfo;
-pub use r#gen::HandshakeRequest;
-pub use r#gen::HandshakeResponse;
-pub use r#gen::Location;
-pub use r#gen::PollInfo;
-pub use r#gen::PutResult;
-pub use r#gen::RenewFlightEndpointRequest;
-pub use r#gen::Result;
-pub use r#gen::SchemaResult;
-pub use r#gen::Ticket;
+pub use r#gen::{
+    Action,
+    ActionType,
+    BasicAuth,
+    CancelFlightInfoRequest,
+    CancelFlightInfoResult,
+    CancelStatus,
+    Criteria,
+    Empty,
+    FlightData,
+    FlightDescriptor,
+    FlightEndpoint,
+    FlightInfo,
+    HandshakeRequest,
+    HandshakeResponse,
+    Location,
+    PollInfo,
+    PutResult,
+    RenewFlightEndpointRequest,
+    Result,
+    SchemaResult,
+    Ticket,
+};
 
 /// Helper to extract HTTP/gRPC trailers from a tonic stream.
 mod trailers;
@@ -418,9 +424,7 @@ impl TryFrom<&FlightData> for Schema {
     type Error = ArrowError;
     fn try_from(data: &FlightData) -> ArrowResult<Self> {
         convert::try_schema_from_flatbuffer_bytes(&data.data_header[..]).map_err(|err| {
-            ArrowError::ParseError(format!(
-                "Unable to convert flight data to Arrow schema: {err}"
-            ))
+            ArrowError::ParseError(format!("Unable to convert flight data to Arrow schema: {err}"))
         })
     }
 }
@@ -829,9 +833,10 @@ impl FlightEndpoint {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use arrow_ipc::MetadataVersion;
     use arrow_schema::{DataType, Field, TimeUnit};
+
+    use super::*;
 
     struct TestVector(Vec<u8>, usize);
 

@@ -63,10 +63,7 @@ pub fn create_registry_for_version(version: ProtoVersion, message_name: &str) ->
     let file_desc_set = load_descriptor_set(version);
     let (msg_desc, file) = find_message_and_file(&file_desc_set, version.package(), message_name);
     let mut descriptor = msg_desc.clone();
-    descriptor.name = Some(format!(
-        "{}.{message_name}",
-        file.package.as_deref().unwrap_or("")
-    ));
+    descriptor.name = Some(format!("{}.{message_name}", file.package.as_deref().unwrap_or("")));
     MessageRegistry::from_descriptor(&descriptor)
 }
 

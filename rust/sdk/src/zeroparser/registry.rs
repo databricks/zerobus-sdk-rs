@@ -203,10 +203,7 @@ impl MessageRegistry {
                 format!("{current_prefix}.{name}")
             };
 
-            acc.insert(
-                full_name.clone(),
-                DescriptorWithFieldCache::from_descriptor(desc),
-            );
+            acc.insert(full_name.clone(), DescriptorWithFieldCache::from_descriptor(desc));
 
             // Push nested types onto the stack (in reverse order to maintain processing order).
             for nested in desc.nested_type.iter().rev() {
@@ -245,13 +242,7 @@ pub mod tests {
         let fields = vec![
             make_field(1, "id", field_descriptor_proto::Type::Int32, false, None),
             make_field(2, "name", field_descriptor_proto::Type::String, false, None),
-            make_field(
-                200,
-                "large",
-                field_descriptor_proto::Type::String,
-                false,
-                None,
-            ),
+            make_field(200, "large", field_descriptor_proto::Type::String, false, None),
             make_field(3, "items", field_descriptor_proto::Type::Int32, true, None),
         ];
         let desc = make_descriptor("TestMessage", fields);
@@ -297,13 +288,7 @@ pub mod tests {
 
     #[test]
     fn message_registry_lookup() {
-        let fields = vec![make_field(
-            1,
-            "id",
-            field_descriptor_proto::Type::Int32,
-            false,
-            None,
-        )];
+        let fields = vec![make_field(1, "id", field_descriptor_proto::Type::Int32, false, None)];
         let desc = make_descriptor("RootMessage", fields);
         let registry = MessageRegistry::from_descriptor(&desc);
 
@@ -316,13 +301,7 @@ pub mod tests {
     fn message_registry_nested() {
         let level3 = make_descriptor(
             "Level3",
-            vec![make_field(
-                1,
-                "field3",
-                field_descriptor_proto::Type::Bool,
-                false,
-                None,
-            )],
+            vec![make_field(1, "field3", field_descriptor_proto::Type::Bool, false, None)],
         );
         let mut level2 = make_descriptor("Level2", vec![]);
         level2.nested_type.push(level3);

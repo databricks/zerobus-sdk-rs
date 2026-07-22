@@ -32,14 +32,8 @@ fn _zerobus_core(py: Python, m: &PyModule) -> PyResult<()> {
     m.add_class::<common::AckCallback>()?;
 
     // Add exception types
-    m.add(
-        "ZerobusException",
-        py.get_type::<common::ZerobusException>(),
-    )?;
-    m.add(
-        "NonRetriableException",
-        py.get_type::<common::NonRetriableException>(),
-    )?;
+    m.add("ZerobusException", py.get_type::<common::ZerobusException>())?;
+    m.add("NonRetriableException", py.get_type::<common::NonRetriableException>())?;
 
     // Add authentication classes
     m.add_class::<auth::HeadersProvider>()?;

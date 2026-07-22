@@ -84,10 +84,7 @@ async fn ingest_with_offset_api(stream: &mut ZerobusStream) -> Result<(), Box<dy
 
     // Queue the record; the call returns immediately without waiting for the ack.
     let offset_id = stream.ingest_record_offset(JsonValue(order)).await?;
-    println!(
-        "[Auto-serializing] Record queued with offset ID: {}",
-        offset_id
-    );
+    println!("[Auto-serializing] Record queued with offset ID: {}", offset_id);
 
     // 2. Pre-serialized: JsonString - pass JSON string with explicit wrapper.
     let json_string = format!(
@@ -105,10 +102,7 @@ async fn ingest_with_offset_api(stream: &mut ZerobusStream) -> Result<(), Box<dy
     );
 
     let offset_id = stream.ingest_record_offset(JsonString(json_string)).await?;
-    println!(
-        "[Pre-serialized] Record queued with offset ID: {}",
-        offset_id
-    );
+    println!("[Pre-serialized] Record queued with offset ID: {}", offset_id);
 
     // 3. Backward-compatible: raw String - no wrapper needed, works the same as JsonString.
     let raw_json = format!(
@@ -126,10 +120,7 @@ async fn ingest_with_offset_api(stream: &mut ZerobusStream) -> Result<(), Box<dy
     );
 
     let offset_id = stream.ingest_record_offset(raw_json).await?;
-    println!(
-        "[Backward-compatible] Record queued with offset ID: {}",
-        offset_id
-    );
+    println!("[Backward-compatible] Record queued with offset ID: {}", offset_id);
 
     // Confirm all queued records at once. flush() waits for every pending acknowledgment;
     // this is the right place to wait, not after each individual ingest above.

@@ -21,15 +21,15 @@
 
 use std::sync::Arc;
 
-use arrow_array::{ArrayRef, RecordBatch, builder::StringBuilder};
+use arrow_array::builder::StringBuilder;
+use arrow_array::{ArrayRef, RecordBatch};
 use arrow_schema::{DataType, Field, Schema, SchemaRef};
 use arrow_select::take::take;
 use once_cell::sync::Lazy;
 
+use super::lexsort_to_indices;
 use crate::error::*;
 use crate::sql::CommandGetTableTypes;
-
-use super::lexsort_to_indices;
 
 /// A builder for a [`CommandGetTableTypes`] response.
 ///
@@ -101,18 +101,14 @@ fn get_table_types_schema() -> SchemaRef {
 }
 
 /// The schema for [`CommandGetTableTypes`].
-static GET_TABLE_TYPES_SCHEMA: Lazy<SchemaRef> = Lazy::new(|| {
-    Arc::new(Schema::new(vec![Field::new(
-        "table_type",
-        DataType::Utf8,
-        false,
-    )]))
-});
+static GET_TABLE_TYPES_SCHEMA: Lazy<SchemaRef> =
+    Lazy::new(|| Arc::new(Schema::new(vec![Field::new("table_type", DataType::Utf8, false)])));
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use arrow_array::StringArray;
+
+    use super::*;
 
     fn get_ref_batch() -> RecordBatch {
         RecordBatch::try_new(

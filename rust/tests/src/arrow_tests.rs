@@ -9,9 +9,15 @@ mod arrow_flight_tests {
 
     use crate::mock_arrow_flight::{start_mock_flight_server, MockFlightResponse};
     use crate::utils::{
-        create_test_arrow_schema, create_test_dict_record_batch, create_test_dict_schema,
-        create_test_record_batch, record_batch_to_ipc_bytes, setup_tracing,
-        CountingHeadersProvider, HangingInvalidationHeadersProvider, TestHeadersProvider,
+        create_test_arrow_schema,
+        create_test_dict_record_batch,
+        create_test_dict_schema,
+        create_test_record_batch,
+        record_batch_to_ipc_bytes,
+        setup_tracing,
+        CountingHeadersProvider,
+        HangingInvalidationHeadersProvider,
+        TestHeadersProvider,
     };
 
     const TABLE_NAME: &str = "test_catalog.test_schema.test_table";
@@ -56,11 +62,7 @@ mod arrow_flight_tests {
                 .build_arrow()
                 .await;
 
-            assert!(
-                result.is_ok(),
-                "Failed to create Arrow Flight stream: {:?}",
-                result.err()
-            );
+            assert!(result.is_ok(), "Failed to create Arrow Flight stream: {:?}", result.err());
 
             let stream = result.unwrap();
             assert_eq!(stream.table_name(), TABLE_NAME);
@@ -109,11 +111,7 @@ mod arrow_flight_tests {
                 "expected an empty-batch InvalidArgument, got: {}",
                 err
             );
-            assert!(
-                !err.is_retryable(),
-                "empty-batch rejection is non-retryable, got: {}",
-                err
-            );
+            assert!(!err.is_retryable(), "empty-batch rejection is non-retryable, got: {}", err);
 
             Ok(())
         }
@@ -577,15 +575,9 @@ mod arrow_flight_tests {
             .expect("close must reach the finalization barrier");
             drop(close_future);
 
-            assert!(
-                !stream.is_closed(),
-                "cancelled teardown is not finalized yet"
-            );
+            assert!(!stream.is_closed(), "cancelled teardown is not finalized yet");
             let batch = create_test_record_batch(schema, vec![2], vec![Some("late")]);
-            assert!(
-                stream.ingest_batch(batch).await.is_err(),
-                "Closing must reject new ingests"
-            );
+            assert!(stream.ingest_batch(batch).await.is_err(), "Closing must reject new ingests");
             assert!(
                 stream.get_unacked_batches().await.is_err(),
                 "unacked retrieval is allowed only after Closed"
@@ -736,10 +728,7 @@ mod arrow_flight_tests {
             let schema = create_test_arrow_schema();
 
             mock_server
-                .inject_responses(
-                    TABLE_NAME,
-                    vec![MockFlightResponse::CloseStream { delay_ms: 0 }],
-                )
+                .inject_responses(TABLE_NAME, vec![MockFlightResponse::CloseStream { delay_ms: 0 }])
                 .await;
 
             let sdk = ZerobusSdk::builder()
@@ -976,12 +965,9 @@ mod arrow_flight_tests {
 
             // The auth rejection must not terminate the stream: recovery re-mints and the
             // batch is eventually acknowledged.
-            tokio::time::timeout(
-                std::time::Duration::from_secs(5),
-                stream.wait_for_offset(offset),
-            )
-            .await
-            .expect("recovery after auth re-mint should complete")?;
+            tokio::time::timeout(std::time::Duration::from_secs(5), stream.wait_for_offset(offset))
+                .await
+                .expect("recovery after auth re-mint should complete")?;
 
             // Exactly one invalidation: the single auth rejection on conn2 (conn1's
             // retriable error and conn3's successful setup must not invalidate).
@@ -1062,10 +1048,7 @@ mod arrow_flight_tests {
                 "must surface the original auth rejection, got: {}",
                 err
             );
-            assert!(
-                stream.is_closed(),
-                "stream must close after invalidation timeout"
-            );
+            assert!(stream.is_closed(), "stream must close after invalidation timeout");
             assert_eq!(
                 invalidations.load(std::sync::atomic::Ordering::SeqCst),
                 1,
@@ -1150,10 +1133,7 @@ mod arrow_flight_tests {
                 1,
                 "terminal auth cleanup should be attempted once"
             );
-            assert!(
-                stream.is_closed(),
-                "terminal auth failure must close the stream"
-            );
+            assert!(stream.is_closed(), "terminal auth failure must close the stream");
 
             Ok(())
         }
@@ -1389,21 +1369,15 @@ mod arrow_flight_tests {
             use arrow_array::Int32Array;
             use arrow_schema::{DataType, Field, Schema};
 
-            let wrong_schema = Arc::new(Schema::new(vec![Field::new(
-                "different_field",
-                DataType::Int32,
-                false,
-            )]));
+            let wrong_schema =
+                Arc::new(Schema::new(vec![Field::new("different_field", DataType::Int32, false)]));
             let wrong_batch = arrow_array::RecordBatch::try_new(
                 wrong_schema,
                 vec![Arc::new(Int32Array::from(vec![1, 2, 3]))],
             )?;
 
             let result = stream.ingest_batch(wrong_batch).await;
-            assert!(
-                result.is_err(),
-                "Expected schema mismatch error, but got Ok"
-            );
+            assert!(result.is_err(), "Expected schema mismatch error, but got Ok");
 
             Ok(())
         }
@@ -1689,10 +1663,7 @@ mod arrow_flight_tests {
             let _offset = stream.ingest_batch(batch).await?;
 
             let close_result = stream.close().await;
-            assert!(
-                close_result.is_err(),
-                "close() must propagate the error when its flush fails"
-            );
+            assert!(close_result.is_err(), "close() must propagate the error when its flush fails");
 
             // The stream is still torn down, and the unacked batch is recoverable.
             assert!(stream.is_closed());
@@ -1900,11 +1871,7 @@ mod arrow_flight_tests {
             let joined = tokio::time::timeout(std::time::Duration::from_secs(3), handle)
                 .await
                 .expect("2nd ingest_batch should unblock after the ack frees a permit")?;
-            assert!(
-                joined.is_ok(),
-                "2nd ingest_batch failed: {:?}",
-                joined.err()
-            );
+            assert!(joined.is_ok(), "2nd ingest_batch failed: {:?}", joined.err());
 
             Ok(())
         }
@@ -2003,10 +1970,7 @@ mod arrow_flight_tests {
             stream.close().await?;
 
             let unacked = stream.get_unacked_batches().await?;
-            assert!(
-                unacked.is_empty(),
-                "All batches were acked, should be empty"
-            );
+            assert!(unacked.is_empty(), "All batches were acked, should be empty");
 
             Ok(())
         }
@@ -2139,11 +2103,7 @@ mod arrow_flight_tests {
                 vec![2, 3],
                 "batch A must be sliced to its un-acked suffix (ids [2, 3])"
             );
-            assert_eq!(
-                batch_ids(&unacked[1]),
-                vec![4],
-                "batch B must be fully retained"
-            );
+            assert_eq!(batch_ids(&unacked[1]), vec![4], "batch B must be fully retained");
 
             Ok(())
         }
@@ -2220,10 +2180,7 @@ mod arrow_flight_tests {
                 vec![vec![2, 3], vec![4]],
                 "first snapshot should be sliced A suffix (ids [2,3]) + full B (id [4])"
             );
-            assert_eq!(
-                first, second,
-                "repeated get_unacked_batches must be idempotent"
-            );
+            assert_eq!(first, second, "repeated get_unacked_batches must be idempotent");
 
             Ok(())
         }
@@ -2392,10 +2349,7 @@ mod arrow_flight_tests {
             // But every auto-ack must be connection-relative: exactly the 3 rows
             // replayed on the recovered connection, never the cumulative 6.
             let acks = mock_server.get_auto_ack_records().await;
-            assert!(
-                !acks.is_empty(),
-                "expected an auto-ack on the recovered connection"
-            );
+            assert!(!acks.is_empty(), "expected an auto-ack on the recovered connection");
             assert!(
                 acks.iter().all(|&r| r == 3),
                 "auto-ack must exclude rows from the first connection (expected all == 3), got {:?}",
@@ -2570,18 +2524,11 @@ mod arrow_flight_tests {
                 tokio::time::timeout(std::time::Duration::from_secs(5), stream.close())
                     .await
                     .expect("close() must not hang while a reconnect is parked");
-            assert!(
-                close_result.is_err(),
-                "close() should surface the flush timeout"
-            );
+            assert!(close_result.is_err(), "close() should surface the flush timeout");
 
             // The un-acked batch was moved to the failed set and is retrievable.
             let unacked = stream.get_unacked_batches().await?;
-            assert_eq!(
-                unacked.len(),
-                1,
-                "pending batch must be moved to the failed set"
-            );
+            assert_eq!(unacked.len(), 1, "pending batch must be moved to the failed set");
 
             Ok(())
         }
@@ -2839,10 +2786,7 @@ mod arrow_flight_tests {
                 tokio::time::sleep(Duration::from_millis(20)).await;
                 waited += Duration::from_millis(20);
             }
-            assert!(
-                stream.is_closed(),
-                "stream should be closed by the schema reconnect failure"
-            );
+            assert!(stream.is_closed(), "stream should be closed by the schema reconnect failure");
 
             // A flush() starting after close must still surface the typed error.
             match stream.flush().await {
@@ -3077,11 +3021,7 @@ mod arrow_flight_tests {
             let offset2 = stream.ingest_batch(batch2).await?;
 
             let result = stream.wait_for_offset(offset2).await;
-            assert!(
-                result.is_ok(),
-                "Expected partial batch recovery to succeed: {:?}",
-                result
-            );
+            assert!(result.is_ok(), "Expected partial batch recovery to succeed: {:?}", result);
 
             stream.close().await?;
 
@@ -3557,10 +3497,7 @@ mod arrow_flight_tests {
                 .ingest_ipc_batch(bytes::Bytes::from_static(b"not valid arrow ipc"))
                 .await;
 
-            assert!(
-                result.is_err(),
-                "Expected InvalidArgument for garbage bytes"
-            );
+            assert!(result.is_err(), "Expected InvalidArgument for garbage bytes");
 
             Ok(())
         }
@@ -3662,11 +3599,7 @@ mod arrow_flight_tests {
                 .await?;
 
             let result = stream.wait_for_offset(offset2).await;
-            assert!(
-                result.is_ok(),
-                "Expected IPC batch recovery to succeed: {:?}",
-                result
-            );
+            assert!(result.is_ok(), "Expected IPC batch recovery to succeed: {:?}", result);
 
             Ok(())
         }
@@ -3757,11 +3690,8 @@ mod arrow_flight_tests {
             // Create IPC bytes with a different schema.
             use arrow_array::Int32Array;
             use arrow_schema::{DataType, Field, Schema};
-            let wrong_schema = Arc::new(Schema::new(vec![Field::new(
-                "different_field",
-                DataType::Int32,
-                false,
-            )]));
+            let wrong_schema =
+                Arc::new(Schema::new(vec![Field::new("different_field", DataType::Int32, false)]));
             let wrong_batch = arrow_array::RecordBatch::try_new(
                 wrong_schema,
                 vec![Arc::new(Int32Array::from(vec![1, 2, 3]))],
@@ -4216,8 +4146,9 @@ mod arrow_flight_tests {
     }
 
     mod graceful_close_tests {
-        use super::*;
         use std::time::Instant;
+
+        use super::*;
 
         #[tokio::test]
         async fn test_default_graceful_close_waits_for_full_server_duration(

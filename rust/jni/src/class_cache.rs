@@ -9,9 +9,10 @@
 //! (which runs on a Java thread with the correct classloader), then reuses them
 //! from async/daemon threads.
 
+use std::sync::OnceLock;
+
 use jni::objects::{GlobalRef, JClass, JObject};
 use jni::JNIEnv;
-use std::sync::OnceLock;
 
 /// Cached JNI class references, populated during `JNI_OnLoad`.
 pub struct CachedClasses {

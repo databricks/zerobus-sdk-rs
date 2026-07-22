@@ -4,8 +4,9 @@
 //! in the Zerobus SDK. The runtime is initialized when the JNI library is loaded
 //! and persists for the lifetime of the JVM.
 
-use jni::JavaVM;
 use std::sync::OnceLock;
+
+use jni::JavaVM;
 use tokio::runtime::Runtime;
 
 /// Global Tokio runtime for async operations.

@@ -13,10 +13,13 @@ use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::Arc;
 
+// Re-export arrow types for public API
+pub use arrow_array::RecordBatch;
 use arrow_flight::encode::FlightDataEncoderBuilder;
 use arrow_flight::error::FlightError;
 use arrow_flight::{FlightClient, PutResult};
 use arrow_ipc::writer::IpcWriteOptions;
+pub use arrow_schema::{DataType, Field, Schema as ArrowSchema, TimeUnit};
 use bytes::Bytes;
 use futures::{Stream, StreamExt};
 #[cfg(feature = "test-hooks")]
@@ -28,10 +31,6 @@ use tokio_retry::RetryIf;
 use tonic::metadata::MetadataValue;
 use tonic::transport::Channel;
 use tracing::{debug, error, info, instrument, warn};
-
-// Re-export arrow types for public API
-pub use arrow_array::RecordBatch;
-pub use arrow_schema::{DataType, Field, Schema as ArrowSchema, TimeUnit};
 
 use crate::arrow_configuration::ArrowStreamConfigurationOptions;
 use crate::arrow_metadata::{FlightAckMetadata, FlightBatchMetadata};
@@ -152,9 +151,7 @@ fn materialize_ipc(bytes: &Bytes) -> ZerobusResult<RecordBatch> {
         })?;
     let batch = match reader.next() {
         None => {
-            return Err(ZerobusError::InvalidArgument(
-                "IPC stream contains no RecordBatch".into(),
-            ));
+            return Err(ZerobusError::InvalidArgument("IPC stream contains no RecordBatch".into()));
         }
         Some(Err(e)) => {
             return Err(ZerobusError::InvalidArgument(format!(
@@ -168,9 +165,9 @@ fn materialize_ipc(bytes: &Bytes) -> ZerobusResult<RecordBatch> {
         Some(Ok(_)) => Err(ZerobusError::InvalidArgument(
             "IPC stream must contain exactly one RecordBatch (found extra batch)".into(),
         )),
-        Some(Err(e)) => Err(ZerobusError::InvalidArgument(format!(
-            "IPC: trailing message read failed: {e}"
-        ))),
+        Some(Err(e)) => {
+            Err(ZerobusError::InvalidArgument(format!("IPC: trailing message read failed: {e}")))
+        }
     }
 }
 
@@ -1700,12 +1697,10 @@ impl ZerobusArrowStream {
                     if let Some(server_error) = error_rx.borrow().clone() {
                         return Err(server_error);
                     }
-                    return Err(ZerobusError::StreamClosedError(tonic::Status::internal(
-                        format!(
-                            "Stream closing or closed during {}",
-                            operation_name.to_lowercase()
-                        ),
-                    )));
+                    return Err(ZerobusError::StreamClosedError(tonic::Status::internal(format!(
+                        "Stream closing or closed during {}",
+                        operation_name.to_lowercase()
+                    ))));
                 }
 
                 // Neither arm returns directly. After either watch changes, loop so the
@@ -1906,10 +1901,7 @@ impl ZerobusArrowStream {
             result
         };
         if let Err(e) = &flush_result {
-            warn!(
-                "Flush failed during close: {}. Draining pending batches to the failed set.",
-                e
-            );
+            warn!("Flush failed during close: {}. Draining pending batches to the failed set.", e);
         }
 
         // Reap the supervisor (abort + await) BEFORE clearing the sender, so an in-flight
@@ -2100,11 +2092,11 @@ impl Drop for ZerobusArrowStream {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use std::collections::HashMap;
+
     use arrow_array::Int32Array;
     use arrow_schema::{DataType, Field};
     use async_trait::async_trait;
-    use std::collections::HashMap;
 
     struct PassthroughTlsConfig;
 
@@ -2129,6 +2121,8 @@ mod tests {
         }
     }
 
+    use super::*;
+
     #[test]
     fn test_arrow_table_properties() {
         let schema = Arc::new(ArrowSchema::new(vec![
@@ -2146,11 +2140,7 @@ mod tests {
     }
 
     fn one_col_schema() -> Arc<ArrowSchema> {
-        Arc::new(ArrowSchema::new(vec![Field::new(
-            "id",
-            DataType::Int32,
-            false,
-        )]))
+        Arc::new(ArrowSchema::new(vec![Field::new("id", DataType::Int32, false)]))
     }
 
     fn batch_with_rows(schema: &Arc<ArrowSchema>, n: i32) -> RecordBatch {
@@ -2184,11 +2174,7 @@ mod tests {
             pending_batch(&sem, batch_with_rows(&schema, 3), 0, 0, 3),
             pending_batch(&sem, batch_with_rows(&schema, 2), 1, 3, 5),
         ]));
-        assert_eq!(
-            sem.available_permits(),
-            2,
-            "two permits held by pending batches"
-        );
+        assert_eq!(sem.available_permits(), 2, "two permits held by pending batches");
 
         // Stale values that must be overwritten by the atomic install.
         let cumulative = Arc::new(AtomicU64::new(999));
@@ -2204,11 +2190,7 @@ mod tests {
         assert!(res.is_err(), "replay must surface the send failure");
 
         let guard = pending.lock().await;
-        assert_eq!(
-            guard.len(),
-            2,
-            "pending must retain all batches on replay failure"
-        );
+        assert_eq!(guard.len(), 2, "pending must retain all batches on replay failure");
         assert_eq!((guard[0].start_record, guard[0].end_record), (0, 3));
         assert_eq!((guard[1].start_record, guard[1].end_record), (3, 5));
         drop(guard);
@@ -2223,11 +2205,7 @@ mod tests {
             0,
             "watermark must be rebased to 0 atomically with the ranges"
         );
-        assert_eq!(
-            sem.available_permits(),
-            2,
-            "permits must not be released on replay failure"
-        );
+        assert_eq!(sem.available_permits(), 2, "permits must not be released on replay failure");
     }
 
     /// With an open receiver, both batches remain pending, replay in order, and reset the
@@ -2320,14 +2298,8 @@ mod tests {
             futures::poll!(fut.as_mut()).is_pending(),
             "pause_and_detach_sender must block while an ingest holds ingest_mutex"
         );
-        assert!(
-            !is_paused.load(Ordering::Relaxed),
-            "is_paused flipped mid-ingest"
-        );
-        assert!(
-            batch_tx.lock().await.is_some(),
-            "sender detached mid-ingest"
-        );
+        assert!(!is_paused.load(Ordering::Relaxed), "is_paused flipped mid-ingest");
+        assert!(batch_tx.lock().await.is_some(), "sender detached mid-ingest");
 
         // Once the ingest leaves its critical section, the transition completes.
         drop(guard);
@@ -2370,10 +2342,7 @@ mod tests {
             futures::poll!(fut.as_mut()).is_pending(),
             "finalize_closed must wait for the in-flight ingest"
         );
-        assert!(
-            !is_closed.load(Ordering::Relaxed),
-            "is_closed must not be published mid-ingest"
-        );
+        assert!(!is_closed.load(Ordering::Relaxed), "is_closed must not be published mid-ingest");
 
         // The ingest appends its batch, then releases the mutex.
         let schema = one_col_schema();

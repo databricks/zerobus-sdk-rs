@@ -42,7 +42,7 @@ Run from `typescript/`:
 - `npm run build:arrow` — Build with Arrow Flight support
 - `npm test` — Run all tests
 - `npm run test:unit` / `npm run test:integration` — Targeted test runs
-- `cargo fmt --all` and `cargo clippy --all-targets --all-features` — Lint/format Rust code
+- `../.github/scripts/rustfmt.sh --all` and `cargo clippy --all-targets --all-features` — Format/lint Rust code
 
 ## FFI boundary: NAPI-RS
 

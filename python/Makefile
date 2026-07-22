@@ -72,7 +72,7 @@ fmt:
 	$(VENV) -m black zerobus examples tests
 	$(VENV) -m autoflake -ri --exclude '*_pb2*.py' zerobus examples tests
 	$(VENV) -m isort zerobus examples tests
-	cd rust && cargo fmt --all
+	cd rust && ../../.github/scripts/rustfmt.sh --all
 
 lint:
 	$(VENV) -m pycodestyle --exclude='*_pb2*.py' --max-line-length=120 --ignore=E203,W503 zerobus

@@ -16,7 +16,9 @@ use super::types::{CallbackMessage, OneshotMap, RecordLandingZone};
 use super::{ZerobusStream, STREAM_TEARDOWN_DRAIN_TIMEOUT_MS};
 use crate::databricks::zerobus::ephemeral_stream_response::Payload as ResponsePayload;
 use crate::databricks::zerobus::{
-    CloseStreamSignal, EphemeralStreamResponse, IngestRecordResponse,
+    CloseStreamSignal,
+    EphemeralStreamResponse,
+    IngestRecordResponse,
 };
 use crate::{OffsetId, StreamConfigurationOptions, ZerobusError, ZerobusResult};
 

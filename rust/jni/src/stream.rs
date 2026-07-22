@@ -3,17 +3,18 @@
 //! This module provides JNI functions for stream operations including
 //! record ingestion, acknowledgment waiting, flushing, and closing.
 
+use std::sync::Arc;
+
+use databricks_zerobus_ingest_sdk::{EncodedBatch, EncodedRecord, ZerobusStream};
+use jni::objects::{JByteArray, JClass, JList, JObject, JValue};
+use jni::sys::{jboolean, jlong, JNI_FALSE, JNI_TRUE};
+use jni::JNIEnv;
+use tokio::sync::Mutex;
+
 use crate::async_bridge::{create_completable_future, spawn_and_complete_void};
 use crate::class_cache::{as_jclass, get_class_cache};
 use crate::errors::{throw_from_zerobus_error, throw_zerobus_exception};
 use crate::runtime::block_on;
-use databricks_zerobus_ingest_sdk::ZerobusStream;
-use databricks_zerobus_ingest_sdk::{EncodedBatch, EncodedRecord};
-use jni::objects::{JByteArray, JClass, JList, JObject, JValue};
-use jni::sys::{jboolean, jlong, JNI_FALSE, JNI_TRUE};
-use jni::JNIEnv;
-use std::sync::Arc;
-use tokio::sync::Mutex;
 
 /// Native stream handle stored in Java.
 pub struct NativeStreamHandle {
@@ -621,12 +622,9 @@ pub extern "system" fn Java_com_databricks_zerobus_BaseZerobusStream_nativeGetUn
             }
         };
 
-        if let Err(e) = env.call_method(
-            &list,
-            "add",
-            "(Ljava/lang/Object;)Z",
-            &[JValue::Object(&batch_obj)],
-        ) {
+        if let Err(e) =
+            env.call_method(&list, "add", "(Ljava/lang/Object;)Z", &[JValue::Object(&batch_obj)])
+        {
             throw_zerobus_exception(&mut env, &format!("Failed to add batch to list: {}", e));
             return JObject::null();
         }

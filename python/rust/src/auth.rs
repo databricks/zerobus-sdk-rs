@@ -1,11 +1,13 @@
-use async_trait::async_trait;
-use pyo3::exceptions::PyNotImplementedError;
-use pyo3::prelude::*;
 use std::collections::HashMap;
 
+use async_trait::async_trait;
 use databricks_zerobus_ingest_sdk::{
-    HeadersProvider as RustHeadersProvider, ZerobusError as RustError, ZerobusResult as RustResult,
+    HeadersProvider as RustHeadersProvider,
+    ZerobusError as RustError,
+    ZerobusResult as RustResult,
 };
+use pyo3::exceptions::PyNotImplementedError;
+use pyo3::prelude::*;
 
 use crate::common::intern_header_name;
 
@@ -41,9 +43,7 @@ impl HeadersProvider {
     /// Returns:
     ///     List of (header_name, header_value) tuples
     fn get_headers(&self, _py: Python) -> PyResult<PyObject> {
-        Err(PyNotImplementedError::new_err(
-            "Subclasses must implement get_headers()",
-        ))
+        Err(PyNotImplementedError::new_err("Subclasses must implement get_headers()"))
     }
 }
 

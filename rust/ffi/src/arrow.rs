@@ -1,14 +1,23 @@
 //! Arrow Flight FFI surface.
 
-use crate::common::*;
-use arrow_ipc::{reader::StreamReader, writer::StreamWriter, CompressionType};
-use bytes::Bytes;
-use databricks_zerobus_ingest_sdk::{
-    HeadersProvider, RecordBatch, StreamBuilder, ZerobusArrowStream, ZerobusError, ZerobusResult,
-};
 use std::os::raw::c_char;
 use std::ptr;
 use std::sync::Arc;
+
+use arrow_ipc::reader::StreamReader;
+use arrow_ipc::writer::StreamWriter;
+use arrow_ipc::CompressionType;
+use bytes::Bytes;
+use databricks_zerobus_ingest_sdk::{
+    HeadersProvider,
+    RecordBatch,
+    StreamBuilder,
+    ZerobusArrowStream,
+    ZerobusError,
+    ZerobusResult,
+};
+
+use crate::common::*;
 
 // ============================================================================
 // Arrow Flight FFI
@@ -595,14 +604,10 @@ pub extern "C" fn zerobus_arrow_free_batch_array(array: CArrowBatchArray) {
                 // Reconstruct as Box<[T]> using the original length. This is safe because
                 // the pointers were produced by Box::into_raw(vec.into_boxed_slice()),
                 // which guarantees capacity == len.
-                let ptrs = Box::from_raw(std::ptr::slice_from_raw_parts_mut(
-                    array.batches,
-                    array.count,
-                ));
-                let lens = Box::from_raw(std::ptr::slice_from_raw_parts_mut(
-                    array.lengths,
-                    array.count,
-                ));
+                let ptrs =
+                    Box::from_raw(std::ptr::slice_from_raw_parts_mut(array.batches, array.count));
+                let lens =
+                    Box::from_raw(std::ptr::slice_from_raw_parts_mut(array.lengths, array.count));
                 for (&ptr, &len) in ptrs.iter().zip(lens.iter()) {
                     if !ptr.is_null() && len > 0 {
                         // Each batch slice was produced by Box::into_raw(bytes.into_boxed_slice()),
@@ -620,14 +625,10 @@ pub extern "C" fn zerobus_arrow_free_batch_array(array: CArrowBatchArray) {
 pub extern "C" fn zerobus_arrow_stream_is_closed(stream: *mut CArrowStream) -> bool {
     // No CResult out-param; on a caught panic return `true` (treat as closed),
     // matching the answer for an invalid handle.
-    ffi_guard(
-        ptr::null_mut(),
-        true,
-        move || match validate_arrow_stream_ptr(stream) {
-            Ok(s) => s.is_closed(),
-            Err(_) => true,
-        },
-    )
+    ffi_guard(ptr::null_mut(), true, move || match validate_arrow_stream_ptr(stream) {
+        Ok(s) => s.is_closed(),
+        Err(_) => true,
+    })
 }
 
 /// Returns the default Arrow stream configuration options.

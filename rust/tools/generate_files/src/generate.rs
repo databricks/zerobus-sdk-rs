@@ -4,11 +4,11 @@ use std::fs::File;
 use std::io::Write;
 use std::path::PathBuf;
 
-use anyhow::{Context, Result, anyhow};
-use databricks_zerobus_ingest_sdk::schema::{UcColumn, descriptor_from_uc_columns};
+use anyhow::{anyhow, Context, Result};
+use databricks_zerobus_ingest_sdk::schema::{descriptor_from_uc_columns, UcColumn};
 use prost_types::field_descriptor_proto::{Label, Type};
 use prost_types::{DescriptorProto, FieldDescriptorProto};
-use reqwest::header::{AUTHORIZATION, CONTENT_TYPE, HeaderMap, HeaderValue};
+use reqwest::header::{HeaderMap, HeaderValue, AUTHORIZATION, CONTENT_TYPE};
 use serde::Deserialize;
 use urlencoding::encode;
 
@@ -50,10 +50,7 @@ pub async fn fetch_table_info(endpoint: &str, token: &str, table: &str) -> Resul
     let url = format!("{base}/api/2.1/unity-catalog/tables/{encoded_table}");
 
     let mut headers = HeaderMap::new();
-    headers.insert(
-        AUTHORIZATION,
-        HeaderValue::from_str(&format!("Bearer {}", token))?,
-    );
+    headers.insert(AUTHORIZATION, HeaderValue::from_str(&format!("Bearer {}", token))?);
     headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
 
     let client = reqwest::Client::builder()
@@ -153,14 +150,7 @@ fn write_field(
         Label::Repeated => "repeated",
     };
     let type_str = type_to_str(f.r#type(), f.type_name.as_deref());
-    out.push_str(&format!(
-        "{}{} {} {} = {};\n",
-        indent,
-        label,
-        type_str,
-        f.name(),
-        f.number()
-    ));
+    out.push_str(&format!("{}{} {} {} = {};\n", indent, label, type_str, f.name(), f.number()));
 }
 
 struct MapEntry {
@@ -248,10 +238,7 @@ pub fn generate_rust_and_descriptor(
     tonic_prost_build::configure()
         .out_dir(output_dir)
         .file_descriptor_set_path(&desc_file)
-        .compile_protos(
-            &[proto_file.to_str().unwrap()],
-            &[proto_dir.to_str().unwrap()],
-        )
+        .compile_protos(&[proto_file.to_str().unwrap()], &[proto_dir.to_str().unwrap()])
         .context("protoc compilation failed")?;
 
     Ok(())
@@ -385,12 +372,10 @@ mod tests {
 
         let result = generate_proto_file("TestMessage", &columns, &proto_path, &output_dir);
         assert!(result.is_err());
-        assert!(
-            result
-                .unwrap_err()
-                .to_string()
-                .contains("map keys must be primitive types")
-        );
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("map keys must be primitive types"));
     }
 
     #[test]
@@ -409,12 +394,10 @@ mod tests {
 
         let result = generate_proto_file("TestMessage", &columns, &proto_path, &output_dir);
         assert!(result.is_err());
-        assert!(
-            result
-                .unwrap_err()
-                .to_string()
-                .contains("maps with complex value types not supported")
-        );
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("maps with complex value types not supported"));
     }
 
     #[test]
@@ -432,12 +415,10 @@ mod tests {
 
         let result = generate_proto_file("TestMessage", &columns, &proto_path, &output_dir);
         assert!(result.is_err());
-        assert!(
-            result
-                .unwrap_err()
-                .to_string()
-                .contains("nested arrays not supported")
-        );
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("nested arrays not supported"));
     }
 
     #[test]
@@ -470,12 +451,10 @@ mod tests {
 
         let result = generate_proto_file("TestMessage", &columns, &proto_path, &output_dir);
         assert!(result.is_err());
-        assert!(
-            result
-                .unwrap_err()
-                .to_string()
-                .contains("invalid field name 'invalid-name'")
-        );
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("invalid field name 'invalid-name'"));
     }
 
     #[test]
@@ -488,12 +467,10 @@ mod tests {
 
         let result = generate_proto_file("TestMessage", &columns, &proto_path, &output_dir);
         assert!(result.is_err());
-        assert!(
-            result
-                .unwrap_err()
-                .to_string()
-                .contains("cannot start with a digit")
-        );
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("cannot start with a digit"));
     }
 
     #[test]

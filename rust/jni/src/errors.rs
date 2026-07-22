@@ -3,10 +3,11 @@
 //! This module provides utilities for converting Zerobus SDK errors to
 //! appropriate Java exceptions.
 
-use crate::class_cache::{as_jclass, get_class_cache};
 use databricks_zerobus_ingest_sdk::ZerobusError;
 use jni::objects::{GlobalRef, JString, JThrowable, JValue};
 use jni::JNIEnv;
+
+use crate::class_cache::{as_jclass, get_class_cache};
 
 /// Throw a ZerobusException in Java.
 ///
@@ -93,11 +94,7 @@ pub fn create_exception<'local>(
     };
 
     // Create the exception instance
-    match env.new_object(
-        class,
-        "(Ljava/lang/String;)V",
-        &[JValue::Object(&j_message.into())],
-    ) {
+    match env.new_object(class, "(Ljava/lang/String;)V", &[JValue::Object(&j_message.into())]) {
         Ok(obj) => Some(JThrowable::from(obj)),
         Err(e) => {
             tracing::error!("Failed to create exception instance: {}", e);
