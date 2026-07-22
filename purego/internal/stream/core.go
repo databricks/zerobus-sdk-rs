@@ -56,7 +56,11 @@ func (r RecoverySetting) enabled() bool { return r == RecoveryEnabled }
 // stream construction so a caller-passed Config{} does not deadlock, spin, or
 // abort teardown immediately.
 type Config struct {
-	// MaxInflight is the maximum number of unacknowledged records in the buffer.
+	// MaxInflight is the maximum number of unacknowledged buffer entries: a
+	// single Ingest is one entry and an IngestBatch is also one entry, so
+	// the memory bound this expresses is (MaxInflight × max encoded message
+	// size). A future revision may add an explicit byte budget for finer
+	// control; today MaxPayloadBytes caps per-message wire size.
 	MaxInflight int
 	// Recovery controls whether stream reconnection is attempted on failure. The
 	// zero value (RecoveryEnabled) recovers; set RecoveryDisabled to opt out.
@@ -147,8 +151,11 @@ func DefaultConfig() Config {
 // RecoveryRetries treats 0 and negative both as "unset → use default": a
 // Config{} whose zero-valued Recovery says "recovery enabled" would
 // otherwise reconnect zero times, contradicting the documented behaviour
-// that a zero Config is safe. Callers who really want a single-attempt
-// stream must combine RecoverySetting=RecoveryDisabled instead.
+// that a zero Config is safe. Callers who want a single-attempt stream
+// use RecoverySetting=RecoveryDisabled instead (that path bypasses the
+// retry loop entirely); if per-episode budget tuning is required beyond
+// on/off, this is the config field a future revision would migrate to an
+// explicit optional value.
 func sanitizeConfig(c Config) Config {
 	if c.MaxInflight <= 0 {
 		c.MaxInflight = DefaultMaxInflight
@@ -291,39 +298,57 @@ func (d *callbackDispatcher) enqueueAck(offset int64) {
 	}
 }
 
-// enqueueError posts an OnError event. Publication is bounded so a stalled
-// user callback cannot block the supervisor from closing cs.done — otherwise
-// Close would hang waiting for the supervisor which is waiting for the
-// callback which is waiting for Close. If the channel is full within the
-// budget, the event is dropped and the record still surfaces via GetUnacked
-// (payloads are retained regardless of callback state).
+// enqueueError posts an OnError event, non-blocking. If the channel is full
+// the event is dropped: terminal drain must not stall the supervisor even
+// under a slow user callback (otherwise Close would hang, waiting for the
+// supervisor which is waiting for the callback which is waiting for Close).
+// GetUnacked retains the record so the data is not lost — only the
+// observability signal.
+//
+// The whole terminal drain is bounded by CallbackTeardownTimeout at the
+// supervisor level via drainErrorsBounded, not per event, so the total wait
+// is O(1) rather than O(items).
 func (d *callbackDispatcher) enqueueError(offset int64, err error) {
 	if d == nil {
 		return
 	}
-	// Fast path: room in the queue.
 	select {
 	case d.events <- cbEvent{offset: offset, err: err}:
-		return
 	default:
-	}
-	// Slow path: give the dispatcher a moment to drain, but never longer
-	// than callbackEnqueueBudget so the supervisor stays responsive.
-	timer := time.NewTimer(callbackEnqueueBudget)
-	defer timer.Stop()
-	select {
-	case d.events <- cbEvent{offset: offset, err: err}:
-	case <-timer.C:
-		// Drop: the event is best-effort observability. GetUnacked retains
-		// the record so no data is lost.
+		// Drop: best-effort observability. GetUnacked retains the payload.
 	}
 }
 
-// callbackEnqueueBudget bounds how long enqueueError waits for room in the
-// dispatcher channel during terminal drain. Kept short so a stalled user
-// callback cannot pin Close for the full CallbackTeardownTimeout multiplied
-// by the number of unacked items.
-const callbackEnqueueBudget = 50 * time.Millisecond
+// dispatchErrorsBounded posts one OnError event per drained item within a
+// single global deadline. Once the deadline expires further events are
+// dropped so a slow callback cannot delay the supervisor from closing
+// cs.done. The deadline is applied once (not per event) so the total wait
+// scales O(1) with items, not O(items × per-event budget).
+func (d *callbackDispatcher) dispatchErrorsBounded(items []cbEvent, budget time.Duration) {
+	if d == nil || len(items) == 0 {
+		return
+	}
+	deadline := time.Now().Add(budget)
+	for _, e := range items {
+		select {
+		case d.events <- e:
+		default:
+			// Queue is full. Wait up to the remaining budget for room; on
+			// deadline, drop this and every subsequent event.
+			remaining := time.Until(deadline)
+			if remaining <= 0 {
+				return
+			}
+			t := time.NewTimer(remaining)
+			select {
+			case d.events <- e:
+				t.Stop()
+			case <-t.C:
+				return
+			}
+		}
+	}
+}
 
 // shutdown closes the event channel and waits up to timeout for the
 // dispatcher to drain and exit. If a user callback is running when shutdown
@@ -543,6 +568,13 @@ func NewCoreStream[Req, Resp any](
 	callback AckCallback,
 ) *CoreStream[Req, Resp] {
 	cfg = sanitizeConfig(cfg)
+	// Snapshot the DescriptorProto so caller mutation cannot race with the
+	// initial Open or with recovery-time Opens (which re-read StreamParams).
+	// Other fields are value types or interface handles; only the byte
+	// slice needs a deep copy.
+	if len(params.DescriptorProto) > 0 {
+		params.DescriptorProto = cloneBytes(params.DescriptorProto)
+	}
 	ctx, cancel := context.WithCancel(context.Background())
 	cs := &CoreStream[Req, Resp]{
 		params:           params,
@@ -569,8 +601,13 @@ func NewCoreStream[Req, Resp any](
 // with ErrPayloadTooLarge before any offset is assigned so oversized input
 // is a deterministic input error, not a transport failure that burns the
 // recovery budget. Wire size (with proto framing) is what the server sees,
-// so pre-encode input size is not sufficient.
+// so pre-encode input size alone is not sufficient — but a cheap raw-size
+// precheck runs first so a genuinely huge input (e.g. accidental multi-GB
+// buffer) is rejected before we copy it.
 func (cs *CoreStream[Req, Resp]) Ingest(ctx context.Context, record []byte) (int64, error) {
+	if err := cs.checkRawSize(len(record)); err != nil {
+		return 0, err
+	}
 	return cs.enqueueEncoded(ctx, func(offset int64) (Req, error) {
 		return cs.enc.encode(offset, record)
 	})
@@ -582,27 +619,53 @@ func (cs *CoreStream[Req, Resp]) Ingest(ctx context.Context, record []byte) (int
 // hot paths: it amortizes per-message overhead across the batch.
 //
 // The serialized wire size of the batch is checked against MaxPayloadBytes
-// and rejected with ErrPayloadTooLarge before any offset is assigned.
+// and rejected with ErrPayloadTooLarge before any offset is assigned. A cheap
+// raw-size precheck runs first so oversized input is rejected before it is
+// copied into the encoded message.
 //
 // A batch with zero records is a no-op (returns -1 without allocating an
-// offset); a batch with any
-// empty record is still rejected as invalid input.
+// offset); a batch with any empty record is still rejected as invalid input.
 func (cs *CoreStream[Req, Resp]) IngestBatch(ctx context.Context, records [][]byte) (int64, error) {
 	if len(records) == 0 {
 		return -1, nil
+	}
+	total := 0
+	for _, r := range records {
+		// Guard against int overflow — the sum can wrap when records is a
+		// user-controlled slice of arbitrary sizes.
+		if total > cs.cfg.MaxPayloadBytes || len(r) > cs.cfg.MaxPayloadBytes {
+			return 0, fmt.Errorf("%w: raw batch size exceeds MaxPayloadBytes=%d",
+				ErrPayloadTooLarge, cs.cfg.MaxPayloadBytes)
+		}
+		total += len(r)
+	}
+	if err := cs.checkRawSize(total); err != nil {
+		return 0, err
 	}
 	return cs.enqueueEncoded(ctx, func(offset int64) (Req, error) {
 		return cs.enc.encodeBatch(offset, records)
 	})
 }
 
+// checkRawSize rejects clearly-oversized input before any encoding copy.
+// The raw byte count is what a caller controls; the encoded wire size is
+// then checked separately in enqueueEncoded to catch cases where framing
+// pushes an otherwise-fine input over the cap.
+func (cs *CoreStream[Req, Resp]) checkRawSize(n int) error {
+	if n > cs.cfg.MaxPayloadBytes {
+		return fmt.Errorf("%w: %d bytes exceeds MaxPayloadBytes=%d",
+			ErrPayloadTooLarge, n, cs.cfg.MaxPayloadBytes)
+	}
+	return nil
+}
+
 // enqueueEncoded reserves a backpressure slot (context-aware, may block),
-// assigns the next offset under a brief critical section, encodes via
-// encodeFn, and appends. The offset-assignment lock is NOT held across the
-// backpressure wait, so a stalled caller does not serialize every later
-// caller behind it and each caller observes its own ctx cancellation
-// promptly. A failed reserve/encode/append consumes no offset, so Flush never
-// waits on an offset the server never sees.
+// pre-encodes the message OUTSIDE the offset-assignment lock, then briefly
+// takes offsetMu to stamp the assigned offset and append. Doing the heavy
+// encoding work (payload clones, proto.Size) without the lock means a large
+// batch does not serialize concurrent small ingests behind it. A failed
+// reserve/encode/append consumes no offset, so Flush never waits on an
+// offset the server never sees.
 func (cs *CoreStream[Req, Resp]) enqueueEncoded(ctx context.Context, encodeFn func(offset int64) (Req, error)) (int64, error) {
 	if cs.isClosed() {
 		if err := cs.terminalErr(); err != nil {
@@ -616,29 +679,38 @@ func (cs *CoreStream[Req, Resp]) enqueueEncoded(ctx context.Context, encodeFn fu
 	if err := cs.buf.reserve(ctx); err != nil {
 		return 0, err
 	}
-	// Assign the next offset atomically. Held only for the encode+append; if
-	// encode fails or append reports errClosed, the slot is released so the
-	// semaphore is not leaked and nextOffset is not advanced.
-	cs.offsetMu.Lock()
-	offset := cs.nextOffset
-	msg, err := encodeFn(offset)
+	// Encode with a placeholder offset (0) OUTSIDE the offset lock. The
+	// stampOffset method will overwrite the offset field once we hold the
+	// lock, so the encoded payload is offset-agnostic here.
+	msg, err := encodeFn(0)
 	if err != nil {
-		cs.offsetMu.Unlock()
 		cs.buf.release()
 		return 0, err
 	}
-	// Wire-size validation against MaxPayloadBytes uses proto.Size (or the
-	// encoder-specific equivalent), not the raw input bytes: proto framing
-	// adds tags and varints on top of the caller's payload, so a batch just
-	// under a byte-sum limit can still exceed the server's message size
-	// limit and bounce back as a transport failure. Reject deterministically
-	// here so recovery is not consumed by an input-shape error.
+	// Wire-size validation against MaxPayloadBytes uses proto.Size, not the
+	// raw input bytes: proto framing adds tags and varints on top of the
+	// caller's payload, so a batch just under a byte-sum limit can still
+	// exceed the server's message size limit and bounce back as a transport
+	// failure. Reject deterministically here so recovery is not consumed by
+	// an input-shape error.
 	if size := cs.enc.wireSize(msg); size > cs.cfg.MaxPayloadBytes {
-		cs.offsetMu.Unlock()
 		cs.buf.release()
 		return 0, fmt.Errorf("%w: %d bytes exceeds MaxPayloadBytes=%d",
 			ErrPayloadTooLarge, size, cs.cfg.MaxPayloadBytes)
 	}
+	// Now take the offset lock, stamp offset, and append. All the expensive
+	// per-call work is done; the critical section is just an offset++ plus
+	// two mutating calls, so concurrent Ingests interleave freely.
+	cs.offsetMu.Lock()
+	offset := cs.nextOffset
+	// Refuse offset exhaustion before it wraps into a negative value (which
+	// is also the "nothing enqueued yet" sentinel and would corrupt Flush).
+	if offset < 0 {
+		cs.offsetMu.Unlock()
+		cs.buf.release()
+		return 0, fmt.Errorf("stream: logical offset space exhausted")
+	}
+	cs.enc.stampOffset(msg, offset)
 	if err := cs.buf.append(offset, msg); err != nil {
 		cs.offsetMu.Unlock()
 		// append() released the slot on error.
@@ -688,20 +760,26 @@ func (cs *CoreStream[Req, Resp]) WaitForOffset(ctx context.Context, offset int64
 
 // GetUnacked returns records that were ingested but never acknowledged, one
 // entry per record. A batched buffer item expands to all of its records (not
-// just the first), so no unacked record is silently dropped. It closes the
-// stream first (idempotent) to ensure the buffer is fully drained and no new
-// items are added.
+// just the first), so no unacked record is silently dropped.
 //
-// GetUnacked is compatible with a registered AckCallback: on terminal failure
-// the supervisor also fires OnError for each unacked buffer item, but the
-// encoded items are retained here so callers get both structured error
-// events AND the raw bytes to persist or re-ingest. Records are decoded and
-// cloned lazily here rather than at terminal drain so a large in-flight set
-// does not double memory when the user never calls GetUnacked. The returned
-// byte slices are independent copies — mutating them does not affect any
-// internal state.
-func (cs *CoreStream[Req, Resp]) GetUnacked() [][]byte {
-	cs.Close()
+// GetUnacked is a post-shutdown recovery accessor: the caller must Close the
+// stream (or observe a terminal failure via IsClosed) BEFORE calling this.
+// Calling it on a live stream returns ErrStreamStillActive and does not
+// mutate any state; a destructive Close would race with the sender and
+// receiver goroutines and reject records that were already durable.
+//
+// GetUnacked is compatible with a registered AckCallback: on terminal
+// failure the supervisor also fires OnError for each unacked buffer item,
+// but the encoded items are retained here so callers get both structured
+// error events AND the raw bytes to persist or re-ingest. Records are
+// decoded and cloned lazily here rather than at terminal drain so a large
+// in-flight set does not double memory when the user never calls
+// GetUnacked. The returned byte slices are independent copies — mutating
+// them does not affect any internal state.
+func (cs *CoreStream[Req, Resp]) GetUnacked() ([][]byte, error) {
+	if !cs.isClosed() {
+		return nil, ErrStreamStillActive
+	}
 	// If the supervisor already drained the buffer for OnError dispatch, the
 	// items live on retainedFailed; otherwise drain the buffer now.
 	items := cs.buf.drain()
@@ -718,7 +796,7 @@ func (cs *CoreStream[Req, Resp]) GetUnacked() [][]byte {
 	for _, it := range failed {
 		decodeAppend(it)
 	}
-	return out
+	return out, nil
 }
 
 // Close terminates the stream and releases its resources. It is idempotent
@@ -854,7 +932,8 @@ func (cs *CoreStream[Req, Resp]) runOnce(ctx context.Context) (cause error, heal
 	go cs.sender(senderCtx, stream, senderExitCh, flightSignal)
 	go cs.receiver(stream, receiverExitCh, pauseCh, flightSignal, &progressed)
 
-	// Wait for the first meaningful exit.
+	// Wait for the first meaningful exit. ctx.Done() is watched too so a
+	// long server pause cannot pin teardown when Close is called mid-drain.
 	var senderParked bool
 	var senderExited bool
 	var receiverExited bool
@@ -863,31 +942,32 @@ waitLoop:
 		select {
 		case sErr := <-senderExitCh:
 			senderExited = true
-			// A sender exit while parked (pause) is NOT the cause we return
-			// — keep waiting on the receiver so it can finish draining acks.
-			// A sender exit while unparked is either (a) ctx cancelled
-			// (Close), in which case teardown proceeds gracefully with the
-			// receiver draining to EOF, or (b) a Send failure that kills the
-			// stream. Both need to exit the wait loop; capture the sender's
-			// error as the cause so a Send failure is reported to the
-			// supervisor.
+			// A sender exit while parked (pause) is NOT the cause we
+			// return; keep waiting on the receiver so it can finish
+			// draining acks. A sender exit while unparked is either
+			// ctx cancelled (Close) or a Send failure; both break out.
 			if !senderParked {
 				cause = sErr
 				break waitLoop
 			}
-			// Parked exit: keep waiting on the receiver.
 		case cause = <-receiverExitCh:
 			receiverExited = true
 			break waitLoop
 		case <-pauseCh:
 			// Pause drain has begun. Park the sender so no further records
 			// enter flight; the receiver keeps reading acks. The receiver
-			// will send its exit (pauseSignal cause) on receiverExitCh when
+			// will post its exit (pauseSignal cause) on receiverExitCh when
 			// the drain window ends.
 			if !senderParked {
 				cancelSender()
 				senderParked = true
 			}
+		case <-ctx.Done():
+			// Close cancelled the supervisor ctx (possibly mid-pause).
+			// Break out; the switch below picks the ctx-cancelled arm and
+			// hard-aborts both goroutines, so a long server pause never
+			// holds teardown.
+			break waitLoop
 		}
 	}
 
@@ -1029,10 +1109,13 @@ func (cs *CoreStream[Req, Resp]) sender(senderCtx context.Context, stream wireSt
 // deadline expires.
 //
 // The lack-of-ack timer is armed only when records are actually in flight.
-// The sender pings flightSignal after each successful Send so the receiver can
-// arm the timer with a fresh full LackOfAckTimeout as soon as a record enters
-// flight (rather than inheriting whatever fraction of an idle timer happened
-// to be running). The channel is buffered=1 so the sender never blocks on it.
+// The sender pings flightSignal BEFORE each Send (buffer.next has already
+// moved the item into flight by that point) so the receiver arms the timer
+// with a fresh full LackOfAckTimeout as soon as a record enters flight —
+// even if Send subsequently blocks. Pinging after Send would let a wedged
+// send leave the timer disarmed until the send returned (which, if the
+// transport blocks, is never). The channel is buffered=1 so the sender
+// never blocks on it.
 //
 // Each Recv call runs on its own goroutine so we can race it against the
 // lack-of-ack timer even when the underlying transport Recv is blocking (e.g. a
@@ -1124,11 +1207,14 @@ func (cs *CoreStream[Req, Resp]) receiver(stream wireStream[Req, Resp], errCh ch
 		case <-lackC:
 			lackTimerArmed = false
 			if pauseState != nil {
-				// Silence during pause drain isn't a failure: the server is
-				// about to close the stream. End the pause window.
-				stopPauseTimer()
-				errCh <- *pauseState
-				return
+				// Ignore lack-of-ack during a server-requested pause: the
+				// server explicitly told us it's about to close the stream
+				// and asked us to wait its requested window. Truncating the
+				// pause here would defeat the throttling and could cut
+				// short a legitimate drain. The pause window is instead
+				// bounded by pauseTimer; a genuinely silent server ends
+				// the wait through pauseC. Do not tear the stream down.
+				continue
 			}
 			// Recheck under the buffer's lock: an ack may have drained the
 			// flight set between the timer firing and us noticing.

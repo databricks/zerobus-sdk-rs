@@ -608,7 +608,12 @@ func TestCoreStreamGetUnackedReturnsItems(t *testing.T) {
 	defer cancel()
 	_, _ = cs.Ingest(ctx, []byte(`{"a":1}`))
 
-	unacked := cs.GetUnacked()
+	// GetUnacked now requires a closed stream; wait for terminal failure.
+	waitCondition(t, cs.IsClosed, 2*time.Second)
+	unacked, err := cs.GetUnacked()
+	if err != nil {
+		t.Fatalf("GetUnacked on closed stream: %v", err)
+	}
 	// Items may or may not be in unacked depending on timing; we just want
 	// GetUnacked to not panic and to close the stream.
 	_ = unacked
@@ -777,7 +782,9 @@ func TestCoreStreamGetUnackedWithoutCallback(t *testing.T) {
 	_, _ = cs.Ingest(ctx, []byte(`{}`))
 
 	waitCondition(t, cs.IsClosed, 2*time.Second)
-	_ = cs.GetUnacked() // must not panic; behavior covered by IsClosed check above
+	if _, err := cs.GetUnacked(); err != nil {
+		t.Fatalf("GetUnacked on closed stream: %v", err)
+	}
 }
 
 // TestCoreStreamNonRetryableErrorTerminates checks that a non-retryable error
@@ -1393,7 +1400,10 @@ func TestCoreStreamGetUnackedWithCallbackPreservesPayloads(t *testing.T) {
 
 	waitCondition(t, cs.IsClosed, 2*time.Second)
 
-	unacked := cs.GetUnacked()
+	unacked, err := cs.GetUnacked()
+	if err != nil {
+		t.Fatalf("GetUnacked on closed stream: %v", err)
+	}
 	if len(unacked) == 0 {
 		t.Fatal("GetUnacked with callback returned no records; payloads must be preserved")
 	}
@@ -1821,4 +1831,184 @@ func TestCoreStreamCallbackPanicDoesNotCrash(t *testing.T) {
 	if got := callCount.Load(); got < 2 {
 		t.Fatalf("callback panic silenced second OnAck: count=%d", got)
 	}
+}
+
+// TestCoreStreamCloseDuringPauseDoesNotBlock verifies that Close called
+// while the receiver is in a pause-drain window returns promptly and does
+// not wait out the full server-requested pause duration. A long pause plus
+// a Close should tear down within a few DrainTimeouts.
+func TestCoreStreamCloseDuringPauseDoesNotBlock(t *testing.T) {
+	rpc := newFakeRPC()
+	cfg := testConfig()
+	cfg.StreamPausedMaxWait = 10 * time.Second // large; would otherwise pin Close
+	cs := newCoreForTest(testParams(), cfg, newFakeOpener(rpc), nil)
+
+	off, err := cs.Ingest(context.Background(), []byte(`{}`))
+	if err != nil {
+		t.Fatalf("Ingest: %v", err)
+	}
+	waitCondition(t, func() bool { return len(rpc.sends) > 0 }, time.Second)
+	<-rpc.sends
+	// Trigger a long pause; don't ack, so the receiver stays in pause
+	// drain waiting for either the ack or the pause deadline.
+	rpc.closeSignalWithDuration(10 * time.Second)
+	// Give the receiver a moment to enter pause mode.
+	time.Sleep(30 * time.Millisecond)
+
+	done := make(chan struct{})
+	start := time.Now()
+	go func() { cs.Close(); close(done) }()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("Close blocked waiting for full server pause window")
+	}
+	if elapsed := time.Since(start); elapsed > 2*time.Second {
+		t.Fatalf("Close during pause took %v; want prompt teardown", elapsed)
+	}
+	_ = off
+}
+
+// TestCoreStreamPauseDrainIgnoresLackOfAckTimeout verifies that during a
+// server-requested pause the client does NOT tear the stream down when the
+// lack-of-ack timer expires. The pause window bounds the wait, and the
+// server explicitly said it's about to close — cutting the drain short on
+// silence would truncate a legitimate pause window.
+func TestCoreStreamPauseDrainIgnoresLackOfAckTimeout(t *testing.T) {
+	rpc1 := newFakeRPC()
+	rpc2 := newFakeRPC()
+	fo := newFakeOpener(rpc1, rpc2)
+	cfg := testConfig()
+	cfg.LackOfAckTimeout = 30 * time.Millisecond
+	cfg.StreamPausedMaxWait = 200 * time.Millisecond
+	cs := newCoreForTest(testParams(), cfg, fo, nil)
+	t.Cleanup(func() { cs.Close() })
+
+	off, err := cs.Ingest(context.Background(), []byte(`{}`))
+	if err != nil {
+		t.Fatalf("Ingest: %v", err)
+	}
+	waitCondition(t, func() bool { return len(rpc1.sends) > 0 }, time.Second)
+	<-rpc1.sends
+	// Pause with a duration longer than the lack-of-ack timer; do NOT ack.
+	start := time.Now()
+	rpc1.closeSignalWithDuration(500 * time.Millisecond)
+
+	// Reconnect should happen roughly at StreamPausedMaxWait (200 ms), not
+	// at LackOfAckTimeout (30 ms). Guard: elapsed must be >= 150 ms.
+	waitCondition(t, func() bool { return len(rpc2.sends) > 0 }, time.Second)
+	elapsed := time.Since(start)
+	if elapsed < 150*time.Millisecond {
+		t.Fatalf("pause was cut short by lack-of-ack timer: reconnect after %v", elapsed)
+	}
+	<-rpc2.sends
+	rpc2.ack(off)
+}
+
+// TestCoreStreamHugeInputRejectedBeforeCopy verifies that a raw input larger
+// than MaxPayloadBytes is rejected without invoking the encoder — i.e.
+// without allocating a MaxPayloadBytes+1 clone.
+func TestCoreStreamHugeInputRejectedBeforeCopy(t *testing.T) {
+	rpc := newFakeRPC()
+	cfg := testConfig()
+	cfg.MaxPayloadBytes = 1024
+	cs := newCoreForTest(testParams(), cfg, newFakeOpener(rpc), nil)
+	t.Cleanup(func() { cs.Close() })
+
+	// 10 MiB record when the cap is 1 KiB: must be rejected fast.
+	big := make([]byte, 10*1024*1024)
+	start := time.Now()
+	_, err := cs.Ingest(context.Background(), big)
+	elapsed := time.Since(start)
+	if !errors.Is(err, ErrPayloadTooLarge) {
+		t.Fatalf("want ErrPayloadTooLarge for huge input, got %v", err)
+	}
+	// The precheck avoids the encoder copy entirely; the total time
+	// should be well under a millisecond even with race.
+	if elapsed > 100*time.Millisecond {
+		t.Fatalf("huge-input rejection took %v; want <100ms (encoder copy avoided)", elapsed)
+	}
+}
+
+// TestCoreStreamGetUnackedOnLiveStreamRejects verifies GetUnacked on an
+// active stream returns ErrStreamStillActive without mutating state, so
+// the stream keeps running.
+func TestCoreStreamGetUnackedOnLiveStreamRejects(t *testing.T) {
+	rpc := newFakeRPC()
+	cs := newTestStream(t, newFakeOpener(rpc))
+
+	off, err := cs.Ingest(context.Background(), []byte(`{}`))
+	if err != nil {
+		t.Fatalf("Ingest: %v", err)
+	}
+
+	unacked, err := cs.GetUnacked()
+	if !errors.Is(err, ErrStreamStillActive) {
+		t.Fatalf("GetUnacked on live stream: want ErrStreamStillActive, got %v (unacked=%v)", err, unacked)
+	}
+	if cs.IsClosed() {
+		t.Fatal("GetUnacked on live stream must NOT close the stream")
+	}
+
+	// Stream is still functional.
+	waitCondition(t, func() bool { return len(rpc.sends) > 0 }, time.Second)
+	<-rpc.sends
+	rpc.ack(off)
+	if err := cs.Flush(context.Background()); err != nil {
+		t.Fatalf("Flush after rejected GetUnacked: %v", err)
+	}
+}
+
+// TestCoreStreamDescriptorProtoCloned verifies that mutating the caller's
+// DescriptorProto slice after NewCoreStream does not affect what the
+// transport sees on Open (this or any recovery Open).
+func TestCoreStreamDescriptorProtoCloned(t *testing.T) {
+	// A test opener that records the descriptor its params carried at Open.
+	rec := &descriptorRecorder{sends: make(chan struct{}, 1), fake: newFakeRPC()}
+	desc := []byte{0xDE, 0xAD, 0xBE, 0xEF}
+	params := testParams()
+	params.DescriptorProto = desc
+	cs := newCoreForTest(params, testConfig(), rec, nil)
+	t.Cleanup(func() { cs.Close() })
+
+	// Wait for the initial Open.
+	<-rec.sends
+	// Now mutate the caller's slice.
+	desc[0] = 0x00
+	desc[1] = 0x00
+
+	// The recorded descriptor at Open must be the original bytes.
+	got := rec.captured()
+	if len(got) != 4 || got[0] != 0xDE || got[1] != 0xAD {
+		t.Fatalf("DescriptorProto was aliased: got %v, want [0xDE 0xAD 0xBE 0xEF]", got)
+	}
+}
+
+// descriptorRecorder captures the DescriptorProto seen at Open so tests can
+// assert deep-copy semantics.
+type descriptorRecorder struct {
+	fake   *fakeRPC
+	sends  chan struct{}
+	mu     sync.Mutex
+	seen   []byte
+	opened bool
+}
+
+func (r *descriptorRecorder) captured() []byte {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.seen
+}
+
+func (r *descriptorRecorder) Open(_ context.Context, p transport.StreamParams) (wireStream[encodedMsg, ephemeralResp], error) {
+	r.mu.Lock()
+	if !r.opened {
+		r.seen = append([]byte(nil), p.DescriptorProto...)
+		r.opened = true
+		r.mu.Unlock()
+		r.sends <- struct{}{}
+	} else {
+		r.mu.Unlock()
+	}
+	return transport.NewFakeStreamForTesting(r.fake), nil
 }

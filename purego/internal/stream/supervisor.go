@@ -115,9 +115,21 @@ func (cs *CoreStream[Req, Resp]) supervise(ctx context.Context) {
 	// being mutually exclusive.
 	items := cs.buf.drain()
 	cs.setRetainedFailed(items)
-	for _, it := range items {
-		cs.dispatcher.enqueueError(it.offset, err)
+	if cs.dispatcher != nil {
+		events := make([]cbEvent, len(items))
+		for i, it := range items {
+			events[i] = cbEvent{offset: it.offset, err: err}
+		}
+		// Bound the entire terminal-error drain by CallbackTeardownTimeout
+		// so a slow user callback plus a large in-flight backlog cannot
+		// pin the supervisor from closing cs.done.
+		cs.dispatcher.dispatchErrorsBounded(events, cs.cfg.CallbackTeardownTimeout)
 	}
+	// Signal the dispatcher to shut down: once cs.done is closed the caller
+	// may never call Close, so we must also shut the callback goroutine
+	// down here to avoid leaking it. The shutdown is non-blocking (respects
+	// the inCallback reentrancy check) so terminal completion is prompt.
+	cs.dispatcher.shutdown(cs.cfg.CallbackTeardownTimeout)
 	// drain() marks the buffer closed; the extra close call is defensive.
 	cs.buf.close()
 }
