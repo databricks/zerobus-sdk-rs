@@ -43,7 +43,7 @@ func TestJSONEncoderSetsOffsetAndPayload(t *testing.T) {
 }
 
 func TestProtoBatchEncoderSetsOffsetAndPayload(t *testing.T) {
-	enc := protoBatchEncoder{}
+	enc := protoEncoder{}
 	msg, err := enc.encodeBatch(3, [][]byte{{0x01, 0x02}, {0x03, 0x04}, {0x05}})
 	if err != nil {
 		t.Fatalf("encodeBatch: %v", err)
@@ -66,7 +66,7 @@ func TestProtoBatchEncoderSetsOffsetAndPayload(t *testing.T) {
 }
 
 func TestJSONBatchEncoderSetsOffsetAndPayload(t *testing.T) {
-	enc := jsonBatchEncoder{}
+	enc := jsonEncoder{}
 	msg, err := enc.encodeBatch(5, [][]byte{[]byte(`{"a":1}`), []byte(`{"b":2}`)})
 	if err != nil {
 		t.Fatalf("encodeBatch: %v", err)
@@ -88,7 +88,7 @@ func TestJSONBatchEncoderSetsOffsetAndPayload(t *testing.T) {
 }
 
 func TestEncodersRejectEmptyRecord(t *testing.T) {
-	for _, enc := range []encoder{protoEncoder{}, jsonEncoder{}} {
+	for _, enc := range []encoder[encodedMsg]{protoEncoder{}, jsonEncoder{}} {
 		if _, err := enc.encode(1, nil); err == nil {
 			t.Errorf("%T: want error for empty record, got nil", enc)
 		}
@@ -99,7 +99,7 @@ func TestEncodersRejectEmptyRecord(t *testing.T) {
 }
 
 func TestBatchEncodersRejectEmptyBatch(t *testing.T) {
-	for _, enc := range []batchEncoder{protoBatchEncoder{}, jsonBatchEncoder{}} {
+	for _, enc := range []encoder[encodedMsg]{protoEncoder{}, jsonEncoder{}} {
 		if _, err := enc.encodeBatch(1, nil); err == nil {
 			t.Errorf("%T: want error for empty batch, got nil", enc)
 		}
@@ -113,19 +113,19 @@ func TestBatchEncodersRejectEmptyBatch(t *testing.T) {
 func TestExtractRecordsReturnsAllBatchRecords(t *testing.T) {
 	// A batch message must yield every record, not just the first, so GetUnacked
 	// doesn't silently drop the tail of an unacked batch.
-	protoMsg, err := protoBatchEncoder{}.encodeBatch(1, [][]byte{{0x01}, {0x02}, {0x03}})
+	protoMsg, err := protoEncoder{}.encodeBatch(1, [][]byte{{0x01}, {0x02}, {0x03}})
 	if err != nil {
 		t.Fatalf("encodeBatch: %v", err)
 	}
-	if got := extractRecords(protoMsg); len(got) != 3 {
+	if got := (protoEncoder{}).decode(protoMsg); len(got) != 3 {
 		t.Fatalf("proto batch: want 3 records extracted, got %d", len(got))
 	}
 
-	jsonMsg, err := jsonBatchEncoder{}.encodeBatch(1, [][]byte{[]byte(`{"a":1}`), []byte(`{"b":2}`)})
+	jsonMsg, err := jsonEncoder{}.encodeBatch(1, [][]byte{[]byte(`{"a":1}`), []byte(`{"b":2}`)})
 	if err != nil {
 		t.Fatalf("encodeBatch: %v", err)
 	}
-	got := extractRecords(jsonMsg)
+	got := (jsonEncoder{}).decode(jsonMsg)
 	if len(got) != 2 || string(got[0]) != `{"a":1}` || string(got[1]) != `{"b":2}` {
 		t.Fatalf("json batch: want both records extracted, got %v", got)
 	}
@@ -135,7 +135,7 @@ func TestExtractRecordsReturnsAllBatchRecords(t *testing.T) {
 	if err != nil {
 		t.Fatalf("encode: %v", err)
 	}
-	if got := extractRecords(single); len(got) != 1 || string(got[0]) != `{"x":1}` {
+	if got := (jsonEncoder{}).decode(single); len(got) != 1 || string(got[0]) != `{"x":1}` {
 		t.Fatalf("single record: want 1 entry, got %v", got)
 	}
 }
@@ -151,23 +151,34 @@ func TestOffsetAckModelParsesIngestResponse(t *testing.T) {
 			},
 		},
 	}
-	got, ok := am.parse(resp)
-	if !ok {
-		t.Fatal("want ok=true for ingest response, got false")
+	kind, got, _ := am.classify(resp)
+	if kind != ackResponse {
+		t.Fatalf("want ackResponse for ingest response, got %v", kind)
 	}
 	if got != 99 {
 		t.Fatalf("want offset 99, got %d", got)
 	}
 }
 
-func TestOffsetAckModelIgnoresNonAckResponse(t *testing.T) {
+func TestOffsetAckModelClassifiesCloseSignalAsPause(t *testing.T) {
 	am := offsetAckModel{}
 	resp := &zerobuspb.EphemeralStreamResponse{
-		Payload: &zerobuspb.EphemeralStreamResponse_CloseStreamSignal{},
+		Payload: &zerobuspb.EphemeralStreamResponse_CloseStreamSignal{
+			CloseStreamSignal: &zerobuspb.CloseStreamSignal{},
+		},
 	}
-	_, ok := am.parse(resp)
-	if ok {
-		t.Fatal("want ok=false for close signal, got true")
+	kind, _, _ := am.classify(resp)
+	if kind != pauseResponse {
+		t.Fatalf("want pauseResponse for close signal, got %v", kind)
+	}
+}
+
+func TestOffsetAckModelIgnoresUnknownResponse(t *testing.T) {
+	am := offsetAckModel{}
+	// An empty response carries neither an ack nor a close signal.
+	kind, _, _ := am.classify(&zerobuspb.EphemeralStreamResponse{})
+	if kind != otherResponse {
+		t.Fatalf("want otherResponse for empty response, got %v", kind)
 	}
 }
 

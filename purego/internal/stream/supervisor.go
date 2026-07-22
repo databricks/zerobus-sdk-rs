@@ -9,22 +9,29 @@ import (
 
 // supervise is the supervisor goroutine. It runs the create→run→recover loop
 // until the context is cancelled (Close called), a non-retryable error fires,
-// or recovery retries are exhausted. It always closes done on exit.
-func (cs *CoreStream) supervise(ctx context.Context) {
+// or consecutive recovery retries are exhausted. It always closes done on exit.
+//
+// The retry budget is per episode: `failedAttempts` counts only *consecutive*
+// failed reconnects and resets to zero whenever a stream connects and runs
+// successfully. A long-lived stream that disconnects occasionally therefore is
+// not doomed after RecoveryRetries lifetime disconnects — each disconnect
+// starts a fresh episode with the full budget. This mirrors the Rust core,
+// which builds a fresh attempt counter per recovery loop iteration.
+func (cs *CoreStream[Req, Resp]) supervise(ctx context.Context) {
 	defer close(cs.done)
 
 	var err error
-	for attempt := 0; ; attempt++ {
+	failedAttempts := 0
+	for {
 		if ctx.Err() != nil {
 			// Cancelled by Close — clean exit, no error.
 			return
 		}
 
-		if attempt > 0 {
-			// Log-friendly: caller can observe via IsClosed / GetUnacked.
-			if !cs.cfg.Recovery.enabled() || attempt > cs.cfg.RecoveryRetries {
+		if failedAttempts > 0 {
+			if !cs.cfg.Recovery.enabled() || failedAttempts > cs.cfg.RecoveryRetries {
 				err = fmt.Errorf("stream: recovery exhausted after %d attempt(s): %w",
-					attempt, err)
+					failedAttempts, err)
 				break
 			}
 			select {
@@ -36,25 +43,30 @@ func (cs *CoreStream) supervise(ctx context.Context) {
 			cs.buf.requeue()
 		}
 
-		runErr := cs.runOnce(ctx)
+		runErr, healthy := cs.runOnce(ctx)
 
-		// ctx cancelled = Clean exit via Close; nil also means clean if the
-		// caller already cancelled. Don't treat server-side EOF as clean.
+		// ctx cancelled = clean exit via Close. Don't treat server-side EOF as clean.
 		if ctx.Err() != nil {
 			return
+		}
+
+		// A stream that successfully opened and ran resets the per-episode budget:
+		// the failure that ended it (if any) begins a fresh recovery episode rather
+		// than continuing the prior reconnect streak.
+		if healthy {
+			failedAttempts = 0
 		}
 
 		// A server-requested pause (CloseStreamSignal) is not a failure: wait the
 		// requested window, then reconnect without consuming the recovery budget.
 		// Ingest keeps buffering meanwhile; unacked records are requeued on the
-		// next attempt. Decrement attempt so this iteration isn't counted.
+		// next attempt.
 		var ps pauseSignal
 		if errors.As(runErr, &ps) {
 			if !cs.waitPause(ctx, ps.duration) {
 				return // Close cancelled ctx during the pause.
 			}
 			cs.buf.requeue()
-			attempt--
 			continue
 		}
 
@@ -68,6 +80,7 @@ func (cs *CoreStream) supervise(ctx context.Context) {
 		if !isRetryable(runErr) {
 			break
 		}
+		failedAttempts++
 	}
 
 	// Terminal failure path.
@@ -96,7 +109,7 @@ func (cs *CoreStream) supervise(ctx context.Context) {
 // client cap"). Returns false if ctx was cancelled (Close) during the wait, so
 // the caller stops instead of reconnecting. A non-positive effective wait
 // reconnects immediately.
-func (cs *CoreStream) waitPause(ctx context.Context, serverDuration time.Duration) bool {
+func (cs *CoreStream[Req, Resp]) waitPause(ctx context.Context, serverDuration time.Duration) bool {
 	wait := serverDuration
 	if cap := cs.cfg.StreamPausedMaxWait; cap > 0 && (wait <= 0 || cap < wait) {
 		wait = cap

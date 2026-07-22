@@ -127,7 +127,7 @@ func (fo *fakeOpener) openCount() int {
 	return fo.attempts
 }
 
-func (fo *fakeOpener) Open(_ context.Context, _ transport.StreamParams) (*transport.Stream, error) {
+func (fo *fakeOpener) Open(_ context.Context, _ transport.StreamParams) (wireStream[encodedMsg, ephemeralResp], error) {
 	fo.mu.Lock()
 	defer fo.mu.Unlock()
 	fo.attempts++
@@ -225,7 +225,7 @@ func (f *gracefulFakeRPC) ack(offset int64) {
 
 type gracefulOpener struct{ rpc *gracefulFakeRPC }
 
-func (o *gracefulOpener) Open(_ context.Context, _ transport.StreamParams) (*transport.Stream, error) {
+func (o *gracefulOpener) Open(_ context.Context, _ transport.StreamParams) (wireStream[encodedMsg, ephemeralResp], error) {
 	return transport.NewFakeStreamForTesting(o.rpc), nil
 }
 
@@ -273,10 +273,22 @@ func testParams() StreamParams {
 	}
 }
 
-func newTestStream(t *testing.T, opener Opener) *CoreStream {
+// testStream is the proto/JSON core specialization used throughout these tests.
+type testStream = CoreStream[encodedMsg, ephemeralResp]
+
+// testOpener is the opener type the fakes satisfy.
+type testOpener = opener[encodedMsg, ephemeralResp]
+
+// newCoreForTest builds a proto/JSON CoreStream with the JSON encoder and offset
+// ack model — the common wiring every test needs.
+func newCoreForTest(params StreamParams, cfg Config, o testOpener, cb AckCallback) *testStream {
+	return NewCoreStream[encodedMsg, ephemeralResp](params, cfg, o, jsonEncoder{}, offsetAckModel{}, cb)
+}
+
+func newTestStream(t *testing.T, o testOpener) *testStream {
 	t.Helper()
 	cb := &recordingCallback{}
-	cs := NewCoreStream(testParams(), testConfig(), opener, jsonEncoder{}, offsetAckModel{}, cb)
+	cs := newCoreForTest(testParams(), testConfig(), o, cb)
 	t.Cleanup(func() { cs.Close() })
 	return cs
 }
@@ -385,7 +397,7 @@ func TestCoreStreamFlushContextExpires(t *testing.T) {
 func TestCoreStreamAckCallbackFires(t *testing.T) {
 	rpc := newFakeRPC()
 	cb := &recordingCallback{}
-	cs := NewCoreStream(testParams(), testConfig(), newFakeOpener(rpc), jsonEncoder{}, offsetAckModel{}, cb)
+	cs := newCoreForTest(testParams(), testConfig(), newFakeOpener(rpc), cb)
 	t.Cleanup(func() { cs.Close() })
 
 	for range 3 {
@@ -417,8 +429,7 @@ func TestCoreStreamCloseIsIdempotent(t *testing.T) {
 func TestCoreStreamCloseDrainsGracefully(t *testing.T) {
 	rpc := newGracefulFakeRPC()
 	cb := &recordingCallback{}
-	cs := NewCoreStream(testParams(), testConfig(), &gracefulOpener{rpc: rpc},
-		jsonEncoder{}, offsetAckModel{}, cb)
+	cs := newCoreForTest(testParams(), testConfig(), &gracefulOpener{rpc: rpc}, cb)
 
 	off, err := cs.Ingest(context.Background(), []byte(`{}`))
 	if err != nil {
@@ -471,7 +482,7 @@ func TestCoreStreamGetUnackedReturnsItems(t *testing.T) {
 	fo := &fakeOpener{openErr: fmt.Errorf("connection refused")}
 	cfg := testConfig()
 	cfg.Recovery = RecoveryDisabled
-	cs := NewCoreStream(testParams(), cfg, fo, jsonEncoder{}, offsetAckModel{}, nil)
+	cs := newCoreForTest(testParams(), cfg, fo, nil)
 
 	// Ingest with a context that will eventually succeed (the buffer blocks,
 	// not the opener). Give it a short context so we can proceed quickly.
@@ -528,7 +539,7 @@ func TestCoreStreamRecoveryRequeuesUnacked(t *testing.T) {
 
 	cfg := testConfig()
 	cfg.RecoveryRetries = 1
-	cs := NewCoreStream(testParams(), cfg, fo, jsonEncoder{}, offsetAckModel{}, nil)
+	cs := newCoreForTest(testParams(), cfg, fo, nil)
 	t.Cleanup(func() { cs.Close() })
 
 	off, err := cs.Ingest(context.Background(), []byte(`{}`))
@@ -604,7 +615,7 @@ func TestCoreStreamCloseUnblocksEnqueueAtCapacity(t *testing.T) {
 	rpc := newFakeRPC()
 	cfg := testConfig()
 	cfg.MaxInflight = 1
-	cs := NewCoreStream(testParams(), cfg, newFakeOpener(rpc), jsonEncoder{}, offsetAckModel{}, nil)
+	cs := newCoreForTest(testParams(), cfg, newFakeOpener(rpc), nil)
 	t.Cleanup(func() { cs.Close() })
 
 	// Fill the single slot.
@@ -640,7 +651,7 @@ func TestCoreStreamGetUnackedWithoutCallback(t *testing.T) {
 	fo := &fakeOpener{openErr: fmt.Errorf("connection refused")}
 	cfg := testConfig()
 	cfg.Recovery = RecoveryDisabled
-	cs := NewCoreStream(testParams(), cfg, fo, jsonEncoder{}, offsetAckModel{}, nil)
+	cs := newCoreForTest(testParams(), cfg, fo, nil)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
 	defer cancel()
@@ -658,7 +669,7 @@ func TestCoreStreamNonRetryableErrorTerminates(t *testing.T) {
 
 	cfg := testConfig()
 	cfg.Recovery = RecoveryDisabled
-	cs := NewCoreStream(testParams(), cfg, fo, jsonEncoder{}, offsetAckModel{}, nil)
+	cs := newCoreForTest(testParams(), cfg, fo, nil)
 	t.Cleanup(func() { cs.Close() })
 
 	// Ingest something so Flush has a target offset.
@@ -686,7 +697,7 @@ func TestCoreStreamInvalidParamsNotRetried(t *testing.T) {
 
 	cfg := testConfig()
 	cfg.RecoveryRetries = 5 // would retry 5x if this were classified retryable
-	cs := NewCoreStream(testParams(), cfg, fo, jsonEncoder{}, offsetAckModel{}, nil)
+	cs := newCoreForTest(testParams(), cfg, fo, nil)
 	t.Cleanup(func() { cs.Close() })
 
 	waitCondition(t, cs.IsClosed, 2*time.Second)
@@ -712,7 +723,7 @@ func TestCoreStreamSelfClassifiedNonRetryableErrorTerminates(t *testing.T) {
 
 	cfg := testConfig()
 	cfg.RecoveryRetries = 5 // would retry 5x if this were classified retryable
-	cs := NewCoreStream(testParams(), cfg, fo, jsonEncoder{}, offsetAckModel{}, nil)
+	cs := newCoreForTest(testParams(), cfg, fo, nil)
 	t.Cleanup(func() { cs.Close() })
 
 	waitCondition(t, cs.IsClosed, 2*time.Second)
@@ -734,7 +745,7 @@ func TestCoreStreamPauseSignalReconnectsWithoutConsumingRetries(t *testing.T) {
 
 	cfg := testConfig()
 	cfg.RecoveryRetries = 0 // a pause must not consume the (zero) retry budget
-	cs := NewCoreStream(testParams(), cfg, fo, jsonEncoder{}, offsetAckModel{}, nil)
+	cs := newCoreForTest(testParams(), cfg, fo, nil)
 	t.Cleanup(func() { cs.Close() })
 
 	off, err := cs.Ingest(context.Background(), []byte(`{}`))
@@ -776,7 +787,7 @@ func TestCoreStreamPauseSignalRespectsStreamPausedMaxWaitCap(t *testing.T) {
 	cfg.StreamPausedMaxWait = 25 * time.Millisecond
 	serverPause := 5 * time.Second
 
-	cs := NewCoreStream(testParams(), cfg, fo, jsonEncoder{}, offsetAckModel{}, nil)
+	cs := newCoreForTest(testParams(), cfg, fo, nil)
 	t.Cleanup(func() { cs.Close() })
 
 	off, err := cs.Ingest(context.Background(), []byte(`{}`))
@@ -805,5 +816,116 @@ func TestCoreStreamPauseSignalRespectsStreamPausedMaxWaitCap(t *testing.T) {
 	defer cancel()
 	if err := cs.WaitForOffset(ctx, off); err != nil {
 		t.Fatalf("WaitForOffset: %v", err)
+	}
+}
+
+// TestCoreStreamIdleStreamDoesNotFailOnLackOfAck verifies that a stream with
+// nothing in flight is never torn down by the lack-of-ack timeout. The opener
+// has exactly one RPC, so any spurious reconnect attempt would fail with "no
+// more RPCs" and the stream would terminate — both assertions catch that.
+func TestCoreStreamIdleStreamDoesNotFailOnLackOfAck(t *testing.T) {
+	rpc := newFakeRPC()
+	fo := newFakeOpener(rpc)
+	cfg := testConfig()
+	cfg.LackOfAckTimeout = 30 * time.Millisecond
+	cs := newCoreForTest(testParams(), cfg, fo, nil)
+	t.Cleanup(func() { cs.Close() })
+
+	// Ingest and fully ack a record so the in-flight set drains to empty.
+	off, err := cs.Ingest(context.Background(), []byte(`{}`))
+	if err != nil {
+		t.Fatalf("Ingest: %v", err)
+	}
+	waitCondition(t, func() bool { return len(rpc.sends) > 0 }, time.Second)
+	<-rpc.sends
+	rpc.ack(off)
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	if err := cs.WaitForOffset(ctx, off); err != nil {
+		t.Fatalf("WaitForOffset: %v", err)
+	}
+
+	// Idle for many lack-of-ack windows. With nothing in flight, silence is not a
+	// failure, so the stream must stay live and must not reconnect.
+	time.Sleep(200 * time.Millisecond)
+
+	if cs.IsClosed() {
+		t.Fatal("idle stream was torn down by the lack-of-ack timeout")
+	}
+	if n := fo.openCount(); n != 1 {
+		t.Fatalf("idle stream reconnected (openCount=%d); lack-of-ack fired with nothing in flight", n)
+	}
+}
+
+// TestCoreStreamHealthyRunResetsRecoveryBudget verifies that the recovery retry
+// budget is per-episode, not lifetime. Three successive connections each receive
+// the re-sent record then die with EOF; with RecoveryRetries=1 and a lifetime
+// budget the supervisor would give up before the fourth connection. Because each
+// run connected and ran successfully, the budget resets and the stream survives
+// to ack on the fourth.
+func TestCoreStreamHealthyRunResetsRecoveryBudget(t *testing.T) {
+	rpc1, rpc2, rpc3, rpc4 := newFakeRPC(), newFakeRPC(), newFakeRPC(), newFakeRPC()
+	fo := newFakeOpener(rpc1, rpc2, rpc3, rpc4)
+	cfg := testConfig()
+	cfg.RecoveryRetries = 1
+	cs := newCoreForTest(testParams(), cfg, fo, nil)
+	t.Cleanup(func() { cs.Close() })
+
+	off, err := cs.Ingest(context.Background(), []byte(`{}`))
+	if err != nil {
+		t.Fatalf("Ingest: %v", err)
+	}
+
+	// Each connection sees the (re-sent) record, then the server drops it (EOF).
+	for i, rpc := range []*fakeRPC{rpc1, rpc2, rpc3} {
+		waitCondition(t, func() bool { return len(rpc.sends) > 0 }, 2*time.Second)
+		<-rpc.sends
+		rpc.close() // EOF: a healthy run that ends; supervisor must recover
+		_ = i
+	}
+
+	// Fourth connection: the record is re-sent once more and finally acked.
+	waitCondition(t, func() bool { return len(rpc4.sends) > 0 }, 2*time.Second)
+	<-rpc4.sends
+	rpc4.ack(off)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	if err := cs.WaitForOffset(ctx, off); err != nil {
+		t.Fatalf("stream did not survive 3 healthy-then-disconnect cycles: %v", err)
+	}
+	if cs.IsClosed() {
+		t.Fatal("stream terminated despite healthy runs resetting the recovery budget")
+	}
+}
+
+// TestCoreStreamIngestBatch verifies the batch ingest path: records go on the
+// wire as a single atomic IngestRecordBatch under one logical offset, and Flush
+// completes once that offset is acked.
+func TestCoreStreamIngestBatch(t *testing.T) {
+	rpc := newFakeRPC()
+	cs := newTestStream(t, newFakeOpener(rpc))
+
+	off, err := cs.IngestBatch(context.Background(), [][]byte{[]byte(`{"a":1}`), []byte(`{"b":2}`)})
+	if err != nil {
+		t.Fatalf("IngestBatch: %v", err)
+	}
+	if off != 0 {
+		t.Fatalf("want offset 0 for the batch, got %d", off)
+	}
+
+	waitCondition(t, func() bool { return len(rpc.sends) > 0 }, time.Second)
+	sent := <-rpc.sends
+	ib := sent.GetIngestRecordBatch()
+	if ib == nil {
+		t.Fatal("want an IngestRecordBatch on the wire, got a single-record message")
+	}
+	if got := len(ib.GetJsonBatch().GetRecords()); got != 2 {
+		t.Fatalf("want 2 records in the batch, got %d", got)
+	}
+	rpc.ack(off)
+
+	if err := cs.Flush(context.Background()); err != nil {
+		t.Fatalf("Flush: %v", err)
 	}
 }

@@ -15,7 +15,7 @@ func dummyMsg(offset int64) encodedMsg {
 }
 
 func TestBufferEnqueueNext(t *testing.T) {
-	b := newBuffer(4)
+	b := newBuffer[encodedMsg](4)
 
 	if err := b.enqueue(context.Background(), 1, dummyMsg(1)); err != nil {
 		t.Fatalf("enqueue: %v", err)
@@ -31,7 +31,7 @@ func TestBufferEnqueueNext(t *testing.T) {
 }
 
 func TestBufferFIFOOrder(t *testing.T) {
-	b := newBuffer(8)
+	b := newBuffer[encodedMsg](8)
 	for i := int64(1); i <= 5; i++ {
 		if err := b.enqueue(context.Background(), i, dummyMsg(i)); err != nil {
 			t.Fatalf("enqueue %d: %v", i, err)
@@ -50,7 +50,7 @@ func TestBufferFIFOOrder(t *testing.T) {
 
 func TestBufferBackpressure(t *testing.T) {
 	const cap = 2
-	b := newBuffer(cap)
+	b := newBuffer[encodedMsg](cap)
 
 	// Fill the buffer to capacity.
 	for i := int64(1); i <= cap; i++ {
@@ -89,7 +89,7 @@ func TestBufferBackpressure(t *testing.T) {
 }
 
 func TestBufferContextCancelUnblocksEnqueue(t *testing.T) {
-	b := newBuffer(1)
+	b := newBuffer[encodedMsg](1)
 	if err := b.enqueue(context.Background(), 1, dummyMsg(1)); err != nil {
 		t.Fatalf("enqueue: %v", err)
 	}
@@ -114,7 +114,7 @@ func TestBufferContextCancelUnblocksEnqueue(t *testing.T) {
 }
 
 func TestBufferRequeueResendsInOrder(t *testing.T) {
-	b := newBuffer(4)
+	b := newBuffer[encodedMsg](4)
 	for i := int64(1); i <= 3; i++ {
 		if err := b.enqueue(context.Background(), i, dummyMsg(i)); err != nil {
 			t.Fatalf("enqueue %d: %v", i, err)
@@ -143,7 +143,7 @@ func TestBufferRequeueResendsInOrder(t *testing.T) {
 }
 
 func TestBufferDrainReturnsAll(t *testing.T) {
-	b := newBuffer(8)
+	b := newBuffer[encodedMsg](8)
 	for i := int64(1); i <= 4; i++ {
 		if err := b.enqueue(context.Background(), i, dummyMsg(i)); err != nil {
 			t.Fatalf("enqueue: %v", err)
@@ -169,7 +169,7 @@ func TestBufferDrainReturnsAll(t *testing.T) {
 }
 
 func TestBufferEnqueueAfterCloseErrors(t *testing.T) {
-	b := newBuffer(4)
+	b := newBuffer[encodedMsg](4)
 	b.close()
 	err := b.enqueue(context.Background(), 1, dummyMsg(1))
 	if err != errClosed {
@@ -178,7 +178,7 @@ func TestBufferEnqueueAfterCloseErrors(t *testing.T) {
 }
 
 func TestBufferNextAfterCloseAndDrainErrors(t *testing.T) {
-	b := newBuffer(4)
+	b := newBuffer[encodedMsg](4)
 	b.drain()
 	_, err := b.next(context.Background())
 	if err != errClosed {
@@ -188,7 +188,7 @@ func TestBufferNextAfterCloseAndDrainErrors(t *testing.T) {
 
 func TestBufferConcurrentEnqueueDiscard(t *testing.T) {
 	const n = 100
-	b := newBuffer(16)
+	b := newBuffer[encodedMsg](16)
 
 	var wg sync.WaitGroup
 	wg.Add(1)

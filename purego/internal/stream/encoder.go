@@ -9,29 +9,36 @@ import (
 )
 
 // encodedMsg is a wire-ready EphemeralStream ingest request, built once at
-// Ingest time and held in the buffer until the sender transmits it.
-// Encoding is eager so the buffer never retains live user objects.
+// Ingest time and held in the buffer until the sender transmits it. It is the
+// Req type the proto/JSON core is instantiated with; the Arrow path will use a
+// Flight frame instead. Encoding is eager so the buffer never retains live user
+// objects.
 type encodedMsg = *zerobuspb.EphemeralStreamRequest
 
-// encoder turns a single user record into a wire message for the given offset.
-// The offset is stamped into the message here so re-sends after recovery use
+// encoder turns user records into wire messages for a given offset and recovers
+// them again for GetUnacked. It is edge #1 of the design: the sole per-encoding
+// seam on the send side. The core is generic over the wire message type Req and
+// never names a concrete proto type — proto/JSON supply encoder[encodedMsg];
+// Arrow will supply encoder[flightFrame].
+//
+// The offset is stamped into the message here so re-sends after recovery reuse
 // the same logical offset the server already saw.
-type encoder interface {
-	encode(offset int64, record []byte) (encodedMsg, error)
+type encoder[Req any] interface {
+	// encode turns a single user record into one wire message.
+	encode(offset int64, record []byte) (Req, error)
+	// encodeBatch turns many already-encoded records into one wire message. All
+	// records share a single offset and are atomic to the server (it acks the
+	// whole batch or none of it), so the batch occupies exactly one logical
+	// offset in the core's buffer.
+	encodeBatch(offset int64, records [][]byte) (Req, error)
+	// decode recovers the raw record bytes from a wire message so GetUnacked can
+	// return original content. A single-record message yields one entry; a batch
+	// yields all of its records so no unacked record is silently dropped.
+	decode(msg Req) [][]byte
 }
 
-// batchEncoder turns a batch of already-encoded records into one wire message.
-// All records in the batch share a single offset and are atomic to the server
-// (it acks the whole batch or none of it), so the batch occupies exactly one
-// logical offset in the core's buffer. Records are passed as a slice — one
-// element per record — rather than a single concatenated blob, so the batch is
-// represented as the N records it actually contains.
-type batchEncoder interface {
-	encodeBatch(offset int64, records [][]byte) (encodedMsg, error)
-}
-
-// protoEncoder builds EphemeralStreamRequest_IngestRecord payloads for
-// proto-encoded records (raw serialized protobuf bytes).
+// protoEncoder builds EphemeralStream payloads for proto-encoded records (raw
+// serialized protobuf bytes), single and batched.
 type protoEncoder struct{}
 
 func (protoEncoder) encode(offset int64, record []byte) (encodedMsg, error) {
@@ -48,30 +55,7 @@ func (protoEncoder) encode(offset int64, record []byte) (encodedMsg, error) {
 	}, nil
 }
 
-// jsonEncoder builds EphemeralStreamRequest_IngestRecord payloads for
-// JSON-encoded records.
-type jsonEncoder struct{}
-
-func (jsonEncoder) encode(offset int64, record []byte) (encodedMsg, error) {
-	if len(record) == 0 {
-		return nil, fmt.Errorf("stream: json record must not be empty")
-	}
-	return &zerobuspb.EphemeralStreamRequest{
-		Payload: &zerobuspb.EphemeralStreamRequest_IngestRecord{
-			IngestRecord: &zerobuspb.IngestRecordRequest{
-				OffsetId: proto.Int64(offset),
-				Record:   &zerobuspb.IngestRecordRequest_JsonRecord{JsonRecord: string(record)},
-			},
-		},
-	}, nil
-}
-
-// protoBatchEncoder builds EphemeralStreamRequest_IngestRecordBatch payloads.
-// All records in the batch share one offset; the whole batch is atomic to
-// the server.
-type protoBatchEncoder struct{}
-
-func (protoBatchEncoder) encodeBatch(offset int64, records [][]byte) (encodedMsg, error) {
+func (protoEncoder) encodeBatch(offset int64, records [][]byte) (encodedMsg, error) {
 	if len(records) == 0 {
 		return nil, fmt.Errorf("stream: proto batch must not be empty")
 	}
@@ -92,11 +76,27 @@ func (protoBatchEncoder) encodeBatch(offset int64, records [][]byte) (encodedMsg
 	}, nil
 }
 
-// jsonBatchEncoder builds EphemeralStreamRequest_IngestRecordBatch payloads
-// for a batch of JSON records.
-type jsonBatchEncoder struct{}
+func (protoEncoder) decode(msg encodedMsg) [][]byte { return extractEphemeralRecords(msg) }
 
-func (jsonBatchEncoder) encodeBatch(offset int64, records [][]byte) (encodedMsg, error) {
+// jsonEncoder builds EphemeralStream payloads for JSON-encoded records, single
+// and batched.
+type jsonEncoder struct{}
+
+func (jsonEncoder) encode(offset int64, record []byte) (encodedMsg, error) {
+	if len(record) == 0 {
+		return nil, fmt.Errorf("stream: json record must not be empty")
+	}
+	return &zerobuspb.EphemeralStreamRequest{
+		Payload: &zerobuspb.EphemeralStreamRequest_IngestRecord{
+			IngestRecord: &zerobuspb.IngestRecordRequest{
+				OffsetId: proto.Int64(offset),
+				Record:   &zerobuspb.IngestRecordRequest_JsonRecord{JsonRecord: string(record)},
+			},
+		},
+	}, nil
+}
+
+func (jsonEncoder) encodeBatch(offset int64, records [][]byte) (encodedMsg, error) {
 	if len(records) == 0 {
 		return nil, fmt.Errorf("stream: json batch must not be empty")
 	}
@@ -117,4 +117,47 @@ func (jsonBatchEncoder) encodeBatch(offset int64, records [][]byte) (encodedMsg,
 			},
 		},
 	}, nil
+}
+
+func (jsonEncoder) decode(msg encodedMsg) [][]byte { return extractEphemeralRecords(msg) }
+
+// newEncoder returns the proto/JSON encoder for the given record type.
+func newEncoder(rt zerobuspb.RecordType) (encoder[encodedMsg], error) {
+	switch rt {
+	case zerobuspb.RecordType_PROTO:
+		return protoEncoder{}, nil
+	case zerobuspb.RecordType_JSON:
+		return jsonEncoder{}, nil
+	default:
+		return nil, errUnsupportedRecordType(rt)
+	}
+}
+
+// extractEphemeralRecords recovers the raw record bytes from an EphemeralStream
+// wire message. A single-record message yields one entry; a batch yields all of
+// its records. Shared by the proto and JSON encoders' decode.
+func extractEphemeralRecords(msg encodedMsg) [][]byte {
+	if msg == nil {
+		return nil
+	}
+	if ir := msg.GetIngestRecord(); ir != nil {
+		if b := ir.GetProtoEncodedRecord(); b != nil {
+			return [][]byte{b}
+		}
+		return [][]byte{[]byte(ir.GetJsonRecord())}
+	}
+	if ib := msg.GetIngestRecordBatch(); ib != nil {
+		if pb := ib.GetProtoEncodedBatch(); pb != nil {
+			return pb.GetRecords()
+		}
+		if jb := ib.GetJsonBatch(); jb != nil {
+			recs := jb.GetRecords()
+			out := make([][]byte, len(recs))
+			for i, r := range recs {
+				out[i] = []byte(r)
+			}
+			return out
+		}
+	}
+	return nil
 }
