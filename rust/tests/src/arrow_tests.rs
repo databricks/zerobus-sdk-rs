@@ -73,6 +73,51 @@ mod arrow_flight_tests {
     mod ingestion_tests {
         use super::*;
 
+        /// A zero-row batch must be rejected with InvalidArgument rather than accepted
+        /// (the Flight encoder emits no data message for it, so it would never be acked
+        /// and flush() would hang).
+        #[tokio::test]
+        async fn test_ingest_empty_batch_rejected() -> Result<(), Box<dyn std::error::Error>> {
+            setup_tracing();
+            info!("Starting test_ingest_empty_batch_rejected");
+
+            let (mock_server, server_url) = start_mock_flight_server().await?;
+            let schema = create_test_arrow_schema();
+            mock_server.inject_responses(TABLE_NAME, vec![]).await;
+
+            let sdk = ZerobusSdk::builder()
+                .endpoint(server_url.clone())
+                .unity_catalog_url("https://mock-uc.com")
+                .tls_config(Arc::new(NoTlsConfig))
+                .build()?;
+
+            let stream = sdk
+                .stream_builder()
+                .table(TABLE_NAME)
+                .headers_provider(Arc::new(TestHeadersProvider::default()))
+                .arrow(schema.clone())
+                .build_arrow()
+                .await?;
+
+            let empty = arrow_array::RecordBatch::new_empty(schema.clone());
+            let err = stream
+                .ingest_batch(empty)
+                .await
+                .expect_err("an empty batch must be rejected");
+            assert!(
+                err.to_string().to_lowercase().contains("empty"),
+                "expected an empty-batch InvalidArgument, got: {}",
+                err
+            );
+            assert!(
+                !err.is_retryable(),
+                "empty-batch rejection is non-retryable, got: {}",
+                err
+            );
+
+            Ok(())
+        }
+
         #[tokio::test]
         async fn test_ingest_single_batch() -> Result<(), Box<dyn std::error::Error>> {
             setup_tracing();

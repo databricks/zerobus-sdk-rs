@@ -1407,7 +1407,8 @@ impl ZerobusArrowStream {
     /// # Errors
     ///
     /// * `StreamClosedError` - If the stream has been closed
-    /// * `InvalidArgument` - If the batch schema doesn't match the stream schema
+    /// * `InvalidArgument` - If the batch schema doesn't match the stream schema, or the
+    ///   batch has zero rows (an empty batch carries no data to send or acknowledge)
     ///
     /// # Examples
     ///
@@ -1438,6 +1439,15 @@ impl ZerobusArrowStream {
                 self.table_properties.schema,
                 batch.schema()
             )));
+        }
+
+        // Reject empty batches: the Flight encoder emits no data message for a zero-row
+        // RecordBatch, so it would enter pending_batches but never be sent or acknowledged,
+        // hanging flush()/wait_for_offset() until they time out.
+        if batch.num_rows() == 0 {
+            return Err(ZerobusError::InvalidArgument(
+                "Cannot ingest an empty RecordBatch (zero rows)".to_string(),
+            ));
         }
 
         // Acquire the backpressure permit BEFORE ingest_mutex: reconnect() holds that
