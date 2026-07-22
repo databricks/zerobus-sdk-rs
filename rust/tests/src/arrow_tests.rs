@@ -523,7 +523,8 @@ mod arrow_flight_tests {
 
         /// Cancelling close after supervisor/sender teardown must leave the stream in a
         /// resumable Closing state: new ingests are rejected, retrieval remains disabled,
-        /// and a second close completes immediately without waiting for flush_timeout.
+        /// and resumed/repeated close calls return the original flush error without waiting
+        /// for flush_timeout again.
         #[tokio::test]
         async fn test_cancelled_close_rejects_ingest_and_resumes_teardown(
         ) -> Result<(), Box<dyn std::error::Error>> {
@@ -532,7 +533,16 @@ mod arrow_flight_tests {
 
             let (mock_server, server_url) = start_mock_flight_server().await?;
             let schema = create_test_arrow_schema();
-            mock_server.inject_responses(TABLE_NAME, vec![]).await;
+            mock_server
+                .inject_responses(
+                    TABLE_NAME,
+                    vec![MockFlightResponse::BatchAck {
+                        ack_up_to_offset: 0,
+                        delay_ms: 5000,
+                        ack_up_to_records: 1,
+                    }],
+                )
+                .await;
 
             let sdk = ZerobusSdk::builder()
                 .endpoint(server_url.clone())
@@ -545,8 +555,13 @@ mod arrow_flight_tests {
                 .table(TABLE_NAME)
                 .headers_provider(Arc::new(TestHeadersProvider::default()))
                 .arrow(schema.clone())
+                .flush_timeout_ms(100)
                 .build_arrow()
                 .await?;
+
+            let pending_batch =
+                create_test_record_batch(schema.clone(), vec![1], vec![Some("pending")]);
+            stream.ingest_batch(pending_batch).await?;
 
             let (reached, _proceed) = stream.arm_close_finalize_barrier().await;
             let mut close_future = Box::pin(stream.close());
@@ -566,7 +581,7 @@ mod arrow_flight_tests {
                 !stream.is_closed(),
                 "cancelled teardown is not finalized yet"
             );
-            let batch = create_test_record_batch(schema, vec![1], vec![Some("late")]);
+            let batch = create_test_record_batch(schema, vec![2], vec![Some("late")]);
             assert!(
                 stream.ingest_batch(batch).await.is_err(),
                 "Closing must reject new ingests"
@@ -576,11 +591,28 @@ mod arrow_flight_tests {
                 "unacked retrieval is allowed only after Closed"
             );
 
-            tokio::time::timeout(std::time::Duration::from_secs(1), stream.close())
+            let resumed =
+                tokio::time::timeout(std::time::Duration::from_secs(1), stream.close())
                 .await
-                .expect("resumed close must skip flush and finish promptly")?;
+                .expect("resumed close must skip flush and finish promptly")
+                .expect_err("resumed close must return the stored flush error");
+            assert!(
+                resumed.to_string().contains("Flush timed out"),
+                "expected stored flush timeout, got: {}",
+                resumed
+            );
             assert!(stream.is_closed());
-            assert!(stream.get_unacked_batches().await?.is_empty());
+
+            let repeated = stream
+                .close()
+                .await
+                .expect_err("repeated close must return the same stored flush error");
+            assert!(
+                repeated.to_string().contains("Flush timed out"),
+                "expected idempotent flush timeout, got: {}",
+                repeated
+            );
+            assert_eq!(stream.get_unacked_batches().await?.len(), 1);
 
             Ok(())
         }
