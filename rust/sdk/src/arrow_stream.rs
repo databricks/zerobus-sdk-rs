@@ -526,6 +526,7 @@ impl ZerobusArrowStream {
         // Add headers from the provider first, filtering out reserved headers.
         // The table name header is authoritative and must not be overridden.
         const TABLE_NAME_HEADER: &str = "x-databricks-zerobus-table-name";
+        const AUTHORIZATION_HEADER: &str = "authorization";
         let headers = headers_provider.get_headers().await?;
         for (key, value) in headers {
             if key.eq_ignore_ascii_case(TABLE_NAME_HEADER) {
@@ -535,7 +536,7 @@ impl ZerobusArrowStream {
                 );
                 continue;
             }
-            if key.eq_ignore_ascii_case("authorization") {
+            if key.eq_ignore_ascii_case(AUTHORIZATION_HEADER) {
                 let mut auth_value = MetadataValue::try_from(value.as_str()).map_err(|_| {
                     error!(table_name = %table_properties.table_name, "authorization token is not a valid HTTP header value");
                     ZerobusError::InvalidUCTokenError(
@@ -543,7 +544,9 @@ impl ZerobusArrowStream {
                     )
                 })?;
                 auth_value.set_sensitive(true);
-                client.metadata_mut().insert("authorization", auth_value);
+                client
+                    .metadata_mut()
+                    .insert(AUTHORIZATION_HEADER, auth_value);
                 continue;
             }
             client.add_header(key, &value).map_err(|e| {
