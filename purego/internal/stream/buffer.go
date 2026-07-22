@@ -253,13 +253,6 @@ func (b *buffer[Req]) close() {
 	b.closeDone()
 }
 
-// len returns the total number of items in the buffer (pending + in-flight).
-func (b *buffer[Req]) len() int {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	return len(b.queue) + len(b.flight)
-}
-
 // inFlight returns the number of items observed by the sender but not yet
 // acknowledged. The receiver uses it to gate the lack-of-ack timeout: silence
 // is only a failure while records are actually awaiting an ack; an idle stream

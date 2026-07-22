@@ -44,9 +44,11 @@ type StreamParams = transport.StreamParams
 // so this is a thin wrapper that just names the concrete types.
 type ephemeralOpener struct{ conn *transport.Conn }
 
-// NewEphemeralOpener returns the proto/JSON opener backed by conn. The public
-// zerobus package uses it to build a proto/JSON CoreStream via NewProtoJSONStream.
-func NewEphemeralOpener(conn *transport.Conn) *ephemeralOpener {
+// NewEphemeralOpener returns the proto/JSON opener backed by conn as an
+// interface value, so callers outside this package can hold and pass it
+// without depending on the unexported concrete type. The public zerobus
+// package uses it to build a proto/JSON CoreStream via NewProtoJSONStream.
+func NewEphemeralOpener(conn *transport.Conn) opener[encodedMsg, ephemeralResp] {
 	return &ephemeralOpener{conn: conn}
 }
 

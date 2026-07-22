@@ -40,8 +40,8 @@ func (cs *CoreStream[Req, Resp]) supervise(ctx context.Context) {
 			case <-ctx.Done():
 				return
 			}
-			// Requeue any items the previous sender observed but didn't ack.
-			cs.buf.requeue()
+			// runOnce requeues on each successful Open, so we do not duplicate
+			// that work here.
 		}
 
 		runErr, healthy := cs.runOnce(ctx)
@@ -76,7 +76,7 @@ func (cs *CoreStream[Req, Resp]) supervise(ctx context.Context) {
 			if !cs.waitPause(ctx, ps.duration) {
 				return // Close cancelled ctx during the pause.
 			}
-			cs.buf.requeue()
+			// runOnce requeues on Open; no duplicate here.
 			continue
 		}
 
