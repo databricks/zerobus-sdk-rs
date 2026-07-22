@@ -198,10 +198,13 @@ everything from source (needs Rust) via `add_subdirectory` / `FetchContent` /
 `find_package`, or points `-DZEROBUS_FFI_LIBRARY=` at the matching prebuilt FFI
 archive from a release and builds only the C++ (no Rust needed).
 
-- Tag: `cpp/v<semver>` → `release-cpp.yml` builds the per-platform bundles (the
-  Rust C FFI archive cross-built with `cargo-zigbuild`, plus the platform-neutral
-  C++ source tree) → creates a GitHub Release with a per-platform `tar.gz`
-  attached and notes from `cpp/CHANGELOG.md`.
+- Create the `cpp/v<semver>` tag.
+- Manually dispatch the `release-zerobus-sdk-cpp.yml` orchestrator (in
+  `secure-public-registry-releases-eng`) with the tag as `ref`. It invokes
+  `release-cpp.yml` in this repo to build the per-platform bundles (the Rust C
+  FFI archive cross-built with `cargo-zigbuild`, plus the platform-neutral C++
+  source tree), scans the artifacts, and cuts the GitHub Release with a
+  per-platform `tar.gz` attached and notes from `cpp/CHANGELOG.md`.
 - Version source: `cpp/include/zerobus/version.hpp` (`ZEROBUS_CPP_VERSION`) and
   the `project(... VERSION ...)` line in `cpp/CMakeLists.txt` — keep them in
   sync (CMake fails configuration if they disagree). The release validates the
