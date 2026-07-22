@@ -9,12 +9,13 @@ import (
 
 // supervise is the supervisor goroutine. It runs the create→run→recover loop
 // until the context is cancelled (Close called), a non-retryable error fires,
-// or consecutive recovery retries are exhausted. It always closes done on exit.
+// or consecutive recovery retries are exhausted. It always closes done on
+// exit.
 //
 // The retry budget is per episode: `failedAttempts` counts only *consecutive*
 // failed reconnects and resets to zero whenever a stream connects and runs
-// successfully. A long-lived stream that disconnects occasionally therefore is
-// not doomed after RecoveryRetries lifetime disconnects — each disconnect
+// successfully. A long-lived stream that disconnects occasionally therefore
+// is not doomed after RecoveryRetries lifetime disconnects — each disconnect
 // starts a fresh episode with the full budget. This mirrors the Rust core,
 // which builds a fresh attempt counter per recovery loop iteration.
 func (cs *CoreStream[Req, Resp]) supervise(ctx context.Context) {
@@ -45,24 +46,33 @@ func (cs *CoreStream[Req, Resp]) supervise(ctx context.Context) {
 
 		runErr, healthy := cs.runOnce(ctx)
 
-		// ctx cancelled = clean exit via Close. Don't treat server-side EOF as clean.
+		// ctx cancelled = clean exit via Close. Don't treat server-side EOF
+		// as clean.
 		if ctx.Err() != nil {
 			return
 		}
 
-		// A stream that successfully opened and ran resets the per-episode budget:
-		// the failure that ended it (if any) begins a fresh recovery episode rather
-		// than continuing the prior reconnect streak.
+		// A stream that successfully opened and ran resets the per-episode
+		// budget: the failure that ended it (if any) begins a fresh recovery
+		// episode rather than continuing the prior reconnect streak.
 		if healthy {
 			failedAttempts = 0
 		}
 
-		// A server-requested pause (CloseStreamSignal) is not a failure: wait the
-		// requested window, then reconnect without consuming the recovery budget.
-		// Ingest keeps buffering meanwhile; unacked records are requeued on the
-		// next attempt.
+		// A server-requested pause (CloseStreamSignal) is not a failure: wait
+		// the requested window, then reconnect without consuming the recovery
+		// budget. Ingest keeps buffering meanwhile; unacked records are
+		// requeued on the next attempt.
+		//
+		// If recovery is disabled, though, we honor that: don't reconnect
+		// after a pause. Treat it as a terminal failure so callers see the
+		// signal rather than silently ingesting into a dead stream.
 		var ps pauseSignal
 		if errors.As(runErr, &ps) {
+			if !cs.cfg.Recovery.enabled() {
+				err = fmt.Errorf("stream: server requested pause and recovery is disabled: %w", runErr)
+				break
+			}
 			if !cs.waitPause(ctx, ps.duration) {
 				return // Close cancelled ctx during the pause.
 			}
@@ -83,48 +93,40 @@ func (cs *CoreStream[Req, Resp]) supervise(ctx context.Context) {
 		failedAttempts++
 	}
 
-	// Terminal failure path.
+	// Terminal failure path. Fail the watermark first so any waiters unblock
+	// promptly with the terminal error; the callback dispatch and buffer
+	// drain run afterwards.
 	cs.wm.fail(err)
 	cs.setTerminalErr(err)
 
-	if cs.callback != nil {
-		// Drain the buffer and fire OnError for each unacked item. drain() also
-		// closes the buffer and unblocks any enqueue callers, so we must call it
-		// here rather than close() + a separate drain in GetUnacked. GetUnacked
-		// documents that it is mutually exclusive with AckCallback: when a
-		// callback is set, the supervisor owns the drain; when it is nil,
-		// GetUnacked drains on demand.
-		for _, it := range cs.buf.drain() {
-			cs.callback.OnError(it.offset, err)
-		}
-	} else {
-		// No callback: just close the buffer so enqueue callers unblock. The
-		// items remain retrievable via GetUnacked, which calls drain() itself.
-		cs.buf.close()
+	// Drain the buffer once. We always preserve the payloads for GetUnacked
+	// AND, if a callback is registered, dispatch per-offset OnError events —
+	// both signals converge on the same underlying records. This matches the
+	// Rust SDK, which retains failed records via failed_records regardless of
+	// callback registration.
+	items := cs.buf.drain()
+	cs.setRetainedFailed(items)
+	for _, it := range items {
+		cs.dispatcher.enqueueError(it.offset, err)
 	}
+	// Ensure the buffer is closed (drain marks it closed already; belt and
+	// braces).
+	cs.buf.close()
 }
 
-// waitPause sleeps for the server-requested pause window before reconnecting,
-// capped by StreamPausedMaxWait (min of the two; a non-positive cap means "no
-// client cap"). Returns false if ctx was cancelled (Close) during the wait, so
-// the caller stops instead of reconnecting. A non-positive effective wait
-// reconnects immediately.
+// waitPause sleeps for the residual pause window before reconnecting. The
+// receiver already drained acks against effectivePauseWait(cfg, duration) and
+// exited when either drain completed or that deadline expired, so this
+// supplementary wait is normally zero-length; it exists to preserve prior
+// semantics for callers that configured a cap larger than the drain window or
+// used PauseWaitServer without the receiver seeing any acks. Returns false if
+// ctx was cancelled (Close) during the wait.
 func (cs *CoreStream[Req, Resp]) waitPause(ctx context.Context, serverDuration time.Duration) bool {
-	wait := serverDuration
-	if cap := cs.cfg.StreamPausedMaxWait; cap > 0 && (wait <= 0 || cap < wait) {
-		wait = cap
-	}
-	if wait <= 0 {
-		return ctx.Err() == nil
-	}
-	timer := time.NewTimer(wait)
-	defer timer.Stop()
-	select {
-	case <-timer.C:
-		return true
-	case <-ctx.Done():
-		return false
-	}
+	// The receiver already applied the per-signal cap via
+	// effectivePauseWait; no additional wait is required here. Kept for a
+	// last-chance ctx check so Close during pause returns promptly.
+	_ = serverDuration
+	return ctx.Err() == nil
 }
 
 // retryableError is any error that self-classifies its retryability. Errors

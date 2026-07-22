@@ -4,19 +4,20 @@ import (
 	"github.com/databricks/zerobus-sdk/purego/internal/zerobuspb"
 )
 
-// ackModel translates a raw server response into a logical "highest fully-acked
-// offset" that the core's watermark can compare against, and classifies
-// non-ack responses so the core stays blind to the concrete wire type. It is
-// edge #2 of the design and is generic over the response type Resp: proto/JSON
-// supply ackModel[ephemeralResp]; Arrow will supply its own over a Flight
-// response, mapping a cumulative record count back to an offset.
+// ackModel translates a raw server response into a logical "highest
+// fully-acked offset" that the core's watermark can compare against, and
+// classifies non-ack responses so the core stays blind to the concrete wire
+// type. It is the receive-side per-encoding seam and is generic over the
+// response type Resp: proto/JSON supply ackModel[ephemeralResp]; Arrow will
+// supply its own over a Flight response, mapping a cumulative record count
+// back to an offset.
 //
-// This interface is intentionally the minimal offset-only subset. The
-// architecture note (§3a) sketches a wider Track/Resolve/Unacked shape for the
-// Arrow record-count model, where an ack can land mid-batch and recovery must
-// slice a straddling batch. That width is deferred until the Arrow wire path
-// lands; adding it now would be unused machinery. The core stays offset-only
-// and blind to the record-vs-batch distinction regardless.
+// This interface is intentionally the minimal offset-only subset. A wider
+// Track/Resolve/Unacked shape will be needed for the Arrow record-count
+// model, where an ack can land mid-batch and recovery must slice a
+// straddling batch; that width is deferred until the Arrow wire path lands.
+// The core stays offset-only and blind to the record-vs-batch distinction
+// regardless.
 type ackModel[Resp any] interface {
 	// classify inspects a server response and reports what it means to the core:
 	//   - kind == ackResponse: off is the highest fully-acked offset.

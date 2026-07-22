@@ -229,6 +229,84 @@ func (o *gracefulOpener) Open(_ context.Context, _ transport.StreamParams) (wire
 	return transport.NewFakeStreamForTesting(o.rpc), nil
 }
 
+// blockingFakeRPC is like fakeRPC but its sends channel has a caller-chosen
+// capacity so tests can wedge the sender by refusing further reads. When
+// sends is full the transport's non-blocking Send fallback returns an error;
+// we instead make Send block, so runOnce sees a truly wedged sender.
+type blockingFakeRPC struct {
+	sends     chan *zerobuspb.EphemeralStreamRequest
+	recvs     chan *zerobuspb.EphemeralStreamResponse
+	aborted   chan struct{}
+	sentN     atomic.Int64
+	closeOnce sync.Once
+	abortOnce sync.Once
+	closed    atomic.Bool
+}
+
+func newBlockingFakeRPC(capacity int) *blockingFakeRPC {
+	return &blockingFakeRPC{
+		sends:   make(chan *zerobuspb.EphemeralStreamRequest, capacity),
+		recvs:   make(chan *zerobuspb.EphemeralStreamResponse, 64),
+		aborted: make(chan struct{}),
+	}
+}
+
+func (f *blockingFakeRPC) Send(req *zerobuspb.EphemeralStreamRequest) error {
+	if f.closed.Load() {
+		return io.EOF
+	}
+	// Blocking send: wedges until either sends has room, or Abort is called
+	// (which models stream.Close()'s hard abort and lets a wedged Send
+	// return so runOnce can reap it).
+	select {
+	case f.sends <- req:
+		f.sentN.Add(1)
+		return nil
+	case <-f.aborted:
+		return io.EOF
+	}
+}
+
+func (f *blockingFakeRPC) Recv() (*zerobuspb.EphemeralStreamResponse, error) {
+	select {
+	case resp, ok := <-f.recvs:
+		if !ok {
+			return nil, io.EOF
+		}
+		return resp, nil
+	case <-f.aborted:
+		return nil, io.ErrClosedPipe
+	}
+}
+
+func (f *blockingFakeRPC) CloseSend() error {
+	f.close()
+	return nil
+}
+
+// Abort models transport.Stream.Close(): unblock a blocked Send/Recv.
+func (f *blockingFakeRPC) Abort() {
+	f.abortOnce.Do(func() {
+		f.closed.Store(true)
+		close(f.aborted)
+	})
+}
+
+func (f *blockingFakeRPC) close() {
+	f.closeOnce.Do(func() {
+		f.closed.Store(true)
+		close(f.recvs)
+	})
+}
+
+func (f *blockingFakeRPC) sendCount() int64 { return f.sentN.Load() }
+
+type blockingOpener struct{ rpc *blockingFakeRPC }
+
+func (o *blockingOpener) Open(_ context.Context, _ transport.StreamParams) (wireStream[encodedMsg, ephemeralResp], error) {
+	return transport.NewFakeStreamForTesting(o.rpc), nil
+}
+
 // ---- recording ack callback ------------------------------------------------
 
 type recordingCallback struct {
@@ -253,6 +331,25 @@ func (r *recordingCallback) ackCount() int {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	return len(r.acks)
+}
+
+// callbackFn is a test AckCallback whose behavior is customized per test via
+// injected closures. Nil closures are no-ops.
+type callbackFn struct {
+	onAck   func(int64)
+	onError func(int64, error)
+}
+
+func (c *callbackFn) OnAck(offset int64) {
+	if c.onAck != nil {
+		c.onAck(offset)
+	}
+}
+
+func (c *callbackFn) OnError(offset int64, err error) {
+	if c.onError != nil {
+		c.onError(offset, err)
+	}
 }
 
 // ---- test helpers ----------------------------------------------------------
@@ -394,7 +491,12 @@ func TestCoreStreamFlushContextExpires(t *testing.T) {
 	}
 }
 
-func TestCoreStreamAckCallbackFires(t *testing.T) {
+// TestCoreStreamAckCallbackFiresPerOffset verifies that a cumulative server
+// ack (offset 2) yields exactly one OnAck per newly-acknowledged logical
+// offset [0, 1, 2] — not one OnAck(2). It also verifies that a duplicate ack
+// (no new items) triggers no additional callbacks, matching the AckCallback
+// contract and the Rust SDK.
+func TestCoreStreamAckCallbackFiresPerOffset(t *testing.T) {
 	rpc := newFakeRPC()
 	cb := &recordingCallback{}
 	cs := newCoreForTest(testParams(), testConfig(), newFakeOpener(rpc), cb)
@@ -410,9 +512,25 @@ func TestCoreStreamAckCallbackFires(t *testing.T) {
 	for range 3 {
 		<-rpc.sends
 	}
+	// Cumulative ack for offset 2 covers offsets 0, 1, and 2.
 	rpc.ack(2)
 
-	waitCondition(t, func() bool { return cb.ackCount() >= 1 }, time.Second)
+	waitCondition(t, func() bool { return cb.ackCount() >= 3 }, time.Second)
+
+	cb.mu.Lock()
+	got := append([]int64(nil), cb.acks...)
+	cb.mu.Unlock()
+	if len(got) != 3 || got[0] != 0 || got[1] != 1 || got[2] != 2 {
+		t.Fatalf("want [0 1 2], got %v", got)
+	}
+
+	// A duplicate ack covering the same watermark must NOT fire additional
+	// callbacks — no new items were discarded.
+	rpc.ack(2)
+	time.Sleep(50 * time.Millisecond)
+	if got := cb.ackCount(); got != 3 {
+		t.Fatalf("duplicate ack fired extra callbacks: want 3 total, got %d", got)
+	}
 }
 
 func TestCoreStreamCloseIsIdempotent(t *testing.T) {
@@ -897,6 +1015,487 @@ func TestCoreStreamHealthyRunResetsRecoveryBudget(t *testing.T) {
 	if cs.IsClosed() {
 		t.Fatal("stream terminated despite healthy runs resetting the recovery budget")
 	}
+}
+
+// TestCoreStreamProtoIngestDoesNotAliasCallerBuffer verifies that mutating the
+// caller's []byte after Ingest does not change the payload the sender
+// eventually places on the wire. The proto encoder must snapshot input bytes
+// before handing them to the buffer, or a caller reusing a marshalling scratch
+// buffer would corrupt queued records.
+func TestCoreStreamProtoIngestDoesNotAliasCallerBuffer(t *testing.T) {
+	rpc := newFakeRPC()
+	cfg := testConfig()
+	cs := NewCoreStream[encodedMsg, ephemeralResp](
+		StreamParams{TableName: "c.s.t", RecordType: zerobuspb.RecordType_PROTO},
+		cfg, newFakeOpener(rpc), protoEncoder{}, offsetAckModel{}, nil,
+	)
+	t.Cleanup(func() { cs.Close() })
+
+	// Ingest with a mutable buffer, then overwrite it before the send happens.
+	buf := []byte{0xAA, 0xBB, 0xCC}
+	off, err := cs.Ingest(context.Background(), buf)
+	if err != nil {
+		t.Fatalf("Ingest: %v", err)
+	}
+	// Mutate the caller's buffer right after Ingest returns.
+	buf[0] = 0xFF
+	buf[1] = 0xFF
+	buf[2] = 0xFF
+
+	waitCondition(t, func() bool { return len(rpc.sends) > 0 }, time.Second)
+	sent := <-rpc.sends
+	got := sent.GetIngestRecord().GetProtoEncodedRecord()
+	if len(got) != 3 || got[0] != 0xAA || got[1] != 0xBB || got[2] != 0xCC {
+		t.Fatalf("proto ingest aliased caller buffer: want [0xAA 0xBB 0xCC], got %v", got)
+	}
+	rpc.ack(off)
+	_ = cs.Flush(context.Background())
+}
+
+// TestCoreStreamProtoIngestBatchDoesNotAliasCallerBuffers verifies the same
+// no-alias contract for the batch ingest path.
+func TestCoreStreamProtoIngestBatchDoesNotAliasCallerBuffers(t *testing.T) {
+	rpc := newFakeRPC()
+	cfg := testConfig()
+	cs := NewCoreStream[encodedMsg, ephemeralResp](
+		StreamParams{TableName: "c.s.t", RecordType: zerobuspb.RecordType_PROTO},
+		cfg, newFakeOpener(rpc), protoEncoder{}, offsetAckModel{}, nil,
+	)
+	t.Cleanup(func() { cs.Close() })
+
+	r1 := []byte{0x01, 0x02}
+	r2 := []byte{0x03, 0x04}
+	off, err := cs.IngestBatch(context.Background(), [][]byte{r1, r2})
+	if err != nil {
+		t.Fatalf("IngestBatch: %v", err)
+	}
+	// Mutate both caller buffers post-Ingest.
+	r1[0], r1[1] = 0xFF, 0xFF
+	r2[0], r2[1] = 0xFF, 0xFF
+
+	waitCondition(t, func() bool { return len(rpc.sends) > 0 }, time.Second)
+	sent := <-rpc.sends
+	batch := sent.GetIngestRecordBatch().GetProtoEncodedBatch().GetRecords()
+	if len(batch) != 2 {
+		t.Fatalf("want 2 records, got %d", len(batch))
+	}
+	if batch[0][0] != 0x01 || batch[0][1] != 0x02 || batch[1][0] != 0x03 || batch[1][1] != 0x04 {
+		t.Fatalf("batch aliased caller buffers: got %v", batch)
+	}
+	rpc.ack(off)
+	_ = cs.Flush(context.Background())
+}
+
+// TestCoreStreamCallbackCallsCloseNoDeadlock verifies that an OnAck callback
+// calling Close on the stream itself does not deadlock. Callbacks run on a
+// dedicated dispatcher goroutine, so Close waits only for the supervisor —
+// which is separate from the callback path.
+func TestCoreStreamCallbackCallsCloseNoDeadlock(t *testing.T) {
+	rpc := newFakeRPC()
+	closed := make(chan struct{})
+	var closeCalled atomic.Bool
+
+	var cs *testStream
+	cb := &callbackFn{
+		onAck: func(int64) {
+			if closeCalled.CompareAndSwap(false, true) {
+				cs.Close()
+				close(closed)
+			}
+		},
+	}
+	cs = newCoreForTest(testParams(), testConfig(), newFakeOpener(rpc), cb)
+
+	if _, err := cs.Ingest(context.Background(), []byte(`{}`)); err != nil {
+		t.Fatalf("Ingest: %v", err)
+	}
+	waitCondition(t, func() bool { return len(rpc.sends) > 0 }, time.Second)
+	<-rpc.sends
+	rpc.ack(0)
+
+	select {
+	case <-closed:
+	case <-time.After(2 * time.Second):
+		t.Fatal("callback-invoked Close deadlocked")
+	}
+	if !cs.IsClosed() {
+		t.Fatal("stream should be closed after callback-invoked Close")
+	}
+}
+
+// TestCoreStreamWaitForOffsetUnblocksOnClose verifies that a WaitForOffset
+// call blocked on an unacked offset returns promptly with an error once the
+// stream is cleanly closed, rather than hanging forever waiting for an ack
+// that will never come.
+func TestCoreStreamWaitForOffsetUnblocksOnClose(t *testing.T) {
+	rpc := newFakeRPC()
+	cs := newCoreForTest(testParams(), testConfig(), newFakeOpener(rpc), nil)
+
+	off, err := cs.Ingest(context.Background(), []byte(`{}`))
+	if err != nil {
+		t.Fatalf("Ingest: %v", err)
+	}
+	waitCondition(t, func() bool { return len(rpc.sends) > 0 }, time.Second)
+	<-rpc.sends // consume; do NOT ack
+
+	errCh := make(chan error, 1)
+	go func() {
+		// Background ctx so Wait can only unblock via Close.
+		errCh <- cs.WaitForOffset(context.Background(), off)
+	}()
+
+	time.Sleep(50 * time.Millisecond)
+	cs.Close()
+
+	select {
+	case err := <-errCh:
+		if err == nil {
+			t.Fatal("WaitForOffset should return an error after clean Close")
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("WaitForOffset did not unblock after Close")
+	}
+}
+
+// TestCoreStreamPreCancelledCtxHonoredInWaitForOffset ensures WaitForOffset
+// with an already-cancelled ctx fails fast rather than parking on the cond
+// wait: without the pre-loop ctx check, an AfterFunc broadcast could race the
+// condition check and leave the waiter asleep.
+func TestCoreStreamPreCancelledCtxHonoredInWaitForOffset(t *testing.T) {
+	rpc := newFakeRPC()
+	cs := newTestStream(t, newFakeOpener(rpc))
+
+	if _, err := cs.Ingest(context.Background(), []byte(`{}`)); err != nil {
+		t.Fatalf("Ingest: %v", err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	done := make(chan error, 1)
+	go func() { done <- cs.WaitForOffset(ctx, 0) }()
+	select {
+	case err := <-done:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("want context.Canceled, got %v", err)
+		}
+	case <-time.After(200 * time.Millisecond):
+		t.Fatal("WaitForOffset with pre-cancelled ctx parked instead of failing fast")
+	}
+}
+
+// TestCoreStreamCloseDoesNotSendQueuedRecords verifies that Close on a stream
+// whose sender is blocked on Send (fake never accepts) does not let the next
+// queued record slip through the sender loop before teardown.
+func TestCoreStreamCloseDoesNotSendQueuedRecords(t *testing.T) {
+	// A blocking fake: Send never accepts more than one message; the second
+	// pending record would only leave the buffer via next() if next()
+	// ignores ctx cancellation.
+	rpc := newBlockingFakeRPC(1)
+	cfg := testConfig()
+	cs := newCoreForTest(testParams(), cfg, &blockingOpener{rpc: rpc}, nil)
+
+	// First send fills rpc.sends (capacity 1); the sender is now blocked on
+	// the second Send.
+	if _, err := cs.Ingest(context.Background(), []byte(`{"i":0}`)); err != nil {
+		t.Fatalf("Ingest 0: %v", err)
+	}
+	if _, err := cs.Ingest(context.Background(), []byte(`{"i":1}`)); err != nil {
+		t.Fatalf("Ingest 1: %v", err)
+	}
+
+	waitCondition(t, func() bool { return rpc.sendCount() >= 1 }, time.Second)
+
+	// Close must return in bounded time, and must not have advanced the send
+	// count beyond the first Send.
+	done := make(chan struct{})
+	go func() { cs.Close(); close(done) }()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("Close blocked on wedged Send")
+	}
+	if got := rpc.sendCount(); got != 1 {
+		t.Fatalf("Close leaked queued Send: %d records sent, want 1", got)
+	}
+}
+
+// TestCoreStreamPauseSignalDrainsInFlightAcks verifies that when the server
+// requests a pause, the client keeps receiving until in-flight records are
+// acked, rather than aborting immediately. A late ack delivered after the
+// pause must still advance the watermark.
+func TestCoreStreamPauseSignalDrainsInFlightAcks(t *testing.T) {
+	rpc1 := newFakeRPC()
+	rpc2 := newFakeRPC()
+	fo := newFakeOpener(rpc1, rpc2)
+
+	cfg := testConfig()
+	cfg.StreamPausedMaxWait = 2 * time.Second // ample drain window
+	cs := newCoreForTest(testParams(), cfg, fo, nil)
+	t.Cleanup(func() { cs.Close() })
+
+	off, err := cs.Ingest(context.Background(), []byte(`{}`))
+	if err != nil {
+		t.Fatalf("Ingest: %v", err)
+	}
+	waitCondition(t, func() bool { return len(rpc1.sends) > 0 }, time.Second)
+	<-rpc1.sends
+
+	// Pause first, then deliver the late ack. If the receiver aborts on
+	// pause, the ack is dropped and the record is re-sent on rpc2 (no
+	// forward progress) — WaitForOffset would still succeed but rpc2 would
+	// receive the re-send. We verify that no re-send happens by asserting
+	// rpc2.sends stays empty.
+	rpc1.closeSignalWithDuration(500 * time.Millisecond)
+	// Give the receiver a moment to observe the pause and enter drain mode.
+	time.Sleep(20 * time.Millisecond)
+	// Late ack: an aborting receiver would have already closed rpc1's Recv.
+	rpc1.ack(off)
+
+	// Wait for the reconnect (drain-complete or window-expired).
+	waitCondition(t, func() bool { return fo.openCount() >= 2 }, 3*time.Second)
+
+	// After reconnect: rpc2 must NOT receive a re-send (the pause drain
+	// caught the ack, so nothing is unacked).
+	select {
+	case <-rpc2.sends:
+		t.Fatal("pause drop caused an unnecessary re-send after reconnect")
+	case <-time.After(200 * time.Millisecond):
+		// Good: no re-send.
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	if err := cs.WaitForOffset(ctx, off); err != nil {
+		t.Fatalf("WaitForOffset: %v", err)
+	}
+}
+
+// TestCoreStreamPauseWithRecoveryDisabledDoesNotReconnect verifies that a
+// server pause on a stream with recovery disabled is treated as a terminal
+// signal — the client does not reconnect.
+func TestCoreStreamPauseWithRecoveryDisabledDoesNotReconnect(t *testing.T) {
+	rpc1 := newFakeRPC()
+	rpc2 := newFakeRPC()
+	fo := newFakeOpener(rpc1, rpc2)
+
+	cfg := testConfig()
+	cfg.Recovery = RecoveryDisabled
+	cs := newCoreForTest(testParams(), cfg, fo, nil)
+	t.Cleanup(func() { cs.Close() })
+
+	if _, err := cs.Ingest(context.Background(), []byte(`{}`)); err != nil {
+		t.Fatalf("Ingest: %v", err)
+	}
+	waitCondition(t, func() bool { return len(rpc1.sends) > 0 }, time.Second)
+	<-rpc1.sends
+	rpc1.closeSignal()
+
+	waitCondition(t, cs.IsClosed, 2*time.Second)
+	if got := fo.openCount(); got != 1 {
+		t.Fatalf("pause under RecoveryDisabled reconnected: openCount=%d, want 1", got)
+	}
+}
+
+// TestCoreStreamPauseImmediateModeReconnectsWithoutWaiting verifies that with
+// PauseWaitImmediate the client reconnects as soon as the pause signal
+// arrives, regardless of the server-requested duration.
+func TestCoreStreamPauseImmediateModeReconnectsWithoutWaiting(t *testing.T) {
+	rpc1 := newFakeRPC()
+	rpc2 := newFakeRPC()
+	fo := newFakeOpener(rpc1, rpc2)
+
+	cfg := testConfig()
+	cfg.StreamPausedMaxWaitMode = PauseWaitImmediate
+	cs := newCoreForTest(testParams(), cfg, fo, nil)
+	t.Cleanup(func() { cs.Close() })
+
+	off, err := cs.Ingest(context.Background(), []byte(`{}`))
+	if err != nil {
+		t.Fatalf("Ingest: %v", err)
+	}
+	waitCondition(t, func() bool { return len(rpc1.sends) > 0 }, time.Second)
+	<-rpc1.sends
+
+	start := time.Now()
+	rpc1.closeSignalWithDuration(5 * time.Second)
+
+	waitCondition(t, func() bool { return len(rpc2.sends) > 0 }, time.Second)
+	if elapsed := time.Since(start); elapsed > 500*time.Millisecond {
+		t.Fatalf("PauseWaitImmediate did not reconnect promptly: %v", elapsed)
+	}
+	<-rpc2.sends
+	rpc2.ack(off)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	if err := cs.WaitForOffset(ctx, off); err != nil {
+		t.Fatalf("WaitForOffset: %v", err)
+	}
+}
+
+// TestCoreStreamGetUnackedWithCallbackPreservesPayloads verifies that when the
+// stream fails terminally with a callback registered, GetUnacked still
+// returns the unacked record bytes (matching the Rust SDK). The callback
+// receives OnError events for the same offsets.
+func TestCoreStreamGetUnackedWithCallbackPreservesPayloads(t *testing.T) {
+	fo := &fakeOpener{openErr: fmt.Errorf("connection refused")}
+	cfg := testConfig()
+	cfg.Recovery = RecoveryDisabled
+	cb := &recordingCallback{}
+	cs := newCoreForTest(testParams(), cfg, fo, cb)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
+	defer cancel()
+	// Ingest three records; the buffer keeps them because the opener always
+	// fails and Recovery is disabled.
+	for i := range 3 {
+		_, _ = cs.Ingest(ctx, []byte(fmt.Sprintf(`{"i":%d}`, i)))
+	}
+
+	waitCondition(t, cs.IsClosed, 2*time.Second)
+
+	unacked := cs.GetUnacked()
+	if len(unacked) == 0 {
+		t.Fatal("GetUnacked with callback returned no records; payloads must be preserved")
+	}
+	// The callback should have received errors for the same items.
+	waitCondition(t, func() bool {
+		cb.mu.Lock()
+		defer cb.mu.Unlock()
+		return len(cb.errs) > 0
+	}, time.Second)
+}
+
+// TestCoreStreamPayloadTooLargeRejected verifies MaxPayloadBytes enforcement:
+// oversized records and batches are rejected with ErrPayloadTooLarge at
+// Ingest without consuming an offset or reaching the transport.
+func TestCoreStreamPayloadTooLargeRejected(t *testing.T) {
+	rpc := newFakeRPC()
+	cfg := testConfig()
+	cfg.MaxPayloadBytes = 16
+	cs := newCoreForTest(testParams(), cfg, newFakeOpener(rpc), nil)
+	t.Cleanup(func() { cs.Close() })
+
+	// Exact-limit record: accepted.
+	if _, err := cs.Ingest(context.Background(), make([]byte, 16)); err != nil {
+		t.Fatalf("record at exact limit rejected: %v", err)
+	}
+	// Above-limit record: rejected.
+	if _, err := cs.Ingest(context.Background(), make([]byte, 17)); !errors.Is(err, ErrPayloadTooLarge) {
+		t.Fatalf("above-limit record: want ErrPayloadTooLarge, got %v", err)
+	}
+	// Batch whose aggregate exceeds the limit: rejected even if each element
+	// is below.
+	batch := [][]byte{make([]byte, 8), make([]byte, 8), make([]byte, 4)}
+	if _, err := cs.IngestBatch(context.Background(), batch); !errors.Is(err, ErrPayloadTooLarge) {
+		t.Fatalf("above-limit batch: want ErrPayloadTooLarge, got %v", err)
+	}
+}
+
+// TestCoreStreamZeroConfigDoesNotDeadlock verifies that a Config{} (all zero
+// values) is normalized to safe defaults so the stream neither deadlocks on
+// an unbuffered semaphore nor busy-spins on a zero lack-of-ack timer.
+func TestCoreStreamZeroConfigDoesNotDeadlock(t *testing.T) {
+	rpc := newFakeRPC()
+	// Pass a completely zero Config; the constructor must sanitize it.
+	cs := newCoreForTest(testParams(), Config{}, newFakeOpener(rpc), nil)
+	t.Cleanup(func() { cs.Close() })
+
+	off, err := cs.Ingest(context.Background(), []byte(`{}`))
+	if err != nil {
+		t.Fatalf("Ingest against zero-Config stream: %v", err)
+	}
+	waitCondition(t, func() bool { return len(rpc.sends) > 0 }, time.Second)
+	<-rpc.sends
+	rpc.ack(off)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	if err := cs.WaitForOffset(ctx, off); err != nil {
+		t.Fatalf("WaitForOffset against zero-Config stream: %v", err)
+	}
+}
+
+// TestCoreStreamBlockedIngestObservesOwnCtxCancel verifies that a caller
+// blocked on the buffer semaphore observes ITS OWN ctx cancellation promptly,
+// not just the ctx of an earlier caller. Regression for the ingestMu-held-
+// across-wait bug where every later caller serialized behind the first
+// blocked one.
+func TestCoreStreamBlockedIngestObservesOwnCtxCancel(t *testing.T) {
+	rpc := newFakeRPC()
+	cfg := testConfig()
+	cfg.MaxInflight = 1
+	cs := newCoreForTest(testParams(), cfg, newFakeOpener(rpc), nil)
+	t.Cleanup(func() { cs.Close() })
+
+	// Fill the only slot; do NOT ack.
+	if _, err := cs.Ingest(context.Background(), []byte(`{}`)); err != nil {
+		t.Fatalf("first Ingest: %v", err)
+	}
+
+	// Two concurrent Ingests with distinct ctxs. Cancel only the second's;
+	// it must return promptly with its own ctx.Canceled while the first
+	// stays blocked.
+	ctx1 := context.Background()
+	ctx2, cancel2 := context.WithCancel(context.Background())
+
+	err1Ch := make(chan error, 1)
+	err2Ch := make(chan error, 1)
+	go func() { _, e := cs.Ingest(ctx1, []byte(`{}`)); err1Ch <- e }()
+	go func() { _, e := cs.Ingest(ctx2, []byte(`{}`)); err2Ch <- e }()
+
+	time.Sleep(30 * time.Millisecond)
+	cancel2()
+
+	select {
+	case err := <-err2Ch:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("second Ingest: want context.Canceled, got %v", err)
+		}
+	case <-time.After(500 * time.Millisecond):
+		t.Fatal("second Ingest did not observe its own ctx cancellation")
+	}
+	// First Ingest must still be waiting.
+	select {
+	case err := <-err1Ch:
+		t.Fatalf("first Ingest unblocked unexpectedly: %v", err)
+	default:
+	}
+}
+
+// TestCoreStreamFirstSendAfterIdleGetsFullTimeout verifies that a record
+// ingested just before the idle lack-of-ack timer would have expired still
+// gets a fresh full timeout — the sender's flightSignal re-arms the timer
+// with the full LackOfAckTimeout budget, not the leftover fraction.
+func TestCoreStreamFirstSendAfterIdleGetsFullTimeout(t *testing.T) {
+	rpc := newFakeRPC()
+	cfg := testConfig()
+	cfg.LackOfAckTimeout = 100 * time.Millisecond
+	cs := newCoreForTest(testParams(), cfg, newFakeOpener(rpc), nil)
+	t.Cleanup(func() { cs.Close() })
+
+	// Let the stream stay idle for a while (no records in flight).
+	time.Sleep(150 * time.Millisecond)
+	// Ingest and never ack.
+	off, err := cs.Ingest(context.Background(), []byte(`{}`))
+	if err != nil {
+		t.Fatalf("Ingest: %v", err)
+	}
+	sendTime := time.Now()
+	waitCondition(t, func() bool { return len(rpc.sends) > 0 }, time.Second)
+	<-rpc.sends
+
+	// The stream should NOT tear down before ~LackOfAckTimeout has elapsed
+	// since the send. Sample at 60% of the timeout: still live.
+	deadline := sendTime.Add(60 * cfg.LackOfAckTimeout / 100)
+	for time.Now().Before(deadline) {
+		if cs.IsClosed() {
+			t.Fatal("stream torn down before full lack-of-ack budget after idle → send transition")
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	_ = off
 }
 
 // TestCoreStreamIngestBatch verifies the batch ingest path: records go on the

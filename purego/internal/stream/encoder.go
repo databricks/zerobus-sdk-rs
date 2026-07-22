@@ -8,6 +8,26 @@ import (
 	"github.com/databricks/zerobus-sdk/purego/internal/zerobuspb"
 )
 
+// DefaultMaxPayloadBytes is the default per-message wire payload cap, matching
+// the Rust SDK: the ~10 MiB gRPC server limit minus a 64 KiB envelope headroom.
+// A single record or an aggregate batch that exceeds this budget is rejected at
+// Ingest so callers see a deterministic input error instead of a transport
+// failure that burns the recovery budget.
+const DefaultMaxPayloadBytes = 10*1024*1024 - 64*1024
+
+// cloneBytes returns a fresh []byte with the same contents as b so buffered
+// records don't alias caller-owned memory. Reusing the same []byte across
+// Ingest calls (or mutating it after Ingest returns) would otherwise change
+// queued and replayed payloads and race with wire serialization.
+func cloneBytes(b []byte) []byte {
+	if b == nil {
+		return nil
+	}
+	out := make([]byte, len(b))
+	copy(out, b)
+	return out
+}
+
 // encodedMsg is a wire-ready EphemeralStream ingest request, built once at
 // Ingest time and held in the buffer until the sender transmits it. It is the
 // Req type the proto/JSON core is instantiated with; the Arrow path will use a
@@ -15,11 +35,11 @@ import (
 // objects.
 type encodedMsg = *zerobuspb.EphemeralStreamRequest
 
-// encoder turns user records into wire messages for a given offset and recovers
-// them again for GetUnacked. It is edge #1 of the design: the sole per-encoding
-// seam on the send side. The core is generic over the wire message type Req and
-// never names a concrete proto type — proto/JSON supply encoder[encodedMsg];
-// Arrow will supply encoder[flightFrame].
+// encoder turns user records into wire messages for a given offset and
+// recovers them again for GetUnacked. It is the send-side per-encoding seam:
+// the core is generic over the wire message type Req and never names a
+// concrete proto type — proto/JSON supply encoder[encodedMsg]; Arrow will
+// supply encoder[flightFrame].
 //
 // The offset is stamped into the message here so re-sends after recovery reuse
 // the same logical offset the server already saw.
@@ -37,6 +57,19 @@ type encoder[Req any] interface {
 	decode(msg Req) [][]byte
 }
 
+// aggregateSize reports the total byte size of the caller's payload for a batch
+// (or single record). This is the pre-encode input size, not the exact wire
+// size: proto/JSON framing adds a small envelope on top. It is what the payload
+// cap compares against so oversized input is rejected deterministically at
+// Ingest rather than turning into a transport failure.
+func aggregateSize(records [][]byte) int {
+	total := 0
+	for _, r := range records {
+		total += len(r)
+	}
+	return total
+}
+
 // protoEncoder builds EphemeralStream payloads for proto-encoded records (raw
 // serialized protobuf bytes), single and batched.
 type protoEncoder struct{}
@@ -49,7 +82,9 @@ func (protoEncoder) encode(offset int64, record []byte) (encodedMsg, error) {
 		Payload: &zerobuspb.EphemeralStreamRequest_IngestRecord{
 			IngestRecord: &zerobuspb.IngestRecordRequest{
 				OffsetId: proto.Int64(offset),
-				Record:   &zerobuspb.IngestRecordRequest_ProtoEncodedRecord{ProtoEncodedRecord: record},
+				// Copy caller bytes: proto retains them by reference and the
+				// buffer may hold this message across recovery re-sends.
+				Record: &zerobuspb.IngestRecordRequest_ProtoEncodedRecord{ProtoEncodedRecord: cloneBytes(record)},
 			},
 		},
 	}, nil
@@ -59,17 +94,22 @@ func (protoEncoder) encodeBatch(offset int64, records [][]byte) (encodedMsg, err
 	if len(records) == 0 {
 		return nil, fmt.Errorf("stream: proto batch must not be empty")
 	}
+	// Snapshot each record so a shared source buffer can't mutate queued or
+	// replayed payloads. The outer slice is also copied so mutations to the
+	// caller's slice header don't reach the batch.
+	copied := make([][]byte, len(records))
 	for i, r := range records {
 		if len(r) == 0 {
 			return nil, fmt.Errorf("stream: proto batch record %d must not be empty", i)
 		}
+		copied[i] = cloneBytes(r)
 	}
 	return &zerobuspb.EphemeralStreamRequest{
 		Payload: &zerobuspb.EphemeralStreamRequest_IngestRecordBatch{
 			IngestRecordBatch: &zerobuspb.IngestRecordBatchRequest{
 				OffsetId: proto.Int64(offset),
 				Batch: &zerobuspb.IngestRecordBatchRequest_ProtoEncodedBatch{
-					ProtoEncodedBatch: &zerobuspb.ProtoEncodedRecordBatch{Records: records},
+					ProtoEncodedBatch: &zerobuspb.ProtoEncodedRecordBatch{Records: copied},
 				},
 			},
 		},

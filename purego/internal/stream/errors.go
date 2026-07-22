@@ -11,6 +11,12 @@ import (
 // errClosed is returned by buffer operations when the buffer has been closed.
 var errClosed = errors.New("stream: buffer closed")
 
+// ErrPayloadTooLarge is returned by Ingest / IngestBatch when the aggregate
+// caller-supplied payload exceeds the configured MaxPayloadBytes cap. It is
+// deterministic input validation, not a transport error, so recovery does not
+// count against the retry budget.
+var ErrPayloadTooLarge = errors.New("stream: ingest payload exceeds MaxPayloadBytes")
+
 // errUnsupportedRecordType is returned when no encoder/ackModel exists for a
 // record type (e.g. RECORD_TYPE_UNSPECIFIED).
 func errUnsupportedRecordType(rt zerobuspb.RecordType) error {

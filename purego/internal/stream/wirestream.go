@@ -6,15 +6,15 @@ import (
 	"github.com/databricks/zerobus-sdk/purego/internal/transport"
 )
 
-// wireStream is edge #3 of the design: the actual transport, abstracted so the
-// core drives Send/Recv/teardown without naming a concrete RPC. It is generic
-// over the request and response types the encoder and ackModel already use, so
-// proto/JSON instantiate wireStream[encodedMsg, ephemeralResp] over
-// EphemeralStream and Arrow will instantiate it over Flight — with no change to
-// core.go.
+// wireStream is the transport seam: the actual RPC, abstracted so the core
+// drives Send/Recv/teardown without naming a concrete transport. It is
+// generic over the request and response types the encoder and ackModel
+// already use, so proto/JSON instantiate wireStream[encodedMsg, ephemeralResp]
+// over EphemeralStream and Arrow will instantiate it over Flight — with no
+// change to core.go.
 //
-// A wireStream is already past its handshake when opener returns it. It is not
-// safe for concurrent Send; the core uses a single sender goroutine.
+// A wireStream is already past its handshake when opener returns it. It is
+// not safe for concurrent Send; the core uses a single sender goroutine.
 type wireStream[Req, Resp any] interface {
 	// Send writes one request to the server.
 	Send(req Req) error
@@ -28,7 +28,7 @@ type wireStream[Req, Resp any] interface {
 	Close()
 }
 
-// opener opens a new wireStream. It is edge #3's factory, injected so the
+// opener opens a new wireStream: the transport factory, injected so the
 // supervisor can reconnect and tests can supply an in-process fake. Generic
 // over the same Req/Resp as wireStream.
 type opener[Req, Resp any] interface {
