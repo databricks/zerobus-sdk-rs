@@ -13,10 +13,12 @@
   to or dropped from the target table — and re-resolve their schema rather than
   treating it as an opaque invalid-argument failure. The variant is not
   SDK-retryable. This applies both to initial stream setup and to mid-stream
-  reconnects: previously a schema change detected during recovery was retried
-  until the recovery budget drained and then reported as a generic failure;
-  now the non-retriable `InvalidSchema` is surfaced to a blocked `wait_for_offset`
-  (or `flush`) immediately so callers can rebuild the stream without downtime.
+  reconnects: on a reconnect, the typed error flows through the terminal
+  recovery path (a non-retriable failure ends recovery and is reported as-is),
+  so a schema change detected during recovery is surfaced to a blocked
+  `wait_for_offset` / `flush` as `InvalidSchema` — letting callers rebuild the
+  stream without downtime — rather than being retried until the recovery budget
+  drains and reported as a generic failure.
 
 ### Bug Fixes
 
