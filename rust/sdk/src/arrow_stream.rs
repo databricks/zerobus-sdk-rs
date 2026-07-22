@@ -64,6 +64,18 @@ struct ReconnectRebuildBarrier {
 #[cfg(feature = "test-hooks")]
 type AckAppliedGate = Arc<Mutex<Option<Arc<Notify>>>>;
 
+/// Test-only barrier that parks `close()` after the supervisor and sender are gone but
+/// before pending batches are finalized, allowing cancellation-safe teardown tests.
+#[cfg(feature = "test-hooks")]
+type CloseFinalizeGate = Arc<Mutex<Option<CloseFinalizeBarrier>>>;
+
+#[cfg(feature = "test-hooks")]
+#[derive(Clone)]
+struct CloseFinalizeBarrier {
+    reached: Arc<Notify>,
+    proceed: Arc<Notify>,
+}
+
 /// Properties for an Arrow Flight ingestion table.
 ///
 /// **Do not construct this directly.** Configure Arrow streams via the builder API:
@@ -247,6 +259,10 @@ pub struct ZerobusArrowStream {
     _last_ack_rx: tokio::sync::watch::Receiver<Option<OffsetId>>,
     /// Flag indicating if the stream has been closed.
     is_closed: Arc<AtomicBool>,
+    /// Tracks resumable close teardown in progress.
+    close_teardown_started: AtomicBool,
+    /// Preserves the initial flush error if close is cancelled during teardown.
+    close_flush_error: Mutex<Option<ZerobusError>>,
     /// Handle to the receiver task processing server responses.
     receiver_task: Arc<Mutex<Option<tokio::task::JoinHandle<ZerobusResult<()>>>>>,
     /// Batches that have been sent but not yet acknowledged (for recovery).
@@ -288,6 +304,9 @@ pub struct ZerobusArrowStream {
     /// Test seam (see [`AckAppliedGate`]); compiled only under `test-hooks`.
     #[cfg(feature = "test-hooks")]
     ack_applied_gate: AckAppliedGate,
+    /// Test seam (see [`CloseFinalizeGate`]); compiled only under `test-hooks`.
+    #[cfg(feature = "test-hooks")]
+    close_finalize_gate: CloseFinalizeGate,
 }
 
 impl ZerobusArrowStream {
@@ -336,6 +355,8 @@ impl ZerobusArrowStream {
             last_ack_tx,
             _last_ack_rx,
             is_closed,
+            close_teardown_started: AtomicBool::new(false),
+            close_flush_error: Mutex::new(None),
             receiver_task,
             pending_batches,
             failed_batches,
@@ -355,6 +376,8 @@ impl ZerobusArrowStream {
             reconnect_rebuild_gate: Arc::new(Mutex::new(None)),
             #[cfg(feature = "test-hooks")]
             ack_applied_gate: Arc::new(Mutex::new(None)),
+            #[cfg(feature = "test-hooks")]
+            close_finalize_gate: Arc::new(Mutex::new(None)),
         };
 
         // Initialize the connection with retry logic.
@@ -786,9 +809,13 @@ impl ZerobusArrowStream {
                         // Clear the server error.
                         let _ = server_error_tx.send(None);
 
-                        // Create new connection.
-                        let reconnect_result = tokio::time::timeout(
-                            Duration::from_millis(options.recovery_timeout_ms),
+                        // One deadline bounds the whole recovery attempt. If reconnect
+                        // fails auth, credential invalidation receives only the remaining
+                        // time rather than starting a second full timeout.
+                        let recovery_deadline = tokio::time::Instant::now()
+                            + Duration::from_millis(options.recovery_timeout_ms);
+                        let reconnect_result = tokio::time::timeout_at(
+                            recovery_deadline,
                             Self::reconnect(
                                 &endpoint,
                                 &tls_config,
@@ -825,8 +852,36 @@ impl ZerobusArrowStream {
                                 // way the real error is preserved as the final cause if
                                 // retries are ultimately exhausted.
                                 if e.is_auth_rejection() {
-                                    headers_provider.invalidate().await;
-                                    reconnect_auth_retry = true;
+                                    match tokio::time::timeout_at(
+                                        recovery_deadline,
+                                        headers_provider.invalidate(),
+                                    )
+                                    .await
+                                    {
+                                        Ok(()) => reconnect_auth_retry = true,
+                                        Err(_) => {
+                                            warn!(
+                                                timeout_ms = options.recovery_timeout_ms,
+                                                "Recovery deadline reached while invalidating \
+                                                 the headers provider; terminating recovery"
+                                            );
+                                            // A custom provider must not stall recovery
+                                            // indefinitely. Close with the original auth
+                                            // rejection; publish before and after
+                                            // finalization for waiter race-freedom.
+                                            let _ = server_error_tx.send(Some(e.clone()));
+                                            Self::finalize_closed(
+                                                &ingest_mutex,
+                                                &is_closed,
+                                                &pending_batches,
+                                                &failed_batches,
+                                                &last_acked_records,
+                                            )
+                                            .await;
+                                            let _ = server_error_tx.send(Some(e.clone()));
+                                            return Err(e);
+                                        }
+                                    }
                                 }
                                 pending_error = Some(e);
                             }
@@ -858,13 +913,23 @@ impl ZerobusArrowStream {
                         )
                         .await;
                         let _ = server_error_tx.send(Some(error.clone()));
-                        // Drop cached credentials on an auth rejection so the next stream
-                        // re-mints. Done last (after finalization) so a slow/hanging
-                        // user-defined invalidate() can't keep the failed stream open and
-                        // accepting ingests. (The reconnect arm also invalidates on an auth
-                        // rejection it retries; those paths are mutually exclusive.)
+                        // Drop cached credentials on a terminal auth rejection so the next
+                        // stream re-mints. The stream is already finalized and waiters have
+                        // the real error; bound this untrusted callback so the supervisor
+                        // task cannot remain alive indefinitely.
                         if error.is_auth_rejection() {
-                            headers_provider.invalidate().await;
+                            if tokio::time::timeout(
+                                Duration::from_millis(options.recovery_timeout_ms),
+                                headers_provider.invalidate(),
+                            )
+                            .await
+                            .is_err()
+                            {
+                                warn!(
+                                    timeout_ms = options.recovery_timeout_ms,
+                                    "Terminal headers provider invalidation timed out"
+                                );
+                            }
                         }
                         return Err(error);
                     }
@@ -1406,7 +1471,7 @@ impl ZerobusArrowStream {
     ///
     /// # Errors
     ///
-    /// * `StreamClosedError` - If the stream has been closed
+    /// * `StreamClosedError` - If the stream is closing or closed
     /// * `InvalidArgument` - If the batch schema doesn't match the stream schema, or the
     ///   batch has zero rows (an empty batch carries no data to send or acknowledge)
     ///
@@ -1426,9 +1491,11 @@ impl ZerobusArrowStream {
     /// ```
     #[instrument(level = "debug", skip_all, fields(table_name = %self.table_properties.table_name))]
     pub async fn ingest_batch(&self, batch: RecordBatch) -> ZerobusResult<OffsetId> {
-        if self.is_closed.load(Ordering::Relaxed) {
+        if self.is_closed.load(Ordering::Relaxed)
+            || self.close_teardown_started.load(Ordering::Acquire)
+        {
             return Err(ZerobusError::StreamClosedError(tonic::Status::internal(
-                "Stream is closed",
+                "Stream is closing or closed",
             )));
         }
 
@@ -1467,9 +1534,11 @@ impl ZerobusArrowStream {
         let _guard = self.ingest_mutex.lock().await;
 
         // May have closed while we blocked on the permit; returning drops it.
-        if self.is_closed.load(Ordering::Relaxed) {
+        if self.is_closed.load(Ordering::Relaxed)
+            || self.close_teardown_started.load(Ordering::Acquire)
+        {
             return Err(ZerobusError::StreamClosedError(tonic::Status::internal(
-                "Stream is closed",
+                "Stream is closing or closed",
             )));
         }
 
@@ -1506,12 +1575,10 @@ impl ZerobusArrowStream {
         let sender = match sender {
             Some(s) => s,
             None => {
-                // Unreachable in safe Rust use: `close()` takes `&mut self` so it can't
-                // run concurrently with `ingest_batch` (`&self`), and the recovery
-                // handoff detaches the sender under `ingest_mutex`
-                // (`pause_and_detach_sender`). Defensive fallback for an unsupported
-                // concurrent FFI call: FFI callers must serialize close and ingest; this
-                // branch only reports a detached sender if that contract is violated.
+                // Safe callers cannot reach a detached sender: close teardown is rejected
+                // by the lifecycle checks above, and recovery detaches the sender under
+                // ingest_mutex (`pause_and_detach_sender`). Keep this fallback for FFI
+                // callers that violate their close/ingest serialization contract.
                 if let Some(server_error) = self.server_error_rx.borrow().clone() {
                     return Err(server_error);
                 }
@@ -1565,9 +1632,11 @@ impl ZerobusArrowStream {
     /// marker after `finish()`) is allowed after that batch.
     #[instrument(level = "debug", skip_all, fields(table_name = %self.table_properties.table_name))]
     pub async fn ingest_ipc_batch(&self, ipc_bytes: Bytes) -> ZerobusResult<OffsetId> {
-        if self.is_closed.load(Ordering::Relaxed) {
+        if self.is_closed.load(Ordering::Relaxed)
+            || self.close_teardown_started.load(Ordering::Acquire)
+        {
             return Err(ZerobusError::StreamClosedError(tonic::Status::internal(
-                "Stream is closed",
+                "Stream is closing or closed",
             )));
         }
 
@@ -1621,12 +1690,13 @@ impl ZerobusArrowStream {
                     );
                 }
 
-                // Only after confirming the target isn't acked, honor closure. Re-read the
-                // watermark first: an ack can land between the read above and observing
-                // closure. Closure guarantees no further acks are processed, so this read
-                // is final — an acked target still resolves Ok. Otherwise prefer the real
-                // terminal error over a generic one.
-                if self.is_closed.load(Ordering::Relaxed) {
+                // Only after confirming the target isn't acked, honor terminal/teardown
+                // state. Re-read first because an ack can land between the read above and
+                // observing that state; an acked target must still resolve Ok. Otherwise
+                // prefer the real terminal error over a generic one.
+                if self.is_closed.load(Ordering::Relaxed)
+                    || self.close_teardown_started.load(Ordering::Acquire)
+                {
                     if let Some(ack_offset) = *offset_rx.borrow_and_update() {
                         if ack_offset >= offset_to_wait {
                             return Ok(());
@@ -1636,7 +1706,10 @@ impl ZerobusArrowStream {
                         return Err(server_error);
                     }
                     return Err(ZerobusError::StreamClosedError(tonic::Status::internal(
-                        format!("Stream closed during {}", operation_name.to_lowercase()),
+                        format!(
+                            "Stream closing or closed during {}",
+                            operation_name.to_lowercase()
+                        ),
                     )));
                 }
 
@@ -1708,12 +1781,14 @@ impl ZerobusArrowStream {
             None => {
                 // Nothing was ingested: report closure if closed, otherwise nothing to do.
                 // Prefer the real terminal error over a generic closed message.
-                if self.is_closed.load(Ordering::Relaxed) {
+                if self.is_closed.load(Ordering::Relaxed)
+                    || self.close_teardown_started.load(Ordering::Acquire)
+                {
                     if let Some(server_error) = self.server_error_rx.borrow().clone() {
                         return Err(server_error);
                     }
                     return Err(ZerobusError::StreamClosedError(tonic::Status::internal(
-                        "Cannot flush: stream is closed",
+                        "Cannot flush: stream is closing or closed",
                     )));
                 }
                 debug!("No batches to flush");
@@ -1785,6 +1860,12 @@ impl ZerobusArrowStream {
     /// Returns any errors from the flush operation. If flush fails, some batches
     /// may not have been acknowledged. Use `get_unacked_batches()` to retrieve them.
     ///
+    /// # Cancellation safety
+    ///
+    /// Cancelling while the initial flush is pending leaves the stream open. Once teardown
+    /// starts, further ingests are rejected. If finalization has not completed, call
+    /// `close()` again to resume teardown without repeating the flush.
+    ///
     /// # Examples
     ///
     /// ```no_run
@@ -1797,13 +1878,17 @@ impl ZerobusArrowStream {
     /// ```
     #[instrument(level = "debug", skip_all, fields(table_name = %self.table_properties.table_name))]
     pub async fn close(&mut self) -> ZerobusResult<()> {
-        if self.is_closed.load(Ordering::Relaxed) {
+        let close_teardown_started = self.close_teardown_started.load(Ordering::Acquire);
+        if self.is_closed.load(Ordering::Relaxed) && !close_teardown_started {
             // Already closed. If the supervisor closed it on a terminal failure, surface
             // that error rather than reporting success — otherwise the common
             // ingest-then-close() pattern would hide failed batches (retrievable via
             // get_unacked_batches()). A clean prior close() has no stored error.
             if let Some(server_error) = self.server_error_rx.borrow().clone() {
                 return Err(server_error);
+            }
+            if let Some(close_error) = self.close_flush_error.lock().await.clone() {
+                return Err(close_error);
             }
             return Ok(());
         }
@@ -1813,9 +1898,21 @@ impl ZerobusArrowStream {
             "Closing Arrow Flight stream"
         );
 
-        // Flush pending batches while the supervisor is still alive to receive acks.
-        // Capture the result so teardown still runs on failure, then propagate it.
-        let flush_result = self.flush().await;
+        // Flush exactly once, before teardown becomes irreversible. Once Closing is
+        // published, a cancelled close can be retried without waiting on a dead
+        // supervisor; the original flush error is retained for the resumed call.
+        let flush_result = if close_teardown_started {
+            match self.close_flush_error.lock().await.clone() {
+                Some(error) => Err(error),
+                None => Ok(()),
+            }
+        } else {
+            let result = self.flush().await;
+            *self.close_flush_error.lock().await = result.as_ref().err().cloned();
+            self.close_teardown_started
+                .store(true, Ordering::Release);
+            result
+        };
         if let Err(e) = &flush_result {
             warn!(
                 "Flush failed during close: {}. Draining pending batches to the failed set.",
@@ -1843,10 +1940,19 @@ impl ZerobusArrowStream {
             *tx = None;
         }
 
-        // Publish closure and drain pending -> failed under ingest_mutex. is_closed is set
-        // only here, at the end of teardown, so a close() cancelled earlier leaves it
-        // false: retrieval stays disabled and a retry re-runs teardown instead of
-        // short-circuiting. finalize_closed also serializes the drain with ingest_batch.
+        // Test seam: cancel close after teardown became irreversible but before finalization.
+        #[cfg(feature = "test-hooks")]
+        {
+            let barrier = self.close_finalize_gate.lock().await.take();
+            if let Some(barrier) = barrier {
+                barrier.reached.notify_one();
+                barrier.proceed.notified().await;
+            }
+        }
+
+        // Finalize under ingest_mutex so the pending drain is serialized with
+        // ingest_batch. close_teardown_started keeps an interrupted teardown resumable
+        // until finalization publishes closure.
         Self::finalize_closed(
             &self.ingest_mutex,
             &self.is_closed,
@@ -1855,6 +1961,8 @@ impl ZerobusArrowStream {
             &self.last_acked_records,
         )
         .await;
+        self.close_teardown_started
+            .store(false, Ordering::Release);
 
         flush_result
     }
@@ -1946,6 +2054,20 @@ impl ZerobusArrowStream {
         let notify = Arc::new(Notify::new());
         *self.ack_applied_gate.lock().await = Some(Arc::clone(&notify));
         notify
+    }
+
+    /// Test-only: parks the next `close()` after supervisor/sender teardown but before
+    /// finalization. Dropping the close future at that point simulates cancellation.
+    #[cfg(feature = "test-hooks")]
+    #[doc(hidden)]
+    pub async fn arm_close_finalize_barrier(&self) -> (Arc<Notify>, Arc<Notify>) {
+        let reached = Arc::new(Notify::new());
+        let proceed = Arc::new(Notify::new());
+        *self.close_finalize_gate.lock().await = Some(CloseFinalizeBarrier {
+            reached: Arc::clone(&reached),
+            proceed: Arc::clone(&proceed),
+        });
+        (reached, proceed)
     }
 
     /// Returns the table name for this stream.

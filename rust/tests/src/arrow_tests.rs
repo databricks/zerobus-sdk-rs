@@ -11,7 +11,7 @@ mod arrow_flight_tests {
     use crate::utils::{
         create_test_arrow_schema, create_test_dict_record_batch, create_test_dict_schema,
         create_test_record_batch, record_batch_to_ipc_bytes, setup_tracing,
-        CountingHeadersProvider, TestHeadersProvider,
+        CountingHeadersProvider, HangingInvalidationHeadersProvider, TestHeadersProvider,
     };
 
     const TABLE_NAME: &str = "test_catalog.test_schema.test_table";
@@ -520,6 +520,67 @@ mod arrow_flight_tests {
 
             Ok(())
         }
+
+        /// Cancelling close after supervisor/sender teardown must leave the stream in a
+        /// resumable Closing state: new ingests are rejected, retrieval remains disabled,
+        /// and a second close completes immediately without waiting for flush_timeout.
+        #[tokio::test]
+        async fn test_cancelled_close_rejects_ingest_and_resumes_teardown(
+        ) -> Result<(), Box<dyn std::error::Error>> {
+            setup_tracing();
+            info!("Starting test_cancelled_close_rejects_ingest_and_resumes_teardown");
+
+            let (mock_server, server_url) = start_mock_flight_server().await?;
+            let schema = create_test_arrow_schema();
+            mock_server.inject_responses(TABLE_NAME, vec![]).await;
+
+            let sdk = ZerobusSdk::builder()
+                .endpoint(server_url.clone())
+                .unity_catalog_url("https://mock-uc.com")
+                .tls_config(Arc::new(NoTlsConfig))
+                .build()?;
+
+            let mut stream = sdk
+                .stream_builder()
+                .table(TABLE_NAME)
+                .headers_provider(Arc::new(TestHeadersProvider::default()))
+                .arrow(schema.clone())
+                .build_arrow()
+                .await?;
+
+            let (reached, _proceed) = stream.arm_close_finalize_barrier().await;
+            let mut close_future = Box::pin(stream.close());
+            tokio::time::timeout(std::time::Duration::from_secs(5), async {
+                tokio::select! {
+                    _ = reached.notified() => {}
+                    result = &mut close_future => {
+                        panic!("close completed before the finalization barrier: {result:?}")
+                    }
+                }
+            })
+            .await
+            .expect("close must reach the finalization barrier");
+            drop(close_future);
+
+            assert!(!stream.is_closed(), "cancelled teardown is not finalized yet");
+            let batch = create_test_record_batch(schema, vec![1], vec![Some("late")]);
+            assert!(
+                stream.ingest_batch(batch).await.is_err(),
+                "Closing must reject new ingests"
+            );
+            assert!(
+                stream.get_unacked_batches().await.is_err(),
+                "unacked retrieval is allowed only after Closed"
+            );
+
+            tokio::time::timeout(std::time::Duration::from_secs(1), stream.close())
+                .await
+                .expect("resumed close must skip flush and finish promptly")?;
+            assert!(stream.is_closed());
+            assert!(stream.get_unacked_batches().await?.is_empty());
+
+            Ok(())
+        }
     }
 
     mod error_handling_tests {
@@ -895,6 +956,164 @@ mod arrow_flight_tests {
                 1,
                 "auth rejection must invalidate cached credentials exactly once"
             );
+
+            Ok(())
+        }
+
+        /// A custom headers provider whose invalidation never completes must not stall
+        /// recovery indefinitely. The invalidation is bounded by recovery_timeout_ms; on
+        /// timeout the stream closes and surfaces the original auth rejection.
+        #[tokio::test]
+        async fn test_reconnect_auth_invalidation_timeout_surfaces_original_error(
+        ) -> Result<(), Box<dyn std::error::Error>> {
+            setup_tracing();
+            info!("Starting test_reconnect_auth_invalidation_timeout_surfaces_original_error");
+
+            let (mock_server, server_url) = start_mock_flight_server().await?;
+            let schema = create_test_arrow_schema();
+
+            mock_server
+                .inject_responses(
+                    TABLE_NAME,
+                    vec![
+                        MockFlightResponse::Error {
+                            status: Status::unavailable("Connection lost"),
+                            delay_ms: 0,
+                        },
+                        MockFlightResponse::FailSetup {
+                            status: Status::unauthenticated("Token invalidation stalled"),
+                        },
+                    ],
+                )
+                .await;
+
+            let invalidations = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+            let cancellations = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+            let provider = Arc::new(HangingInvalidationHeadersProvider {
+                invalidations: Arc::clone(&invalidations),
+                cancellations: Arc::clone(&cancellations),
+            });
+
+            let sdk = ZerobusSdk::builder()
+                .endpoint(server_url.clone())
+                .unity_catalog_url("https://mock-uc.com")
+                .tls_config(Arc::new(NoTlsConfig))
+                .build()?;
+
+            let stream = sdk
+                .stream_builder()
+                .table(TABLE_NAME)
+                .headers_provider(provider)
+                .arrow(schema.clone())
+                .recovery(true)
+                .recovery_backoff_ms(0)
+                .recovery_timeout_ms(1000)
+                .recovery_retries(5)
+                .flush_timeout_ms(5000)
+                .build_arrow()
+                .await?;
+
+            let batch = create_test_record_batch(schema, vec![1], vec![Some("a")]);
+            let offset = stream.ingest_batch(batch).await?;
+
+            let err = tokio::time::timeout(
+                std::time::Duration::from_secs(5),
+                stream.wait_for_offset(offset),
+            )
+            .await
+            .expect("stalled invalidation must be bounded")
+            .expect_err("invalidation timeout must terminate recovery");
+            assert!(
+                err.to_string().contains("Token invalidation stalled"),
+                "must surface the original auth rejection, got: {}",
+                err
+            );
+            assert!(stream.is_closed(), "stream must close after invalidation timeout");
+            assert_eq!(
+                invalidations.load(std::sync::atomic::Ordering::SeqCst),
+                1,
+                "the stalled invalidation must not be retried after terminal closure"
+            );
+            assert_eq!(
+                cancellations.load(std::sync::atomic::Ordering::SeqCst),
+                1,
+                "the timed-out invalidation future must be cancelled"
+            );
+
+            Ok(())
+        }
+
+        /// Terminal auth cleanup runs after the stream closes, but it must still be
+        /// bounded so a custom provider cannot leave the supervisor task alive forever.
+        #[tokio::test]
+        async fn test_terminal_auth_invalidation_is_bounded(
+        ) -> Result<(), Box<dyn std::error::Error>> {
+            setup_tracing();
+            info!("Starting test_terminal_auth_invalidation_is_bounded");
+
+            let (mock_server, server_url) = start_mock_flight_server().await?;
+            let schema = create_test_arrow_schema();
+
+            mock_server
+                .inject_responses(
+                    TABLE_NAME,
+                    vec![MockFlightResponse::Error {
+                        status: Status::unauthenticated("Terminal auth rejection"),
+                        delay_ms: 0,
+                    }],
+                )
+                .await;
+
+            let invalidations = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+            let cancellations = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+            let provider = Arc::new(HangingInvalidationHeadersProvider {
+                invalidations: Arc::clone(&invalidations),
+                cancellations: Arc::clone(&cancellations),
+            });
+
+            let sdk = ZerobusSdk::builder()
+                .endpoint(server_url.clone())
+                .unity_catalog_url("https://mock-uc.com")
+                .tls_config(Arc::new(NoTlsConfig))
+                .build()?;
+
+            let stream = sdk
+                .stream_builder()
+                .table(TABLE_NAME)
+                .headers_provider(provider)
+                .arrow(schema.clone())
+                .recovery(false)
+                .recovery_timeout_ms(1000)
+                .flush_timeout_ms(5000)
+                .build_arrow()
+                .await?;
+
+            let batch = create_test_record_batch(schema, vec![1], vec![Some("a")]);
+            let offset = stream.ingest_batch(batch).await?;
+
+            let err = stream
+                .wait_for_offset(offset)
+                .await
+                .expect_err("terminal auth rejection must fail the waiter");
+            assert!(
+                err.to_string().contains("Terminal auth rejection"),
+                "must surface the original terminal auth error, got: {}",
+                err
+            );
+
+            tokio::time::timeout(std::time::Duration::from_secs(5), async {
+                while cancellations.load(std::sync::atomic::Ordering::SeqCst) == 0 {
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .expect("terminal invalidation must be cancelled at its timeout");
+            assert_eq!(
+                invalidations.load(std::sync::atomic::Ordering::SeqCst),
+                1,
+                "terminal auth cleanup should be attempted once"
+            );
+            assert!(stream.is_closed(), "terminal auth failure must close the stream");
 
             Ok(())
         }
