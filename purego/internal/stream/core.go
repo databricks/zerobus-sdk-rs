@@ -504,6 +504,15 @@ type CoreStream[Req, Resp any] struct {
 	// Ingest. Flush targets this so a failed Ingest can't create a permanent
 	// gap.
 	lastEnqueued atomic.Int64
+	// lastSent is the highest offset for which the sender has successfully
+	// returned from stream.Send on the CURRENT connection (reset on each new
+	// runOnce iteration since a fresh stream re-sends previously-observed
+	// items). Ack validation checks against this value rather than
+	// lastEnqueued: an enqueued-but-not-yet-sent item has never been shown
+	// to the server, so an ack covering it is a protocol error even though
+	// the offset is technically within the client's assigned range.
+	// -1 while nothing has been sent on the current connection.
+	lastSent atomic.Int64
 
 	// done is closed when the supervisor exits (terminal state).
 	done chan struct{}
@@ -589,6 +598,7 @@ func NewCoreStream[Req, Resp any](
 		cancelSupervisor: cancel,
 	}
 	cs.lastEnqueued.Store(-1)
+	cs.lastSent.Store(-1)
 	go cs.supervise(ctx)
 	return cs
 }
@@ -863,14 +873,20 @@ func (cs *CoreStream[Req, Resp]) setTerminalErr(err error) {
 
 // runOnce opens one transport stream and runs sender+receiver until one of
 // them exits. Returns the cause of the exit so the supervisor can decide
-// whether to recover, and healthy=true once the stream made durable progress
-// this iteration (received at least one server ack). That is a stricter
-// definition than "Open succeeded": a stream that Opens but then immediately
-// EOFs / errors before any ack has made no progress, and treating it as
-// healthy would reset the per-episode retry budget on every attempt and let
-// the supervisor hammer the server with no backoff. The supervisor uses the
-// budget-reset only after real acknowledged work, so a permanent immediate-
-// EOF loop exhausts RecoveryRetries.
+// whether to recover, and healthy=true when the iteration counts as a
+// distinct healthy episode. "Healthy" is either of:
+//
+//   - The receiver observed at least one server ack this iteration (real
+//     durable progress), OR
+//   - The connection stayed alive for at least RecoveryTimeout without
+//     exiting (a stable idle stream: it may have carried no traffic, but
+//     the connection itself was durable).
+//
+// Neither condition is met by an Open-then-immediate-EOF loop, so a
+// permanent tight-loop failure still exhausts RecoveryRetries and does
+// not hammer the server with no backoff. Meanwhile, an idle-but-stable
+// stream that later disconnects starts a fresh recovery episode instead
+// of inheriting old failedAttempts and prematurely terminating.
 //
 // The receiver drives pause handling: on a server CloseStreamSignal it sends
 // on pauseCh and then keeps draining acks until either the flight set empties
@@ -903,6 +919,11 @@ func (cs *CoreStream[Req, Resp]) runOnce(ctx context.Context) (cause error, heal
 	// Move all in-flight items back to the pending queue so the sender
 	// re-sends them on this new connection.
 	cs.buf.requeue()
+	// Reset the sent watermark: requeue() has moved any previously-flighted
+	// items back into the pending queue, so on this new connection nothing
+	// has been shown to the server yet. Ack validation on this stream will
+	// only accept offsets whose Send returned on THIS connection.
+	cs.lastSent.Store(-1)
 
 	// senderCtx is cancelled when we want the sender to stop for THIS stream
 	// only, without cancelling the supervisor's outer ctx (which would signal
@@ -928,6 +949,12 @@ func (cs *CoreStream[Req, Resp]) runOnce(ctx context.Context) (cause error, heal
 	// Opens successfully but immediately EOFs would reset the budget every
 	// iteration and hammer the server with no backoff.
 	var progressed atomic.Bool
+
+	// runStart timestamps the moment we finished Open. A stream that stays
+	// connected for >= RecoveryTimeout without exiting also counts as a
+	// healthy episode even if it received no acks, so a stable idle stream
+	// that later disconnects gets a fresh recovery budget.
+	runStart := time.Now()
 
 	go cs.sender(senderCtx, stream, senderExitCh, flightSignal)
 	go cs.receiver(stream, receiverExitCh, pauseCh, flightSignal, &progressed)
@@ -1002,7 +1029,12 @@ waitLoop:
 			<-receiverExitCh
 		}
 	}
-	return cause, progressed.Load()
+	// A run is "healthy" if it either processed a real ack, or the
+	// connection stayed alive long enough (>= RecoveryTimeout) that we can
+	// distinguish it from an immediate-EOF loop. Either signal resets the
+	// per-episode retry budget in the supervisor.
+	healthy = progressed.Load() || time.Since(runStart) >= cs.cfg.RecoveryTimeout
+	return cause, healthy
 }
 
 // gracefulTeardown closes a healthy stream in an orderly fashion after the
@@ -1093,6 +1125,14 @@ func (cs *CoreStream[Req, Resp]) sender(senderCtx context.Context, stream wireSt
 			errCh <- fmt.Errorf("stream: send offset %d: %w", it.offset, err)
 			return
 		}
+		// Record the send-side watermark AFTER Send returns successfully so
+		// ack validation can distinguish "on the wire" from "queued or
+		// mid-Send." A server ack covering an offset past lastSent is a
+		// protocol error even if lastEnqueued has advanced past it, because
+		// the server has not yet been shown that offset. Offsets are
+		// monotonic per stream so Store (not CAS) is enough — only the
+		// single sender writes this.
+		cs.lastSent.Store(it.offset)
 	}
 }
 
@@ -1295,14 +1335,19 @@ func (cs *CoreStream[Req, Resp]) receiver(stream wireStream[Req, Resp], errCh ch
 		spawnRecv()
 
 		// kind == ackResponse. Validate the offset against work actually
-		// sent before advancing the watermark: a bogus high offset from a
-		// buggy or malicious server would otherwise let WaitForOffset
-		// return success for records that were never durably acked.
+		// SENT on this connection, not just enqueued: buf.next moves an
+		// item into flight before Send is called, so an enqueued item may
+		// still be queued or blocked in mid-Send. An ack claiming durability
+		// for an offset the server has not yet been shown is a protocol
+		// error even if the offset is within the client's assigned range;
+		// discarding it from flight would falsely satisfy Flush /
+		// WaitForOffset for a never-sent record.
 		//
-		// The highest offset possibly in flight is bounded by lastEnqueued
-		// (which is monotonic). An ack above that has no corresponding
-		// sent record; refuse it.
-		highestSent := cs.lastEnqueued.Load()
+		// lastSent is the highest offset for which Send returned successfully
+		// on the current connection (reset per runOnce iteration by
+		// cs.buf.requeue's caller). A load of -1 means "nothing sent yet on
+		// this stream", so any ack is invalid.
+		highestSent := cs.lastSent.Load()
 		if offset > highestSent {
 			stopPauseTimer()
 			errCh <- fmt.Errorf("stream: server ack offset %d exceeds highest sent %d", offset, highestSent)

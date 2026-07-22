@@ -1062,6 +1062,91 @@ func TestCoreStreamOpenThenImmediateEOFExhaustsBudget(t *testing.T) {
 	}
 }
 
+// TestCoreStreamStableIdleConnectionResetsBudget verifies that a stream that
+// Opens and stays connected for at least RecoveryTimeout — but never sees an
+// ack (no ingest traffic) — counts as a healthy episode and resets the
+// per-episode retry budget. Without this, prior failures accumulate across a
+// long-lived idle stream and a later disconnect can prematurely terminate.
+func TestCoreStreamStableIdleConnectionResetsBudget(t *testing.T) {
+	// Two failing opens then one long-lived idle stream then more failing
+	// opens: with RecoveryRetries=2 the stream would terminate after the
+	// initial two failures if the idle stream did not reset the budget.
+	failing := &fakeOpener{openErr: fmt.Errorf("transient dial failure")}
+	// Sequence: fail, fail, succeed-idle, then keep failing so we can see
+	// how many retries the supervisor consumes after the idle run.
+	rpcIdle := newFakeRPC()
+	sequenced := &sequencedOpener{
+		steps: []openStep{
+			{err: fmt.Errorf("transient 1")},
+			{err: fmt.Errorf("transient 2")},
+			{rpc: rpcIdle}, // healthy idle
+			{err: fmt.Errorf("transient 3")},
+			{err: fmt.Errorf("transient 4")},
+			{err: fmt.Errorf("transient 5")},
+		},
+	}
+	_ = failing
+
+	cfg := testConfig()
+	cfg.RecoveryRetries = 2
+	cfg.RecoveryBackoff = 5 * time.Millisecond
+	// Small RecoveryTimeout so the test's "idle long enough" wait is short.
+	cfg.RecoveryTimeout = 60 * time.Millisecond
+	cs := newCoreForTest(testParams(), cfg, sequenced, nil)
+	t.Cleanup(func() { cs.Close() })
+
+	// Wait for the idle-run to be entered (3rd open) and stay connected
+	// long enough (>= RecoveryTimeout) for it to count as healthy.
+	waitCondition(t, func() bool { return sequenced.openCount() >= 3 }, 2*time.Second)
+	time.Sleep(cfg.RecoveryTimeout + 20*time.Millisecond)
+	// Now break the idle stream so the supervisor cycles into the fails.
+	rpcIdle.close()
+
+	waitCondition(t, cs.IsClosed, 2*time.Second)
+
+	// Without the idle-reset, the supervisor terminates after
+	// RecoveryRetries+1 = 3 total attempts (2 initial fails + 1 more).
+	// With the reset, the idle-then-disconnect starts a fresh episode
+	// that tolerates RecoveryRetries+1 additional failures, so we expect
+	// ≥ 5 opens (2 initial fails + 1 idle + at least 2 more).
+	if got := sequenced.openCount(); got < 5 {
+		t.Fatalf("healthy idle run did not reset retry budget: opens=%d, want >=5", got)
+	}
+}
+
+// sequencedOpener returns a scripted sequence of Open results.
+type openStep struct {
+	rpc *fakeRPC
+	err error
+}
+type sequencedOpener struct {
+	mu    sync.Mutex
+	steps []openStep
+	i     int
+	n     int
+}
+
+func (o *sequencedOpener) openCount() int {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	return o.n
+}
+
+func (o *sequencedOpener) Open(_ context.Context, _ transport.StreamParams) (wireStream[encodedMsg, ephemeralResp], error) {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	o.n++
+	if o.i >= len(o.steps) {
+		return nil, fmt.Errorf("sequencedOpener: exhausted")
+	}
+	step := o.steps[o.i]
+	o.i++
+	if step.err != nil {
+		return nil, step.err
+	}
+	return transport.NewFakeStreamForTesting(step.rpc), nil
+}
+
 // TestCoreStreamProtoIngestDoesNotAliasCallerBuffer verifies that mutating the
 // caller's []byte after Ingest does not change the payload the sender
 // eventually places on the wire. The proto encoder must snapshot input bytes
@@ -1593,6 +1678,53 @@ func TestCoreStreamIngestBatch(t *testing.T) {
 
 	if err := cs.Flush(context.Background()); err != nil {
 		t.Fatalf("Flush: %v", err)
+	}
+}
+
+// TestCoreStreamServerAckForUnsentEnqueuedRecordFailsStream verifies that
+// a server ack whose offset is within the client's enqueued range but has
+// NOT yet been observed by the sender's Send-return path is treated as a
+// protocol error, not silently trusted. Without this validation, an ack
+// racing a blocked Send could discard an item from flight and falsely
+// satisfy Flush for a never-transmitted record.
+func TestCoreStreamServerAckForUnsentEnqueuedRecordFailsStream(t *testing.T) {
+	// A fake whose Send blocks indefinitely so we can inject an ack while
+	// the sender is stuck in the middle of transmitting.
+	rpc := newBlockingFakeRPC(0)
+	cfg := testConfig()
+	cfg.Recovery = RecoveryDisabled
+	cs := newCoreForTest(testParams(), cfg, &blockingOpener{rpc: rpc}, nil)
+	t.Cleanup(func() { cs.Close() })
+
+	// Ingest two records. Sender picks up both; first one is stuck in
+	// Send (blockingFakeRPC.Send blocks on the 0-capacity channel), second
+	// waits in queue.
+	off0, err := cs.Ingest(context.Background(), []byte(`{}`))
+	if err != nil {
+		t.Fatalf("Ingest 0: %v", err)
+	}
+	_, err = cs.Ingest(context.Background(), []byte(`{}`))
+	if err != nil {
+		t.Fatalf("Ingest 1: %v", err)
+	}
+	// Give the sender a moment to attempt Send on offset 0.
+	time.Sleep(30 * time.Millisecond)
+
+	// Inject an ack for offset 1 (or 0, depending on race). The sender
+	// has NOT yet completed Send for anything, so lastSent is still -1.
+	// The receiver must fail the stream on this ack rather than
+	// discardThrough the enqueued items.
+	rpc.recvs <- &zerobuspb.EphemeralStreamResponse{
+		Payload: &zerobuspb.EphemeralStreamResponse_IngestRecordResponse{
+			IngestRecordResponse: &zerobuspb.IngestRecordResponse{
+				DurabilityAckUpToOffset: proto.Int64(off0),
+			},
+		},
+	}
+
+	waitCondition(t, cs.IsClosed, 2*time.Second)
+	if err := cs.WaitForOffset(context.Background(), off0); err == nil {
+		t.Fatal("Flush/WaitForOffset returned nil for unsent record; ack validation missed the race")
 	}
 }
 

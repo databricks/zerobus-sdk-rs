@@ -188,12 +188,26 @@ func dialFake(t *testing.T, srv *fakeServer) *transport.Conn {
 	lis := bufconn.Listen(1 << 20)
 	gsrv := grpc.NewServer()
 	zerobuspb.RegisterZerobusServer(gsrv, srv)
+	// serveDone is closed once the Serve goroutine has fully exited. The
+	// cleanup below waits on it so the goroutine cannot outlive the test —
+	// otherwise a stray t.Errorf firing after the test has completed would
+	// crash the whole test binary with "Fail in goroutine after ... has
+	// completed" under Go's stricter goroutine leak detection.
+	serveDone := make(chan struct{})
 	go func() {
-		if err := gsrv.Serve(lis); err != nil {
+		defer close(serveDone)
+		err := gsrv.Serve(lis)
+		// grpc.ErrServerStopped is the expected return when the test calls
+		// gsrv.Stop; do not fail the test on it. Any other error is a real
+		// failure of the fake server and worth surfacing.
+		if err != nil && !errors.Is(err, grpc.ErrServerStopped) {
 			t.Errorf("fake server stopped: %v", err)
 		}
 	}()
-	t.Cleanup(gsrv.Stop)
+	t.Cleanup(func() {
+		gsrv.Stop()
+		<-serveDone
+	})
 
 	dialer := grpc.WithContextDialer(func(ctx context.Context, _ string) (net.Conn, error) {
 		return lis.DialContext(ctx)
