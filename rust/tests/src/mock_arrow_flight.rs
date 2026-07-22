@@ -10,7 +10,6 @@ use arrow_flight::{
     Action, ActionType, Criteria, Empty, FlightData, FlightDescriptor, FlightInfo,
     HandshakeRequest, HandshakeResponse, PutResult, SchemaResult, Ticket,
 };
-use arrow_ipc;
 use futures::Stream;
 use serde::{Deserialize, Serialize};
 use tokio::sync::{mpsc, Mutex};
@@ -59,6 +58,10 @@ pub enum MockFlightResponse {
     },
     /// Error response - sent immediately when a batch arrives.
     Error { status: Status, delay_ms: u64 },
+    /// Reject a connection's setup: send this error instead of the ready signal on the
+    /// first (schema) message, simulating a failed reconnect. Consumes its scripted slot,
+    /// so schedule it as the response the target (reconnect) connection reaches.
+    FailSetup { status: Status },
     /// Close stream (drop the connection) - useful for testing recovery.
     CloseStream { delay_ms: u64 },
     /// Graceful close signal - sends a close signal with grace period duration.
@@ -258,6 +261,21 @@ impl FlightService for MockFlightServer {
                 if is_first_message {
                     is_first_message = false;
                     if flight_data.app_metadata.is_empty() {
+                        // A scripted FailSetup rejects this connection's setup: send the
+                        // error instead of the ready signal (simulates a reconnect failure).
+                        if let Some(MockFlightResponse::FailSetup { status }) =
+                            stream_responses.get(response_index)
+                        {
+                            let status = status.clone();
+                            response_index += 1;
+                            {
+                                let mut indices = response_indices.lock().await;
+                                indices.insert(table_name.clone(), response_index);
+                            }
+                            info!("Rejecting connection setup: {:?}", status);
+                            let _ = tx.send(Err(status)).await;
+                            return;
+                        }
                         debug!("Received schema message, sending ready signal");
                         // Send ready signal to confirm setup succeeded.
                         // This mirrors real server behavior where the server sends this after
@@ -391,6 +409,18 @@ impl FlightService for MockFlightServer {
                                 indices.insert(table_name.clone(), response_index);
                             }
                             let _ = tx.send(Err(status.clone())).await;
+                            return;
+                        }
+                        MockFlightResponse::FailSetup { status } => {
+                            // Only meaningful at connection setup; if reached here, the
+                            // scripting is off — fail the connection with the error.
+                            let status = status.clone();
+                            response_index += 1;
+                            {
+                                let mut indices = response_indices.lock().await;
+                                indices.insert(table_name.clone(), response_index);
+                            }
+                            let _ = tx.send(Err(status)).await;
                             return;
                         }
                         MockFlightResponse::CloseStream { delay_ms } => {

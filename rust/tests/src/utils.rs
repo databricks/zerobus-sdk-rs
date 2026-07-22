@@ -26,6 +26,61 @@ impl HeadersProvider for TestHeadersProvider {
     }
 }
 
+/// A headers provider that counts `invalidate()` calls, for asserting credential re-mint
+/// behavior on auth failures.
+#[derive(Default)]
+pub struct CountingHeadersProvider {
+    pub invalidations: Arc<std::sync::atomic::AtomicUsize>,
+}
+
+#[async_trait]
+impl HeadersProvider for CountingHeadersProvider {
+    async fn get_headers(&self) -> ZerobusResult<HashMap<&'static str, String>> {
+        let mut headers = HashMap::new();
+        headers.insert("authorization", "Bearer test_token".to_string());
+        headers.insert("x-databricks-zerobus-table-name", "test_table".to_string());
+        Ok(headers)
+    }
+
+    async fn invalidate(&self) {
+        self.invalidations
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    }
+}
+
+/// A headers provider whose invalidation never completes, for verifying that a custom
+/// provider cannot stall Arrow recovery indefinitely.
+#[derive(Default)]
+pub struct HangingInvalidationHeadersProvider {
+    pub invalidations: Arc<std::sync::atomic::AtomicUsize>,
+    pub cancellations: Arc<std::sync::atomic::AtomicUsize>,
+}
+
+struct InvalidationCancellationGuard(Arc<std::sync::atomic::AtomicUsize>);
+
+impl Drop for InvalidationCancellationGuard {
+    fn drop(&mut self) {
+        self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    }
+}
+
+#[async_trait]
+impl HeadersProvider for HangingInvalidationHeadersProvider {
+    async fn get_headers(&self) -> ZerobusResult<HashMap<&'static str, String>> {
+        let mut headers = HashMap::new();
+        headers.insert("authorization", "Bearer test_token".to_string());
+        headers.insert("x-databricks-zerobus-table-name", "test_table".to_string());
+        Ok(headers)
+    }
+
+    async fn invalidate(&self) {
+        self.invalidations
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        let _guard = InvalidationCancellationGuard(Arc::clone(&self.cancellations));
+        std::future::pending::<()>().await;
+    }
+}
+
 /// Helper function to create a simple descriptor proto for testing.
 pub fn create_test_descriptor_proto() -> Option<prost_types::DescriptorProto> {
     Some(prost_types::DescriptorProto {
