@@ -904,19 +904,18 @@ impl ZerobusArrowStream {
                         // a terminal rejection. The stream is already finalized and waiters
                         // have the real error; bound the callback so the supervisor cannot
                         // remain alive indefinitely.
-                        if error.is_auth_rejection() {
-                            if tokio::time::timeout(
+                        if error.is_auth_rejection()
+                            && tokio::time::timeout(
                                 Duration::from_millis(options.recovery_timeout_ms),
                                 headers_provider.invalidate(),
                             )
                             .await
                             .is_err()
-                            {
-                                warn!(
-                                    timeout_ms = options.recovery_timeout_ms,
-                                    "Terminal headers provider invalidation timed out"
-                                );
-                            }
+                        {
+                            warn!(
+                                timeout_ms = options.recovery_timeout_ms,
+                                "Terminal headers provider invalidation timed out"
+                            );
                         }
                         return Err(error);
                     }
