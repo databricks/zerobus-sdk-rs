@@ -24,11 +24,11 @@ const (
 	// transport's teardown drain budget; the long ack wait lives in Flush.
 	DefaultDrainTimeout = 500 * time.Millisecond
 	// DefaultRecoveryTimeout bounds each Open attempt so a stalled dial cannot
-	// hold recovery indefinitely; matches the Rust SDK's 15s per-attempt budget.
+	// hold recovery indefinitely.
 	DefaultRecoveryTimeout = 15 * time.Second
 	// DefaultCallbackTeardownTimeout bounds how long a terminal-state teardown
 	// waits for pending user callbacks (OnAck/OnError) to drain before giving
-	// up. Matches the Rust SDK's callback-task budget.
+	// up.
 	DefaultCallbackTeardownTimeout = 5 * time.Second
 )
 
@@ -105,7 +105,8 @@ type Config struct {
 // default (PauseWaitServer) waits the server-requested duration, capped by
 // StreamPausedMaxWait if positive. PauseWaitImmediate reconnects immediately
 // on any pause signal regardless of the server-requested duration, matching
-// the Rust SDK's Some(0) knob.
+// the "immediate reconnect on pause" configuration used elsewhere in the
+// ingestion SDK family.
 type PauseWaitMode int
 
 const (
@@ -138,16 +139,21 @@ func DefaultConfig() Config {
 // semaphore (MaxInflight==0), (b) spin the receiver on a zero lack-of-ack
 // timer, or (c) hard-abort teardown immediately (DrainTimeout==0). Kept
 // separate from DefaultConfig so callers can still see which fields they
-// explicitly set; only the fields that would break liveness are rewritten.
-// RecoveryRetries==0 is honored (it is a valid "try once" setting) except
-// when it is genuinely unset (negative), which is normalized. Recovery,
+// explicitly set; only the fields that would break liveness or contradict
+// the documented default behaviour are rewritten. Recovery,
 // StreamPausedMaxWait, and StreamPausedMaxWaitMode are left as-is because
 // their zero values have well-defined meaning.
+//
+// RecoveryRetries treats 0 and negative both as "unset → use default": a
+// Config{} whose zero-valued Recovery says "recovery enabled" would
+// otherwise reconnect zero times, contradicting the documented behaviour
+// that a zero Config is safe. Callers who really want a single-attempt
+// stream must combine RecoverySetting=RecoveryDisabled instead.
 func sanitizeConfig(c Config) Config {
 	if c.MaxInflight <= 0 {
 		c.MaxInflight = DefaultMaxInflight
 	}
-	if c.RecoveryRetries < 0 {
+	if c.RecoveryRetries <= 0 {
 		c.RecoveryRetries = DefaultRecoveryRetries
 	}
 	if c.RecoveryBackoff <= 0 {
@@ -174,20 +180,33 @@ func sanitizeConfig(c Config) Config {
 	return c
 }
 
-// AckCallback is called once per acknowledged record/batch offset.
+// AckCallback receives durability notifications for records that were
+// Ingested successfully.
 //
-// OnAck fires exactly once per newly-acknowledged logical offset. Cumulative
-// server acks (e.g. "durable up to offset 5" following an ack at offset 2) are
-// expanded to individual per-offset OnAck calls for offsets 3, 4, and 5. A
-// repeated ack that advances the watermark by zero triggers no OnAck calls.
-//
-// OnError fires exactly once per record left unacked on terminal failure,
-// carrying the offset assigned at Ingest and the terminal error.
+// # Delivery semantics
 //
 // Callbacks are invoked serially on a dedicated dispatcher goroutine, so a
-// slow callback does not stall the receiver/supervisor and it is safe to call
-// CoreStream methods (including Close) from inside a callback — the caller
-// won't self-deadlock.
+// slow callback does not stall the receiver/supervisor and it is safe to
+// call CoreStream methods (including Close) from inside a callback — the
+// caller won't self-deadlock.
+//
+// OnAck is best-effort per newly-acknowledged logical offset. Under normal
+// load one OnAck fires per offset covered by the ack (a cumulative server
+// ack for offset 5 following an ack at offset 2 yields three OnAcks for
+// offsets 3, 4, and 5); a repeated ack that discards no new items yields
+// zero OnAcks. If the user's OnAck implementation stalls and the internal
+// dispatch queue fills, further OnAcks are dropped rather than back-
+// pressuring the receiver — the record's durability is unaffected (Flush /
+// WaitForOffset remain accurate), only the observability signal is lost.
+// Callers that require strict per-offset delivery must keep OnAck fast, or
+// rely on WaitForOffset for durability confirmation.
+//
+// OnError fires on terminal failure, once per drained buffer item (a batch
+// occupies a single item, so its OnError fires once with the batch's
+// assigned offset). Delivery is bounded: if the user callback is stalled
+// and the dispatch queue fills, later OnErrors during terminal drain may be
+// dropped so the supervisor can complete teardown promptly; the unacked
+// records remain retrievable via GetUnacked regardless.
 type AckCallback interface {
 	OnAck(offset int64)
 	OnError(offset int64, err error)
@@ -235,12 +254,23 @@ func (d *callbackDispatcher) run() {
 	defer close(d.done)
 	for e := range d.events {
 		d.inCallback.Store(true)
-		if e.err == nil {
-			d.cb.OnAck(e.offset)
-		} else {
-			d.cb.OnError(e.offset, e.err)
-		}
+		d.safeInvoke(e)
 		d.inCallback.Store(false)
+	}
+}
+
+// safeInvoke calls the user callback with a panic guard so a misbehaving
+// callback does not crash the process. The recovered panic is silently
+// dropped: the stream itself is unaffected (durability is tracked by the
+// watermark, not the callback), and there is no user-visible channel to
+// surface the panic on. Callbacks that need to surface panics should
+// recover themselves and route via their own error channel.
+func (d *callbackDispatcher) safeInvoke(e cbEvent) {
+	defer func() { _ = recover() }()
+	if e.err == nil {
+		d.cb.OnAck(e.offset)
+	} else {
+		d.cb.OnError(e.offset, e.err)
 	}
 }
 
@@ -261,32 +291,61 @@ func (d *callbackDispatcher) enqueueAck(offset int64) {
 	}
 }
 
-// enqueueError posts an OnError event; blocking is acceptable here because
-// terminal teardown is bounded by CallbackTeardownTimeout at the caller.
+// enqueueError posts an OnError event. Publication is bounded so a stalled
+// user callback cannot block the supervisor from closing cs.done — otherwise
+// Close would hang waiting for the supervisor which is waiting for the
+// callback which is waiting for Close. If the channel is full within the
+// budget, the event is dropped and the record still surfaces via GetUnacked
+// (payloads are retained regardless of callback state).
 func (d *callbackDispatcher) enqueueError(offset int64, err error) {
 	if d == nil {
 		return
 	}
-	d.events <- cbEvent{offset: offset, err: err}
+	// Fast path: room in the queue.
+	select {
+	case d.events <- cbEvent{offset: offset, err: err}:
+		return
+	default:
+	}
+	// Slow path: give the dispatcher a moment to drain, but never longer
+	// than callbackEnqueueBudget so the supervisor stays responsive.
+	timer := time.NewTimer(callbackEnqueueBudget)
+	defer timer.Stop()
+	select {
+	case d.events <- cbEvent{offset: offset, err: err}:
+	case <-timer.C:
+		// Drop: the event is best-effort observability. GetUnacked retains
+		// the record so no data is lost.
+	}
 }
 
+// callbackEnqueueBudget bounds how long enqueueError waits for room in the
+// dispatcher channel during terminal drain. Kept short so a stalled user
+// callback cannot pin Close for the full CallbackTeardownTimeout multiplied
+// by the number of unacked items.
+const callbackEnqueueBudget = 50 * time.Millisecond
+
 // shutdown closes the event channel and waits up to timeout for the
-// dispatcher to drain and exit. If the caller is already running on the
-// dispatcher goroutine itself (a user callback that invoked Close), the
-// synchronous wait is skipped — otherwise Close would self-deadlock waiting
-// for the very goroutine it is running on. After timeout the dispatcher
-// continues to drain in the background and exits on its own once events is
-// empty.
+// dispatcher to drain and exit. If a user callback is running when shutdown
+// is called, the synchronous wait is skipped so a callback-invoked Close
+// does not self-deadlock: the dispatcher goroutine can't drain further
+// events while the callback is running, and the callback can't return
+// until Close does. After a skipped or timed-out wait the dispatcher
+// continues to drain in the background and exits on its own once events
+// is empty.
+//
+// Note: the "callback running" check is process-state, not caller-identity.
+// If an unrelated goroutine calls Close while another callback is in
+// flight, that Close also skips the wait. This is a deliberate trade-off:
+// Close is best-effort teardown, and the alternative (goroutine-ID
+// detection) has no clean Go API. Callers that need a strict "all
+// callbacks completed" barrier should synchronize externally.
 func (d *callbackDispatcher) shutdown(timeout time.Duration) {
 	if d == nil {
 		return
 	}
 	d.closeOnce.Do(func() { close(d.events) })
 	if d.inCallback.Load() {
-		// Called from inside a user callback — the dispatcher goroutine
-		// cannot drain further events until the callback returns, and the
-		// callback cannot return until Close does. Skip the wait; the
-		// dispatcher exits naturally after the callback returns.
 		return
 	}
 	if timeout <= 0 {
@@ -431,33 +490,32 @@ type CoreStream[Req, Resp any] struct {
 	// cancelSupervisor cancels the supervisor's context so Close unblocks it.
 	cancelSupervisor context.CancelFunc
 
-	// retainedFailed holds unacked record bytes preserved on terminal failure
-	// even when an AckCallback is registered, so GetUnacked and OnError both
-	// deliver the same records (matching the Rust SDK). Populated by the
-	// supervisor once on terminal drain; read once by GetUnacked. Protected by
-	// termMu.
-	retainedFailed [][]byte
+	// retainedFailed holds the encoded unacked items preserved on terminal
+	// failure so GetUnacked can decode them lazily. Kept as encoded items
+	// (rather than eagerly-decoded [][]byte) so terminal drain does not
+	// duplicate the entire backlog in memory when the user may never call
+	// GetUnacked. Protected by termMu. Payloads are also retained for
+	// GetUnacked when an AckCallback is registered; the two signals converge
+	// on the same records rather than being mutually exclusive.
+	retainedFailed []item[Req]
 }
 
-// setRetainedFailed atomically stores the terminal-drain unacked records.
+// setRetainedFailed atomically stores the terminal-drain unacked items in
+// their encoded form; decoding is deferred to GetUnacked so a terminal
+// failure with a large in-flight set does not spike memory by holding both
+// encoded and decoded copies at once.
 func (cs *CoreStream[Req, Resp]) setRetainedFailed(items []item[Req]) {
 	if len(items) == 0 {
 		return
 	}
-	out := make([][]byte, 0, len(items))
-	for _, it := range items {
-		for _, r := range cs.enc.decode(it.payload) {
-			out = append(out, cloneBytes(r))
-		}
-	}
 	cs.termMu.Lock()
-	cs.retainedFailed = out
+	cs.retainedFailed = items
 	cs.termMu.Unlock()
 }
 
-// takeRetainedFailed returns and clears the terminal-drain unacked records so
+// takeRetainedFailed returns the retained items and clears the slot so
 // GetUnacked observes them exactly once.
-func (cs *CoreStream[Req, Resp]) takeRetainedFailed() [][]byte {
+func (cs *CoreStream[Req, Resp]) takeRetainedFailed() []item[Req] {
 	cs.termMu.Lock()
 	out := cs.retainedFailed
 	cs.retainedFailed = nil
@@ -469,6 +527,13 @@ func (cs *CoreStream[Req, Resp]) takeRetainedFailed() [][]byte {
 // The stream is immediately ready for Ingest calls; the supervisor opens the
 // first transport stream in the background. Prefer the per-protocol
 // constructors (NewProtoJSONStream) over calling this directly.
+//
+// Construction is intentionally asynchronous at this internal layer:
+// invalid credentials or bad StreamParams surface as a Flush / GetUnacked
+// error once the supervisor's first Open attempts have exhausted
+// RecoveryRetries. The public zerobus package is expected to wrap this
+// with a readiness gate (initial-stream-open confirmation) before
+// exposing the stream to users.
 func NewCoreStream[Req, Resp any](
 	params StreamParams,
 	cfg Config,
@@ -500,14 +565,12 @@ func NewCoreStream[Req, Resp any](
 // is at capacity (backpressure). Returns the logical offset assigned to this
 // record; pass it to WaitForOffset to confirm durability.
 //
-// Records exceeding MaxPayloadBytes are rejected with ErrPayloadTooLarge before
-// any offset is assigned so oversized input is a deterministic input error, not
-// a transport failure that burns the recovery budget.
+// Records whose serialized wire size exceeds MaxPayloadBytes are rejected
+// with ErrPayloadTooLarge before any offset is assigned so oversized input
+// is a deterministic input error, not a transport failure that burns the
+// recovery budget. Wire size (with proto framing) is what the server sees,
+// so pre-encode input size is not sufficient.
 func (cs *CoreStream[Req, Resp]) Ingest(ctx context.Context, record []byte) (int64, error) {
-	if len(record) > cs.cfg.MaxPayloadBytes {
-		return 0, fmt.Errorf("%w: %d bytes exceeds MaxPayloadBytes=%d",
-			ErrPayloadTooLarge, len(record), cs.cfg.MaxPayloadBytes)
-	}
 	return cs.enqueueEncoded(ctx, func(offset int64) (Req, error) {
 		return cs.enc.encode(offset, record)
 	})
@@ -518,13 +581,15 @@ func (cs *CoreStream[Req, Resp]) Ingest(ctx context.Context, record []byte) (int
 // the server acks it atomically. Returns that offset. Prefer this over Ingest in
 // hot paths: it amortizes per-message overhead across the batch.
 //
-// The aggregate byte size of the batch (sum of record lengths) is checked
-// against MaxPayloadBytes and rejected with ErrPayloadTooLarge before any offset
-// is assigned.
+// The serialized wire size of the batch is checked against MaxPayloadBytes
+// and rejected with ErrPayloadTooLarge before any offset is assigned.
+//
+// A batch with zero records is a no-op (returns -1 without allocating an
+// offset); a batch with any
+// empty record is still rejected as invalid input.
 func (cs *CoreStream[Req, Resp]) IngestBatch(ctx context.Context, records [][]byte) (int64, error) {
-	if size := aggregateSize(records); size > cs.cfg.MaxPayloadBytes {
-		return 0, fmt.Errorf("%w: batch of %d bytes exceeds MaxPayloadBytes=%d",
-			ErrPayloadTooLarge, size, cs.cfg.MaxPayloadBytes)
+	if len(records) == 0 {
+		return -1, nil
 	}
 	return cs.enqueueEncoded(ctx, func(offset int64) (Req, error) {
 		return cs.enc.encodeBatch(offset, records)
@@ -562,14 +627,31 @@ func (cs *CoreStream[Req, Resp]) enqueueEncoded(ctx context.Context, encodeFn fu
 		cs.buf.release()
 		return 0, err
 	}
+	// Wire-size validation against MaxPayloadBytes uses proto.Size (or the
+	// encoder-specific equivalent), not the raw input bytes: proto framing
+	// adds tags and varints on top of the caller's payload, so a batch just
+	// under a byte-sum limit can still exceed the server's message size
+	// limit and bounce back as a transport failure. Reject deterministically
+	// here so recovery is not consumed by an input-shape error.
+	if size := cs.enc.wireSize(msg); size > cs.cfg.MaxPayloadBytes {
+		cs.offsetMu.Unlock()
+		cs.buf.release()
+		return 0, fmt.Errorf("%w: %d bytes exceeds MaxPayloadBytes=%d",
+			ErrPayloadTooLarge, size, cs.cfg.MaxPayloadBytes)
+	}
 	if err := cs.buf.append(offset, msg); err != nil {
 		cs.offsetMu.Unlock()
 		// append() released the slot on error.
 		return 0, err
 	}
 	cs.nextOffset++
-	cs.offsetMu.Unlock()
+	// Store lastEnqueued while still holding offsetMu so it advances
+	// monotonically alongside nextOffset. Storing after Unlock let two
+	// concurrent Ingests interleave — the lower-offset caller's Store could
+	// land last and mask a higher offset from Flush, which would then return
+	// success while unacked records remained.
 	cs.lastEnqueued.Store(offset)
+	cs.offsetMu.Unlock()
 	return offset, nil
 }
 
@@ -577,7 +659,8 @@ func (cs *CoreStream[Req, Resp]) enqueueEncoded(ctx context.Context, encodeFn fu
 // server. Returns nil once all are durable, or an error if the stream fails
 // or ctx expires.
 //
-// When ctx has no deadline, Flush applies DefaultFlushTimeout.
+// When ctx has no deadline, Flush applies Config.FlushTimeout (defaulting
+// to DefaultFlushTimeout when unset).
 func (cs *CoreStream[Req, Resp]) Flush(ctx context.Context) error {
 	target := cs.lastEnqueued.Load()
 	if target < 0 {
@@ -610,44 +693,50 @@ func (cs *CoreStream[Req, Resp]) WaitForOffset(ctx context.Context, offset int64
 // items are added.
 //
 // GetUnacked is compatible with a registered AckCallback: on terminal failure
-// the supervisor also fires OnError for each unacked record, but the payloads
-// are retained here so callers get both structured error events AND the raw
-// bytes to persist or re-ingest. The returned byte slices are independent
-// copies — mutating them does not affect any internal buffer.
+// the supervisor also fires OnError for each unacked buffer item, but the
+// encoded items are retained here so callers get both structured error
+// events AND the raw bytes to persist or re-ingest. Records are decoded and
+// cloned lazily here rather than at terminal drain so a large in-flight set
+// does not double memory when the user never calls GetUnacked. The returned
+// byte slices are independent copies — mutating them does not affect any
+// internal state.
 func (cs *CoreStream[Req, Resp]) GetUnacked() [][]byte {
 	cs.Close()
 	// If the supervisor already drained the buffer for OnError dispatch, the
-	// records live on retainedFailed; otherwise drain the buffer now.
+	// items live on retainedFailed; otherwise drain the buffer now.
 	items := cs.buf.drain()
 	failed := cs.takeRetainedFailed()
 	out := make([][]byte, 0, len(items)+len(failed))
-	for _, it := range items {
-		// Re-extract the raw record bytes from the encoded message so callers
-		// get back the original record content; a batch yields all its records.
+	decodeAppend := func(it item[Req]) {
 		for _, r := range cs.enc.decode(it.payload) {
 			out = append(out, cloneBytes(r))
 		}
 	}
-	for _, r := range failed {
-		out = append(out, cloneBytes(r))
+	for _, it := range items {
+		decodeAppend(it)
+	}
+	for _, it := range failed {
+		decodeAppend(it)
 	}
 	return out
 }
 
-// Close terminates the stream and releases its resources. It is idempotent and
-// blocks until teardown completes.
+// Close terminates the stream and releases its resources. It is idempotent
+// and blocks until teardown completes.
 //
-// Close does NOT wait for pending records to be acknowledged: any records still
-// in flight when Close is called are abandoned (retrievable via GetUnacked, or
-// reported through the AckCallback's OnError). Callers that need durability must
-// Flush first, then Close — the standard loop-then-Flush pattern. On this clean
-// shutdown the live stream is torn down gracefully (half-close, then drain any
-// straggling acks to EOF, bounded by DrainTimeout) so the server observes an
-// orderly END_STREAM rather than an abrupt reset; see gracefulTeardown.
+// Close does NOT wait for pending records to be acknowledged: any records
+// still in flight when Close is called are abandoned and remain retrievable
+// via GetUnacked. On a clean Close the AckCallback's OnError is NOT fired
+// for those records — only terminal recovery failure fires OnError. Callers
+// that need durability must Flush first, then Close (the standard
+// loop-then-Flush pattern). On this clean shutdown the live stream is torn
+// down gracefully (half-close, then drain any straggling acks to EOF,
+// bounded by DrainTimeout) so the server observes an orderly END_STREAM
+// rather than an abrupt reset; see gracefulTeardown.
 //
 // It is safe to call Close from inside an AckCallback: callbacks run on a
-// dedicated dispatcher goroutine, not on the supervisor, so this method does
-// not self-deadlock.
+// dedicated dispatcher goroutine, not on the supervisor, so this method
+// does not self-deadlock.
 func (cs *CoreStream[Req, Resp]) Close() {
 	cs.closeOnce.Do(func() {
 		cs.cancelSupervisor()
@@ -696,10 +785,14 @@ func (cs *CoreStream[Req, Resp]) setTerminalErr(err error) {
 
 // runOnce opens one transport stream and runs sender+receiver until one of
 // them exits. Returns the cause of the exit so the supervisor can decide
-// whether to recover, and healthy=true once a stream was successfully opened
-// and run (so the supervisor can reset its per-episode retry budget — a stream
-// that connected and later failed is a fresh episode, not a continuation of
-// the prior reconnect streak).
+// whether to recover, and healthy=true once the stream made durable progress
+// this iteration (received at least one server ack). That is a stricter
+// definition than "Open succeeded": a stream that Opens but then immediately
+// EOFs / errors before any ack has made no progress, and treating it as
+// healthy would reset the per-episode retry budget on every attempt and let
+// the supervisor hammer the server with no backoff. The supervisor uses the
+// budget-reset only after real acknowledged work, so a permanent immediate-
+// EOF loop exhausts RecoveryRetries.
 //
 // The receiver drives pause handling: on a server CloseStreamSignal it sends
 // on pauseCh and then keeps draining acks until either the flight set empties
@@ -708,13 +801,23 @@ func (cs *CoreStream[Req, Resp]) setTerminalErr(err error) {
 // flight during the drain window.
 func (cs *CoreStream[Req, Resp]) runOnce(ctx context.Context) (cause error, healthy bool) {
 	// Bound the Open at RecoveryTimeout so a stalled dial cannot pin recovery
-	// indefinitely — each attempt has an explicit budget matching Rust.
+	// indefinitely — each attempt gets an explicit budget.
 	openCtx, cancelOpen := context.WithTimeout(ctx, cs.cfg.RecoveryTimeout)
 	stream, err := cs.opener.Open(openCtx, cs.params)
+	openTimedOut := openCtx.Err() == context.DeadlineExceeded
 	cancelOpen()
 	if err != nil {
 		if errors.Is(err, transport.ErrInvalidParams) {
 			return wrapValidation(fmt.Errorf("stream: open: %w", err)), false
+		}
+		// Distinguish our internal per-attempt budget from a caller
+		// cancellation of the outer supervisor ctx. The former should stay
+		// retryable so RecoveryRetries actually governs stalled dials; the
+		// latter (ctx cancelled by Close) is naturally non-retryable and
+		// short-circuited by isRetryable's context checks. Same pattern the
+		// auth layer applies to header-fetch budgets.
+		if openTimedOut && ctx.Err() == nil {
+			return &openBudgetExceeded{cause: fmt.Errorf("stream: open: %w", err)}, false
 		}
 		return fmt.Errorf("stream: open: %w", err), false
 	}
@@ -741,9 +844,15 @@ func (cs *CoreStream[Req, Resp]) runOnce(ctx context.Context) (cause error, heal
 	// armed the timer." A dropped signal is fine (buffer full → receiver
 	// already knows).
 	flightSignal := make(chan struct{}, 1)
+	// progressed is set by the receiver on the first ack it processes; it
+	// tells the supervisor this iteration made durable progress and the
+	// per-episode retry budget may be reset. Without it, a stream that
+	// Opens successfully but immediately EOFs would reset the budget every
+	// iteration and hammer the server with no backoff.
+	var progressed atomic.Bool
 
 	go cs.sender(senderCtx, stream, senderExitCh, flightSignal)
-	go cs.receiver(stream, receiverExitCh, pauseCh, flightSignal)
+	go cs.receiver(stream, receiverExitCh, pauseCh, flightSignal, &progressed)
 
 	// Wait for the first meaningful exit.
 	var senderParked bool
@@ -813,7 +922,7 @@ waitLoop:
 			<-receiverExitCh
 		}
 	}
-	return cause, true
+	return cause, progressed.Load()
 }
 
 // gracefulTeardown closes a healthy stream in an orderly fashion after the
@@ -888,16 +997,21 @@ func (cs *CoreStream[Req, Resp]) sender(senderCtx context.Context, stream wireSt
 			errCh <- nil // ctx cancelled or buffer closed — clean exit
 			return
 		}
-		if err := stream.Send(it.payload); err != nil {
-			errCh <- fmt.Errorf("stream: send offset %d: %w", it.offset, err)
-			return
-		}
-		// Non-blocking notify: the receiver only cares whether *at least
-		// one* new record is in flight since it last armed the timer, so a
-		// dropped signal (channel already full) is fine.
+		// Signal flight BEFORE calling Send: buf.next has already moved the
+		// item into the in-flight set, so a stalled Send must not prevent
+		// the receiver from arming the lack-of-ack timer. Signalling after
+		// Send would let a wedged send leave the timer disarmed until the
+		// Send returned (which, if the transport blocks, is never), so a
+		// slow server would not be caught. A dropped signal (channel full)
+		// is fine: the receiver only needs one wake-up per idle→work
+		// transition.
 		select {
 		case flightSignal <- struct{}{}:
 		default:
+		}
+		if err := stream.Send(it.payload); err != nil {
+			errCh <- fmt.Errorf("stream: send offset %d: %w", it.offset, err)
+			return
 		}
 	}
 }
@@ -912,7 +1026,7 @@ func (cs *CoreStream[Req, Resp]) sender(senderCtx context.Context, stream wireSt
 // The pause path is cooperative with the sender via pauseCh: on pauseResponse
 // the receiver signals pauseCh (so runOnce parks the sender) and keeps
 // draining acks until either the buffer's inFlight goes to zero or the pause
-// deadline expires, mirroring the Rust SDK.
+// deadline expires.
 //
 // The lack-of-ack timer is armed only when records are actually in flight.
 // The sender pings flightSignal after each successful Send so the receiver can
@@ -923,7 +1037,7 @@ func (cs *CoreStream[Req, Resp]) sender(senderCtx context.Context, stream wireSt
 // Each Recv call runs on its own goroutine so we can race it against the
 // lack-of-ack timer even when the underlying transport Recv is blocking (e.g. a
 // fake in tests, or a stalled server).
-func (cs *CoreStream[Req, Resp]) receiver(stream wireStream[Req, Resp], errCh chan<- error, pauseCh chan<- pauseSignal, flightSignal <-chan struct{}) {
+func (cs *CoreStream[Req, Resp]) receiver(stream wireStream[Req, Resp], errCh chan<- error, pauseCh chan<- pauseSignal, flightSignal <-chan struct{}, progressed *atomic.Bool) {
 	type recvResult struct {
 		resp Resp
 		err  error
@@ -1044,7 +1158,8 @@ func (cs *CoreStream[Req, Resp]) receiver(stream wireStream[Req, Resp], errCh ch
 		}
 
 		kind, offset, pause := cs.ackMdl.classify(r.resp)
-		if kind == pauseResponse {
+		switch kind {
+		case pauseResponse:
 			// A server pause is a flow-control request: signal runOnce to
 			// park the sender and enter pause-drain mode. Repeat pause
 			// signals during an active pause window are no-ops.
@@ -1052,52 +1167,87 @@ func (cs *CoreStream[Req, Resp]) receiver(stream wireStream[Req, Resp], errCh ch
 				ps := pause
 				pauseState = &ps
 				wait := effectivePauseWait(cs.cfg, pause.duration)
-				if wait <= 0 {
-					// Configuration or server both asked for immediate
-					// reconnect (or recovery-disabled, handled by caller).
-					// End pause drain now.
-					errCh <- pause
-					return
-				}
-				// Signal runOnce so it stops the sender for THIS stream.
+				// Signal runOnce so it stops the sender for THIS stream,
+				// regardless of the effective wait: an immediate reconnect
+				// still requires the sender to be parked so no further
+				// records enter flight before we tear down.
 				select {
 				case pauseCh <- pause:
 				default:
 				}
-				// If nothing is in flight there's nothing to drain.
-				if cs.buf.inFlight() == 0 {
+				if wait <= 0 {
+					// Configuration or server both asked for immediate
+					// reconnect. End pause drain now — no records will enter
+					// flight thanks to the pauseCh signal above.
+					stopPauseTimer()
 					errCh <- pause
 					return
 				}
+				// Always honour the pause window: server-driven throttling
+				// wants us to hold off reconnecting even when nothing is
+				// currently in flight, or reconnect churn amplifies load.
+				// The window is capped by StreamPausedMaxWait; the receiver
+				// still keeps draining acks in case work enters flight
+				// before it (buffered ingest is possible during pause).
 				pauseTimer = time.NewTimer(wait)
 			}
 			spawnRecv()
 			continue
+		case malformedResponse:
+			stopPauseTimer()
+			errCh <- fmt.Errorf("stream: server ack missing durability offset")
+			return
+		case unknownResponse:
+			// A response the ack model does not recognise is a protocol
+			// error, not noise: fail the stream so the supervisor can
+			// decide whether to recover.
+			stopPauseTimer()
+			errCh <- fmt.Errorf("stream: unexpected server response type")
+			return
 		}
 
 		spawnRecv()
 
-		if kind == ackResponse {
-			cs.wm.advance(offset)
+		// kind == ackResponse. Validate the offset against work actually
+		// sent before advancing the watermark: a bogus high offset from a
+		// buggy or malicious server would otherwise let WaitForOffset
+		// return success for records that were never durably acked.
+		//
+		// The highest offset possibly in flight is bounded by lastEnqueued
+		// (which is monotonic). An ack above that has no corresponding
+		// sent record; refuse it.
+		highestSent := cs.lastEnqueued.Load()
+		if offset > highestSent {
+			stopPauseTimer()
+			errCh <- fmt.Errorf("stream: server ack offset %d exceeds highest sent %d", offset, highestSent)
+			return
+		}
+		// Advance the watermark only to the offset of items we actually
+		// discarded from flight; ignore regressing acks (offset lower
+		// than what was already discarded) so a duplicate/replay ack
+		// does not fire callbacks or roll the watermark backwards.
+		discarded := cs.buf.discardThrough(offset)
+		if len(discarded) > 0 {
+			cs.wm.advance(discarded[len(discarded)-1])
+			// Mark the run as having made real progress so the supervisor
+			// resets its per-episode retry budget only after actual acks.
+			progressed.Store(true)
 			// Per-offset callbacks: one OnAck per newly-acked logical offset.
-			discarded := cs.buf.discardThrough(offset)
 			for _, o := range discarded {
 				cs.dispatcher.enqueueAck(o)
 			}
-			// Timer maintenance: reset the freshness budget while work
-			// remains in flight; disarm when the flight set empties.
-			if cs.buf.inFlight() == 0 {
-				disarmLack()
-			} else {
-				resetLack()
-			}
-			// If pause drain has completed, proceed to reconnect.
-			if pauseState != nil && cs.buf.inFlight() == 0 {
-				stopPauseTimer()
-				errCh <- *pauseState
-				return
-			}
 		}
+		// Timer maintenance: reset the freshness budget while work
+		// remains in flight; disarm when the flight set empties.
+		if cs.buf.inFlight() == 0 {
+			disarmLack()
+		} else {
+			resetLack()
+		}
+		// Pause windows are honoured even after the flight set empties,
+		// so server-driven throttling still holds us off reconnecting for
+		// the requested duration and does not churn under load. The
+		// pauseTimer case above will end the wait when the window expires.
 	}
 }
 

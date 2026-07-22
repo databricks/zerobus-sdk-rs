@@ -495,7 +495,7 @@ func TestCoreStreamFlushContextExpires(t *testing.T) {
 // ack (offset 2) yields exactly one OnAck per newly-acknowledged logical
 // offset [0, 1, 2] — not one OnAck(2). It also verifies that a duplicate ack
 // (no new items) triggers no additional callbacks, matching the AckCallback
-// contract and the Rust SDK.
+// contract.
 func TestCoreStreamAckCallbackFiresPerOffset(t *testing.T) {
 	rpc := newFakeRPC()
 	cb := &recordingCallback{}
@@ -761,10 +761,11 @@ func TestCoreStreamCloseUnblocksEnqueueAtCapacity(t *testing.T) {
 	}
 }
 
-// TestCoreStreamGetUnackedWorksWithCallback verifies that GetUnacked returns
-// items even when an AckCallback is registered, since the supervisor drains
-// the buffer for the callback on failure and GetUnacked then returns nothing —
-// the two are mutually exclusive. With no callback, GetUnacked must work.
+// TestCoreStreamGetUnackedWithoutCallback verifies GetUnacked works when no
+// AckCallback is registered. GetUnacked also works WITH a callback (payloads
+// are retained on terminal failure regardless — see
+// TestCoreStreamGetUnackedWithCallbackPreservesPayloads); this test covers
+// the no-callback path.
 func TestCoreStreamGetUnackedWithoutCallback(t *testing.T) {
 	fo := &fakeOpener{openErr: fmt.Errorf("connection refused")}
 	cfg := testConfig()
@@ -975,12 +976,14 @@ func TestCoreStreamIdleStreamDoesNotFailOnLackOfAck(t *testing.T) {
 	}
 }
 
-// TestCoreStreamHealthyRunResetsRecoveryBudget verifies that the recovery retry
-// budget is per-episode, not lifetime. Three successive connections each receive
-// the re-sent record then die with EOF; with RecoveryRetries=1 and a lifetime
-// budget the supervisor would give up before the fourth connection. Because each
-// run connected and ran successfully, the budget resets and the stream survives
-// to ack on the fourth.
+// TestCoreStreamHealthyRunResetsRecoveryBudget verifies that the recovery
+// retry budget is per-episode, not lifetime. "Healthy" here means the run
+// made durable progress — i.e. received at least one server ack — so
+// merely opening a stream that immediately EOFs does NOT reset the budget
+// (that would let an Open-then-fail loop hammer the server with no
+// backoff). Three successive connections each ack the current record and
+// then disconnect; with RecoveryRetries=1 and a lifetime budget the
+// supervisor would give up before the fourth connection.
 func TestCoreStreamHealthyRunResetsRecoveryBudget(t *testing.T) {
 	rpc1, rpc2, rpc3, rpc4 := newFakeRPC(), newFakeRPC(), newFakeRPC(), newFakeRPC()
 	fo := newFakeOpener(rpc1, rpc2, rpc3, rpc4)
@@ -989,31 +992,66 @@ func TestCoreStreamHealthyRunResetsRecoveryBudget(t *testing.T) {
 	cs := newCoreForTest(testParams(), cfg, fo, nil)
 	t.Cleanup(func() { cs.Close() })
 
-	off, err := cs.Ingest(context.Background(), []byte(`{}`))
-	if err != nil {
-		t.Fatalf("Ingest: %v", err)
-	}
-
-	// Each connection sees the (re-sent) record, then the server drops it (EOF).
+	// Ingest one record per connection: ack it on that connection so the
+	// run has made progress, then disconnect.
 	for i, rpc := range []*fakeRPC{rpc1, rpc2, rpc3} {
+		off, err := cs.Ingest(context.Background(), []byte(`{}`))
+		if err != nil {
+			t.Fatalf("Ingest %d: %v", i, err)
+		}
 		waitCondition(t, func() bool { return len(rpc.sends) > 0 }, 2*time.Second)
 		<-rpc.sends
-		rpc.close() // EOF: a healthy run that ends; supervisor must recover
-		_ = i
+		rpc.ack(off)
+		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+		if err := cs.WaitForOffset(ctx, off); err != nil {
+			cancel()
+			t.Fatalf("WaitForOffset for progress ack %d: %v", i, err)
+		}
+		cancel()
+		rpc.close() // EOF; the run had ack progress, budget resets
 	}
 
-	// Fourth connection: the record is re-sent once more and finally acked.
+	// Fourth connection succeeds normally.
+	off4, err := cs.Ingest(context.Background(), []byte(`{}`))
+	if err != nil {
+		t.Fatalf("Ingest 4: %v", err)
+	}
 	waitCondition(t, func() bool { return len(rpc4.sends) > 0 }, 2*time.Second)
 	<-rpc4.sends
-	rpc4.ack(off)
+	rpc4.ack(off4)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
-	if err := cs.WaitForOffset(ctx, off); err != nil {
-		t.Fatalf("stream did not survive 3 healthy-then-disconnect cycles: %v", err)
+	if err := cs.WaitForOffset(ctx, off4); err != nil {
+		t.Fatalf("stream did not survive 3 progress-then-disconnect cycles: %v", err)
 	}
 	if cs.IsClosed() {
-		t.Fatal("stream terminated despite healthy runs resetting the recovery budget")
+		t.Fatal("stream terminated despite progressed runs resetting the recovery budget")
+	}
+}
+
+// TestCoreStreamOpenThenImmediateEOFExhaustsBudget verifies the flip side:
+// runs that Open but never receive an ack (immediate EOF) do NOT reset the
+// recovery budget, so a permanent Open-then-EOF loop terminates instead of
+// hammering the server with no backoff. Uses RecoveryRetries=1 and four
+// EOF-immediately RPCs; the stream should terminate before consuming all
+// of them.
+func TestCoreStreamOpenThenImmediateEOFExhaustsBudget(t *testing.T) {
+	rpcs := []*fakeRPC{newFakeRPC(), newFakeRPC(), newFakeRPC(), newFakeRPC(), newFakeRPC()}
+	// Pre-close every RPC so each Open sees an immediate EOF on Recv.
+	for _, r := range rpcs {
+		r.close()
+	}
+	fo := newFakeOpener(rpcs...)
+	cfg := testConfig()
+	cfg.RecoveryRetries = 1
+	cfg.RecoveryBackoff = 10 * time.Millisecond
+	cs := newCoreForTest(testParams(), cfg, fo, nil)
+	t.Cleanup(func() { cs.Close() })
+
+	waitCondition(t, cs.IsClosed, 2*time.Second)
+	if n := fo.openCount(); n > 3 {
+		t.Fatalf("Open-then-EOF loop exceeded budget: %d attempts, want <= 3", n)
 	}
 }
 
@@ -1336,8 +1374,8 @@ func TestCoreStreamPauseImmediateModeReconnectsWithoutWaiting(t *testing.T) {
 
 // TestCoreStreamGetUnackedWithCallbackPreservesPayloads verifies that when the
 // stream fails terminally with a callback registered, GetUnacked still
-// returns the unacked record bytes (matching the Rust SDK). The callback
-// receives OnError events for the same offsets.
+// returns the unacked record bytes. The callback receives OnError events for
+// the same offsets — the two are not mutually exclusive.
 func TestCoreStreamGetUnackedWithCallbackPreservesPayloads(t *testing.T) {
 	fo := &fakeOpener{openErr: fmt.Errorf("connection refused")}
 	cfg := testConfig()
@@ -1368,26 +1406,45 @@ func TestCoreStreamGetUnackedWithCallbackPreservesPayloads(t *testing.T) {
 }
 
 // TestCoreStreamPayloadTooLargeRejected verifies MaxPayloadBytes enforcement:
-// oversized records and batches are rejected with ErrPayloadTooLarge at
-// Ingest without consuming an offset or reaching the transport.
+// records or batches whose serialized wire size exceeds the cap are
+// rejected with ErrPayloadTooLarge at Ingest without consuming an offset or
+// reaching the transport. The check uses proto.Size (framing included), so
+// a record just under the byte-sum limit can still be rejected if its
+// framing pushes it over.
 func TestCoreStreamPayloadTooLargeRejected(t *testing.T) {
 	rpc := newFakeRPC()
 	cfg := testConfig()
-	cfg.MaxPayloadBytes = 16
+	// Pick a cap comfortably above the small proto envelope for a 4 KiB
+	// record (envelope for a proto ingest request is a handful of bytes),
+	// so a 4 KiB record passes and 16 KiB doesn't.
+	cfg.MaxPayloadBytes = 8 * 1024
 	cs := newCoreForTest(testParams(), cfg, newFakeOpener(rpc), nil)
 	t.Cleanup(func() { cs.Close() })
 
-	// Exact-limit record: accepted.
-	if _, err := cs.Ingest(context.Background(), make([]byte, 16)); err != nil {
-		t.Fatalf("record at exact limit rejected: %v", err)
+	// A well-under-limit record: accepted (JSON is the default here).
+	small := make([]byte, 4*1024)
+	for i := range small {
+		small[i] = 'a'
 	}
-	// Above-limit record: rejected.
-	if _, err := cs.Ingest(context.Background(), make([]byte, 17)); !errors.Is(err, ErrPayloadTooLarge) {
+	if _, err := cs.Ingest(context.Background(), append([]byte(`"`), append(small, '"')...)); err != nil {
+		t.Fatalf("small record rejected: %v", err)
+	}
+
+	// A well-over-limit record: rejected on wire size.
+	big := make([]byte, 16*1024)
+	for i := range big {
+		big[i] = 'b'
+	}
+	if _, err := cs.Ingest(context.Background(), append([]byte(`"`), append(big, '"')...)); !errors.Is(err, ErrPayloadTooLarge) {
 		t.Fatalf("above-limit record: want ErrPayloadTooLarge, got %v", err)
 	}
-	// Batch whose aggregate exceeds the limit: rejected even if each element
-	// is below.
-	batch := [][]byte{make([]byte, 8), make([]byte, 8), make([]byte, 4)}
+
+	// A batch whose aggregate wire size exceeds the limit: rejected.
+	batch := [][]byte{
+		append([]byte(`"`), append(make([]byte, 3*1024), '"')...),
+		append([]byte(`"`), append(make([]byte, 3*1024), '"')...),
+		append([]byte(`"`), append(make([]byte, 3*1024), '"')...),
+	}
 	if _, err := cs.IngestBatch(context.Background(), batch); !errors.Is(err, ErrPayloadTooLarge) {
 		t.Fatalf("above-limit batch: want ErrPayloadTooLarge, got %v", err)
 	}
@@ -1526,5 +1583,242 @@ func TestCoreStreamIngestBatch(t *testing.T) {
 
 	if err := cs.Flush(context.Background()); err != nil {
 		t.Fatalf("Flush: %v", err)
+	}
+}
+
+// TestCoreStreamServerAckAboveHighestSentFailsStream verifies that a server
+// ack whose offset exceeds the highest offset the client has enqueued is
+// treated as a protocol error, not silently trusted. Without this, a buggy
+// server could unblock WaitForOffset for records that were never durably
+// stored.
+func TestCoreStreamServerAckAboveHighestSentFailsStream(t *testing.T) {
+	rpc := newFakeRPC()
+	cfg := testConfig()
+	cfg.Recovery = RecoveryDisabled
+	cs := newCoreForTest(testParams(), cfg, newFakeOpener(rpc), nil)
+	t.Cleanup(func() { cs.Close() })
+
+	// Send exactly one record (offset 0).
+	off, err := cs.Ingest(context.Background(), []byte(`{}`))
+	if err != nil {
+		t.Fatalf("Ingest: %v", err)
+	}
+	waitCondition(t, func() bool { return len(rpc.sends) > 0 }, time.Second)
+	<-rpc.sends
+	// Server sends a bogus ack for offset 99: no record was ever sent for
+	// it. The stream must fail rather than advance the watermark and
+	// pretend offset 99 is durable.
+	rpc.ack(99)
+
+	waitCondition(t, cs.IsClosed, 2*time.Second)
+
+	// WaitForOffset for the real offset should surface the terminal error.
+	if err := cs.WaitForOffset(context.Background(), off); err == nil {
+		t.Fatal("want terminal error after fabricated server ack; got nil")
+	}
+}
+
+// TestCoreStreamServerAckMissingOffsetFailsStream verifies that an ack
+// response with the DurabilityAckUpToOffset field absent is treated as
+// malformed. Silently defaulting to zero would fake a durability signal
+// for offset 0.
+func TestCoreStreamServerAckMissingOffsetFailsStream(t *testing.T) {
+	rpc := newFakeRPC()
+	cfg := testConfig()
+	cfg.Recovery = RecoveryDisabled
+	cs := newCoreForTest(testParams(), cfg, newFakeOpener(rpc), nil)
+	t.Cleanup(func() { cs.Close() })
+
+	if _, err := cs.Ingest(context.Background(), []byte(`{}`)); err != nil {
+		t.Fatalf("Ingest: %v", err)
+	}
+	waitCondition(t, func() bool { return len(rpc.sends) > 0 }, time.Second)
+	<-rpc.sends
+	// Send an ack response with a nil DurabilityAckUpToOffset field.
+	rpc.recvs <- &zerobuspb.EphemeralStreamResponse{
+		Payload: &zerobuspb.EphemeralStreamResponse_IngestRecordResponse{
+			IngestRecordResponse: &zerobuspb.IngestRecordResponse{},
+		},
+	}
+
+	waitCondition(t, cs.IsClosed, 2*time.Second)
+}
+
+// TestCoreStreamConcurrentIngestFlushAllAcked verifies the concurrent-Ingest
+// + Flush race is closed: Flush must not return until every offset assigned
+// by any concurrent Ingest has been acknowledged. Regression for the
+// lastEnqueued-store-outside-offsetMu bug.
+func TestCoreStreamConcurrentIngestFlushAllAcked(t *testing.T) {
+	rpc := newFakeRPC()
+	cs := newTestStream(t, newFakeOpener(rpc))
+
+	const n = 32
+	var wg sync.WaitGroup
+	offsets := make([]int64, n)
+	wg.Add(n)
+	for i := range n {
+		go func(i int) {
+			defer wg.Done()
+			off, err := cs.Ingest(context.Background(), []byte(`{}`))
+			if err != nil {
+				t.Errorf("Ingest %d: %v", i, err)
+				return
+			}
+			offsets[i] = off
+		}(i)
+	}
+	wg.Wait()
+
+	// Drain all sends.
+	waitCondition(t, func() bool { return len(rpc.sends) == n }, 2*time.Second)
+	for range n {
+		<-rpc.sends
+	}
+
+	// Find the maximum offset assigned. If lastEnqueued races, Flush would
+	// snapshot a lower value here.
+	var maxOffset int64 = -1
+	for _, o := range offsets {
+		if o > maxOffset {
+			maxOffset = o
+		}
+	}
+
+	// Ack only up to maxOffset - 1: Flush must NOT return since the highest
+	// offset is still unacked.
+	if maxOffset > 0 {
+		rpc.ack(maxOffset - 1)
+		ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+		if err := cs.Flush(ctx); err == nil {
+			cancel()
+			t.Fatal("Flush returned success while highest offset was unacked (concurrent race regression)")
+		}
+		cancel()
+	}
+	// Now ack the max. Flush should succeed.
+	rpc.ack(maxOffset)
+	if err := cs.Flush(context.Background()); err != nil {
+		t.Fatalf("Flush after ack: %v", err)
+	}
+}
+
+// TestCoreStreamOpenTimeoutRetries verifies that an Open that times out on
+// the internal RecoveryTimeout budget stays retryable — a stalled dial
+// should exhaust RecoveryRetries, not terminate the stream after a single
+// attempt. Regression for the DeadlineExceeded=terminal bug.
+func TestCoreStreamOpenTimeoutRetries(t *testing.T) {
+	fo := &slowOpener{delay: 200 * time.Millisecond}
+	cfg := testConfig()
+	cfg.RecoveryTimeout = 30 * time.Millisecond // < delay → each Open times out
+	cfg.RecoveryRetries = 3
+	cfg.RecoveryBackoff = 5 * time.Millisecond
+	cs := newCoreForTest(testParams(), cfg, fo, nil)
+	t.Cleanup(func() { cs.Close() })
+
+	// Ingest triggers the supervisor to Open; each Open times out, retries.
+	if _, err := cs.Ingest(context.Background(), []byte(`{}`)); err != nil {
+		t.Fatalf("Ingest: %v", err)
+	}
+
+	waitCondition(t, cs.IsClosed, 2*time.Second)
+	// 1 initial + 3 retries = 4 total attempts.
+	if got := fo.openCount(); got != 4 {
+		t.Fatalf("Open-timeout should retry: got %d attempts, want 4", got)
+	}
+}
+
+// slowOpener is an opener that blocks Open for `delay` before returning an
+// error, letting the caller's ctx timeout fire first.
+type slowOpener struct {
+	delay time.Duration
+	mu    sync.Mutex
+	n     int
+}
+
+func (o *slowOpener) openCount() int {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	return o.n
+}
+
+func (o *slowOpener) Open(ctx context.Context, _ transport.StreamParams) (wireStream[encodedMsg, ephemeralResp], error) {
+	o.mu.Lock()
+	o.n++
+	o.mu.Unlock()
+	select {
+	case <-time.After(o.delay):
+		return nil, fmt.Errorf("slowOpener: dial failed")
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
+}
+
+// TestCoreStreamIngestBatchEmptyIsNoop verifies that an empty batch is a
+// no-op returning offset -1 and not consuming an offset, matching the
+// established SDK behaviour for other implementations.
+func TestCoreStreamIngestBatchEmptyIsNoop(t *testing.T) {
+	rpc := newFakeRPC()
+	cs := newTestStream(t, newFakeOpener(rpc))
+
+	off, err := cs.IngestBatch(context.Background(), nil)
+	if err != nil {
+		t.Fatalf("empty batch: %v", err)
+	}
+	if off != -1 {
+		t.Fatalf("empty batch: want offset -1, got %d", off)
+	}
+	off, err = cs.IngestBatch(context.Background(), [][]byte{})
+	if err != nil {
+		t.Fatalf("zero-length batch: %v", err)
+	}
+	if off != -1 {
+		t.Fatalf("zero-length batch: want offset -1, got %d", off)
+	}
+
+	// A subsequent real Ingest still gets offset 0 — the no-op batches
+	// consumed no offset.
+	off, err = cs.Ingest(context.Background(), []byte(`{}`))
+	if err != nil {
+		t.Fatalf("Ingest after empty batches: %v", err)
+	}
+	if off != 0 {
+		t.Fatalf("Ingest after empty batches: want offset 0, got %d", off)
+	}
+	waitCondition(t, func() bool { return len(rpc.sends) > 0 }, time.Second)
+	<-rpc.sends
+	rpc.ack(off)
+	_ = cs.Flush(context.Background())
+}
+
+// TestCoreStreamCallbackPanicDoesNotCrash verifies that a panicking user
+// callback is contained and the stream keeps running.
+func TestCoreStreamCallbackPanicDoesNotCrash(t *testing.T) {
+	rpc := newFakeRPC()
+	var callCount atomic.Int32
+	cb := &callbackFn{
+		onAck: func(o int64) {
+			callCount.Add(1)
+			if o == 0 {
+				panic("user callback panic")
+			}
+		},
+	}
+	cs := newCoreForTest(testParams(), testConfig(), newFakeOpener(rpc), cb)
+	t.Cleanup(func() { cs.Close() })
+
+	for range 2 {
+		if _, err := cs.Ingest(context.Background(), []byte(`{}`)); err != nil {
+			t.Fatalf("Ingest: %v", err)
+		}
+	}
+	waitCondition(t, func() bool { return len(rpc.sends) == 2 }, time.Second)
+	for range 2 {
+		<-rpc.sends
+	}
+	rpc.ack(1) // cumulative → OnAck(0) panics, then OnAck(1) still runs
+
+	waitCondition(t, func() bool { return callCount.Load() >= 2 }, time.Second)
+	if got := callCount.Load(); got < 2 {
+		t.Fatalf("callback panic silenced second OnAck: count=%d", got)
 	}
 }

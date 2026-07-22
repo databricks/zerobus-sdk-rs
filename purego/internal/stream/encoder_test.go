@@ -137,4 +137,3 @@ func TestExtractRecordsReturnsAllBatchRecords(t *testing.T) {
 		t.Fatalf("single record: want 1 entry, got %v", got)
 	}
 }
-

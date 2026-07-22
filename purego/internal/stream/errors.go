@@ -34,3 +34,20 @@ type pauseSignal struct {
 }
 
 func (pauseSignal) Error() string { return "stream: server requested pause (close-stream signal)" }
+
+// openBudgetExceeded marks an Open attempt that exceeded the internal
+// RecoveryTimeout budget (as opposed to the caller cancelling the supervisor
+// ctx). It self-classifies as retryable so RecoveryRetries governs a stalled
+// dial — a single slow Open should not permanently kill the stream while
+// budget remains. Caller-side cancellation continues to unwind cleanly
+// because the outer ctx path is checked separately in the supervisor.
+type openBudgetExceeded struct{ cause error }
+
+func (e *openBudgetExceeded) Error() string {
+	return "stream: open budget exceeded: " + e.cause.Error()
+}
+func (e *openBudgetExceeded) Unwrap() error { return e.cause }
+
+// IsRetryable makes openBudgetExceeded a self-classifying retryable error via
+// the retryableError structural interface honoured by isRetryable.
+func (*openBudgetExceeded) IsRetryable() bool { return true }

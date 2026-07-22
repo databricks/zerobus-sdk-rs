@@ -8,8 +8,7 @@
 > Status: transport, auth (StaticHeadersProvider + per-table token cache + UC
 > OAuthHeadersProvider), and the generic proto/JSON core (`internal/stream`,
 > with `wirestream.go` as the transport seam) all exist. Still to build: the
-> public `zerobus` package and the Arrow wire path. This file is untracked;
-> decide separately whether it belongs on a branch or its own doc PR.
+> public `zerobus` package and the Arrow wire path.
 
 ---
 
@@ -380,13 +379,17 @@ purego/
         ├─▶ purego-api     public zerobus pkg: SDK, Stream interface, typed methods, options
         │
         └─▶ purego-arrow   FlightStream + Arrow encoder + record-count ackModel
-                           ── slots into the core with ZERO changes to earlier stages
+                           ── minimal core changes: adds Track / Resolve /
+                              Unacked to the ackModel seam (see §3a) so partial
+                              batch acks can slice a straddling batch on
+                              reconnect. Sender/receiver/supervisor/buffer stay
+                              as-is.
 ```
 
-Proof the sharing is real: the **core's test suite is encoding-parameterized** —
-the same ingest→flush→recover→drain tests run against proto, JSON, and (stage 4)
-Arrow through the three interfaces. If Arrow drops in at stage 4 without touching
-stages 1–3, the sharing worked.
+The core's proto/JSON test suite is JSON-first with limited proto coverage;
+extending it to run the same ingest→flush→recover→drain tests against every
+encoder is a `purego-arrow` acceptance bar, not something today's suite yet
+demonstrates.
 
 ---
 

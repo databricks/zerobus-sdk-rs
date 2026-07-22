@@ -26,8 +26,14 @@ Implemented packages:
   tokens (client-credentials flow) via `OAuthTokenProvider`, with per-table
   token caching and proactive refresh; `StaticHeadersProvider` returns a fixed
   header set for tests or externally managed credentials.
+- `internal/stream` — the generic ingestion core: bounded buffer, ack
+  watermark, sender/receiver goroutines, supervisor with per-episode retry
+  budget, graceful teardown, per-offset ack callbacks. Instantiated for
+  proto and JSON via `NewProtoJSONStream`; the same core will host the
+  Arrow wire path when that lands.
 
-Planned layers: ingest/ack state management, recovery, and the public API.
+Planned layers: the public `zerobus` package (typed ingest, functional
+options, readiness gate) and the Arrow Flight wire path.
 
 ## Regenerating the protobuf bindings
 

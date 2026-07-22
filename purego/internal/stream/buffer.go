@@ -105,17 +105,6 @@ func (b *buffer[Req]) append(offset int64, msg Req) error {
 	return nil
 }
 
-// enqueue adds an already-encoded message to the pending queue, blocking until
-// a slot is available (backpressure) or ctx is cancelled. The offset must be
-// monotonically increasing; the caller (coreStream) is responsible for that.
-// Returns ctx.Err() if ctx fires before a slot opens.
-func (b *buffer[Req]) enqueue(ctx context.Context, offset int64, msg Req) error {
-	if err := b.reserve(ctx); err != nil {
-		return err
-	}
-	return b.append(offset, msg)
-}
-
 // next blocks until a pending item is available and moves it to the in-flight
 // list, returning the item. The sender must later call discard (on ack) or
 // requeue (on reconnect) for every item returned by next.

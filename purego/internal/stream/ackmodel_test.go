@@ -39,12 +39,37 @@ func TestOffsetAckModelClassifiesCloseSignalAsPause(t *testing.T) {
 	}
 }
 
-func TestOffsetAckModelIgnoresUnknownResponse(t *testing.T) {
+func TestOffsetAckModelUnknownResponseFailsStream(t *testing.T) {
 	am := offsetAckModel{}
-	// An empty response carries neither an ack nor a close signal.
+	// An empty response carries neither an ack nor a close signal. Under the
+	// updated contract, an unknown response is a protocol error the receiver
+	// treats as terminal, not something to silently ignore.
 	kind, _, _ := am.classify(&zerobuspb.EphemeralStreamResponse{})
-	if kind != otherResponse {
-		t.Fatalf("want otherResponse for empty response, got %v", kind)
+	if kind != unknownResponse {
+		t.Fatalf("want unknownResponse for empty response, got %v", kind)
+	}
+	// A nil response is also classified as unknown.
+	if kind, _, _ := am.classify(nil); kind != unknownResponse {
+		t.Fatalf("want unknownResponse for nil response, got %v", kind)
+	}
+}
+
+// TestOffsetAckModelMissingOffsetIsMalformed verifies that an ack whose
+// durability-offset field is absent is reported as malformed rather than
+// silently defaulting to 0 (which would fake a durability signal for
+// offset 0).
+func TestOffsetAckModelMissingOffsetIsMalformed(t *testing.T) {
+	am := offsetAckModel{}
+	resp := &zerobuspb.EphemeralStreamResponse{
+		Payload: &zerobuspb.EphemeralStreamResponse_IngestRecordResponse{
+			IngestRecordResponse: &zerobuspb.IngestRecordResponse{
+				// DurabilityAckUpToOffset intentionally left nil.
+			},
+		},
+	}
+	kind, _, _ := am.classify(resp)
+	if kind != malformedResponse {
+		t.Fatalf("want malformedResponse for missing offset, got %v", kind)
 	}
 }
 

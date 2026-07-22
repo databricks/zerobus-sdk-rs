@@ -8,11 +8,11 @@ import (
 	"github.com/databricks/zerobus-sdk/purego/internal/zerobuspb"
 )
 
-// DefaultMaxPayloadBytes is the default per-message wire payload cap, matching
-// the Rust SDK: the ~10 MiB gRPC server limit minus a 64 KiB envelope headroom.
-// A single record or an aggregate batch that exceeds this budget is rejected at
-// Ingest so callers see a deterministic input error instead of a transport
-// failure that burns the recovery budget.
+// DefaultMaxPayloadBytes is the default per-message wire payload cap: the
+// ~10 MiB gRPC server limit minus a 64 KiB envelope headroom. A single
+// record or a batch whose serialized wire size exceeds this budget is
+// rejected at Ingest so callers see a deterministic input error instead of
+// a transport failure that burns the recovery budget.
 const DefaultMaxPayloadBytes = 10*1024*1024 - 64*1024
 
 // cloneBytes returns a fresh []byte with the same contents as b so buffered
@@ -55,19 +55,10 @@ type encoder[Req any] interface {
 	// return original content. A single-record message yields one entry; a batch
 	// yields all of its records so no unacked record is silently dropped.
 	decode(msg Req) [][]byte
-}
-
-// aggregateSize reports the total byte size of the caller's payload for a batch
-// (or single record). This is the pre-encode input size, not the exact wire
-// size: proto/JSON framing adds a small envelope on top. It is what the payload
-// cap compares against so oversized input is rejected deterministically at
-// Ingest rather than turning into a transport failure.
-func aggregateSize(records [][]byte) int {
-	total := 0
-	for _, r := range records {
-		total += len(r)
-	}
-	return total
+	// wireSize returns the exact serialized wire size of the message so the
+	// payload cap can be enforced against what the server will actually see,
+	// not the raw input bytes (which exclude proto framing).
+	wireSize(msg Req) int
 }
 
 // protoEncoder builds EphemeralStream payloads for proto-encoded records (raw
@@ -118,6 +109,13 @@ func (protoEncoder) encodeBatch(offset int64, records [][]byte) (encodedMsg, err
 
 func (protoEncoder) decode(msg encodedMsg) [][]byte { return extractEphemeralRecords(msg) }
 
+func (protoEncoder) wireSize(msg encodedMsg) int {
+	if msg == nil {
+		return 0
+	}
+	return proto.Size(msg)
+}
+
 // jsonEncoder builds EphemeralStream payloads for JSON-encoded records, single
 // and batched.
 type jsonEncoder struct{}
@@ -160,6 +158,13 @@ func (jsonEncoder) encodeBatch(offset int64, records [][]byte) (encodedMsg, erro
 }
 
 func (jsonEncoder) decode(msg encodedMsg) [][]byte { return extractEphemeralRecords(msg) }
+
+func (jsonEncoder) wireSize(msg encodedMsg) int {
+	if msg == nil {
+		return 0
+	}
+	return proto.Size(msg)
+}
 
 // newEncoder returns the proto/JSON encoder for the given record type.
 func newEncoder(rt zerobuspb.RecordType) (encoder[encodedMsg], error) {
