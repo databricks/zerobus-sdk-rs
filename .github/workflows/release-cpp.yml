@@ -149,7 +149,9 @@ jobs:
         shell: bash
         run: |
           root="$GITHUB_WORKSPACE"
-          out="$root/artifacts/${{ matrix.artifact_dir }}"
+          # Bundle is written under the rust/ working-directory (rust/artifacts/...)
+          # to match release-ffi.yml; the upload step's path is relative to it.
+          out="artifacts/${{ matrix.artifact_dir }}"
           mkdir -p "$out/cpp" "$out/lib"
 
           # Platform-neutral C++ SDK source (everything CMake needs to build the
@@ -192,5 +194,5 @@ jobs:
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: cpp-${{ matrix.artifact_dir }}
-          path: artifacts/${{ matrix.artifact_dir }}
+          path: rust/artifacts/${{ matrix.artifact_dir }}
           if-no-files-found: error
