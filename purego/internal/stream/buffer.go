@@ -65,6 +65,11 @@ func (b *buffer) closeDone() {
 // monotonically increasing; the caller (coreStream) is responsible for that.
 // Returns ctx.Err() if ctx fires before a slot opens.
 func (b *buffer) enqueue(ctx context.Context, offset int64, msg encodedMsg) error {
+	// Honor an already-cancelled ctx first: select picks randomly among ready
+	// cases, so a free slot could otherwise mask cancellation.
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	// Acquire a slot before touching the queue so callers block here rather than
 	// inside the mutex. ctx cancellation wakes up the select immediately.
 	select {
