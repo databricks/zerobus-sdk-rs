@@ -14,9 +14,14 @@ const defaultRefreshBuffer = 5 * time.Minute
 
 // fetchedToken is the raw result of a mint: the token string plus its
 // server-reported lifetime (nil when the OAuth server omits expires_in).
+//
+// receivedAt anchors the TTL to when the response was received, so slow
+// post-mint work (e.g. a custom slog handler) can't inflate the cached
+// lifetime. It is zero when the mint failed; the cache falls back to time.Now.
 type fetchedToken struct {
-	token     string
-	expiresIn *time.Duration
+	token      string
+	expiresIn  *time.Duration
+	receivedAt time.Time
 }
 
 // mintReason is passed to the mint callback so it can distinguish a cold start
@@ -27,6 +32,7 @@ const (
 	mintReasonColdMiss      mintReason = iota // no usable entry in cache
 	mintReasonRefresh                         // token is within the refresh buffer
 	mintReasonCacheDisabled                   // caching is off, so every call mints
+	mintReasonDirect                          // minted outside the cache via FetchToken
 )
 
 func (r mintReason) String() string {
@@ -37,6 +43,8 @@ func (r mintReason) String() string {
 		return "refresh"
 	case mintReasonCacheDisabled:
 		return "cache_disabled"
+	case mintReasonDirect:
+		return "direct"
 	default:
 		return "unknown"
 	}
@@ -44,19 +52,24 @@ func (r mintReason) String() string {
 
 // tokenKey identifies a cache entry. The client secret is stored as its
 // SHA-256 digest so the raw credential is never kept in the map: distinct
-// secrets still yield distinct keys (collision resistance), and a rotated
-// secret gets a fresh entry.
+// secrets still yield distinct keys, and a rotated secret gets a fresh entry.
+//
+// scope discriminates entries that share credentials and table but are not
+// interchangeable — different workspace audience or different issuing UC
+// endpoint. Composed by the provider; opaque to the cache.
 type tokenKey struct {
 	clientID     string
 	secretDigest [sha256.Size]byte
 	tableName    string
+	scope        string
 }
 
-func newTokenKey(clientID, clientSecret, tableName string) tokenKey {
+func newTokenKey(clientID, clientSecret, tableName, scope string) tokenKey {
 	return tokenKey{
 		clientID:     clientID,
 		secretDigest: sha256.Sum256([]byte(clientSecret)),
 		tableName:    tableName,
+		scope:        scope,
 	}
 }
 
@@ -70,11 +83,13 @@ type cachedToken struct {
 }
 
 func (c *cachedToken) isExpired() bool {
-	return time.Now().After(c.expiresAt)
+	// Expired at or after expiresAt: at the exact instant the token is already
+	// unusable, so treat it as expired rather than serving it.
+	return !time.Now().Before(c.expiresAt)
 }
 
 // newCachedToken builds an entry for a token whose TTL started at mintedAt
-// (response-receipt time, matching the Rust SDK). ttl must be positive.
+// (response-receipt time). ttl must be positive.
 //
 // The effective refresh lead time is clamped to at most half the TTL: with the
 // default 5-minute buffer a 10-minute token would otherwise be due for refresh
@@ -101,6 +116,7 @@ type tokenCacheEntry struct {
 	cached   *cachedToken // nil when no valid entry has been stored yet
 	inflight *tokenFlight // non-nil while a mint is in progress
 	minted   bool         // true after the first mint completes; guards pruning
+	pruned   bool         // true once evicted from the map; caller must re-slot
 }
 
 // tokenFlight is a single in-progress mint. The leader records its resolved
@@ -114,7 +130,7 @@ type tokenFlight struct {
 	err   error         // resolved error (nil on success)
 }
 
-// tokenCache caches OAuth tokens per (clientID, secret, tableName).
+// tokenCache caches OAuth tokens per (clientID, secret, tableName, scope).
 //
 // It is safe for concurrent use. Construct one with [newTokenCache]; the
 // methods do not guard against a nil receiver.
@@ -125,21 +141,20 @@ type tokenCache struct {
 	disabled      bool // when true, every getOrFetch mints without caching
 }
 
-// cacheOption configures a token cache at construction. See [cacheEnabled] and
-// [cacheRefreshBuffer]. Unexported until a public SDK builder needs to surface
-// these knobs.
-type cacheOption func(*tokenCache)
+// CacheOption configures a token cache at construction. See [CacheEnabled] and
+// [CacheRefreshBuffer].
+type CacheOption func(*tokenCache)
 
-// cacheEnabled toggles token caching. When disabled, every token request mints
+// CacheEnabled toggles token caching. When disabled, every token request mints
 // a fresh token instead of consulting the cache. Caching is enabled by default.
-func cacheEnabled(enabled bool) cacheOption {
+func CacheEnabled(enabled bool) CacheOption {
 	return func(c *tokenCache) { c.disabled = !enabled }
 }
 
-// cacheRefreshBuffer sets the lead time before a token's expiry at which it is
+// CacheRefreshBuffer sets the lead time before a token's expiry at which it is
 // proactively re-minted; it defaults to 5 minutes. A non-positive value is
 // ignored so the default holds.
-func cacheRefreshBuffer(d time.Duration) cacheOption {
+func CacheRefreshBuffer(d time.Duration) CacheOption {
 	return func(c *tokenCache) {
 		if d > 0 {
 			c.refreshBuffer = d
@@ -147,7 +162,7 @@ func cacheRefreshBuffer(d time.Duration) cacheOption {
 	}
 }
 
-func newTokenCache(opts ...cacheOption) *tokenCache {
+func newTokenCache(opts ...CacheOption) *tokenCache {
 	c := &tokenCache{
 		entries:       make(map[tokenKey]*tokenCacheEntry),
 		refreshBuffer: defaultRefreshBuffer,
@@ -170,7 +185,7 @@ func newTokenCache(opts ...cacheOption) *tokenCache {
 // than inheriting a cancellation it never requested.
 func (c *tokenCache) getOrFetch(
 	ctx context.Context,
-	clientID, clientSecret, tableName string,
+	clientID, clientSecret, tableName, scope string,
 	mint func(ctx context.Context, reason mintReason) (fetchedToken, error),
 ) (string, error) {
 	if c.disabled {
@@ -181,14 +196,15 @@ func (c *tokenCache) getOrFetch(
 		return fetched.token, nil
 	}
 
-	key := newTokenKey(clientID, clientSecret, tableName)
+	key := newTokenKey(clientID, clientSecret, tableName, scope)
 
 	for {
 		token, err, retry := c.tryGetOrFetch(ctx, key, mint)
 		if retry {
-			// The leader we parked on failed because its own ctx was cancelled,
-			// but ours is still live. Re-attempt rather than inheriting a cancel
-			// we never asked for; typically we become the next leader and mint.
+			// Re-attempt. Either the leader we parked on failed because its own
+			// ctx was cancelled while ours is still live (don't inherit a cancel we
+			// never asked for), or our entry was pruned out from under us before we
+			// could use it. Loop to re-slot and typically mint as the next leader.
 			continue
 		}
 		return token, err
@@ -196,9 +212,10 @@ func (c *tokenCache) getOrFetch(
 }
 
 // tryGetOrFetch makes one attempt to serve or mint a token for key. It returns
-// retry == true only when the caller parked on another goroutine's in-flight
-// mint that failed due to that leader's context cancellation while the caller's
-// own context is still live; the caller then loops to re-attempt.
+// retry == true when the caller should loop and re-attempt: either the entry it
+// slotted was pruned before it could be used, or it parked on another
+// goroutine's in-flight mint that failed due to that leader's context
+// cancellation while the caller's own context is still live.
 func (c *tokenCache) tryGetOrFetch(
 	ctx context.Context,
 	key tokenKey,
@@ -207,6 +224,15 @@ func (c *tokenCache) tryGetOrFetch(
 	entry := c.slot(key)
 
 	entry.mu.Lock()
+
+	// The entry was evicted by a concurrent prune between slot() releasing the
+	// map lock and us acquiring entry.mu. It is no longer in the map, so a new
+	// leader would attach to a stale slot while others attach to the replacement,
+	// splitting the single-flight into two mints. Re-slot instead.
+	if entry.pruned {
+		entry.mu.Unlock()
+		return "", nil, true
+	}
 
 	if entry.cached != nil && !c.needsRefresh(entry.cached) {
 		token := entry.cached.value
@@ -222,10 +248,15 @@ func (c *tokenCache) tryGetOrFetch(
 		entry.mu.Unlock()
 		select {
 		case <-flight.done:
-			// If the leader failed solely because its own context was cancelled,
-			// don't propagate that cancel to a waiter whose context is still
-			// live; signal a re-attempt so this caller can mint for itself.
-			if flight.err != nil && isContextError(flight.err) && ctx.Err() == nil {
+			// If the leader failed solely because its own caller cancelled its
+			// context, don't propagate that cancel to a waiter whose context is
+			// still live; signal a re-attempt so this caller can mint for itself.
+			//
+			// A leader mint that timed out on its own (a slow endpoint tripping a
+			// client/transport deadline) is reported retryable, not a cancellation,
+			// so it is excluded here: the waiter shares that one outcome instead of
+			// each re-minting, which is what single-flight is for.
+			if flight.err != nil && isContextError(flight.err) && !isRetryable(flight.err) && ctx.Err() == nil {
 				return "", nil, true
 			}
 			return flight.token, flight.err, false
@@ -255,12 +286,12 @@ func (c *tokenCache) tryGetOrFetch(
 		token, resErr := "", err
 		if entry.cached != nil && !entry.cached.isExpired() && isRetryable(err) {
 			// Proactive refresh failed transiently; serve the still-valid token.
+			// Caller cancellation is non-retryable, so it propagates instead.
 			token, resErr = entry.cached.value, nil
 		}
-		// Publish to waiters: writes before close(done) happen-before <-done. The
-		// mutex just brackets the entry-state transition, not the flight publish.
-		// A context error published here is what lets a live-ctx waiter re-attempt
-		// instead of inheriting our cancellation.
+		// Publish to waiters: writes before close(done) happen-before <-done.
+		// A caller-cancellation error published here lets a live-ctx waiter
+		// re-attempt instead of inheriting a cancellation it never requested.
 		flight.token, flight.err = token, resErr
 		close(flight.done)
 		entry.mu.Unlock()
@@ -269,17 +300,27 @@ func (c *tokenCache) tryGetOrFetch(
 
 	token := fetched.token
 
-	// Cache only tokens with a usable TTL. If refresh returned no expires_in,
-	// keep any existing still-valid token rather than discarding it.
-	if fetched.expiresIn != nil && *fetched.expiresIn > 0 {
-		mintedAt := time.Now()
-		entry.cached = newCachedToken(token, *fetched.expiresIn, c.refreshBuffer, mintedAt)
-	} else {
-		keepExisting := entry.cached != nil && !entry.cached.isExpired()
-		if !keepExisting {
-			entry.cached = nil
-		}
+	// Anchor the TTL to response receipt so post-receipt work (e.g. a custom
+	// logger) can't extend the cached lifetime. That same delay can consume a
+	// short TTL entirely, so a token can arrive already expired.
+	mintedAt := fetched.receivedAt
+	if mintedAt.IsZero() {
+		mintedAt = time.Now()
 	}
+	usableTTL := fetched.expiresIn != nil && *fetched.expiresIn > 0
+	alreadyExpired := usableTTL && !time.Now().Before(mintedAt.Add(*fetched.expiresIn))
+	keepExisting := entry.cached != nil && !entry.cached.isExpired()
+	switch {
+	case usableTTL && !alreadyExpired:
+		entry.cached = newCachedToken(token, *fetched.expiresIn, c.refreshBuffer, mintedAt)
+	case alreadyExpired && keepExisting:
+		// Dead mint but a still-valid token is cached: serve the cached one so
+		// the caller doesn't get a token we already know is expired.
+		token = entry.cached.value
+	case !keepExisting:
+		entry.cached = nil
+	}
+	// !usableTTL with a live cache: return the fresh token as-is, keep the cache.
 	flight.token, flight.err = token, nil
 	close(flight.done)
 	entry.mu.Unlock()
@@ -288,16 +329,32 @@ func (c *tokenCache) tryGetOrFetch(
 }
 
 // isContextError reports whether err is (or wraps) a context cancellation or
-// deadline, the signal that a mint failed because its leader's context ended
-// rather than because the token endpoint itself failed.
+// deadline. This alone does not say where the cancellation came from: an
+// http.Client.Timeout or transport deadline surfaces as a wrapped context error
+// just as a caller's own cancellation does. Use [isCallerCancellation] to tell
+// the two apart when the request context is in hand.
 func isContextError(err error) bool {
 	return errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded)
 }
 
-// invalidate drops the cached token for the given credentials and table. The
-// next getOrFetch call will re-mint from scratch.
-func (c *tokenCache) invalidate(clientID, clientSecret, tableName string) {
-	key := newTokenKey(clientID, clientSecret, tableName)
+// isCallerCancellation reports whether err is a context error that originated
+// from the caller stopping, not from the request or an SDK-internal budget.
+// Only such failures are non-retryable; a client/transport timeout or a
+// WithTimeoutCause budget stays retryable so a cached token can be served.
+// When ctx is done, context.Cause tells the caller's own cancel/deadline (plain
+// context.Canceled/DeadlineExceeded) apart from an intermediate budget cause.
+func isCallerCancellation(ctx context.Context, err error) bool {
+	if !isContextError(err) || ctx.Err() == nil {
+		return false
+	}
+	cause := context.Cause(ctx)
+	return cause == context.Canceled || cause == context.DeadlineExceeded
+}
+
+// invalidate drops the cached token for the given credentials, table, and
+// scope. The next getOrFetch call will re-mint from scratch.
+func (c *tokenCache) invalidate(clientID, clientSecret, tableName, scope string) {
+	key := newTokenKey(clientID, clientSecret, tableName, scope)
 
 	c.mu.Lock()
 	entry, ok := c.entries[key]
@@ -307,7 +364,13 @@ func (c *tokenCache) invalidate(clientID, clientSecret, tableName string) {
 		return
 	}
 	entry.mu.Lock()
-	entry.cached = nil
+	// If the entry was pruned between the map read and this lock, it is detached:
+	// a fresh entry (with no cached token) already replaced it in the map, so
+	// clearing this stale one would be a silent no-op on the live entry. The
+	// replacement starts empty, so no re-invalidation is needed.
+	if !entry.pruned {
+		entry.cached = nil
+	}
 	entry.mu.Unlock()
 }
 
@@ -342,6 +405,12 @@ func (c *tokenCache) pruneExpiredLocked() {
 			// Never evict a mint in flight, and never evict an entry whose first
 			// mint has not yet completed — its leader writes back to this entry.
 			pruneable := e.minted && e.inflight == nil && (e.cached == nil || e.cached.isExpired())
+			if pruneable {
+				// Mark before deleting: a caller that already holds a pointer to
+				// this entry (returned by slot() before it locked entry.mu) sees
+				// pruned and re-slots instead of minting against a detached entry.
+				e.pruned = true
+			}
 			e.mu.Unlock()
 			if pruneable {
 				delete(c.entries, k)

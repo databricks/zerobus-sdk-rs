@@ -21,9 +21,11 @@ Implemented packages:
   the `StreamParams.HeadersProvider`. The authorization value is sent verbatim as
   the provider formats it (e.g. `"Bearer <token>"`); the transport does not add a
   scheme prefix.
-- `internal/auth` — the `HeadersProvider` interface and `StaticHeadersProvider`
-  for fixed-header cases, plus a per-`(clientID, secret, table)` token cache
-  with single-flight minting, proactive refresh, and retryable-error fallback.
+- `internal/auth` — the `HeadersProvider` seam that feeds transport open, with
+  two implementations. `OAuthHeadersProvider` mints Unity Catalog OAuth 2.0
+  tokens (client-credentials flow) via `OAuthTokenProvider`, with per-table
+  token caching and proactive refresh; `StaticHeadersProvider` returns a fixed
+  header set for tests or externally managed credentials.
 
 Planned layers: ingest/ack state management, recovery, and the public API.
 
