@@ -104,17 +104,16 @@ struct PendingBatch {
     _permit: OwnedSemaphorePermit,
 }
 
-/// Returns the portion of a batch that needs to be replayed after recovery.
+/// Returns the batch portion not durably acknowledged, avoiding duplicate retry of an
+/// acknowledged prefix.
 ///
-/// - If batch is fully acked: returns `None`
-/// - If batch is partially acked: returns sliced batch with only un-acked records
-/// - If batch is fully un-acked: returns the full batch
+/// Returns `None` when fully acknowledged, the original batch when fully unacknowledged,
+/// or a sliced suffix when partially acknowledged.
 fn slice_batch_for_recovery(
     pb: &PendingBatch,
     acked_before_disconnect: u64,
 ) -> Option<RecordBatch> {
     if pb.start_record >= acked_before_disconnect {
-        // Fully un-acked
         return Some(pb.batch.clone());
     }
 
@@ -126,10 +125,8 @@ fn slice_batch_for_recovery(
         .saturating_sub(records_already_acked as usize);
 
     if remaining_rows == 0 {
-        // Fully acked
         None
     } else {
-        // Partially acked - slice to get un-acked portion
         debug!(
             offset_id = pb.offset_id,
             total_rows = pb.batch.num_rows(),
@@ -200,10 +197,10 @@ fn make_ipc_write_options(
 ///
 /// # Lifecycle
 ///
-/// 1. Create a stream via `ZerobusSdk::create_arrow_stream()`
-/// 2. Ingest RecordBatches with `ingest_batch()` and await acknowledgments
-/// 3. Optionally call `flush()` to ensure all batches are persisted
-/// 4. Close the stream with `close()` to release resources
+/// 1. Build a stream with `sdk.stream_builder().table(...).arrow(...).build_arrow()`
+/// 2. Queue batches with `ingest_batch()` without waiting after each call
+/// 3. Call `flush()` at durability boundaries
+/// 4. Call `close()` to flush remaining work and stop background I/O
 ///
 /// # Recovery
 ///
@@ -249,50 +246,48 @@ pub struct ZerobusArrowStream {
     pub(crate) table_properties: ArrowTableProperties,
     /// Configuration options for this stream.
     pub(crate) options: ArrowStreamConfigurationOptions,
-    /// Channel to send RecordBatches to the encoder task.
+    /// Sender to the Flight encoder; replaced or detached during recovery and close.
     batch_tx: BatchSender,
-    /// Generator for offset IDs returned from `ingest_batch` / `ingest_ipc_batch`.
+    /// Generates logical batch offsets returned to callers, distinct from wire offsets.
     offset_generator: OffsetIdGenerator,
     /// Watch channel for tracking the last acknowledged offset.
     last_ack_tx: tokio::sync::watch::Sender<Option<OffsetId>>,
     /// Receiver for the watch channel (kept alive to prevent sender errors).
     _last_ack_rx: tokio::sync::watch::Receiver<Option<OffsetId>>,
-    /// Flag indicating if the stream has been closed.
+    /// True once the stream is terminally closed and unacknowledged batches may be retrieved.
     is_closed: Arc<AtomicBool>,
-    /// Tracks resumable close teardown in progress.
+    /// Separates resumable teardown from final closure so retries skip flushing while
+    /// new ingests remain rejected.
     close_teardown_started: AtomicBool,
-    /// Preserves the initial flush error if close is cancelled during teardown.
+    /// Retains the first flush failure so resumed close calls return the same outcome.
     close_flush_error: Mutex<Option<ZerobusError>>,
-    /// Handle to the receiver task processing server responses.
+    /// Handle to the supervisor task that processes acknowledgments and recovery.
     receiver_task: Arc<Mutex<Option<tokio::task::JoinHandle<ZerobusResult<()>>>>>,
-    /// Batches that have been sent but not yet acknowledged (for recovery).
+    /// Accepted batches not yet fully acknowledged; retained for replay or retrieval.
     pending_batches: Arc<Mutex<Vec<PendingBatch>>>,
-    /// Batches that failed and couldn't be recovered.
+    /// Unacknowledged batch suffixes finalized after terminal failure or failed close.
     failed_batches: Arc<Mutex<Vec<RecordBatch>>>,
     /// Count of recovery attempts.
     recovery_attempts: Arc<AtomicU32>,
-    /// Connection details for recovery.
+    /// Endpoint retained for reconnect attempts.
     endpoint: String,
     /// TLS configuration for the connection.
     tls_config: Arc<dyn TlsConfig>,
     headers_provider: Arc<dyn HeadersProvider>,
-    /// Synchronization mutex for serializing ingest operations.
+    /// Serializes ingestion with pause, replay, and finalization transitions.
     ingest_mutex: Arc<Mutex<()>>,
     /// Bounds batches awaiting ack (`max_inflight_batches`). Capacity mirrors the
     /// `batch_tx` channel so the inline send never blocks while holding `ingest_mutex`.
     inflight: Arc<Semaphore>,
-    /// Last error received from the server (watch channel for race-free access).
-    /// When process_acks receives a server error, it sends to this channel.
-    /// When ingest_batch has a send failure, it can immediately check the current value.
+    /// Watch channel carrying the latest cross-task stream error.
     server_error_tx: watch::Sender<Option<ZerobusError>>,
     server_error_rx: watch::Receiver<Option<ZerobusError>>,
-    /// Cumulative count of records sent (for record-based ack tracking).
+    /// Cumulative record count assigned to pending ranges for the current connection.
     cumulative_records_sent: Arc<AtomicU64>,
     /// Last acknowledged cumulative record count (for recovery slicing).
     last_acked_records: Arc<AtomicU64>,
-    /// Flag indicating the stream is paused due to a server close signal.
-    /// When true, new `ingest_batch()` calls are still accepted and buffered,
-    /// but the receiver continues draining in-flight acks before triggering recovery.
+    /// Pause gate used while draining a close signal or rebuilding after failure; accepted
+    /// ingests remain pending until recovery replays or finalizes them.
     is_paused: Arc<AtomicBool>,
     /// Final value sent as the HTTP `user-agent` header on every request.
     /// Either `"zerobus-sdk-rs/<version>"` or `"zerobus-sdk-rs/<version> <application_name>"`.
@@ -311,8 +306,6 @@ pub struct ZerobusArrowStream {
 
 impl ZerobusArrowStream {
     /// Creates a new Arrow Flight stream.
-    ///
-    /// This is typically called internally by `ZerobusSdk::create_arrow_stream()`.
     ///
     /// If `recovery` is enabled in options, initial connection will be retried
     /// up to `recovery_retries` times with `recovery_backoff_ms` delay between attempts.
@@ -678,7 +671,7 @@ impl ZerobusArrowStream {
     /// The supervisor runs a loop that:
     /// 1. Processes acknowledgments from the server
     /// 2. When the ack processor returns with a retriable error, attempts recovery
-    /// 3. Continues until stream is closed or max retries exceeded
+    /// 3. Continues until the stream closes or a terminal error occurs
     #[allow(clippy::too_many_arguments)]
     fn spawn_supervisor_task(
         endpoint: String,
@@ -799,19 +792,17 @@ impl ZerobusArrowStream {
                         // Atomically pause ingest and detach the sender under
                         // ingest_mutex, so an in-flight ingest_batch either completes
                         // before the pause or observes is_paused and buffers — it never
-                        // sees is_paused=false with a detached sender. Gate is lifted
-                        // inside reconnect().
+                        // sees is_paused=false with a detached sender. Successful replay
+                        // lifts the gate; failed attempts remain paused for retry/finalization.
                         Self::pause_and_detach_sender(&ingest_mutex, &is_paused, &batch_tx).await;
 
-                        // Backoff before retry.
                         sleep(Duration::from_millis(options.recovery_backoff_ms)).await;
 
-                        // Clear the server error.
                         let _ = server_error_tx.send(None);
 
-                        // One deadline bounds the whole recovery attempt. If reconnect
-                        // fails auth, credential invalidation receives only the remaining
-                        // time rather than starting a second full timeout.
+                        // Share one deadline across reconnect and auth-rejection
+                        // invalidation so refresh receives only the remaining recovery
+                        // timeout instead of starting a second full timeout.
                         let recovery_deadline = tokio::time::Instant::now()
                             + Duration::from_millis(options.recovery_timeout_ms);
                         let reconnect_result = tokio::time::timeout_at(
@@ -841,16 +832,13 @@ impl ZerobusArrowStream {
                                 recovery_attempts.store(0, Ordering::Relaxed);
                                 // is_paused was already cleared inside reconnect().
                                 response_stream = Some(new_response_stream);
-                                // Loop continues with new stream.
                             }
                             Ok(Err(e)) => {
                                 warn!("Supervisor: Reconnection failed: {}", e);
-                                // On an auth rejection the cached token is likely expired:
-                                // invalidate it and retry so the next attempt mints a fresh
-                                // one (auth errors are otherwise non-retryable). Non-auth
-                                // errors are carried as-is and classified normally. Either
-                                // way the real error is preserved as the final cause if
-                                // retries are ultimately exhausted.
+                                // Ask the provider to invalidate cached authentication
+                                // state after an auth rejection, then retry even though
+                                // such errors are otherwise non-retryable. Preserve this
+                                // reconnect error if refresh or later recovery cannot proceed.
                                 if e.is_auth_rejection() {
                                     match tokio::time::timeout_at(
                                         recovery_deadline,
@@ -895,7 +883,6 @@ impl ZerobusArrowStream {
                         }
                     }
                     Err(error) => {
-                        // Non-retriable error or recovery disabled.
                         error!("Supervisor: Non-retriable error, closing stream: {}", error);
                         // Publish the terminal error before finalization (so a waiter
                         // checking is_closed right after it already sees the real error;
@@ -913,10 +900,10 @@ impl ZerobusArrowStream {
                         )
                         .await;
                         let _ = server_error_tx.send(Some(error.clone()));
-                        // Drop cached credentials on a terminal auth rejection so the next
-                        // stream re-mints. The stream is already finalized and waiters have
-                        // the real error; bound this untrusted callback so the supervisor
-                        // task cannot remain alive indefinitely.
+                        // Ask the provider to invalidate cached authentication state after
+                        // a terminal rejection. The stream is already finalized and waiters
+                        // have the real error; bound the callback so the supervisor cannot
+                        // remain alive indefinitely.
                         if error.is_auth_rejection() {
                             if tokio::time::timeout(
                                 Duration::from_millis(options.recovery_timeout_ms),
@@ -940,11 +927,9 @@ impl ZerobusArrowStream {
 
     /// Reconnects to the server and replays pending batches.
     ///
-    /// Holds `ingest_mutex` for the entire replay and clears `is_paused` before
-    /// releasing the mutex. This guarantees that any `ingest_batch` caller that
-    /// acquires the mutex after this function returns sees `is_paused = false` and
-    /// sends normally — there is no window in which a batch can be buffered but
-    /// never sent.
+    /// On successful replay, holds `ingest_mutex` until `is_paused` is cleared so
+    /// subsequently admitted ingests send normally. Error paths remain paused for
+    /// supervisor retry or finalization.
     #[allow(clippy::too_many_arguments)]
     async fn reconnect(
         endpoint: &str,
@@ -1193,7 +1178,8 @@ impl ZerobusArrowStream {
         *tx = None;
     }
 
-    /// Moves all pending batches to the failed batches list.
+    /// Moves each pending batch's unacknowledged suffix to the failed list, dropping
+    /// fully acknowledged batches.
     async fn move_pending_to_failed(
         pending_batches: &Arc<Mutex<Vec<PendingBatch>>>,
         failed_batches: &Arc<Mutex<Vec<RecordBatch>>>,
@@ -1366,14 +1352,11 @@ impl ZerobusArrowStream {
                                 }
                             }
 
-                            // Find and remove batches that are fully acknowledged.
-                            // A batch is fully acked when ack_up_to_records >= batch.end_record.
                             let mut max_acked_offset: Option<OffsetId> = None;
                             {
                                 let mut pending = pending_batches.lock().await;
                                 pending.retain(|pb| {
                                     if acked_records >= pb.end_record {
-                                        // Batch is fully acknowledged
                                         max_acked_offset = Some(
                                             max_acked_offset
                                                 .map_or(pb.offset_id, |o| o.max(pb.offset_id)),
@@ -1385,7 +1368,6 @@ impl ZerobusArrowStream {
                                 });
                             }
 
-                            // Notify waiters of the highest acknowledged offset.
                             if let Some(offset) = max_acked_offset {
                                 let _ = last_ack_tx.send(Some(offset));
                             }
@@ -1396,8 +1378,8 @@ impl ZerobusArrowStream {
                     }
                 }
                 Ok(Some(Err(e))) => {
-                    // During graceful close, errors are expected (server closes after grace period).
-                    // Return retriable error to trigger recovery.
+                    // A stream error while paused ends the graceful-close wait and
+                    // triggers recovery.
                     if pause_deadline.is_some() {
                         info!(
                             "Stream error during graceful close period, triggering recovery: {}",
@@ -1456,10 +1438,11 @@ impl ZerobusArrowStream {
 
     /// Ingests a single Arrow RecordBatch into the stream.
     ///
-    /// Queues the batch for transmission and returns its assigned offset. This applies
-    /// backpressure: it blocks once `max_inflight_batches` batches are awaiting
-    /// acknowledgment, resuming when an ack frees a slot. Use `wait_for_offset()` to
-    /// explicitly wait for server acknowledgment of this batch when needed.
+    /// Queues the batch and returns its assigned offset. If
+    /// `max_inflight_batches` accepted batches are still pending (including batches
+    /// buffered during recovery), this waits until full acknowledgment or finalization
+    /// releases a permit. Use `wait_for_offset()` only when this specific batch must be
+    /// confirmed before continuing.
     ///
     /// # Arguments
     ///
@@ -1499,7 +1482,6 @@ impl ZerobusArrowStream {
             )));
         }
 
-        // Validate schema matches.
         if batch.schema() != self.table_properties.schema {
             return Err(ZerobusError::InvalidArgument(format!(
                 "RecordBatch schema does not match stream schema. Expected: {:?}, Got: {:?}",
@@ -1519,10 +1501,9 @@ impl ZerobusArrowStream {
 
         // Acquire the backpressure permit BEFORE ingest_mutex: reconnect() holds that
         // mutex, so blocking on a permit while holding it could stall recovery.
-        // `inflight` is never closed, so the map_err is unreachable defensive code; a
-        // close during the wait is handled by the is_closed re-check below (not by
-        // semaphore closure), and permit-blocked ingests wake when acks or
-        // move_pending_to_failed free permits.
+        // `inflight` is never closed, so the map_err is unreachable defensive code.
+        // Permit waiters wake when acknowledgments or finalization release pending
+        // permits, then re-check both lifecycle flags below.
         let permit = Arc::clone(&self.inflight)
             .acquire_owned()
             .await
@@ -1530,7 +1511,6 @@ impl ZerobusArrowStream {
                 ZerobusError::StreamClosedError(tonic::Status::internal("Stream is closed"))
             })?;
 
-        // Serialize ingestion operations.
         let _guard = self.ingest_mutex.lock().await;
 
         // May have closed while we blocked on the permit; returning drops it.
@@ -1549,7 +1529,6 @@ impl ZerobusArrowStream {
             .fetch_add(record_count, Ordering::Relaxed);
         let end_record = start_record + record_count;
 
-        // Store in pending batches for recovery with record range for ack matching.
         {
             let mut pending = self.pending_batches.lock().await;
             pending.push(PendingBatch {
@@ -1561,8 +1540,8 @@ impl ZerobusArrowStream {
             });
         }
 
-        // When paused (graceful close or pre-reconnect), buffer the batch.
-        // It will be replayed by reconnect() after recovery.
+        // While paused for a close signal or recovery handoff, retain the batch as
+        // pending; successful recovery replays it and terminal recovery finalizes it.
         if self.is_paused.load(Ordering::Relaxed) {
             return Ok(offset_id);
         }
@@ -1575,10 +1554,10 @@ impl ZerobusArrowStream {
         let sender = match sender {
             Some(s) => s,
             None => {
-                // Safe callers cannot reach a detached sender: close teardown is rejected
-                // by the lifecycle checks above, and recovery detaches the sender under
-                // ingest_mutex (`pause_and_detach_sender`). Keep this fallback for FFI
-                // callers that violate their close/ingest serialization contract.
+                // Correct callers cannot reach a detached sender: lifecycle checks reject
+                // close teardown, and recovery detaches under ingest_mutex. Retain this
+                // fallback for unsupported concurrent close/ingest across foreign
+                // boundaries, preferring a known terminal cause.
                 if let Some(server_error) = self.server_error_rx.borrow().clone() {
                     return Err(server_error);
                 }
@@ -1644,7 +1623,6 @@ impl ZerobusArrowStream {
         let batch = materialize_ipc(&ipc_bytes)
             .map_err(|e| ZerobusError::InvalidArgument(format!("Invalid Arrow IPC bytes: {e}")))?;
 
-        // Validate schema matches the stream schema.
         if batch.schema() != self.table_properties.schema {
             return Err(ZerobusError::InvalidArgument(format!(
                 "IPC batch schema does not match stream schema. Expected: {:?}, Got: {:?}",
@@ -1669,9 +1647,8 @@ impl ZerobusArrowStream {
 
         let wait_future = async {
             loop {
-                // Check the ack watermark FIRST so a target acknowledged just before
-                // closure/error resolves as Ok(()) — an ack must win over closure to avoid
-                // a spurious error (and a duplicate retry of a durable batch).
+                // Check the published watermark first so an acknowledged target wins over
+                // concurrently visible closure/error, avoiding a duplicate retry.
                 let current_ack = *offset_rx.borrow_and_update();
                 if let Some(ack_offset) = current_ack {
                     if ack_offset >= offset_to_wait {
@@ -1691,9 +1668,9 @@ impl ZerobusArrowStream {
                 }
 
                 // Only after confirming the target isn't acked, honor terminal/teardown
-                // state. Re-read first because an ack can land between the read above and
-                // observing that state; an acked target must still resolve Ok. Otherwise
-                // prefer the real terminal error over a generic one.
+                // state. Re-read first because the watermark can be published between the
+                // read above and observing that state. Otherwise prefer the real terminal
+                // error over a generic one.
                 if self.is_closed.load(Ordering::Relaxed)
                     || self.close_teardown_started.load(Ordering::Acquire)
                 {
@@ -1713,9 +1690,8 @@ impl ZerobusArrowStream {
                     )));
                 }
 
-                // Wait for either watch to change, then loop to re-check the watermark
-                // (ack precedence) and closure. Neither arm returns directly, so a late
-                // ack still wins over a concurrently-published error.
+                // Neither arm returns directly. After either watch changes, loop so the
+                // watermark takes precedence when both updates are visible.
                 tokio::select! {
                     result = offset_rx.changed() => {
                         if result.is_err() {
@@ -1745,17 +1721,18 @@ impl ZerobusArrowStream {
 
     /// Flushes all currently pending batches and waits for their acknowledgments.
     ///
-    /// This method captures the current highest offset and waits until all batches up to
-    /// that offset have been acknowledged by the server. Batches ingested during the flush
-    /// operation are not included in this flush.
+    /// Snapshots the highest assigned offset when it begins and waits through that offset.
+    /// Offsets assigned after the snapshot are not included.
     ///
     /// # Returns
     ///
-    /// `Ok(())` when all pending batches at the time of the call have been acknowledged.
+    /// `Ok(())` when the snapshotted offset has been acknowledged, including when that
+    /// acknowledgment was published just before closure.
     ///
     /// # Errors
     ///
-    /// * `StreamClosedError` - If the stream is closed or times out
+    /// Returns the terminal stream/recovery error when the target remains unacknowledged,
+    /// or `StreamClosedError` when teardown starts or the wait times out.
     ///
     /// # Examples
     ///
@@ -1802,11 +1779,10 @@ impl ZerobusArrowStream {
         self.wait_for_offset_internal(target_offset, "Flush").await
     }
 
-    /// Waits for server acknowledgment of a specific offset.
+    /// Waits asynchronously for the cumulative acknowledgment watermark to reach an offset.
     ///
-    /// This method blocks until the server has acknowledged the batch at the
-    /// specified offset. Use this with offsets returned from `ingest_batch()` to
-    /// explicitly control when to wait for acknowledgments.
+    /// After queueing multiple batches, wait only for the final offset (which implies all
+    /// earlier offsets) or prefer `flush()`.
     ///
     /// # Arguments
     ///
@@ -1818,7 +1794,8 @@ impl ZerobusArrowStream {
     ///
     /// # Errors
     ///
-    /// * `StreamClosedError` - If the stream is closed or times out while waiting
+    /// Returns the terminal stream/recovery error while the target remains unacknowledged,
+    /// or `StreamClosedError` when teardown starts or the wait times out.
     ///
     /// # Examples
     ///
@@ -1826,15 +1803,12 @@ impl ZerobusArrowStream {
     /// # use databricks_zerobus_ingest_sdk::*;
     /// # use arrow_array::RecordBatch;
     /// # async fn example(stream: ZerobusArrowStream, batches: Vec<RecordBatch>) -> Result<(), ZerobusError> {
-    /// // Ingest multiple batches and collect their offsets
-    /// let mut offsets = Vec::new();
+    /// // Queue multiple batches, then wait once for the final cumulative offset.
+    /// let mut last_offset = None;
     /// for batch in batches {
-    ///     let offset = stream.ingest_batch(batch).await?;
-    ///     offsets.push(offset);
+    ///     last_offset = Some(stream.ingest_batch(batch).await?);
     /// }
-    ///
-    /// // Wait for specific offsets
-    /// for offset in offsets {
+    /// if let Some(offset) = last_offset {
     ///     stream.wait_for_offset(offset).await?;
     /// }
     /// println!("All batches acknowledged");
@@ -1846,25 +1820,27 @@ impl ZerobusArrowStream {
             .await
     }
 
-    /// Closes the stream gracefully after flushing all pending batches.
+    /// Flushes pending work, stops background I/O, and retains unacknowledged batches for
+    /// retrieval.
     ///
-    /// This method first calls `flush()` to ensure all pending batches are acknowledged,
-    /// then shuts down the stream and releases all resources.
+    /// While the stream is active, the first call attempts one flush before teardown. If
+    /// teardown is interrupted, a later call resumes it without flushing again.
     ///
     /// # Returns
     ///
-    /// `Ok(())` if the stream was closed successfully after flushing all batches.
+    /// `Ok(())` after clean teardown.
     ///
     /// # Errors
     ///
-    /// Returns any errors from the flush operation. If flush fails, some batches
-    /// may not have been acknowledged. Use `get_unacked_batches()` to retrieve them.
+    /// Returns the initial flush error or a background terminal error. Teardown still
+    /// completes; use `get_unacked_batches()` to retrieve unacknowledged batches.
     ///
     /// # Cancellation safety
     ///
-    /// Cancelling while the initial flush is pending leaves the stream open. Once teardown
-    /// starts, further ingests are rejected. If finalization has not completed, call
-    /// `close()` again to resume teardown without repeating the flush.
+    /// Cancelling before teardown begins does not itself close the stream, although an
+    /// independent terminal failure may do so. Once teardown starts, further ingests are
+    /// rejected; call `close()` again to resume incomplete teardown without repeating a
+    /// completed flush.
     ///
     /// # Examples
     ///
@@ -1898,9 +1874,8 @@ impl ZerobusArrowStream {
             "Closing Arrow Flight stream"
         );
 
-        // Flush exactly once, before teardown becomes irreversible. Once Closing is
-        // published, a cancelled close can be retried without waiting on a dead
-        // supervisor; the original flush error is retained for the resumed call.
+        // Retain a completed flush result before publishing teardown so retries after
+        // teardown starts skip another flush and return the same outcome.
         let flush_result = if close_teardown_started {
             match self.close_flush_error.lock().await.clone() {
                 Some(error) => Err(error),
@@ -1951,8 +1926,9 @@ impl ZerobusArrowStream {
         }
 
         // Finalize under ingest_mutex so the pending drain is serialized with
-        // ingest_batch. close_teardown_started keeps an interrupted teardown resumable
-        // until finalization publishes closure.
+        // ingest_batch. Keep close_teardown_started set while finalization is in flight,
+        // then clear it immediately afterward; cancellation before completion remains
+        // resumable even if closure was already published.
         Self::finalize_closed(
             &self.ingest_mutex,
             &self.is_closed,
@@ -1978,7 +1954,8 @@ impl ZerobusArrowStream {
     ///
     /// # Errors
     ///
-    /// * `InvalidStateError` - If the stream is still active (call `close()` first).
+    /// * `InvalidStateError` - If closure has not been finalized, including after
+    ///   interrupted teardown; call `close()` again first.
     ///
     /// # Examples
     ///
@@ -2023,7 +2000,9 @@ impl ZerobusArrowStream {
         Ok(self.failed_batches.lock().await.clone())
     }
 
-    /// Returns whether the stream has been closed.
+    /// Returns true once terminal finalization publishes closure. Interrupted teardown
+    /// remains false until finalization begins; cancellation during finalization may leave
+    /// this true while `close_teardown_started` marks teardown as resumable.
     pub fn is_closed(&self) -> bool {
         self.is_closed.load(Ordering::Relaxed)
     }
@@ -2085,7 +2064,6 @@ impl ZerobusArrowStream {
         &self.options
     }
 
-    /// Returns the headers provider for this stream (for recreation).
     pub(crate) fn headers_provider(&self) -> Arc<dyn HeadersProvider> {
         Arc::clone(&self.headers_provider)
     }
@@ -2094,9 +2072,8 @@ impl ZerobusArrowStream {
 impl Drop for ZerobusArrowStream {
     fn drop(&mut self) {
         self.is_closed.store(true, Ordering::Relaxed);
-        // Hard-abort the background supervisor task to prevent a zombie task. This does
-        // not drain pending batches into the failed set, so to retrieve un-acked batches
-        // call close() (or let recovery reach a terminal failure) before dropping.
+        // Best-effort abort the supervisor. Drop does not preserve pending batches for
+        // retrieval; call close() or let recovery reach terminal finalization first.
         if let Ok(mut guard) = self.receiver_task.try_lock() {
             if let Some(handle) = guard.take() {
                 handle.abort();
@@ -2212,8 +2189,8 @@ mod tests {
         );
     }
 
-    /// Happy path: with an open receiver, all batches are replayed and the pending set
-    /// is rebuilt with contiguous, connection-relative ranges.
+    /// With an open receiver, both batches remain pending, replay in order, and reset the
+    /// connection-relative counters.
     #[tokio::test]
     async fn replay_success_reinstalls_and_sends_all() {
         let schema = one_col_schema();
@@ -2236,7 +2213,6 @@ mod tests {
         assert_eq!(cumulative.load(Ordering::Relaxed), 5);
         assert_eq!(last_acked.load(Ordering::Relaxed), 0);
 
-        // Both batches were sent, in order.
         let first = rx.try_recv().expect("first replay batch");
         assert_eq!(first.unwrap().num_rows(), 3);
         let second = rx.try_recv().expect("second replay batch");
