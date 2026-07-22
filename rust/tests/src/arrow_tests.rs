@@ -312,6 +312,73 @@ mod arrow_flight_tests {
             Ok(())
         }
 
+        /// close() must surface a background terminal failure rather than returning Ok(()),
+        /// so the ingest-then-close() pattern doesn't hide failed batches.
+        #[tokio::test]
+        async fn test_close_returns_terminal_error_after_background_failure(
+        ) -> Result<(), Box<dyn std::error::Error>> {
+            setup_tracing();
+            info!("Starting test_close_returns_terminal_error_after_background_failure");
+
+            let (mock_server, server_url) = start_mock_flight_server().await?;
+            let schema = create_test_arrow_schema();
+
+            // A is acked; B then triggers a terminal error that the supervisor closes on.
+            mock_server
+                .inject_responses(
+                    TABLE_NAME,
+                    vec![
+                        MockFlightResponse::BatchAck {
+                            ack_up_to_offset: 0,
+                            delay_ms: 0,
+                            ack_up_to_records: 1,
+                        },
+                        MockFlightResponse::Error {
+                            status: tonic::Status::invalid_argument("boom"),
+                            delay_ms: 0,
+                        },
+                    ],
+                )
+                .await;
+
+            let sdk = ZerobusSdk::builder()
+                .endpoint(server_url.clone())
+                .unity_catalog_url("https://mock-uc.com")
+                .tls_config(Arc::new(NoTlsConfig))
+                .build()?;
+
+            let mut stream = sdk
+                .stream_builder()
+                .table(TABLE_NAME)
+                .headers_provider(Arc::new(TestHeadersProvider::default()))
+                .arrow(schema.clone())
+                .recovery(false)
+                .build_arrow()
+                .await?;
+
+            let batch_a = create_test_record_batch(schema.clone(), vec![1], vec![Some("a")]);
+            stream.ingest_batch(batch_a).await?;
+            let batch_b = create_test_record_batch(schema.clone(), vec![2], vec![Some("b")]);
+            let b_offset = stream.ingest_batch(batch_b).await?;
+
+            // Drive the supervisor to its terminal failure (B is never acked).
+            let _ = stream.wait_for_offset(b_offset).await;
+
+            // close() now runs against an already-closed stream and must surface the real
+            // terminal error instead of Ok(()).
+            let err = stream
+                .close()
+                .await
+                .expect_err("close() must surface the background terminal failure");
+            assert!(
+                err.to_string().contains("boom"),
+                "close() must return the real terminal error, got: {}",
+                err
+            );
+
+            Ok(())
+        }
+
         #[tokio::test]
         async fn test_flush_waits_for_acks() -> Result<(), Box<dyn std::error::Error>> {
             setup_tracing();

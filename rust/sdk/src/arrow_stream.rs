@@ -1788,6 +1788,13 @@ impl ZerobusArrowStream {
     #[instrument(level = "debug", skip_all, fields(table_name = %self.table_properties.table_name))]
     pub async fn close(&mut self) -> ZerobusResult<()> {
         if self.is_closed.load(Ordering::Relaxed) {
+            // Already closed. If the supervisor closed it on a terminal failure, surface
+            // that error rather than reporting success — otherwise the common
+            // ingest-then-close() pattern would hide failed batches (retrievable via
+            // get_unacked_batches()). A clean prior close() has no stored error.
+            if let Some(server_error) = self.server_error_rx.borrow().clone() {
+                return Err(server_error);
+            }
             return Ok(());
         }
 
@@ -1860,12 +1867,10 @@ impl ZerobusArrowStream {
     /// ```no_run
     /// # use databricks_zerobus_ingest_sdk::*;
     /// # async fn example(sdk: ZerobusSdk, mut stream: ZerobusArrowStream) -> Result<(), ZerobusError> {
-    /// // Do NOT treat close() == Ok(()) as "all acknowledged": if a background terminal
-    /// // failure already closed the stream, close() early-returns Ok(()). Always inspect
-    /// // the un-acked batches after closing.
-    /// stream.close().await.ok();
-    /// let failed_batches = stream.get_unacked_batches().await?;
-    /// if !failed_batches.is_empty() {
+    /// // close() returns Err on a failed flush or a background terminal failure; either
+    /// // way, inspect the un-acked batches to retry them.
+    /// if stream.close().await.is_err() {
+    ///     let failed_batches = stream.get_unacked_batches().await?;
     ///     println!("Retrying {} un-acked batches", failed_batches.len());
     ///     // recreate_arrow_stream() re-ingests the un-acked batches on the new stream,
     ///     // so just flush it — don't re-ingest them yourself.
