@@ -591,8 +591,7 @@ mod arrow_flight_tests {
                 "unacked retrieval is allowed only after Closed"
             );
 
-            let resumed =
-                tokio::time::timeout(std::time::Duration::from_secs(1), stream.close())
+            let resumed = tokio::time::timeout(std::time::Duration::from_secs(1), stream.close())
                 .await
                 .expect("resumed close must skip flush and finish promptly")
                 .expect_err("resumed close must return the stored flush error");
