@@ -1884,8 +1884,7 @@ impl ZerobusArrowStream {
         } else {
             let result = self.flush().await;
             *self.close_flush_error.lock().await = result.as_ref().err().cloned();
-            self.close_teardown_started
-                .store(true, Ordering::Release);
+            self.close_teardown_started.store(true, Ordering::Release);
             result
         };
         if let Err(e) = &flush_result {
@@ -1937,8 +1936,7 @@ impl ZerobusArrowStream {
             &self.last_acked_records,
         )
         .await;
-        self.close_teardown_started
-            .store(false, Ordering::Release);
+        self.close_teardown_started.store(false, Ordering::Release);
 
         flush_result
     }

@@ -562,7 +562,10 @@ mod arrow_flight_tests {
             .expect("close must reach the finalization barrier");
             drop(close_future);
 
-            assert!(!stream.is_closed(), "cancelled teardown is not finalized yet");
+            assert!(
+                !stream.is_closed(),
+                "cancelled teardown is not finalized yet"
+            );
             let batch = create_test_record_batch(schema, vec![1], vec![Some("late")]);
             assert!(
                 stream.ingest_batch(batch).await.is_err(),
@@ -1028,7 +1031,10 @@ mod arrow_flight_tests {
                 "must surface the original auth rejection, got: {}",
                 err
             );
-            assert!(stream.is_closed(), "stream must close after invalidation timeout");
+            assert!(
+                stream.is_closed(),
+                "stream must close after invalidation timeout"
+            );
             assert_eq!(
                 invalidations.load(std::sync::atomic::Ordering::SeqCst),
                 1,
@@ -1113,7 +1119,10 @@ mod arrow_flight_tests {
                 1,
                 "terminal auth cleanup should be attempted once"
             );
-            assert!(stream.is_closed(), "terminal auth failure must close the stream");
+            assert!(
+                stream.is_closed(),
+                "terminal auth failure must close the stream"
+            );
 
             Ok(())
         }
