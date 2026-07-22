@@ -149,8 +149,6 @@ jobs:
         shell: bash
         run: |
           root="$GITHUB_WORKSPACE"
-          # Bundle is written under the rust/ working-directory (rust/artifacts/...)
-          # to match release-ffi.yml; the upload step's path is relative to it.
           out="artifacts/${{ matrix.artifact_dir }}"
           mkdir -p "$out/cpp" "$out/lib"
 
