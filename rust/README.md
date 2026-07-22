@@ -20,6 +20,7 @@ A high-performance Rust client for streaming data ingestion into Databricks Delt
   - [7. Close the Stream](#7-close-the-stream)
 - [Client-side warnings](#client-side-warnings)
 - [Configuration Options](#configuration-options)
+- [Proxy Configuration](#proxy-configuration)
 - [Error Handling](#error-handling)
 - [Examples](#examples)
 - [Best Practices](#best-practices)
@@ -780,6 +781,28 @@ let stream = sdk
     .build()
     .await?;
 ```
+
+## Proxy Configuration
+
+Standard and Arrow Flight streams use the same proxy policy for initial connections,
+automatic recovery, and stream recreation. By default, the SDK uses the first non-empty
+proxy variable in this order:
+
+1. `grpc_proxy`, then `GRPC_PROXY`
+2. `https_proxy`, then `HTTPS_PROXY`
+3. `http_proxy`, then `HTTP_PROXY`
+
+Set `no_grpc_proxy`/`NO_GRPC_PROXY`, falling back to `no_proxy`/`NO_PROXY`, to a
+comma-separated list of host suffixes that should connect directly. `*` bypasses the
+proxy for every host. Both `http://` and `https://` CONNECT proxies are supported;
+HTTPS proxy certificates are validated with the system trust store.
+
+For application-specific routing, install a `ConnectorFactory` with
+`ZerobusSdkBuilder::connector_factory`. A caller-supplied factory completely replaces
+environment discovery and must implement any desired no-proxy rules itself. Returning
+`None` connects directly; returning a `ProxyConnector` created with
+`ProxyConnector::new` uses that proxy. The selected factory is retained for every Arrow
+replacement channel.
 
 ## Error Handling
 
