@@ -19,7 +19,9 @@ use arrow_flight::{FlightClient, PutResult};
 use arrow_ipc::writer::IpcWriteOptions;
 use bytes::Bytes;
 use futures::{Stream, StreamExt};
-use tokio::sync::{mpsc, watch, Mutex};
+#[cfg(feature = "test-hooks")]
+use tokio::sync::Notify;
+use tokio::sync::{mpsc, watch, Mutex, OwnedSemaphorePermit, Semaphore};
 use tokio::time::{sleep, Duration};
 use tokio_retry::strategy::FixedInterval;
 use tokio_retry::RetryIf;
@@ -41,6 +43,27 @@ use crate::ZerobusResult;
 /// Type alias for the batch sender channel, wrapped for thread-safe sharing.
 type BatchSender = Arc<Mutex<Option<mpsc::Sender<Result<RecordBatch, FlightError>>>>>;
 
+/// Test-only barrier used to pause `reconnect` at a precise point — the new connection
+/// is established but pending ranges are not yet rebuilt — so a test can schedule a
+/// concurrent ingest or `close()`.
+#[cfg(feature = "test-hooks")]
+type ReconnectRebuildGate = Arc<Mutex<Option<ReconnectRebuildBarrier>>>;
+
+/// Paired notifications for [`ReconnectRebuildGate`]: `reached` fires when reconnect
+/// hits the barrier; `proceed` releases it (or a test aborts via `close()` instead).
+#[cfg(feature = "test-hooks")]
+#[derive(Clone)]
+struct ReconnectRebuildBarrier {
+    reached: Arc<Notify>,
+    proceed: Arc<Notify>,
+}
+
+/// Test-only gate: when armed, `process_acks` fires the notify right after applying a
+/// non-empty ack (i.e. after storing `last_acked_records`), letting a test confirm a
+/// partial ack has landed before it proceeds.
+#[cfg(feature = "test-hooks")]
+type AckAppliedGate = Arc<Mutex<Option<Arc<Notify>>>>;
+
 /// Properties for an Arrow Flight ingestion table.
 ///
 /// **Do not construct this directly.** Configure Arrow streams via the builder API:
@@ -56,7 +79,6 @@ pub(crate) struct ArrowTableProperties {
 }
 
 /// A pending batch waiting for acknowledgment.
-#[derive(Clone)]
 struct PendingBatch {
     batch: RecordBatch,
     /// Offset ID assigned by the client for this batch.
@@ -66,6 +88,8 @@ struct PendingBatch {
     /// Cumulative record count after this batch.
     /// Batch is fully acked when `acked_records >= end_record`.
     end_record: u64,
+    /// Backpressure permit; dropping it frees one `max_inflight_batches` slot.
+    _permit: OwnedSemaphorePermit,
 }
 
 /// Returns the portion of a batch that needs to be replayed after recovery.
@@ -238,6 +262,9 @@ pub struct ZerobusArrowStream {
     headers_provider: Arc<dyn HeadersProvider>,
     /// Synchronization mutex for serializing ingest operations.
     ingest_mutex: Arc<Mutex<()>>,
+    /// Bounds batches awaiting ack (`max_inflight_batches`). Capacity mirrors the
+    /// `batch_tx` channel so the inline send never blocks while holding `ingest_mutex`.
+    inflight: Arc<Semaphore>,
     /// Last error received from the server (watch channel for race-free access).
     /// When process_acks receives a server error, it sends to this channel.
     /// When ingest_batch has a send failure, it can immediately check the current value.
@@ -255,6 +282,12 @@ pub struct ZerobusArrowStream {
     /// Either `"zerobus-sdk-rs/<version>"` or `"zerobus-sdk-rs/<version> <application_name>"`.
     /// Re-applied to each fresh Channel built during recovery.
     sdk_identifier: Arc<str>,
+    /// Test seam (see [`ReconnectRebuildGate`]); compiled only under `test-hooks`.
+    #[cfg(feature = "test-hooks")]
+    reconnect_rebuild_gate: ReconnectRebuildGate,
+    /// Test seam (see [`AckAppliedGate`]); compiled only under `test-hooks`.
+    #[cfg(feature = "test-hooks")]
+    ack_applied_gate: AckAppliedGate,
 }
 
 impl ZerobusArrowStream {
@@ -273,6 +306,13 @@ impl ZerobusArrowStream {
         options: ArrowStreamConfigurationOptions,
         sdk_identifier: Arc<str>,
     ) -> ZerobusResult<Self> {
+        // A zero bound would deadlock every ingest and panic the zero-capacity channel.
+        if options.max_inflight_batches == 0 {
+            return Err(ZerobusError::InvalidArgument(
+                "max_inflight_batches must be greater than 0".to_string(),
+            ));
+        }
+
         let (last_ack_tx, _last_ack_rx) = tokio::sync::watch::channel(None);
         let is_closed = Arc::new(AtomicBool::new(false));
         let pending_batches = Arc::new(Mutex::new(Vec::new()));
@@ -283,6 +323,8 @@ impl ZerobusArrowStream {
         let cumulative_records_sent = Arc::new(AtomicU64::new(0));
         let last_acked_records = Arc::new(AtomicU64::new(0));
         let is_paused = Arc::new(AtomicBool::new(false));
+        // Capacity mirrors the batch_tx channel so a permit holder always has a slot.
+        let inflight = Arc::new(Semaphore::new(options.max_inflight_batches));
 
         let (server_error_tx, server_error_rx) = watch::channel(None);
 
@@ -302,12 +344,17 @@ impl ZerobusArrowStream {
             tls_config,
             headers_provider,
             ingest_mutex: Arc::new(Mutex::new(())),
+            inflight,
             server_error_tx,
             server_error_rx,
             cumulative_records_sent,
             last_acked_records,
             is_paused,
             sdk_identifier,
+            #[cfg(feature = "test-hooks")]
+            reconnect_rebuild_gate: Arc::new(Mutex::new(None)),
+            #[cfg(feature = "test-hooks")]
+            ack_applied_gate: Arc::new(Mutex::new(None)),
         };
 
         // Initialize the connection with retry logic.
@@ -384,6 +431,10 @@ impl ZerobusArrowStream {
             Arc::clone(&stream.ingest_mutex),
             response_stream,
             Arc::clone(&stream.sdk_identifier),
+            #[cfg(feature = "test-hooks")]
+            Arc::clone(&stream.reconnect_rebuild_gate),
+            #[cfg(feature = "test-hooks")]
+            Arc::clone(&stream.ack_applied_gate),
         );
 
         {
@@ -625,6 +676,8 @@ impl ZerobusArrowStream {
         ingest_mutex: Arc<Mutex<()>>,
         initial_response_stream: Pin<Box<dyn Stream<Item = Result<PutResult, FlightError>> + Send>>,
         sdk_identifier: Arc<str>,
+        #[cfg(feature = "test-hooks")] reconnect_rebuild_gate: ReconnectRebuildGate,
+        #[cfg(feature = "test-hooks")] ack_applied_gate: AckAppliedGate,
     ) -> tokio::task::JoinHandle<ZerobusResult<()>> {
         tokio::spawn(async move {
             let ack_timeout = Duration::from_millis(options.server_lack_of_ack_timeout_ms);
@@ -647,6 +700,8 @@ impl ZerobusArrowStream {
                     Arc::clone(&last_acked_records),
                     Arc::clone(&is_paused),
                     &options,
+                    #[cfg(feature = "test-hooks")]
+                    Arc::clone(&ack_applied_gate),
                 )
                 .await;
 
@@ -685,20 +740,18 @@ impl ZerobusArrowStream {
                             "Supervisor: Attempting recovery after retriable error"
                         );
 
-                        // Pause ingest before reconnect; gate is lifted inside reconnect().
-                        is_paused.store(true, Ordering::Relaxed);
+                        // Atomically pause ingest and detach the sender under
+                        // ingest_mutex, so an in-flight ingest_batch either completes
+                        // before the pause or observes is_paused and buffers — it never
+                        // sees is_paused=false with a detached sender. Gate is lifted
+                        // inside reconnect().
+                        Self::pause_and_detach_sender(&ingest_mutex, &is_paused, &batch_tx).await;
 
                         // Backoff before retry.
                         sleep(Duration::from_millis(options.recovery_backoff_ms)).await;
 
                         // Clear the server error.
                         let _ = server_error_tx.send(None);
-
-                        // Close old sender.
-                        {
-                            let mut tx_guard = batch_tx.lock().await;
-                            *tx_guard = None;
-                        }
 
                         // Create new connection.
                         let reconnect_result = tokio::time::timeout(
@@ -716,6 +769,8 @@ impl ZerobusArrowStream {
                                 &sdk_identifier,
                                 &ingest_mutex,
                                 &is_paused,
+                                #[cfg(feature = "test-hooks")]
+                                &reconnect_rebuild_gate,
                             ),
                         )
                         .await;
@@ -793,6 +848,7 @@ impl ZerobusArrowStream {
         sdk_identifier: &str,
         ingest_mutex: &Arc<Mutex<()>>,
         is_paused: &Arc<AtomicBool>,
+        #[cfg(feature = "test-hooks")] reconnect_rebuild_gate: &ReconnectRebuildGate,
     ) -> ZerobusResult<Pin<Box<dyn Stream<Item = Result<PutResult, FlightError>> + Send>>> {
         // Create new client.
         let client = Self::create_flight_client(
@@ -893,28 +949,70 @@ impl ZerobusArrowStream {
             }
         }
 
-        // Store the new sender.
+        // Store the new sender before taking ingest_mutex for the rebuild. Safe only
+        // because is_paused stays true until after replay: a concurrent ingest that
+        // observes this new sender still buffers rather than sending out of order.
         {
             let mut tx_guard = batch_tx.lock().await;
             *tx_guard = Some(tx.clone());
         }
 
-        // Get the last acked record count before the disconnect.
-        // This tells us how many records were durably stored.
-        let acked_before_disconnect = last_acked_records.load(Ordering::Relaxed);
-        // Reset for the new connection to avoid reusing stale values.
-        last_acked_records.store(0, Ordering::Relaxed);
+        // Counters are reset atomically with the range rebuild inside
+        // replay_pending_batches, so a concurrent ingest can't fetch_add a reset counter,
+        // fabricate a low range, and have replay drop it as fully-acked.
+        let acked_before_disconnect = last_acked_records.load(Ordering::Acquire);
 
-        // Reset cumulative_records_sent for the new connection.
-        // It will be recalculated as we replay batches.
-        cumulative_records_sent.store(0, Ordering::Relaxed);
-
-        // Replay pending batches, slicing partially-acked ones if present.
-        // We rebuild the pending list to drop fully-acked batches.
-        // Lock order matches ingest_batch: ingest_mutex -> pending_batches.
-        let _ingest_guard = ingest_mutex.lock().await;
+        // Test seam: pause after the connection is established but before ingest_mutex is
+        // held and ranges/watermark are rebuilt, so a test can schedule a paused ingest
+        // that wins ingest_mutex first (reset/rebase race) or drive a concurrent close().
+        #[cfg(feature = "test-hooks")]
         {
+            let barrier = reconnect_rebuild_gate.lock().await.take();
+            if let Some(barrier) = barrier {
+                barrier.reached.notify_one();
+                barrier.proceed.notified().await;
+            }
+        }
+
+        // Hold ingest_mutex across the replay so no concurrent ingest interleaves.
+        let _ingest_guard = ingest_mutex.lock().await;
+        Self::replay_pending_batches(
+            &tx,
+            pending_batches,
+            cumulative_records_sent,
+            last_acked_records,
+            acked_before_disconnect,
+        )
+        .await?;
+
+        // Clear the pause gate while still holding ingest_mutex.
+        is_paused.store(false, Ordering::Relaxed);
+
+        Ok(response_stream)
+    }
+
+    /// Rebuilds `pending_batches` for replay after a reconnect and replays them over
+    /// `tx`: partially-acked batches (vs `acked_before_disconnect`) are sliced to their
+    /// un-acked suffix, fully-acked ones dropped.
+    ///
+    /// The rebuilt pending set and the counter reset are installed together under the
+    /// `pending_batches` lock, before any send: a replay-send failure keeps pending (and
+    /// permits) intact, and no concurrent ingest can observe reset counters against stale
+    /// ranges. Caller holds `ingest_mutex`.
+    async fn replay_pending_batches(
+        tx: &mpsc::Sender<Result<RecordBatch, FlightError>>,
+        pending_batches: &Arc<Mutex<Vec<PendingBatch>>>,
+        cumulative_records_sent: &Arc<AtomicU64>,
+        last_acked_records: &Arc<AtomicU64>,
+        acked_before_disconnect: u64,
+    ) -> ZerobusResult<()> {
+        let replay_batches: Vec<RecordBatch> = {
             let mut pending = pending_batches.lock().await;
+
+            let mut new_pending = Vec::with_capacity(pending.len());
+            let mut replay = Vec::with_capacity(pending.len());
+            let mut new_cumulative: u64 = 0;
+
             if !pending.is_empty() {
                 info!(
                     batch_count = pending.len(),
@@ -922,59 +1020,66 @@ impl ZerobusArrowStream {
                     "Replaying pending batches after recovery"
                 );
 
-                let mut new_pending = Vec::with_capacity(pending.len());
-                let mut new_cumulative: u64 = 0;
-
                 for pb in pending.drain(..) {
                     let Some(batch) = slice_batch_for_recovery(&pb, acked_before_disconnect) else {
                         debug!(offset_id = pb.offset_id, "Skipping fully-acked batch");
                         continue;
                     };
 
-                    if tx.send(Ok(batch.clone())).await.is_err() {
-                        return Err(ZerobusError::StreamClosedError(tonic::Status::internal(
-                            "Failed to replay batch during recovery",
-                        )));
-                    }
-
                     let num_records = batch.num_rows() as u64;
                     let start_record = new_cumulative;
                     let end_record = new_cumulative + num_records;
                     new_cumulative = end_record;
 
+                    replay.push(batch.clone());
                     new_pending.push(PendingBatch {
                         batch,
                         offset_id: pb.offset_id,
                         start_record,
                         end_record,
+                        // Carry the permit across recovery; skipped batches drop theirs.
+                        _permit: pb._permit,
                     });
                 }
 
                 *pending = new_pending;
-                cumulative_records_sent.store(new_cumulative, Ordering::Relaxed);
+            }
+
+            // Reset counters together with the range install, before any send.
+            cumulative_records_sent.store(new_cumulative, Ordering::Relaxed);
+            last_acked_records.store(0, Ordering::Release);
+
+            replay
+        };
+
+        // Send only after the pending_batches lock is released (ingest_mutex is still
+        // held by the caller); pending stays intact on failure.
+        for batch in replay_batches {
+            if tx.send(Ok(batch)).await.is_err() {
+                return Err(ZerobusError::StreamClosedError(tonic::Status::internal(
+                    "Failed to replay batch during recovery",
+                )));
             }
         }
 
-        #[cfg(debug_assertions)]
-        {
-            let pending = pending_batches.lock().await;
-            let mut expected_start: u64 = 0;
-            for pb in pending.iter() {
-                debug_assert_eq!(
-                    pb.start_record, expected_start,
-                    "pending_batches has non-contiguous record ranges after recovery \
-                     (expected start_record = {}, found {} for offset_id {}); \
-                     possible orphaned buffered batch from pause-gate handoff race",
-                    expected_start, pb.start_record, pb.offset_id,
-                );
-                expected_start = pb.end_record;
-            }
-        }
+        Ok(())
+    }
 
-        // Clear the pause gate while still holding ingest_mutex.
-        is_paused.store(false, Ordering::Relaxed);
-
-        Ok(response_stream)
+    /// Atomically pauses ingest and detaches the sender, under `ingest_mutex`.
+    ///
+    /// Holding `ingest_mutex` across both stores makes the pause + sender-detach a
+    /// single step relative to `ingest_batch`'s critical section: a concurrent ingest
+    /// either finishes first, or observes `is_paused == true` and buffers — it never
+    /// reads a detached (`None`) sender while `is_paused` is still false.
+    async fn pause_and_detach_sender(
+        ingest_mutex: &Arc<Mutex<()>>,
+        is_paused: &Arc<AtomicBool>,
+        batch_tx: &BatchSender,
+    ) {
+        let _guard = ingest_mutex.lock().await;
+        is_paused.store(true, Ordering::Relaxed);
+        let mut tx = batch_tx.lock().await;
+        *tx = None;
     }
 
     /// Moves all pending batches to the failed batches list.
@@ -1010,6 +1115,7 @@ impl ZerobusArrowStream {
         last_acked_records: Arc<AtomicU64>,
         is_paused: Arc<AtomicBool>,
         options: &ArrowStreamConfigurationOptions,
+        #[cfg(feature = "test-hooks")] ack_applied_gate: AckAppliedGate,
     ) -> ZerobusResult<()> {
         let mut pause_deadline: Option<tokio::time::Instant> = None;
 
@@ -1114,8 +1220,16 @@ impl ZerobusArrowStream {
                                 "Received acknowledgment"
                             );
 
-                            // Update last_acked_records for recovery slicing.
-                            last_acked_records.store(acked_records, Ordering::Relaxed);
+                            // Release so the watermark is observed cross-task (reconnect / drain).
+                            last_acked_records.store(acked_records, Ordering::Release);
+
+                            // Test seam: let a test await a landed partial ack.
+                            #[cfg(feature = "test-hooks")]
+                            if acked_records > 0 {
+                                if let Some(notify) = ack_applied_gate.lock().await.as_ref() {
+                                    notify.notify_one();
+                                }
+                            }
 
                             // Find and remove batches that are fully acknowledged.
                             // A batch is fully acked when ack_up_to_records >= batch.end_record.
@@ -1203,9 +1317,10 @@ impl ZerobusArrowStream {
 
     /// Ingests a single Arrow RecordBatch into the stream.
     ///
-    /// This method queues the batch for transmission and returns the assigned offset
-    /// immediately. Use `wait_for_offset()` to explicitly wait for server acknowledgment
-    /// of this batch when needed.
+    /// Queues the batch for transmission and returns its assigned offset. This applies
+    /// backpressure: it blocks once `max_inflight_batches` batches are awaiting
+    /// acknowledgment, resuming when an ack frees a slot. Use `wait_for_offset()` to
+    /// explicitly wait for server acknowledgment of this batch when needed.
     ///
     /// # Arguments
     ///
@@ -1251,8 +1366,28 @@ impl ZerobusArrowStream {
             )));
         }
 
+        // Acquire the backpressure permit BEFORE ingest_mutex: reconnect() holds that
+        // mutex, so blocking on a permit while holding it could stall recovery.
+        // `inflight` is never closed, so the map_err is unreachable defensive code; a
+        // close during the wait is handled by the is_closed re-check below (not by
+        // semaphore closure), and permit-blocked ingests wake when acks or
+        // move_pending_to_failed free permits.
+        let permit = Arc::clone(&self.inflight)
+            .acquire_owned()
+            .await
+            .map_err(|_| {
+                ZerobusError::StreamClosedError(tonic::Status::internal("Stream is closed"))
+            })?;
+
         // Serialize ingestion operations.
         let _guard = self.ingest_mutex.lock().await;
+
+        // May have closed while we blocked on the permit; returning drops it.
+        if self.is_closed.load(Ordering::Relaxed) {
+            return Err(ZerobusError::StreamClosedError(tonic::Status::internal(
+                "Stream is closed",
+            )));
+        }
 
         let offset_id = self.offset_generator.next();
         let record_count = batch.num_rows() as u64;
@@ -1269,6 +1404,7 @@ impl ZerobusArrowStream {
                 offset_id,
                 start_record,
                 end_record,
+                _permit: permit,
             });
         }
 
@@ -1286,6 +1422,12 @@ impl ZerobusArrowStream {
         let sender = match sender {
             Some(s) => s,
             None => {
+                // Unreachable in safe Rust use: `close()` takes `&mut self` so it can't
+                // run concurrently with `ingest_batch` (`&self`), and the recovery
+                // handoff detaches the sender under `ingest_mutex`
+                // (`pause_and_detach_sender`). Defensive fallback for an unsupported
+                // concurrent FFI call: FFI callers must serialize close and ingest; this
+                // branch only reports a detached sender if that contract is violated.
                 if let Some(server_error) = self.server_error_rx.borrow().clone() {
                     return Err(server_error);
                 }
@@ -1665,6 +1807,34 @@ impl ZerobusArrowStream {
         self.is_closed.load(Ordering::Relaxed)
     }
 
+    /// Test-only: arms the reconnect rebuild barrier. The next `reconnect` pauses after
+    /// establishing the connection but before rebuilding pending ranges/watermark,
+    /// firing the returned `reached` notify, then waits on `proceed`. A test either
+    /// releases `proceed` to let recovery finish, or drives a concurrent `close()`
+    /// (which reaps the paused supervisor) without releasing it.
+    #[cfg(feature = "test-hooks")]
+    #[doc(hidden)]
+    pub async fn arm_reconnect_rebuild_barrier(&self) -> (Arc<Notify>, Arc<Notify>) {
+        let reached = Arc::new(Notify::new());
+        let proceed = Arc::new(Notify::new());
+        *self.reconnect_rebuild_gate.lock().await = Some(ReconnectRebuildBarrier {
+            reached: Arc::clone(&reached),
+            proceed: Arc::clone(&proceed),
+        });
+        (reached, proceed)
+    }
+
+    /// Test-only: arms a notify that fires each time `process_acks` applies a non-empty
+    /// ack (after storing `last_acked_records`). Lets a test wait until a partial ack has
+    /// been processed before proceeding.
+    #[cfg(feature = "test-hooks")]
+    #[doc(hidden)]
+    pub async fn arm_ack_applied_notify(&self) -> Arc<Notify> {
+        let notify = Arc::new(Notify::new());
+        *self.ack_applied_gate.lock().await = Some(Arc::clone(&notify));
+        notify
+    }
+
     /// Returns the table name for this stream.
     pub fn table_name(&self) -> &str {
         &self.table_properties.table_name
@@ -1704,6 +1874,7 @@ impl Drop for ZerobusArrowStream {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use arrow_array::Int32Array;
     use arrow_schema::{DataType, Field};
 
     #[test]
@@ -1720,5 +1891,199 @@ mod tests {
 
         assert_eq!(props.table_name, "catalog.schema.table");
         assert_eq!(props.schema.fields().len(), 2);
+    }
+
+    fn one_col_schema() -> Arc<ArrowSchema> {
+        Arc::new(ArrowSchema::new(vec![Field::new(
+            "id",
+            DataType::Int32,
+            false,
+        )]))
+    }
+
+    fn batch_with_rows(schema: &Arc<ArrowSchema>, n: i32) -> RecordBatch {
+        let ids: Vec<i32> = (0..n).collect();
+        RecordBatch::try_new(schema.clone(), vec![Arc::new(Int32Array::from(ids))]).unwrap()
+    }
+
+    fn pending_batch(
+        sem: &Arc<Semaphore>,
+        batch: RecordBatch,
+        offset_id: OffsetId,
+        start_record: u64,
+        end_record: u64,
+    ) -> PendingBatch {
+        PendingBatch {
+            batch,
+            offset_id,
+            start_record,
+            end_record,
+            _permit: Arc::clone(sem).try_acquire_owned().unwrap(),
+        }
+    }
+
+    /// A replay-send failure must not drop pending batches, their permits, or desync
+    /// the counter. A dropped receiver gives a deterministic send failure.
+    #[tokio::test]
+    async fn replay_send_failure_retains_pending_permits_and_cumulative() {
+        let schema = one_col_schema();
+        let sem = Arc::new(Semaphore::new(4));
+        let pending = Arc::new(Mutex::new(vec![
+            pending_batch(&sem, batch_with_rows(&schema, 3), 0, 0, 3),
+            pending_batch(&sem, batch_with_rows(&schema, 2), 1, 3, 5),
+        ]));
+        assert_eq!(
+            sem.available_permits(),
+            2,
+            "two permits held by pending batches"
+        );
+
+        // Stale values that must be overwritten by the atomic install.
+        let cumulative = Arc::new(AtomicU64::new(999));
+        let last_acked = Arc::new(AtomicU64::new(7));
+
+        // Receiver dropped -> every send fails.
+        let (tx, rx) = mpsc::channel::<Result<RecordBatch, FlightError>>(4);
+        drop(rx);
+
+        let res =
+            ZerobusArrowStream::replay_pending_batches(&tx, &pending, &cumulative, &last_acked, 0)
+                .await;
+        assert!(res.is_err(), "replay must surface the send failure");
+
+        let guard = pending.lock().await;
+        assert_eq!(
+            guard.len(),
+            2,
+            "pending must retain all batches on replay failure"
+        );
+        assert_eq!((guard[0].start_record, guard[0].end_record), (0, 3));
+        assert_eq!((guard[1].start_record, guard[1].end_record), (3, 5));
+        drop(guard);
+
+        assert_eq!(
+            cumulative.load(Ordering::Relaxed),
+            5,
+            "cumulative_records_sent must match the reinstalled ranges, not the stale value"
+        );
+        assert_eq!(
+            last_acked.load(Ordering::Relaxed),
+            0,
+            "watermark must be rebased to 0 atomically with the ranges"
+        );
+        assert_eq!(
+            sem.available_permits(),
+            2,
+            "permits must not be released on replay failure"
+        );
+    }
+
+    /// Happy path: with an open receiver, all batches are replayed and the pending set
+    /// is rebuilt with contiguous, connection-relative ranges.
+    #[tokio::test]
+    async fn replay_success_reinstalls_and_sends_all() {
+        let schema = one_col_schema();
+        let sem = Arc::new(Semaphore::new(4));
+        let pending = Arc::new(Mutex::new(vec![
+            pending_batch(&sem, batch_with_rows(&schema, 3), 0, 0, 3),
+            pending_batch(&sem, batch_with_rows(&schema, 2), 1, 3, 5),
+        ]));
+        let cumulative = Arc::new(AtomicU64::new(0));
+        let last_acked = Arc::new(AtomicU64::new(9));
+
+        let (tx, mut rx) = mpsc::channel::<Result<RecordBatch, FlightError>>(4);
+
+        let res =
+            ZerobusArrowStream::replay_pending_batches(&tx, &pending, &cumulative, &last_acked, 0)
+                .await;
+        assert!(res.is_ok());
+
+        assert_eq!(pending.lock().await.len(), 2);
+        assert_eq!(cumulative.load(Ordering::Relaxed), 5);
+        assert_eq!(last_acked.load(Ordering::Relaxed), 0);
+
+        // Both batches were sent, in order.
+        let first = rx.try_recv().expect("first replay batch");
+        assert_eq!(first.unwrap().num_rows(), 3);
+        let second = rx.try_recv().expect("second replay batch");
+        assert_eq!(second.unwrap().num_rows(), 2);
+    }
+
+    /// A fully-acked batch is dropped during replay (permit released), and a partially
+    /// acked batch is sliced to its un-acked suffix.
+    #[tokio::test]
+    async fn replay_slices_partial_and_drops_fully_acked() {
+        let schema = one_col_schema();
+        let sem = Arc::new(Semaphore::new(4));
+        // Batch 0: rows [0,3) fully acked (acked_before_disconnect = 4 covers it).
+        // Batch 1: rows [3,6), 1 record acked -> 2-row suffix replayed.
+        let pending = Arc::new(Mutex::new(vec![
+            pending_batch(&sem, batch_with_rows(&schema, 3), 0, 0, 3),
+            pending_batch(&sem, batch_with_rows(&schema, 3), 1, 3, 6),
+        ]));
+        assert_eq!(sem.available_permits(), 2);
+        let cumulative = Arc::new(AtomicU64::new(0));
+        let last_acked = Arc::new(AtomicU64::new(4));
+        let (tx, mut rx) = mpsc::channel::<Result<RecordBatch, FlightError>>(4);
+
+        let res =
+            ZerobusArrowStream::replay_pending_batches(&tx, &pending, &cumulative, &last_acked, 4)
+                .await;
+        assert!(res.is_ok());
+
+        // Only the partially-acked batch remains, rebuilt from cumulative 0.
+        let guard = pending.lock().await;
+        assert_eq!(guard.len(), 1);
+        assert_eq!((guard[0].start_record, guard[0].end_record), (0, 2));
+        drop(guard);
+        assert_eq!(cumulative.load(Ordering::Relaxed), 2);
+        assert_eq!(last_acked.load(Ordering::Relaxed), 0);
+        // Fully-acked batch's permit was released; one remains.
+        assert_eq!(sem.available_permits(), 3);
+
+        let replayed = rx.try_recv().expect("suffix replay batch");
+        assert_eq!(replayed.unwrap().num_rows(), 2);
+        assert!(rx.try_recv().is_err(), "only one batch should be replayed");
+    }
+
+    /// `pause_and_detach_sender` must block while an ingest holds `ingest_mutex`, so an
+    /// ingest can never observe `is_paused == false` together with a detached sender.
+    #[tokio::test]
+    async fn pause_and_detach_waits_for_in_flight_ingest() {
+        let ingest_mutex = Arc::new(Mutex::new(()));
+        let is_paused = Arc::new(AtomicBool::new(false));
+        let (tx, _rx) = mpsc::channel::<Result<RecordBatch, FlightError>>(1);
+        let batch_tx: BatchSender = Arc::new(Mutex::new(Some(tx)));
+
+        // Deterministic sync point: hold ingest_mutex to represent an ingest in its
+        // critical section, past the is_paused observation and about to read the sender.
+        let guard = ingest_mutex.lock().await;
+
+        let fut = ZerobusArrowStream::pause_and_detach_sender(&ingest_mutex, &is_paused, &batch_tx);
+        tokio::pin!(fut);
+
+        // Polling the future while the ingest holds ingest_mutex must return Pending
+        // (it is actively driven, not merely unscheduled) and must not have flipped
+        // is_paused or detached the sender.
+        assert!(
+            futures::poll!(fut.as_mut()).is_pending(),
+            "pause_and_detach_sender must block while an ingest holds ingest_mutex"
+        );
+        assert!(
+            !is_paused.load(Ordering::Relaxed),
+            "is_paused flipped mid-ingest"
+        );
+        assert!(
+            batch_tx.lock().await.is_some(),
+            "sender detached mid-ingest"
+        );
+
+        // Once the ingest leaves its critical section, the transition completes.
+        drop(guard);
+        tokio::time::timeout(Duration::from_secs(1), fut)
+            .await
+            .expect("pause_and_detach_sender should proceed after ingest_mutex is released");
+        assert!(is_paused.load(Ordering::Relaxed));
+        assert!(batch_tx.lock().await.is_none());
     }
 }

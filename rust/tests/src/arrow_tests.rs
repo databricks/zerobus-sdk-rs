@@ -698,6 +698,131 @@ mod arrow_flight_tests {
         }
     }
 
+    mod backpressure_tests {
+        use super::*;
+
+        /// `max_inflight_batches` bounds batches awaiting ACK, not just batches
+        /// buffered before the encoder drains. With capacity 1 the second ingest must
+        /// block until the first is acked.
+        #[tokio::test]
+        async fn test_max_inflight_batches_blocks_until_ack(
+        ) -> Result<(), Box<dyn std::error::Error>> {
+            setup_tracing();
+            info!("Starting test_max_inflight_batches_blocks_until_ack");
+
+            let (mock_server, server_url) = start_mock_flight_server().await?;
+            let schema = create_test_arrow_schema();
+
+            // Ack for offset 0 is delayed; until it arrives the single permit stays held.
+            mock_server
+                .inject_responses(
+                    TABLE_NAME,
+                    vec![MockFlightResponse::BatchAck {
+                        ack_up_to_offset: 0,
+                        delay_ms: 500,
+                        ack_up_to_records: 1,
+                    }],
+                )
+                .await;
+
+            let sdk = ZerobusSdk::builder()
+                .endpoint(server_url.clone())
+                .unity_catalog_url("https://mock-uc.com")
+                .tls_config(Arc::new(NoTlsConfig))
+                .build()?;
+
+            let stream = Arc::new(
+                sdk.stream_builder()
+                    .table(TABLE_NAME)
+                    .headers_provider(Arc::new(TestHeadersProvider::default()))
+                    .arrow(schema.clone())
+                    .max_inflight_batches(1)
+                    .recovery(false)
+                    .build_arrow()
+                    .await?,
+            );
+
+            // First batch takes the only permit; held until the delayed ack.
+            let batch1 = create_test_record_batch(schema.clone(), vec![1], vec![Some("a")]);
+            stream.ingest_batch(batch1).await?;
+
+            // Wait until the mock received batch 1 (encoder freed the channel slot), so
+            // a later block is attributable to the permit, not channel capacity.
+            let mut waited_ms = 0;
+            while mock_server.get_batch_count().await < 1 {
+                tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+                waited_ms += 5;
+                assert!(waited_ms < 2000, "mock never received the first batch");
+            }
+
+            // Second ingest must block on the permit (not just the encoder drain).
+            let stream2 = Arc::clone(&stream);
+            let schema2 = schema.clone();
+            let mut handle = tokio::spawn(async move {
+                let batch2 = create_test_record_batch(schema2, vec![2], vec![Some("b")]);
+                stream2.ingest_batch(batch2).await
+            });
+
+            // Well under the 500ms ack delay it should still be blocked.
+            tokio::select! {
+                res = &mut handle => {
+                    panic!("2nd ingest_batch should block until the 1st is acked, returned: {:?}", res)
+                }
+                _ = tokio::time::sleep(std::time::Duration::from_millis(150)) => {}
+            }
+
+            // Once the ack frees the permit, the second ingest completes.
+            let joined = tokio::time::timeout(std::time::Duration::from_secs(3), handle)
+                .await
+                .expect("2nd ingest_batch should unblock after the ack frees a permit")?;
+            assert!(
+                joined.is_ok(),
+                "2nd ingest_batch failed: {:?}",
+                joined.err()
+            );
+
+            Ok(())
+        }
+
+        /// `max_inflight_batches == 0` must be rejected by `build_arrow` (a zero bound
+        /// would deadlock every ingest / panic the zero-capacity channel). This is
+        /// Arrow-only validation; JSON/proto `build()` is unaffected.
+        #[tokio::test]
+        async fn test_max_inflight_batches_zero_rejected() -> Result<(), Box<dyn std::error::Error>>
+        {
+            setup_tracing();
+            info!("Starting test_max_inflight_batches_zero_rejected");
+
+            let schema = create_test_arrow_schema();
+            let sdk = ZerobusSdk::builder()
+                .endpoint("http://127.0.0.1:1")
+                .unity_catalog_url("https://mock-uc.com")
+                .tls_config(Arc::new(NoTlsConfig))
+                .build()?;
+
+            // Rejected before any connection attempt.
+            let result = sdk
+                .stream_builder()
+                .table(TABLE_NAME)
+                .headers_provider(Arc::new(TestHeadersProvider::default()))
+                .arrow(schema)
+                .max_inflight_batches(0)
+                .build_arrow()
+                .await;
+
+            assert!(
+                matches!(
+                    result,
+                    Err(databricks_zerobus_ingest_sdk::ZerobusError::InvalidArgument(_))
+                ),
+                "expected InvalidArgument for max_inflight_batches(0), got {:?}",
+                result.err()
+            );
+
+            Ok(())
+        }
+    }
+
     mod unacked_tests {
         use super::*;
 
@@ -898,6 +1023,187 @@ mod arrow_flight_tests {
                 acks.iter().all(|&r| r == 3),
                 "auto-ack must exclude rows from the first connection (expected all == 3), got {:?}",
                 acks
+            );
+
+            Ok(())
+        }
+
+        /// A record ingested during the reconnect rebuild window must be replayed, not
+        /// silently dropped. A partial ack (1 of 3 records) lands, a retriable error
+        /// triggers recovery, and a barrier parks reconnect after the new connection is up
+        /// but before it takes ingest_mutex and rebuilds ranges. While parked
+        /// (is_paused == true) a record is ingested and buffered; after the barrier is
+        /// released it must be replayed and acknowledged on the recovered connection.
+        #[tokio::test]
+        async fn test_ingest_during_reconnect_window_is_not_dropped(
+        ) -> Result<(), Box<dyn std::error::Error>> {
+            setup_tracing();
+            info!("Starting test_ingest_during_reconnect_window_is_not_dropped");
+
+            let (mock_server, server_url) = start_mock_flight_server().await?;
+            let schema = create_test_arrow_schema();
+
+            // Connection 1: partial-ack A (1 of 3 records) so last_acked_records == 1, then
+            // a retriable error on B triggers the reconnect we park at the barrier. B (a
+            // second batch) makes the error fire promptly on connection 1 — relying on A
+            // alone would instead reconnect via the slow ack timeout and let the scripted
+            // error fire on a later connection.
+            mock_server
+                .inject_responses(
+                    TABLE_NAME,
+                    vec![
+                        MockFlightResponse::BatchAck {
+                            ack_up_to_offset: 0,
+                            delay_ms: 0,
+                            ack_up_to_records: 1,
+                        },
+                        MockFlightResponse::Error {
+                            status: tonic::Status::unavailable("Connection lost"),
+                            delay_ms: 0,
+                        },
+                    ],
+                )
+                .await;
+
+            let sdk = ZerobusSdk::builder()
+                .endpoint(server_url.clone())
+                .unity_catalog_url("https://mock-uc.com")
+                .tls_config(Arc::new(NoTlsConfig))
+                .build()?;
+
+            let stream = sdk
+                .stream_builder()
+                .table(TABLE_NAME)
+                .headers_provider(Arc::new(TestHeadersProvider::default()))
+                .arrow(schema.clone())
+                .recovery(true)
+                .recovery_backoff_ms(0)
+                .recovery_retries(5)
+                .build_arrow()
+                .await?;
+
+            let ack_applied = stream.arm_ack_applied_notify().await;
+            let (reached, proceed) = stream.arm_reconnect_rebuild_barrier().await;
+
+            let batch_a = create_test_record_batch(
+                schema.clone(),
+                vec![1, 2, 3],
+                vec![Some("a"), Some("b"), Some("c")],
+            );
+            stream.ingest_batch(batch_a).await?;
+
+            // Wait until A's partial ack (1 of 3) is applied (last_acked_records == 1),
+            // otherwise the ack and error can arrive back-to-back and the watermark is 0.
+            tokio::time::timeout(std::time::Duration::from_secs(5), ack_applied.notified())
+                .await
+                .expect("A's partial ack should be applied");
+
+            // B triggers the retriable error on connection 1, kicking off recovery.
+            let batch_b = create_test_record_batch(schema.clone(), vec![50], vec![Some("y")]);
+            stream.ingest_batch(batch_b).await?;
+
+            // Wait until reconnect is parked: connection up, ingest_mutex free, counters
+            // and ranges not yet rebuilt.
+            tokio::time::timeout(std::time::Duration::from_secs(5), reached.notified())
+                .await
+                .expect("reconnect should reach the rebuild barrier");
+
+            // Ingest while parked. is_paused is set, so the record buffers (Ok) after
+            // computing its range against the still-pre-reconnect counter.
+            let batch_c = create_test_record_batch(schema.clone(), vec![99], vec![Some("z")]);
+            let c_offset = stream.ingest_batch(batch_c).await?;
+
+            // Release reconnect: it takes ingest_mutex and rebuilds/replays, rebasing the
+            // buffered record consistently and sending it on the recovered connection.
+            proceed.notify_one();
+
+            // The buffered record must be replayed and acknowledged, not silently dropped.
+            tokio::time::timeout(
+                std::time::Duration::from_secs(5),
+                stream.wait_for_offset(c_offset),
+            )
+            .await
+            .expect("record ingested during the reconnect window must not be dropped")?;
+
+            // Global observation: conn1 decodes A (3) + B (1) = 4; the recovered connection
+            // replays A's un-acked suffix (2) + B (1) + C (1) = 4, so 8 total.
+            assert_eq!(
+                mock_server.get_total_records_received().await,
+                8,
+                "recovered connection must replay A's un-acked suffix, B, and the windowed record"
+            );
+
+            Ok(())
+        }
+
+        /// close() while a reconnect is parked at the rebuild barrier must tear the stream
+        /// down and move pending batches to the failed set, without panicking or hanging
+        /// beyond the flush timeout.
+        #[tokio::test]
+        async fn test_close_during_reconnect_window_moves_pending_to_failed(
+        ) -> Result<(), Box<dyn std::error::Error>> {
+            setup_tracing();
+            info!("Starting test_close_during_reconnect_window_moves_pending_to_failed");
+
+            let (mock_server, server_url) = start_mock_flight_server().await?;
+            let schema = create_test_arrow_schema();
+
+            // A retriable error triggers the reconnect we park at the rebuild barrier.
+            mock_server
+                .inject_responses(
+                    TABLE_NAME,
+                    vec![MockFlightResponse::Error {
+                        status: tonic::Status::unavailable("Connection lost"),
+                        delay_ms: 0,
+                    }],
+                )
+                .await;
+
+            let sdk = ZerobusSdk::builder()
+                .endpoint(server_url.clone())
+                .unity_catalog_url("https://mock-uc.com")
+                .tls_config(Arc::new(NoTlsConfig))
+                .build()?;
+
+            let mut stream = sdk
+                .stream_builder()
+                .table(TABLE_NAME)
+                .headers_provider(Arc::new(TestHeadersProvider::default()))
+                .arrow(schema.clone())
+                .recovery(true)
+                .recovery_backoff_ms(0)
+                .recovery_retries(5)
+                .flush_timeout_ms(200)
+                .build_arrow()
+                .await?;
+
+            // Park the reconnect; do not release it — close() reaps it instead.
+            let (reached, _proceed) = stream.arm_reconnect_rebuild_barrier().await;
+
+            let batch = create_test_record_batch(schema.clone(), vec![1], vec![Some("a")]);
+            stream.ingest_batch(batch).await?;
+
+            tokio::time::timeout(std::time::Duration::from_secs(5), reached.notified())
+                .await
+                .expect("reconnect should reach the rebuild barrier");
+
+            // close() must return (its flush times out at 200ms) without hanging or
+            // panicking, reaping the parked supervisor along the way.
+            let close_result =
+                tokio::time::timeout(std::time::Duration::from_secs(5), stream.close())
+                    .await
+                    .expect("close() must not hang while a reconnect is parked");
+            assert!(
+                close_result.is_err(),
+                "close() should surface the flush timeout"
+            );
+
+            // The un-acked batch was moved to the failed set and is retrievable.
+            let unacked = stream.get_unacked_batches().await?;
+            assert_eq!(
+                unacked.len(),
+                1,
+                "pending batch must be moved to the failed set"
             );
 
             Ok(())
