@@ -315,7 +315,17 @@ func (p *OAuthTokenProvider) fetchToken(ctx context.Context, tableName string) (
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	req.SetBasicAuth(p.clientID, p.clientSecret)
 
-	resp, err := p.client.Do(req)
+	// Don't follow redirects: a same-host https→http redirect would re-send the
+	// client credentials in the clear, since Go re-attaches them without checking
+	// the scheme. A token endpoint has no reason to redirect, so one surfaces as a
+	// non-success response and fails through classifyHTTPError. Copy the client so
+	// a caller-supplied one (WithHTTPClient) is not mutated.
+	client := *p.client
+	client.CheckRedirect = func(*http.Request, []*http.Request) error {
+		return http.ErrUseLastResponse
+	}
+
+	resp, err := client.Do(req)
 	if err != nil {
 		return fetchedToken{}, &TokenError{msg: fmt.Sprintf("token request: %v", err), retryable: isRetryableTransportError(ctx, err), cause: err}
 	}

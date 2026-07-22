@@ -763,8 +763,9 @@ func TestTokenCacheAnchorsExpiryToReceivedAt(t *testing.T) {
 }
 
 // A token whose receipt-anchored TTL has already elapsed by the time the cache
-// publishes it (e.g. a slow custom logger consumed the whole short TTL) must not
-// be cached: the caller still gets the token, but a dead entry is not stored.
+// publishes it (e.g. a slow custom logger consumed the whole short TTL), with no
+// still-valid cached entry to fall back on, must fail with a retryable error
+// rather than returning a dead token behind a nil error — and nothing is cached.
 func TestTokenCacheDoesNotCacheAlreadyExpiredToken(t *testing.T) {
 	c := newTokenCache()
 	// Received well in the past with a tiny TTL: expired before publication.
@@ -774,11 +775,15 @@ func TestTokenCacheDoesNotCacheAlreadyExpiredToken(t *testing.T) {
 		func(context.Context, mintReason) (fetchedToken, error) {
 			return fetchedToken{token: "stale", expiresIn: &ttl, receivedAt: receivedAt}, nil
 		})
-	if err != nil {
-		t.Fatalf("getOrFetch: %v", err)
+	if err == nil {
+		t.Fatalf("want error for expired-on-arrival token, got token %q", tok)
 	}
-	if tok != "stale" {
-		t.Fatalf("caller must still receive the minted token, got %q", tok)
+	if tok != "" {
+		t.Fatalf("want empty token on error, got %q", tok)
+	}
+	var te *TokenError
+	if !asTokenError(err, &te) || !te.IsRetryable() {
+		t.Fatalf("want retryable TokenError, got %T (retryable=%v): %v", err, te != nil && te.IsRetryable(), err)
 	}
 	// Nothing usable should be cached.
 	entry := c.slot(newTokenKey("id", "secret", "c.s.t", ""))

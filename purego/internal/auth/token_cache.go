@@ -6,6 +6,8 @@ import (
 	"errors"
 	"sync"
 	"time"
+
+	"github.com/databricks/zerobus-sdk/purego/internal/authctx"
 )
 
 // defaultRefreshBuffer is the lead time before a token's expiry at which the
@@ -317,6 +319,17 @@ func (c *tokenCache) tryGetOrFetch(
 		// Dead mint but a still-valid token is cached: serve the cached one so
 		// the caller doesn't get a token we already know is expired.
 		token = entry.cached.value
+	case alreadyExpired:
+		// Expired on arrival with nothing valid to fall back on: don't hand the
+		// caller a token we already know is dead behind a nil error — it would
+		// surface later as an opaque server-side auth rejection. Fail here, where
+		// the cause is known. Retryable, since the next cold mint may succeed.
+		entry.cached = nil
+		err := &TokenError{msg: "minted token already expired on arrival", retryable: true}
+		flight.token, flight.err = "", err
+		close(flight.done)
+		entry.mu.Unlock()
+		return "", err, false
 	case !keepExisting:
 		entry.cached = nil
 	}
@@ -338,17 +351,20 @@ func isContextError(err error) bool {
 }
 
 // isCallerCancellation reports whether err is a context error that originated
-// from the caller stopping, not from the request or an SDK-internal budget.
-// Only such failures are non-retryable; a client/transport timeout or a
-// WithTimeoutCause budget stays retryable so a cached token can be served.
-// When ctx is done, context.Cause tells the caller's own cancel/deadline (plain
-// context.Canceled/DeadlineExceeded) apart from an intermediate budget cause.
+// from the caller stopping, not from an SDK-internal budget. Caller
+// cancellations are non-retryable; the internal budget stays retryable so a
+// cached token can be served.
+//
+// The header-resolution budget is the one non-caller cause (tagged with
+// authctx.ErrHeadersBudgetExceeded); everything else is a caller cancellation,
+// including a caller's custom cause from context.WithCancelCause. Matching only
+// our own budget, rather than enumerating the caller's causes, means an
+// unfamiliar cause is honored as the caller stopping, not misread as retryable.
 func isCallerCancellation(ctx context.Context, err error) bool {
 	if !isContextError(err) || ctx.Err() == nil {
 		return false
 	}
-	cause := context.Cause(ctx)
-	return cause == context.Canceled || cause == context.DeadlineExceeded
+	return context.Cause(ctx) != authctx.ErrHeadersBudgetExceeded
 }
 
 // invalidate drops the cached token for the given credentials, table, and

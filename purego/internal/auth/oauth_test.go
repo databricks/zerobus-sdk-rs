@@ -12,6 +12,8 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/databricks/zerobus-sdk/purego/internal/authctx"
 )
 
 // tokenServer is a minimal OAuth 2.0 token endpoint stub.
@@ -133,6 +135,75 @@ func TestOAuthTokenProvider4xxIsNonRetryable(t *testing.T) {
 	var te *TokenError
 	if !asTokenError(err, &te) || te.IsRetryable() {
 		t.Fatalf("want non-retryable TokenError, got %T (retryable=%v): %v", err, te != nil && te.IsRetryable(), err)
+	}
+}
+
+// A redirect from the token endpoint must not be followed: Go re-sends the
+// client credentials on a same-host redirect without re-checking the scheme, so
+// following an https→http redirect would leak them in the clear. The mint must
+// instead fail on the redirect status via the normal error path.
+func TestOAuthTokenProviderDoesNotFollowSameHostRedirect(t *testing.T) {
+	var followed atomic.Bool
+	mux := http.NewServeMux()
+	// The credential-leaking target: reaching it means the redirect was followed.
+	mux.HandleFunc("/leak", func(w http.ResponseWriter, r *http.Request) {
+		followed.Store(true)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"access_token":"leaked","expires_in":3600}`))
+	})
+	mux.HandleFunc("/oidc/v1/token", func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, "/leak", http.StatusFound)
+	})
+	ts := httptest.NewServer(mux)
+	defer ts.Close()
+
+	p, err := NewOAuthTokenProvider("id", "secret", "https://ws.zerobus.databricks.com", ts.URL,
+		WithHTTPClient(ts.Client()),
+	)
+	if err != nil {
+		t.Fatalf("NewOAuthTokenProvider: %v", err)
+	}
+
+	tok, err := p.Token(context.Background(), "c.s.t")
+	if err == nil {
+		t.Fatalf("want error on redirect, got token %q", tok)
+	}
+	if followed.Load() {
+		t.Fatal("redirect was followed; credentials would be re-sent to the redirect target")
+	}
+	var te *TokenError
+	if !asTokenError(err, &te) {
+		t.Fatalf("want TokenError from the redirect status, got %T: %v", err, err)
+	}
+}
+
+// A cross-host redirect must likewise not be followed.
+func TestOAuthTokenProviderDoesNotFollowCrossHostRedirect(t *testing.T) {
+	var reached atomic.Bool
+	other := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		reached.Store(true)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"access_token":"leaked","expires_in":3600}`))
+	}))
+	defer other.Close()
+
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, other.URL+"/oidc/v1/token", http.StatusFound)
+	}))
+	defer ts.Close()
+
+	p, err := NewOAuthTokenProvider("id", "secret", "https://ws.zerobus.databricks.com", ts.URL,
+		WithHTTPClient(ts.Client()),
+	)
+	if err != nil {
+		t.Fatalf("NewOAuthTokenProvider: %v", err)
+	}
+
+	if tok, err := p.Token(context.Background(), "c.s.t"); err == nil {
+		t.Fatalf("want error on cross-host redirect, got token %q", tok)
+	}
+	if reached.Load() {
+		t.Fatal("cross-host redirect was followed")
 	}
 }
 
@@ -433,10 +504,10 @@ func TestTokenErrorUnwrapsContextCancellation(t *testing.T) {
 	}
 }
 
-// isCallerCancellation must classify only the caller's own cancel/deadline as
-// caller cancellation. An SDK-internal budget wrapping a live caller context via
-// WithTimeoutCause carries a custom cause, so it is a request/budget timeout —
-// retryable — not the caller giving up.
+// isCallerCancellation must classify the SDK's own header-resolution budget as
+// the sole non-caller cause and treat everything else — plain cancel/deadline
+// and a caller-supplied custom cause via WithCancelCause alike — as the caller
+// giving up. Only the budget stays retryable so a cached token can be served.
 func TestIsCallerCancellationDistinguishesBudgetFromCaller(t *testing.T) {
 	// Caller cancelled their own context.
 	cancelledCtx, cancel := context.WithCancel(context.Background())
@@ -445,9 +516,9 @@ func TestIsCallerCancellationDistinguishesBudgetFromCaller(t *testing.T) {
 		t.Error("caller cancel must be classified as caller cancellation")
 	}
 
-	// SDK-internal budget with a custom cause over a still-live caller context.
-	budgetCause := errors.New("open budget exceeded")
-	budgetCtx, cancelBudget := context.WithTimeoutCause(context.Background(), time.Nanosecond, budgetCause)
+	// The SDK-internal header budget, tagged with the shared sentinel, over a
+	// still-live caller context. This is the one cause that is NOT the caller.
+	budgetCtx, cancelBudget := context.WithTimeoutCause(context.Background(), time.Nanosecond, authctx.ErrHeadersBudgetExceeded)
 	defer cancelBudget()
 	<-budgetCtx.Done() // budget fires; underlying caller context never cancelled
 	if isCallerCancellation(budgetCtx, context.DeadlineExceeded) {
@@ -463,6 +534,18 @@ func TestIsCallerCancellationDistinguishesBudgetFromCaller(t *testing.T) {
 	<-deadlineCtx.Done()
 	if !isCallerCancellation(deadlineCtx, context.DeadlineExceeded) {
 		t.Error("caller's own deadline must be classified as caller cancellation")
+	}
+
+	// A caller cancelling via WithCancelCause supplies a custom cause. It must
+	// still be honored as a caller cancellation (not misread as a retryable
+	// budget timeout) so we stop as asked instead of serving a cached token.
+	causeCtx, cancelCause := context.WithCancelCause(context.Background())
+	cancelCause(errors.New("caller gave up with a reason"))
+	if !isCallerCancellation(causeCtx, context.Canceled) {
+		t.Error("WithCancelCause cancellation must be classified as caller cancellation")
+	}
+	if isRetryableTransportError(causeCtx, context.Canceled) {
+		t.Error("WithCancelCause cancellation must not be retryable")
 	}
 }
 
