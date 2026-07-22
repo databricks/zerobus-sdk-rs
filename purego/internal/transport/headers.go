@@ -158,7 +158,14 @@ func isUsableAsHeaderValue(value string) bool {
 
 // isAuthRejection reports whether err is a gRPC auth rejection
 // (Unauthenticated or PermissionDenied), unwrapping wrapped errors.
-func isAuthRejection(err error) bool {
+func isAuthRejection(err error) bool { return IsAuthRejection(err) }
+
+// IsAuthRejection reports whether err is a gRPC auth rejection
+// (Unauthenticated or PermissionDenied). Exported so the stream layer can
+// invalidate the HeadersProvider on mid-stream auth failure, matching Rust:
+// a cached token that is rejected mid-stream is stale and should be
+// re-minted on the next Open.
+func IsAuthRejection(err error) bool {
 	code := status.Code(err)
 	return code == codes.Unauthenticated || code == codes.PermissionDenied
 }

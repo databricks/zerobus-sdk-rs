@@ -5,18 +5,21 @@ import (
 	"errors"
 	"fmt"
 	"time"
+
+	"github.com/databricks/zerobus-sdk/purego/internal/transport"
 )
 
 // supervise is the supervisor goroutine. It runs the create→run→recover loop
 // until the context is cancelled (Close called), a non-retryable error fires,
-// or consecutive recovery retries are exhausted. It always closes done on exit.
+// or consecutive recovery retries are exhausted. It always closes done on
+// exit.
 //
 // The retry budget is per episode: `failedAttempts` counts only *consecutive*
 // failed reconnects and resets to zero whenever a stream connects and runs
-// successfully. A long-lived stream that disconnects occasionally therefore is
-// not doomed after RecoveryRetries lifetime disconnects — each disconnect
-// starts a fresh episode with the full budget. This mirrors the Rust core,
-// which builds a fresh attempt counter per recovery loop iteration.
+// successfully. A long-lived stream that disconnects occasionally therefore
+// is not doomed after RecoveryRetries lifetime disconnects — each disconnect
+// starts a fresh episode with the full budget: a long-lived stream that
+// disconnects occasionally is not doomed by consecutive-lifetime failures.
 func (cs *CoreStream[Req, Resp]) supervise(ctx context.Context) {
 	defer close(cs.done)
 
@@ -39,34 +42,43 @@ func (cs *CoreStream[Req, Resp]) supervise(ctx context.Context) {
 			case <-ctx.Done():
 				return
 			}
-			// Requeue any items the previous sender observed but didn't ack.
-			cs.buf.requeue()
+			// runOnce requeues on each successful Open, so we do not duplicate
+			// that work here.
 		}
 
 		runErr, healthy := cs.runOnce(ctx)
 
-		// ctx cancelled = clean exit via Close. Don't treat server-side EOF as clean.
+		// ctx cancelled = clean exit via Close. Don't treat server-side EOF
+		// as clean.
 		if ctx.Err() != nil {
 			return
 		}
 
-		// A stream that successfully opened and ran resets the per-episode budget:
-		// the failure that ended it (if any) begins a fresh recovery episode rather
-		// than continuing the prior reconnect streak.
+		// A stream that successfully opened and ran resets the per-episode
+		// budget: the failure that ended it (if any) begins a fresh recovery
+		// episode rather than continuing the prior reconnect streak.
 		if healthy {
 			failedAttempts = 0
 		}
 
-		// A server-requested pause (CloseStreamSignal) is not a failure: wait the
-		// requested window, then reconnect without consuming the recovery budget.
-		// Ingest keeps buffering meanwhile; unacked records are requeued on the
-		// next attempt.
+		// A server-requested pause (CloseStreamSignal) is not a failure: wait
+		// the requested window, then reconnect without consuming the recovery
+		// budget. Ingest keeps buffering meanwhile; unacked records are
+		// requeued on the next attempt.
+		//
+		// If recovery is disabled, though, we honor that: don't reconnect
+		// after a pause. Treat it as a terminal failure so callers see the
+		// signal rather than silently ingesting into a dead stream.
 		var ps pauseSignal
 		if errors.As(runErr, &ps) {
-			if !cs.waitPause(ctx, ps.duration) {
-				return // Close cancelled ctx during the pause.
+			if !cs.cfg.Recovery.enabled() {
+				err = fmt.Errorf("stream: server requested pause and recovery is disabled: %w", runErr)
+				break
 			}
-			cs.buf.requeue()
+			// The receiver already applied effectivePauseWait(cfg, duration)
+			// during pause drain; no additional wait is required here. A
+			// concurrent Close would have short-circuited the loop above
+			// via the ctx.Err() check, so we don't repeat that check.
 			continue
 		}
 
@@ -76,6 +88,14 @@ func (cs *CoreStream[Req, Resp]) supervise(ctx context.Context) {
 			runErr = fmt.Errorf("stream: server closed the stream")
 		}
 
+		// Mid-stream auth rejection means the cached credential the transport
+		// attached at Open is no longer accepted (e.g. token rotated or
+		// revoked). Drop it so the next Open re-mints via GetHeaders instead
+		// of reconnecting with the same stale value.
+		if transport.IsAuthRejection(runErr) && cs.params.HeadersProvider != nil {
+			cs.params.HeadersProvider.Invalidate(ctx, cs.params.TableName)
+		}
+
 		err = runErr
 		if !isRetryable(runErr) {
 			break
@@ -83,48 +103,23 @@ func (cs *CoreStream[Req, Resp]) supervise(ctx context.Context) {
 		failedAttempts++
 	}
 
-	// Terminal failure path.
+	// Terminal failure path. Fail the watermark first so any waiters unblock
+	// promptly with the terminal error; the callback dispatch and buffer
+	// drain run afterwards.
 	cs.wm.fail(err)
 	cs.setTerminalErr(err)
 
-	if cs.callback != nil {
-		// Drain the buffer and fire OnError for each unacked item. drain() also
-		// closes the buffer and unblocks any enqueue callers, so we must call it
-		// here rather than close() + a separate drain in GetUnacked. GetUnacked
-		// documents that it is mutually exclusive with AckCallback: when a
-		// callback is set, the supervisor owns the drain; when it is nil,
-		// GetUnacked drains on demand.
-		for _, it := range cs.buf.drain() {
-			cs.callback.OnError(it.offset, err)
-		}
-	} else {
-		// No callback: just close the buffer so enqueue callers unblock. The
-		// items remain retrievable via GetUnacked, which calls drain() itself.
-		cs.buf.close()
+	// Drain the buffer once. We always preserve the payloads for GetUnacked
+	// AND, if a callback is registered, dispatch per-offset OnError events;
+	// both signals converge on the same underlying records rather than
+	// being mutually exclusive.
+	items := cs.buf.drain()
+	cs.setRetainedFailed(items)
+	for _, it := range items {
+		cs.dispatcher.enqueueError(it.offset, err)
 	}
-}
-
-// waitPause sleeps for the server-requested pause window before reconnecting,
-// capped by StreamPausedMaxWait (min of the two; a non-positive cap means "no
-// client cap"). Returns false if ctx was cancelled (Close) during the wait, so
-// the caller stops instead of reconnecting. A non-positive effective wait
-// reconnects immediately.
-func (cs *CoreStream[Req, Resp]) waitPause(ctx context.Context, serverDuration time.Duration) bool {
-	wait := serverDuration
-	if cap := cs.cfg.StreamPausedMaxWait; cap > 0 && (wait <= 0 || cap < wait) {
-		wait = cap
-	}
-	if wait <= 0 {
-		return ctx.Err() == nil
-	}
-	timer := time.NewTimer(wait)
-	defer timer.Stop()
-	select {
-	case <-timer.C:
-		return true
-	case <-ctx.Done():
-		return false
-	}
+	// drain() marks the buffer closed; the extra close call is defensive.
+	cs.buf.close()
 }
 
 // retryableError is any error that self-classifies its retryability. Errors
@@ -145,29 +140,32 @@ func isRetryable(err error) bool {
 	if err == nil {
 		return false
 	}
-	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
-		return false
-	}
-	// errClosed means the buffer was drained by Close; not retryable.
-	if errors.Is(err, errClosed) {
-		return false
-	}
-	// Errors produced by the transport layer's Open (validation failures such
-	// as empty table name or unsupported record type) are non-retryable
-	// because reconnecting would produce the same error.
+	// Self-classifying retryable errors take precedence over the generic
+	// context-error check: an internal per-attempt budget (e.g. an
+	// openBudgetExceeded wrapping context.DeadlineExceeded) wants to remain
+	// retryable so RecoveryRetries actually governs stalled dials.
+	// Validation errors and errClosed are checked first though, because
+	// they wrap non-retryable causes regardless of self-classification.
 	var ve *validationError
 	if errors.As(err, &ve) {
 		return false
 	}
-	// Honor any layer's self-reported retryability verdict (e.g. OAuth
-	// TokenError). Walk the unwrap chain so a wrapped mint failure is still seen.
+	if errors.Is(err, errClosed) {
+		return false
+	}
 	var re retryableError
 	if errors.As(err, &re) {
 		return re.IsRetryable()
 	}
-	// All other errors (network failures, server resets, auth rejections after
-	// the stream was open) are considered retryable; the supervisor's retry cap
-	// is the backstop.
+	// Bare ctx-cancel / deadline (without a self-classifying wrapper) is
+	// non-retryable: those come from the caller/supervisor cancelling us,
+	// not an internal budget.
+	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return false
+	}
+	// All other errors (network failures, server resets, auth rejections
+	// after the stream was open) are considered retryable; the supervisor's
+	// retry cap is the backstop.
 	return true
 }
 
