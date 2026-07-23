@@ -206,7 +206,24 @@ impl TokenCache {
             // Hold the per-entry lock across the fetch so concurrent callers for
             // the same key reuse a single mint instead of stampeding the endpoint.
             let mut guard = slot.token.lock().await;
-            if slot.invalidated.load(AtomicOrdering::Acquire) {
+            // The slot may have been pruned after it was cloned but before its
+            // token lock was acquired. Revalidate its map identity while holding
+            // the token lock; pruning cannot detach it after this point because
+            // `prune_expired` uses `try_lock`. Also clean up any tombstone left by
+            // a cancelled older implementation of invalidation.
+            let slot_is_current = {
+                let mut entries = self.entries.lock().await;
+                let is_current = entries
+                    .get(&key)
+                    .is_some_and(|current| Arc::ptr_eq(current, &slot));
+                if is_current && slot.invalidated.load(AtomicOrdering::Acquire) {
+                    entries.remove(&key);
+                    false
+                } else {
+                    is_current
+                }
+            };
+            if !slot_is_current {
                 continue;
             }
 
@@ -226,12 +243,12 @@ impl TokenCache {
                 }
             }
 
-            // A present-but-stale token means we are refreshing; an empty slot is
-            // a cold miss. The reason is surfaced on the mint log.
-            let reason = if guard.is_some() {
-                MintReason::Refresh
-            } else {
-                MintReason::ColdMiss
+            // Only an unexpired token can make this a proactive refresh. An
+            // expired entry has no fallback and must retain cold-miss timeout
+            // semantics.
+            let reason = match guard.as_ref() {
+                Some(cached) if !cached.is_expired() => MintReason::Refresh,
+                _ => MintReason::ColdMiss,
             };
 
             // `expires_in` starts at token issuance, not after a slow response has
@@ -335,13 +352,43 @@ impl TokenCache {
                         id: generation,
                     })
                 }
-                Some(_) | None => {
+                Some(_) => {
+                    // The response took longer than the token's entire reported
+                    // lifetime. Never send a token that is already expired by the
+                    // cache's conservative clock. A still-valid prior generation
+                    // remains the safest fallback; otherwise surface a retryable
+                    // mint error.
+                    if let Some(cached) = guard.as_mut() {
+                        if !cached.is_expired()
+                            && slot.current_generation.load(AtomicOrdering::Acquire)
+                                == cached.generation
+                        {
+                            cached.defer_refresh(self.refresh_failure_backoff);
+                            warn!(
+                                table = %table_name,
+                                "fetched token expired before arrival; serving still-valid cached token"
+                            );
+                            return Ok(TokenResult {
+                                value: cached.value.clone(),
+                                generation: Some(TokenGeneration {
+                                    slot: Arc::clone(&slot),
+                                    id: cached.generation,
+                                }),
+                            });
+                        }
+                    }
+                    Self::clear_cached_token(&slot, &mut guard, prior_generation)?;
+                    return Err(crate::ZerobusError::TokenFetchError(
+                        "Fetched OAuth token expired before the response completed".to_string(),
+                    ));
+                }
+                None => {
                     // No usable TTL: keep an existing still-valid token rather
                     // than discarding it. The newly returned token is not tied
                     // to that older cache generation.
                     let keep_existing = guard.as_ref().is_some_and(|cached| !cached.is_expired());
                     if !keep_existing {
-                        *guard = None;
+                        Self::clear_cached_token(&slot, &mut guard, prior_generation)?;
                     }
                     None
                 }
@@ -385,6 +432,16 @@ impl TokenCache {
         }
 
         let key = TokenKey::new(client_id, client_secret, table_name);
+        // Acquire the only awaited lock before mutating the slot. Once the CAS
+        // succeeds there is no cancellation point between tombstoning and map
+        // removal, so a timed-out invalidation cannot poison this key.
+        let mut entries = self.entries.lock().await;
+        let is_current = entries
+            .get(&key)
+            .is_some_and(|slot| Arc::ptr_eq(slot, &generation.slot));
+        if !is_current {
+            return;
+        }
         if generation
             .slot
             .current_generation
@@ -403,14 +460,31 @@ impl TokenCache {
             .slot
             .invalidated
             .store(true, AtomicOrdering::Release);
-        let mut entries = self.entries.lock().await;
-        let is_current = entries
-            .get(&key)
-            .is_some_and(|slot| Arc::ptr_eq(slot, &generation.slot));
-        if is_current {
-            entries.remove(&key);
-            debug!(table = %table_name, "token cache entry invalidated after auth rejection");
+        entries.remove(&key);
+        debug!(table = %table_name, "token cache entry invalidated after auth rejection");
+    }
+
+    /// Clears the token while keeping its mutex held and atomically returns the
+    /// slot to the cold-miss generation. A concurrent exact-generation
+    /// invalidation wins the CAS and is surfaced to the caller instead of
+    /// leaving detached state behind.
+    fn clear_cached_token(
+        slot: &Slot,
+        guard: &mut Option<CachedToken>,
+        prior_generation: Option<u64>,
+    ) -> ZerobusResult<()> {
+        let expected = prior_generation.unwrap_or(0);
+        if slot
+            .current_generation
+            .compare_exchange(expected, 0, AtomicOrdering::AcqRel, AtomicOrdering::Acquire)
+            .is_err()
+        {
+            return Err(crate::ZerobusError::TokenFetchError(
+                "Token cache generation changed while clearing an uncacheable token".to_string(),
+            ));
         }
+        *guard = None;
+        Ok(())
     }
 
     fn needs_refresh(&self, cached: &CachedToken) -> bool {
@@ -433,14 +507,14 @@ impl TokenCache {
         }
     }
 
-    /// Drops entries whose token has fully expired. Locked (in-flight) entries,
-    /// still-valid tokens, and empty slots are kept — keeping empty slots is
-    /// what preserves single-flight for a key being minted concurrently.
+    /// Drops idle entries whose token has fully expired or is absent. Locked
+    /// entries are retained, and lookups revalidate map identity after taking
+    /// the per-slot lock, so pruning cannot detach active single-flight work.
     fn prune_expired(entries: &mut HashMap<TokenKey, Slot>) {
         entries.retain(|_, slot| match slot.token.try_lock() {
             Ok(guard) => match guard.as_ref() {
                 Some(cached) => !cached.is_expired(),
-                None => true,
+                None => false,
             },
             Err(_) => true,
         });
@@ -1012,9 +1086,76 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn slow_fetch_does_not_extend_reported_token_lifetime() {
+    async fn expired_entry_uses_cold_miss_timeout_semantics() {
         let cache = TokenCache::new(true, Duration::ZERO);
-        let first = cache
+        let initial = cache
+            .get_or_fetch_with_timeout("id", "secret", "c.s.t", None, |_reason| async {
+                Ok(fetched("old", Some(3600)))
+            })
+            .await
+            .unwrap();
+        let slot = initial.generation.unwrap().slot;
+        slot.token.lock().await.as_mut().unwrap().expires_at = Instant::now();
+
+        // A zero proactive-refresh timeout must not affect replacement of an
+        // expired token because there is no cached fallback left to serve.
+        let replacement = cache
+            .get_or_fetch_with_timeout(
+                "id",
+                "secret",
+                "c.s.t",
+                Some(Duration::ZERO),
+                |reason| async move {
+                    assert!(matches!(reason, MintReason::ColdMiss));
+                    Ok(fetched("fresh", Some(3600)))
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(replacement.value, "fresh");
+    }
+
+    #[tokio::test]
+    async fn non_cacheable_refresh_resets_generation() {
+        let cache = TokenCache::new(true, Duration::ZERO);
+        let initial = cache
+            .get_or_fetch_with_timeout("id", "secret", "c.s.t", None, |_reason| async {
+                Ok(fetched("old", Some(3600)))
+            })
+            .await
+            .unwrap();
+        let slot = initial.generation.unwrap().slot;
+        slot.token.lock().await.as_mut().unwrap().expires_at = Instant::now();
+
+        let uncached = cache
+            .get_or_fetch("id", "secret", "c.s.t", |_reason| async {
+                Ok(fetched("no-ttl", None))
+            })
+            .await
+            .unwrap();
+        assert_eq!(uncached, "no-ttl");
+        assert_eq!(slot.current_generation.load(AtomicOrdering::Acquire), 0);
+
+        let cached_again = cache
+            .get_or_fetch("id", "secret", "c.s.t", |_reason| async {
+                Ok(fetched("recovered", Some(3600)))
+            })
+            .await
+            .unwrap();
+        assert_eq!(cached_again, "recovered");
+    }
+
+    #[tokio::test]
+    async fn expired_on_arrival_falls_back_to_valid_cached_token() {
+        let cache = TokenCache::new(true, Duration::from_secs(60));
+        cache
+            .get_or_fetch("id", "secret", "c.s.t", |_reason| async {
+                Ok(fetched("valid", Some(30)))
+            })
+            .await
+            .unwrap();
+
+        let served = cache
             .get_or_fetch("id", "secret", "c.s.t", |_reason| async {
                 tokio::time::sleep(Duration::from_millis(50)).await;
                 Ok(FetchedToken {
@@ -1024,7 +1165,25 @@ mod tests {
             })
             .await
             .unwrap();
-        assert_eq!(first, "already-expired");
+        assert_eq!(served, "valid");
+    }
+
+    #[tokio::test]
+    async fn expired_on_arrival_is_not_returned_on_cold_miss() {
+        let cache = TokenCache::new(true, Duration::ZERO);
+        let first = cache
+            .get_or_fetch("id", "secret", "c.s.t", |_reason| async {
+                tokio::time::sleep(Duration::from_millis(50)).await;
+                Ok(FetchedToken {
+                    token: "already-expired".to_string(),
+                    expires_in: Some(Duration::from_millis(10)),
+                })
+            })
+            .await;
+        assert!(matches!(
+            first,
+            Err(crate::ZerobusError::TokenFetchError(_))
+        ));
 
         let second = cache
             .get_or_fetch("id", "secret", "c.s.t", |_reason| async {
@@ -1033,6 +1192,104 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(second, "fresh");
+    }
+
+    #[tokio::test]
+    async fn invalidation_cancelled_on_map_lock_leaves_slot_usable() {
+        let cache = Arc::new(TokenCache::new(true, Duration::ZERO));
+        let initial = cache
+            .get_or_fetch_with_timeout("id", "secret", "c.s.t", None, |_reason| async {
+                Ok(fetched("cached", Some(3600)))
+            })
+            .await
+            .unwrap();
+        let generation = initial.generation.unwrap();
+
+        let entries_guard = cache.entries.lock().await;
+        let started = Arc::new(tokio::sync::Notify::new());
+        let invalidation = {
+            let cache = Arc::clone(&cache);
+            let started = Arc::clone(&started);
+            let generation = generation.clone();
+            tokio::spawn(async move {
+                started.notify_one();
+                cache
+                    .invalidate_generation("id", "secret", "c.s.t", &generation)
+                    .await;
+            })
+        };
+        started.notified().await;
+        tokio::time::sleep(Duration::from_millis(10)).await;
+
+        assert!(!generation.slot.invalidated.load(AtomicOrdering::Acquire));
+        assert_eq!(
+            generation
+                .slot
+                .current_generation
+                .load(AtomicOrdering::Acquire),
+            generation.id
+        );
+        invalidation.abort();
+        assert!(invalidation.await.unwrap_err().is_cancelled());
+        drop(entries_guard);
+
+        let still_cached = cache
+            .get_or_fetch("id", "secret", "c.s.t", |_reason| async {
+                panic!("cancelled invalidation damaged the cached slot")
+            })
+            .await
+            .unwrap();
+        assert_eq!(still_cached, "cached");
+    }
+
+    #[tokio::test]
+    async fn lookup_self_heals_invalidated_mapped_slot() {
+        let cache = TokenCache::new(true, Duration::ZERO);
+        let initial = cache
+            .get_or_fetch_with_timeout("id", "secret", "c.s.t", None, |_reason| async {
+                Ok(fetched("old", Some(3600)))
+            })
+            .await
+            .unwrap();
+        initial
+            .generation
+            .unwrap()
+            .slot
+            .invalidated
+            .store(true, AtomicOrdering::Release);
+
+        let replacement = tokio::time::timeout(
+            Duration::from_secs(1),
+            cache.get_or_fetch("id", "secret", "c.s.t", |_reason| async {
+                Ok(fetched("replacement", Some(3600)))
+            }),
+        )
+        .await
+        .expect("invalidated slot lookup must not spin")
+        .unwrap();
+        assert_eq!(replacement, "replacement");
+    }
+
+    #[tokio::test]
+    async fn miss_prunes_idle_empty_slots() {
+        let cache = TokenCache::new(true, Duration::ZERO);
+        let failed = cache
+            .get_or_fetch("id", "secret", "c.s.failed", |_reason| async {
+                Err(crate::ZerobusError::TokenFetchError("boom".to_string()))
+            })
+            .await;
+        assert!(failed.is_err());
+        assert_eq!(cache.entries.lock().await.len(), 1);
+
+        cache
+            .get_or_fetch("id", "secret", "c.s.healthy", |_reason| async {
+                Ok(fetched("healthy", Some(3600)))
+            })
+            .await
+            .unwrap();
+        let entries = cache.entries.lock().await;
+        assert_eq!(entries.len(), 1);
+        assert!(entries.contains_key(&TokenKey::new("id", "secret", "c.s.healthy")));
     }
 
     #[tokio::test]

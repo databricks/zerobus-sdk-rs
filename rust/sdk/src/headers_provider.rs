@@ -7,6 +7,10 @@ use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::Mutex;
 
+/// Upper bound for a proactive refresh. A cold miss remains governed by the
+/// enclosing stream-creation deadline because it has no cached fallback.
+pub(crate) const MAX_PROACTIVE_REFRESH_TIMEOUT: Duration = Duration::from_secs(5);
+
 /// A trait for providing custom headers for gRPC requests.
 ///
 /// This trait allows you to implement custom logic for generating authentication headers,
@@ -63,6 +67,11 @@ pub trait HeadersProvider: Send + Sync {
 ///
 /// This provider implements the OAuth 2.0 client credentials flow to obtain
 /// access tokens for authenticating with the Zerobus service.
+///
+/// One provider instance tracks the token generation used by one stream. Do
+/// not share an `OAuthHeadersProvider` across concurrent stream builders;
+/// construct one provider per stream instead. The `.oauth(...)` stream-builder
+/// path does this automatically while still sharing the underlying token cache.
 pub struct OAuthHeadersProvider {
     client_id: String,
     client_secret: String,
@@ -96,7 +105,7 @@ impl OAuthHeadersProvider {
             workspace_id,
             unity_catalog_url,
             Arc::new(TokenCache::new(true, DEFAULT_REFRESH_BUFFER)),
-            None,
+            Some(MAX_PROACTIVE_REFRESH_TIMEOUT),
         )
     }
 

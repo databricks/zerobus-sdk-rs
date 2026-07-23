@@ -26,7 +26,9 @@ use crate::callbacks::AckCallback;
 use crate::databricks::zerobus::RecordType;
 #[cfg(feature = "testing")]
 use crate::headers_provider::NoAuthHeadersProvider;
-use crate::headers_provider::{HeadersProvider, OAuthHeadersProvider};
+use crate::headers_provider::{
+    HeadersProvider, OAuthHeadersProvider, MAX_PROACTIVE_REFRESH_TIMEOUT,
+};
 use crate::stream_configuration::StreamConfigurationOptions;
 use crate::{TableProperties, ZerobusError, ZerobusResult, ZerobusSdk, ZerobusStream};
 
@@ -46,7 +48,12 @@ enum AuthConfig {
     NoAuth,
 }
 
-const TOKEN_REFRESH_TIMEOUT_MARGIN: Duration = Duration::from_millis(100);
+/// Leaves at least half of a stream-creation attempt for transport setup while
+/// preventing a healthy-sized recovery budget from spending more than five
+/// seconds on a proactive refresh that already has a valid fallback token.
+fn proactive_refresh_timeout(recovery_timeout_ms: u64) -> Duration {
+    Duration::from_millis(recovery_timeout_ms / 2).min(MAX_PROACTIVE_REFRESH_TIMEOUT)
+}
 
 /// Which record format was selected.
 enum FormatConfig {
@@ -403,8 +410,7 @@ impl<'a> StreamBuilder<'a> {
     /// or if an Arrow format was selected (use `build_arrow()` instead).
     pub async fn build(mut self) -> ZerobusResult<ZerobusStream> {
         self.validate()?;
-        let refresh_timeout = Duration::from_millis(self.grpc_config.recovery_timeout_ms)
-            .saturating_sub(TOKEN_REFRESH_TIMEOUT_MARGIN);
+        let refresh_timeout = proactive_refresh_timeout(self.grpc_config.recovery_timeout_ms);
         let headers_provider =
             self.resolve_headers_provider_with_refresh_timeout(Some(refresh_timeout))?;
 
@@ -467,8 +473,7 @@ impl<'a> StreamBuilder<'a> {
             crate::client_warnings::warn_payload_limit_ignored_for_arrow();
         }
 
-        let refresh_timeout = Duration::from_millis(self.arrow_config.recovery_timeout_ms)
-            .saturating_sub(TOKEN_REFRESH_TIMEOUT_MARGIN);
+        let refresh_timeout = proactive_refresh_timeout(self.arrow_config.recovery_timeout_ms);
         let headers_provider =
             self.resolve_headers_provider_with_refresh_timeout(Some(refresh_timeout))?;
 
@@ -607,6 +612,19 @@ mod tests {
             crate::stream_options::defaults::MAX_INGEST_PAYLOAD_BYTES
         );
         assert!(builder.grpc_config.max_ingest_payload_bytes < 10 * 1024 * 1024);
+    }
+
+    #[test]
+    fn proactive_refresh_reserves_connection_budget() {
+        assert_eq!(
+            proactive_refresh_timeout(15_000),
+            MAX_PROACTIVE_REFRESH_TIMEOUT
+        );
+        assert_eq!(
+            proactive_refresh_timeout(4_000),
+            Duration::from_millis(2_000)
+        );
+        assert_eq!(proactive_refresh_timeout(99), Duration::from_millis(49));
     }
 
     #[test]
