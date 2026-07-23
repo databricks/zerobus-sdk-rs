@@ -477,6 +477,7 @@ impl<'a> StreamBuilder<'a> {
         let stream = ZerobusArrowStream::new(
             &self.sdk.zerobus_endpoint,
             Arc::clone(&self.sdk.tls_config),
+            self.sdk.connector_factory.clone(),
             table_properties,
             headers_provider,
             self.arrow_config,

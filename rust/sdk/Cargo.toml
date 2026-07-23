@@ -35,6 +35,7 @@ tonic-prost.workspace = true
 tonic-types = { workspace = true, optional = true }
 tracing.workspace = true
 hyper-http-proxy.workspace = true
+hyper-rustls.workspace = true
 hyper-util.workspace = true
 smallvec.workspace = true
 bytes.workspace = true

@@ -11,9 +11,11 @@ use arrow_flight::{
     HandshakeRequest, HandshakeResponse, PutResult, SchemaResult, Ticket,
 };
 use futures::Stream;
+use rcgen::{generate_simple_self_signed, CertifiedKey};
 use serde::{Deserialize, Serialize};
 use tokio::sync::{mpsc, Mutex};
 use tokio::time::sleep;
+use tonic::transport::{Identity, ServerTlsConfig};
 use tonic::{Request, Response, Status, Streaming};
 use tracing::{debug, error, info, warn};
 
@@ -538,6 +540,28 @@ impl FlightService for MockFlightServer {
 /// Helper function to create a mock Flight server and return its address
 pub async fn start_mock_flight_server(
 ) -> Result<(MockFlightServer, String), Box<dyn std::error::Error>> {
+    start_mock_flight_server_inner(None, "http", "127.0.0.1").await
+}
+
+/// Starts the mock Flight server with a runtime-generated TLS identity.
+#[allow(dead_code)]
+pub async fn start_mock_tls_flight_server(
+) -> Result<(MockFlightServer, String, Vec<u8>), Box<dyn std::error::Error>> {
+    let CertifiedKey { cert, key_pair } =
+        generate_simple_self_signed(vec!["localhost".to_string()])?;
+    let cert_pem = cert.pem();
+    let identity = Identity::from_pem(cert_pem.as_bytes(), key_pair.serialize_pem().as_bytes());
+    let tls = ServerTlsConfig::new().identity(identity);
+    let (server, server_url) =
+        start_mock_flight_server_inner(Some(tls), "https", "localhost").await?;
+    Ok((server, server_url, cert_pem.into_bytes()))
+}
+
+async fn start_mock_flight_server_inner(
+    tls: Option<ServerTlsConfig>,
+    scheme: &str,
+    endpoint_host: &str,
+) -> Result<(MockFlightServer, String), Box<dyn std::error::Error>> {
     info!("Starting mock Arrow Flight server");
     let mock_server = MockFlightServer::new();
     let server_clone = MockFlightServer {
@@ -552,12 +576,16 @@ pub async fn start_mock_flight_server(
     let addr: std::net::SocketAddr = "127.0.0.1:0".parse()?;
     let listener = tokio::net::TcpListener::bind(addr).await?;
     let local_addr = listener.local_addr()?;
-    let server_url = format!("http://{}", local_addr);
+    let server_url = format!("{}://{}:{}", scheme, endpoint_host, local_addr.port());
     info!("Mock Flight server will listen on: {}", server_url);
 
+    let mut server = tonic::transport::Server::builder();
+    if let Some(tls) = tls {
+        server = server.tls_config(tls)?;
+    }
+    let router = server.add_service(FlightServiceServer::new(server_clone));
     tokio::spawn(async move {
-        if let Err(e) = tonic::transport::Server::builder()
-            .add_service(FlightServiceServer::new(server_clone))
+        if let Err(e) = router
             .serve_with_incoming(tokio_stream::wrappers::TcpListenerStream::new(listener))
             .await
         {
