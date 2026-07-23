@@ -181,7 +181,15 @@ func (b *buffer[Req]) requeue() {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	// Prepend in-flight items (in order) before any still-pending ones.
-	b.queue = append(b.flight, b.queue...)
+	requeued := make([]item[Req], 0, len(b.flight)+len(b.queue))
+	requeued = append(requeued, b.flight...)
+	requeued = append(requeued, b.queue...)
+	b.queue = requeued
+	// Zero departed slots so payload references in the old backing array become
+	// GC-collectible after flight is reset.
+	for i := range b.flight {
+		b.flight[i] = item[Req]{}
+	}
 	b.flight = b.flight[:0]
 	b.cond.Broadcast()
 }
