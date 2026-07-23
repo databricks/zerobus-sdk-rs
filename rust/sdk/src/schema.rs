@@ -685,7 +685,9 @@ fn sanitize_message_name(name: &str) -> String {
 ///
 /// Notable Arrow choices, all dictated by the Databricks Arrow Flight server:
 /// `STRING` / `DECIMAL` → `LargeUtf8`, `VARIANT` →
-/// `Struct<metadata: LargeBinary not null, value: LargeBinary not null>`,
+/// `Struct<metadata: LargeBinary not null, value: LargeBinary not null>`
+/// annotated with the canonical `arrow.parquet.variant` extension marker so
+/// downstream consumers can recover which fields are variants,
 /// `BINARY` → `LargeBinary`,
 /// `DATE` → `Date32`, `TIMESTAMP` → `Timestamp(Microsecond, Some("UTC"))`,
 /// `TIMESTAMP_NTZ` → `Timestamp(Microsecond, None)`, `ARRAY<T>` → `List` with
@@ -733,11 +735,7 @@ fn uc_column_to_arrow_field(column: &UcColumn) -> Result<arrow_schema::Field, Sc
         complex_type_to_arrow_field(&column.name, &complex, column.nullable)
     } else {
         let p = parse_uc_top_level_type(&column.type_name)?;
-        Ok(arrow_schema::Field::new(
-            &column.name,
-            map_primitive_to_arrow(p),
-            column.nullable,
-        ))
+        Ok(primitive_arrow_field(&column.name, p, column.nullable))
     }
 }
 
@@ -764,6 +762,40 @@ fn map_primitive_to_arrow(p: PrimitiveType) -> arrow_schema::DataType {
         PrimitiveType::Decimal => DataType::LargeUtf8,
         PrimitiveType::Variant => variant_arrow_data_type(),
     }
+}
+
+/// Canonical Arrow extension name for the Parquet Variant type (Arrow's
+/// `VariantType::NAME`). Stamped via raw metadata to avoid a `parquet-variant`
+/// dependency; the result is byte-identical.
+#[cfg(feature = "arrow-flight")]
+const VARIANT_EXTENSION_NAME: &str = "arrow.parquet.variant";
+
+/// Build an Arrow field for a UC primitive, marking `VARIANT` fields so
+/// downstream consumers can recover variant-ness. The Arrow Flight server
+/// strips the marker on the write path.
+#[cfg(feature = "arrow-flight")]
+fn primitive_arrow_field(name: &str, p: PrimitiveType, nullable: bool) -> arrow_schema::Field {
+    let field = arrow_schema::Field::new(name, map_primitive_to_arrow(p), nullable);
+    if matches!(p, PrimitiveType::Variant) {
+        variant_marked_field(field)
+    } else {
+        field
+    }
+}
+
+/// Stamp the canonical variant extension marker onto `field`: extension name
+/// plus empty metadata, matching `Field::with_extension_type(VariantType)`.
+#[cfg(feature = "arrow-flight")]
+fn variant_marked_field(field: arrow_schema::Field) -> arrow_schema::Field {
+    use arrow_schema::extension::{EXTENSION_TYPE_METADATA_KEY, EXTENSION_TYPE_NAME_KEY};
+
+    let mut metadata = field.metadata().clone();
+    metadata.insert(
+        EXTENSION_TYPE_NAME_KEY.to_string(),
+        VARIANT_EXTENSION_NAME.to_string(),
+    );
+    metadata.insert(EXTENSION_TYPE_METADATA_KEY.to_string(), String::new());
+    field.with_metadata(metadata)
 }
 
 #[cfg(feature = "arrow-flight")]
@@ -799,7 +831,7 @@ fn complex_type_to_arrow_field(
     use std::sync::Arc;
 
     match ct {
-        ComplexType::Primitive(p) => Ok(Field::new(name, map_primitive_to_arrow(*p), nullable)),
+        ComplexType::Primitive(p) => Ok(primitive_arrow_field(name, *p, nullable)),
         ComplexType::Struct(st) => {
             let mut child_fields = Vec::with_capacity(st.fields.len());
             for f in &st.fields {
@@ -821,7 +853,7 @@ fn complex_type_to_arrow_field(
             // nullable elements (Spark/Delta semantics for an unspecified
             // value).
             let item_field = match element.as_ref() {
-                ComplexType::Primitive(p) => Field::new("item", map_primitive_to_arrow(*p), true),
+                ComplexType::Primitive(p) => primitive_arrow_field("item", *p, true),
                 ComplexType::Struct(_) => complex_type_to_arrow_field("item", element, true)?,
                 ComplexType::Array(_) => return Err(shape_unsupported("nested arrays", name)),
                 ComplexType::Map { .. } => return Err(shape_unsupported("arrays of maps", name)),
@@ -835,7 +867,7 @@ fn complex_type_to_arrow_field(
         ComplexType::Map { key, value } => {
             let key_primitive = validate_arrow_map_key(key, name)?;
             let value_field = match value.as_ref() {
-                ComplexType::Primitive(p) => Field::new("values", map_primitive_to_arrow(*p), true),
+                ComplexType::Primitive(p) => primitive_arrow_field("values", *p, true),
                 ComplexType::Struct(_) => complex_type_to_arrow_field("values", value, true)?,
                 ComplexType::Array(_) | ComplexType::Map { .. } => {
                     return Err(shape_unsupported("maps with complex value types", name));
@@ -1278,6 +1310,30 @@ mod tests {
             }
         }
 
+        /// Asserts `field` is a VARIANT struct carrying the canonical
+        /// `arrow.parquet.variant` extension marker.
+        fn assert_variant_marked(field: &arrow_schema::Field) {
+            use arrow_schema::extension::{EXTENSION_TYPE_METADATA_KEY, EXTENSION_TYPE_NAME_KEY};
+
+            assert_variant_data_type(field.data_type());
+            assert_eq!(
+                field
+                    .metadata()
+                    .get(EXTENSION_TYPE_NAME_KEY)
+                    .map(String::as_str),
+                Some("arrow.parquet.variant"),
+                "variant field must carry the extension name marker"
+            );
+            assert_eq!(
+                field
+                    .metadata()
+                    .get(EXTENSION_TYPE_METADATA_KEY)
+                    .map(String::as_str),
+                Some(""),
+                "variant field must carry empty extension metadata"
+            );
+        }
+
         #[test]
         fn scalars_use_proper_arrow_types() {
             let cols = vec![
@@ -1312,8 +1368,11 @@ mod tests {
             // DECIMAL renders as LargeUtf8 (text encoding contract preserved).
             assert_eq!(arrow_field(&s, "price").data_type(), &DataType::LargeUtf8);
             let attributes = arrow_field(&s, "attributes");
-            assert_variant_data_type(attributes.data_type());
+            assert_variant_marked(attributes);
             assert!(!attributes.is_nullable());
+            // Non-variant fields carry no extension marker.
+            assert!(arrow_field(&s, "id").metadata().is_empty());
+            assert!(arrow_field(&s, "data").metadata().is_empty());
         }
 
         #[test]
@@ -1536,16 +1595,18 @@ mod tests {
             let s = arrow_schema_from_uc_columns(&cols).unwrap();
             match arrow_field(&s, "payload").data_type() {
                 DataType::Struct(fs) => {
-                    assert_variant_data_type(fs[0].data_type());
+                    // Nested variants, in a struct child / array item / map value,
+                    // all carry the extension marker.
+                    assert_variant_marked(&fs[0]);
                     match fs[1].data_type() {
-                        DataType::List(item) => assert_variant_data_type(item.data_type()),
+                        DataType::List(item) => assert_variant_marked(item),
                         other => panic!("expected List, got {:?}", other),
                     }
                     match fs[2].data_type() {
                         DataType::Map(entries, _) => match entries.data_type() {
                             DataType::Struct(kv) => {
                                 assert_eq!(kv[0].data_type(), &DataType::LargeUtf8);
-                                assert_variant_data_type(kv[1].data_type());
+                                assert_variant_marked(&kv[1]);
                             }
                             other => panic!("expected Struct inside Map, got {:?}", other),
                         },
