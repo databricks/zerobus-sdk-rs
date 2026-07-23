@@ -77,6 +77,23 @@ func TestClassifyMalformedAckMissingOffset(t *testing.T) {
 	}
 }
 
+func TestClassifyMalformedAckNegativeOffset(t *testing.T) {
+	resp := &zerobuspb.EphemeralStreamResponse{
+		Payload: &zerobuspb.EphemeralStreamResponse_IngestRecordResponse{
+			IngestRecordResponse: &zerobuspb.IngestRecordResponse{
+				DurabilityAckUpToOffset: proto.Int64(-1),
+			},
+		},
+	}
+	kind, off, _ := offsetAckModel{}.classify(resp)
+	if kind != malformedResponse {
+		t.Fatalf("want malformedResponse for negative offset, got %v", kind)
+	}
+	if off != 0 {
+		t.Fatalf("want offset 0 for malformed, got %d", off)
+	}
+}
+
 // Nil and payload-less responses are unknown, not ignorable, so the receiver
 // can fail the stream on a wire-contract mismatch.
 func TestClassifyUnknown(t *testing.T) {

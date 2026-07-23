@@ -49,7 +49,11 @@ func (offsetAckModel) classify(resp ephemeralResp) (respKind, int64, pauseSignal
 		if ack.DurabilityAckUpToOffset == nil {
 			return malformedResponse, 0, pauseSignal{}
 		}
-		return ackResponse, *ack.DurabilityAckUpToOffset, pauseSignal{}
+		off := *ack.DurabilityAckUpToOffset
+		if off < 0 {
+			return malformedResponse, 0, pauseSignal{}
+		}
+		return ackResponse, off, pauseSignal{}
 	}
 	return unknownResponse, 0, pauseSignal{}
 }
