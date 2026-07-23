@@ -130,6 +130,11 @@ type tokenFlight struct {
 	done  chan struct{} // closed when the mint completes
 	token string        // resolved token (empty on error)
 	err   error         // resolved error (nil on success)
+	// leaderCanceled marks that the mint failed because the leader's own context
+	// was cancelled (not the SDK budget), stamped from the live context since the
+	// final error can't reveal a custom WithCancelCause cause on HTTP/1. Lets a
+	// live-ctx waiter re-attempt instead of inheriting a cancel it never made.
+	leaderCanceled bool
 }
 
 // tokenCache caches OAuth tokens per (clientID, secret, tableName, scope).
@@ -250,15 +255,11 @@ func (c *tokenCache) tryGetOrFetch(
 		entry.mu.Unlock()
 		select {
 		case <-flight.done:
-			// If the leader failed solely because its own caller cancelled its
-			// context, don't propagate that cancel to a waiter whose context is
-			// still live; signal a re-attempt so this caller can mint for itself.
-			//
-			// A leader mint that timed out on its own (a slow endpoint tripping a
-			// client/transport deadline) is reported retryable, not a cancellation,
-			// so it is excluded here: the waiter shares that one outcome instead of
-			// each re-minting, which is what single-flight is for.
-			if flight.err != nil && isContextError(flight.err) && !isRetryable(flight.err) && ctx.Err() == nil {
+			// The leader failed because its own caller cancelled: don't propagate
+			// that to a live-ctx waiter, signal a re-attempt instead. A leader that
+			// timed out on its own has leaderCanceled false, so waiters share that
+			// one outcome rather than each re-minting (the point of single-flight).
+			if flight.leaderCanceled && ctx.Err() == nil {
 				return "", nil, true
 			}
 			return flight.token, flight.err, false
@@ -292,9 +293,13 @@ func (c *tokenCache) tryGetOrFetch(
 			token, resErr = entry.cached.value, nil
 		}
 		// Publish to waiters: writes before close(done) happen-before <-done.
-		// A caller-cancellation error published here lets a live-ctx waiter
-		// re-attempt instead of inheriting a cancellation it never requested.
+		// Stamp leaderCanceled only when the leader's own caller-cancel produced a
+		// non-retryable failure, so a live-ctx waiter re-attempts rather than
+		// inherits it. A successful cached fallback (resErr == nil) or a retryable
+		// outcome is still shared: those don't need re-minting, and the context can
+		// only be inspected for provenance, not blamed for the error itself.
 		flight.token, flight.err = token, resErr
+		flight.leaderCanceled = resErr != nil && !isRetryable(resErr) && isCallerCancellation(ctx)
 		close(flight.done)
 		entry.mu.Unlock()
 		return token, resErr, false
@@ -341,27 +346,24 @@ func (c *tokenCache) tryGetOrFetch(
 	return token, nil, false
 }
 
-// isContextError reports whether err is (or wraps) a context cancellation or
-// deadline. This alone does not say where the cancellation came from: an
-// http.Client.Timeout or transport deadline surfaces as a wrapped context error
-// just as a caller's own cancellation does. Use [isCallerCancellation] to tell
-// the two apart when the request context is in hand.
+// isContextError reports whether err is (or wraps) a standard context cancel or
+// deadline. It sees only the standard sentinels, not a custom WithTimeoutCause /
+// WithCancelCause cause, so use it only where ctx is known live (to spot a
+// client/transport timeout). To tell caller cancel from the SDK budget, use
+// [isCallerCancellation], which reads the context instead.
 func isContextError(err error) bool {
 	return errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded)
 }
 
-// isCallerCancellation reports whether err is a context error that originated
-// from the caller stopping, not from an SDK-internal budget. Caller
-// cancellations are non-retryable; the internal budget stays retryable so a
-// cached token can be served.
+// isCallerCancellation reports whether ctx finished because the caller stopped,
+// as opposed to the SDK's own header-resolution budget (which stays retryable).
 //
-// The header-resolution budget is the one non-caller cause (tagged with
-// authctx.ErrHeadersBudgetExceeded); everything else is a caller cancellation,
-// including a caller's custom cause from context.WithCancelCause. Matching only
-// our own budget, rather than enumerating the caller's causes, means an
-// unfamiliar cause is honored as the caller stopping, not misread as retryable.
-func isCallerCancellation(ctx context.Context, err error) bool {
-	if !isContextError(err) || ctx.Err() == nil {
+// Provenance comes from context.Cause, not the error's shape: on HTTP/1 the
+// transport wraps a custom cause into the error, so a shape check misses the
+// budget. The budget (authctx.ErrHeadersBudgetExceeded) is the one non-caller
+// cause; everything else is the caller stopping.
+func isCallerCancellation(ctx context.Context) bool {
+	if ctx.Err() == nil {
 		return false
 	}
 	return context.Cause(ctx) != authctx.ErrHeadersBudgetExceeded

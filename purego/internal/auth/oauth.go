@@ -15,6 +15,8 @@ import (
 	"strings"
 	"time"
 	"unicode"
+
+	"github.com/databricks/zerobus-sdk/purego/internal/authctx"
 )
 
 // OAuthTokenProvider obtains Unity Catalog OAuth 2.0 tokens using the client
@@ -518,13 +520,20 @@ func isHTTPSuccess(code int) bool { return code >= 200 && code < 300 }
 // isRetryableTransportError reports whether a transport-level error from the
 // token request is transient and safe to retry. Network timeouts, dial
 // failures, and request/budget timeouts qualify; a caller-owned cancel or
-// deadline does not — that is the caller's signal to stop, not a server fault.
-// isCallerCancellation tells the two apart when the error is a context error.
+// deadline does not.
+//
+// Provenance comes from the context, not the error's shape: on HTTP/1 the
+// transport wraps a WithTimeoutCause/WithCancelCause cause into the error, so
+// isContextError alone would miss the SDK's own budget. Check the context first.
 func isRetryableTransportError(ctx context.Context, err error) bool {
+	if ctx.Err() != nil {
+		// Only the SDK's own header budget is retryable; any other cause is the
+		// caller stopping.
+		return context.Cause(ctx) == authctx.ErrHeadersBudgetExceeded
+	}
+	// Context still live: a wrapped context error is a client/transport timeout.
 	if isContextError(err) {
-		// A context error is retryable only when it came from the request itself
-		// (client Timeout / transport deadline), not from the caller's own context.
-		return !isCallerCancellation(ctx, err)
+		return true
 	}
 	// Network-level timeouts (dial/read deadlines, i/o timeout) are transient.
 	var ne net.Error

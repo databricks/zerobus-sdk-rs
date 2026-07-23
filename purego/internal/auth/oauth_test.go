@@ -345,6 +345,110 @@ func TestOAuthTokenProviderClientTimeoutRefreshServesCachedToken(t *testing.T) {
 	}
 }
 
+func TestOAuthTokenProviderHeaderBudgetRefreshServesCachedTokenHTTP1(t *testing.T) {
+	// Over HTTP/1.1, a refresh whose context trips the SDK header budget must be
+	// retryable so the still-valid cached token is served. HTTP/1 wraps the budget
+	// cause into the error, not context.DeadlineExceeded, so classification must
+	// read the context — otherwise the budget is missed and the refresh fails.
+	unblock := make(chan struct{})
+	hang := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		select {
+		case <-unblock:
+		case <-r.Context().Done():
+		}
+	}))
+	defer hang.Close()   // executed second: server is now idle
+	defer close(unblock) // executed first: unblocks the handler
+
+	p, err := NewOAuthTokenProvider("id", "secret", "https://ws.zerobus.databricks.com", hang.URL,
+		WithHTTPClient(hang.Client()),
+	)
+	if err != nil {
+		t.Fatalf("NewOAuthTokenProvider: %v", err)
+	}
+	// Still-valid-but-refresh-due token, so the mint runs and its budget can fire.
+	seedRefreshable(p.cache, "id", "secret", "c.s.t", p.cacheScope(), "cached-valid")
+
+	ctx, cancel := context.WithTimeoutCause(context.Background(), 50*time.Millisecond, authctx.ErrHeadersBudgetExceeded)
+	defer cancel()
+
+	tok, err := p.Token(ctx, "c.s.t")
+	if err != nil {
+		t.Fatalf("want fallback to cached token on header-budget refresh, got error: %v", err)
+	}
+	if tok != "cached-valid" {
+		t.Fatalf("want cached token served, got %q", tok)
+	}
+}
+
+func TestOAuthTokenProviderWaiterRemintsWhenLeaderCancelCauseHTTP1(t *testing.T) {
+	// Over HTTP/1.1, a leader cancelled via WithCancelCause (a custom cause) must
+	// not poison a live waiter on its single-flight mint. HTTP/1 wraps the custom
+	// cause into the error, not context.Canceled, so the re-attempt decision must
+	// come from the leader's context (leaderCanceled), not the error's shape.
+	leaderArrived := make(chan struct{})
+	unblock := make(chan struct{}) // frees the parked leader handler at teardown
+	var leaderSeen, waiterSeen atomic.Bool
+	srv := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// First request is the leader: park until its context is cancelled (or
+		// teardown). The waiter's later re-mint is served a token.
+		if leaderSeen.CompareAndSwap(false, true) {
+			close(leaderArrived)
+			select {
+			case <-r.Context().Done():
+			case <-unblock:
+			}
+			return
+		}
+		waiterSeen.Store(true)
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{"access_token": "waiter-tok", "expires_in": 3600})
+	})
+	ts := httptest.NewServer(srv)
+	defer ts.Close()     // executed second: server is now idle
+	defer close(unblock) // executed first: frees the parked leader handler
+
+	p, err := NewOAuthTokenProvider("id", "secret", "https://ws.zerobus.databricks.com", ts.URL,
+		WithHTTPClient(ts.Client()),
+	)
+	if err != nil {
+		t.Fatalf("NewOAuthTokenProvider: %v", err)
+	}
+
+	// Leader mints under a cancel-cause context and parks in the handler.
+	leaderCtx, cancelLeader := context.WithCancelCause(context.Background())
+	leaderDone := make(chan struct{})
+	go func() {
+		defer close(leaderDone)
+		_, _ = p.Token(leaderCtx, "c.s.t")
+	}()
+
+	<-leaderArrived // leader holds the in-flight slot
+
+	// Waiter with a healthy context parks on the leader's flight.
+	waiterTok := make(chan string, 1)
+	waiterErr := make(chan error, 1)
+	go func() {
+		tok, err := p.Token(context.Background(), "c.s.t")
+		waiterErr <- err
+		waiterTok <- tok
+	}()
+
+	time.Sleep(50 * time.Millisecond)                        // let the waiter park on the flight
+	cancelLeader(errors.New("caller gave up with a reason")) // custom cause, not the budget
+
+	<-leaderDone
+	if err := <-waiterErr; err != nil {
+		t.Fatalf("live waiter should not inherit leader's custom-cause cancel, got %v", err)
+	}
+	if tok := <-waiterTok; tok != "waiter-tok" {
+		t.Fatalf("waiter should have re-minted its own token, got %q", tok)
+	}
+	if !waiterSeen.Load() {
+		t.Fatal("waiter never issued its own mint request; it inherited the leader's outcome")
+	}
+}
+
 func TestOAuthTokenProviderSharedCacheKeyedByWorkspace(t *testing.T) {
 	// Two providers with the same credentials and table but different workspaces
 	// share a cache. Because a minted token is bound to its workspace audience,
@@ -512,7 +616,7 @@ func TestIsCallerCancellationDistinguishesBudgetFromCaller(t *testing.T) {
 	// Caller cancelled their own context.
 	cancelledCtx, cancel := context.WithCancel(context.Background())
 	cancel()
-	if !isCallerCancellation(cancelledCtx, context.Canceled) {
+	if !isCallerCancellation(cancelledCtx) {
 		t.Error("caller cancel must be classified as caller cancellation")
 	}
 
@@ -521,10 +625,12 @@ func TestIsCallerCancellationDistinguishesBudgetFromCaller(t *testing.T) {
 	budgetCtx, cancelBudget := context.WithTimeoutCause(context.Background(), time.Nanosecond, authctx.ErrHeadersBudgetExceeded)
 	defer cancelBudget()
 	<-budgetCtx.Done() // budget fires; underlying caller context never cancelled
-	if isCallerCancellation(budgetCtx, context.DeadlineExceeded) {
+	if isCallerCancellation(budgetCtx) {
 		t.Error("internal budget timeout must NOT be classified as caller cancellation")
 	}
-	if !isRetryableTransportError(budgetCtx, context.DeadlineExceeded) {
+	// The transport error carries the budget cause, not a standard context
+	// sentinel — mirroring HTTP/1, where classification must read the context.
+	if !isRetryableTransportError(budgetCtx, context.Cause(budgetCtx)) {
 		t.Error("internal budget timeout must be retryable so a cached token can be served")
 	}
 
@@ -532,7 +638,7 @@ func TestIsCallerCancellationDistinguishesBudgetFromCaller(t *testing.T) {
 	deadlineCtx, cancelDeadline := context.WithTimeout(context.Background(), time.Nanosecond)
 	defer cancelDeadline()
 	<-deadlineCtx.Done()
-	if !isCallerCancellation(deadlineCtx, context.DeadlineExceeded) {
+	if !isCallerCancellation(deadlineCtx) {
 		t.Error("caller's own deadline must be classified as caller cancellation")
 	}
 
@@ -541,10 +647,10 @@ func TestIsCallerCancellationDistinguishesBudgetFromCaller(t *testing.T) {
 	// budget timeout) so we stop as asked instead of serving a cached token.
 	causeCtx, cancelCause := context.WithCancelCause(context.Background())
 	cancelCause(errors.New("caller gave up with a reason"))
-	if !isCallerCancellation(causeCtx, context.Canceled) {
+	if !isCallerCancellation(causeCtx) {
 		t.Error("WithCancelCause cancellation must be classified as caller cancellation")
 	}
-	if isRetryableTransportError(causeCtx, context.Canceled) {
+	if isRetryableTransportError(causeCtx, context.Cause(causeCtx)) {
 		t.Error("WithCancelCause cancellation must not be retryable")
 	}
 }

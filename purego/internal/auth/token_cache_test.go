@@ -595,6 +595,116 @@ func TestTokenCacheWaiterRemintsWhenLeaderContextCancelled(t *testing.T) {
 	}
 }
 
+// TestTokenCacheWaiterSharesLeaderCancelWithCachedFallback verifies that when a
+// cancelled leader still succeeds by serving a still-valid cached token (a
+// retryable mint failure with a live cache entry), waiters share that token
+// rather than re-minting. leaderCanceled must reflect a genuine failure, not a
+// caller cancel that was absorbed by the fallback.
+func TestTokenCacheWaiterSharesLeaderCancelWithCachedFallback(t *testing.T) {
+	c := newTokenCache()
+	seedRefreshable(c, "id", "secret", "c.s.t", "", "cached-valid")
+
+	leaderCtx, cancelLeader := context.WithCancel(context.Background())
+	mintStarted := make(chan struct{})
+	var mints atomic.Int64
+
+	// Leader: parks until its context is cancelled, then returns a RETRYABLE error
+	// while ctx is cancelled. The cache absorbs it into the still-valid cached
+	// token, so the leader succeeds (err == nil) despite the cancellation.
+	leaderDone := make(chan struct{})
+	go func() {
+		defer close(leaderDone)
+		_, _ = c.getOrFetch(leaderCtx, "id", "secret", "c.s.t", "",
+			func(ctx context.Context, _ mintReason) (fetchedToken, error) {
+				mints.Add(1)
+				close(mintStarted)
+				<-ctx.Done()
+				return fetchedToken{}, &retryErr{"transient"}
+			},
+		)
+	}()
+
+	<-mintStarted
+
+	waiterTok := make(chan string, 1)
+	go func() {
+		tok, _ := c.getOrFetch(context.Background(), "id", "secret", "c.s.t", "",
+			func(_ context.Context, _ mintReason) (fetchedToken, error) {
+				mints.Add(1) // a waiter minting here means it wrongly re-attempted
+				return fetchedToken{token: "waiter-tok", expiresIn: dur(3600)}, nil
+			},
+		)
+		waiterTok <- tok
+	}()
+
+	time.Sleep(50 * time.Millisecond)
+	cancelLeader()
+
+	<-leaderDone
+	if tok := <-waiterTok; tok != "cached-valid" {
+		t.Fatalf("waiter should share the leader's cached fallback, got %q", tok)
+	}
+	// Only the leader minted; the waiter shared the resolved cached token.
+	if n := mints.Load(); n != 1 {
+		t.Fatalf("want 1 mint (leader only), got %d", n)
+	}
+}
+
+// TestTokenCacheWaiterSharesLeaderRetryableErrorDespiteLeaderCancel verifies
+// that a RETRYABLE leader failure is shared with waiters even when the leader's
+// context was also cancelled. A caller cancel yields a non-retryable error (and
+// so triggers re-attempt); a retryable failure signals a transient endpoint
+// fault, which single-flight must not turn into one mint per waiter just because
+// the leader's context happened to be cancelled. Guards the !isRetryable clause
+// that keeps leaderCanceled false for retryable outcomes.
+func TestTokenCacheWaiterSharesLeaderRetryableErrorDespiteLeaderCancel(t *testing.T) {
+	c := newTokenCache()
+
+	leaderCtx, cancelLeader := context.WithCancel(context.Background())
+	mintStarted := make(chan struct{})
+	var mints atomic.Int64
+
+	// Leader: parks until its context is cancelled, then returns a RETRYABLE error
+	// with no cache to fall back on, so the retryable error is the resolved outcome.
+	leaderDone := make(chan struct{})
+	go func() {
+		defer close(leaderDone)
+		_, _ = c.getOrFetch(leaderCtx, "id", "secret", "c.s.t", "",
+			func(ctx context.Context, _ mintReason) (fetchedToken, error) {
+				mints.Add(1)
+				close(mintStarted)
+				<-ctx.Done()
+				return fetchedToken{}, &retryErr{"transient"}
+			},
+		)
+	}()
+
+	<-mintStarted
+
+	waiterErr := make(chan error, 1)
+	go func() {
+		_, err := c.getOrFetch(context.Background(), "id", "secret", "c.s.t", "",
+			func(_ context.Context, _ mintReason) (fetchedToken, error) {
+				mints.Add(1) // a waiter minting here means it wrongly re-attempted
+				return fetchedToken{token: "waiter-tok", expiresIn: dur(3600)}, nil
+			},
+		)
+		waiterErr <- err
+	}()
+
+	time.Sleep(50 * time.Millisecond)
+	cancelLeader()
+
+	<-leaderDone
+	if err := <-waiterErr; err == nil {
+		t.Fatal("waiter should share the leader's retryable error, got nil")
+	}
+	// Only the leader minted; the waiter shared the retryable outcome.
+	if n := mints.Load(); n != 1 {
+		t.Fatalf("want 1 mint (leader only), got %d", n)
+	}
+}
+
 // TestTokenCacheWaiterSharesLeaderRetryableTimeout verifies that when the
 // leader's mint times out on its own (a retryable error that also wraps a
 // context deadline, as a client-Timeout does), waiters share that one outcome
