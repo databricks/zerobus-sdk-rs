@@ -21,6 +21,11 @@
 - Fix the credential variable names in the `generate_files` snippet
   (`DATABRICKS_CLIENT_ID` / `DATABRICKS_CLIENT_SECRET`, matching the rest of the
   docs).
+- Correct the batch-ingest offset docs. `ingest_json_records()` /
+  `ingest_proto_records()` return the single logical offset assigned to the
+  whole batch, not "the offset of the last record" — a 3-record batch on a fresh
+  stream returns offset 0, not 2. Fixed the API docstrings, example comments,
+  and expected-output samples.
 
 ### Internal Changes
 

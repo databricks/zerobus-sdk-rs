@@ -6,8 +6,8 @@
 // crossing has a fixed cost that batching amortizes, and a batch is
 // acknowledged all-or-nothing as a unit.
 //
-// The batch call returns the offset of the LAST record in the batch. Because
-// acks are monotonic, waiting on that single offset confirms the whole batch.
+// The batch call returns a single logical offset assigned to the whole batch.
+// Waiting on that one offset confirms the entire batch.
 //
 // It also demonstrates two optional features:
 //   - An async ack callback (StreamOptions::ack_callback) that observes
@@ -154,7 +154,8 @@ int main() {
     const std::int64_t now = now_micros();
 
     // 3. Build a batch and hand it over in one call. ingest_json_records()
-    //    queues the whole vector and returns the offset of the LAST record.
+    //    queues the whole vector and returns the single offset assigned to the
+    //    batch.
     const std::vector<std::string> batch = {
         make_order_json(1, "Alice Smith", "Wireless Mouse", 2, 25.99, "pending",
                         now),
@@ -164,18 +165,16 @@ int main() {
                         now),
     };
 
-    const std::int64_t last_offset = stream.ingest_json_records(batch);
+    const std::int64_t batch_offset = stream.ingest_json_records(batch);
     std::cout << "Batch of " << batch.size()
-              << " records queued; last offset ID: " << last_offset << "\n";
+              << " records queued; batch offset ID: " << batch_offset << "\n";
 
-    // 4. Confirm the batch. Waiting on the last offset is enough — acks are
-    //    monotonic, so offset N acked implies every offset <= N is acked. In a
-    //    hot path you would queue many batches and flush() once instead of
-    //    waiting after each.
-    if (last_offset >= 0) {
-      stream.wait_for_offset(last_offset);
-      std::cout << "Batch acknowledged through offset ID: " << last_offset
-                << "\n";
+    // 4. Confirm the batch. Waiting on the batch's single offset confirms every
+    //    record in it. In a hot path you would queue many batches and flush()
+    //    once instead of waiting after each.
+    if (batch_offset >= 0) {
+      stream.wait_for_offset(batch_offset);
+      std::cout << "Batch acknowledged at offset ID: " << batch_offset << "\n";
     }
 
     // 5. flush() drains anything still pending, then close at a controlled

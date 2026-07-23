@@ -248,7 +248,7 @@ destructor swallows it.
 | **Method** | `ingest_json_record()` / `ingest_proto_record()` | `ingest_json_records()` / `ingest_proto_records()` |
 | **Use case** | Records arrive one at a time | Multiple records ready at once |
 | **Semantics** | Each record independent | All-or-nothing (atomic) |
-| **Acknowledgment** | Per record | Per batch (offset of last record) |
+| **Acknowledgment** | Per record | Per batch (one offset for the batch) |
 | **Throughput** | Lower | Higher (amortizes the FFI crossing) |
 
 **Single-record:**
@@ -261,9 +261,9 @@ stream.flush();
 
 **Batch:**
 ```cpp
-std::int64_t last = stream.ingest_json_records(records);
-if (last >= 0) {
-  stream.wait_for_offset(last);   // one wait confirms the whole batch
+std::int64_t batch_offset = stream.ingest_json_records(records);
+if (batch_offset >= 0) {
+  stream.wait_for_offset(batch_offset);   // one wait confirms the whole batch
 }
 ```
 

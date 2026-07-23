@@ -163,16 +163,16 @@ zerobus::Stream stream =
 
 **Expected output:**
 ```
-Batch of 3 records queued; last offset ID: 2
-Batch acknowledged through offset ID: 2
+Batch of 3 records queued; batch offset ID: 0
+Batch acknowledged at offset ID: 0
 Stream closed successfully.
 ```
 
 ### Code Highlights
 
 Encode each record, collect the bytes into a batch, and hand the whole batch to
-`ingest_proto_records()` in one call. It returns the offset of the **last**
-record; waiting on that one offset confirms the batch:
+`ingest_proto_records()` in one call. It returns the single logical offset
+assigned to the batch; waiting on that one offset confirms the batch:
 
 ```cpp
 const std::vector<std::vector<std::uint8_t>> batch = {
@@ -181,15 +181,15 @@ const std::vector<std::vector<std::uint8_t>> batch = {
     schema.encode_json(record3),
 };
 
-const std::int64_t last_offset = stream.ingest_proto_records(batch);
-if (last_offset >= 0) {
-  stream.wait_for_offset(last_offset);   // one wait confirms the batch
+const std::int64_t batch_offset = stream.ingest_proto_records(batch);
+if (batch_offset >= 0) {
+  stream.wait_for_offset(batch_offset);   // one wait confirms the batch
 }
 ```
 
 **Batch semantics:**
 - **All-or-nothing** — the entire batch succeeds or fails as a unit.
-- **Single acknowledgment** — one offset (the last record's) for the whole batch.
+- **Single acknowledgment** — one logical offset for the whole batch.
 - **Empty batches** — a no-op; `ingest_proto_records()` returns `-1`.
 
 In a hot path you would queue **many** batches and `flush()` once, rather than
