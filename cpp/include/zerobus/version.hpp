@@ -8,7 +8,7 @@
 
 namespace zerobus {
 
-/// The Zerobus C++ SDK version string (e.g. "0.1.0"). Sent as the default
+/// The Zerobus C++ SDK version string (e.g. "1.2.3"). Sent as the default
 /// `user-agent` SDK identifier prefix (`zerobus-sdk-cpp/<version>`).
 inline const char* version() { return ZEROBUS_CPP_VERSION; }
 

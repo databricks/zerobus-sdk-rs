@@ -17,7 +17,7 @@ every other Zerobus SDK.
   acks and terminal errors on a background task, without blocking in
   `wait_for_offset()` / `flush()`.
 
-> Status: `0.1.0` — initial development. The API may change before `1.0.0`.
+> Status: `0.1.1` — initial development. The API may change before `1.0.0`.
 
 **Prerequisites** (workspace setup, Delta table, service principal): See the
 [examples README](examples/README.md#prerequisites).
