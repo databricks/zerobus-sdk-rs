@@ -35,7 +35,7 @@ pub use arrow_schema::{DataType, Field, Schema as ArrowSchema, TimeUnit};
 
 use crate::arrow_configuration::ArrowStreamConfigurationOptions;
 use crate::arrow_metadata::{FlightAckMetadata, FlightBatchMetadata};
-use crate::errors::ZerobusError;
+use crate::errors::{should_retry_initial_connection, ZerobusError};
 use crate::headers_provider::HeadersProvider;
 use crate::offset_generator::{OffsetId, OffsetIdGenerator};
 use crate::proxy::{self, ConnectorFactory};
@@ -104,30 +104,6 @@ struct PendingBatch {
     end_record: u64,
     /// Backpressure permit; dropping it frees one `max_inflight_batches` slot.
     _permit: OwnedSemaphorePermit,
-}
-
-/// Applies the initial-connection retry policy without changing global error
-/// classification. An auth rejection may use one retry from the recovery budget
-/// so a stale credential can be refreshed; subsequent auth rejections remain terminal.
-fn should_retry_initial_connection(
-    error: &ZerobusError,
-    recovery_enabled: bool,
-    auth_retry_available: &mut bool,
-) -> bool {
-    if !recovery_enabled {
-        return false;
-    }
-
-    if error.is_retryable() {
-        return true;
-    }
-
-    if error.is_auth_rejection() && *auth_retry_available {
-        *auth_retry_available = false;
-        return true;
-    }
-
-    false
 }
 
 /// Returns the batch portion not durably acknowledged, avoiding duplicate retry of an
@@ -2214,60 +2190,6 @@ mod tests {
 
         assert_eq!(props.table_name, "catalog.schema.table");
         assert_eq!(props.schema.fields().len(), 2);
-    }
-
-    #[test]
-    fn initial_connection_auth_retry_is_one_shot() {
-        let unauthenticated =
-            ZerobusError::CreateStreamError(tonic::Status::unauthenticated("stale token"));
-        let permission_denied =
-            ZerobusError::CreateStreamError(tonic::Status::permission_denied("stale token"));
-        let mut auth_retry_available = true;
-
-        assert!(should_retry_initial_connection(
-            &unauthenticated,
-            true,
-            &mut auth_retry_available
-        ));
-        assert!(!auth_retry_available);
-        assert!(!should_retry_initial_connection(
-            &permission_denied,
-            true,
-            &mut auth_retry_available
-        ));
-        assert!(!unauthenticated.is_retryable());
-        assert!(!permission_denied.is_retryable());
-    }
-
-    #[test]
-    fn initial_connection_auth_retry_requires_recovery_and_budget() {
-        let auth_error =
-            ZerobusError::CreateStreamError(tonic::Status::unauthenticated("stale token"));
-        let permanent_error =
-            ZerobusError::CreateStreamError(tonic::Status::invalid_argument("bad schema"));
-
-        let mut auth_retry_available = true;
-        assert!(!should_retry_initial_connection(
-            &auth_error,
-            false,
-            &mut auth_retry_available
-        ));
-        assert!(auth_retry_available);
-
-        let mut no_retry_budget = false;
-        assert!(!should_retry_initial_connection(
-            &auth_error,
-            true,
-            &mut no_retry_budget
-        ));
-
-        let mut auth_retry_available = true;
-        assert!(!should_retry_initial_connection(
-            &permanent_error,
-            true,
-            &mut auth_retry_available
-        ));
-        assert!(auth_retry_available);
     }
 
     fn one_col_schema() -> Arc<ArrowSchema> {
