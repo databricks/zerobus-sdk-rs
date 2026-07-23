@@ -1,6 +1,7 @@
 package stream
 
 import (
+	"bytes"
 	"fmt"
 
 	"google.golang.org/protobuf/proto"
@@ -35,6 +36,10 @@ type encoder[Req any] interface {
 	// return original content. A single-record message yields one entry; a batch
 	// yields all of its records so no unacked record is silently dropped.
 	decode(msg Req) [][]byte
+	// wireSize reports the exact serialized size of the message, including
+	// protobuf framing, so the caller can enforce a payload cap against what the
+	// server will actually receive rather than the raw input length.
+	wireSize(msg Req) int
 }
 
 // protoEncoder builds EphemeralStream payloads for proto-encoded records (raw
@@ -42,14 +47,15 @@ type encoder[Req any] interface {
 type protoEncoder struct{}
 
 func (protoEncoder) encode(offset int64, record []byte) (encodedMsg, error) {
-	if len(record) == 0 {
-		return nil, fmt.Errorf("stream: proto record must not be empty")
-	}
+	// An empty slice is a valid proto encoding (an all-default message), so it is
+	// accepted. Clone the caller's bytes: Ingest returns before the sender
+	// serializes the request, so a reused scratch buffer must not alias the
+	// queued (or replayed) payload.
 	return &zerobuspb.EphemeralStreamRequest{
 		Payload: &zerobuspb.EphemeralStreamRequest_IngestRecord{
 			IngestRecord: &zerobuspb.IngestRecordRequest{
 				OffsetId: proto.Int64(offset),
-				Record:   &zerobuspb.IngestRecordRequest_ProtoEncodedRecord{ProtoEncodedRecord: record},
+				Record:   &zerobuspb.IngestRecordRequest_ProtoEncodedRecord{ProtoEncodedRecord: bytes.Clone(record)},
 			},
 		},
 	}, nil
@@ -59,17 +65,18 @@ func (protoEncoder) encodeBatch(offset int64, records [][]byte) (encodedMsg, err
 	if len(records) == 0 {
 		return nil, fmt.Errorf("stream: proto batch must not be empty")
 	}
+	// Empty proto records are valid; clone each so a reused source buffer can't
+	// mutate a queued or replayed payload, and copy the outer slice too.
+	copied := make([][]byte, len(records))
 	for i, r := range records {
-		if len(r) == 0 {
-			return nil, fmt.Errorf("stream: proto batch record %d must not be empty", i)
-		}
+		copied[i] = bytes.Clone(r)
 	}
 	return &zerobuspb.EphemeralStreamRequest{
 		Payload: &zerobuspb.EphemeralStreamRequest_IngestRecordBatch{
 			IngestRecordBatch: &zerobuspb.IngestRecordBatchRequest{
 				OffsetId: proto.Int64(offset),
 				Batch: &zerobuspb.IngestRecordBatchRequest_ProtoEncodedBatch{
-					ProtoEncodedBatch: &zerobuspb.ProtoEncodedRecordBatch{Records: records},
+					ProtoEncodedBatch: &zerobuspb.ProtoEncodedRecordBatch{Records: copied},
 				},
 			},
 		},
@@ -77,6 +84,13 @@ func (protoEncoder) encodeBatch(offset int64, records [][]byte) (encodedMsg, err
 }
 
 func (protoEncoder) decode(msg encodedMsg) [][]byte { return extractEphemeralRecords(msg) }
+
+func (protoEncoder) wireSize(msg encodedMsg) int {
+	if msg == nil {
+		return 0
+	}
+	return proto.Size(msg)
+}
 
 // jsonEncoder builds EphemeralStream payloads for JSON-encoded records, single
 // and batched.
@@ -121,6 +135,13 @@ func (jsonEncoder) encodeBatch(offset int64, records [][]byte) (encodedMsg, erro
 
 func (jsonEncoder) decode(msg encodedMsg) [][]byte { return extractEphemeralRecords(msg) }
 
+func (jsonEncoder) wireSize(msg encodedMsg) int {
+	if msg == nil {
+		return 0
+	}
+	return proto.Size(msg)
+}
+
 // newEncoder returns the proto/JSON encoder for the given record type.
 func newEncoder(rt zerobuspb.RecordType) (encoder[encodedMsg], error) {
 	switch rt {
@@ -141,10 +162,15 @@ func extractEphemeralRecords(msg encodedMsg) [][]byte {
 		return nil
 	}
 	if ir := msg.GetIngestRecord(); ir != nil {
-		if b := ir.GetProtoEncodedRecord(); b != nil {
-			return [][]byte{b}
+		// Discriminate by oneof type, not by nil: an empty proto record is a
+		// valid non-nil case that must not be mistaken for a JSON record.
+		switch r := ir.GetRecord().(type) {
+		case *zerobuspb.IngestRecordRequest_ProtoEncodedRecord:
+			return [][]byte{r.ProtoEncodedRecord}
+		case *zerobuspb.IngestRecordRequest_JsonRecord:
+			return [][]byte{[]byte(r.JsonRecord)}
 		}
-		return [][]byte{[]byte(ir.GetJsonRecord())}
+		return nil
 	}
 	if ib := msg.GetIngestRecordBatch(); ib != nil {
 		if pb := ib.GetProtoEncodedBatch(); pb != nil {

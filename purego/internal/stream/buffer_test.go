@@ -214,3 +214,57 @@ func TestBufferConcurrentEnqueueDiscard(t *testing.T) {
 		t.Fatalf("want buffer empty after all discards, got len=%d", got)
 	}
 }
+
+// next must unblock when its ctx is cancelled while parked on an empty buffer.
+// The AfterFunc broadcast has to be ordered under b.mu against cond.Wait, or
+// the wake-up can be lost and next sleeps forever on a cancelled ctx.
+func TestBufferNextContextCancelUnblocks(t *testing.T) {
+	b := newBuffer[encodedMsg](4)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	errCh := make(chan error, 1)
+	go func() {
+		_, err := b.next(ctx)
+		errCh <- err
+	}()
+
+	time.Sleep(20 * time.Millisecond) // let it park in cond.Wait
+	cancel()
+
+	select {
+	case err := <-errCh:
+		if err != context.Canceled {
+			t.Fatalf("want context.Canceled, got %v", err)
+		}
+	case <-time.After(200 * time.Millisecond):
+		t.Fatal("next did not unblock on context cancel")
+	}
+}
+
+// next must return immediately on an already-cancelled ctx and leave a queued
+// item untouched, so a stopping sender never drains one more record.
+func TestBufferNextAlreadyCancelledCtx(t *testing.T) {
+	b := newBuffer[encodedMsg](4)
+	if err := b.enqueue(context.Background(), 1, dummyMsg(1)); err != nil {
+		t.Fatalf("enqueue: %v", err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if _, err := b.next(ctx); err != context.Canceled {
+		t.Fatalf("want context.Canceled, got %v", err)
+	}
+	if got := b.len(); got != 1 {
+		t.Fatalf("want item left in buffer, got len=%d", got)
+	}
+}
+
+// A non-positive cap is normalized to the default rather than deadlocking (0)
+// or panicking (<0), so the primitive stays live on a bad value.
+func TestNewBufferNormalizesNonPositiveCap(t *testing.T) {
+	for _, cap := range []int{0, -1} {
+		b := newBuffer[encodedMsg](cap)
+		if err := b.enqueue(context.Background(), 1, dummyMsg(1)); err != nil {
+			t.Fatalf("cap %d: enqueue should not block/fail, got %v", cap, err)
+		}
+	}
+}

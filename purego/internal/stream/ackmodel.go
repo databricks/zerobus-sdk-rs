@@ -7,22 +7,21 @@ import (
 // ackModel translates a raw server response into a logical "highest fully-acked
 // offset" that the core's watermark can compare against, and classifies
 // non-ack responses so the core stays blind to the concrete wire type. It is
-// edge #2 of the design and is generic over the response type Resp: proto/JSON
-// supply ackModel[ephemeralResp]; Arrow will supply its own over a Flight
-// response, mapping a cumulative record count back to an offset.
+// generic over the response type Resp: proto/JSON supply ackModel[ephemeralResp].
 //
-// This interface is intentionally the minimal offset-only subset. The
-// architecture note (§3a) sketches a wider Track/Resolve/Unacked shape for the
-// Arrow record-count model, where an ack can land mid-batch and recovery must
-// slice a straddling batch. That width is deferred until the Arrow wire path
-// lands; adding it now would be unused machinery. The core stays offset-only
-// and blind to the record-vs-batch distinction regardless.
+// TODO(arrow): the Arrow wire path will supply its own ackModel over a Flight
+// response, mapping a cumulative record count back to an offset.
 type ackModel[Resp any] interface {
 	// classify inspects a server response and reports what it means to the core:
 	//   - kind == ackResponse: off is the highest fully-acked offset.
 	//   - kind == pauseResponse: the server asked the client to pause; pause
 	//     carries the requested duration. The core waits then reconnects.
-	//   - kind == otherResponse: anything else (ignored by the receiver).
+	//   - kind == unknownResponse: an unrecognized response type. The receiver
+	//     must fail the stream rather than ignore it, since silently dropping
+	//     unexpected messages hides a wire-contract mismatch.
+	//   - kind == malformedResponse: an ack whose offset field is absent.
+	//     Treating the zero default as a real ack would fake durability for
+	//     offset 0, so the receiver must fail the stream.
 	// Keeping close-signal detection here means the receiver never names a
 	// concrete proto message.
 	classify(resp Resp) (kind respKind, off int64, pause pauseSignal)
@@ -32,9 +31,10 @@ type ackModel[Resp any] interface {
 type respKind int
 
 const (
-	otherResponse respKind = iota // no ack, no pause — ignored
-	ackResponse                   // carries a durability ack offset
-	pauseResponse                 // server-requested pause (close-stream signal)
+	ackResponse       respKind = iota // carries a durability ack offset
+	pauseResponse                     // server-requested pause (close-stream signal)
+	unknownResponse                   // unrecognized response type — receiver fails
+	malformedResponse                 // ack missing its offset field — receiver fails
 )
 
 // ephemeralResp is the proto/JSON server response type. Aliased so the core's
@@ -48,15 +48,21 @@ type offsetAckModel struct{}
 
 func (offsetAckModel) classify(resp ephemeralResp) (respKind, int64, pauseSignal) {
 	if resp == nil {
-		return otherResponse, 0, pauseSignal{}
+		return unknownResponse, 0, pauseSignal{}
 	}
 	if sig := resp.GetCloseStreamSignal(); sig != nil {
 		return pauseResponse, 0, pauseSignal{duration: sig.GetDuration().AsDuration()}
 	}
 	if ack := resp.GetIngestRecordResponse(); ack != nil {
-		return ackResponse, ack.GetDurabilityAckUpToOffset(), pauseSignal{}
+		// DurabilityAckUpToOffset is an optional field; GetDurabilityAckUpToOffset
+		// would turn an absent value into 0 and fake an ack for offset 0. Preserve
+		// field presence and classify a missing offset as malformed.
+		if ack.DurabilityAckUpToOffset == nil {
+			return malformedResponse, 0, pauseSignal{}
+		}
+		return ackResponse, *ack.DurabilityAckUpToOffset, pauseSignal{}
 	}
-	return otherResponse, 0, pauseSignal{}
+	return unknownResponse, 0, pauseSignal{}
 }
 
 // newAckModel returns the proto/JSON ack model for the given record type.
