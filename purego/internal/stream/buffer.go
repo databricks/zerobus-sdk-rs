@@ -54,10 +54,8 @@ type buffer[Req any] struct {
 }
 
 func newBuffer[Req any](maxInflight int) *buffer[Req] {
-	// A non-positive cap would make an unbuffered (0) or panicking (<0) semaphore
-	// and deadlock every reservation, so normalize it to the default. Callers
-	// that sanitize config upstream never hit this; it guards the primitive from
-	// breaking liveness on a bad value.
+	// Normalize a non-positive cap, which would otherwise deadlock (0) or
+	// panic (<0) at the semaphore.
 	if maxInflight <= 0 {
 		maxInflight = defaultMaxInflight
 	}
@@ -116,18 +114,15 @@ func (b *buffer[Req]) enqueue(ctx context.Context, offset int64, msg Req) error 
 // Returns errClosed when the buffer has been closed and drained.
 // Returns ctx.Err() if ctx is cancelled while waiting.
 func (b *buffer[Req]) next(ctx context.Context) (item[Req], error) {
-	// Fail fast if the sender's ctx is already cancelled (teardown/Close): a
-	// non-empty queue would otherwise skip the wait loop and put one more record
-	// on a stream that is being torn down.
+	// Fail fast on an already-cancelled ctx so a stopping sender doesn't dequeue
+	// one more record from a non-empty queue.
 	if err := ctx.Err(); err != nil {
 		return item[Req]{}, err
 	}
 	b.mu.Lock()
 	for len(b.queue) == 0 && !b.closed {
-		// Take b.mu inside the callback so the Broadcast cannot run until Wait has
-		// registered the waiter and released the lock. Without it, a cancellation
-		// landing between the loop's queue check and Wait's park step would fire
-		// too early and leave next asleep on an already-cancelled ctx.
+		// Take b.mu in the callback so the Broadcast can't run before Wait
+		// registers the waiter; otherwise the wake-up is lost.
 		stop := context.AfterFunc(ctx, func() {
 			b.mu.Lock()
 			b.cond.Broadcast()
@@ -144,16 +139,13 @@ func (b *buffer[Req]) next(ctx context.Context) (item[Req], error) {
 		b.mu.Unlock()
 		return item[Req]{}, errClosed
 	}
-	// Re-check after waking: teardown may have started while a queued item was
-	// available, and we must not hand it to a sender that is stopping.
+	// Re-check after waking: teardown may have started while an item was queued.
 	if err := ctx.Err(); err != nil {
 		b.mu.Unlock()
 		return item[Req]{}, err
 	}
 	it := b.queue[0]
-	// Zero the departed slot so its payload isn't pinned in the backing array
-	// after the item moves to flight.
-	b.queue[0] = item[Req]{}
+	b.queue[0] = item[Req]{} // release the departed slot's payload for GC
 	b.queue = b.queue[1:]
 	b.flight = append(b.flight, it)
 	b.mu.Unlock()
@@ -169,9 +161,7 @@ func (b *buffer[Req]) discardThrough(offset int64) int {
 	b.mu.Lock()
 	n := 0
 	for len(b.flight) > 0 && b.flight[0].offset <= offset {
-		// Zero the departed slot so the acknowledged payload isn't pinned in the
-		// backing array by later still-live entries.
-		b.flight[0] = item[Req]{}
+		b.flight[0] = item[Req]{} // release the acked payload for GC
 		b.flight = b.flight[1:]
 		n++
 	}

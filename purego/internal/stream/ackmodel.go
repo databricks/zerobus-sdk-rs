@@ -12,18 +12,9 @@ import (
 // TODO(arrow): the Arrow wire path will supply its own ackModel over a Flight
 // response, mapping a cumulative record count back to an offset.
 type ackModel[Resp any] interface {
-	// classify inspects a server response and reports what it means to the core:
-	//   - kind == ackResponse: off is the highest fully-acked offset.
-	//   - kind == pauseResponse: the server asked the client to pause; pause
-	//     carries the requested duration. The core waits then reconnects.
-	//   - kind == unknownResponse: an unrecognized response type. The receiver
-	//     must fail the stream rather than ignore it, since silently dropping
-	//     unexpected messages hides a wire-contract mismatch.
-	//   - kind == malformedResponse: an ack whose offset field is absent.
-	//     Treating the zero default as a real ack would fake durability for
-	//     offset 0, so the receiver must fail the stream.
-	// Keeping close-signal detection here means the receiver never names a
-	// concrete proto message.
+	// classify reports what a server response means to the core: an ack offset,
+	// a pause request, or an unknown/malformed response the receiver must fail
+	// on. Detecting these here keeps the receiver blind to concrete proto types.
 	classify(resp Resp) (kind respKind, off int64, pause pauseSignal)
 }
 
@@ -54,9 +45,7 @@ func (offsetAckModel) classify(resp ephemeralResp) (respKind, int64, pauseSignal
 		return pauseResponse, 0, pauseSignal{duration: sig.GetDuration().AsDuration()}
 	}
 	if ack := resp.GetIngestRecordResponse(); ack != nil {
-		// DurabilityAckUpToOffset is an optional field; GetDurabilityAckUpToOffset
-		// would turn an absent value into 0 and fake an ack for offset 0. Preserve
-		// field presence and classify a missing offset as malformed.
+		// Absent offset must be malformed, not a fabricated ack for offset 0.
 		if ack.DurabilityAckUpToOffset == nil {
 			return malformedResponse, 0, pauseSignal{}
 		}

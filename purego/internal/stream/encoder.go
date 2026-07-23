@@ -36,9 +36,8 @@ type encoder[Req any] interface {
 	// return original content. A single-record message yields one entry; a batch
 	// yields all of its records so no unacked record is silently dropped.
 	decode(msg Req) [][]byte
-	// wireSize reports the exact serialized size of the message, including
-	// protobuf framing, so the caller can enforce a payload cap against what the
-	// server will actually receive rather than the raw input length.
+	// wireSize reports the serialized message size (incl. proto framing) so a
+	// payload cap can be enforced against what the server actually receives.
 	wireSize(msg Req) int
 }
 
@@ -47,10 +46,8 @@ type encoder[Req any] interface {
 type protoEncoder struct{}
 
 func (protoEncoder) encode(offset int64, record []byte) (encodedMsg, error) {
-	// An empty slice is a valid proto encoding (an all-default message), so it is
-	// accepted. Clone the caller's bytes: Ingest returns before the sender
-	// serializes the request, so a reused scratch buffer must not alias the
-	// queued (or replayed) payload.
+	// Empty is a valid proto encoding (all-default message). Clone so a reused
+	// caller buffer can't mutate the queued payload before it's serialized.
 	return &zerobuspb.EphemeralStreamRequest{
 		Payload: &zerobuspb.EphemeralStreamRequest_IngestRecord{
 			IngestRecord: &zerobuspb.IngestRecordRequest{
@@ -65,8 +62,8 @@ func (protoEncoder) encodeBatch(offset int64, records [][]byte) (encodedMsg, err
 	if len(records) == 0 {
 		return nil, fmt.Errorf("stream: proto batch must not be empty")
 	}
-	// Empty proto records are valid; clone each so a reused source buffer can't
-	// mutate a queued or replayed payload, and copy the outer slice too.
+	// Clone each record (empty is valid) so a reused caller buffer can't mutate
+	// a queued payload.
 	copied := make([][]byte, len(records))
 	for i, r := range records {
 		copied[i] = bytes.Clone(r)
@@ -162,8 +159,8 @@ func extractEphemeralRecords(msg encodedMsg) [][]byte {
 		return nil
 	}
 	if ir := msg.GetIngestRecord(); ir != nil {
-		// Discriminate by oneof type, not by nil: an empty proto record is a
-		// valid non-nil case that must not be mistaken for a JSON record.
+		// Switch on oneof type, not nil: an empty proto record must not be read
+		// as JSON.
 		switch r := ir.GetRecord().(type) {
 		case *zerobuspb.IngestRecordRequest_ProtoEncodedRecord:
 			return [][]byte{r.ProtoEncodedRecord}
