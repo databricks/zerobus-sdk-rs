@@ -1,9 +1,11 @@
 use crate::default_token_factory::DefaultTokenFactory;
-use crate::token_cache::{TokenCache, DEFAULT_REFRESH_BUFFER};
+use crate::token_cache::{TokenCache, TokenGeneration, DEFAULT_REFRESH_BUFFER};
 use crate::ZerobusResult;
 use async_trait::async_trait;
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::time::Duration;
+use tokio::sync::Mutex;
 
 /// A trait for providing custom headers for gRPC requests.
 ///
@@ -68,6 +70,8 @@ pub struct OAuthHeadersProvider {
     workspace_id: String,
     unity_catalog_url: String,
     token_cache: Arc<TokenCache>,
+    refresh_timeout: Option<Duration>,
+    token_generation: Mutex<Option<TokenGeneration>>,
 }
 
 impl OAuthHeadersProvider {
@@ -92,6 +96,7 @@ impl OAuthHeadersProvider {
             workspace_id,
             unity_catalog_url,
             Arc::new(TokenCache::new(true, DEFAULT_REFRESH_BUFFER)),
+            None,
         )
     }
 
@@ -106,6 +111,7 @@ impl OAuthHeadersProvider {
         workspace_id: String,
         unity_catalog_url: String,
         token_cache: Arc<TokenCache>,
+        refresh_timeout: Option<Duration>,
     ) -> Self {
         Self {
             client_id,
@@ -114,6 +120,8 @@ impl OAuthHeadersProvider {
             workspace_id,
             unity_catalog_url,
             token_cache,
+            refresh_timeout,
+            token_generation: Mutex::new(None),
         }
     }
 }
@@ -121,12 +129,13 @@ impl OAuthHeadersProvider {
 #[async_trait]
 impl HeadersProvider for OAuthHeadersProvider {
     async fn get_headers(&self) -> ZerobusResult<HashMap<&'static str, String>> {
-        let token = self
+        let result = self
             .token_cache
-            .get_or_fetch(
+            .get_or_fetch_with_timeout(
                 &self.client_id,
                 &self.client_secret,
                 &self.table_name,
+                self.refresh_timeout,
                 |reason| {
                     DefaultTokenFactory::fetch_token(
                         &self.unity_catalog_url,
@@ -139,16 +148,24 @@ impl HeadersProvider for OAuthHeadersProvider {
                 },
             )
             .await?;
+        *self.token_generation.lock().await = result.generation;
         let mut headers = HashMap::new();
-        headers.insert("authorization", format!("Bearer {}", token));
+        headers.insert("authorization", format!("Bearer {}", result.value));
         headers.insert("x-databricks-zerobus-table-name", self.table_name.clone());
         Ok(headers)
     }
 
     async fn invalidate(&self) {
-        self.token_cache
-            .invalidate(&self.client_id, &self.client_secret, &self.table_name)
-            .await;
+        if let Some(generation) = self.token_generation.lock().await.take() {
+            self.token_cache
+                .invalidate_generation(
+                    &self.client_id,
+                    &self.client_secret,
+                    &self.table_name,
+                    &generation,
+                )
+                .await;
+        }
     }
 }
 

@@ -20,6 +20,7 @@
 
 use std::fmt;
 use std::sync::Arc;
+use std::time::Duration;
 
 use crate::callbacks::AckCallback;
 use crate::databricks::zerobus::RecordType;
@@ -44,6 +45,8 @@ enum AuthConfig {
     #[cfg(feature = "testing")]
     NoAuth,
 }
+
+const TOKEN_REFRESH_TIMEOUT_MARGIN: Duration = Duration::from_millis(100);
 
 /// Which record format was selected.
 enum FormatConfig {
@@ -365,7 +368,15 @@ impl<'a> StreamBuilder<'a> {
     }
 
     /// Resolve the headers provider from the stored auth config.
+    #[cfg(test)]
     fn resolve_headers_provider(&self) -> ZerobusResult<Arc<dyn HeadersProvider>> {
+        self.resolve_headers_provider_with_refresh_timeout(None)
+    }
+
+    fn resolve_headers_provider_with_refresh_timeout(
+        &self,
+        refresh_timeout: Option<Duration>,
+    ) -> ZerobusResult<Arc<dyn HeadersProvider>> {
         match self.auth.as_ref() {
             Some(AuthConfig::OAuth {
                 client_id,
@@ -377,6 +388,7 @@ impl<'a> StreamBuilder<'a> {
                 self.sdk.workspace_id.clone(),
                 self.sdk.unity_catalog_url.clone(),
                 Arc::clone(&self.sdk.token_cache),
+                refresh_timeout,
             ))),
             Some(AuthConfig::HeadersProvider(p)) => Ok(Arc::clone(p)),
             #[cfg(feature = "testing")]
@@ -391,7 +403,10 @@ impl<'a> StreamBuilder<'a> {
     /// or if an Arrow format was selected (use `build_arrow()` instead).
     pub async fn build(mut self) -> ZerobusResult<ZerobusStream> {
         self.validate()?;
-        let headers_provider = self.resolve_headers_provider()?;
+        let refresh_timeout = Duration::from_millis(self.grpc_config.recovery_timeout_ms)
+            .saturating_sub(TOKEN_REFRESH_TIMEOUT_MARGIN);
+        let headers_provider =
+            self.resolve_headers_provider_with_refresh_timeout(Some(refresh_timeout))?;
 
         let (record_type, descriptor_proto) = match self.format {
             Some(FormatConfig::Json) => (RecordType::Json, None),
@@ -452,7 +467,10 @@ impl<'a> StreamBuilder<'a> {
             crate::client_warnings::warn_payload_limit_ignored_for_arrow();
         }
 
-        let headers_provider = self.resolve_headers_provider()?;
+        let refresh_timeout = Duration::from_millis(self.arrow_config.recovery_timeout_ms)
+            .saturating_sub(TOKEN_REFRESH_TIMEOUT_MARGIN);
+        let headers_provider =
+            self.resolve_headers_provider_with_refresh_timeout(Some(refresh_timeout))?;
 
         let schema = match self.format {
             Some(FormatConfig::Arrow(schema)) => schema,

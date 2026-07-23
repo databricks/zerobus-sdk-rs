@@ -22,6 +22,7 @@
 
 ### Bug Fixes
 
+- OAuth token caching now tolerates common token-endpoint responses and refresh failures: `expires_in` may be returned as either a JSON number or a quoted integer without silently disabling the cache. When proactive refresh fails or times out, the SDK continues serving the cached access token until its reported expiry regardless of the mint error's retry classification, and briefly backs off before another refresh attempt so concurrent callers do not stampede the token endpoint. HTTP 429 responses remain retryable when no valid cached token can be used. An authentication rejection from Zerobus invalidates only the cache generation that supplied the rejected token.
 - **Arrow Flight — `close()` now propagates flush errors and survives cancellation** (Beta): `ZerobusArrowStream::close()` previously swallowed a failed final `flush()` and always returned `Ok(())`, contradicting its documentation and diverging from the proto stream's `close()`. It now returns the flush error after still tearing down the stream and moving pending batches to the failed set (retrievable via `get_unacked_batches()`). If the close future is cancelled after teardown starts, the stream enters a non-ingestable `Closing` state and a later `close()` resumes teardown without waiting for another flush.
 - **Arrow Flight — `max_inflight_batches` now bounds batches awaiting acknowledgment** (Beta): it previously limited only the pre-encode channel, so pending batches could grow unbounded under a slow-acking server. `ingest_batch` now holds a permit until the batch is acked, applying backpressure (it blocks) at the configured limit. `max_inflight_batches = 0` is now rejected with `InvalidArgument` instead of panicking.
 - **Arrow Flight — recovery replay is now failure-safe** (Beta): if a batch send failed while replaying after a reconnect, the pending set was drained and lost (unrecoverable via automatic replay or `get_unacked_batches()`). Pending batches (and their in-flight accounting) are now retained so the next recovery attempt replays them.
@@ -37,6 +38,7 @@
 
 ### Internal Changes
 
+- Added an opt-in staging harness that opens three real streams through a loopback OAuth proxy to verify quoted `expires_in` caching and fallback after an injected refresh failure.
 - Added a test-only `test-hooks` Cargo feature that exposes deterministic synchronization seams in the Arrow stream for recovery-race tests. It has zero footprint in default and FFI builds.
 
 ### Breaking Changes

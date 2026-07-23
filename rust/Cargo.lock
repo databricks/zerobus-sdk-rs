@@ -4052,6 +4052,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "zerobus-token-cache-staging-harness"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "databricks-zerobus-ingest-sdk",
+ "reqwest",
+ "serde_json",
+ "tokio",
+]
+
+[[package]]
 name = "zerocopy"
 version = "0.8.40"
 source = "registry+https://github.com/rust-lang/crates.io-index"

@@ -20,6 +20,10 @@ path = "src/multiplexed_stream_tests.rs"
 name = "arrow_tests"
 path = "src/arrow_tests.rs"
 
+[[test]]
+name = "token_cache_tests"
+path = "src/token_cache_tests.rs"
+
 [dependencies]
 async-trait.workspace = true
 prost.workspace = true

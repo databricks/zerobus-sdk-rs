@@ -242,10 +242,16 @@ impl DefaultTokenFactory {
     /// `Duration`. It is optional in the OAuth spec; if it is missing or not a
     /// positive integer the token has no known TTL and must not be cached.
     fn parse_expires_in(body: &serde_json::Value) -> Option<Duration> {
-        body["expires_in"]
-            .as_u64()
-            .filter(|secs| *secs > 0)
-            .map(Duration::from_secs)
+        let seconds = match &body["expires_in"] {
+            serde_json::Value::Number(value) => value.as_u64(),
+            // OAuth servers in the wild also encode this integer as a JSON
+            // string. Accept the same positive base-10 values as the numeric
+            // representation so that formatting does not disable caching.
+            serde_json::Value::String(value) => value.parse::<u64>().ok(),
+            _ => None,
+        };
+
+        seconds.filter(|secs| *secs > 0).map(Duration::from_secs)
     }
 
     /// Classifies HTTP status codes as retryable or non-retryable errors.
@@ -257,10 +263,10 @@ impl DefaultTokenFactory {
     ///
     /// # Returns
     ///
-    /// * `TokenFetchError` for 5xx server errors (retryable)
-    /// * `InvalidUCTokenError` for 4xx client errors (non-retryable)
+    /// * `TokenFetchError` for HTTP 429 and 5xx server errors (retryable)
+    /// * `InvalidUCTokenError` for other 4xx client errors (non-retryable)
     fn classify_status_code(status_code: u16, message: String) -> ZerobusError {
-        if status_code >= 500 {
+        if status_code == 429 || status_code >= 500 {
             ZerobusError::TokenFetchError(format!(
                 "Unity catalog server error ({}): {}",
                 status_code, message
@@ -367,9 +373,32 @@ mod tests {
         let zero = serde_json::json!({ "expires_in": 0 });
         assert_eq!(DefaultTokenFactory::parse_expires_in(&zero), None);
 
-        // A string value (non-integer) is not usable and yields no TTL.
-        let non_numeric = serde_json::json!({ "expires_in": "3600" });
-        assert_eq!(DefaultTokenFactory::parse_expires_in(&non_numeric), None);
+        let string_ttl = serde_json::json!({ "expires_in": "3600" });
+        assert_eq!(
+            DefaultTokenFactory::parse_expires_in(&string_ttl),
+            Some(Duration::from_secs(3600))
+        );
+
+        for invalid in [
+            serde_json::json!({ "expires_in": "0" }),
+            serde_json::json!({ "expires_in": "not-a-number" }),
+            serde_json::json!({ "expires_in": -1 }),
+            serde_json::json!({ "expires_in": 1.5 }),
+        ] {
+            assert_eq!(DefaultTokenFactory::parse_expires_in(&invalid), None);
+        }
+    }
+
+    #[test]
+    fn test_classify_status_code_treats_rate_limit_as_retryable() {
+        let rate_limited =
+            DefaultTokenFactory::classify_status_code(429, "rate limited".to_string());
+        assert!(matches!(rate_limited, ZerobusError::TokenFetchError(_)));
+        assert!(rate_limited.is_retryable());
+
+        let bad_request = DefaultTokenFactory::classify_status_code(400, "bad request".to_string());
+        assert!(matches!(bad_request, ZerobusError::InvalidUCTokenError(_)));
+        assert!(!bad_request.is_retryable());
     }
 
     #[test]
