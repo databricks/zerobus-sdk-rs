@@ -106,6 +106,30 @@ struct PendingBatch {
     _permit: OwnedSemaphorePermit,
 }
 
+/// Applies the initial-connection retry policy without changing global error
+/// classification. An auth rejection may use one retry from the recovery budget
+/// so a stale credential can be refreshed; subsequent auth rejections remain terminal.
+fn should_retry_initial_connection(
+    error: &ZerobusError,
+    recovery_enabled: bool,
+    auth_retry_available: &mut bool,
+) -> bool {
+    if !recovery_enabled {
+        return false;
+    }
+
+    if error.is_retryable() {
+        return true;
+    }
+
+    if error.is_auth_rejection() && *auth_retry_available {
+        *auth_retry_available = false;
+        return true;
+    }
+
+    false
+}
+
 /// Returns the batch portion not durably acknowledged, avoiding duplicate retry of an
 /// acknowledged prefix.
 ///
@@ -313,6 +337,8 @@ impl ZerobusArrowStream {
     ///
     /// If `recovery` is enabled in options, initial connection will be retried
     /// up to `recovery_retries` times with `recovery_backoff_ms` delay between attempts.
+    /// One available retry may refresh credentials after an authentication rejection;
+    /// a second authentication rejection remains terminal.
     #[instrument(level = "debug", skip_all, fields(table_name = %table_properties.table_name))]
     pub(crate) async fn new(
         endpoint: &str,
@@ -399,27 +425,24 @@ impl ZerobusArrowStream {
             let sdk_identifier = Arc::clone(&stream.sdk_identifier);
 
             async move {
-                tokio::time::timeout(
-                    Duration::from_millis(options.recovery_timeout_ms),
-                    Self::try_connect(
-                        &endpoint,
-                        &tls_config,
-                        connector_factory.as_ref(),
-                        &table_properties,
-                        &options,
-                        &headers_provider,
-                        &sdk_identifier,
-                    ),
+                Self::try_connect(
+                    &endpoint,
+                    &tls_config,
+                    connector_factory.as_ref(),
+                    &table_properties,
+                    &options,
+                    &headers_provider,
+                    &sdk_identifier,
                 )
                 .await
-                .map_err(|_| {
-                    ZerobusError::CreateStreamError(tonic::Status::deadline_exceeded(
-                        "Stream creation timed out",
-                    ))
-                })?
             }
         };
-        let should_retry = |e: &ZerobusError| options.recovery && e.is_retryable();
+        // Keep auth errors globally non-retryable, but let initial setup refresh one
+        // stale credential when recovery has at least one retry in its budget.
+        let mut auth_retry_available = options.recovery_retries > 0;
+        let should_retry = |e: &ZerobusError| {
+            should_retry_initial_connection(e, options.recovery, &mut auth_retry_available)
+        };
         let creation = RetryIf::spawn(strategy, create_attempt, should_retry).await;
 
         let (response_stream, tx) = match creation {
@@ -490,26 +513,51 @@ impl ZerobusArrowStream {
         Pin<Box<dyn Stream<Item = Result<PutResult, FlightError>> + Send>>,
         mpsc::Sender<Result<RecordBatch, FlightError>>,
     )> {
-        let client = Self::create_flight_client(
-            endpoint,
-            tls_config,
-            connector_factory,
-            table_properties,
-            options,
-            headers_provider,
-            sdk_identifier,
-        )
-        .await?;
+        // Share one deadline across connection setup and auth-rejection invalidation.
+        // This preserves the original auth error if a custom provider stalls instead of
+        // reclassifying the attempt as a retryable setup timeout.
+        let attempt_deadline =
+            tokio::time::Instant::now() + Duration::from_millis(options.recovery_timeout_ms);
+        let result = tokio::time::timeout_at(attempt_deadline, async {
+            let client = Self::create_flight_client(
+                endpoint,
+                tls_config,
+                connector_factory,
+                table_properties,
+                options,
+                headers_provider,
+                sdk_identifier,
+            )
+            .await?;
 
-        let result = Self::start_stream_connection(client, table_properties, options).await;
+            Self::start_stream_connection(client, table_properties, options).await
+        })
+        .await
+        .map_err(|_| {
+            ZerobusError::CreateStreamError(tonic::Status::deadline_exceeded(
+                "Stream creation timed out",
+            ))
+        })?;
 
-        // Drop the rejected token so the next attempt re-mints.
-        if let Err(err) = &result {
-            if err.is_auth_rejection() {
-                headers_provider.invalidate().await;
+        match result {
+            Ok(connection) => Ok(connection),
+            Err(error) => {
+                // Drop the rejected token so the next attempt re-mints. A provider must
+                // not be able to turn a known auth rejection into repeated generic
+                // timeout retries by stalling here.
+                if error.is_auth_rejection()
+                    && tokio::time::timeout_at(attempt_deadline, headers_provider.invalidate())
+                        .await
+                        .is_err()
+                {
+                    warn!(
+                        timeout_ms = options.recovery_timeout_ms,
+                        "Initial headers provider invalidation timed out; preserving auth rejection"
+                    );
+                }
+                Err(error)
             }
         }
-        result
     }
 
     /// Creates a Flight client connected to the endpoint.
@@ -2166,6 +2214,60 @@ mod tests {
 
         assert_eq!(props.table_name, "catalog.schema.table");
         assert_eq!(props.schema.fields().len(), 2);
+    }
+
+    #[test]
+    fn initial_connection_auth_retry_is_one_shot() {
+        let unauthenticated =
+            ZerobusError::CreateStreamError(tonic::Status::unauthenticated("stale token"));
+        let permission_denied =
+            ZerobusError::CreateStreamError(tonic::Status::permission_denied("stale token"));
+        let mut auth_retry_available = true;
+
+        assert!(should_retry_initial_connection(
+            &unauthenticated,
+            true,
+            &mut auth_retry_available
+        ));
+        assert!(!auth_retry_available);
+        assert!(!should_retry_initial_connection(
+            &permission_denied,
+            true,
+            &mut auth_retry_available
+        ));
+        assert!(!unauthenticated.is_retryable());
+        assert!(!permission_denied.is_retryable());
+    }
+
+    #[test]
+    fn initial_connection_auth_retry_requires_recovery_and_budget() {
+        let auth_error =
+            ZerobusError::CreateStreamError(tonic::Status::unauthenticated("stale token"));
+        let permanent_error =
+            ZerobusError::CreateStreamError(tonic::Status::invalid_argument("bad schema"));
+
+        let mut auth_retry_available = true;
+        assert!(!should_retry_initial_connection(
+            &auth_error,
+            false,
+            &mut auth_retry_available
+        ));
+        assert!(auth_retry_available);
+
+        let mut no_retry_budget = false;
+        assert!(!should_retry_initial_connection(
+            &auth_error,
+            true,
+            &mut no_retry_budget
+        ));
+
+        let mut auth_retry_available = true;
+        assert!(!should_retry_initial_connection(
+            &permanent_error,
+            true,
+            &mut auth_retry_available
+        ));
+        assert!(auth_retry_available);
     }
 
     fn one_col_schema() -> Arc<ArrowSchema> {

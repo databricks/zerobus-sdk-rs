@@ -26,16 +26,19 @@ impl HeadersProvider for TestHeadersProvider {
     }
 }
 
-/// A headers provider that counts `invalidate()` calls, for asserting credential re-mint
-/// behavior on auth failures.
+/// A headers provider that counts header fetches and `invalidate()` calls, for asserting
+/// credential re-mint behavior on auth failures.
 #[derive(Default)]
 pub struct CountingHeadersProvider {
+    pub get_headers_calls: Arc<std::sync::atomic::AtomicUsize>,
     pub invalidations: Arc<std::sync::atomic::AtomicUsize>,
 }
 
 #[async_trait]
 impl HeadersProvider for CountingHeadersProvider {
     async fn get_headers(&self) -> ZerobusResult<HashMap<&'static str, String>> {
+        self.get_headers_calls
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         let mut headers = HashMap::new();
         headers.insert("authorization", "Bearer test_token".to_string());
         headers.insert("x-databricks-zerobus-table-name", "test_table".to_string());
