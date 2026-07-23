@@ -1305,6 +1305,9 @@ mod tests {
                     assert_eq!(fields[1].name(), "value");
                     assert_eq!(fields[1].data_type(), &DataType::LargeBinary);
                     assert!(!fields[1].is_nullable());
+                    // Marker belongs on the variant field, not its children.
+                    assert!(fields[0].metadata().is_empty());
+                    assert!(fields[1].metadata().is_empty());
                 }
                 other => panic!("expected VARIANT Struct, got {:?}", other),
             }
@@ -1615,6 +1618,47 @@ mod tests {
                 }
                 other => panic!("expected Struct, got {:?}", other),
             }
+        }
+
+        /// Covers the case where a client does not simply reuse the marked
+        /// schema for its batches but rebuilds an equivalent one from scratch:
+        /// the batch must still compare equal so the client-side ingest gate
+        /// (`ingest_batch`, which rejects on a metadata-inclusive
+        /// `batch.schema() != stream_schema`) accepts it.
+        #[test]
+        fn variant_batch_matches_marked_stream_schema() {
+            use std::sync::Arc;
+
+            use arrow_array::{LargeBinaryArray, RecordBatch, StructArray};
+
+            let cols = vec![col("attrs", "VARIANT", false, 0)];
+            // The stream schema and the batch's schema are converted separately,
+            // so they are distinct instances rather than a shared `Arc`.
+            let stream_schema = Arc::new(arrow_schema_from_uc_columns(&cols).unwrap());
+            let batch_schema = Arc::new(arrow_schema_from_uc_columns(&cols).unwrap());
+            assert_variant_marked(arrow_field(&batch_schema, "attrs"));
+
+            // Physical arrays carry no marker (it lives on the field), matching
+            // how a client encodes variant data.
+            let DataType::Struct(child_fields) = arrow_field(&batch_schema, "attrs").data_type()
+            else {
+                panic!("expected VARIANT Struct");
+            };
+            let attrs = StructArray::new(
+                child_fields.clone(),
+                vec![
+                    Arc::new(LargeBinaryArray::from(vec![b"m".as_slice()])),
+                    Arc::new(LargeBinaryArray::from(vec![b"v".as_slice()])),
+                ],
+                None,
+            );
+            let batch = RecordBatch::try_new(batch_schema, vec![Arc::new(attrs)]).unwrap();
+
+            assert_eq!(
+                batch.schema(),
+                stream_schema,
+                "batch built from a separately converted schema must satisfy the ingest gate"
+            );
         }
 
         #[test]
