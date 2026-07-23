@@ -101,8 +101,8 @@ impl ZerobusSdkBuilder {
         self
     }
 
-    /// Override gRPC channel connector construction; see
-    /// [`ConnectorFactory`] for semantics.
+    /// Override gRPC channel connector construction for standard and Arrow Flight
+    /// streams; see [`ConnectorFactory`] for semantics.
     pub fn connector_factory(mut self, factory: ConnectorFactory) -> Self {
         self.connector_factory = Some(factory);
         self
