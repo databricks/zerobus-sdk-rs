@@ -188,26 +188,22 @@ func main() {
     }
     defer stream.Close()
 
-    // 4. Send record to server and get offset.
-    // IngestRecordOffset returns as soon as the record is queued; the offset is a
-    // logical sequence number assigned to this record. The server round-trip
-    // happens in the background.
-    offset, err := stream.IngestRecordOffset(`{"id": 1, "message": "Hello"}`)
-    if err != nil {
-        log.Fatal(err)
+    // 4. Queue records without waiting for each acknowledgment.
+    records := []string{
+        `{"id": 1, "message": "Hello"}`,
+        `{"id": 2, "message": "World"}`,
     }
-    log.Printf("Record queued for ingestion with offset %d", offset)
+    for _, record := range records {
+        if _, err := stream.IngestRecordOffset(record); err != nil {
+            log.Fatal(err)
+        }
+    }
 
-    // 5. Wait for the server to acknowledge the record is durably written.
-    //
-    // WaitForOffset confirms this one record, which is all this example needs.
-    // For real workloads, the idiomatic flow is to ingest many records in a loop
-    // and call stream.Flush() once at the end. See the "Idiomatic high-throughput
-    // flow" under Usage Guide → Ingest Data.
-    if err := stream.WaitForOffset(offset); err != nil {
+    // 5. Wait once for every queued record to be acknowledged.
+    if err := stream.Flush(); err != nil {
         log.Fatal(err)
     }
-    log.Println("Record confirmed by server")
+    log.Println("Records confirmed by server")
 }
 ```
 
@@ -447,6 +443,25 @@ if err != nil {
 }
 defer sdk.Free()
 ```
+
+#### Identifying your application in the user-agent header
+
+The SDK sends `zerobus-sdk-go/<version>` as the HTTP `user-agent` header on
+every Zerobus request. To append an application identifier for server-side
+attribution, use `NewZerobusSdkWithOptions` and `WithApplicationName`:
+
+```go
+sdk, err := zerobus.NewZerobusSdkWithOptions(
+    "https://your-shard-id.zerobus.region.cloud.databricks.com",
+    "https://your-workspace.cloud.databricks.com",
+    zerobus.WithApplicationName("my-app/1.0"),
+)
+```
+
+The wire value becomes `zerobus-sdk-go/<version> my-app/1.0`. By convention,
+application names use `<product>/<version>`. The existing
+`NewZerobusSdk(endpoint, unityCatalogURL)` constructor remains available when
+no options are needed.
 
 ### 2. Configure Authentication
 
@@ -1019,12 +1034,39 @@ Main entry point for the SDK.
 **Constructor:**
 ```go
 func NewZerobusSdk(zerobusEndpoint, unityCatalogURL string) (*ZerobusSdk, error)
+
+func NewZerobusSdkWithOptions(
+    zerobusEndpoint, unityCatalogURL string,
+    opts ...SdkOption,
+) (*ZerobusSdk, error)
+
+func WithApplicationName(name string) SdkOption
 ```
 
 Creates a new SDK instance.
 
 - `zerobusEndpoint` - Zerobus gRPC service endpoint
 - `unityCatalogURL` - Unity Catalog URL for OAuth token acquisition
+- `SdkOption` - An optional SDK-construction setting passed to
+  `NewZerobusSdkWithOptions`
+- `WithApplicationName` - Appends a trimmed application identifier to the
+  default wire user-agent, `zerobus-sdk-go/1.3.0`; blank names are ignored
+
+The original `NewZerobusSdk` constructor remains available. Use
+`NewZerobusSdkWithOptions` when the application should identify itself in
+requests:
+
+```go
+sdk, err := zerobus.NewZerobusSdkWithOptions(
+    zerobusEndpoint,
+    unityCatalogURL,
+    zerobus.WithApplicationName("my-app/1.0"),
+)
+```
+
+This example sends `zerobus-sdk-go/1.3.0 my-app/1.0` as the wire user-agent.
+Invalid UTF-8, NUL bytes, and values that are invalid in an HTTP header return
+a non-retryable construction error.
 
 **Methods:**
 
