@@ -106,10 +106,18 @@ export DATABRICKS_CLIENT_SECRET="<your_databricks_client_secret>"
 For Azure, use `.azuredatabricks.net` hosts in the endpoint and workspace URL.
 
 The proto examples additionally read the Unity Catalog table metadata JSON from
-the environment (see the [Protocol Buffers README](proto/README.md)):
+the environment (the JSON examples don't). See the [Protocol Buffers
+README](proto/README.md#how-the-schema-is-built-dynamic-proto) for why it's
+needed and the full two-step fetch:
 
 ```bash
-export ZEROBUS_UC_TABLE_JSON="$(curl -s \
+DATABRICKS_TOKEN="$(curl -sS --fail --request POST \
+  --user "$DATABRICKS_CLIENT_ID:$DATABRICKS_CLIENT_SECRET" \
+  "$DATABRICKS_WORKSPACE_URL/oidc/v1/token" \
+  --data 'grant_type=client_credentials&scope=all-apis' \
+  | jq -r .access_token)"
+
+export ZEROBUS_UC_TABLE_JSON="$(curl -sS --fail \
   -H "Authorization: Bearer $DATABRICKS_TOKEN" \
   "$DATABRICKS_WORKSPACE_URL/api/2.1/unity-catalog/tables/$ZEROBUS_TABLE_NAME")"
 ```

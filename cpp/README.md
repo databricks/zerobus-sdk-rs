@@ -1,7 +1,7 @@
 # Zerobus C++ SDK
 
 A C++17 SDK for high-throughput ingestion into Databricks Zerobus. It is a thin,
-RAII wrapper over the [Zerobus C FFI](../rust/ffi) (which wraps the Rust core),
+RAII wrapper over the [Zerobus C FFI](https://github.com/databricks/zerobus-sdk/tree/main/rust/ffi) (which wraps the Rust core),
 so it shares the same gRPC streaming, OAuth, recovery, and ingestion engine as
 every other Zerobus SDK.
 
@@ -20,26 +20,46 @@ every other Zerobus SDK.
 > Status: `0.1.0` — initial development. The API may change before `1.0.0`.
 
 **Prerequisites** (workspace setup, Delta table, service principal): See the
-[top-level README](../README.md#prerequisites).
+[examples README](examples/README.md#prerequisites).
 
 ## Requirements
 
 - A C++17 compiler (GCC, Clang, or MSVC)
 - CMake ≥ 3.16
-- A Rust toolchain (only when building the FFI library from source, which is the
-  default)
+- A Rust toolchain — only when building the FFI library from source (the default
+  for a source checkout). A release bundle ships the FFI prebuilt, so consuming
+  one needs **no** Rust toolchain.
 
 ## Building
+
+The SDK is distributed two ways, and the build differs slightly between them.
+
+### From a release bundle (no Rust toolchain)
+
+A [release](https://github.com/databricks/zerobus-sdk/releases) ships a
+per-platform bundle: the C++ source under `cpp/` plus the matching prebuilt Rust
+C FFI archive under `lib/`. Point CMake at the prebuilt archive so it does not
+try to build the FFI from source (the bundle has no Rust source or `Makefile`):
+
+```bash
+cmake -S cpp -B build \
+  -DZEROBUS_FFI_LIBRARY="$PWD/lib/libzerobus_ffi.a" \
+  -DZEROBUS_FFI_HEADER_DIR="$PWD/lib"
+cmake --build build -j
+```
+
+The bundle contains the SDK and the runnable [examples](examples/README.md), but
+not the test suite (`make`, `ctest`, and the sanitizer runs below apply to a
+source checkout only).
+
+### From a source checkout (builds the FFI with Rust)
 
 From `cpp/`:
 
 ```bash
-make build        # configure + build the SDK and tests
+make build        # configure + build the SDK, tests, and examples
 make test         # build + run the test suite
 ```
-
-(`make build` also builds the runnable examples under `examples/`; see
-[Examples](#examples).)
 
 Or drive CMake directly:
 
@@ -50,15 +70,12 @@ ctest --test-dir build --output-on-failure
 ```
 
 By default CMake builds the FFI static library from local Rust source
-(`cargo build --release` in `rust/ffi`). To link a prebuilt library instead:
-
-```bash
-cmake -S . -B build \
-  -DZEROBUS_FFI_LIBRARY=/path/to/libzerobus_ffi.a \
-  -DZEROBUS_FFI_HEADER_DIR=/path/to/dir/containing/zerobus.h
-```
+(`cargo build --release` in `rust/ffi`). To link a prebuilt library instead, use
+the `-DZEROBUS_FFI_LIBRARY=` / `-DZEROBUS_FFI_HEADER_DIR=` flags shown above.
 
 ### Running the tests
+
+> The test suite ships only in a source checkout, not in a release bundle.
 
 `make test` runs the full suite (`ctest`). Every test is a dependency-free,
 network-free executable — the suite is hermetic and safe to run anywhere.
@@ -393,14 +410,16 @@ setup confusion:
 
 You do not hand-write the `.proto` for a real table — the monorepo ships a
 generator that emits it (plus a binary descriptor) from the live Unity Catalog
-schema, authenticated with the OAuth client credentials:
+schema, authenticated with the OAuth client credentials. It lives in the
+[source repo](https://github.com/databricks/zerobus-sdk/tree/main/rust/tools/generate_files)
+(not in a release bundle); from a checkout, relative to `cpp/`:
 
 ```bash
 cd ../rust/tools/generate_files
 cargo run -- \
   --uc-endpoint "https://<workspace>.cloud.databricks.com" \
-  --client-id "$ZEROBUS_CLIENT_ID" \
-  --client-secret "$ZEROBUS_CLIENT_SECRET" \
+  --client-id "$DATABRICKS_CLIENT_ID" \
+  --client-secret "$DATABRICKS_CLIENT_SECRET" \
   --table "catalog.schema.table" \
   --output-dir ./out \
   --output catalog.schema.table.proto
@@ -437,29 +456,29 @@ calling `close()` explicitly** rather than relying on the destructor:
 
 A `Stream` or `ArrowStream` is **not** safe for concurrent use — serialize
 access externally (the same contract as the Rust core). A single `Sdk` may
-create many streams. See [`CLAUDE.md`](CLAUDE.md) for the full memory-ownership
-and threading contract.
+create many streams. See [`CLAUDE.md`](https://github.com/databricks/zerobus-sdk/blob/main/cpp/CLAUDE.md)
+for the full memory-ownership and threading contract.
 
 ## HTTP proxy support
 
 Like the other SDKs, the C++ SDK honors the standard proxy environment variables
 (`grpc_proxy`/`https_proxy`/`http_proxy` and the matching `no_proxy` list) — the
 Rust core detects them automatically, so no code change is needed. See the
-[top-level README](../README.md#http-proxy-support) for the full precedence
-rules and behavior.
+[top-level README](https://github.com/databricks/zerobus-sdk/blob/main/README.md#http-proxy-support)
+for the full precedence rules and behavior.
 
 ## Community and Contributing
 
 This is an open source project. We welcome contributions, feedback, and bug
 reports.
 
-- **[Contributing Guide](CONTRIBUTING.md)**: C++-specific development setup and workflow.
-- **[General Contributing Guide](../CONTRIBUTING.md)**: Pull request process, commit requirements, and policies.
+- **[Contributing Guide](https://github.com/databricks/zerobus-sdk/blob/main/cpp/CONTRIBUTING.md)**: C++-specific development setup and workflow.
+- **[General Contributing Guide](https://github.com/databricks/zerobus-sdk/blob/main/CONTRIBUTING.md)**: Pull request process, commit requirements, and policies.
 - **[Changelog](CHANGELOG.md)**: See the history of changes in the SDK.
-- **[Security Policy](../SECURITY.md)**: Read about our security process and how to report vulnerabilities.
-- **[Developer Certificate of Origin (DCO)](../DCO)**: Understand the agreement for contributions.
+- **[Security Policy](https://github.com/databricks/zerobus-sdk/blob/main/SECURITY.md)**: Read about our security process and how to report vulnerabilities.
+- **[Developer Certificate of Origin (DCO)](https://github.com/databricks/zerobus-sdk/blob/main/DCO)**: Understand the agreement for contributions.
 - **[Open Source Attributions](NOTICE)**: See a list of the open source libraries we use.
 
 ## License
 
-Apache 2.0. See the [root LICENSE](../LICENSE).
+Apache 2.0. See the [LICENSE](LICENSE).

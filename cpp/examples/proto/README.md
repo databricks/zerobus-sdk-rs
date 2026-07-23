@@ -42,6 +42,14 @@ examples do not compile or use it.
 
 ## How the Schema Is Built (Dynamic Proto)
 
+> **Why fetch this yourself?** The dynamic-proto path encodes each record to
+> protobuf **client-side**, so it needs the table's column schema up front. That
+> is a different thing from the OAuth/authorization handshake the SDK performs on
+> its own at stream creation — that call authorizes the write, it does not hand
+> your code the schema. (The [JSON path](../json/README.md) needs none of this:
+> the server maps fields by name, so there is no metadata fetch and
+> `descriptor_proto` is left empty.)
+
 `ProtoSchema::from_uc_json()` takes the JSON body of
 `GET /api/2.1/unity-catalog/tables/{full_name}` and produces:
 
@@ -50,13 +58,33 @@ examples do not compile or use it.
 2. **A JSON→proto encoder** (`encode_json()`) — turns each record's JSON string
    into the protobuf bytes the stream ingests.
 
-Fetch the metadata JSON once and pass it via the environment:
+Fetch the metadata JSON once and pass it via the environment. First get an OAuth
+token for the same service principal used for ingestion (client-credentials
+grant against `{workspace}/oidc/v1/token` — the same flow the SDK uses
+internally), then call the Unity Catalog
+[Get a table](https://docs.databricks.com/api/workspace/tables/get) API
+(`GET /api/2.1/unity-catalog/tables/{full_name}`). `--fail` makes an auth or
+permission error stop you rather than storing an error body in the variable, and
+`jq` extracts the token:
 
 ```bash
-export ZEROBUS_UC_TABLE_JSON="$(curl -s \
+# 1. Exchange the service-principal credentials for a short-lived OAuth token.
+DATABRICKS_TOKEN="$(curl -sS --fail \
+  --request POST \
+  --user "$DATABRICKS_CLIENT_ID:$DATABRICKS_CLIENT_SECRET" \
+  "$DATABRICKS_WORKSPACE_URL/oidc/v1/token" \
+  --data 'grant_type=client_credentials&scope=all-apis' \
+  | jq -r .access_token)"
+
+# 2. Fetch the table metadata (--fail turns a 401/403/404 into a non-zero exit).
+export ZEROBUS_UC_TABLE_JSON="$(curl -sS --fail \
   -H "Authorization: Bearer $DATABRICKS_TOKEN" \
   "$DATABRICKS_WORKSPACE_URL/api/2.1/unity-catalog/tables/$ZEROBUS_TABLE_NAME")"
 ```
+
+If step 2 fails, the service principal likely lacks `SELECT` on the table (it
+needs the table read to fetch the schema) — see the [permissions in the examples
+README](../README.md#2-set-up-oauth-service-principal).
 
 Per-column value shaping rules (DATE/TIMESTAMP as integers, BINARY as base64,
 etc.) are documented in the FFI README / `zerobus.h`.
@@ -73,10 +101,10 @@ etc.) are documented in the FFI README / `zerobus.h`.
    export ZEROBUS_TABLE_NAME="catalog.schema.orders"
    export DATABRICKS_CLIENT_ID="<your_databricks_client_id>"
    export DATABRICKS_CLIENT_SECRET="<your_databricks_client_secret>"
-   export ZEROBUS_UC_TABLE_JSON="$(curl -s \
-     -H "Authorization: Bearer $DATABRICKS_TOKEN" \
-     "$DATABRICKS_WORKSPACE_URL/api/2.1/unity-catalog/tables/$ZEROBUS_TABLE_NAME")"
    ```
+   Then set `ZEROBUS_UC_TABLE_JSON` as shown in [How the Schema Is
+   Built](#how-the-schema-is-built-dynamic-proto) (fetch a token, then the table
+   metadata with `--fail`).
 
 2. Run:
    ```bash
