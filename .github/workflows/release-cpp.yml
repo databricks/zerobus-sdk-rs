@@ -168,6 +168,10 @@ jobs:
           cp "target/${{ matrix.target }}/release/${{ matrix.static_lib }}" "$out/lib/"
           cp "ffi/zerobus.h" "$out/lib/"
 
+          # Lockfile for the prebuilt FFI archive; gives the release scan a
+          # manifest to build an SBOM from (an empty SBOM fails the scan).
+          cp "Cargo.lock" "$out/lib/"
+
           # A short pointer so the bundle is self-explanatory.
           cat > "$out/README.md" <<EOF
           # Zerobus C++ SDK — prebuilt bundle
