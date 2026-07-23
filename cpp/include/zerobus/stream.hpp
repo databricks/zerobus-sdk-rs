@@ -71,8 +71,9 @@ class Stream {
   /// crossing has a fixed cost that batching amortizes.
   ///
   /// @param records The protobuf-encoded records to ingest.
-  /// @return The logical offset of the last record in the batch, or -1 if
-  ///         @p records is empty (a no-op).
+  /// @return The single logical offset assigned to the whole batch, or -1 if
+  ///         @p records is empty (a no-op). Waiting on this one offset confirms
+  ///         the entire batch.
   /// @throws ZerobusException if the stream is closed or ingestion fails.
   std::int64_t ingest_proto_records(
       const std::vector<std::vector<std::uint8_t>>& records);
@@ -80,14 +81,16 @@ class Stream {
   /// Ingest a batch of JSON records, blocking until they are queued.
   ///
   /// @param records The records, each a UTF-8 JSON string.
-  /// @return The logical offset of the last record in the batch, or -1 if
-  ///         @p records is empty (a no-op).
+  /// @return The single logical offset assigned to the whole batch, or -1 if
+  ///         @p records is empty (a no-op). Waiting on this one offset confirms
+  ///         the entire batch.
   /// @throws ZerobusException if the stream is closed or ingestion fails.
   std::int64_t ingest_json_records(const std::vector<std::string>& records);
 
   /// Block until the record at @p offset has been acknowledged by the server.
   ///
-  /// @param offset A logical offset returned by an ingest call. Must be
+  /// @param offset A logical offset returned by an ingest call (for a batch,
+  ///        the single offset assigned to the whole batch). Must be
   ///        non-negative; the -1 returned by an empty ingest_*_records() batch
   ///        is rejected rather than forwarded to the server.
   /// @throws ZerobusException if @p offset is negative, the stream is closed,

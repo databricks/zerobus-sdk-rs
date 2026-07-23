@@ -10,6 +10,11 @@ import (
 	"time"
 )
 
+// errHeadersBudgetExceeded tags the internal header-resolution budget (see
+// defaultHeadersTimeout) so a HeadersProvider can distinguish the SDK's own
+// budget firing from a caller-owned cancel via context.Cause.
+var errHeadersBudgetExceeded = errors.New("transport: open header budget exceeded")
+
 // defaultHeadersTimeout bounds header resolution during Open when the caller's
 // context has no deadline. A var so tests can shrink it via export_test.go;
 // tests that override it therefore must not call t.Parallel().

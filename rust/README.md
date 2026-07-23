@@ -20,6 +20,7 @@ A high-performance Rust client for streaming data ingestion into Databricks Delt
   - [7. Close the Stream](#7-close-the-stream)
 - [Client-side warnings](#client-side-warnings)
 - [Configuration Options](#configuration-options)
+- [Proxy Configuration](#proxy-configuration)
 - [Error Handling](#error-handling)
 - [Examples](#examples)
 - [Best Practices](#best-practices)
@@ -781,6 +782,28 @@ let stream = sdk
     .await?;
 ```
 
+## Proxy Configuration
+
+Standard and Arrow Flight streams use the same proxy policy for initial connections,
+automatic recovery, and stream recreation. By default, the SDK uses the first non-empty
+proxy variable in this order:
+
+1. `grpc_proxy`, then `GRPC_PROXY`
+2. `https_proxy`, then `HTTPS_PROXY`
+3. `http_proxy`, then `HTTP_PROXY`
+
+Set `no_grpc_proxy`/`NO_GRPC_PROXY`, falling back to `no_proxy`/`NO_PROXY`, to a
+comma-separated list of host suffixes that should connect directly. `*` bypasses the
+proxy for every host. Both `http://` and `https://` CONNECT proxies are supported;
+HTTPS proxy certificates are validated with the system trust store.
+
+For application-specific routing, install a `ConnectorFactory` with
+`ZerobusSdkBuilder::connector_factory`. A caller-supplied factory completely replaces
+environment discovery and must implement any desired no-proxy rules itself. Returning
+`None` connects directly; returning a `ProxyConnector` created with
+`ProxyConnector::new` uses that proxy. The selected factory is retained for every Arrow
+replacement channel.
+
 ## Error Handling
 
 The SDK categorizes errors as **retryable** or **non-retryable**:
@@ -797,9 +820,47 @@ Require manual intervention:
 - `InvalidUCTokenError` - Invalid OAuth credentials
 - `InvalidTableName` - Table doesn't exist or invalid format
 - `InvalidArgument` - Invalid parameters, schema mismatch, or payload too large (see [Payload Size Limit](#payload-size-limit))
+- `InvalidSchema` *(Arrow Flight, Beta)* - The client's Arrow schema does not match the target Delta table (see [Schema Mismatch](#schema-mismatch-arrow-flight))
 - `Code::Unauthenticated` - Authentication failure
 - `Code::PermissionDenied` - Insufficient table permissions
 - `ChannelCreationError` - Failed to establish TLS connection
+
+### Schema Mismatch (Arrow Flight)
+
+*(Beta; requires `features = ["arrow-flight"]`.)*
+
+When the server rejects an Arrow Flight stream because the client's schema no longer matches the target Delta table — for example, a column was added to or dropped from the table — the SDK surfaces a structured `ZerobusError::InvalidSchema` rather than an opaque `CreateStreamError`. This applies both to initial stream setup (`build_arrow()`) and to mid-stream reconnects: a schema change detected during recovery is surfaced immediately (via `wait_for_offset` / `flush`) instead of being retried until the recovery budget drains.
+
+`InvalidSchema` carries the raw, machine-readable facts the server reported so you can branch programmatically instead of parsing the message string. The SDK deliberately does not decide whether a mismatch is recoverable — that policy is yours (for example, re-resolving the table schema from Unity Catalog and rebuilding the stream):
+
+```rust
+use databricks_zerobus_ingest_sdk::{SchemaValidationCause, ZerobusError};
+
+match stream.wait_for_offset(offset).await {
+    Ok(()) => { /* durable */ }
+    // `InvalidSchema` is #[non_exhaustive], so match with `..`.
+    Err(ZerobusError::InvalidSchema { causes, error_code, message, .. }) => {
+        // `causes` are typed tokens (e.g. FieldNotInTable, MissingRequiredColumn);
+        // `error_code` is the server's numeric code (e.g. "8001") for telemetry;
+        // `message` carries per-field detail for diagnostics.
+        let drift_only = !causes.is_empty()
+            && causes.iter().all(|c| matches!(
+                c,
+                SchemaValidationCause::FieldNotInTable
+                    | SchemaValidationCause::MissingRequiredColumn
+            ));
+        if drift_only {
+            // Re-resolve the table schema and rebuild the stream, then replay.
+        } else {
+            // e.g. TypeIncompatible — a re-resolve won't help; surface to the operator.
+        }
+        let _ = (error_code, message);
+    }
+    Err(e) => { /* handle other errors */ }
+}
+```
+
+`SchemaValidationCause` is `#[non_exhaustive]` and includes an `Unknown(String)` variant, so a newer server cause the SDK doesn't recognize is still surfaced rather than dropped.
 
 ### Payload Size Limit
 

@@ -10,11 +10,12 @@ use arrow_flight::{
     Action, ActionType, Criteria, Empty, FlightData, FlightDescriptor, FlightInfo,
     HandshakeRequest, HandshakeResponse, PutResult, SchemaResult, Ticket,
 };
-use arrow_ipc;
 use futures::Stream;
+use rcgen::{generate_simple_self_signed, CertifiedKey};
 use serde::{Deserialize, Serialize};
 use tokio::sync::{mpsc, Mutex};
 use tokio::time::sleep;
+use tonic::transport::{Identity, ServerTlsConfig};
 use tonic::{Request, Response, Status, Streaming};
 use tracing::{debug, error, info, warn};
 
@@ -59,6 +60,10 @@ pub enum MockFlightResponse {
     },
     /// Error response - sent immediately when a batch arrives.
     Error { status: Status, delay_ms: u64 },
+    /// Reject a connection's setup: send this error instead of the ready signal on the
+    /// first (schema) message, simulating a failed reconnect. Consumes its scripted slot,
+    /// so schedule it as the response the target (reconnect) connection reaches.
+    FailSetup { status: Status },
     /// Close stream (drop the connection) - useful for testing recovery.
     CloseStream { delay_ms: u64 },
     /// Graceful close signal - sends a close signal with grace period duration.
@@ -258,6 +263,22 @@ impl FlightService for MockFlightServer {
                 if is_first_message {
                     is_first_message = false;
                     if flight_data.app_metadata.is_empty() {
+                        // A scripted FailSetup rejects this connection's setup: send the
+                        // error instead of the ready signal (simulates a reconnect failure).
+                        if let Some(MockFlightResponse::FailSetup { status }) =
+                            stream_responses.get(response_index)
+                        {
+                            let status = status.clone();
+                            response_index += 1;
+                            {
+                                let mut indices = response_indices.lock().await;
+                                indices.insert(table_name.clone(), response_index);
+                            }
+                            info!("Rejecting connection setup: {:?}", status);
+                            let _ = tx.send(Err(status)).await;
+                            return;
+                        }
+
                         debug!("Received schema message, sending ready signal");
                         // Send ready signal to confirm setup succeeded.
                         // This mirrors real server behavior where the server sends this after
@@ -393,6 +414,18 @@ impl FlightService for MockFlightServer {
                             let _ = tx.send(Err(status.clone())).await;
                             return;
                         }
+                        MockFlightResponse::FailSetup { status } => {
+                            // Only meaningful at connection setup; if reached here, the
+                            // scripting is off — fail the connection with the error.
+                            let status = status.clone();
+                            response_index += 1;
+                            {
+                                let mut indices = response_indices.lock().await;
+                                indices.insert(table_name.clone(), response_index);
+                            }
+                            let _ = tx.send(Err(status)).await;
+                            return;
+                        }
                         MockFlightResponse::CloseStream { delay_ms } => {
                             // CloseStream triggers immediately - simulates server closing without ack
                             if *delay_ms > 0 {
@@ -507,6 +540,28 @@ impl FlightService for MockFlightServer {
 /// Helper function to create a mock Flight server and return its address
 pub async fn start_mock_flight_server(
 ) -> Result<(MockFlightServer, String), Box<dyn std::error::Error>> {
+    start_mock_flight_server_inner(None, "http", "127.0.0.1").await
+}
+
+/// Starts the mock Flight server with a runtime-generated TLS identity.
+#[allow(dead_code)]
+pub async fn start_mock_tls_flight_server(
+) -> Result<(MockFlightServer, String, Vec<u8>), Box<dyn std::error::Error>> {
+    let CertifiedKey { cert, key_pair } =
+        generate_simple_self_signed(vec!["localhost".to_string()])?;
+    let cert_pem = cert.pem();
+    let identity = Identity::from_pem(cert_pem.as_bytes(), key_pair.serialize_pem().as_bytes());
+    let tls = ServerTlsConfig::new().identity(identity);
+    let (server, server_url) =
+        start_mock_flight_server_inner(Some(tls), "https", "localhost").await?;
+    Ok((server, server_url, cert_pem.into_bytes()))
+}
+
+async fn start_mock_flight_server_inner(
+    tls: Option<ServerTlsConfig>,
+    scheme: &str,
+    endpoint_host: &str,
+) -> Result<(MockFlightServer, String), Box<dyn std::error::Error>> {
     info!("Starting mock Arrow Flight server");
     let mock_server = MockFlightServer::new();
     let server_clone = MockFlightServer {
@@ -521,12 +576,16 @@ pub async fn start_mock_flight_server(
     let addr: std::net::SocketAddr = "127.0.0.1:0".parse()?;
     let listener = tokio::net::TcpListener::bind(addr).await?;
     let local_addr = listener.local_addr()?;
-    let server_url = format!("http://{}", local_addr);
+    let server_url = format!("{}://{}:{}", scheme, endpoint_host, local_addr.port());
     info!("Mock Flight server will listen on: {}", server_url);
 
+    let mut server = tonic::transport::Server::builder();
+    if let Some(tls) = tls {
+        server = server.tls_config(tls)?;
+    }
+    let router = server.add_service(FlightServiceServer::new(server_clone));
     tokio::spawn(async move {
-        if let Err(e) = tonic::transport::Server::builder()
-            .add_service(FlightServiceServer::new(server_clone))
+        if let Err(e) = router
             .serve_with_incoming(tokio_stream::wrappers::TcpListenerStream::new(listener))
             .await
         {

@@ -70,7 +70,9 @@ func (c *Conn) Open(ctx context.Context, p StreamParams) (*Stream, error) {
 	if _, ok := ctx.Deadline(); !ok {
 		useDefaultBudgets = true
 		var cancelHeaders context.CancelFunc
-		headersCtx, cancelHeaders = context.WithTimeout(ctx, defaultHeadersTimeout)
+		// Tag the budget so a HeadersProvider can tell this internal timeout
+		// apart from a caller cancel via context.Cause.
+		headersCtx, cancelHeaders = context.WithTimeoutCause(ctx, defaultHeadersTimeout, errHeadersBudgetExceeded)
 		defer cancelHeaders()
 	}
 

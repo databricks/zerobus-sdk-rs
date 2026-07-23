@@ -70,7 +70,7 @@ pub use arrow_stream::{ArrowSchema, DataType, Field, RecordBatch, TimeUnit, Zero
 pub use builder::{StreamBuilder, ZerobusSdkBuilder};
 pub use callbacks::AckCallback;
 pub use default_token_factory::DefaultTokenFactory;
-pub use errors::ZerobusError;
+pub use errors::{SchemaValidationCause, ZerobusError};
 #[cfg(feature = "testing")]
 pub use headers_provider::NoAuthHeadersProvider;
 pub use headers_provider::{HeadersProvider, OAuthHeadersProvider};
