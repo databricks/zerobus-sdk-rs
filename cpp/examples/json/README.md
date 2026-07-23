@@ -128,29 +128,29 @@ Each `UnackedRecord` exposes `is_json()`, the raw `data()` bytes, and
 
 **Expected output:**
 ```
-Batch of 3 records queued; last offset ID: 2
-Batch acknowledged through offset ID: 2
+Batch of 3 records queued; batch offset ID: 0
+Batch acknowledged at offset ID: 0
 Stream closed successfully. Callback observed 3 acknowledgements.
 ```
 
 ### Code Highlights
 
 `ingest_json_records()` hands a whole vector of records to the SDK in a single
-FFI crossing and returns the offset of the **last** record. Waiting on that one
-offset confirms the whole batch, because acks are monotonic:
+FFI crossing and returns the single logical offset assigned to the batch.
+Waiting on that one offset confirms the whole batch:
 
 ```cpp
 const std::vector<std::string> batch = { record1, record2, record3 };
 
-const std::int64_t last_offset = stream.ingest_json_records(batch);
-if (last_offset >= 0) {
-  stream.wait_for_offset(last_offset);   // one wait confirms the batch
+const std::int64_t batch_offset = stream.ingest_json_records(batch);
+if (batch_offset >= 0) {
+  stream.wait_for_offset(batch_offset);   // one wait confirms the batch
 }
 ```
 
 **Batch semantics:**
 - **All-or-nothing** — the entire batch succeeds or fails as a unit.
-- **Single acknowledgment** — one offset (the last record's) for the whole batch.
+- **Single acknowledgment** — one logical offset for the whole batch.
 - **Empty batches** — a no-op; `ingest_json_records()` returns `-1`.
 
 In a hot path you would queue **many** batches and `flush()` once, rather than

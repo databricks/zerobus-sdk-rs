@@ -8,8 +8,8 @@
 //
 // Batching is the right choice in hot paths: each FFI crossing has a fixed cost
 // that batching amortizes, and a batch is acknowledged all-or-nothing as a
-// unit. The call returns the offset of the LAST record; because acks are
-// monotonic, waiting on that single offset confirms the whole batch.
+// unit. The call returns a single logical offset assigned to the whole batch;
+// waiting on that one offset confirms the entire batch.
 //
 // Configuration — every connection setting, plus the Unity Catalog table
 // metadata JSON, is read from the environment. Export these before running (see
@@ -110,17 +110,16 @@ int main() {
                                            45.00, "delivered", now)),
     };
 
-    const std::int64_t last_offset = stream.ingest_proto_records(batch);
+    const std::int64_t batch_offset = stream.ingest_proto_records(batch);
     std::cout << "Batch of " << batch.size()
-              << " records queued; last offset ID: " << last_offset << "\n";
+              << " records queued; batch offset ID: " << batch_offset << "\n";
 
-    // 5. Confirm the batch. Waiting on the last offset is enough — acks are
-    //    monotonic. In a hot path you would queue many batches and flush() once
-    //    instead of waiting after each.
-    if (last_offset >= 0) {
-      stream.wait_for_offset(last_offset);
-      std::cout << "Batch acknowledged through offset ID: " << last_offset
-                << "\n";
+    // 5. Confirm the batch. Waiting on the batch's single offset confirms every
+    //    record in it. In a hot path you would queue many batches and flush()
+    //    once instead of waiting after each.
+    if (batch_offset >= 0) {
+      stream.wait_for_offset(batch_offset);
+      std::cout << "Batch acknowledged at offset ID: " << batch_offset << "\n";
     }
 
     // 6. flush() drains anything still pending, then close at a controlled
