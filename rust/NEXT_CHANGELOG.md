@@ -6,6 +6,20 @@
 
 ### New Features and Improvements
 
+- Arrow Flight: schema-validation rejections now surface as the new
+  `ZerobusError::InvalidSchema` variant (carrying the server-reported `causes` as
+  typed `SchemaValidationCause` values) instead of a generic `CreateStreamError`.
+  This lets callers detect a table/stream schema mismatch — e.g. a column added
+  to or dropped from the target table — and re-resolve their schema rather than
+  treating it as an opaque invalid-argument failure. The variant is not
+  SDK-retryable. This applies both to initial stream setup and to mid-stream
+  reconnects: on a reconnect, the typed error flows through the terminal
+  recovery path (a non-retriable failure ends recovery and is reported as-is),
+  so a schema change detected during recovery is surfaced to a blocked
+  `wait_for_offset` / `flush` as `InvalidSchema` — letting callers rebuild the
+  stream without downtime — rather than being retried until the recovery budget
+  drains and reported as a generic failure.
+
 ### Bug Fixes
 
 - **Arrow Flight — `close()` now propagates flush errors and survives cancellation** (Beta): `ZerobusArrowStream::close()` previously swallowed a failed final `flush()` and always returned `Ok(())`, contradicting its documentation and diverging from the proto stream's `close()`. It now returns the flush error after still tearing down the stream and moving pending batches to the failed set (retrievable via `get_unacked_batches()`). If the close future is cancelled after teardown starts, the stream enters a non-ingestable `Closing` state and a later `close()` resumes teardown without waiting for another flush.
