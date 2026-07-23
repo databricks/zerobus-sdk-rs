@@ -466,6 +466,23 @@ async fn test_proxy_and_no_proxy() -> Result<(), Box<dyn std::error::Error>> {
         );
     }
 
+    // === Part 9: Verify invalid proxy configuration fails closed ===
+    info!("=== Testing invalid Arrow Flight proxy configuration ===");
+    {
+        let (mock_server, server_url) = start_mock_flight_server().await?;
+        mock_server.inject_responses(TABLE_NAME, vec![]).await;
+
+        let _proxy = EnvVarGuard::set("grpc_proxy", "http://proxy-user:super-secret@/proxy");
+        let error = match ingest_one_arrow_batch(&server_url).await {
+            Ok(()) => panic!("expected invalid proxy configuration to fail"),
+            Err(error) => error.to_string(),
+        };
+
+        assert!(error.contains("failed to parse proxy URL"));
+        assert!(!error.contains("proxy-user"));
+        assert!(!error.contains("super-secret"));
+    }
+
     Ok(())
 }
 

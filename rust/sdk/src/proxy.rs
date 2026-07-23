@@ -37,9 +37,15 @@ impl ProxyConnector {
 
 #[allow(clippy::result_large_err)]
 fn build_connector(proxy_uri: &str) -> Result<ProxiedConnector, ZerobusError> {
-    let uri = proxy_uri.parse().map_err(|e| {
-        ZerobusError::InvalidArgument(format!("failed to parse proxy URL '{}': {}", proxy_uri, e))
-    })?;
+    let uri: tonic::transport::Uri = proxy_uri
+        .parse()
+        .map_err(|e| ZerobusError::InvalidArgument(format!("failed to parse proxy URL: {}", e)))?;
+    info!(
+        scheme = uri.scheme_str().unwrap_or_default(),
+        host = uri.host().unwrap_or_default(),
+        port = uri.port_u16(),
+        "Using HTTP proxy"
+    );
     let mut proxy = Proxy::new(Intercept::All, uri);
     // gRPC is HTTP/2 and cannot traverse a regular HTTP/1 forward proxy;
     // force CONNECT tunneling for all targets (matches gRPC core behavior).
@@ -83,11 +89,11 @@ pub type ConnectorFactory = Arc<dyn Fn(&str) -> Option<ProxyConnector> + Send + 
 pub(crate) fn resolve_connector(
     host: &str,
     connector_factory: Option<&ConnectorFactory>,
-) -> Option<ProxiedConnector> {
+) -> Result<Option<ProxiedConnector>, ZerobusError> {
     match connector_factory {
-        Some(factory) => factory(host).map(ProxyConnector::into_inner),
+        Some(factory) => Ok(factory(host).map(ProxyConnector::into_inner)),
         None if !is_no_proxy(host) => create_proxy_connector(),
-        None => None,
+        None => Ok(None),
     }
 }
 
@@ -126,16 +132,11 @@ fn read_first_env(names: &[&str]) -> Option<String> {
 /// The underlying connector handles TLS for `https://` proxy URLs using the
 /// system trust store. The CONNECT tunnel remains raw so tonic applies any
 /// target TLS exactly once.
-pub(crate) fn create_proxy_connector() -> Option<ProxiedConnector> {
-    let proxy_url = read_first_env(PROXY_ENV_VARS)?;
-    info!("Using HTTP proxy: {}", proxy_url);
-    match build_connector(&proxy_url) {
-        Ok(pc) => Some(pc),
-        Err(e) => {
-            tracing::warn!("{}", e);
-            None
-        }
-    }
+pub(crate) fn create_proxy_connector() -> Result<Option<ProxiedConnector>, ZerobusError> {
+    let Some(proxy_url) = read_first_env(PROXY_ENV_VARS) else {
+        return Ok(None);
+    };
+    build_connector(&proxy_url).map(Some)
 }
 
 /// Checks whether a given host should bypass the proxy.
@@ -219,5 +220,17 @@ mod tests {
             "example.com",
             "other.com , example.com , more.com"
         ));
+    }
+
+    #[test]
+    fn invalid_proxy_error_does_not_expose_credentials() {
+        let result = build_connector("http://proxy-user:super-secret@/proxy");
+        let error = match result {
+            Ok(_) => panic!("expected invalid proxy URL to fail"),
+            Err(error) => error.to_string(),
+        };
+
+        assert!(!error.contains("proxy-user"));
+        assert!(!error.contains("super-secret"));
     }
 }

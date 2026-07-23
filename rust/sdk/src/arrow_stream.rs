@@ -533,7 +533,7 @@ impl ZerobusArrowStream {
 
         let configured_endpoint = tls_config.configure_endpoint(base_endpoint)?;
         let host = configured_endpoint.uri().host().unwrap_or_default();
-        let channel = match proxy::resolve_connector(host, connector_factory) {
+        let channel = match proxy::resolve_connector(host, connector_factory)? {
             Some(proxy_connector) => {
                 configured_endpoint.connect_with_connector_lazy(proxy_connector)
             }
