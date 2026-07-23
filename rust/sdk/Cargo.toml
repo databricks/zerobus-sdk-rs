@@ -32,6 +32,7 @@ tokio-stream.workspace = true
 tokio-util = { workspace = true, features = ["rt"] }
 tonic = { workspace = true, features = ["tls-native-roots", "transport"] }
 tonic-prost.workspace = true
+tonic-types = { workspace = true, optional = true }
 tracing.workspace = true
 hyper-http-proxy.workspace = true
 hyper-util.workspace = true
@@ -63,7 +64,7 @@ prost-build = { version = "0.14", optional = true }
 [features]
 default = []
 # Arrow Flight is in Beta
-arrow-flight = ["dep:arrow-flight", "dep:arrow-array", "dep:arrow-schema", "dep:arrow-ipc", "dep:futures"]
+arrow-flight = ["dep:arrow-flight", "dep:arrow-array", "dep:arrow-schema", "dep:arrow-ipc", "dep:futures", "dep:tonic-types"]
 # Zero-copy protobuf parser.
 zeroparser = ["dep:self_cell", "dep:prost-build"]
 testing = ["dep:futures"]

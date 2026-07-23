@@ -1408,6 +1408,78 @@ mod arrow_flight_tests {
             Ok(())
         }
 
+        /// End-to-end: when the server rejects the stream *during setup* with the
+        /// structured schema-validation `ErrorInfo`, `build_arrow()` surfaces it
+        /// as `ZerobusError::InvalidSchema` carrying the decoded causes — not a
+        /// generic `CreateStreamError`. This exercises the full production path
+        /// (poll → `FlightError` → `from_setup_status`) that the errors.rs unit
+        /// tests can't reach, since they build a `tonic::Status` directly.
+        #[tokio::test]
+        async fn test_setup_schema_validation_error_surfaces_invalid_schema(
+        ) -> Result<(), Box<dyn std::error::Error>> {
+            use std::collections::HashMap;
+
+            use databricks_zerobus_ingest_sdk::{SchemaValidationCause, ZerobusError};
+            use tonic_types::{ErrorDetails, StatusExt};
+
+            setup_tracing();
+            info!("Starting test_setup_schema_validation_error_surfaces_invalid_schema");
+
+            let (mock_server, server_url) = start_mock_flight_server().await?;
+            let schema = create_test_arrow_schema();
+
+            // Mirror what Shinkansen attaches on a schema mismatch.
+            let mut metadata = HashMap::new();
+            metadata.insert("error_code".to_string(), "8001".to_string());
+            metadata.insert(
+                "causes".to_string(),
+                "FIELD_NOT_IN_TABLE,MISSING_REQUIRED_COLUMN".to_string(),
+            );
+            let status = Status::with_error_details(
+                tonic::Code::InvalidArgument,
+                "Arrow Flight schema validation failed: ...",
+                ErrorDetails::with_error_info(
+                    "SCHEMA_VALIDATION_FAILED",
+                    "zerobus.databricks.com",
+                    metadata,
+                ),
+            );
+
+            mock_server
+                .inject_responses(TABLE_NAME, vec![MockFlightResponse::FailSetup { status }])
+                .await;
+
+            let sdk = ZerobusSdk::builder()
+                .endpoint(server_url.clone())
+                .unity_catalog_url("https://mock-uc.com")
+                .tls_config(Arc::new(NoTlsConfig))
+                .build()?;
+
+            let result = sdk
+                .stream_builder()
+                .table(TABLE_NAME)
+                .headers_provider(Arc::new(TestHeadersProvider::default()))
+                .arrow(schema)
+                .build_arrow()
+                .await;
+
+            match result {
+                Err(ZerobusError::InvalidSchema { causes, .. }) => {
+                    assert_eq!(
+                        causes,
+                        vec![
+                            SchemaValidationCause::FieldNotInTable,
+                            SchemaValidationCause::MissingRequiredColumn,
+                        ]
+                    );
+                }
+                Err(other) => panic!("expected InvalidSchema, got {other:?}"),
+                Ok(_) => panic!("expected InvalidSchema, but stream setup succeeded"),
+            }
+
+            Ok(())
+        }
+
         #[tokio::test]
         async fn test_ingest_after_close_rejected() -> Result<(), Box<dyn std::error::Error>> {
             setup_tracing();
@@ -2573,6 +2645,218 @@ mod arrow_flight_tests {
 
             let result = stream.wait_for_offset(offset2).await;
             assert!(result.is_ok(), "Expected recovery to succeed: {:?}", result);
+
+            Ok(())
+        }
+
+        /// End-to-end: when the table schema changes mid-stream, the *reconnect*
+        /// is rejected with the structured schema-validation `ErrorInfo`. Because
+        /// `InvalidSchema` is non-retriable (the SDK holds a fixed schema and
+        /// would just re-send the rejected one), the supervisor must surface it to
+        /// a blocked `wait_for_offset` immediately rather than burning the recovery
+        /// budget and reporting a generic failure. This lets callers (e.g. Vector)
+        /// re-resolve their schema and rebuild the stream for zero-downtime.
+        ///
+        /// Sequence on the one table: ack batch 0 → drop the connection (retriable,
+        /// triggers recovery) → reject the reconnect with the schema `ErrorInfo`.
+        #[tokio::test]
+        async fn test_reconnect_schema_validation_error_surfaces_invalid_schema(
+        ) -> Result<(), Box<dyn std::error::Error>> {
+            use std::collections::HashMap;
+
+            use databricks_zerobus_ingest_sdk::{SchemaValidationCause, ZerobusError};
+            use tonic_types::{ErrorDetails, StatusExt};
+
+            setup_tracing();
+            info!("Starting test_reconnect_schema_validation_error_surfaces_invalid_schema");
+
+            let (mock_server, server_url) = start_mock_flight_server().await?;
+            let schema = create_test_arrow_schema();
+
+            let mut metadata = HashMap::new();
+            metadata.insert("error_code".to_string(), "8001".to_string());
+            metadata.insert("causes".to_string(), "MISSING_REQUIRED_COLUMN".to_string());
+            let schema_status = tonic::Status::with_error_details(
+                tonic::Code::InvalidArgument,
+                "Arrow Flight schema validation failed: ...",
+                ErrorDetails::with_error_info(
+                    "SCHEMA_VALIDATION_FAILED",
+                    "zerobus.databricks.com",
+                    metadata,
+                ),
+            );
+
+            mock_server
+                .inject_responses(
+                    TABLE_NAME,
+                    vec![
+                        // First connection: ack batch 0, then drop the connection
+                        // (retriable) to trigger recovery.
+                        MockFlightResponse::BatchAck {
+                            ack_up_to_offset: 0,
+                            delay_ms: 0,
+                            ack_up_to_records: 1,
+                        },
+                        MockFlightResponse::CloseStream { delay_ms: 0 },
+                        // Second connection (the reconnect): reject during setup
+                        // with the schema-validation ErrorInfo.
+                        MockFlightResponse::FailSetup {
+                            status: schema_status,
+                        },
+                    ],
+                )
+                .await;
+
+            let sdk = ZerobusSdk::builder()
+                .endpoint(server_url.clone())
+                .unity_catalog_url("https://mock-uc.com")
+                .tls_config(Arc::new(NoTlsConfig))
+                .build()?;
+
+            let stream = sdk
+                .stream_builder()
+                .table(TABLE_NAME)
+                .headers_provider(Arc::new(TestHeadersProvider::default()))
+                .arrow(schema.clone())
+                .recovery(true)
+                .recovery_timeout_ms(5000)
+                .recovery_backoff_ms(50)
+                .recovery_retries(3)
+                .build_arrow()
+                .await?;
+
+            // Batch 0 is acked on the first connection.
+            let batch1 = create_test_record_batch(schema.clone(), vec![1], vec![Some("first")]);
+            let offset1 = stream.ingest_batch(batch1).await?;
+            stream.wait_for_offset(offset1).await?;
+
+            // Batch 1 is in flight when the connection drops; recovery reconnects
+            // and is rejected with the schema error.
+            let batch2 = create_test_record_batch(schema.clone(), vec![2], vec![Some("second")]);
+            let offset2 = stream.ingest_batch(batch2).await?;
+
+            match stream.wait_for_offset(offset2).await {
+                Err(ZerobusError::InvalidSchema { causes, .. }) => {
+                    assert_eq!(causes, vec![SchemaValidationCause::MissingRequiredColumn]);
+                }
+                other => panic!("expected Err(InvalidSchema) after reconnect, got {other:?}"),
+            }
+
+            Ok(())
+        }
+
+        /// Regression: a `flush()` that starts *after* the schema-reconnect has
+        /// already closed the stream must still observe the typed `InvalidSchema`
+        /// (with its causes), not a generic "stream is closed" error. The sibling
+        /// test above covers a waiter already parked in the supervisor's
+        /// `select!` before close; this one covers the late-caller path through
+        /// the terminal-error snapshot, proving the typed error survives the
+        /// close path (the whole point of the schema-error work).
+        #[tokio::test]
+        async fn test_flush_after_schema_reconnect_close_surfaces_invalid_schema(
+        ) -> Result<(), Box<dyn std::error::Error>> {
+            use std::collections::HashMap;
+            use std::time::Duration;
+
+            use databricks_zerobus_ingest_sdk::{SchemaValidationCause, ZerobusError};
+            use tonic_types::{ErrorDetails, StatusExt};
+
+            setup_tracing();
+            info!("Starting test_flush_after_schema_reconnect_close_surfaces_invalid_schema");
+
+            let (mock_server, server_url) = start_mock_flight_server().await?;
+            let schema = create_test_arrow_schema();
+
+            let mut metadata = HashMap::new();
+            metadata.insert("error_code".to_string(), "8001".to_string());
+            metadata.insert(
+                "causes".to_string(),
+                "FIELD_NOT_IN_TABLE,MISSING_REQUIRED_COLUMN".to_string(),
+            );
+            let schema_status = tonic::Status::with_error_details(
+                tonic::Code::InvalidArgument,
+                "Arrow Flight schema validation failed: ...",
+                ErrorDetails::with_error_info(
+                    "SCHEMA_VALIDATION_FAILED",
+                    "zerobus.databricks.com",
+                    metadata,
+                ),
+            );
+
+            mock_server
+                .inject_responses(
+                    TABLE_NAME,
+                    vec![
+                        // First connection: ack batch 0, then drop the connection
+                        // (retriable) to trigger recovery.
+                        MockFlightResponse::BatchAck {
+                            ack_up_to_offset: 0,
+                            delay_ms: 0,
+                            ack_up_to_records: 1,
+                        },
+                        MockFlightResponse::CloseStream { delay_ms: 0 },
+                        // The reconnect is rejected during setup with the schema error,
+                        // which terminates the stream (InvalidSchema is non-retriable).
+                        MockFlightResponse::FailSetup {
+                            status: schema_status,
+                        },
+                    ],
+                )
+                .await;
+
+            let sdk = ZerobusSdk::builder()
+                .endpoint(server_url.clone())
+                .unity_catalog_url("https://mock-uc.com")
+                .tls_config(Arc::new(NoTlsConfig))
+                .build()?;
+
+            let stream = sdk
+                .stream_builder()
+                .table(TABLE_NAME)
+                .headers_provider(Arc::new(TestHeadersProvider::default()))
+                .arrow(schema.clone())
+                .recovery(true)
+                .recovery_timeout_ms(5000)
+                .recovery_backoff_ms(50)
+                .recovery_retries(3)
+                .build_arrow()
+                .await?;
+
+            let batch1 = create_test_record_batch(schema.clone(), vec![1], vec![Some("first")]);
+            let offset1 = stream.ingest_batch(batch1).await?;
+            stream.wait_for_offset(offset1).await?;
+
+            // Batch 1 is in flight when the connection drops; the reconnect is
+            // rejected and the supervisor closes the stream.
+            let batch2 = create_test_record_batch(schema.clone(), vec![2], vec![Some("second")]);
+            let _offset2 = stream.ingest_batch(batch2).await?;
+
+            // Wait until the supervisor has closed the stream, so flush() below is
+            // a *late* caller reading the terminal snapshot — not a waiter parked
+            // before close.
+            let mut waited = Duration::ZERO;
+            while !stream.is_closed() && waited < Duration::from_secs(5) {
+                tokio::time::sleep(Duration::from_millis(20)).await;
+                waited += Duration::from_millis(20);
+            }
+            assert!(
+                stream.is_closed(),
+                "stream should be closed by the schema reconnect failure"
+            );
+
+            // A flush() starting after close must still surface the typed error.
+            match stream.flush().await {
+                Err(ZerobusError::InvalidSchema { causes, .. }) => {
+                    assert_eq!(
+                        causes,
+                        vec![
+                            SchemaValidationCause::FieldNotInTable,
+                            SchemaValidationCause::MissingRequiredColumn,
+                        ]
+                    );
+                }
+                other => panic!("expected Err(InvalidSchema) from post-close flush, got {other:?}"),
+            }
 
             Ok(())
         }
