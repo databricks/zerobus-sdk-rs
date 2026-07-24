@@ -6,14 +6,18 @@
 
 ### New Features and Improvements
 
-- Arrow Flight: `arrow_schema_from_uc_columns` / `arrow_schema_from_uc_schema`
-  now annotate `VARIANT` fields (top-level and nested inside structs, arrays, and
-  maps) with the canonical `arrow.parquet.variant` Arrow extension marker
-  (`ARROW:extension:name` + empty `ARROW:extension:metadata`), so downstream
-  consumers can recover which fields are variants — previously lost when a UC
-  schema was converted to Arrow. The physical `Struct<metadata, value>` shape is
-  unchanged, and the Databricks Arrow Flight server ignores and strips the marker
-  on the write path, so ingestion behavior is unaffected.
+- Arrow Flight: new `arrow_schema_from_uc_columns_with_options` /
+  `arrow_schema_from_uc_schema_with_options` accept an `ArrowSchemaOptions`. When
+  `annotate_variant_extension` is set, `VARIANT` fields (top-level and nested
+  inside structs, arrays, and maps) are annotated with the canonical
+  `arrow.parquet.variant` Arrow extension marker (`ARROW:extension:name` + empty
+  `ARROW:extension:metadata`), so downstream consumers can recover which fields
+  are variants — previously lost when a UC schema was converted to Arrow. The
+  physical `Struct<metadata, value>` shape is unchanged. The option defaults to
+  off (and `arrow_schema_from_uc_columns` / `arrow_schema_from_uc_schema` are
+  unchanged) because the Arrow Flight server's target schema is unmarked, so a
+  marked schema forces a per-batch server-side cast; enable it only when a
+  consumer needs the annotation and that cost is acceptable.
 
 ### Bug Fixes
 
