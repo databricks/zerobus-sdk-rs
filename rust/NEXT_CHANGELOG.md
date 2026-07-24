@@ -19,6 +19,7 @@
   `wait_for_offset` / `flush` as `InvalidSchema` — letting callers rebuild the
   stream without downtime — rather than being retried until the recovery budget
   drains and reported as a generic failure.
+- Added dynamic protobuf support: build and ingest records against a descriptor known only at runtime (for example one fetched from Unity Catalog or built with `schema::descriptor_from_uc_columns`), with no compiled `prost::Message` type. Resolve the descriptor with `message_descriptor()`, pass it to `StreamBuilder::dynamic_proto()` (also available from `ZerobusStream::message_descriptor()`), fill records field-by-field with `DynamicRecord`, and `encode()` them (which enforces proto2 `required` fields) for ingestion. See the new `proto_dynamic_single` example.
 
 ### Bug Fixes
 
@@ -47,3 +48,6 @@
 ### Deprecations
 
 ### API Changes
+
+- Added `StreamBuilder::dynamic_proto()`, `ZerobusStream::message_descriptor()`, and `ZerobusStream::new_record()`.
+- Added dynamic-proto types at the crate root: `DynamicRecord` (with `set()` and a `required`-field-checking `encode()`), the `IntoDynamicValue` conversion trait, the `message_descriptor()` resolver, the `missing_required_fields()` helper, and re-exports of `prost_reflect::{DynamicMessage, MessageDescriptor, Value}`.

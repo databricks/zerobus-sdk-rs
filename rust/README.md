@@ -261,7 +261,7 @@ zerobus_rust_sdk/
 |                  |                   |
 |      +-----------+-----------+       |
 |      v                       v       |
-| +----------+          +----------+   | 
+| +----------+          +----------+   |
 | |  Sender  |          | Receiver |   | Parallel tasks
 | |  Task    |          |  Task    |   |
 | +----------+          +----------+   |
@@ -371,7 +371,7 @@ For JSON-based ingestion, you can skip the schema generation step and directly p
 ### 1. Generate Protocol Buffer Schema (Protocol Buffers approach only)
 
 > **Important Note**: The schema generation tool and examples are **only available in the GitHub repository**. The crate published on [crates.io](https://crates.io/crates/databricks-zerobus-ingest-sdk) contains only the core Zerobus ingestion SDK logic. To generate protobuf schemas or see working examples, clone the repository:
-> 
+>
 > ```bash
 > git clone https://github.com/databricks/zerobus-sdk.git
 > cd zerobus-sdk/rust
@@ -533,6 +533,41 @@ let mut stream = sdk
     .await?;
 ```
 
+#### Dynamic Protobuf Stream
+
+When the table's schema is known only at runtime — for example a descriptor fetched from Unity Catalog or built in code with `schema::descriptor_from_uc_columns` — there is no compiled `prost::Message` type. Resolve the descriptor with `message_descriptor`, pass it to `.dynamic_proto(descriptor)`, and fill records field-by-field with `DynamicRecord`:
+
+```rust
+use databricks_zerobus_ingest_sdk::{message_descriptor, DynamicRecord, ProtoBytes};
+use databricks_zerobus_ingest_sdk::schema::{descriptor_from_uc_columns, UcColumn};
+
+// Build the descriptor at runtime (a column's proto field number is `position + 1`).
+let descriptor_proto = descriptor_from_uc_columns(&columns, "table_Orders")?;
+let descriptor = message_descriptor(&descriptor_proto)?;
+
+let mut stream = sdk
+    .stream_builder().table("catalog.schema.orders")
+    .oauth(client_id, client_secret)
+    .dynamic_proto(descriptor)
+    .build()
+    .await?;
+
+// Fill records field-by-field; `set()` validates the field name and type (the
+// value must match the field's proto type, e.g. a BIGINT column takes an i64).
+// `encode()` then checks proto2 required fields before producing the bytes.
+use databricks_zerobus_ingest_sdk::ProtoBytes;
+for i in 0..100_000i64 {
+    let mut record = stream.new_record()?; // bound to the stream's schema
+    record.set("id", i)?.set("customer_name", "Alice Smith")?;
+    let _offset = stream.ingest_record_offset(ProtoBytes(record.encode()?)).await?; // queue only — do NOT wait here
+}
+stream.flush().await?; // wait once for all pending acknowledgments
+```
+
+`.dynamic_proto()` takes a resolved `MessageDescriptor`. Get one from `message_descriptor(&proto)` or build it against your own `prost_reflect::DescriptorPool`.
+
+On the wire this is identical to `.compiled_proto(...)`; the difference is that records are built dynamically rather than from a generated struct. See the [`dynamic_proto`](https://docs.rs/databricks-zerobus-ingest-sdk/latest/databricks_zerobus_ingest_sdk/dynamic_proto/) module and the `proto_dynamic_single` example for details.
+
 Setters can be called in any order. The builder validates at `build()` time that both authentication and format have been configured.
 
 ### 5. Ingest Data
@@ -544,6 +579,7 @@ The SDK provides flexible ways to ingest data with different levels of abstracti
 | `ProtoMessage<T>` | Proto | Auto-encoding: pass structs, SDK handles encoding |
 | `ProtoBytes` | Proto | Pre-encoded: pass bytes with explicit wrapper |
 | `Vec<u8>` | Proto | Backward-compatible: raw bytes without wrapper |
+| `ProtoBytes(record.encode()?)` | Proto | Dynamic: build fields at runtime against a descriptor, then encode ([`dynamic_proto`](#dynamic-protobuf-stream)) |
 | `JsonValue<T>` | JSON | Auto-serializing: pass structs, SDK handles JSON conversion |
 | `JsonString` | JSON | Pre-serialized: pass JSON strings with explicit wrapper |
 | `String` | JSON | Backward-compatible: raw strings without wrapper |
@@ -722,12 +758,12 @@ match stream.close().await {
         let unacked = stream.get_unacked_records().await?;
         let total_records = unacked.count();
         println!("Failed to ack {} records", total_records);
-        
+
         // Option 2: Get records grouped by batch (preserves batch structure)
         let unacked_batches = stream.get_unacked_batches().await?;
         let total_records: usize = unacked_batches.iter().map(|batch| batch.get_record_count()).sum();
         println!("Failed to ack {} records in {} batches", total_records, unacked_batches.len());
-        
+
         // Retry with a new stream
     }
     Ok(_) => println!("Stream closed successfully"),
@@ -922,8 +958,10 @@ The `examples/` directory contains four working examples covering different seri
 |---------|--------------|-----------|----------|
 | `json/single.rs` | JSON | Single-record | `cargo run -p rust-examples-json --example json_single` |
 | `json/batch.rs` | JSON | Batch | `cargo run -p rust-examples-json --example json_batch` |
-| `proto/single.rs` | Protocol Buffers | Single-record | `cargo run -p rust-examples-proto --example proto_single` |
-| `proto/batch.rs` | Protocol Buffers | Batch | `cargo run -p rust-examples-proto --example proto_batch` |
+| `proto/compiled/single.rs` | Protocol Buffers | Single-record | `cargo run -p rust-examples-proto --example proto_compiled_single` |
+| `proto/compiled/batch.rs` | Protocol Buffers | Batch | `cargo run -p rust-examples-proto --example proto_compiled_batch` |
+| `proto/dynamic/single.rs` | Protocol Buffers (runtime schema) | Single-record | `cargo run -p rust-examples-proto --example proto_dynamic_single` |
+| `proto/dynamic/batch.rs` | Protocol Buffers (runtime schema) | Batch | `cargo run -p rust-examples-proto --example proto_dynamic_batch` |
 
 
 Check [`examples/README.md`](https://github.com/databricks/zerobus-sdk/blob/main/rust/examples/README.md) for setup instructions and detailed comparisons.
@@ -1188,11 +1226,15 @@ cargo run -p rust-examples-json --example json_single
 # Build and run JSON batch example
 cargo run -p rust-examples-json --example json_batch
 
-# Build and run Protocol Buffers single-record example
-cargo run -p rust-examples-proto --example proto_single
+# Build and run Protocol Buffers single-record example (compiled schema)
+cargo run -p rust-examples-proto --example proto_compiled_single
 
-# Build and run Protocol Buffers batch example
-cargo run -p rust-examples-proto --example proto_batch
+# Build and run Protocol Buffers batch example (compiled schema)
+cargo run -p rust-examples-proto --example proto_compiled_batch
+
+# Build and run Protocol Buffers dynamic-schema examples
+cargo run -p rust-examples-proto --example proto_dynamic_single
+cargo run -p rust-examples-proto --example proto_dynamic_batch
 ```
 
 ## Community and Contributing
