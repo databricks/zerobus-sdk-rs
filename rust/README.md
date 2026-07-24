@@ -825,6 +825,13 @@ Require manual intervention:
 - `Code::PermissionDenied` - Insufficient table permissions
 - `ChannelCreationError` - Failed to establish TLS connection
 
+`Code::Unauthenticated` and `Code::PermissionDenied` remain globally non-retryable and
+require manual intervention. During initial stream setup only, if recovery is enabled
+and at least one configured retry remains, the SDK may invalidate the rejected
+credentials and spend at most one recovery retry on another setup attempt. A second
+authentication rejection is terminal. This one-shot setup exception does not change
+reconnect behavior.
+
 ### Schema Mismatch (Arrow Flight)
 
 *(Beta; requires `features = ["arrow-flight"]`.)*
