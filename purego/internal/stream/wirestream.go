@@ -6,45 +6,31 @@ import (
 	"github.com/databricks/zerobus-sdk/purego/internal/transport"
 )
 
-// wireStream abstracts the transport so the core drives Send/Recv/teardown
-// without naming a concrete RPC. Generic over the same Req/Resp the encoder and
-// ackModel use: proto/JSON instantiate wireStream[encodedMsg, ephemeralResp].
-//
-// A wireStream is already past its handshake when opener returns it. It is not
-// safe for concurrent Send; the core uses a single sender goroutine.
-//
-// TODO(arrow): the Arrow path instantiates wireStream over Flight.
+// wireStream abstracts an open bidirectional transport stream.
+// The core uses one sender goroutine.
 type wireStream[Req, Resp any] interface {
 	// Send writes one request to the server.
 	Send(req Req) error
-	// Recv blocks for the next response, returning io.EOF (unwrapped) once the
-	// server ends the stream cleanly.
+	// Recv returns io.EOF when the server ends the stream.
 	Recv() (Resp, error)
-	// CloseSend half-closes the send side, leaving Recv open to drain remaining
-	// responses (used for graceful teardown).
+	// CloseSend half-closes sending while Recv drains.
 	CloseSend() error
 	// Close aborts the stream and releases resources. Idempotent.
 	Close()
 }
 
-// opener opens a new wireStream, injected so the supervisor can reconnect and
-// tests can supply an in-process fake. Generic over the same Req/Resp as
-// wireStream.
+// opener creates transport streams.
 type opener[Req, Resp any] interface {
 	Open(ctx context.Context, p StreamParams) (wireStream[Req, Resp], error)
 }
 
-// StreamParams mirrors transport.StreamParams but lives here so upper layers
-// can use the stream package without importing transport directly.
+// StreamParams aliases the transport parameters.
 type StreamParams = transport.StreamParams
 
-// ephemeralOpener adapts a *transport.Conn to opener[encodedMsg, ephemeralResp]
-// for the proto/JSON wire path. *transport.Stream already satisfies wireStream,
-// so this is a thin wrapper that just names the concrete types.
+// ephemeralOpener adapts a transport connection.
 type ephemeralOpener struct{ conn *transport.Conn }
 
-// NewEphemeralOpener returns the proto/JSON opener backed by conn. The public
-// zerobus package uses it to build a proto/JSON CoreStream via NewProtoJSONStream.
+// NewEphemeralOpener returns an opener backed by conn.
 func NewEphemeralOpener(conn *transport.Conn) *ephemeralOpener {
 	return &ephemeralOpener{conn: conn}
 }
@@ -57,14 +43,9 @@ func (o *ephemeralOpener) Open(ctx context.Context, p StreamParams) (wireStream[
 	return s, nil
 }
 
-// Compile-time proof that the transport's proto/JSON Stream satisfies the
-// generic wireStream the core drives.
 var _ wireStream[encodedMsg, ephemeralResp] = (*transport.Stream)(nil)
 
-// NewProtoJSONStream builds a proto/JSON ingestion core over the EphemeralStream
-// wire path: it wires the offset ack model, the proto or JSON encoder (chosen by
-// params.RecordType), and the ephemeral opener. It is the constructor the public
-// zerobus package calls for proto and JSON streams.
+// NewProtoJSONStream builds a proto or JSON ingestion stream.
 func NewProtoJSONStream(
 	conn *transport.Conn,
 	params StreamParams,

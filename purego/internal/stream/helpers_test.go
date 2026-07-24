@@ -15,8 +15,6 @@ import (
 	"github.com/databricks/zerobus-sdk/purego/internal/zerobuspb"
 )
 
-// ---- fake transport helpers ------------------------------------------------
-
 // fakeRPC is a controllable in-process stream.
 type fakeRPC struct {
 	sends     chan *zerobuspb.EphemeralStreamRequest
@@ -119,7 +117,6 @@ func (o *controlledSendOpener) Open(_ context.Context, _ transport.StreamParams)
 	return transport.NewFakeStreamForTesting(o.rpc), nil
 }
 
-// fakeOpener returns configured streams in order.
 type fakeOpener struct {
 	mu       sync.Mutex
 	rpcs     []*fakeRPC
@@ -147,7 +144,12 @@ func (fo *fakeOpener) Open(_ context.Context, _ transport.StreamParams) (wireStr
 	return transport.NewFakeStreamForTesting(rpc), nil
 }
 
-// gracefulFakeRPC distinguishes graceful and abrupt teardown.
+func (fo *fakeOpener) openCount() int {
+	fo.mu.Lock()
+	defer fo.mu.Unlock()
+	return fo.attempts
+}
+
 type gracefulFakeRPC struct {
 	sends     chan *zerobuspb.EphemeralStreamRequest
 	recvs     chan *zerobuspb.EphemeralStreamResponse
@@ -185,13 +187,11 @@ func (f *gracefulFakeRPC) Recv() (*zerobuspb.EphemeralStreamResponse, error) {
 	}
 }
 
-// CloseSend half-closes the send side without ending Recv, matching gRPC.
 func (f *gracefulFakeRPC) CloseSend() error {
 	f.closeOnce.Do(func() { close(f.closeSent) })
 	return nil
 }
 
-// Abort models Stream.Close/context-cancel: it unblocks Recv with an error.
 func (f *gracefulFakeRPC) Abort() {
 	f.abortOnce.Do(func() {
 		f.ended.Store(true)
@@ -199,7 +199,6 @@ func (f *gracefulFakeRPC) Abort() {
 	})
 }
 
-// serverEnd ends the stream from the server side so the drain sees io.EOF.
 func (f *gracefulFakeRPC) serverEnd() {
 	f.endOnce.Do(func() {
 		f.ended.Store(true)
@@ -226,8 +225,6 @@ func (o *gracefulOpener) Open(_ context.Context, _ transport.StreamParams) (wire
 	return transport.NewFakeStreamForTesting(o.rpc), nil
 }
 
-// ---- recording ack callback ------------------------------------------------
-
 type recordingCallback struct {
 	mu   sync.Mutex
 	acks []int64
@@ -252,8 +249,6 @@ func (r *recordingCallback) ackCount() int {
 	return len(r.acks)
 }
 
-// ---- test helpers ----------------------------------------------------------
-
 func testConfig() Config {
 	c := DefaultConfig()
 	c.MaxInflight = 64
@@ -270,14 +265,10 @@ func testParams() StreamParams {
 	}
 }
 
-// testStream is the proto/JSON core specialization used throughout these tests.
 type testStream = CoreStream[encodedMsg, ephemeralResp]
 
-// testOpener is the opener type the fakes satisfy.
 type testOpener = opener[encodedMsg, ephemeralResp]
 
-// newCoreForTest builds a proto/JSON CoreStream with the JSON encoder and offset
-// ack model — the common wiring every test needs.
 func newCoreForTest(params StreamParams, cfg Config, o testOpener, cb AckCallback) *testStream {
 	return NewCoreStream[encodedMsg, ephemeralResp](params, cfg, o, jsonEncoder{}, offsetAckModel{}, cb)
 }
@@ -290,7 +281,6 @@ func newTestStream(t *testing.T, o testOpener) *testStream {
 	return cs
 }
 
-// waitCondition polls fn until it returns true or deadline expires.
 func waitCondition(t *testing.T, fn func() bool, timeout time.Duration) {
 	t.Helper()
 	deadline := time.Now().Add(timeout)

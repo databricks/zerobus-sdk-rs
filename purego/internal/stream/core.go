@@ -13,11 +13,12 @@ import (
 
 // Default config constants for the ingestion core.
 const (
-	DefaultMaxInflight      = 1_000_000
-	DefaultRecoveryRetries  = 4
-	DefaultRecoveryBackoff  = 2 * time.Second
-	DefaultFlushTimeout     = 5 * time.Minute
-	DefaultLackOfAckTimeout = 60 * time.Second
+	DefaultMaxInflight        = 1_000_000
+	DefaultRecoveryRetries    = 4
+	DefaultRecoveryBackoff    = 2 * time.Second
+	DefaultRecoveryResetAfter = 15 * time.Second
+	DefaultFlushTimeout       = 5 * time.Minute
+	DefaultLackOfAckTimeout   = 60 * time.Second
 	// DefaultDrainTimeout bounds graceful shutdown.
 	DefaultDrainTimeout = 500 * time.Millisecond
 )
@@ -45,6 +46,8 @@ type Config struct {
 	RecoveryRetries int
 	// RecoveryBackoff is the fixed wait between reconnect attempts.
 	RecoveryBackoff time.Duration
+	// RecoveryResetAfter marks a connection healthy after this duration.
+	RecoveryResetAfter time.Duration
 	// FlushTimeout bounds Flush when the caller's context has no deadline.
 	FlushTimeout time.Duration
 	// LackOfAckTimeout bounds ack silence while records are in flight.
@@ -61,11 +64,12 @@ func DefaultConfig() Config {
 	return Config{
 		MaxInflight: DefaultMaxInflight,
 		// Recovery left as its zero value, RecoveryEnabled.
-		RecoveryRetries:  DefaultRecoveryRetries,
-		RecoveryBackoff:  DefaultRecoveryBackoff,
-		FlushTimeout:     DefaultFlushTimeout,
-		LackOfAckTimeout: DefaultLackOfAckTimeout,
-		DrainTimeout:     DefaultDrainTimeout,
+		RecoveryRetries:    DefaultRecoveryRetries,
+		RecoveryBackoff:    DefaultRecoveryBackoff,
+		RecoveryResetAfter: DefaultRecoveryResetAfter,
+		FlushTimeout:       DefaultFlushTimeout,
+		LackOfAckTimeout:   DefaultLackOfAckTimeout,
+		DrainTimeout:       DefaultDrainTimeout,
 	}
 }
 
@@ -325,6 +329,8 @@ func (cs *CoreStream[Req, Resp]) runOnce(ctx context.Context) (cause error, heal
 		}
 		return fmt.Errorf("stream: open: %w", err), false
 	}
+	openedAt := time.Now()
+	startAck := cs.wm.current()
 
 	// Resend unacknowledged items on the new connection.
 	cs.buf.requeue()
@@ -355,7 +361,12 @@ func (cs *CoreStream[Req, Resp]) runOnce(ctx context.Context) (cause error, heal
 		stream.Close()
 		<-errCh // drain second exit
 	}
-	return cause, true
+	resetAfter := cs.cfg.RecoveryResetAfter
+	if resetAfter <= 0 {
+		resetAfter = DefaultRecoveryResetAfter
+	}
+	healthy = cs.wm.current() > startAck || time.Since(openedAt) >= resetAfter
+	return cause, healthy
 }
 
 // gracefulTeardown drains responses within DrainTimeout.

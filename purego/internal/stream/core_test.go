@@ -243,6 +243,43 @@ func TestCoreStreamRecoveryRequeuesUnacked(t *testing.T) {
 	}
 }
 
+func TestCoreStreamImmediateEOFExhaustsRecovery(t *testing.T) {
+	rpcs := []*fakeRPC{newFakeRPC(), newFakeRPC(), newFakeRPC()}
+	for _, rpc := range rpcs {
+		rpc.close()
+	}
+	fo := newFakeOpener(rpcs...)
+	cfg := testConfig()
+	cfg.RecoveryRetries = 2
+	cfg.RecoveryBackoff = time.Millisecond
+	cs := newCoreForTest(testParams(), cfg, fo, nil)
+	t.Cleanup(func() { cs.Close() })
+
+	waitCondition(t, cs.IsClosed, time.Second)
+	if got := fo.openCount(); got != 3 {
+		t.Fatalf("want 3 Open attempts, got %d", got)
+	}
+}
+
+func TestCoreStreamStableIdleConnectionResetsRecovery(t *testing.T) {
+	rpc1 := newFakeRPC()
+	rpc1.close()
+	rpc2 := newFakeRPC()
+	rpc3 := newFakeRPC()
+	fo := newFakeOpener(rpc1, rpc2, rpc3)
+	cfg := testConfig()
+	cfg.RecoveryRetries = 1
+	cfg.RecoveryBackoff = time.Millisecond
+	cfg.RecoveryResetAfter = 25 * time.Millisecond
+	cs := newCoreForTest(testParams(), cfg, fo, nil)
+	t.Cleanup(func() { cs.Close() })
+
+	waitCondition(t, func() bool { return fo.openCount() == 2 }, time.Second)
+	time.Sleep(50 * time.Millisecond)
+	rpc2.close()
+	waitCondition(t, func() bool { return fo.openCount() == 3 }, time.Second)
+}
+
 func TestCoreStreamDefersAckUntilSendSucceeds(t *testing.T) {
 	rpc := newControlledSendRPC()
 	cs := newCoreForTest(testParams(), testConfig(), &controlledSendOpener{rpc}, nil)
