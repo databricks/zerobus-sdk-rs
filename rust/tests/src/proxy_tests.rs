@@ -278,10 +278,7 @@ async fn test_proxy_and_no_proxy() -> Result<(), Box<dyn std::error::Error>> {
             .await;
 
         let (proxy_url, connect_count) = start_mock_proxy().await;
-        info!(
-            "Mock proxy at: {}, mock server at: {}",
-            proxy_url, server_url
-        );
+        info!("Mock proxy at: {}, mock server at: {}", proxy_url, server_url);
 
         std::env::set_var("grpc_proxy", &proxy_url);
 
@@ -291,10 +288,7 @@ async fn test_proxy_and_no_proxy() -> Result<(), Box<dyn std::error::Error>> {
 
         let connects = connect_count.load(Ordering::SeqCst);
         info!("Proxy received {} CONNECT requests", connects);
-        assert!(
-            connects > 0,
-            "Expected proxy to receive CONNECT requests, got 0"
-        );
+        assert!(connects > 0, "Expected proxy to receive CONNECT requests, got 0");
     }
 
     // === Part 2: Verify no_proxy bypasses the proxy ===

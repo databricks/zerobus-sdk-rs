@@ -15,14 +15,13 @@
 // specific language governing permissions and limitations
 // under the License.
 
-use std::{
-    pin::Pin,
-    sync::{Arc, Mutex},
-    task::{Context, Poll},
-};
+use std::pin::Pin;
+use std::sync::{Arc, Mutex};
+use std::task::{Context, Poll};
 
-use futures::{FutureExt, Stream, StreamExt, ready};
-use tonic::{Status, Streaming, metadata::MetadataMap};
+use futures::{ready, FutureExt, Stream, StreamExt};
+use tonic::metadata::MetadataMap;
+use tonic::{Status, Streaming};
 
 /// Extract [`LazyTrailers`] from [`Streaming`] [tonic] response.
 ///

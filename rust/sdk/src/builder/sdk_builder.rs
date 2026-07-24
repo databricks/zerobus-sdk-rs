@@ -8,7 +8,12 @@ use crate::token_cache::DEFAULT_REFRESH_BUFFER;
 #[cfg(feature = "testing")]
 use crate::NoTlsConfig;
 use crate::{
-    SecureTlsConfig, TlsConfig, ZerobusError, ZerobusResult, ZerobusSdk, DEFAULT_SDK_IDENTIFIER,
+    SecureTlsConfig,
+    TlsConfig,
+    ZerobusError,
+    ZerobusResult,
+    ZerobusSdk,
+    DEFAULT_SDK_IDENTIFIER,
 };
 
 /// Builder for creating a [`ZerobusSdk`] instance with fluent configuration.
@@ -299,10 +304,7 @@ mod tests {
             sdk.zerobus_endpoint,
             "https://my-workspace.zerobus.us-east-1.cloud.databricks.com"
         );
-        assert_eq!(
-            sdk.unity_catalog_url,
-            "https://my-workspace.cloud.databricks.com"
-        );
+        assert_eq!(sdk.unity_catalog_url, "https://my-workspace.cloud.databricks.com");
     }
 
     #[test]
@@ -351,10 +353,7 @@ mod tests {
             .expect("should build successfully with schemeless endpoint");
 
         assert_eq!(sdk.workspace_id, "my-workspace");
-        assert_eq!(
-            sdk.zerobus_endpoint,
-            "https://my-workspace.zerobus.databricks.com"
-        );
+        assert_eq!(sdk.zerobus_endpoint, "https://my-workspace.zerobus.databricks.com");
     }
 
     #[test]
@@ -427,12 +426,7 @@ mod tests {
     #[test]
     fn test_application_name_with_invalid_header_bytes_is_rejected() {
         // Control bytes that tonic's `user-agent` header rejects.
-        for bad in [
-            "my-app\n1.0",
-            "my-app\r1.0",
-            "my-app\u{0}1.0",
-            "my-app\u{7f}1.0",
-        ] {
+        for bad in ["my-app\n1.0", "my-app\r1.0", "my-app\u{0}1.0", "my-app\u{7f}1.0"] {
             let result = ZerobusSdkBuilder::new()
                 .endpoint("https://workspace.zerobus.databricks.com")
                 .application_name(bad)

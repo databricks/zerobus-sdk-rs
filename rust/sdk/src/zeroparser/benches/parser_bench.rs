@@ -1,8 +1,13 @@
 mod common;
 
 use common::{
-    bench_prost_reflect_decode, bench_prost_typed_decode, bench_zeroparser_decode,
-    create_encoded_messages, format_bytes, load_bench_sample, BenchmarkConfig,
+    bench_prost_reflect_decode,
+    bench_prost_typed_decode,
+    bench_zeroparser_decode,
+    create_encoded_messages,
+    format_bytes,
+    load_bench_sample,
+    BenchmarkConfig,
 };
 use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
 
@@ -62,11 +67,8 @@ fn run_decode_benchmark(c: &mut Criterion, scenario: BenchScenario) {
             );
             let actual_message_size = encoded_messages.first().map(|m| m.len()).unwrap_or(0);
             let total_bytes = actual_message_size * count;
-            let description = format_args!(
-                "{} size x {} messages",
-                format_bytes(actual_message_size),
-                count
-            );
+            let description =
+                format_args!("{} size x {} messages", format_bytes(actual_message_size), count);
             group.throughput(Throughput::Bytes(total_bytes as u64));
 
             group.bench_with_input(

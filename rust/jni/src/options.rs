@@ -3,12 +3,14 @@
 //! Values are extracted on the JNI thread into JNI-private structs (so they're `Send`),
 //! then applied to a `StreamBuilder` inside the async task that builds the stream.
 
-use crate::callbacks::JavaAckCallback;
+use std::sync::Arc;
+
 use arrow_ipc::CompressionType;
 use databricks_zerobus_ingest_sdk::{AckCallback, StreamBuilder};
 use jni::objects::JObject;
 use jni::JNIEnv;
-use std::sync::Arc;
+
+use crate::callbacks::JavaAckCallback;
 
 /// Extracted gRPC stream options, ready to apply to a `StreamBuilder`.
 pub struct ExtractedStreamOptions {

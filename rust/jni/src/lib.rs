@@ -15,8 +15,6 @@ mod stream;
 #[cfg(feature = "test-helpers")]
 mod test_helper;
 
-use jni::sys::jint;
-use jni::JavaVM;
 use std::ffi::c_void;
 
 pub use arrow_stream::*;
@@ -24,6 +22,8 @@ pub use async_bridge::*;
 pub use callbacks::*;
 pub use class_cache::*;
 pub use errors::*;
+use jni::sys::jint;
+use jni::JavaVM;
 pub use options::*;
 pub use runtime::*;
 pub use sdk::*;

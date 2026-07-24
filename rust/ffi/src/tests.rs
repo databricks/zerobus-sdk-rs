@@ -1,25 +1,50 @@
 #[cfg(test)]
 mod tests {
-    use crate::{
-        c_record_type, ffi_guard, intern_header_key, validate_sdk_ptr, validate_stream_ptr,
-        write_error_result, write_success_result, zerobus_free_error_message,
-        zerobus_get_default_config, zerobus_sdk_builder_application_name,
-        zerobus_sdk_builder_build, zerobus_sdk_builder_disable_tls, zerobus_sdk_builder_endpoint,
-        zerobus_sdk_builder_free, zerobus_sdk_builder_new, zerobus_sdk_builder_sdk_identifier,
-        zerobus_sdk_builder_unity_catalog_url, zerobus_sdk_create_stream,
-        zerobus_sdk_create_stream_async, zerobus_sdk_create_stream_with_headers_provider_async,
-        zerobus_sdk_free, zerobus_sdk_recreate_stream_async, zerobus_stream_close_async,
-        zerobus_stream_flush_async, zerobus_stream_get_unacked_records_async,
-        zerobus_stream_ingest_json_record_async, zerobus_stream_ingest_json_records_async,
-        zerobus_stream_ingest_proto_record_async, zerobus_stream_ingest_proto_records_async,
-        zerobus_stream_wait_for_offset_async, CHeaders, CRecordArray, CResult,
-        CallbackHeadersProvider, RecordType, ZerobusError,
-    };
-    use databricks_zerobus_ingest_sdk::HeadersProvider;
     use std::ffi::{CStr, CString};
     use std::ptr;
     use std::sync::mpsc;
     use std::time::Duration;
+
+    use databricks_zerobus_ingest_sdk::HeadersProvider;
+
+    use crate::{
+        c_record_type,
+        ffi_guard,
+        intern_header_key,
+        validate_sdk_ptr,
+        validate_stream_ptr,
+        write_error_result,
+        write_success_result,
+        zerobus_free_error_message,
+        zerobus_get_default_config,
+        zerobus_sdk_builder_application_name,
+        zerobus_sdk_builder_build,
+        zerobus_sdk_builder_disable_tls,
+        zerobus_sdk_builder_endpoint,
+        zerobus_sdk_builder_free,
+        zerobus_sdk_builder_new,
+        zerobus_sdk_builder_sdk_identifier,
+        zerobus_sdk_builder_unity_catalog_url,
+        zerobus_sdk_create_stream,
+        zerobus_sdk_create_stream_async,
+        zerobus_sdk_create_stream_with_headers_provider_async,
+        zerobus_sdk_free,
+        zerobus_sdk_recreate_stream_async,
+        zerobus_stream_close_async,
+        zerobus_stream_flush_async,
+        zerobus_stream_get_unacked_records_async,
+        zerobus_stream_ingest_json_record_async,
+        zerobus_stream_ingest_json_records_async,
+        zerobus_stream_ingest_proto_record_async,
+        zerobus_stream_ingest_proto_records_async,
+        zerobus_stream_wait_for_offset_async,
+        CHeaders,
+        CRecordArray,
+        CResult,
+        CallbackHeadersProvider,
+        RecordType,
+        ZerobusError,
+    };
 
     // Helper for c_str_to_string since it's private
     unsafe fn test_c_str_to_string(
@@ -275,12 +300,8 @@ mod tests {
     #[test]
     fn test_builder_empty_strings_are_noops() {
         // Empty identifier/application_name must not produce a trailing space.
-        let (sdk, result) = build_via_c_builder(
-            "https://workspace.zerobus.databricks.com",
-            "",
-            Some(""),
-            Some(""),
-        );
+        let (sdk, result) =
+            build_via_c_builder("https://workspace.zerobus.databricks.com", "", Some(""), Some(""));
         assert!(result.success);
         assert!(!sdk.is_null());
         zerobus_sdk_free(sdk);
@@ -394,10 +415,7 @@ mod tests {
 
         assert!(stream.is_null(), "create_stream should fail");
         assert!(!create_result.success, "result should indicate failure");
-        assert!(
-            create_result.is_retryable,
-            "retryable create failures must set is_retryable=true"
-        );
+        assert!(create_result.is_retryable, "retryable create failures must set is_retryable=true");
 
         zerobus_free_error_message(create_result.error_message);
         zerobus_sdk_free(sdk);
@@ -479,10 +497,7 @@ mod tests {
         let (stream_is_null, callback_success, callback_retryable, callback_message) = receiver
             .recv_timeout(Duration::from_secs(2))
             .expect("callback should be invoked");
-        assert!(
-            stream_is_null,
-            "callback should receive a null stream on failure"
-        );
+        assert!(stream_is_null, "callback should receive a null stream on failure");
         assert!(!callback_success, "callback result should indicate failure");
         assert!(
             !callback_retryable,
@@ -573,19 +588,13 @@ mod tests {
             &mut create_result as *mut CResult,
         );
 
-        assert!(
-            started,
-            "create_stream_with_headers_provider_async should schedule the task"
-        );
+        assert!(started, "create_stream_with_headers_provider_async should schedule the task");
         assert!(create_result.success, "scheduling result should succeed");
 
         let (stream_is_null, callback_success, callback_retryable, callback_message) = receiver
             .recv_timeout(Duration::from_secs(2))
             .expect("callback should be invoked");
-        assert!(
-            stream_is_null,
-            "callback should receive a null stream on failure"
-        );
+        assert!(stream_is_null, "callback should receive a null stream on failure");
         assert!(!callback_success, "callback result should indicate failure");
         assert!(
             !callback_retryable,
@@ -926,10 +935,12 @@ mod tests {
     // Ack callback bridge tests
     // ========================================================================
 
-    use crate::CallbackAckCallback;
-    use databricks_zerobus_ingest_sdk::AckCallback as _AckCallbackTrait;
     use std::os::raw::c_char;
     use std::sync::atomic::{AtomicI64, Ordering as AtomicOrdering};
+
+    use databricks_zerobus_ingest_sdk::AckCallback as _AckCallbackTrait;
+
+    use crate::CallbackAckCallback;
 
     // extern "C" callbacks can't capture, so they record into these statics.
     // Tests reset the slots before use.
@@ -1013,9 +1024,10 @@ mod tests {
     //     code, so the callback runs to completion — `user_data` must outlive the
     //     callback, not merely `teardown()`.
 
-    use databricks_zerobus_ingest_sdk::CallbackHandlerHarness;
     use std::sync::atomic::{AtomicBool, AtomicU64};
     use std::sync::Arc;
+
+    use databricks_zerobus_ingest_sdk::CallbackHandlerHarness;
 
     // Heap user_data each callback dereferences; a post-free call is a UAF ASan
     // catches, and `magic` detects a freed/garbage box. `block_ms` lets a callback
@@ -1044,10 +1056,7 @@ mod tests {
             // its `user_data` access below) outlives a bounded teardown budget.
             std::thread::sleep(std::time::Duration::from_millis(data.block_ms));
         }
-        assert_eq!(
-            data.magic, ACK_MAGIC,
-            "user_data was freed or corrupted mid-callback"
-        );
+        assert_eq!(data.magic, ACK_MAGIC, "user_data was freed or corrupted mid-callback");
         data.calls.fetch_add(1, AtomicOrdering::SeqCst);
         data.finished.store(true, AtomicOrdering::SeqCst);
     }
@@ -1120,10 +1129,7 @@ mod tests {
             assert!(harness.send_ack(offset), "enqueue must succeed while live");
         }
         for &(offset, msg) in errors {
-            assert!(
-                harness.send_error(offset, msg),
-                "enqueue must succeed while live"
-            );
+            assert!(harness.send_error(offset, msg), "enqueue must succeed while live");
         }
         let expected = (acks.len() + errors.len()) as u64;
         wait_for_calls(user_data, expected).await;
@@ -1131,14 +1137,8 @@ mod tests {
         harness.teardown(callback_max_wait_time_ms).await;
 
         // Task gone: its receiver is dropped, so no further dispatch is possible.
-        assert!(
-            harness.is_task_gone(),
-            "handler task must be gone after teardown"
-        );
-        assert!(
-            !harness.send_ack(999),
-            "enqueue must be rejected once task is gone"
-        );
+        assert!(harness.is_task_gone(), "handler task must be gone after teardown");
+        assert!(!harness.send_ack(999), "enqueue must be rejected once task is gone");
         assert!(!harness.send_error(1000, "late"));
         assert_eq!(
             unsafe { &*user_data }.calls.load(AtomicOrdering::SeqCst),
@@ -1236,10 +1236,7 @@ mod tests {
 
         harness.teardown(callback_max_wait_time_ms).await;
 
-        assert!(
-            harness.is_task_gone(),
-            "handler task must be gone after teardown"
-        );
+        assert!(harness.is_task_gone(), "handler task must be gone after teardown");
         assert_eq!(
             unsafe { &*user_data }.calls.load(AtomicOrdering::SeqCst),
             0,
@@ -1397,10 +1394,7 @@ mod tests {
 
         assert!(stream.is_null());
         let (success, _retryable, msg) = drain_result(&mut result);
-        assert!(
-            !success,
-            "expected create_stream_with_headers_provider to fail on empty table"
-        );
+        assert!(!success, "expected create_stream_with_headers_provider to fail on empty table");
         assert!(!msg.is_empty(), "expected a non-empty error message");
 
         assert_eq!(
@@ -1417,13 +1411,16 @@ mod tests {
     // Dynamic protobuf schema tests
     // ========================================================================
 
-    use crate::{
-        zerobus_free_proto_bytes, zerobus_proto_schema_descriptor_bytes,
-        zerobus_proto_schema_encode_json, zerobus_proto_schema_free,
-        zerobus_proto_schema_from_uc_json,
-    };
     use prost::Message;
     use prost_reflect::{DescriptorPool, DynamicMessage, MessageDescriptor};
+
+    use crate::{
+        zerobus_free_proto_bytes,
+        zerobus_proto_schema_descriptor_bytes,
+        zerobus_proto_schema_encode_json,
+        zerobus_proto_schema_free,
+        zerobus_proto_schema_from_uc_json,
+    };
 
     // Minimal Unity Catalog table-metadata JSON, shaped like the body of
     // GET /api/2.1/unity-catalog/tables/{name}.
@@ -1522,14 +1519,8 @@ mod tests {
         let msg_desc = message_descriptor_from_bytes(desc_bytes);
         let decoded = DynamicMessage::decode(msg_desc, encoded).unwrap();
         assert_eq!(decoded.get_field_by_name("id").unwrap().as_i64(), Some(7));
-        assert_eq!(
-            decoded.get_field_by_name("payload").unwrap().as_str(),
-            Some("hello")
-        );
-        assert_eq!(
-            decoded.get_field_by_name("ts").unwrap().as_i64(),
-            Some(1700000000000000)
-        );
+        assert_eq!(decoded.get_field_by_name("payload").unwrap().as_str(), Some("hello"));
+        assert_eq!(decoded.get_field_by_name("ts").unwrap().as_i64(), Some(1700000000000000));
 
         zerobus_free_proto_bytes(out_data, out_len);
         zerobus_proto_schema_free(schema);
@@ -1782,10 +1773,7 @@ mod tests {
         // string to preserve precision and scale.
         let table = uc_table_json_with_column("price", "DECIMAL");
         let decoded = encode_and_decode(&table, r#"{"k": 1, "price": "123.45"}"#);
-        assert_eq!(
-            decoded.get_field_by_name("price").unwrap().as_str(),
-            Some("123.45")
-        );
+        assert_eq!(decoded.get_field_by_name("price").unwrap().as_str(), Some("123.45"));
     }
 
     #[test]
@@ -1794,10 +1782,7 @@ mod tests {
         // string round-trips exactly.
         let table = uc_table_json_with_column("big", "BIGINT");
         let decoded = encode_and_decode(&table, r#"{"k": 1, "big": "9223372036854775807"}"#);
-        assert_eq!(
-            decoded.get_field_by_name("big").unwrap().as_i64(),
-            Some(9223372036854775807)
-        );
+        assert_eq!(decoded.get_field_by_name("big").unwrap().as_i64(), Some(9223372036854775807));
     }
 
     #[test]
@@ -1806,10 +1791,7 @@ mod tests {
         // (a string whose contents are the variant's JSON).
         let table = uc_table_json_with_column("v", "VARIANT");
         let decoded = encode_and_decode(&table, r#"{"k": 1, "v": "{\"a\":1,\"b\":[2,3]}"}"#);
-        assert_eq!(
-            decoded.get_field_by_name("v").unwrap().as_str(),
-            Some(r#"{"a":1,"b":[2,3]}"#)
-        );
+        assert_eq!(decoded.get_field_by_name("v").unwrap().as_str(), Some(r#"{"a":1,"b":[2,3]}"#));
     }
 
     #[test]
@@ -1882,10 +1864,7 @@ mod tests {
             encode_and_decode(&table, r#"{"k": 1, "addr": {"city": "NYC", "zip": 10001}}"#);
         let field = decoded.get_field_by_name("addr").unwrap();
         let addr = field.as_message().unwrap();
-        assert_eq!(
-            addr.get_field_by_name("city").unwrap().as_str(),
-            Some("NYC")
-        );
+        assert_eq!(addr.get_field_by_name("city").unwrap().as_str(), Some("NYC"));
         assert_eq!(addr.get_field_by_name("zip").unwrap().as_i32(), Some(10001));
     }
 
@@ -1928,10 +1907,7 @@ mod tests {
         // integer (not an ISO-8601 string). 19000 days ≈ 2022-01-08.
         let table = uc_table_json_with_column("d", "DATE");
         let decoded = encode_and_decode(&table, r#"{"k": 1, "d": 19000}"#);
-        assert_eq!(
-            decoded.get_field_by_name("d").unwrap().as_i32(),
-            Some(19000)
-        );
+        assert_eq!(decoded.get_field_by_name("d").unwrap().as_i32(), Some(19000));
     }
 
     #[test]
@@ -1940,10 +1916,7 @@ mod tests {
         // value is microseconds since the epoch, an integer.
         let table = uc_table_json_with_column("tsn", "TIMESTAMP_NTZ");
         let decoded = encode_and_decode(&table, r#"{"k": 1, "tsn": 1700000000000000}"#);
-        assert_eq!(
-            decoded.get_field_by_name("tsn").unwrap().as_i64(),
-            Some(1700000000000000)
-        );
+        assert_eq!(decoded.get_field_by_name("tsn").unwrap().as_i64(), Some(1700000000000000));
     }
 
     #[test]
@@ -1976,14 +1949,8 @@ mod tests {
             &mut enc_result as *mut CResult,
         );
         assert!(ok, "encode failed");
-        assert_eq!(
-            out_len, 0,
-            "record with no fields set should encode to zero bytes"
-        );
-        assert!(
-            !out_data.is_null(),
-            "buffer pointer should be non-null even when empty"
-        );
+        assert_eq!(out_len, 0, "record with no fields set should encode to zero bytes");
+        assert!(!out_data.is_null(), "buffer pointer should be non-null even when empty");
 
         // The assertion is the absence of a leak/crash on free.
         zerobus_free_proto_bytes(out_data, out_len);
@@ -2010,12 +1977,9 @@ mod tests {
             workers.push(thread::spawn(move || {
                 let handle = handle_addr as *const crate::CZerobusProtoSchema;
                 for i in 0..200 {
-                    let record = CString::new(format!(
-                        r#"{{"id": {}, "payload": "p{}"}}"#,
-                        t * 1000 + i,
-                        i
-                    ))
-                    .unwrap();
+                    let record =
+                        CString::new(format!(r#"{{"id": {}, "payload": "p{}"}}"#, t * 1000 + i, i))
+                            .unwrap();
                     let mut out_data: *mut u8 = ptr::null_mut();
                     let mut out_len: usize = 0;
                     let mut enc = unwritten_result();
@@ -2272,10 +2236,7 @@ mod tests {
         );
         assert!(!ok, "expected encode to fail");
         assert!(!enc.success);
-        assert!(
-            !enc.is_retryable,
-            "a missing required field is a caller error"
-        );
+        assert!(!enc.is_retryable, "a missing required field is a caller error");
         assert!(out_data.is_null(), "no buffer should be allocated on error");
         assert_eq!(out_len, 0, "length must be cleared on error");
         assert!(!enc.error_message.is_null());
@@ -2303,10 +2264,7 @@ mod tests {
         )
         .unwrap();
         let msg = encode_expecting_error(&table, r#"{"k": 1, "addr": {"city": "boston"}}"#);
-        assert!(
-            msg.contains("addr.zip"),
-            "error should name the nested path, got: {msg}"
-        );
+        assert!(msg.contains("addr.zip"), "error should name the nested path, got: {msg}");
     }
 
     #[test]
@@ -2326,10 +2284,7 @@ mod tests {
         .unwrap();
         let msg =
             encode_expecting_error(&table, r#"{"k": 1, "items": [{"id": 5}, {"label": "x"}]}"#);
-        assert!(
-            msg.contains("items[1].id"),
-            "error should name the element path, got: {msg}"
-        );
+        assert!(msg.contains("items[1].id"), "error should name the element path, got: {msg}");
     }
 
     #[test]
@@ -2347,14 +2302,9 @@ mod tests {
             }"#,
         )
         .unwrap();
-        let msg = encode_expecting_error(
-            &table,
-            r#"{"k": 1, "lookup": {"home": {"v": 2}, "work": {}}}"#,
-        );
-        assert!(
-            msg.contains("lookup[work].v"),
-            "error should name the map-value path, got: {msg}"
-        );
+        let msg =
+            encode_expecting_error(&table, r#"{"k": 1, "lookup": {"home": {"v": 2}, "work": {}}}"#);
+        assert!(msg.contains("lookup[work].v"), "error should name the map-value path, got: {msg}");
     }
 
     #[test]
@@ -2410,10 +2360,7 @@ mod tests {
         .unwrap();
         let msg =
             encode_expecting_error(&table, r#"{"addr": {"geo": {}}, "items": [{"inner": {}}]}"#);
-        assert!(
-            msg.contains("addr.geo.lat"),
-            "should report the 3-level-deep path, got: {msg}"
-        );
+        assert!(msg.contains("addr.geo.lat"), "should report the 3-level-deep path, got: {msg}");
         assert!(
             msg.contains("items[0].inner.id"),
             "should report the path through an array element's nested struct, got: {msg}"

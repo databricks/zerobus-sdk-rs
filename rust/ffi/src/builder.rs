@@ -1,10 +1,12 @@
 //! `ZerobusSdkBuilder` FFI surface.
 
-use crate::common::*;
-use databricks_zerobus_ingest_sdk::{NoTlsConfig, ZerobusSdk, ZerobusSdkBuilder};
 use std::os::raw::c_char;
 use std::ptr;
 use std::sync::Arc;
+
+use databricks_zerobus_ingest_sdk::{NoTlsConfig, ZerobusSdk, ZerobusSdkBuilder};
+
+use crate::common::*;
 
 // ============================================================================
 // ZerobusSdkBuilder FFI

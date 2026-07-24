@@ -37,16 +37,13 @@ mod table_types;
 mod tables;
 mod xdbc_info;
 
+use arrow_array::{ArrayRef, UInt32Array};
+use arrow_row::{RowConverter, SortField};
 pub use catalogs::GetCatalogsBuilder;
 pub use db_schemas::GetDbSchemasBuilder;
 pub use sql_info::{SqlInfoData, SqlInfoDataBuilder};
 pub use tables::GetTablesBuilder;
 pub use xdbc_info::{XdbcTypeInfo, XdbcTypeInfoData, XdbcTypeInfoDataBuilder};
-
-use arrow_array::ArrayRef;
-use arrow_array::UInt32Array;
-use arrow_row::RowConverter;
-use arrow_row::SortField;
 
 /// Helper function to sort all the columns in an array
 fn lexsort_to_indices(arrays: &[ArrayRef]) -> UInt32Array {

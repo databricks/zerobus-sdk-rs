@@ -4,10 +4,11 @@
 //! class references work correctly from daemon threads, even when the system
 //! classloader cannot see the SDK classes.
 
-use crate::class_cache::{as_jclass, get_class_cache};
-use crate::runtime::{get_jvm, get_runtime};
 use jni::objects::{JClass, JObject, JString};
 use jni::JNIEnv;
+
+use crate::class_cache::{as_jclass, get_class_cache};
+use crate::runtime::{get_jvm, get_runtime};
 
 /// Test finding a class from a Tokio daemon thread using direct `find_class`.
 ///

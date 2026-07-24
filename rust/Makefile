@@ -33,7 +33,7 @@ clean:
 	cargo clean
 
 fmt:
-	cargo fmt --all
+	../.github/scripts/rustfmt.sh --all
 
 lint:
 	cargo clippy --all -- -D warnings

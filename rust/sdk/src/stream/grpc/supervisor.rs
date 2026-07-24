@@ -22,8 +22,13 @@ use super::types::{CallbackMessage, OneshotMap, RecordLandingZone};
 use super::{ZerobusStream, STREAM_TEARDOWN_DRAIN_TIMEOUT_MS};
 use crate::databricks::zerobus::zerobus_client::ZerobusClient;
 use crate::{
-    EncodedBatch, HeadersProvider, OffsetId, StreamConfigurationOptions, TableProperties,
-    ZerobusError, ZerobusResult,
+    EncodedBatch,
+    HeadersProvider,
+    OffsetId,
+    StreamConfigurationOptions,
+    TableProperties,
+    ZerobusError,
+    ZerobusResult,
 };
 
 impl ZerobusStream {
@@ -309,10 +314,7 @@ impl ZerobusStream {
                 let _ = sender.send(Err(error.clone()));
             }
             if let Some(tx) = callback_tx {
-                let _ = tx.send(CallbackMessage::Error(
-                    record.offset_id,
-                    error_message.clone(),
-                ));
+                let _ = tx.send(CallbackMessage::Error(record.offset_id, error_message.clone()));
             }
         }
     }

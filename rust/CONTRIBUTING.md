@@ -10,6 +10,7 @@ This document covers Rust-specific development setup and workflow.
 
 - Git
 - Rust 1.70+ (stable toolchain)
+- Pinned formatter: `rustup toolchain install nightly-2025-08-07 --profile minimal --component rustfmt`
 - Protocol Buffers compiler (`protoc`)
 
 ### Setting Up Your Development Environment
@@ -37,7 +38,7 @@ Code style is enforced by a formatter check in your pull request. We use `rustfm
 make fmt
 ```
 
-This runs `cargo fmt --all` to format all crates in the workspace.
+This runs `cargo fmt --all` with the same pinned rustfmt used by CI. Compilation, linting, and tests continue to use stable Rust.
 
 ### Running Linters
 

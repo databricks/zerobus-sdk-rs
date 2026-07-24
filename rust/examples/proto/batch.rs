@@ -1,10 +1,9 @@
 use std::error::Error;
 use std::fs;
 
+use databricks_zerobus_ingest_sdk::{ProtoBytes, ProtoMessage, ZerobusSdk, ZerobusStream};
 use prost::Message;
 use prost_reflect::prost_types;
-
-use databricks_zerobus_ingest_sdk::{ProtoBytes, ProtoMessage, ZerobusSdk, ZerobusStream};
 
 pub mod orders {
     include!("output/orders.rs");
@@ -94,15 +93,9 @@ async fn ingest_with_offset_api(stream: &mut ZerobusStream) -> Result<(), Box<dy
     ];
 
     if let Some(offset_id) = stream.ingest_records_offset(batch).await? {
-        println!(
-            "[Auto-encoding] Batch of 3 records sent with offset ID: {}",
-            offset_id
-        );
+        println!("[Auto-encoding] Batch of 3 records sent with offset ID: {}", offset_id);
         stream.wait_for_offset(offset_id).await?;
-        println!(
-            "[Auto-encoding] Batch acknowledged with offset ID: {}",
-            offset_id
-        );
+        println!("[Auto-encoding] Batch acknowledged with offset ID: {}", offset_id);
     }
 
     // 2. Pre-encoded: ProtoBytes - pass bytes with explicit wrapper.
@@ -149,15 +142,9 @@ async fn ingest_with_offset_api(stream: &mut ZerobusStream) -> Result<(), Box<dy
     ];
 
     if let Some(offset_id) = stream.ingest_records_offset(batch).await? {
-        println!(
-            "[Pre-encoded] Batch of 3 records sent with offset ID: {}",
-            offset_id
-        );
+        println!("[Pre-encoded] Batch of 3 records sent with offset ID: {}", offset_id);
         stream.wait_for_offset(offset_id).await?;
-        println!(
-            "[Pre-encoded] Batch acknowledged with offset ID: {}",
-            offset_id
-        );
+        println!("[Pre-encoded] Batch acknowledged with offset ID: {}", offset_id);
     }
 
     // 3. Backward-compatible: raw Vec<u8> - no wrapper needed, works the same as ProtoBytes.
@@ -198,15 +185,9 @@ async fn ingest_with_offset_api(stream: &mut ZerobusStream) -> Result<(), Box<dy
     ];
 
     if let Some(offset_id) = stream.ingest_records_offset(batch).await? {
-        println!(
-            "[Backward-compatible] Batch of 3 records sent with offset ID: {}",
-            offset_id
-        );
+        println!("[Backward-compatible] Batch of 3 records sent with offset ID: {}", offset_id);
         stream.wait_for_offset(offset_id).await?;
-        println!(
-            "[Backward-compatible] Batch acknowledged with offset ID: {}",
-            offset_id
-        );
+        println!("[Backward-compatible] Batch acknowledged with offset ID: {}", offset_id);
     }
 
     Ok(())

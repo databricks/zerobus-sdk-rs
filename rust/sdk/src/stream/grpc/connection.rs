@@ -17,7 +17,10 @@ use crate::databricks::zerobus::ephemeral_stream_request::Payload as RequestPayl
 use crate::databricks::zerobus::ephemeral_stream_response::Payload as ResponsePayload;
 use crate::databricks::zerobus::zerobus_client::ZerobusClient;
 use crate::databricks::zerobus::{
-    CreateIngestStreamRequest, EphemeralStreamRequest, EphemeralStreamResponse, RecordType,
+    CreateIngestStreamRequest,
+    EphemeralStreamRequest,
+    EphemeralStreamResponse,
+    RecordType,
 };
 use crate::{HeadersProvider, TableProperties, ZerobusError, ZerobusResult};
 

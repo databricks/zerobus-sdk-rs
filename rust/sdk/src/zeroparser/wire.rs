@@ -226,10 +226,9 @@ pub fn try_read_varint(data: &[u8]) -> ParseResult<(u64, &[u8])> {
         // Only 2 bytes but continuation bit set.
         [_, _] => Err(ParseError::TruncatedVarint),
         // Fast path: 3-byte varint (values 16384-2097151).
-        [b0, b1, b2, ref rest @ ..] if b2 < 0x80 => Ok((
-            ((b0 & 0x7f) as u64) | (((b1 & 0x7f) as u64) << 7) | ((b2 as u64) << 14),
-            rest,
-        )),
+        [b0, b1, b2, ref rest @ ..] if b2 < 0x80 => {
+            Ok((((b0 & 0x7f) as u64) | (((b1 & 0x7f) as u64) << 7) | ((b2 as u64) << 14), rest))
+        }
         // Only 3 bytes but continuation bit set.
         [_, _, _] => Err(ParseError::TruncatedVarint),
         // Fast path: 4-byte varint (values 2097152-268435455).
@@ -400,27 +399,16 @@ mod tests {
     fn varint_errors() {
         // Truncated varints.
         assert_eq!(try_read_varint(&[0x80]), Err(ParseError::TruncatedVarint));
-        assert_eq!(
-            try_read_varint(&[0x80, 0x80]),
-            Err(ParseError::TruncatedVarint)
-        );
-        assert_eq!(
-            try_read_varint(&[0x80, 0x80, 0x80]),
-            Err(ParseError::TruncatedVarint)
-        );
-        assert_eq!(
-            try_read_varint(&[0x80, 0x80, 0x80, 0x80]),
-            Err(ParseError::TruncatedVarint)
-        );
+        assert_eq!(try_read_varint(&[0x80, 0x80]), Err(ParseError::TruncatedVarint));
+        assert_eq!(try_read_varint(&[0x80, 0x80, 0x80]), Err(ParseError::TruncatedVarint));
+        assert_eq!(try_read_varint(&[0x80, 0x80, 0x80, 0x80]), Err(ParseError::TruncatedVarint));
         assert_eq!(
             try_read_varint(&[0x80, 0x80, 0x80, 0x80, 0x80]),
             Err(ParseError::TruncatedVarint)
         );
 
         // Varint too long (11 bytes).
-        let too_long = &[
-            0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x01,
-        ];
+        let too_long = &[0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x01];
         assert_eq!(try_read_varint(too_long), Err(ParseError::VarintTooLong));
     }
 
@@ -449,37 +437,20 @@ mod tests {
 
         // Invalid: 10th byte = 0x02 (bit 1 set, would overflow u64).
         let overflow_bit1 = &[0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x02];
-        assert_eq!(
-            try_read_varint(overflow_bit1),
-            Err(ParseError::VarintTooLong)
-        );
+        assert_eq!(try_read_varint(overflow_bit1), Err(ParseError::VarintTooLong));
 
         // Invalid: 10th byte = 0x7F (bits 1-6 all set, would overflow u64).
         let overflow_bits = &[0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x7F];
-        assert_eq!(
-            try_read_varint(overflow_bits),
-            Err(ParseError::VarintTooLong)
-        );
+        assert_eq!(try_read_varint(overflow_bits), Err(ParseError::VarintTooLong));
 
         // Invalid: 10th byte = 0x80 (continuation bit set, would need 11+ bytes).
         let continuation = &[0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80];
-        assert_eq!(
-            try_read_varint(continuation),
-            Err(ParseError::VarintTooLong)
-        );
+        assert_eq!(try_read_varint(continuation), Err(ParseError::VarintTooLong));
     }
 
     #[test]
     fn zigzag_decoding() {
-        let cases32 = [
-            (0, 0),
-            (1, -1),
-            (2, 1),
-            (3, -2),
-            (4, 2),
-            (99, -50),
-            (100, 50),
-        ];
+        let cases32 = [(0, 0), (1, -1), (2, 1), (3, -2), (4, 2), (99, -50), (100, 50)];
         for (encoded, expected) in cases32 {
             assert_eq!(decode_zigzag32(encoded), expected, "zigzag32({})", encoded);
         }
@@ -504,14 +475,8 @@ mod tests {
             assert_eq!(WireType::try_from(val), Ok(expected));
         }
 
-        assert_eq!(
-            WireType::try_from(6u64),
-            Err(ParseError::InvalidWireType(6))
-        );
-        assert_eq!(
-            WireType::try_from(7u64),
-            Err(ParseError::InvalidWireType(7))
-        );
+        assert_eq!(WireType::try_from(6u64), Err(ParseError::InvalidWireType(6)));
+        assert_eq!(WireType::try_from(7u64), Err(ParseError::InvalidWireType(7)));
     }
 
     #[test]
@@ -521,11 +486,7 @@ mod tests {
             // Varint: field 1, value 150. Tag = 8, 150 = 0x96 0x01.
             (&[8, 0x96, 0x01][..], 1, WireValue::Varint(150)),
             // I32: field 1, tag = 13, value 0x01020304 little-endian.
-            (
-                &[13, 0x04, 0x03, 0x02, 0x01][..],
-                1,
-                WireValue::I32(0x01020304),
-            ),
+            (&[13, 0x04, 0x03, 0x02, 0x01][..], 1, WireValue::I32(0x01020304)),
             // I64: field 1, tag = 9.
             (
                 &[9, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08][..],
@@ -533,11 +494,7 @@ mod tests {
                 WireValue::I64(0x0807060504030201),
             ),
             // Len: field 1, tag = 10, length 3.
-            (
-                &[10, 3, 0xAA, 0xBB, 0xCC][..],
-                1,
-                WireValue::Len(&[0xAA, 0xBB, 0xCC]),
-            ),
+            (&[10, 3, 0xAA, 0xBB, 0xCC][..], 1, WireValue::Len(&[0xAA, 0xBB, 0xCC])),
         ];
         for (data, expected_num, expected_val) in cases {
             let (field, rest) = try_parse_field(data).unwrap();
@@ -553,10 +510,7 @@ mod tests {
         assert_eq!(try_parse_field(&[14]), Err(ParseError::InvalidWireType(6)));
 
         // Group wire type: tag = (1 << 3) | 3 = 11.
-        assert_eq!(
-            try_parse_field(&[11]),
-            Err(ParseError::UnsupportedGroupWireType)
-        );
+        assert_eq!(try_parse_field(&[11]), Err(ParseError::UnsupportedGroupWireType));
 
         // Buffer too short for I32: tag 13, only 2 bytes.
         assert_eq!(
@@ -589,10 +543,7 @@ mod tests {
         );
 
         // Invalid field number 0: tag = (0 << 3) | 0 = 0.
-        assert_eq!(
-            try_parse_field(&[0]),
-            Err(ParseError::InvalidFieldNumber { field_num: 0 })
-        );
+        assert_eq!(try_parse_field(&[0]), Err(ParseError::InvalidFieldNumber { field_num: 0 }));
 
         // Invalid field number 536_870_912 (2^29) - exceeds max valid field number 536_870_911.
         // Tag = (536_870_912 << 3) | 0 = 4_294_967_296 -> varint [0x80, 0x80, 0x80, 0x80, 0x10].
@@ -611,10 +562,7 @@ mod tests {
 
     #[test]
     fn wire_value_accessors() {
-        assert_eq!(
-            WireValue::Len(b"hello").try_as_str(1 /* field_num */),
-            Ok("hello")
-        );
+        assert_eq!(WireValue::Len(b"hello").try_as_str(1 /* field_num */), Ok("hello"));
         assert_eq!(
             WireValue::Len(&[0xFF, 0xFE]).try_as_str(1 /* field_num */),
             Err(ParseError::InvalidUtf8 { field_num: 1 })
@@ -624,32 +572,17 @@ mod tests {
             Err(ParseError::TypeMismatch { .. })
         ));
 
-        assert_eq!(
-            WireValue::Len(&[1, 2, 3]).try_as_bytes(1 /* field_num */),
-            Ok(&[1, 2, 3][..])
-        );
+        assert_eq!(WireValue::Len(&[1, 2, 3]).try_as_bytes(1 /* field_num */), Ok(&[1, 2, 3][..]));
 
         assert_eq!(WireValue::Varint(42).try_as_i32(1 /* field_num */), Ok(42));
         assert_eq!(WireValue::I32(100).try_as_i32(1 /* field_num */), Ok(100));
 
-        assert_eq!(
-            WireValue::Varint(1000).try_as_u64(1 /* field_num */),
-            Ok(1000)
-        );
+        assert_eq!(WireValue::Varint(1000).try_as_u64(1 /* field_num */), Ok(1000));
         assert_eq!(WireValue::I64(2000).try_as_u64(1 /* field_num */), Ok(2000));
 
-        assert_eq!(
-            WireValue::Varint(0).try_as_bool(1 /* field_num */),
-            Ok(false)
-        );
-        assert_eq!(
-            WireValue::Varint(1).try_as_bool(1 /* field_num */),
-            Ok(true)
-        );
-        assert_eq!(
-            WireValue::Varint(42).try_as_bool(1 /* field_num */),
-            Ok(true)
-        );
+        assert_eq!(WireValue::Varint(0).try_as_bool(1 /* field_num */), Ok(false));
+        assert_eq!(WireValue::Varint(1).try_as_bool(1 /* field_num */), Ok(true));
+        assert_eq!(WireValue::Varint(42).try_as_bool(1 /* field_num */), Ok(true));
 
         assert!(
             (WireValue::I32(std::f32::consts::PI.to_bits())

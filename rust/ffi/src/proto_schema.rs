@@ -1,15 +1,24 @@
 //! Dynamic protobuf schema FFI surface.
 
-use crate::common::*;
-use databricks_zerobus_ingest_sdk::schema::{descriptor_from_uc_schema, UcTableSchema};
-use prost::Message;
-use prost_reflect::{
-    Cardinality, DescriptorPool, DeserializeOptions, DynamicMessage, Kind, MapKey,
-    MessageDescriptor, ReflectMessage, Value,
-};
 use std::fmt::Write;
 use std::os::raw::c_char;
 use std::ptr;
+
+use databricks_zerobus_ingest_sdk::schema::{descriptor_from_uc_schema, UcTableSchema};
+use prost::Message;
+use prost_reflect::{
+    Cardinality,
+    DescriptorPool,
+    DeserializeOptions,
+    DynamicMessage,
+    Kind,
+    MapKey,
+    MessageDescriptor,
+    ReflectMessage,
+    Value,
+};
+
+use crate::common::*;
 
 // ============================================================================
 // Dynamic Protobuf FFI

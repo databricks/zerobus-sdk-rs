@@ -2,20 +2,27 @@ use std::future::Future;
 use std::pin::Pin;
 use std::sync::{Arc, Mutex};
 
+use databricks_zerobus_ingest_sdk::{
+    StreamBuilder,
+    ZerobusSdk as RustSdk,
+    ZerobusStream as RustStream,
+};
 use pyo3::prelude::*;
 use pyo3_asyncio::tokio::future_into_py;
 use tokio::sync::RwLock;
-
-use databricks_zerobus_ingest_sdk::{
-    StreamBuilder, ZerobusSdk as RustSdk, ZerobusStream as RustStream,
-};
 
 use crate::arrow;
 use crate::arrow::{ArrowStreamConfigurationOptions, AsyncZerobusArrowStream};
 use crate::auth::HeadersProviderWrapper;
 use crate::common::{
-    apply_grpc_options, encoded_record_to_pybytes, extract_record_payload, extract_record_payloads,
-    map_error, StreamConfigurationOptions, TableProperties, SDK_IDENTIFIER_PREFIX,
+    apply_grpc_options,
+    encoded_record_to_pybytes,
+    extract_record_payload,
+    extract_record_payloads,
+    map_error,
+    StreamConfigurationOptions,
+    TableProperties,
+    SDK_IDENTIFIER_PREFIX,
 };
 
 // =============================================================================

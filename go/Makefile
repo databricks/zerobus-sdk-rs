@@ -85,7 +85,7 @@ fmt-go:
 
 fmt-rust:
 	@echo "Formatting Rust code..."
-	cd ../rust/ffi && cargo fmt --all
+	cd ../rust/ffi && ../../.github/scripts/rustfmt.sh --all
 
 lint: lint-go lint-rust
 

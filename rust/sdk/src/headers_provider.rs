@@ -1,9 +1,11 @@
+use std::collections::HashMap;
+use std::sync::Arc;
+
+use async_trait::async_trait;
+
 use crate::default_token_factory::DefaultTokenFactory;
 use crate::token_cache::{TokenCache, DEFAULT_REFRESH_BUFFER};
 use crate::ZerobusResult;
-use async_trait::async_trait;
-use std::collections::HashMap;
-use std::sync::Arc;
 
 /// A trait for providing custom headers for gRPC requests.
 ///
@@ -123,21 +125,16 @@ impl HeadersProvider for OAuthHeadersProvider {
     async fn get_headers(&self) -> ZerobusResult<HashMap<&'static str, String>> {
         let token = self
             .token_cache
-            .get_or_fetch(
-                &self.client_id,
-                &self.client_secret,
-                &self.table_name,
-                |reason| {
-                    DefaultTokenFactory::fetch_token(
-                        &self.unity_catalog_url,
-                        &self.table_name,
-                        &self.client_id,
-                        &self.client_secret,
-                        &self.workspace_id,
-                        reason,
-                    )
-                },
-            )
+            .get_or_fetch(&self.client_id, &self.client_secret, &self.table_name, |reason| {
+                DefaultTokenFactory::fetch_token(
+                    &self.unity_catalog_url,
+                    &self.table_name,
+                    &self.client_id,
+                    &self.client_secret,
+                    &self.workspace_id,
+                    reason,
+                )
+            })
             .await?;
         let mut headers = HashMap::new();
         headers.insert("authorization", format!("Bearer {}", token));

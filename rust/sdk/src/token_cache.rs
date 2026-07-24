@@ -221,8 +221,9 @@ impl TokenCache {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use std::sync::atomic::{AtomicUsize, Ordering};
+
+    use super::*;
 
     fn fetched(token: &str, ttl_secs: Option<u64>) -> FetchedToken {
         FetchedToken {
@@ -252,11 +253,7 @@ mod tests {
 
         assert_eq!(a, "tok");
         assert_eq!(b, "tok");
-        assert_eq!(
-            calls.load(Ordering::SeqCst),
-            1,
-            "second call should hit cache"
-        );
+        assert_eq!(calls.load(Ordering::SeqCst), 1, "second call should hit cache");
     }
 
     #[tokio::test]
@@ -461,15 +458,10 @@ mod tests {
         // must surface rather than being masked by the still-valid cached token.
         let result = cache
             .get_or_fetch("id", "secret", "c.s.t", |_reason| async {
-                Err(crate::ZerobusError::InvalidUCTokenError(
-                    "revoked".to_string(),
-                ))
+                Err(crate::ZerobusError::InvalidUCTokenError("revoked".to_string()))
             })
             .await;
-        assert!(matches!(
-            result,
-            Err(crate::ZerobusError::InvalidUCTokenError(_))
-        ));
+        assert!(matches!(result, Err(crate::ZerobusError::InvalidUCTokenError(_))));
     }
 
     #[tokio::test]
@@ -487,9 +479,7 @@ mod tests {
         // A refresh returns a token with no TTL: the caller gets the fresh token,
         // but the cached valid token must not be discarded.
         let fresh = cache
-            .get_or_fetch("id", "secret", "c.s.t", |_reason| async {
-                Ok(fetched("nottl", None))
-            })
+            .get_or_fetch("id", "secret", "c.s.t", |_reason| async { Ok(fetched("nottl", None)) })
             .await
             .unwrap();
         assert_eq!(fresh, "nottl");

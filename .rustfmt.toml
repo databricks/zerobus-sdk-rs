@@ -1,0 +1,13 @@
+# cargo fmt reads each crate's edition from Cargo.toml; this fallback keeps
+# direct rustfmt usable for the repository's Rust 2021 crates.
+edition = "2021"
+style_edition = "2021"
+newline_style = "Unix"
+group_imports = "StdExternalCrate"
+imports_layout = "HorizontalVertical"
+imports_granularity = "Module"
+
+max_width = 100
+fn_call_width = 100
+attr_fn_like_width = 100
+array_width = 100

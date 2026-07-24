@@ -4,7 +4,12 @@ mod utils;
 use std::sync::Arc;
 
 use databricks_zerobus_ingest_sdk::{
-    MessageId, MultiplexedStream, NoTlsConfig, ZerobusError, ZerobusSdk, ZerobusStream,
+    MessageId,
+    MultiplexedStream,
+    NoTlsConfig,
+    ZerobusError,
+    ZerobusSdk,
+    ZerobusStream,
 };
 use mock_grpc::{start_mock_server, MockResponse};
 use tracing::info;
@@ -227,8 +232,9 @@ mod single_stream_tests {
 }
 
 mod multi_stream_tests {
-    use super::*;
     use std::time::Duration;
+
+    use super::*;
 
     /// Use separate table names per stream so each gRPC connection gets its own response sequence.
     const TABLE_A: &str = "multi.schema.table_a";
@@ -675,10 +681,7 @@ mod failure_tests {
 
         // The sub-stream closed (non-retryable error), so the mux should be poisoned
         // and further ingest should fail with InvalidStateError.
-        assert!(
-            mux.is_closed(),
-            "Expected mux to be poisoned after sub-stream close"
-        );
+        assert!(mux.is_closed(), "Expected mux to be poisoned after sub-stream close");
         let ingest_after = mux.ingest_record(b"record3".to_vec()).await;
         assert!(
             matches!(ingest_after, Err(ZerobusError::InvalidStateError(_))),
@@ -721,10 +724,7 @@ mod failure_tests {
         // Non-retryable error → sub-stream closes → flush errors → mux poisoned.
         let flush_result = mux.flush().await;
         assert!(flush_result.is_err(), "Expected flush to fail");
-        assert!(
-            mux.is_closed(),
-            "Expected mux poisoned after sub-stream close"
-        );
+        assert!(mux.is_closed(), "Expected mux poisoned after sub-stream close");
 
         let ingest_after = mux.ingest_record(b"data".to_vec()).await;
         assert!(
@@ -816,10 +816,7 @@ mod failure_tests {
 
         let unacked: Vec<_> = mux.get_unacked_records().await?.collect();
         assert!(unacked.is_empty(), "All records were acked");
-        assert!(
-            mux.is_closed(),
-            "get_unacked_records should have closed the mux"
-        );
+        assert!(mux.is_closed(), "get_unacked_records should have closed the mux");
 
         Ok(())
     }

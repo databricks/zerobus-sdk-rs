@@ -92,13 +92,8 @@ fn get_catalogs_schema() -> SchemaRef {
 }
 
 /// The schema for GetCatalogs
-static GET_CATALOG_SCHEMA: Lazy<SchemaRef> = Lazy::new(|| {
-    Arc::new(Schema::new(vec![Field::new(
-        "catalog_name",
-        DataType::Utf8,
-        false,
-    )]))
-});
+static GET_CATALOG_SCHEMA: Lazy<SchemaRef> =
+    Lazy::new(|| Arc::new(Schema::new(vec![Field::new("catalog_name", DataType::Utf8, false)])));
 
 #[cfg(test)]
 mod tests {

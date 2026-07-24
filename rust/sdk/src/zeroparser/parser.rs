@@ -7,8 +7,15 @@ use prost_types::field_descriptor_proto::Type;
 use super::errors::{ParseError, ParseResult};
 use super::registry::{DescriptorWithFieldCache, FieldInfo, MessageRegistry};
 use super::types::{
-    convert_scalar_value, default_value_for_type, ComplexType, FieldValueRef, MapKeyRef,
-    PackedField, ParsedMapValue, MAP_ENTRY_KEY_FIELD_NUM, MAP_ENTRY_VALUE_FIELD_NUM,
+    convert_scalar_value,
+    default_value_for_type,
+    ComplexType,
+    FieldValueRef,
+    MapKeyRef,
+    PackedField,
+    ParsedMapValue,
+    MAP_ENTRY_KEY_FIELD_NUM,
+    MAP_ENTRY_VALUE_FIELD_NUM,
     MAX_NESTING_DEPTH,
 };
 use super::wire::{try_parse_field, WireValue};
@@ -330,10 +337,7 @@ impl<'a> ParsedMessage<'a> {
     /// Parse a protobuf message recursively in a single O(N) pass.
     #[inline(always)]
     pub fn parse(bytes: &'a [u8], registry: &'a MessageRegistry) -> ParseResult<ParsedMessage<'a>> {
-        Self::parse_internal(
-            bytes, None, /* type_name */
-            registry, 0, /* depth */
-        )
+        Self::parse_internal(bytes, None /* type_name */, registry, 0 /* depth */)
     }
 
     #[inline(always)]
@@ -592,7 +596,10 @@ impl<'a, 'b> std::ops::Deref for ParsedFieldValue<'a, 'b> {
 pub mod tests {
     use prost_types::field_descriptor_proto::Type;
     use prost_types::{
-        DescriptorProto, FieldDescriptorProto, MessageOptions, OneofDescriptorProto,
+        DescriptorProto,
+        FieldDescriptorProto,
+        MessageOptions,
+        OneofDescriptorProto,
     };
 
     use super::*;
@@ -678,34 +685,10 @@ pub mod tests {
     #[test]
     fn parse_scalar_fields() {
         let cases: Vec<(i32, &str, Type, &[u8], FieldValueRef)> = vec![
-            (
-                1,
-                "id",
-                Type::Int32,
-                &[8, 0x96, 0x01],
-                FieldValueRef::Int32(150),
-            ),
-            (
-                1,
-                "big",
-                Type::Int64,
-                &[8, 0xAC, 0x02],
-                FieldValueRef::Int64(300),
-            ),
-            (
-                1,
-                "count",
-                Type::Uint32,
-                &[8, 42],
-                FieldValueRef::UInt32(42),
-            ),
-            (
-                1,
-                "ts",
-                Type::Uint64,
-                &[8, 0xE8, 0x07],
-                FieldValueRef::UInt64(1000),
-            ),
+            (1, "id", Type::Int32, &[8, 0x96, 0x01], FieldValueRef::Int32(150)),
+            (1, "big", Type::Int64, &[8, 0xAC, 0x02], FieldValueRef::Int64(300)),
+            (1, "count", Type::Uint32, &[8, 42], FieldValueRef::UInt32(42)),
+            (1, "ts", Type::Uint64, &[8, 0xE8, 0x07], FieldValueRef::UInt64(1000)),
             (1, "delta", Type::Sint32, &[8, 1], FieldValueRef::Int32(-1)),
             (1, "offset", Type::Sint64, &[8, 3], FieldValueRef::Int64(-2)),
             (1, "flag", Type::Bool, &[8, 1], FieldValueRef::Bool(true)),
@@ -724,13 +707,7 @@ pub mod tests {
                 &[9, 0x08, 0x07, 0x06, 0x05, 0x04, 0x03, 0x02, 0x01],
                 FieldValueRef::UInt64(0x0102030405060708),
             ),
-            (
-                1,
-                "sf32",
-                Type::Sfixed32,
-                &[13, 0xFF, 0xFF, 0xFF, 0xFF],
-                FieldValueRef::Int32(-1),
-            ),
+            (1, "sf32", Type::Sfixed32, &[13, 0xFF, 0xFF, 0xFF, 0xFF], FieldValueRef::Int32(-1)),
             (
                 1,
                 "sf64",
@@ -779,10 +756,7 @@ pub mod tests {
 
         let double_bits = std::f64::consts::E.to_bits().to_le_bytes();
         let double_bytes = [&[9u8][..], &double_bits[..]].concat();
-        let desc = make_descriptor(
-            "Test",
-            vec![make_field(1, "val", Type::Double, false, None)],
-        );
+        let desc = make_descriptor("Test", vec![make_field(1, "val", Type::Double, false, None)]);
         let registry = MessageRegistry::from_descriptor(&desc);
         let parsed = ParsedMessage::parse(&double_bytes, &registry).unwrap();
         match parsed.get_scalar(1) {
@@ -844,11 +818,7 @@ pub mod tests {
                 "int32_packed",
                 Type::Int32,
                 &[10, 3, 1, 2, 127],
-                vec![
-                    FieldValueRef::Int32(1),
-                    FieldValueRef::Int32(2),
-                    FieldValueRef::Int32(127),
-                ],
+                vec![FieldValueRef::Int32(1), FieldValueRef::Int32(2), FieldValueRef::Int32(127)],
             ),
             (
                 "fixed32_packed",
@@ -937,12 +907,7 @@ pub mod tests {
                 .unwrap_or_else(|_| panic!("{}: parse failed", name));
 
             let values = parsed.get_repeated_scalars(1);
-            assert_eq!(
-                values.len(),
-                expected_values.len(),
-                "{}: length mismatch",
-                name
-            );
+            assert_eq!(values.len(), expected_values.len(), "{}: length mismatch", name);
             for (i, expected_val) in expected_values.iter().enumerate() {
                 assert_eq!(values[i], *expected_val, "{}: value {} mismatch", name, i);
             }
@@ -961,13 +926,7 @@ pub mod tests {
 
         let mut outer = make_descriptor(
             "Outer",
-            vec![make_field(
-                1,
-                "inner",
-                Type::Message,
-                false,
-                Some(".Outer.Inner"),
-            )],
+            vec![make_field(1, "inner", Type::Message, false, Some(".Outer.Inner"))],
         );
         outer.nested_type.push(inner);
 
@@ -980,10 +939,7 @@ pub mod tests {
         let parsed = ParsedMessage::parse(&wire, &registry).unwrap();
         let inner_parsed = parsed.get_message(1).expect("inner should be parsed");
         assert_eq!(inner_parsed.get_scalar(1), Some(&FieldValueRef::Int32(42)));
-        assert_eq!(
-            inner_parsed.get_scalar(2),
-            Some(&FieldValueRef::String("hello"))
-        );
+        assert_eq!(inner_parsed.get_scalar(2), Some(&FieldValueRef::String("hello")));
     }
 
     #[test]
@@ -991,13 +947,7 @@ pub mod tests {
         let item = make_descriptor("Item", vec![make_field(1, "id", Type::Int32, false, None)]);
         let mut container = make_descriptor(
             "Container",
-            vec![make_field(
-                1,
-                "items",
-                Type::Message,
-                true,
-                Some(".Container.Item"),
-            )],
+            vec![make_field(1, "items", Type::Message, true, Some(".Container.Item"))],
         );
         container.nested_type.push(item);
 
@@ -1017,13 +967,7 @@ pub mod tests {
         let map_entry = make_map_entry_descriptor("MapEntry", Type::String, Type::Int32);
         let mut outer = make_descriptor(
             "Outer",
-            vec![make_field(
-                1,
-                "items",
-                Type::Message,
-                true,
-                Some(".Outer.MapEntry"),
-            )],
+            vec![make_field(1, "items", Type::Message, true, Some(".Outer.MapEntry"))],
         );
         outer.nested_type.push(map_entry);
 
@@ -1043,13 +987,7 @@ pub mod tests {
         let int_key_map_entry = make_map_entry_descriptor("IntKeyMap", Type::Int32, Type::String);
         let mut outer2 = make_descriptor(
             "Outer2",
-            vec![make_field(
-                1,
-                "items",
-                Type::Message,
-                true,
-                Some(".Outer2.IntKeyMap"),
-            )],
+            vec![make_field(1, "items", Type::Message, true, Some(".Outer2.IntKeyMap"))],
         );
         outer2.nested_type.push(int_key_map_entry);
 
@@ -1069,10 +1007,8 @@ pub mod tests {
 
     #[test]
     fn parse_map_message_values() {
-        let value_msg = make_descriptor(
-            "ValueMsg",
-            vec![make_field(1, "x", Type::Int32, false, None)],
-        );
+        let value_msg =
+            make_descriptor("ValueMsg", vec![make_field(1, "x", Type::Int32, false, None)]);
         let mut map_entry = make_descriptor(
             "MapEntry",
             vec![
@@ -1087,13 +1023,7 @@ pub mod tests {
 
         let mut outer = make_descriptor(
             "Outer",
-            vec![make_field(
-                1,
-                "items",
-                Type::Message,
-                true,
-                Some(".Outer.MapEntry"),
-            )],
+            vec![make_field(1, "items", Type::Message, true, Some(".Outer.MapEntry"))],
         );
         outer.nested_type.push(map_entry);
         outer.nested_type.push(value_msg);
@@ -1147,31 +1077,15 @@ pub mod tests {
                 MapKeyRef::String("key"),
                 FieldValueRef::Int32(5),
             ),
-            (
-                "no_value",
-                &[10, 1, b'x'],
-                MapKeyRef::String("x"),
-                FieldValueRef::Int32(0),
-            ),
-            (
-                "no_key",
-                &[16, 99],
-                MapKeyRef::String(""),
-                FieldValueRef::Int32(99),
-            ),
+            ("no_value", &[10, 1, b'x'], MapKeyRef::String("x"), FieldValueRef::Int32(0)),
+            ("no_key", &[16, 99], MapKeyRef::String(""), FieldValueRef::Int32(99)),
             ("empty", &[], MapKeyRef::String(""), FieldValueRef::Int32(0)),
         ];
 
         let map_entry = make_map_entry_descriptor("MapEntry", Type::String, Type::Int32);
         let mut outer = make_descriptor(
             "Outer",
-            vec![make_field(
-                1,
-                "m",
-                Type::Message,
-                true,
-                Some(".Outer.MapEntry"),
-            )],
+            vec![make_field(1, "m", Type::Message, true, Some(".Outer.MapEntry"))],
         );
         outer.nested_type.push(map_entry);
         let registry = MessageRegistry::from_descriptor(&outer);
@@ -1288,13 +1202,7 @@ pub mod tests {
         let level2 = make_descriptor("L2", vec![make_field(1, "val", Type::Int32, false, None)]);
         let mut level1 = make_descriptor(
             "L1",
-            vec![make_field(
-                1,
-                "l2",
-                Type::Message,
-                false,
-                Some(".Root.L1.L2"),
-            )],
+            vec![make_field(1, "l2", Type::Message, false, Some(".Root.L1.L2"))],
         );
         level1.nested_type.push(level2);
         let mut root = make_descriptor(
@@ -1347,11 +1255,7 @@ pub mod tests {
 
         // All fields are present even though they have default values.
         for field_num in 1..=9 {
-            assert!(
-                parsed.has_field(field_num),
-                "Field {} should be present",
-                field_num
-            );
+            assert!(parsed.has_field(field_num), "Field {} should be present", field_num);
         }
 
         // Case 2: Empty message - no fields present.
@@ -1568,13 +1472,7 @@ pub mod tests {
         let map_entry = make_map_entry_descriptor("MapEntry", Type::String, Type::Int32);
         let mut outer = make_descriptor(
             "Outer",
-            vec![make_field(
-                1,
-                "items",
-                Type::Message,
-                true,
-                Some(".Outer.MapEntry"),
-            )],
+            vec![make_field(1, "items", Type::Message, true, Some(".Outer.MapEntry"))],
         );
         outer.nested_type.push(map_entry);
 
@@ -1619,10 +1517,7 @@ pub mod tests {
         assert_eq!(parsed_dup.get_map_entries_count(1), 1);
         let dup_entries: Vec<_> = parsed_dup.get_map_entries(1).collect();
         assert_eq!(*dup_entries[0].0, MapKeyRef::String("x"));
-        assert!(matches!(
-            dup_entries[0].1,
-            ParsedMapValue::Scalar(FieldValueRef::Int32(20))
-        ));
+        assert!(matches!(dup_entries[0].1, ParsedMapValue::Scalar(FieldValueRef::Int32(20))));
     }
 
     #[test]
@@ -1650,13 +1545,7 @@ pub mod tests {
 
         let mut outer = make_descriptor(
             "Outer",
-            vec![make_field(
-                1,
-                "items",
-                Type::Message,
-                true,
-                Some(".Outer.MapEntry"),
-            )],
+            vec![make_field(1, "items", Type::Message, true, Some(".Outer.MapEntry"))],
         );
         outer.nested_type.push(map_entry);
         outer.nested_type.push(value_msg);
@@ -1753,13 +1642,7 @@ pub mod tests {
         );
         let mut outer = make_descriptor(
             "Outer",
-            vec![make_field(
-                1,
-                "inner",
-                Type::Message,
-                false,
-                Some(".Outer.Inner"),
-            )],
+            vec![make_field(1, "inner", Type::Message, false, Some(".Outer.Inner"))],
         );
         outer.nested_type.push(inner);
         let registry = MessageRegistry::from_descriptor(&outer);
@@ -1786,15 +1669,11 @@ pub mod tests {
                 make_field(2, "y", Type::Int32, false, None),
             ],
         );
-        let mut b = make_descriptor(
-            "B",
-            vec![make_field(1, "c", Type::Message, false, Some(".A.B.C"))],
-        );
+        let mut b =
+            make_descriptor("B", vec![make_field(1, "c", Type::Message, false, Some(".A.B.C"))]);
         b.nested_type.push(c);
-        let mut a = make_descriptor(
-            "A",
-            vec![make_field(1, "b", Type::Message, false, Some(".A.B"))],
-        );
+        let mut a =
+            make_descriptor("A", vec![make_field(1, "b", Type::Message, false, Some(".A.B"))]);
         a.nested_type.push(b);
         let registry = MessageRegistry::from_descriptor(&a);
 
@@ -1833,13 +1712,7 @@ pub mod tests {
         wrapper.nested_type.push(inner);
         let mut outer = make_descriptor(
             "Outer",
-            vec![make_field(
-                1,
-                "w",
-                Type::Message,
-                false,
-                Some(".Outer.Wrapper"),
-            )],
+            vec![make_field(1, "w", Type::Message, false, Some(".Outer.Wrapper"))],
         );
         outer.nested_type.push(wrapper);
         let registry = MessageRegistry::from_descriptor(&outer);
@@ -1850,10 +1723,7 @@ pub mod tests {
         let p = ParsedMessage::parse(&wire, &registry).unwrap();
         let w = p.get_message(1).unwrap();
         assert!(!w.has_field(1) && !w.has_field(2));
-        assert_eq!(
-            w.get_message(3).unwrap().get_scalar(1),
-            Some(&FieldValueRef::Int32(1))
-        );
+        assert_eq!(w.get_message(3).unwrap().get_scalar(1), Some(&FieldValueRef::Int32(1)));
 
         // B: same message member twice — inner messages merge (Inner has only x,
         // so scalar last-wins semantics surface inside the merged inner).
@@ -1898,13 +1768,7 @@ pub mod tests {
         wrapper.nested_type.push(map_entry);
         let mut outer = make_descriptor(
             "Outer",
-            vec![make_field(
-                1,
-                "w",
-                Type::Message,
-                false,
-                Some(".Outer.Wrapper"),
-            )],
+            vec![make_field(1, "w", Type::Message, false, Some(".Outer.Wrapper"))],
         );
         outer.nested_type.push(wrapper);
         let registry = MessageRegistry::from_descriptor(&outer);
@@ -1926,21 +1790,14 @@ pub mod tests {
 
         assert_eq!(
             w.get_repeated_scalars(1),
-            &[
-                FieldValueRef::Int32(1),
-                FieldValueRef::Int32(2),
-                FieldValueRef::Int32(3),
-            ]
+            &[FieldValueRef::Int32(1), FieldValueRef::Int32(2), FieldValueRef::Int32(3),]
         );
         let item_vs: Vec<_> = w
             .get_repeated_messages(2)
             .iter()
             .map(|m| m.get_scalar(1).copied())
             .collect();
-        assert_eq!(
-            item_vs,
-            vec![Some(FieldValueRef::Int32(1)), Some(FieldValueRef::Int32(2))]
-        );
+        assert_eq!(item_vs, vec![Some(FieldValueRef::Int32(1)), Some(FieldValueRef::Int32(2))]);
 
         let counts: std::collections::HashMap<_, i32> = w
             .get_map_entries(3)
@@ -1970,13 +1827,7 @@ pub mod tests {
         );
         let mut outer = make_descriptor(
             "Outer",
-            vec![make_field(
-                1,
-                "w",
-                Type::Message,
-                false,
-                Some(".Outer.Wrapper"),
-            )],
+            vec![make_field(1, "w", Type::Message, false, Some(".Outer.Wrapper"))],
         );
         outer.nested_type.push(std::mem::take(&mut wrapper));
         let registry = MessageRegistry::from_descriptor(&outer);
@@ -2002,13 +1853,7 @@ pub mod tests {
             "Wrapper",
             vec![
                 make_field(1, "id", Type::Int32, false, None),
-                make_field(
-                    2,
-                    "inner",
-                    Type::Message,
-                    false,
-                    Some(".Outer.Wrapper.Inner"),
-                ),
+                make_field(2, "inner", Type::Message, false, Some(".Outer.Wrapper.Inner")),
                 make_field(3, "counts", Type::Message, true, Some(".Outer.Wrapper.CE")),
             ],
         );
@@ -2016,13 +1861,7 @@ pub mod tests {
         wrapper.nested_type.push(map_entry);
         let mut outer = make_descriptor(
             "Outer",
-            vec![make_field(
-                1,
-                "w",
-                Type::Message,
-                false,
-                Some(".Outer.Wrapper"),
-            )],
+            vec![make_field(1, "w", Type::Message, false, Some(".Outer.Wrapper"))],
         );
         outer.nested_type.push(wrapper);
         let registry = MessageRegistry::from_descriptor(&outer);
@@ -2036,10 +1875,7 @@ pub mod tests {
         let parsed = ParsedMessage::parse(&wire, &registry).unwrap();
         let w = parsed.get_message(1).unwrap();
         assert_eq!(w.get_scalar(1), Some(&FieldValueRef::Int32(1))); // preserved
-        assert_eq!(
-            w.get_message(2).unwrap().get_scalar(1),
-            Some(&FieldValueRef::Int32(5))
-        ); // installed
+        assert_eq!(w.get_message(2).unwrap().get_scalar(1), Some(&FieldValueRef::Int32(5))); // installed
         let counts: Vec<_> = w.get_map_entries(3).collect();
         assert_eq!(counts.len(), 1);
         assert_eq!(*counts[0].0, MapKeyRef::String("a"));
@@ -2050,19 +1886,11 @@ pub mod tests {
         // Second occurrence parses to a completely empty ParsedMessage;
         // merge_from must leave self untouched. Targets the "all None / Empty
         // in other" path of every loop in merge_from.
-        let wrapper = make_descriptor(
-            "Wrapper",
-            vec![make_field(1, "id", Type::Int32, false, None)],
-        );
+        let wrapper =
+            make_descriptor("Wrapper", vec![make_field(1, "id", Type::Int32, false, None)]);
         let mut outer = make_descriptor(
             "Outer",
-            vec![make_field(
-                1,
-                "w",
-                Type::Message,
-                false,
-                Some(".Outer.Wrapper"),
-            )],
+            vec![make_field(1, "w", Type::Message, false, Some(".Outer.Wrapper"))],
         );
         outer.nested_type.push(wrapper);
         let registry = MessageRegistry::from_descriptor(&outer);
@@ -2182,13 +2010,7 @@ pub mod tests {
 
         let mut outer = make_descriptor(
             "Outer",
-            vec![make_field(
-                1,
-                "items",
-                Type::Message,
-                true,
-                Some(".Outer.MapEntry"),
-            )],
+            vec![make_field(1, "items", Type::Message, true, Some(".Outer.MapEntry"))],
         );
         outer.nested_type.push(map_entry);
 
@@ -2222,23 +2044,14 @@ pub mod tests {
         // Note: We only test float/double/bytes here because:
         // - message (structs) → comes through as Bytes in wire format, so already covered
         // - repeated/map → invalid protobuf syntax, can't be declared as key types
-        let invalid_key_types = vec![
-            ("float", Type::Float),
-            ("double", Type::Double),
-            ("bytes", Type::Bytes),
-        ];
+        let invalid_key_types =
+            vec![("float", Type::Float), ("double", Type::Double), ("bytes", Type::Bytes)];
 
         for (type_name, key_type) in invalid_key_types {
             let map_entry = make_map_entry_descriptor("MapEntry", key_type, Type::Int32);
             let mut outer = make_descriptor(
                 "Outer",
-                vec![make_field(
-                    1,
-                    "items",
-                    Type::Message,
-                    true,
-                    Some(".Outer.MapEntry"),
-                )],
+                vec![make_field(1, "items", Type::Message, true, Some(".Outer.MapEntry"))],
             );
             outer.nested_type.push(map_entry);
 
@@ -2267,11 +2080,7 @@ pub mod tests {
             wire.extend_from_slice(&entry_wire);
 
             let result = ParsedMessage::parse(&wire, &registry);
-            assert!(
-                result.is_err(),
-                "Expected error for invalid map key type: {}",
-                type_name
-            );
+            assert!(result.is_err(), "Expected error for invalid map key type: {}", type_name);
             assert!(
                 matches!(result, Err(ParseError::InvalidMapKeyType { .. })),
                 "Expected InvalidMapKeyType error for {}, got {:?}",
@@ -2369,13 +2178,7 @@ pub mod tests {
             let map_entry = make_map_entry_descriptor("MapEntry", key_type, Type::Int32);
             let mut outer = make_descriptor(
                 "Outer",
-                vec![make_field(
-                    1,
-                    "items",
-                    Type::Message,
-                    true,
-                    Some(".Outer.MapEntry"),
-                )],
+                vec![make_field(1, "items", Type::Message, true, Some(".Outer.MapEntry"))],
             );
             outer.nested_type.push(map_entry);
 
@@ -2393,11 +2196,7 @@ pub mod tests {
 
             assert_eq!(parsed.get_map_entries_count(1), 1, "case: {}", case_name);
             let entries: Vec<_> = parsed.get_map_entries(1).collect();
-            assert_eq!(
-                *entries[0].0, expected_key,
-                "case: {} key mismatch",
-                case_name
-            );
+            assert_eq!(*entries[0].0, expected_key, "case: {} key mismatch", case_name);
             match entries[0].1 {
                 ParsedMapValue::Scalar(v) => {
                     assert_eq!(v, &FieldValueRef::Int32(99), "case: {} value", case_name)
@@ -2507,14 +2306,7 @@ pub mod tests {
             vec![
                 make_field(1, "tag", Type::Int32, false, None),
                 make_oneof_field(2, "str_val", Type::String, false, None, Some(0)),
-                make_oneof_field(
-                    3,
-                    "msg_val",
-                    Type::Message,
-                    false,
-                    Some(".Outer.Inner"),
-                    Some(0),
-                ),
+                make_oneof_field(3, "msg_val", Type::Message, false, Some(".Outer.Inner"), Some(0)),
             ],
             vec!["payload"],
         );
@@ -2558,14 +2350,7 @@ pub mod tests {
             "Outer",
             vec![
                 make_oneof_field(2, "str_val", Type::String, false, None, Some(0)),
-                make_oneof_field(
-                    3,
-                    "msg_val",
-                    Type::Message,
-                    false,
-                    Some(".Outer.Inner"),
-                    Some(0),
-                ),
+                make_oneof_field(3, "msg_val", Type::Message, false, Some(".Outer.Inner"), Some(0)),
             ],
             vec!["payload"],
         );
@@ -2629,10 +2414,7 @@ pub mod tests {
 
         let desc = make_descriptor_with_oneofs(
             "Test",
-            vec![
-                make_oneof_field(1, "real_a", Type::Int32, false, None, Some(0)),
-                field2,
-            ],
+            vec![make_oneof_field(1, "real_a", Type::Int32, false, None, Some(0)), field2],
             vec!["_opt_field"],
         );
         let registry = MessageRegistry::from_descriptor(&desc);
@@ -2664,13 +2446,7 @@ pub mod tests {
         let inner = make_descriptor("Inner", vec![make_field(1, "a", Type::Int32, false, None)]);
         let mut outer = make_descriptor(
             "Outer",
-            vec![make_field(
-                1,
-                "inner",
-                Type::Message,
-                false,
-                Some(".Outer.Inner"),
-            )],
+            vec![make_field(1, "inner", Type::Message, false, Some(".Outer.Inner"))],
         );
         outer.nested_type.push(inner);
 

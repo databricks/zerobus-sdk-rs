@@ -7,8 +7,18 @@ use std::time::Duration;
 
 use arrow_flight::flight_service_server::{FlightService, FlightServiceServer};
 use arrow_flight::{
-    Action, ActionType, Criteria, Empty, FlightData, FlightDescriptor, FlightInfo,
-    HandshakeRequest, HandshakeResponse, PutResult, SchemaResult, Ticket,
+    Action,
+    ActionType,
+    Criteria,
+    Empty,
+    FlightData,
+    FlightDescriptor,
+    FlightInfo,
+    HandshakeRequest,
+    HandshakeResponse,
+    PutResult,
+    SchemaResult,
+    Ticket,
 };
 use futures::Stream;
 use rcgen::{generate_simple_self_signed, CertifiedKey};
@@ -493,10 +503,7 @@ impl FlightService for MockFlightServer {
                         };
                         let ack_bytes = serde_json::to_vec(&ack_metadata).unwrap();
 
-                        debug!(
-                            "Auto-acking offset: {}, records: {}",
-                            metadata.offset_id, records
-                        );
+                        debug!("Auto-acking offset: {}, records: {}", metadata.offset_id, records);
                         let put_result = PutResult {
                             app_metadata: ack_bytes.into(),
                         };

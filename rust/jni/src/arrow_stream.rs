@@ -3,15 +3,17 @@
 //! This module provides JNI functions for Arrow Flight stream operations including
 //! batch ingestion, acknowledgment waiting, flushing, and closing.
 
-use crate::class_cache::{as_jclass, get_class_cache};
-use crate::errors::{throw_from_zerobus_error, throw_zerobus_exception};
-use crate::runtime::block_on;
+use std::sync::Arc;
+
 use databricks_zerobus_ingest_sdk::ZerobusArrowStream;
 use jni::objects::{JByteArray, JClass, JObject, JValue};
 use jni::sys::{jboolean, jlong, JNI_FALSE, JNI_TRUE};
 use jni::JNIEnv;
-use std::sync::Arc;
 use tokio::sync::Mutex;
+
+use crate::class_cache::{as_jclass, get_class_cache};
+use crate::errors::{throw_from_zerobus_error, throw_zerobus_exception};
+use crate::runtime::block_on;
 
 /// Native Arrow stream handle stored in Java.
 pub struct NativeArrowStreamHandle {
@@ -125,11 +127,9 @@ pub extern "system" fn Java_com_databricks_zerobus_ZerobusArrowStream_nativeInge
         }
 
         if batches.is_empty() {
-            return Err(
-                databricks_zerobus_ingest_sdk::ZerobusError::InvalidArgument(
-                    "No batches found in Arrow IPC data".to_string(),
-                ),
-            );
+            return Err(databricks_zerobus_ingest_sdk::ZerobusError::InvalidArgument(
+                "No batches found in Arrow IPC data".to_string(),
+            ));
         }
 
         // Ingest the first batch

@@ -3,9 +3,10 @@
 //! This module provides a strategy pattern for TLS configuration,
 //! allowing different TLS setups (secure, custom CA, or no TLS for testing).
 
+use tonic::transport::{ClientTlsConfig, Endpoint};
+
 use crate::errors::ZerobusError;
 use crate::ZerobusResult;
-use tonic::transport::{ClientTlsConfig, Endpoint};
 
 /// Trait for TLS configuration strategies.
 ///

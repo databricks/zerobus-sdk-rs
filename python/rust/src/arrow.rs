@@ -8,14 +8,15 @@
 
 use std::sync::Arc;
 
+use databricks_zerobus_ingest_sdk::{
+    StreamBuilder,
+    ZerobusArrowStream as RustZerobusArrowStream,
+    ZerobusError as RustError,
+    ZerobusSdk as RustSdk,
+};
 use pyo3::prelude::*;
 use pyo3::types::PyBytes;
 use tokio::sync::RwLock;
-
-use databricks_zerobus_ingest_sdk::{
-    StreamBuilder, ZerobusArrowStream as RustZerobusArrowStream, ZerobusError as RustError,
-    ZerobusSdk as RustSdk,
-};
 
 use crate::auth::HeadersProviderWrapper;
 use crate::common::map_error;
@@ -249,10 +250,7 @@ impl ArrowStreamConfigurationOptions {
             ("recovery_timeout_ms", self.recovery_timeout_ms),
             ("recovery_backoff_ms", self.recovery_backoff_ms),
             ("recovery_retries", self.recovery_retries as i64),
-            (
-                "server_lack_of_ack_timeout_ms",
-                self.server_lack_of_ack_timeout_ms,
-            ),
+            ("server_lack_of_ack_timeout_ms", self.server_lack_of_ack_timeout_ms),
             ("flush_timeout_ms", self.flush_timeout_ms),
             ("connection_timeout_ms", self.connection_timeout_ms),
         ] {

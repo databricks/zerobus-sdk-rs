@@ -1,11 +1,5 @@
 //! Shared FFI types and helpers used across the FFI surface modules.
 
-use async_trait::async_trait;
-use databricks_zerobus_ingest_sdk::databricks::zerobus::RecordType;
-use databricks_zerobus_ingest_sdk::{
-    AckCallback, HeadersProvider, OffsetId, ZerobusError, ZerobusResult, ZerobusSdk, ZerobusStream,
-};
-use once_cell::sync::Lazy;
 use std::any::Any;
 use std::collections::{HashMap, HashSet};
 use std::ffi::{CStr, CString};
@@ -14,6 +8,19 @@ use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::ptr;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
+
+use async_trait::async_trait;
+use databricks_zerobus_ingest_sdk::databricks::zerobus::RecordType;
+use databricks_zerobus_ingest_sdk::{
+    AckCallback,
+    HeadersProvider,
+    OffsetId,
+    ZerobusError,
+    ZerobusResult,
+    ZerobusSdk,
+    ZerobusStream,
+};
+use once_cell::sync::Lazy;
 use tokio::runtime::Runtime;
 use tracing_subscriber::{fmt, EnvFilter};
 
@@ -475,10 +482,7 @@ pub(crate) static ACK_DROP_SENTINEL_CREATE_FAIL_TESTS: u8 = 0;
 #[cfg(test)]
 impl Drop for CallbackAckCallback {
     fn drop(&mut self) {
-        if std::ptr::eq(
-            self.user_data as *const u8,
-            &ACK_DROP_SENTINEL_CREATE_FAIL_TESTS,
-        ) {
+        if std::ptr::eq(self.user_data as *const u8, &ACK_DROP_SENTINEL_CREATE_FAIL_TESTS) {
             ACK_CALLBACK_DROP_COUNT.fetch_add(1, Ordering::SeqCst);
         }
     }
@@ -587,10 +591,7 @@ mod common_tests {
         })
         .join();
         assert!(poisoned.is_err(), "the spawned thread should have panicked");
-        assert!(
-            HEADER_KEY_CACHE.lock().is_err(),
-            "the lock should now be poisoned"
-        );
+        assert!(HEADER_KEY_CACHE.lock().is_err(), "the lock should now be poisoned");
 
         // Interning must still work despite the poison — no panic, correct value,
         // and still interned (same pointer on a second call).

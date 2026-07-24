@@ -50,63 +50,66 @@ mod r#gen {
     include!("arrow.flight.protocol.sql.rs");
 }
 
-pub use r#gen::ActionBeginSavepointRequest;
-pub use r#gen::ActionBeginSavepointResult;
-pub use r#gen::ActionBeginTransactionRequest;
-pub use r#gen::ActionBeginTransactionResult;
-pub use r#gen::ActionCancelQueryRequest;
-pub use r#gen::ActionCancelQueryResult;
-pub use r#gen::ActionClosePreparedStatementRequest;
-pub use r#gen::ActionCreatePreparedStatementRequest;
-pub use r#gen::ActionCreatePreparedStatementResult;
-pub use r#gen::ActionCreatePreparedSubstraitPlanRequest;
-pub use r#gen::ActionEndSavepointRequest;
-pub use r#gen::ActionEndTransactionRequest;
-pub use r#gen::CommandGetCatalogs;
-pub use r#gen::CommandGetCrossReference;
-pub use r#gen::CommandGetDbSchemas;
-pub use r#gen::CommandGetExportedKeys;
-pub use r#gen::CommandGetImportedKeys;
-pub use r#gen::CommandGetPrimaryKeys;
-pub use r#gen::CommandGetSqlInfo;
-pub use r#gen::CommandGetTableTypes;
-pub use r#gen::CommandGetTables;
-pub use r#gen::CommandGetXdbcTypeInfo;
-pub use r#gen::CommandPreparedStatementQuery;
-pub use r#gen::CommandPreparedStatementUpdate;
-pub use r#gen::CommandStatementIngest;
-pub use r#gen::CommandStatementQuery;
-pub use r#gen::CommandStatementSubstraitPlan;
-pub use r#gen::CommandStatementUpdate;
-pub use r#gen::DoPutPreparedStatementResult;
-pub use r#gen::DoPutUpdateResult;
-pub use r#gen::Nullable;
-pub use r#gen::Searchable;
-pub use r#gen::SqlInfo;
-pub use r#gen::SqlNullOrdering;
-pub use r#gen::SqlOuterJoinsSupportLevel;
-pub use r#gen::SqlSupportedCaseSensitivity;
-pub use r#gen::SqlSupportedElementActions;
-pub use r#gen::SqlSupportedGroupBy;
-pub use r#gen::SqlSupportedPositionedCommands;
-pub use r#gen::SqlSupportedResultSetConcurrency;
-pub use r#gen::SqlSupportedResultSetType;
-pub use r#gen::SqlSupportedSubqueries;
-pub use r#gen::SqlSupportedTransaction;
-pub use r#gen::SqlSupportedTransactions;
-pub use r#gen::SqlSupportedUnions;
-pub use r#gen::SqlSupportsConvert;
-pub use r#gen::SqlTransactionIsolationLevel;
-pub use r#gen::SubstraitPlan;
-pub use r#gen::SupportedSqlGrammar;
-pub use r#gen::TicketStatementQuery;
-pub use r#gen::UpdateDeleteRules;
-pub use r#gen::XdbcDataType;
-pub use r#gen::XdbcDatetimeSubcode;
 pub use r#gen::action_end_transaction_request::EndTransaction;
-pub use r#gen::command_statement_ingest::TableDefinitionOptions;
 pub use r#gen::command_statement_ingest::table_definition_options::{
-    TableExistsOption, TableNotExistOption,
+    TableExistsOption,
+    TableNotExistOption,
+};
+pub use r#gen::command_statement_ingest::TableDefinitionOptions;
+pub use r#gen::{
+    ActionBeginSavepointRequest,
+    ActionBeginSavepointResult,
+    ActionBeginTransactionRequest,
+    ActionBeginTransactionResult,
+    ActionCancelQueryRequest,
+    ActionCancelQueryResult,
+    ActionClosePreparedStatementRequest,
+    ActionCreatePreparedStatementRequest,
+    ActionCreatePreparedStatementResult,
+    ActionCreatePreparedSubstraitPlanRequest,
+    ActionEndSavepointRequest,
+    ActionEndTransactionRequest,
+    CommandGetCatalogs,
+    CommandGetCrossReference,
+    CommandGetDbSchemas,
+    CommandGetExportedKeys,
+    CommandGetImportedKeys,
+    CommandGetPrimaryKeys,
+    CommandGetSqlInfo,
+    CommandGetTableTypes,
+    CommandGetTables,
+    CommandGetXdbcTypeInfo,
+    CommandPreparedStatementQuery,
+    CommandPreparedStatementUpdate,
+    CommandStatementIngest,
+    CommandStatementQuery,
+    CommandStatementSubstraitPlan,
+    CommandStatementUpdate,
+    DoPutPreparedStatementResult,
+    DoPutUpdateResult,
+    Nullable,
+    Searchable,
+    SqlInfo,
+    SqlNullOrdering,
+    SqlOuterJoinsSupportLevel,
+    SqlSupportedCaseSensitivity,
+    SqlSupportedElementActions,
+    SqlSupportedGroupBy,
+    SqlSupportedPositionedCommands,
+    SqlSupportedResultSetConcurrency,
+    SqlSupportedResultSetType,
+    SqlSupportedSubqueries,
+    SqlSupportedTransaction,
+    SqlSupportedTransactions,
+    SqlSupportedUnions,
+    SqlSupportsConvert,
+    SqlTransactionIsolationLevel,
+    SubstraitPlan,
+    SupportedSqlGrammar,
+    TicketStatementQuery,
+    UpdateDeleteRules,
+    XdbcDataType,
+    XdbcDatetimeSubcode,
 };
 
 pub mod client;

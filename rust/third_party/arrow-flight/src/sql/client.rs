@@ -17,50 +17,76 @@
 
 //! A FlightSQL Client [`FlightSqlServiceClient`]
 
-use arrow_buffer::Buffer;
-use arrow_ipc::MessageHeader;
-use arrow_ipc::convert::fb_to_schema;
-use arrow_ipc::reader::read_record_batch;
-use arrow_ipc::root_as_message;
-use arrow_schema::SchemaRef;
-use base64::Engine;
-use base64::prelude::BASE64_STANDARD;
-use bytes::Bytes;
 use std::collections::HashMap;
 use std::str::FromStr;
+
+use arrow_array::RecordBatch;
+use arrow_buffer::Buffer;
+use arrow_ipc::convert::fb_to_schema;
+use arrow_ipc::reader::read_record_batch;
+use arrow_ipc::{root_as_message, MessageHeader};
+use arrow_schema::{ArrowError, Schema, SchemaRef};
+use base64::prelude::BASE64_STANDARD;
+use base64::Engine;
+use bytes::Bytes;
+use futures::{stream, Stream, TryStreamExt};
+use prost::Message;
+use tonic::codegen::{Body, StdError};
 use tonic::metadata::AsciiMetadataKey;
+use tonic::{IntoRequest, IntoStreamingRequest, Streaming};
 
 use crate::decode::FlightRecordBatchStream;
 use crate::encode::FlightDataEncoderBuilder;
-use crate::error::FlightError;
-use crate::error::Result;
+use crate::error::{FlightError, Result};
 use crate::flight_service_client::FlightServiceClient;
 use crate::sql::r#gen::action_end_transaction_request::EndTransaction;
 use crate::sql::server::{
-    BEGIN_TRANSACTION, CLOSE_PREPARED_STATEMENT, CREATE_PREPARED_STATEMENT, END_TRANSACTION,
+    BEGIN_TRANSACTION,
+    CLOSE_PREPARED_STATEMENT,
+    CREATE_PREPARED_STATEMENT,
+    END_TRANSACTION,
 };
 use crate::sql::{
-    ActionBeginTransactionRequest, ActionBeginTransactionResult,
-    ActionClosePreparedStatementRequest, ActionCreatePreparedStatementRequest,
-    ActionCreatePreparedStatementResult, ActionEndTransactionRequest, Any, CommandGetCatalogs,
-    CommandGetCrossReference, CommandGetDbSchemas, CommandGetExportedKeys, CommandGetImportedKeys,
-    CommandGetPrimaryKeys, CommandGetSqlInfo, CommandGetTableTypes, CommandGetTables,
-    CommandGetXdbcTypeInfo, CommandPreparedStatementQuery, CommandPreparedStatementUpdate,
-    CommandStatementIngest, CommandStatementQuery, CommandStatementUpdate,
-    DoPutPreparedStatementResult, DoPutUpdateResult, ProstMessageExt, SqlInfo,
+    ActionBeginTransactionRequest,
+    ActionBeginTransactionResult,
+    ActionClosePreparedStatementRequest,
+    ActionCreatePreparedStatementRequest,
+    ActionCreatePreparedStatementResult,
+    ActionEndTransactionRequest,
+    Any,
+    CommandGetCatalogs,
+    CommandGetCrossReference,
+    CommandGetDbSchemas,
+    CommandGetExportedKeys,
+    CommandGetImportedKeys,
+    CommandGetPrimaryKeys,
+    CommandGetSqlInfo,
+    CommandGetTableTypes,
+    CommandGetTables,
+    CommandGetXdbcTypeInfo,
+    CommandPreparedStatementQuery,
+    CommandPreparedStatementUpdate,
+    CommandStatementIngest,
+    CommandStatementQuery,
+    CommandStatementUpdate,
+    DoPutPreparedStatementResult,
+    DoPutUpdateResult,
+    ProstMessageExt,
+    SqlInfo,
 };
 use crate::streams::FallibleRequestStream;
 use crate::trailers::extract_lazy_trailers;
 use crate::{
-    Action, FlightData, FlightDescriptor, FlightInfo, HandshakeRequest, HandshakeResponse,
-    IpcMessage, PutResult, Ticket,
+    Action,
+    FlightData,
+    FlightDescriptor,
+    FlightInfo,
+    HandshakeRequest,
+    HandshakeResponse,
+    IpcMessage,
+    PutResult,
+    Ticket,
 };
-use arrow_array::RecordBatch;
-use arrow_schema::{ArrowError, Schema};
-use futures::{Stream, TryStreamExt, stream};
-use prost::Message;
-use tonic::codegen::{Body, StdError};
-use tonic::{IntoRequest, IntoStreamingRequest, Streaming};
 
 /// A FlightSQLServiceClient is an endpoint for retrieving or storing Arrow data
 /// by FlightSQL protocol.
@@ -196,9 +222,7 @@ where
         let resp = match responses.as_slice() {
             [resp] => resp.payload.clone(),
             [] => Bytes::new(),
-            _ => Err(ArrowError::ParseError(
-                "Multiple handshake responses".to_string(),
-            ))?,
+            _ => Err(ArrowError::ParseError("Multiple handshake responses".to_string()))?,
         };
         Ok(resp)
     }
@@ -572,9 +596,7 @@ where
                 .with_flight_descriptor(Some(descriptor))
                 .with_schema(params_batch.schema());
             let flight_data = flight_stream_builder
-                .build(futures::stream::iter(
-                    self.parameter_binding.clone().map(Ok),
-                ))
+                .build(futures::stream::iter(self.parameter_binding.clone().map(Ok)))
                 .try_collect::<Vec<_>>()
                 .await?;
 

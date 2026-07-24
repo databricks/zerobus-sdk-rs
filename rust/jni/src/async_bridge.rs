@@ -3,13 +3,15 @@
 //! This module provides utilities for bridging Rust async operations to Java
 //! CompletableFutures, allowing async results to be propagated back to Java.
 
-use crate::class_cache::{as_jclass, get_class_cache};
-use crate::errors::{create_exception_from_error, create_zerobus_exception};
-use crate::runtime::{get_jvm, spawn};
+use std::future::Future;
+
 use databricks_zerobus_ingest_sdk::ZerobusError;
 use jni::objects::{GlobalRef, JObject, JValue};
 use jni::JNIEnv;
-use std::future::Future;
+
+use crate::class_cache::{as_jclass, get_class_cache};
+use crate::errors::{create_exception_from_error, create_zerobus_exception};
+use crate::runtime::{get_jvm, spawn};
 
 /// Complete a Java CompletableFuture with a successful result.
 ///
@@ -20,12 +22,7 @@ pub fn complete_future<'local>(
     future: &JObject<'local>,
     value: JObject<'local>,
 ) -> Result<(), jni::errors::Error> {
-    env.call_method(
-        future,
-        "complete",
-        "(Ljava/lang/Object;)Z",
-        &[JValue::Object(&value)],
-    )?;
+    env.call_method(future, "complete", "(Ljava/lang/Object;)Z", &[JValue::Object(&value)])?;
     Ok(())
 }
 

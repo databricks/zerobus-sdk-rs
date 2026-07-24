@@ -12,22 +12,25 @@
 
 #![deny(clippy::all)]
 
-use napi::bindgen_prelude::*;
-use napi::threadsafe_function::{ErrorStrategy, ThreadsafeFunction};
-use napi::{Env, JsFunction, JsGlobal, JsObject, JsString, JsUnknown, ValueType};
-use napi_derive::napi;
+use std::collections::HashMap;
+use std::sync::Arc;
 
 use async_trait::async_trait;
 use databricks_zerobus_ingest_sdk::databricks::zerobus::RecordType as RustRecordType;
 use databricks_zerobus_ingest_sdk::{
-    DefaultTokenFactory, EncodedRecord as RustRecordPayload,
-    HeadersProvider as RustHeadersProvider, ZerobusError as RustZerobusError,
-    ZerobusResult as RustZerobusResult, ZerobusSdk as RustZerobusSdk,
+    DefaultTokenFactory,
+    EncodedRecord as RustRecordPayload,
+    HeadersProvider as RustHeadersProvider,
+    ZerobusError as RustZerobusError,
+    ZerobusResult as RustZerobusResult,
+    ZerobusSdk as RustZerobusSdk,
     ZerobusStream as RustZerobusStream,
 };
+use napi::bindgen_prelude::*;
+use napi::threadsafe_function::{ErrorStrategy, ThreadsafeFunction};
+use napi::{Env, JsFunction, JsGlobal, JsObject, JsString, JsUnknown, ValueType};
+use napi_derive::napi;
 use prost_types;
-use std::collections::HashMap;
-use std::sync::Arc;
 use tokio::sync::Mutex;
 
 /// User-Agent header value for TypeScript SDK requests.
@@ -1164,7 +1167,8 @@ impl ZerobusSdk {
 
 /// Helper function to decode base64 strings.
 fn base64_decode(input: &str) -> std::result::Result<Vec<u8>, String> {
-    use base64::{engine::general_purpose::STANDARD, Engine};
+    use base64::engine::general_purpose::STANDARD;
+    use base64::Engine;
     STANDARD
         .decode(input)
         .map_err(|e| format!("Base64 decode error: {}", e))
@@ -1181,8 +1185,11 @@ use arrow_ipc::writer::StreamWriter;
 use bytes::Bytes;
 #[cfg(feature = "arrow-flight")]
 use databricks_zerobus_ingest_sdk::{
-    ArrowSchema as RustArrowSchema, DataType as RustDataType, Field as RustField,
-    RecordBatch as RustRecordBatch, ZerobusArrowStream as RustZerobusArrowStream,
+    ArrowSchema as RustArrowSchema,
+    DataType as RustDataType,
+    Field as RustField,
+    RecordBatch as RustRecordBatch,
+    ZerobusArrowStream as RustZerobusArrowStream,
 };
 
 /// IPC compression type for Arrow Flight streams.

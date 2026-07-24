@@ -97,15 +97,9 @@ async fn ingest_with_offset_api(stream: &mut ZerobusStream) -> Result<(), Box<dy
     ];
 
     if let Some(offset_id) = stream.ingest_records_offset(batch).await? {
-        println!(
-            "[Auto-serializing] Batch of 3 records sent with offset ID: {}",
-            offset_id
-        );
+        println!("[Auto-serializing] Batch of 3 records sent with offset ID: {}", offset_id);
         stream.wait_for_offset(offset_id).await?;
-        println!(
-            "[Auto-serializing] Batch acknowledged with offset ID: {}",
-            offset_id
-        );
+        println!("[Auto-serializing] Batch acknowledged with offset ID: {}", offset_id);
     }
 
     // 2. Pre-serialized: JsonString - pass JSON strings with explicit wrapper.
@@ -152,15 +146,9 @@ async fn ingest_with_offset_api(stream: &mut ZerobusStream) -> Result<(), Box<dy
     ];
 
     if let Some(offset_id) = stream.ingest_records_offset(batch).await? {
-        println!(
-            "[Pre-serialized] Batch of 3 records sent with offset ID: {}",
-            offset_id
-        );
+        println!("[Pre-serialized] Batch of 3 records sent with offset ID: {}", offset_id);
         stream.wait_for_offset(offset_id).await?;
-        println!(
-            "[Pre-serialized] Batch acknowledged with offset ID: {}",
-            offset_id
-        );
+        println!("[Pre-serialized] Batch acknowledged with offset ID: {}", offset_id);
     }
 
     // 3. Backward-compatible: raw String - no wrapper needed, works the same as JsonString.
@@ -207,15 +195,9 @@ async fn ingest_with_offset_api(stream: &mut ZerobusStream) -> Result<(), Box<dy
     ];
 
     if let Some(offset_id) = stream.ingest_records_offset(batch).await? {
-        println!(
-            "[Backward-compatible] Batch of 3 records sent with offset ID: {}",
-            offset_id
-        );
+        println!("[Backward-compatible] Batch of 3 records sent with offset ID: {}", offset_id);
         stream.wait_for_offset(offset_id).await?;
-        println!(
-            "[Backward-compatible] Batch acknowledged with offset ID: {}",
-            offset_id
-        );
+        println!("[Backward-compatible] Batch acknowledged with offset ID: {}", offset_id);
     }
 
     Ok(())

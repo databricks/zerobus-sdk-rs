@@ -10,13 +10,12 @@ use std::time::Duration;
 use tonic::transport::{Channel, Endpoint};
 use tracing::{error, info, instrument};
 
+#[cfg(feature = "arrow-flight")]
+use crate::arrow_stream::ZerobusArrowStream;
 use crate::databricks::zerobus::zerobus_client::ZerobusClient;
 use crate::proxy::{self, ConnectorFactory};
 use crate::stream::ZerobusStream;
 use crate::{StreamBuilder, TlsConfig, ZerobusError, ZerobusResult, ZerobusSdkBuilder};
-
-#[cfg(feature = "arrow-flight")]
-use crate::arrow_stream::ZerobusArrowStream;
 
 /// Default identifier the SDK sends as the HTTP `user-agent` header on every
 /// request. Use [`ZerobusSdkBuilder::application_name`] to append an

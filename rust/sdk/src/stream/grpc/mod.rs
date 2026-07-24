@@ -31,8 +31,14 @@ use tracing::instrument;
 use crate::databricks::zerobus::zerobus_client::ZerobusClient;
 use crate::landing_zone::LandingZone;
 use crate::{
-    HeadersProvider, OffsetId, OffsetIdGenerator, StreamConfigurationOptions, StreamType,
-    TableProperties, ZerobusError, ZerobusResult,
+    HeadersProvider,
+    OffsetId,
+    OffsetIdGenerator,
+    StreamConfigurationOptions,
+    StreamType,
+    TableProperties,
+    ZerobusError,
+    ZerobusResult,
 };
 
 mod acks;
@@ -45,10 +51,9 @@ mod sender;
 mod supervisor;
 mod types;
 
-use types::{IngestRequest, OneshotMap, RecordLandingZone};
-
 #[cfg(feature = "testing")]
 pub use callback_handler::CallbackHandlerHarness;
+use types::{IngestRequest, OneshotMap, RecordLandingZone};
 
 /// Maximum time to wait for the receiver/sender tasks to finish during stream
 /// teardown.
@@ -144,9 +149,8 @@ impl ZerobusStream {
 
         let (logical_last_received_offset_id_tx, _logical_last_received_offset_id_rx) =
             tokio::sync::watch::channel(None);
-        let landing_zone = Arc::new(LandingZone::<Box<IngestRequest>>::new(
-            options.max_inflight_requests,
-        ));
+        let landing_zone =
+            Arc::new(LandingZone::<Box<IngestRequest>>::new(options.max_inflight_requests));
 
         let oneshot_map = Arc::new(tokio::sync::Mutex::new(HashMap::new()));
         let is_closed = Arc::new(AtomicBool::new(false));

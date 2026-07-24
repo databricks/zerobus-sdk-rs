@@ -18,13 +18,20 @@
 //! [`get_unacked_records`](MultiplexedStream::get_unacked_records) or
 //! [`get_unacked_batches`](MultiplexedStream::get_unacked_batches).
 
-use futures::future::join_all;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
+
+use futures::future::join_all;
 use tracing::{error, info, warn};
 
 use crate::{
-    AckCallback, EncodedBatch, EncodedRecord, OffsetId, ZerobusError, ZerobusResult, ZerobusStream,
+    AckCallback,
+    EncodedBatch,
+    EncodedRecord,
+    OffsetId,
+    ZerobusError,
+    ZerobusResult,
+    ZerobusStream,
 };
 
 /// Number of bits reserved for the stream index.
@@ -42,12 +49,7 @@ pub struct MessageId(i64);
 
 impl std::fmt::Display for MessageId {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(
-            f,
-            "MessageId(stream={}, offset={})",
-            self.stream_index(),
-            self.sub_offset()
-        )
+        write!(f, "MessageId(stream={}, offset={})", self.stream_index(), self.sub_offset())
     }
 }
 
@@ -137,10 +139,7 @@ impl MultiplexedStream {
     ///
     /// Panics if `streams` is empty or holds more than 64 sub-streams.
     pub fn new(streams: Vec<ZerobusStream>) -> Self {
-        assert!(
-            !streams.is_empty(),
-            "MultiplexedStream requires at least one sub-stream"
-        );
+        assert!(!streams.is_empty(), "MultiplexedStream requires at least one sub-stream");
         assert!(
             streams.len() <= (1 << STREAM_BITS),
             "MultiplexedStream supports at most {} sub-streams",
@@ -156,9 +155,7 @@ impl MultiplexedStream {
     #[allow(clippy::result_large_err)]
     fn check_closed(&self) -> ZerobusResult<()> {
         if self.is_closed_fast() {
-            return Err(ZerobusError::InvalidStateError(
-                "MultiplexedStream is closed".to_string(),
-            ));
+            return Err(ZerobusError::InvalidStateError("MultiplexedStream is closed".to_string()));
         }
         Ok(())
     }
@@ -476,8 +473,9 @@ impl Drop for MultiplexedStream {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use std::sync::Mutex;
+
+    use super::*;
 
     #[derive(Default)]
     struct RecordingMultiplexedCallback {

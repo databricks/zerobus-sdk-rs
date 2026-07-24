@@ -5,16 +5,19 @@ use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 use common::{
-    bench_prost_reflect_decode, bench_prost_typed_decode, bench_zeroparser_decode,
-    create_sized_message, format_bytes, load_bench_sample, BenchmarkConfig,
+    bench_prost_reflect_decode,
+    bench_prost_typed_decode,
+    bench_zeroparser_decode,
+    create_sized_message,
+    format_bytes,
+    load_bench_sample,
+    BenchmarkConfig,
 };
 use plotters::prelude::*;
 use plotters::style::text_anchor::{HPos, Pos, VPos};
 
-const OUTPUT_PATH: &str = concat!(
-    env!("CARGO_MANIFEST_DIR"),
-    "/src/zeroparser/benches/bench_plot.svg"
-);
+const OUTPUT_PATH: &str =
+    concat!(env!("CARGO_MANIFEST_DIR"), "/src/zeroparser/benches/bench_plot.svg");
 const MIN_MEASURE_SECS: f64 = 1.0;
 const MAX_ITERATIONS: u64 = 1_000;
 const TRIALS_PER_MEASUREMENT: usize = 3;
@@ -180,13 +183,11 @@ fn measure_scenario(
 
     let messages = vec![single; scenario.count];
 
-    let reflect_mbps = measure_mbps(&messages, |m| {
-        bench_prost_reflect_decode(&scenario.config.msg_desc, m)
-    });
+    let reflect_mbps =
+        measure_mbps(&messages, |m| bench_prost_reflect_decode(&scenario.config.msg_desc, m));
 
-    let prost_typed_mbps = measure_mbps(&messages, |m| {
-        bench_prost_typed_decode(scenario.config.prost_typed, m)
-    });
+    let prost_typed_mbps =
+        measure_mbps(&messages, |m| bench_prost_typed_decode(scenario.config.prost_typed, m));
 
     let zeroparser_mbps = measure_mbps(&messages, |m| {
         bench_zeroparser_decode(&scenario.config.registry, &scenario.config.fields, m)
@@ -263,9 +264,7 @@ fn draw_plot(results: &[Measurement]) -> Result<(), Box<dyn std::error::Error>> 
     let bars_per_group: &[Bar] = &[
         ("prost-reflect", RGBColor(220, 80, 80), |m| m.reflect_mbps),
         ("prost", RGBColor(235, 145, 70), |m| m.prost_typed_mbps),
-        ("C++ reflect", RGBColor(120, 100, 180), |m| {
-            m.cpp_reflect_mbps
-        }),
+        ("C++ reflect", RGBColor(120, 100, 180), |m| m.cpp_reflect_mbps),
         ("C++ typed", RGBColor(95, 165, 110), |m| m.cpp_typed_mbps),
         ("Zeroparser", RGBColor(60, 130, 200), |m| m.zeroparser_mbps),
     ];
@@ -343,10 +342,7 @@ fn draw_plot(results: &[Measurement]) -> Result<(), Box<dyn std::error::Error>> 
     for (name, color, _) in bars_per_group {
         let c = *color;
         chart
-            .draw_series(std::iter::once(Rectangle::new(
-                [(0.0, 0.0), (0.0, 0.0)],
-                c.filled(),
-            )))?
+            .draw_series(std::iter::once(Rectangle::new([(0.0, 0.0), (0.0, 0.0)], c.filled())))?
             .label(*name)
             .legend(move |(x, y)| Rectangle::new([(x, y - 6), (x + 18, y + 6)], c.filled()));
     }

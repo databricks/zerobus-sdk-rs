@@ -1,4 +1,4 @@
-use anyhow::{Result, anyhow};
+use anyhow::{anyhow, Result};
 
 pub async fn get_token(
     uc_endpoint: &str,
@@ -84,9 +84,5 @@ fn parse_table_name(table_name: &str) -> Result<(String, String, String)> {
             table_name
         ));
     }
-    Ok((
-        parts[0].to_string(),
-        parts[1].to_string(),
-        parts[2].to_string(),
-    ))
+    Ok((parts[0].to_string(), parts[1].to_string(), parts[2].to_string()))
 }

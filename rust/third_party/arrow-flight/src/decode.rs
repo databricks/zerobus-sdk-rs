@@ -15,17 +15,24 @@
 // specific language governing permissions and limitations
 // under the License.
 
-use crate::{FlightData, trailers::LazyTrailers};
+use std::collections::HashMap;
+use std::fmt::Debug;
+use std::pin::Pin;
+use std::sync::Arc;
+use std::task::Poll;
+
 use arrow_array::{ArrayRef, RecordBatch};
 use arrow_buffer::Buffer;
 use arrow_data::UnsafeFlag;
 use arrow_schema::{Schema, SchemaRef};
 use bytes::Bytes;
-use futures::{Stream, StreamExt, ready, stream::BoxStream};
-use std::{collections::HashMap, fmt::Debug, pin::Pin, sync::Arc, task::Poll};
+use futures::stream::BoxStream;
+use futures::{ready, Stream, StreamExt};
 use tonic::metadata::MetadataMap;
 
 use crate::error::{FlightError, Result};
+use crate::trailers::LazyTrailers;
+use crate::FlightData;
 
 /// Decodes a [Stream] of [`FlightData`] back into
 /// [`RecordBatch`]es. This can be used to decode the response from an
@@ -296,9 +303,7 @@ impl FlightDataDecoder {
                 let state = if let Some(state) = self.state.as_mut() {
                     state
                 } else {
-                    return Err(FlightError::protocol(
-                        "Received DictionaryBatch prior to Schema",
-                    ));
+                    return Err(FlightError::protocol("Received DictionaryBatch prior to Schema"));
                 };
 
                 let buffer = Buffer::from(data.data_body);
@@ -326,9 +331,7 @@ impl FlightDataDecoder {
                 let state = if let Some(state) = self.state.as_ref() {
                     state
                 } else {
-                    return Err(FlightError::protocol(
-                        "Received RecordBatch prior to Schema",
-                    ));
+                    return Err(FlightError::protocol("Received RecordBatch prior to Schema"));
                 };
 
                 let record_batch = message.header_as_record_batch().ok_or_else(|| {

@@ -2,7 +2,11 @@ use std::error::Error;
 use std::sync::Arc;
 
 use arrow_array::{
-    Float64Array, Int32Array, LargeStringArray, RecordBatch, TimestampMicrosecondArray,
+    Float64Array,
+    Int32Array,
+    LargeStringArray,
+    RecordBatch,
+    TimestampMicrosecondArray,
 };
 use arrow_ipc::CompressionType;
 use databricks_zerobus_ingest_sdk::{ArrowSchema, DataType, Field, TimeUnit, ZerobusSdk};
@@ -128,11 +132,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
         if (i + 1) % WAIT_EVERY == 0 {
             stream.wait_for_offset(offset_id).await?;
-            println!(
-                "Acknowledged through batch {} (offset ID {})",
-                i + 1,
-                offset_id
-            );
+            println!("Acknowledged through batch {} (offset ID {})", i + 1, offset_id);
         }
     }
 

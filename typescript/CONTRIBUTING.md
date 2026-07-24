@@ -85,7 +85,7 @@ npm run test:integration
 Follow standard Rust formatting:
 
 ```bash
-cargo fmt --all
+../.github/scripts/rustfmt.sh --all
 cargo clippy --all-targets --all-features
 ```
 

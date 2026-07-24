@@ -17,16 +17,17 @@
 
 //! Utilities to assist with reading and writing Arrow data as Flight messages
 
-use crate::{FlightData, SchemaAsIpc};
 use std::collections::HashMap;
 use std::sync::Arc;
 
 use arrow_array::{ArrayRef, RecordBatch};
 use arrow_buffer::Buffer;
 use arrow_ipc::convert::fb_to_schema;
-use arrow_ipc::writer::IpcWriteContext;
-use arrow_ipc::{reader, root_as_message, writer, writer::IpcWriteOptions};
+use arrow_ipc::writer::{IpcWriteContext, IpcWriteOptions};
+use arrow_ipc::{reader, root_as_message, writer};
 use arrow_schema::{ArrowError, Schema, SchemaRef};
+
+use crate::{FlightData, SchemaAsIpc};
 
 /// Convert a slice of wire protocol `FlightData`s into a vector of `RecordBatch`es
 pub fn flight_data_to_batches(flight_data: &[FlightData]) -> Result<Vec<RecordBatch>, ArrowError> {
@@ -95,12 +96,8 @@ pub fn batches_to_flight_data(
     let mut ipc_write_context = IpcWriteContext::default();
 
     for batch in batches.iter() {
-        let (encoded_dictionaries, encoded_batch) = data_gen.encode(
-            batch,
-            &mut dictionary_tracker,
-            &options,
-            &mut ipc_write_context,
-        )?;
+        let (encoded_dictionaries, encoded_batch) =
+            data_gen.encode(batch, &mut dictionary_tracker, &options, &mut ipc_write_context)?;
 
         dictionaries.extend(encoded_dictionaries.into_iter().map(Into::into));
         flight_data.push(encoded_batch.into());

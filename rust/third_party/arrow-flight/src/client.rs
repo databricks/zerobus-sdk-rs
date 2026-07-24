@@ -15,27 +15,36 @@
 // specific language governing permissions and limitations
 // under the License.
 
-use crate::{
-    Action, ActionType, Criteria, Empty, FlightData, FlightDescriptor, FlightEndpoint, FlightInfo,
-    HandshakeRequest, PollInfo, PutResult, Ticket,
-    decode::FlightRecordBatchStream,
-    flight_service_client::FlightServiceClient,
-    r#gen::{CancelFlightInfoRequest, CancelFlightInfoResult, RenewFlightEndpointRequest},
-    trailers::extract_lazy_trailers,
-};
 use arrow_schema::Schema;
 use bytes::Bytes;
-use futures::{
-    Stream, StreamExt, TryStreamExt,
-    future::ready,
-    stream::{self, BoxStream},
-};
+use futures::future::ready;
+use futures::stream::{self, BoxStream};
+use futures::{Stream, StreamExt, TryStreamExt};
 use prost::Message;
 use tonic::codegen::{Body, StdError};
-use tonic::{metadata::MetadataMap, transport::Channel};
+use tonic::metadata::MetadataMap;
+use tonic::transport::Channel;
 
+use crate::decode::FlightRecordBatchStream;
 use crate::error::{FlightError, Result};
+use crate::flight_service_client::FlightServiceClient;
+use crate::r#gen::{CancelFlightInfoRequest, CancelFlightInfoResult, RenewFlightEndpointRequest};
 use crate::streams::{FallibleRequestStream, FallibleTonicResponseStream};
+use crate::trailers::extract_lazy_trailers;
+use crate::{
+    Action,
+    ActionType,
+    Criteria,
+    Empty,
+    FlightData,
+    FlightDescriptor,
+    FlightEndpoint,
+    FlightInfo,
+    HandshakeRequest,
+    PollInfo,
+    PutResult,
+    Ticket,
+};
 
 /// A "Mid level" [Apache Arrow Flight](https://arrow.apache.org/docs/format/Flight.html) client.
 ///
@@ -163,9 +172,7 @@ where
         if let Some(response) = response_stream.next().await.transpose()? {
             // check if there is another response
             if response_stream.next().await.is_some() {
-                return Err(FlightError::protocol(
-                    "Got unexpected second response from handshake",
-                ));
+                return Err(FlightError::protocol("Got unexpected second response from handshake"));
             }
 
             Ok(response.payload)
@@ -625,9 +632,8 @@ where
     ) -> Result<CancelFlightInfoResult> {
         let action = Action::new("CancelFlightInfo", request.encode_to_vec());
         let response = self.do_action(action).await?.try_next().await?;
-        let response = response.ok_or(FlightError::protocol(
-            "Received no response for cancel_flight_info call",
-        ))?;
+        let response = response
+            .ok_or(FlightError::protocol("Received no response for cancel_flight_info call"))?;
         CancelFlightInfoResult::decode(response)
             .map_err(|e| FlightError::DecodeError(e.to_string()))
     }
@@ -664,9 +670,8 @@ where
     ) -> Result<FlightEndpoint> {
         let action = Action::new("RenewFlightEndpoint", request.encode_to_vec());
         let response = self.do_action(action).await?.try_next().await?;
-        let response = response.ok_or(FlightError::protocol(
-            "Received no response for renew_flight_endpoint call",
-        ))?;
+        let response = response
+            .ok_or(FlightError::protocol("Received no response for renew_flight_endpoint call"))?;
         FlightEndpoint::decode(response).map_err(|e| FlightError::DecodeError(e.to_string()))
     }
 
@@ -681,19 +686,14 @@ where
 
 #[cfg(test)]
 mod tests {
-    use super::FlightClient;
-    use crate::encode::FlightDataEncoderBuilder;
-    use crate::flight_service_server::{FlightService, FlightServiceServer};
-    use crate::{
-        Action, ActionType, Criteria, Empty, FlightData, FlightDescriptor, FlightInfo,
-        HandshakeRequest, HandshakeResponse, PollInfo, PutResult, SchemaResult, Ticket,
-    };
-    use arrow_array::{RecordBatch, UInt64Array};
-    use bytes::Bytes;
-    use futures::{StreamExt, TryStreamExt, stream::BoxStream};
     use std::net::SocketAddr;
     use std::sync::{Arc, Mutex};
     use std::time::Duration;
+
+    use arrow_array::{RecordBatch, UInt64Array};
+    use bytes::Bytes;
+    use futures::stream::BoxStream;
+    use futures::{StreamExt, TryStreamExt};
     use tokio::net::TcpListener;
     use tokio::task::JoinHandle;
     use tonic::metadata::MetadataMap;
@@ -701,6 +701,25 @@ mod tests {
     use tonic::transport::Channel;
     use tonic::{Request, Response, Status, Streaming};
     use uuid::Uuid;
+
+    use super::FlightClient;
+    use crate::encode::FlightDataEncoderBuilder;
+    use crate::flight_service_server::{FlightService, FlightServiceServer};
+    use crate::{
+        Action,
+        ActionType,
+        Criteria,
+        Empty,
+        FlightData,
+        FlightDescriptor,
+        FlightInfo,
+        HandshakeRequest,
+        HandshakeResponse,
+        PollInfo,
+        PutResult,
+        SchemaResult,
+        Ticket,
+    };
 
     /// Minimal `FlightService` that records request metadata and serves a
     /// configured `do_get` response. Other RPCs return `Unimplemented`.

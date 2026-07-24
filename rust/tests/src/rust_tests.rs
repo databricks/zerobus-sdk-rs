@@ -45,11 +45,7 @@ mod stream_initialization_and_basic_lifecycle_tests {
             .recovery(false)
             .build()
             .await;
-        assert!(
-            result.is_ok(),
-            "Failed to create a stream: {:?}",
-            result.err()
-        );
+        assert!(result.is_ok(), "Failed to create a stream: {:?}", result.err());
 
         let stream = result.unwrap();
         assert_eq!(stream.stream_type, StreamType::Ephemeral);
@@ -378,10 +374,7 @@ mod stream_initialization_and_basic_lifecycle_tests {
         let ingest_result = stream
             .ingest_record_offset(b"test record data".to_vec())
             .await;
-        assert!(matches!(
-            ingest_result,
-            Err(ZerobusError::StreamClosedError(_))
-        ));
+        assert!(matches!(ingest_result, Err(ZerobusError::StreamClosedError(_))));
 
         Ok(())
     }
@@ -424,10 +417,7 @@ mod stream_initialization_and_basic_lifecycle_tests {
         let batch = vec![b"record 1".to_vec(), b"record 2".to_vec()];
         let ingest_result = stream.ingest_records_offset(batch).await;
 
-        assert!(matches!(
-            ingest_result,
-            Err(ZerobusError::StreamClosedError(_))
-        ));
+        assert!(matches!(ingest_result, Err(ZerobusError::StreamClosedError(_))));
 
         Ok(())
     }
@@ -525,11 +515,7 @@ mod stream_initialization_and_basic_lifecycle_tests {
         let duration = start.elapsed();
 
         // Drop should be nearly instantaneous.
-        assert!(
-            duration.as_millis() < 100,
-            "Drop should be immediate, took {:?}",
-            duration
-        );
+        assert!(duration.as_millis() < 100, "Drop should be immediate, took {:?}", duration);
 
         Ok(())
     }
@@ -585,10 +571,7 @@ mod stream_initialization_and_basic_lifecycle_tests {
         // Second close should also work.
         let second_close = stream.close().await;
         assert!(second_close.is_ok(), "Second close should be idempotent");
-        assert!(
-            stream.is_closed(),
-            "Stream should still be closed after second close()"
-        );
+        assert!(stream.is_closed(), "Stream should still be closed after second close()");
 
         Ok(())
     }
@@ -1040,10 +1023,7 @@ mod schema_tests {
         let exact = vec![0u8; limit];
         let result = stream.ingest_record_offset(exact).await;
 
-        assert!(
-            result.is_ok(),
-            "payload of exactly the limit should be accepted, got {result:?}"
-        );
+        assert!(result.is_ok(), "payload of exactly the limit should be accepted, got {result:?}");
 
         Ok(())
     }
@@ -1144,10 +1124,7 @@ mod schema_tests {
             .build()
             .await;
 
-        assert!(
-            result.is_ok(),
-            "JSON stream should be created even with descriptor"
-        );
+        assert!(result.is_ok(), "JSON stream should be created even with descriptor");
 
         Ok(())
     }
@@ -1306,11 +1283,7 @@ mod standard_operation_and_state_management_tests {
             .build()
             .await?;
 
-        let batch = vec![
-            b"record 1".to_vec(),
-            b"record 2".to_vec(),
-            b"record 3".to_vec(),
-        ];
+        let batch = vec![b"record 1".to_vec(), b"record 2".to_vec(), b"record 3".to_vec()];
 
         let ack_future = stream.ingest_records_offset(batch).await?;
         if let Some(off) = ack_future {
@@ -1744,10 +1717,7 @@ mod standard_operation_and_state_management_tests {
         if let Err(ZerobusError::StreamClosedError(_)) = flush_result {
             // Expected timeout error
         } else {
-            panic!(
-                "Expected StreamClosedError with timeout, got: {:?}",
-                flush_result
-            );
+            panic!("Expected StreamClosedError with timeout, got: {:?}", flush_result);
         }
 
         Ok(())
@@ -1882,10 +1852,7 @@ mod concurrency_and_race_condition_tests {
             "Offsets should be a complete sequence from 0 to NUM_RECORDS - 1"
         );
         assert_eq!(mock_server.get_write_count().await, NUM_RECORDS as u64);
-        assert_eq!(
-            mock_server.get_max_offset_sent().await,
-            (NUM_RECORDS - 1) as i64
-        );
+        assert_eq!(mock_server.get_max_offset_sent().await, (NUM_RECORDS - 1) as i64);
 
         Ok(())
     }
@@ -1976,10 +1943,7 @@ mod concurrency_and_race_condition_tests {
         }
 
         assert_eq!(mock_server.get_write_count().await, TOTAL_REQUESTS as u64);
-        assert_eq!(
-            mock_server.get_max_offset_sent().await,
-            (TOTAL_REQUESTS - 1) as i64
-        );
+        assert_eq!(mock_server.get_max_offset_sent().await, (TOTAL_REQUESTS - 1) as i64);
 
         Ok(())
     }
@@ -2071,14 +2035,8 @@ mod concurrency_and_race_condition_tests {
         }
 
         // Total writes = TOTAL_BATCHES * RECORDS_PER_BATCH
-        assert_eq!(
-            mock_server.get_write_count().await,
-            (TOTAL_BATCHES * RECORDS_PER_BATCH) as u64
-        );
-        assert_eq!(
-            mock_server.get_max_offset_sent().await,
-            (TOTAL_BATCHES - 1) as i64
-        );
+        assert_eq!(mock_server.get_write_count().await, (TOTAL_BATCHES * RECORDS_PER_BATCH) as u64);
+        assert_eq!(mock_server.get_max_offset_sent().await, (TOTAL_BATCHES - 1) as i64);
 
         Ok(())
     }
@@ -2767,10 +2725,7 @@ mod failure_scenarios_tests {
                 .await;
             let duration = start_time.elapsed();
 
-            assert!(
-                result.is_err(),
-                "Expected stream creation to fail after exhausting retries"
-            );
+            assert!(result.is_err(), "Expected stream creation to fail after exhausting retries");
 
             let error = result.err().unwrap();
             assert!(
@@ -2859,11 +2814,7 @@ mod failure_scenarios_tests {
                 write_count
             );
 
-            assert_eq!(
-                max_offset, 4,
-                "Expected max offset of 4 (records 0-4), got {}",
-                max_offset
-            );
+            assert_eq!(max_offset, 4, "Expected max offset of 4 (records 0-4), got {}", max_offset);
 
             Ok(())
         }
@@ -2927,11 +2878,7 @@ mod failure_scenarios_tests {
             let max_offset = mock_server.get_max_offset_sent().await;
             assert_eq!(write_count, 5, "Expected 5 writes, got {}", write_count);
 
-            assert_eq!(
-                max_offset, 4,
-                "Expected max offset of 4 (records 0-4), got {}",
-                max_offset
-            );
+            assert_eq!(max_offset, 4, "Expected max offset of 4 (records 0-4), got {}", max_offset);
 
             Ok(())
         }
@@ -2996,10 +2943,7 @@ mod failure_scenarios_tests {
             let ingest_after_failed_close =
                 stream.ingest_record_offset(b"more data".to_vec()).await;
             assert!(
-                matches!(
-                    ingest_after_failed_close,
-                    Err(ZerobusError::StreamClosedError(_))
-                ),
+                matches!(ingest_after_failed_close, Err(ZerobusError::StreamClosedError(_))),
                 "Expected StreamClosedError after failed close"
             );
 
@@ -3082,11 +3026,7 @@ mod failure_scenarios_tests {
                 write_count
             );
 
-            assert_eq!(
-                max_offset, 2,
-                "Expected max physical offset of 2, got {}",
-                max_offset
-            );
+            assert_eq!(max_offset, 2, "Expected max physical offset of 2, got {}", max_offset);
 
             Ok(())
         }
@@ -3283,11 +3223,7 @@ mod failure_scenarios_tests {
             // Original stream: 2 + 1 + 2 = 5 records written
             // Recreated stream: 1 + 2 = 3 records re-written (at least some should complete)
             // Total: at least 6 (may be up to 8 depending on timing)
-            assert!(
-                write_count >= 6,
-                "Expected at least 6 writes, got {}",
-                write_count
-            );
+            assert!(write_count >= 6, "Expected at least 6 writes, got {}", write_count);
 
             // Verify the stream was successfully recreated
             assert_eq!(new_stream.stream_type, StreamType::Ephemeral);
@@ -4071,11 +4007,7 @@ mod api_offset_tests {
             .build()
             .await?;
 
-        let batch = vec![
-            b"record 1".to_vec(),
-            b"record 2".to_vec(),
-            b"record 3".to_vec(),
-        ];
+        let batch = vec![b"record 1".to_vec(), b"record 2".to_vec(), b"record 3".to_vec()];
 
         // ingest_records_offset returns the offset directly without nested future
         let offset = stream.ingest_records_offset(batch).await?;
@@ -4142,10 +4074,7 @@ mod api_offset_tests {
 
         let elapsed = start.elapsed();
 
-        assert!(
-            wait_result.is_err(),
-            "Expected wait_for_offset to fail with server error"
-        );
+        assert!(wait_result.is_err(), "Expected wait_for_offset to fail with server error");
 
         if let Err(e) = wait_result {
             let error_msg = e.to_string();
@@ -4419,10 +4348,7 @@ mod api_offset_tests {
         let ingest_result = stream
             .ingest_record_offset(b"test record data".to_vec())
             .await;
-        assert!(matches!(
-            ingest_result,
-            Err(ZerobusError::StreamClosedError(_))
-        ));
+        assert!(matches!(ingest_result, Err(ZerobusError::StreamClosedError(_))));
 
         Ok(())
     }
@@ -4466,10 +4392,7 @@ mod api_offset_tests {
         let batch = vec![b"record 1".to_vec(), b"record 2".to_vec()];
         let ingest_result = stream.ingest_records_offset(batch).await;
 
-        assert!(matches!(
-            ingest_result,
-            Err(ZerobusError::StreamClosedError(_))
-        ));
+        assert!(matches!(ingest_result, Err(ZerobusError::StreamClosedError(_))));
 
         Ok(())
     }
@@ -4563,10 +4486,7 @@ mod api_offset_tests {
         stream.flush().await?;
 
         assert_eq!(mock_server.get_write_count().await, TOTAL_REQUESTS as u64);
-        assert_eq!(
-            mock_server.get_max_offset_sent().await,
-            (TOTAL_REQUESTS - 1) as i64
-        );
+        assert_eq!(mock_server.get_max_offset_sent().await, (TOTAL_REQUESTS - 1) as i64);
 
         Ok(())
     }
@@ -4704,11 +4624,7 @@ mod callback_tests {
 
         // Other two should have error callbacks
         let errors = callback.get_errors();
-        assert!(
-            errors.len() >= 2,
-            "Expected at least 2 error callbacks, got {}",
-            errors.len()
-        );
+        assert!(errors.len() >= 2, "Expected at least 2 error callbacks, got {}", errors.len());
 
         Ok(())
     }

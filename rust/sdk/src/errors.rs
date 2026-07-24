@@ -235,18 +235,12 @@ mod tests {
 
     #[test]
     fn auth_rejection_classification() {
-        assert!(
-            ZerobusError::CreateStreamError(tonic::Status::unauthenticated("x"))
-                .is_auth_rejection()
-        );
-        assert!(
-            ZerobusError::CreateStreamError(tonic::Status::permission_denied("x"))
-                .is_auth_rejection()
-        );
-        assert!(
-            ZerobusError::StreamClosedError(tonic::Status::unauthenticated("x"))
-                .is_auth_rejection()
-        );
+        assert!(ZerobusError::CreateStreamError(tonic::Status::unauthenticated("x"))
+            .is_auth_rejection());
+        assert!(ZerobusError::CreateStreamError(tonic::Status::permission_denied("x"))
+            .is_auth_rejection());
+        assert!(ZerobusError::StreamClosedError(tonic::Status::unauthenticated("x"))
+            .is_auth_rejection());
         // Non-auth gRPC codes are not rejections.
         assert!(!ZerobusError::CreateStreamError(tonic::Status::internal("x")).is_auth_rejection());
         assert!(
@@ -310,6 +304,7 @@ mod tests {
     #[cfg(feature = "arrow-flight")]
     fn schema_validation_status(causes: &str) -> tonic::Status {
         use std::collections::HashMap;
+
         use tonic_types::ErrorDetails;
 
         let mut metadata = HashMap::new();
@@ -392,6 +387,7 @@ mod tests {
     #[test]
     fn setup_status_with_wrong_domain_falls_back_to_create_stream_error() {
         use std::collections::HashMap;
+
         use tonic_types::ErrorDetails;
 
         let mut metadata = HashMap::new();
