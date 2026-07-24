@@ -1,6 +1,7 @@
 package stream
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -160,22 +161,16 @@ func TestCoreStreamIsClosed(t *testing.T) {
 }
 
 func TestCoreStreamGetUnackedReturnsItems(t *testing.T) {
-	// Use a fakeOpener that always fails to open so all items stay unacked.
-	fo := &fakeOpener{openErr: fmt.Errorf("connection refused")}
-	cfg := testConfig()
-	cfg.Recovery = RecoveryDisabled
-	cs := newCoreForTest(testParams(), cfg, fo, nil)
-
-	// Ingest with a context that will eventually succeed (the buffer blocks,
-	// not the opener). Give it a short context so we can proceed quickly.
-	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
-	defer cancel()
-	_, _ = cs.Ingest(ctx, []byte(`{"a":1}`))
-
+	rpc := newFakeRPC()
+	cs := newCoreForTest(testParams(), testConfig(), newFakeOpener(rpc), nil)
+	record := []byte(`{"a":1}`)
+	if _, err := cs.Ingest(context.Background(), record); err != nil {
+		t.Fatalf("Ingest: %v", err)
+	}
 	unacked := cs.GetUnacked()
-	// Items may or may not be in unacked depending on timing; we just want
-	// GetUnacked to not panic and to close the stream.
-	_ = unacked
+	if len(unacked) != 1 || !bytes.Equal(unacked[0], record) {
+		t.Fatalf("want exact unacked record %q, got %q", record, unacked)
+	}
 	if !cs.IsClosed() {
 		t.Fatal("GetUnacked should close the stream")
 	}
@@ -411,6 +406,40 @@ func TestCoreStreamRejectsAckWhenSendFails(t *testing.T) {
 	}
 }
 
+// TestCoreStreamMalformedAckTearsDownAndRecovers verifies that an
+// uninterpretable server response (an ack missing its offset) tears the stream
+// down instead of being silently ignored, and the supervisor reconnects.
+func TestCoreStreamMalformedAckTearsDownAndRecovers(t *testing.T) {
+	rpc1 := newFakeRPC()
+	rpc2 := newFakeRPC()
+	fo := newFakeOpener(rpc1, rpc2)
+
+	cfg := testConfig()
+	cfg.RecoveryRetries = 1
+	cs := newCoreForTest(testParams(), cfg, fo, nil)
+	t.Cleanup(func() { cs.Close() })
+
+	off, err := cs.Ingest(context.Background(), []byte(`{}`))
+	if err != nil {
+		t.Fatalf("Ingest: %v", err)
+	}
+
+	// Wait for the send to land on rpc1, then feed a malformed ack. The receiver
+	// must fail the stream, so the supervisor recovers to rpc2 and re-sends.
+	waitCondition(t, func() bool { return len(rpc1.sends) > 0 }, time.Second)
+	rpc1.malformedAck()
+
+	waitCondition(t, func() bool { return len(rpc2.sends) > 0 }, 2*time.Second)
+	<-rpc2.sends
+	rpc2.ack(off)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	if err := cs.WaitForOffset(ctx, off); err != nil {
+		t.Fatalf("WaitForOffset after recovery: %v", err)
+	}
+}
+
 // TestCoreStreamIngestOnClosedStreamErrors verifies that Ingest on a cleanly
 // closed stream returns an error, not (0, nil).
 func TestCoreStreamIngestOnClosedStreamErrors(t *testing.T) {
@@ -423,6 +452,90 @@ func TestCoreStreamIngestOnClosedStreamErrors(t *testing.T) {
 		t.Fatal("want error from Ingest on closed stream, got nil")
 	}
 }
+
+// TestCoreStreamFailedIngestDoesNotAdvanceFlushTarget verifies that a
+// ctx-cancelled Ingest does not leave a gap that blocks Flush forever.
+func TestCoreStreamFailedIngestDoesNotAdvanceFlushTarget(t *testing.T) {
+	rpc := newFakeRPC()
+	cs := newTestStream(t, newFakeOpener(rpc))
+
+	// First Ingest succeeds.
+	off, err := cs.Ingest(context.Background(), []byte(`{}`))
+	if err != nil {
+		t.Fatalf("first Ingest: %v", err)
+	}
+
+	// Second Ingest fails (cancelled context) — must not consume an offset.
+	cancelledCtx, cancel := context.WithCancel(context.Background())
+	cancel()
+	_, err = cs.Ingest(cancelledCtx, []byte(`{}`))
+	if err == nil {
+		t.Fatal("want error from cancelled Ingest, got nil")
+	}
+
+	// Ack the first offset and flush — must not block waiting for offset 1.
+	waitCondition(t, func() bool { return len(rpc.sends) > 0 }, time.Second)
+	<-rpc.sends
+	rpc.ack(off)
+
+	ctx, cancel2 := context.WithTimeout(context.Background(), time.Second)
+	defer cancel2()
+	if err := cs.Flush(ctx); err != nil {
+		t.Fatalf("Flush blocked on gap from failed Ingest: %v", err)
+	}
+}
+
+// TestCoreStreamCloseUnblocksEnqueueAtCapacity verifies that a caller blocked
+// in Ingest (buffer at capacity) unblocks when the stream is closed, rather
+// than hanging forever on the semaphore.
+func TestCoreStreamCloseUnblocksEnqueueAtCapacity(t *testing.T) {
+	rpc := newFakeRPC()
+	cfg := testConfig()
+	cfg.MaxInflight = 1
+	cs := newCoreForTest(testParams(), cfg, newFakeOpener(rpc), nil)
+	t.Cleanup(func() { cs.Close() })
+
+	// Fill the single slot.
+	if _, err := cs.Ingest(context.Background(), []byte(`{}`)); err != nil {
+		t.Fatalf("first Ingest: %v", err)
+	}
+
+	// A second Ingest should block; close the stream from another goroutine.
+	errCh := make(chan error, 1)
+	go func() {
+		_, err := cs.Ingest(context.Background(), []byte(`{}`))
+		errCh <- err
+	}()
+
+	time.Sleep(20 * time.Millisecond)
+	cs.Close()
+
+	select {
+	case err := <-errCh:
+		if err == nil {
+			t.Fatal("want error from blocked Ingest after Close, got nil")
+		}
+	case <-time.After(500 * time.Millisecond):
+		t.Fatal("Ingest did not unblock after Close")
+	}
+}
+
+func TestCoreStreamGetUnackedWithoutCallback(t *testing.T) {
+	fo := &fakeOpener{openErr: fmt.Errorf("connection refused")}
+	cfg := testConfig()
+	cfg.Recovery = RecoveryDisabled
+	cs := newCoreForTest(testParams(), cfg, fo, nil)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+	defer cancel()
+	_, _ = cs.Ingest(ctx, []byte(`{}`))
+
+	waitCondition(t, cs.IsClosed, 2*time.Second)
+	_ = cs.GetUnacked() // must not panic; behavior covered by IsClosed check above
+}
+
+// TestCoreStreamNonRetryableErrorTerminates checks that a non-retryable error
+// from the opener is surfaced and Flush returns it.
 
 func TestCoreStreamIngestBatch(t *testing.T) {
 	rpc := newFakeRPC()
@@ -449,5 +562,347 @@ func TestCoreStreamIngestBatch(t *testing.T) {
 
 	if err := cs.Flush(context.Background()); err != nil {
 		t.Fatalf("Flush: %v", err)
+	}
+}
+
+func TestWatermarkAlreadyCancelledContextReturnsImmediately(t *testing.T) {
+	w := newWatermark()
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	done := make(chan error, 1)
+	go func() { done <- w.waitFor(ctx, 0) }()
+	select {
+	case err := <-done:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("want context.Canceled, got %v", err)
+		}
+	case <-time.After(200 * time.Millisecond):
+		t.Fatal("waitFor missed context cancellation")
+	}
+}
+
+func TestCoreStreamCloseUnblocksBlockedSend(t *testing.T) {
+	rpc := newBlockedSendRPC()
+	cfg := testConfig()
+	cfg.DrainTimeout = 25 * time.Millisecond
+	cs := newCoreForTest(testParams(), cfg, &blockedSendOpener{rpc: rpc}, nil)
+
+	if _, err := cs.Ingest(context.Background(), []byte(`{}`)); err != nil {
+		t.Fatalf("Ingest: %v", err)
+	}
+	select {
+	case <-rpc.sendStarted:
+	case <-time.After(time.Second):
+		t.Fatal("Send did not start")
+	}
+
+	done := make(chan struct{})
+	go func() {
+		cs.Close()
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(500 * time.Millisecond):
+		t.Fatal("Close hung behind blocked Send")
+	}
+}
+
+func TestCoreStreamCloseWakesOffsetWaiters(t *testing.T) {
+	rpc := newFakeRPC()
+	cs := newCoreForTest(testParams(), testConfig(), newFakeOpener(rpc), nil)
+	offset, err := cs.Ingest(context.Background(), []byte(`{}`))
+	if err != nil {
+		t.Fatalf("Ingest: %v", err)
+	}
+
+	waitDone := make(chan error, 1)
+	go func() {
+		waitDone <- cs.WaitForOffset(context.Background(), offset)
+	}()
+	cs.Close()
+
+	select {
+	case err := <-waitDone:
+		if !errors.Is(err, errWatermarkClosed) {
+			t.Fatalf("want errWatermarkClosed, got %v", err)
+		}
+	case <-time.After(500 * time.Millisecond):
+		t.Fatal("WaitForOffset remained blocked after Close")
+	}
+}
+
+func TestCoreStreamAckCallbackCanClose(t *testing.T) {
+	rpc := newFakeRPC()
+	callbackDone := make(chan struct{})
+	var cs *testStream
+	cb := &callbackFuncs{
+		onAck: func(int64) {
+			cs.Close()
+			close(callbackDone)
+		},
+	}
+	cs = newCoreForTest(testParams(), testConfig(), newFakeOpener(rpc), cb)
+
+	offset, err := cs.Ingest(context.Background(), []byte(`{}`))
+	if err != nil {
+		t.Fatalf("Ingest: %v", err)
+	}
+	waitCondition(t, func() bool { return len(rpc.sends) == 1 }, time.Second)
+	<-rpc.sends
+	rpc.ack(offset)
+
+	select {
+	case <-callbackDone:
+	case <-time.After(time.Second):
+		t.Fatal("OnAck calling Close deadlocked")
+	}
+}
+
+func TestCoreStreamCloseReportsAbandonedOffsets(t *testing.T) {
+	rpc := newFakeRPC()
+	cb := &recordingCallback{}
+	cs := newCoreForTest(testParams(), testConfig(), newFakeOpener(rpc), cb)
+
+	record := []byte(`{"retained":true}`)
+	offset, err := cs.Ingest(context.Background(), record)
+	if err != nil {
+		t.Fatalf("Ingest: %v", err)
+	}
+	waitCondition(t, func() bool { return len(rpc.sends) == 1 }, time.Second)
+	cs.Close()
+	waitCondition(t, func() bool { return len(cb.errorOffsets()) == 1 }, time.Second)
+	if got := cb.errorOffsets()[0]; got != offset {
+		t.Fatalf("want OnError offset %d, got %d", offset, got)
+	}
+	unacked := cs.GetUnacked()
+	if len(unacked) != 1 || !bytes.Equal(unacked[0], record) {
+		t.Fatalf("callback drain lost GetUnacked payload: %q", unacked)
+	}
+}
+
+func TestCoreStreamErrorCallbackCanClose(t *testing.T) {
+	rpc := newFakeRPC()
+	callbackDone := make(chan struct{})
+	var cs *testStream
+	cb := &callbackFuncs{
+		onError: func(int64, error) {
+			cs.Close()
+			close(callbackDone)
+		},
+	}
+	cs = newCoreForTest(testParams(), testConfig(), newFakeOpener(rpc), cb)
+	if _, err := cs.Ingest(context.Background(), []byte(`{}`)); err != nil {
+		t.Fatalf("Ingest: %v", err)
+	}
+	waitCondition(t, func() bool { return len(rpc.sends) == 1 }, time.Second)
+
+	closeDone := make(chan struct{})
+	go func() {
+		cs.Close()
+		close(closeDone)
+	}()
+	select {
+	case <-closeDone:
+	case <-time.After(time.Second):
+		t.Fatal("Close blocked while dispatching OnError")
+	}
+	select {
+	case <-callbackDone:
+	case <-time.After(time.Second):
+		t.Fatal("OnError calling Close deadlocked")
+	}
+}
+
+func TestCoreStreamRejectsAckBeyondInFlight(t *testing.T) {
+	rpc1 := newFakeRPC()
+	rpc2 := newFakeRPC()
+	cfg := testConfig()
+	cfg.RecoveryRetries = 1
+	cs := newCoreForTest(testParams(), cfg, newFakeOpener(rpc1, rpc2), nil)
+	t.Cleanup(func() { cs.Close() })
+
+	offset, err := cs.Ingest(context.Background(), []byte(`{}`))
+	if err != nil {
+		t.Fatalf("Ingest: %v", err)
+	}
+	waitCondition(t, func() bool { return len(rpc1.sends) == 1 }, time.Second)
+	<-rpc1.sends
+	rpc1.ack(offset + 100)
+
+	waitCondition(t, func() bool { return len(rpc2.sends) == 1 }, time.Second)
+	<-rpc2.sends
+	shortCtx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	defer cancel()
+	if err := cs.WaitForOffset(shortCtx, offset); !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("future ack falsely advanced durability watermark: %v", err)
+	}
+
+	rpc2.ack(offset)
+	ctx, cancelWait := context.WithTimeout(context.Background(), time.Second)
+	defer cancelWait()
+	if err := cs.WaitForOffset(ctx, offset); err != nil {
+		t.Fatalf("WaitForOffset after valid ack: %v", err)
+	}
+}
+
+func TestCoreStreamCumulativeAckDispatchesEveryOffset(t *testing.T) {
+	rpc := newFakeRPC()
+	cb := &recordingCallback{}
+	cs := newCoreForTest(testParams(), testConfig(), newFakeOpener(rpc), cb)
+	t.Cleanup(func() { cs.Close() })
+
+	for range 3 {
+		if _, err := cs.Ingest(context.Background(), []byte(`{}`)); err != nil {
+			t.Fatalf("Ingest: %v", err)
+		}
+	}
+	waitCondition(t, func() bool { return len(rpc.sends) == 3 }, time.Second)
+	for range 3 {
+		<-rpc.sends
+	}
+	rpc.ack(2)
+	waitCondition(t, func() bool { return len(cb.ackOffsets()) == 3 }, time.Second)
+	for i, got := range cb.ackOffsets() {
+		if got != int64(i) {
+			t.Fatalf("callback %d: want offset %d, got %d", i, i, got)
+		}
+	}
+}
+
+func TestCallbackDispatcherDoesNotDropLargeAckRange(t *testing.T) {
+	cb := &recordingCallback{}
+	dispatcher := newCallbackDispatcher(cb)
+	dispatcher.enqueueAcks(0, 2047)
+	dispatcher.shutdown(time.Second)
+
+	offsets := cb.ackOffsets()
+	if len(offsets) != 2048 {
+		t.Fatalf("want 2048 callbacks, got %d", len(offsets))
+	}
+	for i, offset := range offsets {
+		if offset != int64(i) {
+			t.Fatalf("callback %d: want offset %d, got %d", i, i, offset)
+		}
+	}
+}
+
+func TestCoreStreamPauseDrainsLateAck(t *testing.T) {
+	rpc := newFakeRPC()
+	rpc2 := newFakeRPC()
+	fo := newFakeOpener(rpc, rpc2)
+	cfg := testConfig()
+	cfg.StreamPausedMaxWait = 200 * time.Millisecond
+	cs := newCoreForTest(testParams(), cfg, fo, nil)
+	t.Cleanup(func() { cs.Close() })
+
+	offset, err := cs.Ingest(context.Background(), []byte(`{}`))
+	if err != nil {
+		t.Fatalf("Ingest: %v", err)
+	}
+	waitCondition(t, func() bool { return len(rpc.sends) == 1 }, time.Second)
+	<-rpc.sends
+	rpc.closeSignalWithDuration(150 * time.Millisecond)
+	rpc.ack(offset)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 75*time.Millisecond)
+	defer cancel()
+	if err := cs.WaitForOffset(ctx, offset); err != nil {
+		t.Fatalf("late ack was not drained during pause: %v", err)
+	}
+	waitCondition(t, func() bool { return fo.openCount() == 2 }, time.Second)
+}
+
+func TestCoreStreamPauseHonorsRecoveryDisabled(t *testing.T) {
+	rpc := newFakeRPC()
+	fo := newFakeOpener(rpc)
+	cfg := testConfig()
+	cfg.Recovery = RecoveryDisabled
+	cs := newCoreForTest(testParams(), cfg, fo, nil)
+
+	if _, err := cs.Ingest(context.Background(), []byte(`{}`)); err != nil {
+		t.Fatalf("Ingest: %v", err)
+	}
+	waitCondition(t, func() bool { return len(rpc.sends) == 1 }, time.Second)
+	rpc.closeSignal()
+	waitCondition(t, cs.IsClosed, time.Second)
+	if got := fo.openCount(); got != 1 {
+		t.Fatalf("RecoveryDisabled pause reopened stream %d times", got)
+	}
+}
+
+func TestCoreStreamIdlePauseRecoversImmediately(t *testing.T) {
+	rpc1 := newFakeRPC()
+	rpc2 := newFakeRPC()
+	fo := newFakeOpener(rpc1, rpc2)
+	cs := newCoreForTest(testParams(), testConfig(), fo, nil)
+	t.Cleanup(func() { cs.Close() })
+
+	waitCondition(t, func() bool { return fo.openCount() == 1 }, time.Second)
+	rpc1.closeSignalWithDuration(time.Second)
+	waitCondition(t, func() bool { return fo.openCount() == 2 }, 200*time.Millisecond)
+}
+
+func TestCoreStreamLackOfAckBudgetStartsWithFlight(t *testing.T) {
+	rpc := newFakeRPC()
+	fo := newFakeOpener(rpc)
+	cfg := testConfig()
+	cfg.LackOfAckTimeout = 200 * time.Millisecond
+	cs := newCoreForTest(testParams(), cfg, fo, nil)
+	t.Cleanup(func() { cs.Close() })
+
+	waitCondition(t, func() bool { return fo.openCount() == 1 }, time.Second)
+	time.Sleep(175 * time.Millisecond)
+	offset, err := cs.Ingest(context.Background(), []byte(`{}`))
+	if err != nil {
+		t.Fatalf("Ingest: %v", err)
+	}
+	waitCondition(t, func() bool { return len(rpc.sends) == 1 }, time.Second)
+	<-rpc.sends
+	time.Sleep(50 * time.Millisecond)
+	if cs.IsClosed() || fo.openCount() != 1 {
+		t.Fatal("record inherited an almost-expired idle ack timer")
+	}
+	rpc.ack(offset)
+}
+
+func TestCoreStreamRejectsOversizedPayloadWithoutConsumingOffset(t *testing.T) {
+	rpc := newFakeRPC()
+	cfg := testConfig()
+	cfg.MaxPayloadBytes = 64
+	cs := newCoreForTest(testParams(), cfg, newFakeOpener(rpc), nil)
+	t.Cleanup(func() { cs.Close() })
+
+	if _, err := cs.Ingest(context.Background(), bytes.Repeat([]byte("x"), 65)); !errors.Is(err, ErrPayloadTooLarge) {
+		t.Fatalf("want ErrPayloadTooLarge for record, got %v", err)
+	}
+	if _, err := cs.IngestBatch(context.Background(), [][]byte{
+		bytes.Repeat([]byte("x"), 40),
+		bytes.Repeat([]byte("y"), 30),
+	}); !errors.Is(err, ErrPayloadTooLarge) {
+		t.Fatalf("want ErrPayloadTooLarge for batch, got %v", err)
+	}
+	cs.cfg.MaxBatchRecords = 1
+	if _, err := cs.IngestBatch(context.Background(), [][]byte{
+		[]byte(`{}`), []byte(`{}`),
+	}); !errors.Is(err, ErrPayloadTooLarge) {
+		t.Fatalf("want ErrPayloadTooLarge for batch record count, got %v", err)
+	}
+	cs.cfg.MaxBatchRecords = DefaultMaxBatchRecords
+	offset, err := cs.Ingest(context.Background(), []byte(`{}`))
+	if err != nil {
+		t.Fatalf("small Ingest: %v", err)
+	}
+	if offset != 0 {
+		t.Fatalf("oversized inputs consumed offsets; small record got %d", offset)
+	}
+
+	wireCfg := testConfig()
+	wireCfg.MaxPayloadBytes = len([]byte(`{}`))
+	wireCS := newCoreForTest(testParams(), wireCfg, newFakeOpener(newFakeRPC()), nil)
+	t.Cleanup(func() { wireCS.Close() })
+	if _, err := wireCS.Ingest(context.Background(), []byte(`{}`)); !errors.Is(err, ErrPayloadTooLarge) {
+		t.Fatalf("want encoded wire-size rejection, got %v", err)
 	}
 }

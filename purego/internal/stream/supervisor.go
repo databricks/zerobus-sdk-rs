@@ -5,16 +5,37 @@ import (
 	"errors"
 	"fmt"
 	"time"
+
+	"github.com/databricks/zerobus-sdk/purego/internal/transport"
 )
 
-// supervise manages connection and recovery.
+// supervise runs the connect, stream, and recovery lifecycle.
+// Successful connections reset the retry budget.
 func (cs *CoreStream[Req, Resp]) supervise(ctx context.Context) {
-	defer close(cs.done)
+	defer func() {
+		if ctx.Err() != nil {
+			// Wake waiters whose targets are now unreachable.
+			cs.wm.closeForClean()
+			if cs.dispatcher != nil {
+				items := cs.buf.drain()
+				cs.retainUnacked(items)
+				if len(items) > 0 {
+					cs.dispatcher.enqueueErrors(
+						items[0].offset, items[len(items)-1].offset, errWatermarkClosed,
+					)
+				}
+			}
+		}
+		// Publish completion before waiting for callbacks.
+		close(cs.done)
+		cs.dispatcher.shutdown(cs.cfg.CallbackTeardownTimeout)
+	}()
 
 	var err error
 	failedAttempts := 0
 	for {
 		if ctx.Err() != nil {
+			// Cancelled by Close — clean exit, no error.
 			return
 		}
 
@@ -29,31 +50,43 @@ func (cs *CoreStream[Req, Resp]) supervise(ctx context.Context) {
 			case <-ctx.Done():
 				return
 			}
-			cs.buf.requeue()
+			// runOnce requeues after Open succeeds.
 		}
 
 		runErr, resetRecoveryBudget := cs.runOnce(ctx)
 
+		// ctx cancelled = clean exit via Close. Don't treat server-side EOF as clean.
 		if ctx.Err() != nil {
 			return
 		}
 
+		// Reset the retry budget after a successful Open.
 		if resetRecoveryBudget {
 			failedAttempts = 0
 		}
 
+		// Pauses do not consume the retry budget.
 		var ps pauseSignal
 		if errors.As(runErr, &ps) {
-			if !cs.waitPause(ctx, ps.duration) {
-				return // Close cancelled ctx during the pause.
+			if !cs.cfg.Recovery.enabled() {
+				err = fmt.Errorf(
+					"stream: server requested pause and recovery is disabled: %w",
+					runErr,
+				)
+				break
 			}
-			cs.buf.requeue()
+			// The receiver already drained the pause window.
 			continue
 		}
 
 		if runErr == nil {
-			// EOF is a retryable disconnect.
+			// Server closed the stream cleanly (EOF). Treat as a retryable
+			// disconnect and recover.
 			runErr = fmt.Errorf("stream: server closed the stream")
+		}
+
+		if transport.IsAuthRejection(runErr) && cs.params.HeadersProvider != nil {
+			cs.params.HeadersProvider.Invalidate(ctx, cs.params.TableName)
 		}
 
 		err = runErr
@@ -67,33 +100,19 @@ func (cs *CoreStream[Req, Resp]) supervise(ctx context.Context) {
 	cs.wm.fail(err)
 	cs.setTerminalErr(err)
 
-	if cs.callback != nil {
-		// Report every abandoned item.
-		for _, it := range cs.buf.drain() {
-			cs.callback.OnError(it.offset, err)
+	if cs.dispatcher != nil {
+		// Retain records and queue one callback range.
+		items := cs.buf.drain()
+		cs.retainUnacked(items)
+		if len(items) > 0 {
+			cs.dispatcher.enqueueErrors(
+				items[0].offset, items[len(items)-1].offset, err,
+			)
 		}
 	} else {
-		// Preserve items for GetUnacked.
+		// No callback: just close the buffer so enqueue callers unblock. The
+		// items remain retrievable via GetUnacked, which calls drain() itself.
 		cs.buf.close()
-	}
-}
-
-// waitPause applies the server pause and optional client cap.
-func (cs *CoreStream[Req, Resp]) waitPause(ctx context.Context, serverDuration time.Duration) bool {
-	wait := serverDuration
-	if cap := cs.cfg.StreamPausedMaxWait; cap > 0 && (wait <= 0 || cap < wait) {
-		wait = cap
-	}
-	if wait <= 0 {
-		return ctx.Err() == nil
-	}
-	timer := time.NewTimer(wait)
-	defer timer.Stop()
-	select {
-	case <-timer.C:
-		return true
-	case <-ctx.Done():
-		return false
 	}
 }
 
@@ -107,24 +126,28 @@ func isRetryable(err error) bool {
 	if err == nil {
 		return false
 	}
-	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+	// Validation failures are deterministic.
+	var ve *validationError
+	if errors.As(err, &ve) {
 		return false
 	}
 	if errors.Is(err, errClosed) {
 		return false
 	}
-	var ve *validationError
-	if errors.As(err, &ve) {
-		return false
-	}
+	// Honor self-classifying wrapped errors.
 	var re retryableError
 	if errors.As(err, &re) {
 		return re.IsRetryable()
 	}
+	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return false
+	}
+	// Treat remaining failures as transient.
 	return true
 }
 
-// validationError marks deterministic failures.
+// validationError marks errors that are configuration/validation failures
+// rather than transient transport failures.
 type validationError struct{ cause error }
 
 func (e *validationError) Error() string { return e.cause.Error() }
