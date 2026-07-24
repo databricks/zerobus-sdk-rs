@@ -243,6 +243,56 @@ func TestCoreStreamRecoveryRequeuesUnacked(t *testing.T) {
 	}
 }
 
+func TestCoreStreamDefersAckUntilSendSucceeds(t *testing.T) {
+	rpc := newControlledSendRPC()
+	cs := newCoreForTest(testParams(), testConfig(), &controlledSendOpener{rpc}, nil)
+	t.Cleanup(func() { cs.Close() })
+
+	offset, err := cs.Ingest(context.Background(), []byte(`{}`))
+	if err != nil {
+		t.Fatalf("Ingest: %v", err)
+	}
+	<-rpc.started
+	rpc.ack(offset)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	defer cancel()
+	if err := cs.WaitForOffset(ctx, offset); !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("ack completed before Send: %v", err)
+	}
+
+	rpc.result <- nil
+	<-rpc.sends
+	rpc.close()
+	ctx, cancel = context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	if err := cs.WaitForOffset(ctx, offset); err != nil {
+		t.Fatalf("deferred ack after Send and EOF: %v", err)
+	}
+}
+
+func TestCoreStreamRejectsAckWhenSendFails(t *testing.T) {
+	rpc := newControlledSendRPC()
+	cfg := testConfig()
+	cfg.Recovery = RecoveryDisabled
+	cs := newCoreForTest(testParams(), cfg, &controlledSendOpener{rpc}, nil)
+	t.Cleanup(func() { cs.Close() })
+
+	offset, err := cs.Ingest(context.Background(), []byte(`{}`))
+	if err != nil {
+		t.Fatalf("Ingest: %v", err)
+	}
+	<-rpc.started
+	rpc.ack(offset)
+	rpc.result <- errors.New("send failed")
+
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	if err := cs.WaitForOffset(ctx, offset); err == nil {
+		t.Fatal("ack from failed Send established durability")
+	}
+}
+
 // TestCoreStreamIngestOnClosedStreamErrors verifies that Ingest on a cleanly
 // closed stream returns an error, not (0, nil).
 func TestCoreStreamIngestOnClosedStreamErrors(t *testing.T) {

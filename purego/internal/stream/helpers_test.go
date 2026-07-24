@@ -17,10 +17,7 @@ import (
 
 // ---- fake transport helpers ------------------------------------------------
 
-// fakeRPC is a minimal in-process bidi stream satisfying transport.FakeStreamRPC.
-// It lets tests control exactly what acks the receiver sees without a real
-// gRPC server. close() closes the recvs channel so Recv returns io.EOF,
-// unblocking the receiver goroutine just like a real gRPC stream close would.
+// fakeRPC is a controllable in-process stream.
 type fakeRPC struct {
 	sends     chan *zerobuspb.EphemeralStreamRequest
 	recvs     chan *zerobuspb.EphemeralStreamResponse
@@ -56,15 +53,11 @@ func (f *fakeRPC) Recv() (*zerobuspb.EphemeralStreamResponse, error) {
 	return resp, nil
 }
 
-// CloseSend closes the stream from the send side; in our fake this also
-// closes the recvs channel so the receiver unblocks with io.EOF.
 func (f *fakeRPC) CloseSend() error {
 	f.close()
 	return nil
 }
 
-// close closes the recvs channel, causing any blocking Recv call to return
-// io.EOF. Safe to call multiple times.
 func (f *fakeRPC) close() {
 	f.closeOnce.Do(func() {
 		f.closed.Store(true)
@@ -72,7 +65,6 @@ func (f *fakeRPC) close() {
 	})
 }
 
-// ack sends a DurabilityAck response for offset.
 func (f *fakeRPC) ack(offset int64) {
 	f.recvs <- &zerobuspb.EphemeralStreamResponse{
 		Payload: &zerobuspb.EphemeralStreamResponse_IngestRecordResponse{
@@ -83,9 +75,51 @@ func (f *fakeRPC) ack(offset int64) {
 	}
 }
 
-// fakeOpener wraps a fakeRPC as a transport.Opener by building a rawStream
-// from it. Each call to Open returns the same underlying fakeRPC so tests
-// can send acks from it.
+type controlledSendRPC struct {
+	*fakeRPC
+	started   chan struct{}
+	result    chan error
+	aborted   chan struct{}
+	startOnce sync.Once
+	abortOnce sync.Once
+}
+
+func newControlledSendRPC() *controlledSendRPC {
+	return &controlledSendRPC{
+		fakeRPC: newFakeRPC(),
+		started: make(chan struct{}),
+		result:  make(chan error, 1),
+		aborted: make(chan struct{}),
+	}
+}
+
+func (f *controlledSendRPC) Send(req *zerobuspb.EphemeralStreamRequest) error {
+	f.startOnce.Do(func() { close(f.started) })
+	select {
+	case err := <-f.result:
+		if err != nil {
+			return err
+		}
+		return f.fakeRPC.Send(req)
+	case <-f.aborted:
+		return io.ErrClosedPipe
+	}
+}
+
+func (f *controlledSendRPC) Abort() {
+	f.abortOnce.Do(func() {
+		close(f.aborted)
+		f.fakeRPC.close()
+	})
+}
+
+type controlledSendOpener struct{ rpc *controlledSendRPC }
+
+func (o *controlledSendOpener) Open(_ context.Context, _ transport.StreamParams) (wireStream[encodedMsg, ephemeralResp], error) {
+	return transport.NewFakeStreamForTesting(o.rpc), nil
+}
+
+// fakeOpener returns configured streams in order.
 type fakeOpener struct {
 	mu       sync.Mutex
 	rpcs     []*fakeRPC
@@ -113,15 +147,7 @@ func (fo *fakeOpener) Open(_ context.Context, _ transport.StreamParams) (wireStr
 	return transport.NewFakeStreamForTesting(rpc), nil
 }
 
-// gracefulFakeRPC models real gRPC teardown semantics more faithfully than
-// fakeRPC by distinguishing the two teardown verbs:
-//   - CloseSend half-closes the send side (signalling closeSent) but leaves Recv
-//     open, so a test can deliver late acks after the half-close and assert the
-//     receiver drains them.
-//   - Abort models Close/context-cancel: it unblocks a blocked Recv with an error
-//     and drops any further acks, as an abrupt reset would.
-//
-// serverEnd closes recvs to produce the io.EOF that ends a graceful drain.
+// gracefulFakeRPC distinguishes graceful and abrupt teardown.
 type gracefulFakeRPC struct {
 	sends     chan *zerobuspb.EphemeralStreamRequest
 	recvs     chan *zerobuspb.EphemeralStreamResponse

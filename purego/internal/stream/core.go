@@ -22,29 +22,24 @@ const (
 	DefaultDrainTimeout = 500 * time.Millisecond
 )
 
-// RecoverySetting controls stream reconnection.
-// Its zero value enables recovery.
+// RecoverySetting controls stream reconnection and defaults to enabled.
 type RecoverySetting int
 
 const (
-	// RecoveryEnabled reconnects on failure. It is the zero value, so a Config
-	// that never sets Recovery still recovers.
+	// RecoveryEnabled reconnects on failure.
 	RecoveryEnabled RecoverySetting = iota
-	// RecoveryDisabled fails the stream on the first unrecoverable error without
-	// attempting to reconnect.
+	// RecoveryDisabled prevents reconnection.
 	RecoveryDisabled
 )
 
 // enabled reports whether recovery should be attempted.
 func (r RecoverySetting) enabled() bool { return r == RecoveryEnabled }
 
-// Config holds per-stream configuration. All fields have sane defaults via
-// DefaultConfig(); override individual fields before passing to NewCoreStream.
+// Config holds per-stream configuration.
 type Config struct {
 	// MaxInflight is the maximum number of unacknowledged records in the buffer.
 	MaxInflight int
-	// Recovery controls whether stream reconnection is attempted on failure. The
-	// zero value (RecoveryEnabled) recovers; set RecoveryDisabled to opt out.
+	// Recovery controls reconnection and defaults to enabled.
 	Recovery RecoverySetting
 	// RecoveryRetries limits consecutive reconnect failures.
 	RecoveryRetries int
@@ -54,14 +49,10 @@ type Config struct {
 	FlushTimeout time.Duration
 	// LackOfAckTimeout bounds ack silence while records are in flight.
 	LackOfAckTimeout time.Duration
-	// DrainTimeout bounds the orderly drain-to-EOF performed on a clean Close so
-	// the server observes an orderly END_STREAM rather than an abrupt reset.
+	// DrainTimeout bounds graceful shutdown.
 	DrainTimeout time.Duration
-	// StreamPausedMaxWait caps how long the client waits after a server
-	// CloseStreamSignal before reconnecting. The effective wait is
-	// min(StreamPausedMaxWait, server-requested duration). A non-positive value
-	// means "no client cap": wait the full server-requested duration. This lets a
-	// caller trade graceful drain (wait longer) against faster recovery.
+	// StreamPausedMaxWait caps a server-requested pause.
+	// Non-positive values apply no client cap.
 	StreamPausedMaxWait time.Duration
 }
 
@@ -84,8 +75,7 @@ type AckCallback interface {
 	OnError(offset int64, err error)
 }
 
-// watermark is the monotonic ack offset shared between the receiver goroutine
-// (writer) and Flush/WaitForOffset callers (readers).
+// watermark tracks the highest acknowledged offset.
 type watermark struct {
 	mu       sync.Mutex
 	cond     *sync.Cond
@@ -121,8 +111,13 @@ func (w *watermark) fail(err error) {
 	w.cond.Broadcast()
 }
 
-// waitFor blocks until the watermark reaches target or the watermark becomes
-// terminal. Returns nil if the target is reached, or the terminal error.
+func (w *watermark) current() int64 {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.offset
+}
+
+// waitFor blocks until target, cancellation, or terminal failure.
 func (w *watermark) waitFor(ctx context.Context, target int64) error {
 	w.mu.Lock()
 	defer w.mu.Unlock()
@@ -141,22 +136,8 @@ func (w *watermark) waitFor(ctx context.Context, target int64) error {
 	return w.err
 }
 
-// CoreStream is the protocol-agnostic ingestion core. It owns the buffer,
-// sender goroutine, receiver goroutine, ack watermark, and the supervisor
-// that reconnects on failure. It is generic over the wire request/response
-// types (Req/Resp): proto/JSON instantiate it over EphemeralStream, Arrow over
-// Flight. The three specialization points — encoder, ackModel, and the
-// wireStream returned by opener — are injected, so this core is written once
-// and never names a concrete proto type.
-//
-// The three goroutines:
-//
-//	sender   — pulls items from the buffer, writes them to the wire stream.
-//	receiver — reads acks from the wire stream, advances the watermark.
-//	supervisor — create → run → recover loop; wires sender+receiver together.
-//
-// Callers interact only through Ingest, IngestBatch, Flush, WaitForOffset,
-// GetUnacked, and Close.
+// CoreStream is the protocol-independent ingestion pipeline.
+// It coordinates buffering, sending, acknowledgements, and recovery.
 type CoreStream[Req, Resp any] struct {
 	params   StreamParams
 	cfg      Config
@@ -167,16 +148,11 @@ type CoreStream[Req, Resp any] struct {
 	wm       *watermark
 	callback AckCallback
 
-	// ingestMu serializes offset assignment + enqueue so that nextOffset only
-	// advances for records that were successfully queued. Without this, a failed
-	// enqueue (e.g. ctx-cancelled backpressure) would consume an offset that is
-	// never sent, making Flush wait forever for an offset the server never sees.
+	// ingestMu serializes offset assignment and enqueue.
 	ingestMu sync.Mutex
-	// nextOffset is the next logical offset to assign. Protected by ingestMu.
+	// nextOffset is protected by ingestMu.
 	nextOffset int64
-	// lastEnqueued is the highest offset successfully enqueued; -1 until the
-	// first successful Ingest. Flush targets this, not nextOffset-1, so a
-	// failed Ingest can't create a permanent gap.
+	// lastEnqueued is the highest successfully queued offset.
 	lastEnqueued int64
 
 	// done is closed when the supervisor exits (terminal state).
@@ -190,10 +166,7 @@ type CoreStream[Req, Resp any] struct {
 	cancelSupervisor context.CancelFunc
 }
 
-// NewCoreStream constructs a CoreStream and starts the supervisor goroutine.
-// The stream is immediately ready for Ingest calls; the supervisor opens the
-// first transport stream in the background. Prefer the per-protocol
-// constructors (NewProtoJSONStream) over calling this directly.
+// NewCoreStream constructs a stream and starts its supervisor.
 func NewCoreStream[Req, Resp any](
 	params StreamParams,
 	cfg Config,
@@ -220,29 +193,22 @@ func NewCoreStream[Req, Resp any](
 	return cs
 }
 
-// Ingest encodes record and enqueues it in the buffer, blocking if the buffer
-// is at capacity (backpressure). Returns the logical offset assigned to this
-// record; pass it to WaitForOffset to confirm durability.
+// Ingest queues one record and returns its durability offset.
 func (cs *CoreStream[Req, Resp]) Ingest(ctx context.Context, record []byte) (int64, error) {
 	return cs.enqueueEncoded(ctx, func(offset int64) (Req, error) {
 		return cs.enc.encode(offset, record)
 	})
 }
 
-// IngestBatch encodes records as a single atomic batch and enqueues it, blocking
-// if the buffer is at capacity. The whole batch occupies one logical offset and
-// the server acks it atomically. Returns that offset. Prefer this over Ingest in
-// hot paths: it amortizes per-message overhead across the batch.
+// IngestBatch queues one atomic batch under one offset.
+// Prefer it in hot paths to reduce per-message overhead.
 func (cs *CoreStream[Req, Resp]) IngestBatch(ctx context.Context, records [][]byte) (int64, error) {
 	return cs.enqueueEncoded(ctx, func(offset int64) (Req, error) {
 		return cs.enc.encodeBatch(offset, records)
 	})
 }
 
-// enqueueEncoded assigns the next offset, encodes via encodeFn, and enqueues the
-// result under ingestMu so nextOffset advances only for records that make it
-// into the buffer. A failed encode or ctx-cancelled backpressure consumes no
-// offset, so Flush never waits on an offset the server never sees.
+// enqueueEncoded assigns an offset only after a successful enqueue.
 func (cs *CoreStream[Req, Resp]) enqueueEncoded(ctx context.Context, encodeFn func(offset int64) (Req, error)) (int64, error) {
 	if cs.isClosed() {
 		if err := cs.terminalErr(); err != nil {
@@ -266,11 +232,8 @@ func (cs *CoreStream[Req, Resp]) enqueueEncoded(ctx context.Context, encodeFn fu
 	return offset, nil
 }
 
-// Flush blocks until every record ingested so far is acknowledged by the
-// server. Returns nil once all are durable, or an error if the stream fails
-// or ctx expires.
-//
-// When ctx has no deadline, Flush applies DefaultFlushTimeout.
+// Flush waits for all currently queued records.
+// It applies DefaultFlushTimeout when ctx has no deadline.
 func (cs *CoreStream[Req, Resp]) Flush(ctx context.Context) error {
 	cs.ingestMu.Lock()
 	target := cs.lastEnqueued
@@ -286,23 +249,14 @@ func (cs *CoreStream[Req, Resp]) Flush(ctx context.Context) error {
 	return cs.WaitForOffset(ctx, target)
 }
 
-// WaitForOffset blocks until the server has acknowledged all records up to and
-// including offset, or until ctx expires or the stream fails terminally.
-//
-// offset must be one returned by a successful Ingest. Passing an offset that was
-// never enqueued (e.g. a value above the last assigned offset) is a caller error:
-// since the watermark can never reach it, the call blocks until ctx expires (or
-// the stream fails). Prefer Flush, which waits for exactly the records ingested
-// so far.
+// WaitForOffset waits until offset is durable.
+// The offset must come from a successful ingest call.
 func (cs *CoreStream[Req, Resp]) WaitForOffset(ctx context.Context, offset int64) error {
 	return cs.wm.waitFor(ctx, offset)
 }
 
-// GetUnacked returns records that were ingested but never acknowledged, one
-// entry per record. A batched buffer item expands to all of its records (not
-// just the first), so no unacked record is silently dropped. It closes the
-// stream first (idempotent) to ensure the buffer is fully drained and no new
-// items are added.
+// GetUnacked closes the stream and returns unacknowledged records.
+// Batch items expand into their original records.
 func (cs *CoreStream[Req, Resp]) GetUnacked() [][]byte {
 	cs.Close()
 	items := cs.buf.drain()
@@ -315,16 +269,8 @@ func (cs *CoreStream[Req, Resp]) GetUnacked() [][]byte {
 	return out
 }
 
-// Close terminates the stream and releases its resources. It is idempotent and
-// blocks until teardown completes.
-//
-// Close does NOT wait for pending records to be acknowledged: any records still
-// in flight when Close is called are abandoned (retrievable via GetUnacked, or
-// reported through the AckCallback's OnError). Callers that need durability must
-// Flush first, then Close — the standard loop-then-Flush pattern. On this clean
-// shutdown the live stream is torn down gracefully (half-close, then drain any
-// straggling acks to EOF, bounded by DrainTimeout) so the server observes an
-// orderly END_STREAM rather than an abrupt reset; see gracefulTeardown.
+// Close gracefully terminates the stream and is idempotent.
+// It does not wait for durability; call Flush first when required.
 func (cs *CoreStream[Req, Resp]) Close() {
 	cs.closeOnce.Do(func() {
 		cs.cancelSupervisor()
@@ -361,6 +307,13 @@ func (cs *CoreStream[Req, Resp]) setTerminalErr(err error) {
 	cs.termMu.Unlock()
 }
 
+type sendEvent struct {
+	offset    int64
+	completed bool
+	err       error
+	consumed  chan struct{}
+}
+
 // runOnce operates one transport stream until a worker exits.
 // healthy reports whether Open succeeded.
 func (cs *CoreStream[Req, Resp]) runOnce(ctx context.Context) (cause error, healthy bool) {
@@ -381,14 +334,12 @@ func (cs *CoreStream[Req, Resp]) runOnce(ctx context.Context) (cause error, heal
 	defer cancelSender()
 
 	errCh := make(chan error, 2)
+	sendEvents := make(chan sendEvent, 2)
 
-	go cs.sender(senderCtx, stream, errCh)
-	go cs.receiver(stream, errCh)
+	go cs.sender(senderCtx, stream, errCh, sendEvents)
+	go cs.receiver(stream, errCh, sendEvents)
 
-	// Wait for the first goroutine to signal, then tear both down. On clean
-	// shutdown (Close cancelled ctx) only the sender exits first — the receiver
-	// keeps draining acks — so we half-close and let it drain to EOF for an
-	// orderly server-observed END_STREAM. On failure we hard-abort instead.
+	// Tear down after the first worker exits.
 	cause = <-errCh
 	cancelSender() // unblocks sender waiting on buf.next()
 	var ps pauseSignal
@@ -396,24 +347,20 @@ func (cs *CoreStream[Req, Resp]) runOnce(ctx context.Context) (cause error, heal
 	case ctx.Err() != nil:
 		cs.gracefulTeardown(stream, errCh)
 	case errors.As(cause, &ps):
-		// Server-requested pause: the receiver already closed the stream to
-		// unblock its Recv, so just reap the sender. Requeue happens on reconnect.
+		// Requeue after the pause.
 		stream.Close()
 		<-errCh
 	default:
-		// Failure/recovery path: the stream is already broken, so hard-abort to
-		// unblock the receiver's Recv immediately.
+		// Abort a broken stream.
 		stream.Close()
 		<-errCh // drain second exit
 	}
 	return cause, true
 }
 
-// gracefulTeardown stops sending and drains responses to EOF.
-// DrainTimeout prevents shutdown from hanging.
+// gracefulTeardown drains responses within DrainTimeout.
 func (cs *CoreStream[Req, Resp]) gracefulTeardown(stream wireStream[Req, Resp], errCh <-chan error) {
 	if err := stream.CloseSend(); err != nil {
-		// Send side already broken; fall back to a hard abort.
 		stream.Close()
 		<-errCh
 		return
@@ -422,25 +369,51 @@ func (cs *CoreStream[Req, Resp]) gracefulTeardown(stream wireStream[Req, Resp], 
 	defer timer.Stop()
 	select {
 	case <-errCh:
-		// Receiver drained to EOF; release resources (Close is idempotent).
 		stream.Close()
 	case <-timer.C:
-		// Drain budget exceeded; force the receiver out and reap it.
 		stream.Close()
 		<-errCh
 	}
 }
 
 // sender writes queued items until cancellation or failure.
-func (cs *CoreStream[Req, Resp]) sender(senderCtx context.Context, stream wireStream[Req, Resp], errCh chan<- error) {
+func (cs *CoreStream[Req, Resp]) sender(
+	senderCtx context.Context,
+	stream wireStream[Req, Resp],
+	errCh chan<- error,
+	sendEvents chan<- sendEvent,
+) {
+	publish := func(event sendEvent) bool {
+		select {
+		case sendEvents <- event:
+			return true
+		case <-senderCtx.Done():
+			return false
+		}
+	}
 	for {
 		it, err := cs.buf.next(senderCtx)
 		if err != nil {
 			errCh <- nil // ctx cancelled or buffer closed — clean exit
 			return
 		}
-		if err := stream.Send(it.payload); err != nil {
+		if !publish(sendEvent{offset: it.offset}) {
+			errCh <- nil
+			return
+		}
+		err = stream.Send(it.payload)
+		consumed := make(chan struct{})
+		sendEvents <- sendEvent{
+			offset: it.offset, completed: true, err: err, consumed: consumed,
+		}
+		if err != nil {
 			errCh <- fmt.Errorf("stream: send offset %d: %w", it.offset, err)
+			return
+		}
+		select {
+		case <-consumed:
+		case <-senderCtx.Done():
+			errCh <- nil
 			return
 		}
 	}
@@ -448,7 +421,11 @@ func (cs *CoreStream[Req, Resp]) sender(senderCtx context.Context, stream wireSt
 
 // receiver processes responses and advances the ack watermark.
 // Each Recv runs separately so the ack timer remains responsive.
-func (cs *CoreStream[Req, Resp]) receiver(stream wireStream[Req, Resp], errCh chan<- error) {
+func (cs *CoreStream[Req, Resp]) receiver(
+	stream wireStream[Req, Resp],
+	errCh chan<- error,
+	sendEvents <-chan sendEvent,
+) {
 	type recvResult struct {
 		resp Resp
 		err  error
@@ -467,9 +444,56 @@ func (cs *CoreStream[Req, Resp]) receiver(stream wireStream[Req, Resp], errCh ch
 	lackTimer := time.NewTimer(cs.cfg.LackOfAckTimeout)
 	defer lackTimer.Stop()
 
+	lastSent := cs.wm.current()
+	sending := int64(-1)
+	pendingAck := int64(-1)
+
+	resetLackTimer := func() {
+		if !lackTimer.Stop() {
+			select {
+			case <-lackTimer.C:
+			default:
+			}
+		}
+		lackTimer.Reset(cs.cfg.LackOfAckTimeout)
+	}
+	applyAck := func(offset int64) {
+		resetLackTimer()
+		cs.wm.advance(offset)
+		cs.buf.discardThrough(offset)
+		if cs.callback != nil {
+			cs.callback.OnAck(offset)
+		}
+	}
+	handleSendEvent := func(event sendEvent) {
+		if !event.completed {
+			sending = event.offset
+			return
+		}
+		close(event.consumed)
+		sending = -1
+		if event.err == nil {
+			lastSent = event.offset
+		}
+		if event.err == nil && pendingAck >= 0 && pendingAck <= lastSent {
+			applyAck(pendingAck)
+		}
+		pendingAck = -1
+	}
+	resolvePendingOnExit := func() {
+		if pendingAck < 0 || sending < 0 {
+			return
+		}
+		stream.Close()
+		handleSendEvent(<-sendEvents)
+	}
+
 	for {
 		var r recvResult
 		select {
+		case event := <-sendEvents:
+			handleSendEvent(event)
+			continue
 		case <-lackTimer.C:
 			// Silence is only a failure while records are actually awaiting an ack.
 			// An idle stream (nothing in flight) legitimately receives no acks, so
@@ -481,64 +505,66 @@ func (cs *CoreStream[Req, Resp]) receiver(stream wireStream[Req, Resp], errCh ch
 			}
 			stream.Close()
 			<-recvCh // reap the outstanding Recv goroutine
+			resolvePendingOnExit()
 			errCh <- fmt.Errorf("stream: no ack from server for %s", cs.cfg.LackOfAckTimeout)
 			return
 		case r = <-recvCh:
 		}
 
 		if r.err == io.EOF {
+			resolvePendingOnExit()
 			errCh <- nil
 			return
 		}
 		if r.err != nil {
+			resolvePendingOnExit()
 			errCh <- fmt.Errorf("stream: recv: %w", r.err)
 			return
 		}
 
 		kind, offset, pause := cs.ackMdl.classify(r.resp)
 		if kind == unknownResponse || kind == malformedResponse {
-			// A response the ack model can't interpret (unrecognized type, or an
-			// ack missing/with a negative offset) is a protocol violation. Tear the
-			// stream down rather than silently dropping it; the supervisor decides
-			// whether to reconnect. The current Recv already delivered and no new
-			// one is outstanding, so there's nothing to reap.
+			// Reject protocol violations.
+			resolvePendingOnExit()
 			errCh <- fmt.Errorf("stream: unusable server response (kind %d)", kind)
 			return
 		}
 		if kind == pauseResponse {
-			// A server pause (proto/JSON CloseStreamSignal) is a flow-control
-			// request, not noise: the server is about to close this stream and
-			// wants the client to pause (stop sending, keep buffering and draining
-			// acks) then reconnect. Report it so the supervisor waits the requested
-			// window and reconnects without counting it against the recovery
-			// budget. This iteration's Recv goroutine already delivered (via r
-			// above), so there is nothing to drain; runOnce owns tearing the stream
-			// down.
+			// Let the supervisor apply the requested pause.
+			resolvePendingOnExit()
 			errCh <- pause
 			return
 		}
 
-		// Not a terminal response — keep reading. Spawn the next Recv before
-		// handling this one so the loop always has exactly one outstanding.
+		// Keep one Recv outstanding.
 		spawnRecv()
 
 		if kind == ackResponse {
-			// Reset the lack-of-ack timer on every ack received.
-			if !lackTimer.Stop() {
+			// Observe send-start events queued before a fast response.
+			for {
 				select {
-				case <-lackTimer.C:
+				case event := <-sendEvents:
+					handleSendEvent(event)
 				default:
+					goto sendsDrained
 				}
 			}
-			lackTimer.Reset(cs.cfg.LackOfAckTimeout)
-
-			cs.wm.advance(offset)
-			// Discard all buffer items that are now acknowledged, freeing their
-			// backpressure slots for waiting enqueue callers.
-			cs.buf.discardThrough(offset)
-
-			if cs.callback != nil {
-				cs.callback.OnAck(offset)
+		sendsDrained:
+			resetLackTimer()
+			switch {
+			case offset <= lastSent:
+				applyAck(offset)
+			case sending >= 0 && offset <= sending:
+				if offset > pendingAck {
+					pendingAck = offset
+				}
+			default:
+				resolvePendingOnExit()
+				errCh <- fmt.Errorf(
+					"stream: server ack offset %d exceeds sending offset %d",
+					offset, sending,
+				)
+				return
 			}
 		}
 		// Non-ack, non-pause kinds already returned above; the next Recv is
