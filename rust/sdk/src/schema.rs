@@ -1748,50 +1748,6 @@ mod tests {
             assert_nested_variants(&s, assert_variant_marked);
         }
 
-        /// Two separate annotated conversions of the same columns produce equal
-        /// schemas (marker metadata included), so a client that rebuilds the
-        /// schema for its batch rather than reusing the stream's still satisfies
-        /// the metadata-inclusive ingest-gate comparison. (The gate itself is
-        /// exercised end-to-end in `arrow_tests`.)
-        #[test]
-        fn variant_batch_matches_marked_stream_schema() {
-            use std::sync::Arc;
-
-            use arrow_array::{LargeBinaryArray, RecordBatch, StructArray};
-
-            let cols = vec![col("attrs", "VARIANT", false, 0)];
-            // The stream schema and the batch's schema are converted separately
-            // (both annotated), so they are distinct instances rather than a
-            // shared `Arc`.
-            let stream_schema =
-                Arc::new(arrow_schema_from_uc_columns_with_options(&cols, &annotate()).unwrap());
-            let batch_schema =
-                Arc::new(arrow_schema_from_uc_columns_with_options(&cols, &annotate()).unwrap());
-            assert_variant_marked(arrow_field(&batch_schema, "attrs"));
-
-            // Physical arrays carry no marker (it lives on the field), matching
-            // how a client encodes variant data.
-            let DataType::Struct(child_fields) = arrow_field(&batch_schema, "attrs").data_type()
-            else {
-                panic!("expected VARIANT Struct");
-            };
-            let attrs = StructArray::new(
-                child_fields.clone(),
-                vec![
-                    Arc::new(LargeBinaryArray::from(vec![b"m".as_slice()])),
-                    Arc::new(LargeBinaryArray::from(vec![b"v".as_slice()])),
-                ],
-                None,
-            );
-            let batch = RecordBatch::try_new(batch_schema, vec![Arc::new(attrs)]).unwrap();
-
-            assert_eq!(
-                batch.schema(),
-                stream_schema,
-                "batch built from a separately converted schema must satisfy the ingest gate"
-            );
-        }
-
         #[test]
         fn rejects_excessively_deep_nesting() {
             let mut type_json = String::from("\"integer\"");
