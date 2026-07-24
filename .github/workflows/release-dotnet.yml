@@ -151,9 +151,11 @@ jobs:
           dotnet-version: 10.0.x
 
       - name: Download all native libraries
+        # download-artifact paths are relative to the workspace root, not the
+        # job working-directory, so download under dotnet/ explicitly.
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
         with:
-          path: native
+          path: dotnet/native
           pattern: ffi-*
           merge-multiple: false
 
