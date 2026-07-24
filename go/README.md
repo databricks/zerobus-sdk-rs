@@ -1050,7 +1050,7 @@ Creates a new SDK instance.
 - `SdkOption` - An optional SDK-construction setting passed to
   `NewZerobusSdkWithOptions`
 - `WithApplicationName` - Appends a trimmed application identifier to the
-  default wire user-agent, `zerobus-sdk-go/1.3.0`; blank names are ignored
+  default wire user-agent, `zerobus-sdk-go/<version>`; blank names are ignored
 
 The original `NewZerobusSdk` constructor remains available. Use
 `NewZerobusSdkWithOptions` when the application should identify itself in
@@ -1064,7 +1064,7 @@ sdk, err := zerobus.NewZerobusSdkWithOptions(
 )
 ```
 
-This example sends `zerobus-sdk-go/1.3.0 my-app/1.0` as the wire user-agent.
+This example sends `zerobus-sdk-go/<version> my-app/1.0` as the wire user-agent.
 Invalid UTF-8, NUL bytes, and values that are invalid in an HTTP header return
 a non-retryable construction error.
 

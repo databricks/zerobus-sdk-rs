@@ -99,18 +99,41 @@ func startUserAgentTestServer(t *testing.T) (*MockZerobusServer, string) {
 	return mockServer, serverURL
 }
 
+func assertGoUserAgent(t *testing.T, userAgent, applicationName string) {
+	t.Helper()
+
+	const sdkPrefix = "zerobus-sdk-go/"
+	fields := strings.Fields(userAgent)
+	sdkFieldIndex := -1
+	for i, field := range fields {
+		if !strings.HasPrefix(field, sdkPrefix) {
+			continue
+		}
+		if strings.TrimPrefix(field, sdkPrefix) == "" {
+			t.Fatalf("Go SDK user-agent version must not be empty: %q", userAgent)
+		}
+		sdkFieldIndex = i
+		break
+	}
+
+	if sdkFieldIndex == -1 {
+		t.Fatalf("expected Go SDK user-agent, got %q", userAgent)
+	}
+	if applicationName != "" &&
+		(sdkFieldIndex+1 >= len(fields) || fields[sdkFieldIndex+1] != applicationName) {
+		t.Fatalf("expected application name %q immediately after Go SDK user-agent, got %q", applicationName, userAgent)
+	}
+	if strings.Contains(userAgent, "zerobus-sdk-rs/") {
+		t.Fatalf("user-agent must not advertise the Rust SDK: %q", userAgent)
+	}
+}
+
 func TestDefaultUserAgentIdentifiesGoSdk(t *testing.T) {
 	mockServer, serverURL := startUserAgentTestServer(t)
 
 	openStreamForUserAgent(t, serverURL)
 
-	userAgent := mockServer.GetLastUserAgent()
-	if !strings.Contains(userAgent, "zerobus-sdk-go/1.3.0") {
-		t.Fatalf("expected Go SDK user-agent, got %q", userAgent)
-	}
-	if strings.Contains(userAgent, "zerobus-sdk-rs/") {
-		t.Fatalf("user-agent must not advertise the Rust SDK: %q", userAgent)
-	}
+	assertGoUserAgent(t, mockServer.GetLastUserAgent(), "")
 }
 
 func TestApplicationNameIsAppendedToUserAgent(t *testing.T) {
@@ -122,10 +145,7 @@ func TestApplicationNameIsAppendedToUserAgent(t *testing.T) {
 		zerobus.WithApplicationName("my-app/1.0"),
 	)
 
-	userAgent := mockServer.GetLastUserAgent()
-	if !strings.Contains(userAgent, "zerobus-sdk-go/1.3.0 my-app/1.0") {
-		t.Fatalf("expected application name in user-agent, got %q", userAgent)
-	}
+	assertGoUserAgent(t, mockServer.GetLastUserAgent(), "my-app/1.0")
 }
 
 func TestEmptyApplicationNameIsIgnored(t *testing.T) {
@@ -137,10 +157,7 @@ func TestEmptyApplicationNameIsIgnored(t *testing.T) {
 		zerobus.WithApplicationName("   "),
 	)
 
-	userAgent := mockServer.GetLastUserAgent()
-	if !strings.Contains(userAgent, "zerobus-sdk-go/1.3.0") {
-		t.Fatalf("expected default Go SDK user-agent, got %q", userAgent)
-	}
+	assertGoUserAgent(t, mockServer.GetLastUserAgent(), "")
 }
 
 func TestArrowDefaultUserAgentIdentifiesGoSdk(t *testing.T) {
@@ -152,13 +169,7 @@ func TestArrowDefaultUserAgentIdentifiesGoSdk(t *testing.T) {
 
 	openArrowStreamForUserAgent(t, serverURL)
 
-	userAgent := mockServer.GetLastUserAgent()
-	if !strings.Contains(userAgent, "zerobus-sdk-go/1.3.0") {
-		t.Fatalf("expected Go SDK user-agent on Arrow DoPut, got %q", userAgent)
-	}
-	if strings.Contains(userAgent, "zerobus-sdk-rs/") {
-		t.Fatalf("Arrow user-agent must not advertise the Rust SDK: %q", userAgent)
-	}
+	assertGoUserAgent(t, mockServer.GetLastUserAgent(), "")
 }
 
 func TestArrowApplicationNameIsAppendedToUserAgent(t *testing.T) {
@@ -174,8 +185,5 @@ func TestArrowApplicationNameIsAppendedToUserAgent(t *testing.T) {
 		zerobus.WithApplicationName("my-app/1.0"),
 	)
 
-	userAgent := mockServer.GetLastUserAgent()
-	if !strings.Contains(userAgent, "zerobus-sdk-go/1.3.0 my-app/1.0") {
-		t.Fatalf("expected application name in Arrow user-agent, got %q", userAgent)
-	}
+	assertGoUserAgent(t, mockServer.GetLastUserAgent(), "my-app/1.0")
 }
