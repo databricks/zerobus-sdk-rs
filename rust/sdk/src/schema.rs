@@ -1748,11 +1748,11 @@ mod tests {
             assert_nested_variants(&s, assert_variant_marked);
         }
 
-        /// Covers the case where a client does not simply reuse the marked
-        /// schema for its batches but rebuilds an equivalent one from scratch:
-        /// the batch must still compare equal so the client-side ingest gate
-        /// (`ingest_batch`, which rejects on a metadata-inclusive
-        /// `batch.schema() != stream_schema`) accepts it.
+        /// Two separate annotated conversions of the same columns produce equal
+        /// schemas (marker metadata included), so a client that rebuilds the
+        /// schema for its batch rather than reusing the stream's still satisfies
+        /// the metadata-inclusive ingest-gate comparison. (The gate itself is
+        /// exercised end-to-end in `arrow_tests`.)
         #[test]
         fn variant_batch_matches_marked_stream_schema() {
             use std::sync::Arc;
