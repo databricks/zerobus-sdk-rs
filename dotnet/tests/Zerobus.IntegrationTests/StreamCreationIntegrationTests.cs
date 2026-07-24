@@ -321,8 +321,8 @@ public class StreamCreationIntegrationTests : IntegrationTestBase
     {
         await using var fixture = await MockServerFixture.StartAsync();
 
-        // A non-auth non-retriable error (auth rejections now get one initial-setup
-        // refresh retry; a permanent error like InvalidArgument must still fail at once).
+        // A non-auth non-retriable error (auth rejections may get one initial-setup
+        // retry; a permanent error like InvalidArgument must still fail at once).
         fixture.MockServer.InjectResponses(TestTableName,
         [
             MockResponses.ErrorResponse(StatusCode.InvalidArgument, "Non-retriable error"),
@@ -348,8 +348,8 @@ public class StreamCreationIntegrationTests : IntegrationTestBase
     {
         await using var fixture = await MockServerFixture.StartAsync();
 
-        // A non-auth non-retriable error (auth rejections now get one initial-setup
-        // refresh retry; a permanent error like InvalidArgument must still fail at once).
+        // A non-auth non-retriable error (auth rejections may get one initial-setup
+        // retry; a permanent error like InvalidArgument must still fail at once).
         fixture.MockServer.InjectResponses(TestTableName,
         [
             MockResponses.ErrorResponse(StatusCode.InvalidArgument, "Non-retriable error"),
@@ -371,15 +371,15 @@ public class StreamCreationIntegrationTests : IntegrationTestBase
     }
 
     [Test]
-    public async Task InitialAuthRejectionRefreshesOnceThenSucceeds()
+    public async Task InitialAuthRejectionRetriesOnceThenSucceeds()
     {
         await using var fixture = await MockServerFixture.StartAsync();
 
-        // One Unauthenticated response is retried once (so the headers provider can
-        // refresh a stale credential); the stream is then created on the retry.
+        // One Unauthenticated response consumes one recovery retry, after which the
+        // stream is created.
         fixture.MockServer.InjectResponses(TestTableName,
         [
-            MockResponses.ErrorResponse(StatusCode.Unauthenticated, "stale credential"),
+            MockResponses.ErrorResponse(StatusCode.Unauthenticated, "initial authentication rejected"),
             MockResponses.CreateStreamResponse("test_stream_1"),
         ]);
 
@@ -406,8 +406,8 @@ public class StreamCreationIntegrationTests : IntegrationTestBase
 
         fixture.MockServer.InjectResponses(TestTableName,
         [
-            MockResponses.ErrorResponse(StatusCode.Unauthenticated, "stale credential"),
-            MockResponses.ErrorResponse(StatusCode.PermissionDenied, "refreshed credential rejected"),
+            MockResponses.ErrorResponse(StatusCode.Unauthenticated, "initial authentication rejected"),
+            MockResponses.ErrorResponse(StatusCode.PermissionDenied, "second authentication rejected"),
             // A regression that retries auth failures repeatedly would consume this
             // third response instead of surfacing the second rejection.
             MockResponses.CreateStreamResponse("unexpected_third_attempt"),

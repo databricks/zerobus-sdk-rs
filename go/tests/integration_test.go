@@ -116,8 +116,8 @@ func TestNonRetriableErrorDuringStreamCreation(t *testing.T) {
 	}
 	defer grpcServer.Stop()
 
-	// A non-auth non-retriable error (auth rejections now get one initial-setup
-	// refresh retry; a permanent error like InvalidArgument must still fail at once).
+	// A non-auth non-retriable error (auth rejections may get one initial-setup
+	// retry; a permanent error like InvalidArgument must still fail at once).
 	mockServer.InjectResponses(testTableName, []MockResponse{
 		ErrorResponse(codes.InvalidArgument, "Non-retriable error", 0),
 	})
@@ -146,10 +146,10 @@ func TestNonRetriableErrorDuringStreamCreation(t *testing.T) {
 	}
 }
 
-// TestInitialAuthRejectionRefreshesOnceThenSucceeds verifies that a single
-// Unauthenticated response during initial setup is retried once (so the headers
-// provider can refresh a stale credential) and the stream is then created.
-func TestInitialAuthRejectionRefreshesOnceThenSucceeds(t *testing.T) {
+// TestInitialAuthRejectionRetriesOnceThenSucceeds verifies that a single
+// Unauthenticated response during initial setup consumes one recovery retry and
+// the stream is then created.
+func TestInitialAuthRejectionRetriesOnceThenSucceeds(t *testing.T) {
 	mockServer, serverURL, grpcServer, err := StartMockServer()
 	if err != nil {
 		t.Fatalf("Failed to start mock server: %v", err)
@@ -157,7 +157,7 @@ func TestInitialAuthRejectionRefreshesOnceThenSucceeds(t *testing.T) {
 	defer grpcServer.Stop()
 
 	mockServer.InjectResponses(testTableName, []MockResponse{
-		ErrorResponse(codes.Unauthenticated, "stale credential", 0),
+		ErrorResponse(codes.Unauthenticated, "initial authentication rejected", 0),
 		CreateStreamResponse("test_stream_1", 0),
 	})
 
@@ -183,13 +183,13 @@ func TestInitialAuthRejectionRefreshesOnceThenSucceeds(t *testing.T) {
 
 	stream, err := sdk.CreateStreamWithHeadersProvider(tableProps, headersProvider, options)
 	if err != nil {
-		t.Fatalf("Expected stream creation to succeed after one refresh, got: %v", err)
+		t.Fatalf("Expected stream creation to succeed after one retry, got: %v", err)
 	}
 	defer stream.Close()
 }
 
 // TestRepeatedInitialAuthRejectionIsTerminal verifies that a second authentication
-// rejection during initial setup is terminal: only one refresh retry is allowed.
+// rejection during initial setup is terminal: only one setup retry is allowed.
 func TestRepeatedInitialAuthRejectionIsTerminal(t *testing.T) {
 	mockServer, serverURL, grpcServer, err := StartMockServer()
 	if err != nil {
@@ -198,8 +198,8 @@ func TestRepeatedInitialAuthRejectionIsTerminal(t *testing.T) {
 	defer grpcServer.Stop()
 
 	mockServer.InjectResponses(testTableName, []MockResponse{
-		ErrorResponse(codes.Unauthenticated, "stale credential", 0),
-		ErrorResponse(codes.PermissionDenied, "refreshed credential rejected", 0),
+		ErrorResponse(codes.Unauthenticated, "initial authentication rejected", 0),
+		ErrorResponse(codes.PermissionDenied, "second authentication rejected", 0),
 		// A regression that retries auth failures repeatedly would consume this
 		// third response instead of surfacing the second rejection.
 		CreateStreamResponse("unexpected_third_attempt", 0),
