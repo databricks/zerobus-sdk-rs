@@ -17,6 +17,10 @@ func TestProtoEncoderSetsOffsetAndPayload(t *testing.T) {
 	if ir.GetOffsetId() != 42 {
 		t.Fatalf("want offset 42, got %d", ir.GetOffsetId())
 	}
+	enc.stampOffset(msg, 0)
+	if ir.GetOffsetId() != 0 {
+		t.Fatalf("want stamped offset 0, got %d", ir.GetOffsetId())
+	}
 	if len(ir.GetProtoEncodedRecord()) == 0 {
 		t.Fatal("want non-empty proto record")
 	}
@@ -75,6 +79,10 @@ func TestJSONBatchEncoderSetsOffsetAndPayload(t *testing.T) {
 	}
 	if ib.GetOffsetId() != 5 {
 		t.Fatalf("want offset 5, got %d", ib.GetOffsetId())
+	}
+	enc.stampOffset(msg, 0)
+	if ib.GetOffsetId() != 0 {
+		t.Fatalf("want stamped offset 0, got %d", ib.GetOffsetId())
 	}
 	jb := ib.GetJsonBatch()
 	if jb == nil {

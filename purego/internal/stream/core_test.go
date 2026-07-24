@@ -222,24 +222,57 @@ func TestCoreStreamRecoveryRequeuesUnacked(t *testing.T) {
 	cs := newCoreForTest(testParams(), cfg, fo, nil)
 	t.Cleanup(func() { cs.Close() })
 
-	off, err := cs.Ingest(context.Background(), []byte(`{}`))
+	first, err := cs.Ingest(context.Background(), []byte(`{"first":true}`))
 	if err != nil {
-		t.Fatalf("Ingest: %v", err)
+		t.Fatalf("first Ingest: %v", err)
+	}
+	waitCondition(t, func() bool { return len(rpc1.sends) == 1 }, time.Second)
+	firstSend := <-rpc1.sends
+	if got := firstSend.GetIngestRecord().GetOffsetId(); got != 0 {
+		t.Fatalf("first physical offset: want 0, got %d", got)
+	}
+	rpc1.ack(0)
+	if err := cs.WaitForOffset(context.Background(), first); err != nil {
+		t.Fatalf("first WaitForOffset: %v", err)
 	}
 
-	// Wait for the send to land on rpc1 then kill rpc1 before acking.
-	waitCondition(t, func() bool { return len(rpc1.sends) > 0 }, time.Second)
-	rpc1.close() // triggers receiver EOF → supervisor recovers to rpc2
+	replayed, err := cs.Ingest(context.Background(), []byte(`{"replayed":true}`))
+	if err != nil {
+		t.Fatalf("second Ingest: %v", err)
+	}
+	last, err := cs.Ingest(context.Background(), []byte(`{"last":true}`))
+	if err != nil {
+		t.Fatalf("third Ingest: %v", err)
+	}
+	waitCondition(t, func() bool { return len(rpc1.sends) == 2 }, time.Second)
+	secondSend := <-rpc1.sends
+	if got := secondSend.GetIngestRecord().GetOffsetId(); got != 1 {
+		t.Fatalf("second physical offset: want 1, got %d", got)
+	}
+	thirdSend := <-rpc1.sends
+	if got := thirdSend.GetIngestRecord().GetOffsetId(); got != 2 {
+		t.Fatalf("third physical offset: want 2, got %d", got)
+	}
+	rpc1.close()
 
-	// rpc2 should receive the re-sent item.
-	waitCondition(t, func() bool { return len(rpc2.sends) > 0 }, 2*time.Second)
-	<-rpc2.sends
-	rpc2.ack(off)
+	waitCondition(t, func() bool { return len(rpc2.sends) == 2 }, 2*time.Second)
+	replayedSend := <-rpc2.sends
+	if got := replayedSend.GetIngestRecord().GetOffsetId(); got != 0 {
+		t.Fatalf("replayed physical offset: want 0, got %d", got)
+	}
+	lastSend := <-rpc2.sends
+	if got := lastSend.GetIngestRecord().GetOffsetId(); got != 1 {
+		t.Fatalf("last physical offset: want 1, got %d", got)
+	}
+	rpc2.ack(1)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
-	if err := cs.WaitForOffset(ctx, off); err != nil {
-		t.Fatalf("WaitForOffset after recovery: %v", err)
+	if err := cs.WaitForOffset(ctx, replayed); err != nil {
+		t.Fatalf("replayed WaitForOffset: %v", err)
+	}
+	if err := cs.WaitForOffset(ctx, last); err != nil {
+		t.Fatalf("last WaitForOffset: %v", err)
 	}
 }
 
@@ -305,6 +338,54 @@ func TestCoreStreamDefersAckUntilSendSucceeds(t *testing.T) {
 	defer cancel()
 	if err := cs.WaitForOffset(ctx, offset); err != nil {
 		t.Fatalf("deferred ack after Send and EOF: %v", err)
+	}
+}
+
+func TestCoreStreamDefersTranslatedAckAfterReconnect(t *testing.T) {
+	firstRPC := newFakeRPC()
+	secondRPC := newControlledSendRPC()
+	opener := &reconnectControlledOpener{first: firstRPC, second: secondRPC}
+	cfg := testConfig()
+	cfg.RecoveryRetries = 1
+	cs := newCoreForTest(testParams(), cfg, opener, nil)
+	t.Cleanup(func() { cs.Close() })
+
+	first, err := cs.Ingest(context.Background(), []byte(`{"first":true}`))
+	if err != nil {
+		t.Fatalf("first Ingest: %v", err)
+	}
+	waitCondition(t, func() bool { return len(firstRPC.sends) == 1 }, time.Second)
+	<-firstRPC.sends
+	firstRPC.ack(0)
+	if err := cs.WaitForOffset(context.Background(), first); err != nil {
+		t.Fatalf("first WaitForOffset: %v", err)
+	}
+
+	replayed, err := cs.Ingest(context.Background(), []byte(`{"replayed":true}`))
+	if err != nil {
+		t.Fatalf("second Ingest: %v", err)
+	}
+	waitCondition(t, func() bool { return len(firstRPC.sends) == 1 }, time.Second)
+	<-firstRPC.sends
+	firstRPC.close()
+	<-secondRPC.started
+	secondRPC.ack(0)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	defer cancel()
+	if err := cs.WaitForOffset(ctx, replayed); !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("translated ack completed before Send: %v", err)
+	}
+
+	secondRPC.result <- nil
+	sent := <-secondRPC.sends
+	if got := sent.GetIngestRecord().GetOffsetId(); got != 0 {
+		t.Fatalf("replayed physical offset: want 0, got %d", got)
+	}
+	ctx, cancel = context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	if err := cs.WaitForOffset(ctx, replayed); err != nil {
+		t.Fatalf("translated deferred ack: %v", err)
 	}
 }
 

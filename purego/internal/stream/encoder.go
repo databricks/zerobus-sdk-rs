@@ -22,8 +22,7 @@ type encodedMsg = *zerobuspb.EphemeralStreamRequest
 // never names a concrete proto type — proto/JSON supply encoder[encodedMsg];
 // Arrow will supply encoder[flightFrame].
 //
-// The offset is stamped into the message here so re-sends after recovery reuse
-// the same logical offset the server already saw.
+// The sender replaces the encoded offset with a connection-local wire offset.
 type encoder[Req any] interface {
 	// encode turns a single user record into one wire message.
 	encode(offset int64, record []byte) (Req, error)
@@ -32,6 +31,8 @@ type encoder[Req any] interface {
 	// whole batch or none of it), so the batch occupies exactly one logical
 	// offset in the core's buffer.
 	encodeBatch(offset int64, records [][]byte) (Req, error)
+	// stampOffset assigns the connection-local wire offset.
+	stampOffset(msg Req, offset int64)
 	// decode recovers the raw record bytes from a wire message so GetUnacked can
 	// return original content. A single-record message yields one entry; a batch
 	// yields all of its records so no unacked record is silently dropped.
@@ -89,6 +90,10 @@ func (protoEncoder) wireSize(msg encodedMsg) int {
 	return proto.Size(msg)
 }
 
+func (protoEncoder) stampOffset(msg encodedMsg, offset int64) {
+	stampEphemeralOffset(msg, offset)
+}
+
 // jsonEncoder builds EphemeralStream payloads for JSON-encoded records, single
 // and batched.
 type jsonEncoder struct{}
@@ -137,6 +142,23 @@ func (jsonEncoder) wireSize(msg encodedMsg) int {
 		return 0
 	}
 	return proto.Size(msg)
+}
+
+func (jsonEncoder) stampOffset(msg encodedMsg, offset int64) {
+	stampEphemeralOffset(msg, offset)
+}
+
+func stampEphemeralOffset(msg encodedMsg, offset int64) {
+	if msg == nil {
+		return
+	}
+	if record := msg.GetIngestRecord(); record != nil {
+		record.OffsetId = proto.Int64(offset)
+		return
+	}
+	if batch := msg.GetIngestRecordBatch(); batch != nil {
+		batch.OffsetId = proto.Int64(offset)
+	}
 }
 
 // newEncoder returns the proto/JSON encoder for the given record type.

@@ -312,15 +312,16 @@ func (cs *CoreStream[Req, Resp]) setTerminalErr(err error) {
 }
 
 type sendEvent struct {
-	offset    int64
-	completed bool
-	err       error
-	consumed  chan struct{}
+	logicalOffset  int64
+	physicalOffset int64
+	completed      bool
+	err            error
+	consumed       chan struct{}
 }
 
 // runOnce operates one transport stream until a worker exits.
-// healthy reports whether Open succeeded.
-func (cs *CoreStream[Req, Resp]) runOnce(ctx context.Context) (cause error, healthy bool) {
+// resetRecoveryBudget reports durable progress or a stable connection.
+func (cs *CoreStream[Req, Resp]) runOnce(ctx context.Context) (cause error, resetRecoveryBudget bool) {
 	stream, err := cs.opener.Open(ctx, cs.params)
 	if err != nil {
 		// Invalid parameters cannot be fixed by reconnecting.
@@ -365,8 +366,9 @@ func (cs *CoreStream[Req, Resp]) runOnce(ctx context.Context) (cause error, heal
 	if resetAfter <= 0 {
 		resetAfter = DefaultRecoveryResetAfter
 	}
-	healthy = cs.wm.current() > startAck || time.Since(openedAt) >= resetAfter
-	return cause, healthy
+	resetRecoveryBudget = cs.wm.current() > startAck ||
+		time.Since(openedAt) >= resetAfter
+	return cause, resetRecoveryBudget
 }
 
 // gracefulTeardown drains responses within DrainTimeout.
@@ -402,25 +404,34 @@ func (cs *CoreStream[Req, Resp]) sender(
 			return false
 		}
 	}
+	physicalOffset := int64(0)
 	for {
 		it, err := cs.buf.next(senderCtx)
 		if err != nil {
 			errCh <- nil // ctx cancelled or buffer closed — clean exit
 			return
 		}
-		if !publish(sendEvent{offset: it.offset}) {
+		cs.enc.stampOffset(it.payload, physicalOffset)
+		if !publish(sendEvent{
+			logicalOffset: it.offset, physicalOffset: physicalOffset,
+		}) {
 			errCh <- nil
 			return
 		}
 		err = stream.Send(it.payload)
 		consumed := make(chan struct{})
 		sendEvents <- sendEvent{
-			offset: it.offset, completed: true, err: err, consumed: consumed,
+			logicalOffset:  it.offset,
+			physicalOffset: physicalOffset,
+			completed:      true,
+			err:            err,
+			consumed:       consumed,
 		}
 		if err != nil {
 			errCh <- fmt.Errorf("stream: send offset %d: %w", it.offset, err)
 			return
 		}
+		physicalOffset++
 		select {
 		case <-consumed:
 		case <-senderCtx.Done():
@@ -455,9 +466,12 @@ func (cs *CoreStream[Req, Resp]) receiver(
 	lackTimer := time.NewTimer(cs.cfg.LackOfAckTimeout)
 	defer lackTimer.Stop()
 
-	lastSent := cs.wm.current()
-	sending := int64(-1)
-	pendingAck := int64(-1)
+	lastAckedPhysical := int64(-1)
+	sendingPhysical := int64(-1)
+	sendingLogical := int64(-1)
+	pendingPhysicalAck := int64(-1)
+	sentBasePhysical := int64(0)
+	var sentLogical []int64
 
 	resetLackTimer := func() {
 		if !lackTimer.Stop() {
@@ -468,7 +482,7 @@ func (cs *CoreStream[Req, Resp]) receiver(
 		}
 		lackTimer.Reset(cs.cfg.LackOfAckTimeout)
 	}
-	applyAck := func(offset int64) {
+	applyLogicalAck := func(offset int64) {
 		resetLackTimer()
 		cs.wm.advance(offset)
 		cs.buf.discardThrough(offset)
@@ -476,34 +490,79 @@ func (cs *CoreStream[Req, Resp]) receiver(
 			cs.callback.OnAck(offset)
 		}
 	}
-	handleSendEvent := func(event sendEvent) {
+	applyPhysicalAck := func(offset int64) error {
+		resetLackTimer()
+		if offset <= lastAckedPhysical {
+			return nil
+		}
+		index := offset - sentBasePhysical
+		if index < 0 || index >= int64(len(sentLogical)) {
+			return fmt.Errorf(
+				"stream: server ack offset %d exceeds highest completed physical offset %d",
+				offset, sentBasePhysical+int64(len(sentLogical))-1,
+			)
+		}
+		logical := sentLogical[index]
+		applyLogicalAck(logical)
+		lastAckedPhysical = offset
+		sentLogical = sentLogical[index+1:]
+		sentBasePhysical = offset + 1
+		if len(sentLogical) == 0 {
+			sentLogical = nil
+		}
+		return nil
+	}
+	handleSendEvent := func(event sendEvent) error {
 		if !event.completed {
-			sending = event.offset
-			return
+			sendingPhysical = event.physicalOffset
+			sendingLogical = event.logicalOffset
+			return nil
 		}
 		close(event.consumed)
-		sending = -1
 		if event.err == nil {
-			lastSent = event.offset
+			expected := sentBasePhysical + int64(len(sentLogical))
+			if event.physicalOffset != expected {
+				return fmt.Errorf(
+					"stream: physical send offset %d is not contiguous after %d",
+					event.physicalOffset, expected-1,
+				)
+			}
+			sentLogical = append(sentLogical, event.logicalOffset)
 		}
-		if event.err == nil && pendingAck >= 0 && pendingAck <= lastSent {
-			applyAck(pendingAck)
+		sendingPhysical = -1
+		sendingLogical = -1
+		var ackErr error
+		if event.err == nil && pendingPhysicalAck >= 0 {
+			ackErr = applyPhysicalAck(pendingPhysicalAck)
 		}
-		pendingAck = -1
+		pendingPhysicalAck = -1
+		return ackErr
 	}
-	resolvePendingOnExit := func() {
-		if pendingAck < 0 || sending < 0 {
-			return
+	resolvePendingOnExit := func() error {
+		if pendingPhysicalAck < 0 || sendingPhysical < 0 {
+			return nil
+		}
+		if sendingLogical < 0 {
+			return fmt.Errorf("stream: missing logical offset for active send")
 		}
 		stream.Close()
-		handleSendEvent(<-sendEvents)
+		return handleSendEvent(<-sendEvents)
+	}
+	handleTerminal := func(err error) {
+		if pendingErr := resolvePendingOnExit(); pendingErr != nil && err == nil {
+			err = pendingErr
+		}
+		errCh <- err
 	}
 
 	for {
 		var r recvResult
 		select {
 		case event := <-sendEvents:
-			handleSendEvent(event)
+			if err := handleSendEvent(event); err != nil {
+				handleTerminal(err)
+				return
+			}
 			continue
 		case <-lackTimer.C:
 			// Silence is only a failure while records are actually awaiting an ack.
@@ -516,34 +575,31 @@ func (cs *CoreStream[Req, Resp]) receiver(
 			}
 			stream.Close()
 			<-recvCh // reap the outstanding Recv goroutine
-			resolvePendingOnExit()
-			errCh <- fmt.Errorf("stream: no ack from server for %s", cs.cfg.LackOfAckTimeout)
+			handleTerminal(fmt.Errorf(
+				"stream: no ack from server for %s", cs.cfg.LackOfAckTimeout,
+			))
 			return
 		case r = <-recvCh:
 		}
 
 		if r.err == io.EOF {
-			resolvePendingOnExit()
-			errCh <- nil
+			handleTerminal(nil)
 			return
 		}
 		if r.err != nil {
-			resolvePendingOnExit()
-			errCh <- fmt.Errorf("stream: recv: %w", r.err)
+			handleTerminal(fmt.Errorf("stream: recv: %w", r.err))
 			return
 		}
 
 		kind, offset, pause := cs.ackMdl.classify(r.resp)
 		if kind == unknownResponse || kind == malformedResponse {
 			// Reject protocol violations.
-			resolvePendingOnExit()
-			errCh <- fmt.Errorf("stream: unusable server response (kind %d)", kind)
+			handleTerminal(fmt.Errorf("stream: unusable server response (kind %d)", kind))
 			return
 		}
 		if kind == pauseResponse {
 			// Let the supervisor apply the requested pause.
-			resolvePendingOnExit()
-			errCh <- pause
+			handleTerminal(pause)
 			return
 		}
 
@@ -555,26 +611,24 @@ func (cs *CoreStream[Req, Resp]) receiver(
 			for {
 				select {
 				case event := <-sendEvents:
-					handleSendEvent(event)
+					if err := handleSendEvent(event); err != nil {
+						handleTerminal(err)
+						return
+					}
 				default:
 					goto sendsDrained
 				}
 			}
 		sendsDrained:
 			resetLackTimer()
-			switch {
-			case offset <= lastSent:
-				applyAck(offset)
-			case sending >= 0 && offset <= sending:
-				if offset > pendingAck {
-					pendingAck = offset
+			if sendingPhysical >= 0 && offset == sendingPhysical {
+				if offset > pendingPhysicalAck {
+					pendingPhysicalAck = offset
 				}
-			default:
-				resolvePendingOnExit()
-				errCh <- fmt.Errorf(
-					"stream: server ack offset %d exceeds sending offset %d",
-					offset, sending,
-				)
+				continue
+			}
+			if err := applyPhysicalAck(offset); err != nil {
+				handleTerminal(err)
 				return
 			}
 		}

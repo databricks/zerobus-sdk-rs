@@ -32,13 +32,13 @@ func (cs *CoreStream[Req, Resp]) supervise(ctx context.Context) {
 			cs.buf.requeue()
 		}
 
-		runErr, healthy := cs.runOnce(ctx)
+		runErr, resetRecoveryBudget := cs.runOnce(ctx)
 
 		if ctx.Err() != nil {
 			return
 		}
 
-		if healthy {
+		if resetRecoveryBudget {
 			failedAttempts = 0
 		}
 

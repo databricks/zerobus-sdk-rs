@@ -117,6 +117,26 @@ func (o *controlledSendOpener) Open(_ context.Context, _ transport.StreamParams)
 	return transport.NewFakeStreamForTesting(o.rpc), nil
 }
 
+type reconnectControlledOpener struct {
+	mu     sync.Mutex
+	first  *fakeRPC
+	second *controlledSendRPC
+	opens  int
+}
+
+func (o *reconnectControlledOpener) Open(_ context.Context, _ transport.StreamParams) (wireStream[encodedMsg, ephemeralResp], error) {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	o.opens++
+	if o.opens == 1 {
+		return transport.NewFakeStreamForTesting(o.first), nil
+	}
+	if o.opens == 2 {
+		return transport.NewFakeStreamForTesting(o.second), nil
+	}
+	return nil, fmt.Errorf("reconnectControlledOpener: no more RPCs")
+}
+
 type fakeOpener struct {
 	mu       sync.Mutex
 	rpcs     []*fakeRPC
