@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/apache/arrow-go/v18/arrow/flight"
+	"google.golang.org/grpc/metadata"
 )
 
 // arrowBatchMeta matches FlightBatchMetadata JSON in the Rust SDK.
@@ -33,6 +34,7 @@ type MockArrowFlightServer struct {
 	defaultRows     uint64           // fallback when offset not configured
 	batchesReceived int
 	maxOffsetSeen   int64
+	lastUserAgent   string
 }
 
 // NewMockArrowFlightServer creates a server with defaultRows=1.
@@ -72,6 +74,13 @@ func (s *MockArrowFlightServer) GetMaxOffsetSeen() int64 {
 	return s.maxOffsetSeen
 }
 
+// GetLastUserAgent returns the most recent user-agent observed on a DoPut call.
+func (s *MockArrowFlightServer) GetLastUserAgent() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.lastUserAgent
+}
+
 // Reset clears server state for reuse between tests.
 func (s *MockArrowFlightServer) ArrowReset() {
 	s.mu.Lock()
@@ -80,6 +89,7 @@ func (s *MockArrowFlightServer) ArrowReset() {
 	s.defaultRows = 1
 	s.batchesReceived = 0
 	s.maxOffsetSeen = -1
+	s.lastUserAgent = ""
 }
 
 // DoPut implements flight.FlightServer. It handles one Arrow Flight DoPut call:
@@ -88,6 +98,14 @@ func (s *MockArrowFlightServer) ArrowReset() {
 //  3. For each subsequent data FlightData, reads offset_id from AppMetadata,
 //     accumulates the configured row count, and sends an ack.
 func (s *MockArrowFlightServer) DoPut(stream flight.FlightService_DoPutServer) error {
+	if incoming, ok := metadata.FromIncomingContext(stream.Context()); ok {
+		if values := incoming.Get("user-agent"); len(values) > 0 {
+			s.mu.Lock()
+			s.lastUserAgent = values[0]
+			s.mu.Unlock()
+		}
+	}
+
 	// First message is the schema (FlightDataEncoderBuilder idx=0, no AppMetadata).
 	if _, err := stream.Recv(); err != nil {
 		return err

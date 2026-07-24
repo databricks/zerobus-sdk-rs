@@ -24,8 +24,13 @@ func main() {
 		log.Fatal("Missing required environment variables")
 	}
 
-	// Create SDK instance
-	sdk, err := zerobus.NewZerobusSdk(zerobusEndpoint, unityCatalogURL)
+	// WithApplicationName is optional. It appends an application identifier to
+	// the Go SDK user-agent sent to Zerobus.
+	sdk, err := zerobus.NewZerobusSdkWithOptions(
+		zerobusEndpoint,
+		unityCatalogURL,
+		zerobus.WithApplicationName("my-app/1.0"),
+	)
 	if err != nil {
 		log.Fatalf("Failed to create SDK: %v", err)
 	}
@@ -65,10 +70,8 @@ func main() {
 
 	// Ingest records in a loop. IngestRecordOffset returns as soon as the record
 	// is queued; the SDK sends it and tracks its acknowledgment in the background.
-	// We collect the last offset and confirm everything below — keeping the ingest
-	// loop free of per-record waits is what sustains throughput.
+	// Keeping the ingest loop free of per-record waits sustains throughput.
 	log.Println("Ingesting records...")
-	var lastOffset int64 = -1
 	for i := 0; i < 5; i++ {
 		// Create a message using the generated struct.
 		// Change this message to match the schema of your table.
@@ -94,17 +97,12 @@ func main() {
 
 		log.Printf("Ingested record %d at offset %d (temp=%d, humidity=%d)",
 			i, offset, *message.Temp, *message.Humidity)
-		lastOffset = offset
 	}
 
-	// Wait once on the LAST offset. The ack watermark is monotonic, so confirming
-	// the last offset confirms all prior records too. (Equivalently, call
-	// stream.Flush() to wait for all pending records.)
-	if lastOffset >= 0 {
-		log.Println("Waiting for acknowledgments...")
-		if err := stream.WaitForOffset(lastOffset); err != nil {
-			log.Fatalf("Failed to wait for offset %d: %v", lastOffset, err)
-		}
+	// Wait once for every successfully queued record to be acknowledged.
+	log.Println("Waiting for acknowledgments...")
+	if err := stream.Flush(); err != nil {
+		log.Fatalf("Failed to flush stream: %v", err)
 	}
 
 	log.Println("All records successfully ingested and acknowledged!")
