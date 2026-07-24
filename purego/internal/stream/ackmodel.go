@@ -4,10 +4,7 @@ import (
 	"github.com/databricks/zerobus-sdk/purego/internal/zerobuspb"
 )
 
-// ackModel translates a raw server response into a logical "highest fully-acked
-// offset" that the core's watermark can compare against, and classifies
-// non-ack responses so the core stays blind to the concrete wire type. It is
-// generic over the response type Resp: proto/JSON supply ackModel[ephemeralResp].
+// ackModel extracts connection-local ack offsets and classifies other responses.
 //
 // TODO(arrow): the Arrow wire path will supply its own ackModel over a Flight
 // response, mapping a cumulative record count back to an offset.
@@ -32,9 +29,7 @@ const (
 // Resp type parameter is named once here rather than spelled out at every use.
 type ephemeralResp = *zerobuspb.EphemeralStreamResponse
 
-// offsetAckModel is the proto/JSON ack model: the server sends
-// DurabilityAckUpToOffset directly as the logical offset, and a
-// CloseStreamSignal requests a pause.
+// offsetAckModel extracts proto/JSON physical offsets and pause signals.
 type offsetAckModel struct{}
 
 func (offsetAckModel) classify(resp ephemeralResp) (respKind, int64, pauseSignal) {
