@@ -158,13 +158,15 @@ jobs:
           merge-multiple: false
 
       - name: Consolidate native libraries
+        # Each ffi-<rid> artifact holds native/<libs>; place it at runtimes/<rid>/native.
         run: |
-          mkdir -p src/Zerobus/runtimes
-          cp -r native/ffi-linux-x64/linux-x64 src/Zerobus/runtimes/
-          cp -r native/ffi-linux-arm64/linux-arm64 src/Zerobus/runtimes/
-          cp -r native/ffi-linux-musl-x64/linux-musl-x64 src/Zerobus/runtimes/
-          cp -r native/ffi-linux-musl-arm64/linux-musl-arm64 src/Zerobus/runtimes/
-          cp -r native/ffi-win-x64/win-x64 src/Zerobus/runtimes/
+          for dir in native/ffi-*/; do
+            rid=$(basename "$dir" | sed 's/^ffi-//')
+            mkdir -p "src/Zerobus/runtimes/$rid"
+            cp -r "$dir/native" "src/Zerobus/runtimes/$rid/"
+          done
+          echo "Consolidated runtimes:"
+          find src/Zerobus/runtimes -type f | sort
 
       - name: Package NuGet
         env:
