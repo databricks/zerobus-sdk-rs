@@ -116,8 +116,10 @@ func TestNonRetriableErrorDuringStreamCreation(t *testing.T) {
 	}
 	defer grpcServer.Stop()
 
+	// A non-auth non-retriable error (auth rejections may get one initial-setup
+	// retry; a permanent error like InvalidArgument must still fail at once).
 	mockServer.InjectResponses(testTableName, []MockResponse{
-		ErrorResponse(codes.Unauthenticated, "Non-retriable error", 0),
+		ErrorResponse(codes.InvalidArgument, "Non-retriable error", 0),
 	})
 
 	sdk, err := zerobus.NewZerobusSdk(serverURL, "https://mock-uc.com")
@@ -141,6 +143,91 @@ func TestNonRetriableErrorDuringStreamCreation(t *testing.T) {
 	_, err = sdk.CreateStreamWithHeadersProvider(tableProps, headersProvider, options)
 	if err == nil {
 		t.Fatal("Expected stream creation to fail, but it succeeded")
+	}
+}
+
+// TestInitialAuthRejectionRetriesOnceThenSucceeds verifies that a single
+// Unauthenticated response during initial setup consumes one recovery retry and
+// the stream is then created.
+func TestInitialAuthRejectionRetriesOnceThenSucceeds(t *testing.T) {
+	mockServer, serverURL, grpcServer, err := StartMockServer()
+	if err != nil {
+		t.Fatalf("Failed to start mock server: %v", err)
+	}
+	defer grpcServer.Stop()
+
+	mockServer.InjectResponses(testTableName, []MockResponse{
+		ErrorResponse(codes.Unauthenticated, "initial authentication rejected", 0),
+		CreateStreamResponse("test_stream_1", 0),
+	})
+
+	sdk, err := zerobus.NewZerobusSdk(serverURL, "https://mock-uc.com")
+	if err != nil {
+		t.Fatalf("Failed to create SDK: %v", err)
+	}
+	defer sdk.Free()
+
+	tableProps := zerobus.TableProperties{
+		TableName:       testTableName,
+		DescriptorProto: CreateTestDescriptorProto(),
+	}
+
+	options := &zerobus.StreamConfigurationOptions{
+		MaxInflightRequests: 100,
+		Recovery:            true,
+		RecoveryBackoffMs:   0,
+		RecoveryRetries:     1,
+	}
+
+	headersProvider := &TestHeadersProvider{}
+
+	stream, err := sdk.CreateStreamWithHeadersProvider(tableProps, headersProvider, options)
+	if err != nil {
+		t.Fatalf("Expected stream creation to succeed after one retry, got: %v", err)
+	}
+	defer stream.Close()
+}
+
+// TestRepeatedInitialAuthRejectionIsTerminal verifies that a second authentication
+// rejection during initial setup is terminal: only one setup retry is allowed.
+func TestRepeatedInitialAuthRejectionIsTerminal(t *testing.T) {
+	mockServer, serverURL, grpcServer, err := StartMockServer()
+	if err != nil {
+		t.Fatalf("Failed to start mock server: %v", err)
+	}
+	defer grpcServer.Stop()
+
+	mockServer.InjectResponses(testTableName, []MockResponse{
+		ErrorResponse(codes.Unauthenticated, "initial authentication rejected", 0),
+		ErrorResponse(codes.PermissionDenied, "second authentication rejected", 0),
+		// A regression that retries auth failures repeatedly would consume this
+		// third response instead of surfacing the second rejection.
+		CreateStreamResponse("unexpected_third_attempt", 0),
+	})
+
+	sdk, err := zerobus.NewZerobusSdk(serverURL, "https://mock-uc.com")
+	if err != nil {
+		t.Fatalf("Failed to create SDK: %v", err)
+	}
+	defer sdk.Free()
+
+	tableProps := zerobus.TableProperties{
+		TableName:       testTableName,
+		DescriptorProto: CreateTestDescriptorProto(),
+	}
+
+	options := &zerobus.StreamConfigurationOptions{
+		MaxInflightRequests: 100,
+		Recovery:            true,
+		RecoveryBackoffMs:   0,
+		RecoveryRetries:     5,
+	}
+
+	headersProvider := &TestHeadersProvider{}
+
+	_, err = sdk.CreateStreamWithHeadersProvider(tableProps, headersProvider, options)
+	if err == nil {
+		t.Fatal("Expected the second auth rejection to terminate stream creation")
 	}
 }
 

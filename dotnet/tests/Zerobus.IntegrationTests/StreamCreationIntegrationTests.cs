@@ -321,9 +321,11 @@ public class StreamCreationIntegrationTests : IntegrationTestBase
     {
         await using var fixture = await MockServerFixture.StartAsync();
 
+        // A non-auth non-retriable error (auth rejections may get one initial-setup
+        // retry; a permanent error like InvalidArgument must still fail at once).
         fixture.MockServer.InjectResponses(TestTableName,
         [
-            MockResponses.ErrorResponse(StatusCode.Unauthenticated, "Non-retriable error"),
+            MockResponses.ErrorResponse(StatusCode.InvalidArgument, "Non-retriable error"),
         ]);
 
         using var sdk = CreateDefaultSdk(fixture);
@@ -346,9 +348,11 @@ public class StreamCreationIntegrationTests : IntegrationTestBase
     {
         await using var fixture = await MockServerFixture.StartAsync();
 
+        // A non-auth non-retriable error (auth rejections may get one initial-setup
+        // retry; a permanent error like InvalidArgument must still fail at once).
         fixture.MockServer.InjectResponses(TestTableName,
         [
-            MockResponses.ErrorResponse(StatusCode.Unauthenticated, "Non-retriable error"),
+            MockResponses.ErrorResponse(StatusCode.InvalidArgument, "Non-retriable error"),
         ]);
 
         using var sdk = CreateDefaultSdk(fixture);
@@ -363,6 +367,66 @@ public class StreamCreationIntegrationTests : IntegrationTestBase
         Assert.ThrowsAsync<ZerobusException>(async () =>
         {
             await sdk.CreateStreamWithHeadersProviderAsync(tableProps, new TestHeadersProvider(), options);
+        });
+    }
+
+    [Test]
+    public async Task InitialAuthRejectionRetriesOnceThenSucceeds()
+    {
+        await using var fixture = await MockServerFixture.StartAsync();
+
+        // One Unauthenticated response consumes one recovery retry, after which the
+        // stream is created.
+        fixture.MockServer.InjectResponses(TestTableName,
+        [
+            MockResponses.ErrorResponse(StatusCode.Unauthenticated, "initial authentication rejected"),
+            MockResponses.CreateStreamResponse("test_stream_1"),
+        ]);
+
+        using var sdk = CreateDefaultSdk(fixture);
+        var tableProps = CreateTableProperties();
+
+        var options = StreamConfigurationOptions.Default with
+        {
+            MaxInflightRequests = 100,
+            Recovery = true,
+            RecoveryBackoffMs = 0,
+            RecoveryRetries = 1,
+        };
+
+        using var stream = sdk.CreateStreamWithHeadersProvider(tableProps, new TestHeadersProvider(), options);
+
+        Assert.That(stream, Is.Not.Null);
+    }
+
+    [Test]
+    public async Task RepeatedInitialAuthRejectionIsTerminal()
+    {
+        await using var fixture = await MockServerFixture.StartAsync();
+
+        fixture.MockServer.InjectResponses(TestTableName,
+        [
+            MockResponses.ErrorResponse(StatusCode.Unauthenticated, "initial authentication rejected"),
+            MockResponses.ErrorResponse(StatusCode.PermissionDenied, "second authentication rejected"),
+            // A regression that retries auth failures repeatedly would consume this
+            // third response instead of surfacing the second rejection.
+            MockResponses.CreateStreamResponse("unexpected_third_attempt"),
+        ]);
+
+        using var sdk = CreateDefaultSdk(fixture);
+        var tableProps = CreateTableProperties();
+
+        var options = StreamConfigurationOptions.Default with
+        {
+            MaxInflightRequests = 100,
+            Recovery = true,
+            RecoveryBackoffMs = 0,
+            RecoveryRetries = 5,
+        };
+
+        Assert.Throws<ZerobusException>(() =>
+        {
+            sdk.CreateStreamWithHeadersProvider(tableProps, new TestHeadersProvider(), options);
         });
     }
 

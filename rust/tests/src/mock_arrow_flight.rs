@@ -64,6 +64,8 @@ pub enum MockFlightResponse {
     /// first (schema) message, simulating a failed reconnect. Consumes its scripted slot,
     /// so schedule it as the response the target (reconnect) connection reaches.
     FailSetup { status: Status },
+    /// Reject a connection's setup after a delay.
+    FailSetupAfter { status: Status, delay_ms: u64 },
     /// Close stream (drop the connection) - useful for testing recovery.
     CloseStream { delay_ms: u64 },
     /// Graceful close signal - sends a close signal with grace period duration.
@@ -265,14 +267,23 @@ impl FlightService for MockFlightServer {
                     if flight_data.app_metadata.is_empty() {
                         // A scripted FailSetup rejects this connection's setup: send the
                         // error instead of the ready signal (simulates a reconnect failure).
-                        if let Some(MockFlightResponse::FailSetup { status }) =
-                            stream_responses.get(response_index)
-                        {
-                            let status = status.clone();
+                        let setup_failure = match stream_responses.get(response_index) {
+                            Some(MockFlightResponse::FailSetup { status }) => {
+                                Some((status.clone(), 0))
+                            }
+                            Some(MockFlightResponse::FailSetupAfter { status, delay_ms }) => {
+                                Some((status.clone(), *delay_ms))
+                            }
+                            _ => None,
+                        };
+                        if let Some((status, delay_ms)) = setup_failure {
                             response_index += 1;
                             {
                                 let mut indices = response_indices.lock().await;
                                 indices.insert(table_name.clone(), response_index);
+                            }
+                            if delay_ms > 0 {
+                                sleep(Duration::from_millis(delay_ms)).await;
                             }
                             info!("Rejecting connection setup: {:?}", status);
                             let _ = tx.send(Err(status)).await;
@@ -417,6 +428,19 @@ impl FlightService for MockFlightServer {
                         MockFlightResponse::FailSetup { status } => {
                             // Only meaningful at connection setup; if reached here, the
                             // scripting is off — fail the connection with the error.
+                            let status = status.clone();
+                            response_index += 1;
+                            {
+                                let mut indices = response_indices.lock().await;
+                                indices.insert(table_name.clone(), response_index);
+                            }
+                            let _ = tx.send(Err(status)).await;
+                            return;
+                        }
+                        MockFlightResponse::FailSetupAfter { status, delay_ms } => {
+                            if *delay_ms > 0 {
+                                sleep(Duration::from_millis(*delay_ms)).await;
+                            }
                             let status = status.clone();
                             response_index += 1;
                             {

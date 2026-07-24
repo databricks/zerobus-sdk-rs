@@ -6,6 +6,8 @@
 
 set(ZEROBUS_REPO_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/.." CACHE PATH
     "Path to the zerobus-sdk monorepo root")
+set(ZEROBUS_RUST_NIGHTLY_TOOLCHAIN "nightly" CACHE STRING
+    "Rust nightly toolchain used for sanitizer builds")
 set(ZEROBUS_FFI_CRATE_DIR "${ZEROBUS_REPO_ROOT}/rust/ffi")
 set(ZEROBUS_RUST_TARGET_DIR "${ZEROBUS_REPO_ROOT}/rust/target")
 
@@ -48,17 +50,18 @@ else()
     # Instrument the Rust core — otherwise TSan/ASan only watch the thin C++
     # wrapper and miss races/UAF inside the FFI, where the real work runs.
     # -Zsanitizer + -Zbuild-std are nightly-only and need a --target (which
-    # relocates the archive under target/<triple>/). +nightly requires cargo to
-    # be the rustup proxy; fail clearly if nightly is unavailable.
-    execute_process(COMMAND "${CARGO_EXECUTABLE}" +nightly --version
+    # relocates the archive under target/<triple>/). The +toolchain argument
+    # requires cargo to be the rustup proxy; fail clearly if it is unavailable.
+    set(_zb_nightly_arg "+${ZEROBUS_RUST_NIGHTLY_TOOLCHAIN}")
+    execute_process(COMMAND "${CARGO_EXECUTABLE}" "${_zb_nightly_arg}" --version
         RESULT_VARIABLE _zb_nightly_rc OUTPUT_QUIET ERROR_QUIET)
     if(NOT _zb_nightly_rc EQUAL 0)
       message(FATAL_ERROR
           "ZEROBUS_SANITIZE=${ZEROBUS_SANITIZE} needs a nightly toolchain with "
-          "rust-src via rustup (cargo +nightly). Install: rustup toolchain "
-          "install nightly && rustup component add rust-src --toolchain nightly")
+          "rust-src via rustup (cargo ${_zb_nightly_arg}). Install: rustup toolchain "
+          "install ${ZEROBUS_RUST_NIGHTLY_TOOLCHAIN} --component rust-src")
     endif()
-    execute_process(COMMAND "${CARGO_EXECUTABLE}" -vV
+    execute_process(COMMAND "${CARGO_EXECUTABLE}" "${_zb_nightly_arg}" -vV
         OUTPUT_VARIABLE _zb_rustc_v OUTPUT_STRIP_TRAILING_WHITESPACE)
     string(REGEX MATCH "host: ([^\n]+)" _zb_host_match "${_zb_rustc_v}")
     set(_zb_host "${CMAKE_MATCH_1}")
@@ -66,13 +69,14 @@ else()
     # tsan, and changing only RUSTFLAGS does not invalidate cargo's cache, so a
     # shared dir would link a stale archive built for the other sanitizer.
     set(_zb_target_dir "${ZEROBUS_RUST_TARGET_DIR}/sanitize-${ZEROBUS_SANITIZE}")
-    set(_zb_cargo "${CARGO_EXECUTABLE}" "+nightly")
+    set(_zb_cargo "${CARGO_EXECUTABLE}" "${_zb_nightly_arg}")
     set(_zb_cargo_flags -Z build-std --target "${_zb_host}"
         --target-dir "${_zb_target_dir}")
     set(_zb_ffi_lib
         "${_zb_target_dir}/${_zb_host}/release/${_zb_ffi_lib_name}")
     message(STATUS
-        "Zerobus: building FFI with -Zsanitizer=${ZEROBUS_SANITIZE} (nightly, build-std)")
+        "Zerobus: building FFI with -Zsanitizer=${ZEROBUS_SANITIZE} "
+        "(${ZEROBUS_RUST_NIGHTLY_TOOLCHAIN}, build-std)")
   endif()
 
   # Track the Rust sources the archive is built from so editing rust/ffi or

@@ -25,7 +25,7 @@ async-trait.workspace = true
 prost.workspace = true
 prost-reflect.workspace = true
 prost-types.workspace = true
-tokio = { workspace = true, features = ["macros", "rt-multi-thread", "sync", "time"] }
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "sync", "test-util", "time"] }
 tokio-stream = { workspace = true, features = ["net"] }
 tonic = { workspace = true, features = ["tls-native-roots", "transport"] }
 tonic-prost.workspace = true

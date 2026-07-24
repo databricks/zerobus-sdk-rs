@@ -21,6 +21,7 @@ use tracing::{debug, error, info, instrument, warn};
 use super::types::{CallbackMessage, OneshotMap, RecordLandingZone};
 use super::{ZerobusStream, STREAM_TEARDOWN_DRAIN_TIMEOUT_MS};
 use crate::databricks::zerobus::zerobus_client::ZerobusClient;
+use crate::errors::should_retry_initial_connection;
 use crate::{
     EncodedBatch, HeadersProvider, OffsetId, StreamConfigurationOptions, TableProperties,
     ZerobusError, ZerobusResult,
@@ -48,6 +49,10 @@ impl ZerobusStream {
     ) -> ZerobusResult<()> {
         let mut initial_stream_creation = true;
         let mut stream_init_result_tx = Some(stream_init_result_tx);
+        // One-shot budget: initial setup may spend a single recovery retry to refresh a
+        // stale credential after an auth rejection. Reconnect iterations never consume it,
+        // so mid-stream auth behavior is unchanged. Auth errors stay globally non-retryable.
+        let mut initial_auth_retry_available = options.recovery_retries > 0;
 
         loop {
             debug!("Supervisor task loop");
@@ -73,6 +78,13 @@ impl ZerobusStream {
             let strategy = FixedInterval::from_millis(options.recovery_backoff_ms)
                 .take(options.recovery_retries as usize);
 
+            // Initial setup may refresh one stale credential (auth rejection consumes the
+            // one-shot budget); reconnect keeps the plain `recovery && is_retryable()` rule
+            // so mid-stream behavior is unchanged. Both connection paths invalidate on auth
+            // rejection, so the retry re-mints via the headers provider. Initial setup bounds
+            // that invalidation under the setup deadline so a stalled provider cannot bypass
+            // the one-shot limit; reconnect keeps its existing timeout-wrapped path unchanged.
+            let is_initial = initial_stream_creation;
             let attempt = AtomicUsize::new(0);
             let create_attempt = || {
                 let channel = channel.clone();
@@ -83,22 +95,33 @@ impl ZerobusStream {
 
                 async move {
                     let attempt_no = attempt.fetch_add(1, Ordering::Relaxed) + 1;
-                    let result = tokio::time::timeout(
-                        Duration::from_millis(options.recovery_timeout_ms),
-                        Self::create_stream_connection(
+                    let result = if is_initial {
+                        Self::create_initial_stream_connection(
                             channel,
                             &table_properties,
                             &headers_provider,
                             record_type,
-                        ),
-                    )
-                    .await
-                    .map_err(|_| {
-                        ZerobusError::CreateStreamError(tonic::Status::deadline_exceeded(
-                            "Stream creation timed out",
-                        ))
-                    })
-                    .and_then(|res| res);
+                            options.recovery_timeout_ms,
+                        )
+                        .await
+                    } else {
+                        tokio::time::timeout(
+                            Duration::from_millis(options.recovery_timeout_ms),
+                            Self::create_stream_connection(
+                                channel,
+                                &table_properties,
+                                &headers_provider,
+                                record_type,
+                            ),
+                        )
+                        .await
+                        .map_err(|_| {
+                            ZerobusError::CreateStreamError(tonic::Status::deadline_exceeded(
+                                "Stream creation timed out",
+                            ))
+                        })
+                        .and_then(|res| res)
+                    };
                     if let Err(ref e) = result {
                         warn!(
                             attempt = attempt_no,
@@ -112,7 +135,17 @@ impl ZerobusStream {
                     result
                 }
             };
-            let should_retry = |e: &ZerobusError| options.recovery && e.is_retryable();
+            let should_retry = |e: &ZerobusError| {
+                if is_initial {
+                    should_retry_initial_connection(
+                        e,
+                        options.recovery,
+                        &mut initial_auth_retry_available,
+                    )
+                } else {
+                    options.recovery && e.is_retryable()
+                }
+            };
             let creation = RetryIf::spawn(strategy, create_attempt, should_retry).await;
 
             let (tx, response_grpc_stream, stream_id) = match creation {
