@@ -492,9 +492,9 @@ impl ZerobusArrowStream {
         // Share one deadline across connection setup and auth-rejection invalidation.
         // This preserves the original auth error if a custom provider stalls instead of
         // reclassifying the attempt as a retryable setup timeout.
-        let attempt_deadline =
-            tokio::time::Instant::now() + Duration::from_millis(options.recovery_timeout_ms);
-        let result = tokio::time::timeout_at(attempt_deadline, async {
+        let attempt_timeout = Duration::from_millis(options.recovery_timeout_ms);
+        let attempt_started = tokio::time::Instant::now();
+        let result = tokio::time::timeout(attempt_timeout, async {
             let client = Self::create_flight_client(
                 endpoint,
                 tls_config,
@@ -521,8 +521,9 @@ impl ZerobusArrowStream {
                 // Drop the rejected token so the next attempt re-mints. A provider must
                 // not be able to turn a known auth rejection into repeated generic
                 // timeout retries by stalling here.
+                let invalidate_timeout = attempt_timeout.saturating_sub(attempt_started.elapsed());
                 if error.is_auth_rejection()
-                    && tokio::time::timeout_at(attempt_deadline, headers_provider.invalidate())
+                    && tokio::time::timeout(invalidate_timeout, headers_provider.invalidate())
                         .await
                         .is_err()
                 {

@@ -7,7 +7,8 @@ use databricks_zerobus_ingest_sdk::{NoTlsConfig, StreamType, ZerobusError, Zerob
 use mock_grpc::{start_mock_server, MockResponse};
 use tracing::info;
 use utils::{
-    create_test_descriptor_proto, setup_tracing, CountingHeadersProvider,
+    advance_tokio_time_near_instant_limit, create_test_descriptor_proto,
+    run_with_paused_time_watchdog, setup_tracing, CountingHeadersProvider,
     HangingInvalidationHeadersProvider, TestCallback, TestHeadersProvider,
 };
 
@@ -247,6 +248,72 @@ mod stream_initialization_and_basic_lifecycle_tests {
             "the rejected initial credential must be invalidated exactly once"
         );
         assert_eq!(stream.stream_type, StreamType::Ephemeral);
+
+        Ok(())
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn test_max_recovery_timeout_does_not_overflow_initial_deadline(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        setup_tracing();
+
+        let (mock_server, server_url) = start_mock_server().await?;
+        mock_server
+            .inject_responses(
+                TABLE_NAME,
+                vec![
+                    MockResponse::Error {
+                        status: tonic::Status::unauthenticated("stale credential"),
+                        delay_ms: 0,
+                    },
+                    MockResponse::CreateStream {
+                        stream_id: "test_stream_1".to_string(),
+                        delay_ms: 0,
+                    },
+                ],
+            )
+            .await;
+
+        let invalidations = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let provider = Arc::new(CountingHeadersProvider {
+            get_headers_calls: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            invalidations: Arc::clone(&invalidations),
+        });
+        let sdk = ZerobusSdk::builder()
+            .endpoint(server_url)
+            .unity_catalog_url("https://mock-uc.com")
+            .tls_config(Arc::new(NoTlsConfig))
+            .build()?;
+
+        advance_tokio_time_near_instant_limit().await;
+
+        let stream_result = run_with_paused_time_watchdog(
+            sdk.stream_builder()
+                .table(TABLE_NAME)
+                .headers_provider(provider)
+                .compiled_proto(create_test_descriptor_proto().unwrap_or_default())
+                .recovery(true)
+                .recovery_backoff_ms(0)
+                .recovery_timeout_ms(u64::MAX)
+                .recovery_retries(1)
+                .build(),
+        )
+        .await;
+
+        match stream_result {
+            Ok(stream) => {
+                assert_eq!(stream.stream_type, StreamType::Ephemeral);
+                assert_eq!(
+                    invalidations.load(std::sync::atomic::Ordering::SeqCst),
+                    1,
+                    "the rejected credential must still be invalidated"
+                );
+            }
+            Err(ZerobusError::CreateStreamError(status)) => {
+                assert_eq!(status.code(), tonic::Code::DeadlineExceeded);
+            }
+            Err(error) => panic!("unexpected stream creation error: {error}"),
+        }
 
         Ok(())
     }

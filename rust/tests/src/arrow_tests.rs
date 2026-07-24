@@ -4,13 +4,14 @@ mod utils;
 mod arrow_flight_tests {
     use std::sync::Arc;
 
-    use databricks_zerobus_ingest_sdk::{NoTlsConfig, ZerobusSdk};
+    use databricks_zerobus_ingest_sdk::{NoTlsConfig, ZerobusError, ZerobusSdk};
     use tracing::info;
 
     use crate::mock_arrow_flight::{start_mock_flight_server, MockFlightResponse};
     use crate::utils::{
-        create_test_arrow_schema, create_test_dict_record_batch, create_test_dict_schema,
-        create_test_record_batch, record_batch_to_ipc_bytes, setup_tracing,
+        advance_tokio_time_near_instant_limit, create_test_arrow_schema,
+        create_test_dict_record_batch, create_test_dict_schema, create_test_record_batch,
+        record_batch_to_ipc_bytes, run_with_paused_time_watchdog, setup_tracing,
         CountingHeadersProvider, HangingInvalidationHeadersProvider, TestHeadersProvider,
     };
 
@@ -120,6 +121,66 @@ mod arrow_flight_tests {
                 "the rejected initial credential must be invalidated exactly once"
             );
             assert!(!stream.is_closed());
+
+            Ok(())
+        }
+
+        #[tokio::test(start_paused = true)]
+        async fn test_max_recovery_timeout_does_not_overflow_initial_deadline(
+        ) -> Result<(), Box<dyn std::error::Error>> {
+            setup_tracing();
+
+            let (mock_server, server_url) = start_mock_flight_server().await?;
+            let schema = create_test_arrow_schema();
+            mock_server
+                .inject_responses(
+                    TABLE_NAME,
+                    vec![MockFlightResponse::FailSetup {
+                        status: Status::unauthenticated("stale credential"),
+                    }],
+                )
+                .await;
+
+            let invalidations = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+            let provider = Arc::new(CountingHeadersProvider {
+                get_headers_calls: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+                invalidations: Arc::clone(&invalidations),
+            });
+            let sdk = ZerobusSdk::builder()
+                .endpoint(server_url)
+                .unity_catalog_url("https://mock-uc.com")
+                .tls_config(Arc::new(NoTlsConfig))
+                .build()?;
+
+            advance_tokio_time_near_instant_limit().await;
+
+            let stream_result = run_with_paused_time_watchdog(
+                sdk.stream_builder()
+                    .table(TABLE_NAME)
+                    .headers_provider(provider)
+                    .arrow(schema)
+                    .recovery(true)
+                    .recovery_backoff_ms(0)
+                    .recovery_timeout_ms(u64::MAX)
+                    .recovery_retries(1)
+                    .build_arrow(),
+            )
+            .await;
+
+            match stream_result {
+                Ok(stream) => {
+                    assert!(!stream.is_closed());
+                    assert_eq!(
+                        invalidations.load(std::sync::atomic::Ordering::SeqCst),
+                        1,
+                        "the rejected credential must still be invalidated"
+                    );
+                }
+                Err(ZerobusError::CreateStreamError(status)) => {
+                    assert_eq!(status.code(), tonic::Code::DeadlineExceeded);
+                }
+                Err(error) => panic!("unexpected stream creation error: {error}"),
+            }
 
             Ok(())
         }

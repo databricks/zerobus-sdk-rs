@@ -75,10 +75,10 @@ impl ZerobusStream {
         tonic::Streaming<EphemeralStreamResponse>,
         String,
     )> {
-        let attempt_deadline =
-            tokio::time::Instant::now() + Duration::from_millis(recovery_timeout_ms);
-        let result = tokio::time::timeout_at(
-            attempt_deadline,
+        let attempt_timeout = Duration::from_millis(recovery_timeout_ms);
+        let attempt_started = tokio::time::Instant::now();
+        let result = tokio::time::timeout(
+            attempt_timeout,
             Self::create_stream_connection_inner(
                 channel,
                 table_properties,
@@ -94,8 +94,9 @@ impl ZerobusStream {
         })?;
 
         if let Err(err) = &result {
+            let invalidate_timeout = attempt_timeout.saturating_sub(attempt_started.elapsed());
             if err.is_auth_rejection()
-                && tokio::time::timeout_at(attempt_deadline, headers_provider.invalidate())
+                && tokio::time::timeout(invalidate_timeout, headers_provider.invalidate())
                     .await
                     .is_err()
             {
