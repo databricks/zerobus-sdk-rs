@@ -583,6 +583,10 @@ mod stream_initialization_and_basic_lifecycle_tests {
     #[tokio::test]
     async fn test_initial_auth_invalidation_timeout_preserves_one_retry_limit(
     ) -> Result<(), Box<dyn std::error::Error>> {
+        const ATTEMPT_TIMEOUT_MS: u64 = 600;
+        const SETUP_REJECTION_DELAY_MS: u64 = 300;
+        const MAX_TWO_ATTEMPT_DURATION_MS: u64 = 1_500;
+
         setup_tracing();
 
         let (mock_server, server_url) = start_mock_server().await?;
@@ -592,11 +596,11 @@ mod stream_initialization_and_basic_lifecycle_tests {
                 vec![
                     MockResponse::Error {
                         status: tonic::Status::unauthenticated("first rejected credential"),
-                        delay_ms: 0,
+                        delay_ms: SETUP_REJECTION_DELAY_MS,
                     },
                     MockResponse::Error {
                         status: tonic::Status::permission_denied("second rejected credential"),
-                        delay_ms: 0,
+                        delay_ms: SETUP_REJECTION_DELAY_MS,
                     },
                     // A stalled invalidation must not turn the auth path into generic
                     // timeout retries that consume the rest of the recovery budget.
@@ -620,6 +624,7 @@ mod stream_initialization_and_basic_lifecycle_tests {
             .tls_config(Arc::new(NoTlsConfig))
             .build()?;
 
+        let started = std::time::Instant::now();
         let result = sdk
             .stream_builder()
             .table(TABLE_NAME)
@@ -627,10 +632,11 @@ mod stream_initialization_and_basic_lifecycle_tests {
             .compiled_proto(create_test_descriptor_proto().unwrap_or_default())
             .recovery(true)
             .recovery_backoff_ms(0)
-            .recovery_timeout_ms(250)
+            .recovery_timeout_ms(ATTEMPT_TIMEOUT_MS)
             .recovery_retries(5)
             .build()
             .await;
+        let elapsed = started.elapsed();
         let error = match result {
             Ok(_) => panic!("stalled invalidation must not bypass the one-auth-retry limit"),
             Err(error) => error,
@@ -641,6 +647,10 @@ mod stream_initialization_and_basic_lifecycle_tests {
             "the final auth rejection must be preserved, got: {error}"
         );
         assert!(!error.is_retryable());
+        assert!(
+            elapsed < std::time::Duration::from_millis(MAX_TWO_ATTEMPT_DURATION_MS),
+            "setup and invalidation must share each attempt timeout; elapsed: {elapsed:?}"
+        );
         assert_eq!(
             invalidations.load(std::sync::atomic::Ordering::SeqCst),
             2,
