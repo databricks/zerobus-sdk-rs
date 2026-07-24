@@ -18,16 +18,12 @@ const (
 	DefaultRecoveryBackoff  = 2 * time.Second
 	DefaultFlushTimeout     = 5 * time.Minute
 	DefaultLackOfAckTimeout = 60 * time.Second
-	// DefaultDrainTimeout bounds the orderly drain-to-EOF on a clean Close so a
-	// wedged sender or an unresponsive server can't hang teardown. Matches the
-	// transport's teardown drain budget; the long ack wait lives in Flush.
+	// DefaultDrainTimeout bounds graceful shutdown.
 	DefaultDrainTimeout = 500 * time.Millisecond
 )
 
-// RecoverySetting controls whether a stream reconnects on failure. It is an enum
-// rather than a bool so its zero value is the safe default (recovery enabled): a
-// zero-valued Config recovers, and disabling is an explicit opt-out. This avoids
-// the bool zero-value footgun where Config{...} silently disables recovery.
+// RecoverySetting controls stream reconnection.
+// Its zero value enables recovery.
 type RecoverySetting int
 
 const (
@@ -50,19 +46,13 @@ type Config struct {
 	// Recovery controls whether stream reconnection is attempted on failure. The
 	// zero value (RecoveryEnabled) recovers; set RecoveryDisabled to opt out.
 	Recovery RecoverySetting
-	// RecoveryRetries is the maximum number of consecutive failed reconnect
-	// attempts before giving up. The budget is per recovery episode: a stream
-	// that connects and runs successfully resets it, so a long-lived stream that
-	// disconnects occasionally is not doomed after RecoveryRetries lifetime
-	// disconnects.
+	// RecoveryRetries limits consecutive reconnect failures.
 	RecoveryRetries int
 	// RecoveryBackoff is the fixed wait between reconnect attempts.
 	RecoveryBackoff time.Duration
 	// FlushTimeout bounds Flush when the caller's context has no deadline.
 	FlushTimeout time.Duration
-	// LackOfAckTimeout is how long the receiver waits for a server ack, while
-	// records are in flight, before treating silence as a stream failure. An idle
-	// stream with nothing in flight is never failed for silence.
+	// LackOfAckTimeout bounds ack silence while records are in flight.
 	LackOfAckTimeout time.Duration
 	// DrainTimeout bounds the orderly drain-to-EOF performed on a clean Close so
 	// the server observes an orderly END_STREAM rather than an abrupt reset.
@@ -371,31 +361,22 @@ func (cs *CoreStream[Req, Resp]) setTerminalErr(err error) {
 	cs.termMu.Unlock()
 }
 
-// runOnce opens one transport stream and runs sender+receiver until one of
-// them exits. Returns the cause of the exit so the supervisor can decide
-// whether to recover, and healthy=true once a stream was successfully opened
-// and run (so the supervisor can reset its per-episode retry budget — a stream
-// that connected and later failed is a fresh episode, not a continuation of the
-// prior reconnect streak).
+// runOnce operates one transport stream until a worker exits.
+// healthy reports whether Open succeeded.
 func (cs *CoreStream[Req, Resp]) runOnce(ctx context.Context) (cause error, healthy bool) {
 	stream, err := cs.opener.Open(ctx, cs.params)
 	if err != nil {
-		// Invalid params (bad table name, unsupported record type, missing
-		// descriptor) are deterministic — reconnecting reproduces them — so mark
-		// them non-retryable rather than burning the recovery budget on a failure
-		// that can't succeed.
+		// Invalid parameters cannot be fixed by reconnecting.
 		if errors.Is(err, transport.ErrInvalidParams) {
 			return wrapValidation(fmt.Errorf("stream: open: %w", err)), false
 		}
 		return fmt.Errorf("stream: open: %w", err), false
 	}
 
-	// Move all in-flight items back to the pending queue so the sender
-	// re-sends them on this new connection.
+	// Resend unacknowledged items on the new connection.
 	cs.buf.requeue()
 
-	// senderCtx is cancelled when we want the sender to stop for THIS stream
-	// only, without cancelling the supervisor's outer ctx (which would signal Close).
+	// senderCtx controls only this connection's sender.
 	senderCtx, cancelSender := context.WithCancel(ctx)
 	defer cancelSender()
 
@@ -428,13 +409,8 @@ func (cs *CoreStream[Req, Resp]) runOnce(ctx context.Context) (cause error, heal
 	return cause, true
 }
 
-// gracefulTeardown closes a healthy stream in an orderly fashion after the
-// sender has stopped: half-close the send side so the server flushes any
-// remaining acks and ends the stream, let the still-running receiver drain to
-// io.EOF (advancing the watermark for late acks), then release resources.
-// DrainTimeout bounds the wait so a wedged server can't hang Close; on expiry we
-// hard-abort. This mirrors transport.GracefulClose, done cooperatively because
-// the receiver goroutine — not this one — owns Recv.
+// gracefulTeardown stops sending and drains responses to EOF.
+// DrainTimeout prevents shutdown from hanging.
 func (cs *CoreStream[Req, Resp]) gracefulTeardown(stream wireStream[Req, Resp], errCh <-chan error) {
 	if err := stream.CloseSend(); err != nil {
 		// Send side already broken; fall back to a hard abort.
@@ -455,10 +431,7 @@ func (cs *CoreStream[Req, Resp]) gracefulTeardown(stream wireStream[Req, Resp], 
 	}
 }
 
-// sender pulls items from the buffer and writes them to stream. Exits when
-// senderCtx is cancelled (per-stream teardown), the buffer is closed, or
-// Send fails. senderCtx is derived from a per-runOnce cancel so the supervisor
-// can stop this sender without cancelling the outer supervisor context.
+// sender writes queued items until cancellation or failure.
 func (cs *CoreStream[Req, Resp]) sender(senderCtx context.Context, stream wireStream[Req, Resp], errCh chan<- error) {
 	for {
 		it, err := cs.buf.next(senderCtx)
@@ -473,26 +446,15 @@ func (cs *CoreStream[Req, Resp]) sender(senderCtx context.Context, stream wireSt
 	}
 }
 
-// receiver reads ack responses from stream and advances the watermark. It runs
-// until io.EOF (server closed cleanly, including after a graceful half-close),
-// a receive error, the lack-of-ack timeout (only while records are in flight),
-// or the stream being Closed out from under it (which surfaces as a Recv error).
-// Teardown is coordinated by runOnce, so the receiver does not watch the
-// supervisor context itself.
-//
-// Each Recv call runs on its own goroutine so we can race it against the
-// lack-of-ack timer even when the underlying transport Recv is blocking (e.g. a
-// fake in tests, or a stalled server).
+// receiver processes responses and advances the ack watermark.
+// Each Recv runs separately so the ack timer remains responsive.
 func (cs *CoreStream[Req, Resp]) receiver(stream wireStream[Req, Resp], errCh chan<- error) {
 	type recvResult struct {
 		resp Resp
 		err  error
 	}
 
-	// A single outstanding Recv goroutine at a time feeds recvCh. Hoisting it out
-	// of the loop keeps the lack-of-ack timer live across idle periods: re-arming
-	// the timer must not commit us to blocking on the current Recv, or records
-	// that go in flight later would never be checked against the timeout.
+	// Keep exactly one Recv active.
 	recvCh := make(chan recvResult, 1)
 	spawnRecv := func() {
 		go func() {

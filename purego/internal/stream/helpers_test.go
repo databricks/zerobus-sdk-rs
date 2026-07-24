@@ -10,7 +10,6 @@ import (
 	"time"
 
 	"google.golang.org/protobuf/proto"
-	"google.golang.org/protobuf/types/known/durationpb"
 
 	"github.com/databricks/zerobus-sdk/purego/internal/transport"
 	"github.com/databricks/zerobus-sdk/purego/internal/zerobuspb"
@@ -84,37 +83,6 @@ func (f *fakeRPC) ack(offset int64) {
 	}
 }
 
-// malformedAck sends an IngestRecordResponse with no offset field set — a
-// protocol violation the ack model classifies as malformedResponse.
-func (f *fakeRPC) malformedAck() {
-	f.recvs <- &zerobuspb.EphemeralStreamResponse{
-		Payload: &zerobuspb.EphemeralStreamResponse_IngestRecordResponse{
-			IngestRecordResponse: &zerobuspb.IngestRecordResponse{},
-		},
-	}
-}
-
-// closeSignal sends a server CloseStreamSignal, asking the client to pause.
-func (f *fakeRPC) closeSignal() {
-	f.recvs <- &zerobuspb.EphemeralStreamResponse{
-		Payload: &zerobuspb.EphemeralStreamResponse_CloseStreamSignal{
-			CloseStreamSignal: &zerobuspb.CloseStreamSignal{},
-		},
-	}
-}
-
-// closeSignalWithDuration sends a CloseStreamSignal carrying the given
-// server-requested pause duration.
-func (f *fakeRPC) closeSignalWithDuration(d time.Duration) {
-	f.recvs <- &zerobuspb.EphemeralStreamResponse{
-		Payload: &zerobuspb.EphemeralStreamResponse_CloseStreamSignal{
-			CloseStreamSignal: &zerobuspb.CloseStreamSignal{
-				Duration: durationpb.New(d),
-			},
-		},
-	}
-}
-
 // fakeOpener wraps a fakeRPC as a transport.Opener by building a rawStream
 // from it. Each call to Open returns the same underlying fakeRPC so tests
 // can send acks from it.
@@ -128,12 +96,6 @@ type fakeOpener struct {
 
 func newFakeOpener(rpcs ...*fakeRPC) *fakeOpener {
 	return &fakeOpener{rpcs: rpcs}
-}
-
-func (fo *fakeOpener) openCount() int {
-	fo.mu.Lock()
-	defer fo.mu.Unlock()
-	return fo.attempts
 }
 
 func (fo *fakeOpener) Open(_ context.Context, _ transport.StreamParams) (wireStream[encodedMsg, ephemeralResp], error) {

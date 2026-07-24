@@ -96,8 +96,7 @@ func TestJSONEncoderRejectsEmptyRecord(t *testing.T) {
 	}
 }
 
-// An empty proto record is a valid encoding and must be accepted, both as a
-// single record and within a batch, matching the Rust SDK.
+// Empty proto records are valid in single and batch requests.
 func TestProtoEncoderAcceptsEmptyRecord(t *testing.T) {
 	def := []byte{} // zero-length serialization of an all-default message
 	msg, err := protoEncoder{}.encode(1, def)

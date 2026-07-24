@@ -7,16 +7,8 @@ import (
 	"time"
 )
 
-// supervise is the supervisor goroutine. It runs the create→run→recover loop
-// until the context is cancelled (Close called), a non-retryable error fires,
-// or consecutive recovery retries are exhausted. It always closes done on exit.
-//
-// The retry budget is per episode: `failedAttempts` counts only *consecutive*
-// failed reconnects and resets to zero whenever a stream connects and runs
-// successfully. A long-lived stream that disconnects occasionally therefore is
-// not doomed after RecoveryRetries lifetime disconnects — each disconnect
-// starts a fresh episode with the full budget. This mirrors the Rust core,
-// which builds a fresh attempt counter per recovery loop iteration.
+// supervise runs the connect, stream, and recovery lifecycle.
+// Successful connections reset the retry budget.
 func (cs *CoreStream[Req, Resp]) supervise(ctx context.Context) {
 	defer close(cs.done)
 
@@ -50,17 +42,12 @@ func (cs *CoreStream[Req, Resp]) supervise(ctx context.Context) {
 			return
 		}
 
-		// A stream that successfully opened and ran resets the per-episode budget:
-		// the failure that ended it (if any) begins a fresh recovery episode rather
-		// than continuing the prior reconnect streak.
+		// Reset the retry budget after a successful Open.
 		if healthy {
 			failedAttempts = 0
 		}
 
-		// A server-requested pause (CloseStreamSignal) is not a failure: wait the
-		// requested window, then reconnect without consuming the recovery budget.
-		// Ingest keeps buffering meanwhile; unacked records are requeued on the
-		// next attempt.
+		// Pauses do not consume the retry budget.
 		var ps pauseSignal
 		if errors.As(runErr, &ps) {
 			if !cs.waitPause(ctx, ps.duration) {
@@ -127,20 +114,12 @@ func (cs *CoreStream[Req, Resp]) waitPause(ctx context.Context, serverDuration t
 	}
 }
 
-// retryableError is any error that self-classifies its retryability. Errors
-// from the transport and auth layers (e.g. TokenError from an OAuth mint)
-// implement it; the supervisor honors their verdict rather than blindly
-// retrying every non-context error. Structural so we don't have to import
-// auth or transport just to name their concrete types.
+// retryableError lets errors classify their retry behavior.
 type retryableError interface {
 	IsRetryable() bool
 }
 
-// isRetryable reports whether err represents a transient failure that warrants
-// a stream reconnect. Context cancellation, stream-open validation errors
-// (wrong table name, bad record type), and errors that self-report as
-// non-retryable (e.g. a revoked-credentials OAuth mint failure) are not
-// retryable; transport-level failures (connection reset, server going away) are.
+// isRetryable reports whether reconnecting may succeed.
 func isRetryable(err error) bool {
 	if err == nil {
 		return false
@@ -152,22 +131,17 @@ func isRetryable(err error) bool {
 	if errors.Is(err, errClosed) {
 		return false
 	}
-	// Errors produced by the transport layer's Open (validation failures such
-	// as empty table name or unsupported record type) are non-retryable
-	// because reconnecting would produce the same error.
+	// Validation failures are deterministic.
 	var ve *validationError
 	if errors.As(err, &ve) {
 		return false
 	}
-	// Honor any layer's self-reported retryability verdict (e.g. OAuth
-	// TokenError). Walk the unwrap chain so a wrapped mint failure is still seen.
+	// Honor self-classifying wrapped errors.
 	var re retryableError
 	if errors.As(err, &re) {
 		return re.IsRetryable()
 	}
-	// All other errors (network failures, server resets, auth rejections after
-	// the stream was open) are considered retryable; the supervisor's retry cap
-	// is the backstop.
+	// Treat remaining failures as transient.
 	return true
 }
 
