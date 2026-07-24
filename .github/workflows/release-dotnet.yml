@@ -1,20 +1,15 @@
-name: Build & Release .NET SDK
-run-name: "Release .NET SDK ${{ github.ref_name }}"
+name: Build .NET SDK
+run-name: "Build .NET SDK ${{ github.ref_name }}"
+
+# Build-only: packs the NuGet package with all native runtimes and uploads it
+# as an artifact. Publishing and the GitHub Release happen downstream.
 
 on:
-  push:
-    tags:
-      - 'dotnet/v*'
   workflow_dispatch:
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
-
-permissions:
-  contents: write
-  id-token: write # Required for attestation
-  attestations: write # Required for attestation
 
 jobs:
   build-ffi:
@@ -55,6 +50,9 @@ jobs:
 
     name: Build FFI - ${{ matrix.artifact_dir }}
     runs-on: ${{ matrix.runner }}
+    permissions:
+      contents: read
+      id-token: write
 
     defaults:
       run:
@@ -63,8 +61,18 @@ jobs:
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
 
+      - name: Get JFrog OIDC token
+        shell: bash
+        run: bash "$GITHUB_WORKSPACE/.github/scripts/jfrog-oidc-token.sh"
+
+      - name: Configure cargo for JFrog
+        shell: bash
+        run: bash "$GITHUB_WORKSPACE/.github/scripts/configure-cargo.sh"
+
       - name: Install protoc
         uses: arduino/setup-protoc@c65c819552d16ad3c9b72d9dfd5ba5237b9c906b # v3
+        with:
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Install cross-compilation toolchain (Linux ARM64)
         if: matrix.cross
@@ -95,12 +103,16 @@ jobs:
         with:
           name: ffi-${{ matrix.artifact_dir }}
           path: rust/artifacts/${{ matrix.artifact_dir }}
+          if-no-files-found: error
 
-  publish:
+  package:
+    name: Pack NuGet package
     needs: build-ffi
     runs-on:
       group: databricks-protected-runner-group
       labels: linux-ubuntu-latest
+    permissions:
+      contents: read
     defaults:
       run:
         working-directory: dotnet
@@ -129,10 +141,6 @@ jobs:
           cp -r native/ffi-osx-arm64/osx-arm64 src/Zerobus/runtimes/
           cp -r native/ffi-win-x64/win-x64 src/Zerobus/runtimes/
 
-      - name: Extract version from tag
-        id: version
-        run: echo "version=${GITHUB_REF#refs/tags/dotnet/v}" >> "$GITHUB_OUTPUT"
-
       - name: Package NuGet
         env:
           CI: true
@@ -141,54 +149,11 @@ jobs:
             --configuration Release \
             --output ./packages \
             -p:SkipNativeBuild=true \
-            -p:Version=${{ steps.version.outputs.version }} \
-            -p:PackageVersion=${{ steps.version.outputs.version }} \
-            -p:AssemblyVersion=${{ steps.version.outputs.version }} \
-            -p:FileVersion=${{ steps.version.outputs.version }} \
-            -p:InformationalVersion=${{ steps.version.outputs.version }} \
             -p:CI=true
 
-      - name: Generate attestation
-        uses: actions/attest-build-provenance@0f67c3f4856b2e3261c31976d6725780e5e4c373 # v4
+      - name: Upload NuGet package
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
-          subject-path: "packages/*.nupkg"
-
-      - name: NuGet login (OIDC → temp API key)
-        uses: NuGet/login@8d196754b4036150537f80ac539e15c2f1028841 # v1
-        id: login
-        with:
-          user: ${{ secrets.NUGET_USERNAME }}
-
-      - name: Publish to Nuget Packages
-        env:
-          NUGET_AUTH_TOKEN: ${{ steps.login.outputs.NUGET_API_KEY }}
-        run: |
-          dotnet nuget push packages/*.nupkg \
-            --api-key "${{ steps.login.outputs.NUGET_API_KEY }}" \
-            --skip-duplicate  \
-            --source https://api.nuget.org/v3/index.json
-
-  release:
-    name: Create GitHub Release
-    runs-on:
-      group: databricks-protected-runner-group
-      labels: linux-ubuntu-latest
-    needs: publish
-
-    steps:
-      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
-
-      - name: Extract version from tag
-        id: version
-        run: echo "version=${GITHUB_REF#refs/tags/dotnet/v}" >> "$GITHUB_OUTPUT"
-
-      - name: Extract release notes from changelog
-        run: |
-          version="v${{ steps.version.outputs.version }}"
-          awk "/^## Release ${version}/{found=1; next} /^## /{if(found) exit} found{print}" dotnet/CHANGELOG.md > /tmp/release-notes.md
-
-      - name: Create GitHub Release
-        uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2
-        with:
-          name: .NET SDK v${{ steps.version.outputs.version }}
-          body_path: /tmp/release-notes.md
+          name: dotnet-package
+          path: dotnet/packages/*.nupkg
+          if-no-files-found: error
