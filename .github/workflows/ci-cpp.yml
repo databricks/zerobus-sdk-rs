@@ -68,7 +68,7 @@ jobs:
       # (BuildRustFfi.cmake), which needs -Zsanitizer + -Zbuild-std.
       - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # nightly
         with:
-          toolchain: nightly
+          toolchain: nightly-2026-07-23
           components: rust-src
 
       # clang: the instrumented Rust archive emits LLVM sanitizer runtime calls,
@@ -112,7 +112,7 @@ jobs:
       # (BuildRustFfi.cmake), which needs -Zsanitizer + -Zbuild-std.
       - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # nightly
         with:
-          toolchain: nightly
+          toolchain: nightly-2026-07-23
           components: rust-src
 
       # clang: the instrumented Rust archive emits LLVM sanitizer runtime calls,
