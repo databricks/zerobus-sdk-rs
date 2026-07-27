@@ -33,6 +33,13 @@ type pauseSignal struct {
 
 func (pauseSignal) Error() string { return "stream: server requested pause (close-stream signal)" }
 
+// openFailure marks an error already handled by the transport Open path.
+type openFailure struct{ cause error }
+
+func (e *openFailure) Error() string { return e.cause.Error() }
+
+func (e *openFailure) Unwrap() error { return e.cause }
+
 // openBudgetExceeded marks a timed-out Open as retryable.
 type openBudgetExceeded struct{ cause error }
 

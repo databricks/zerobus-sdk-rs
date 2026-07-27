@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -308,8 +309,8 @@ func (cs *CoreStream[Req, Resp]) Ingest(ctx context.Context, record []byte) (int
 	if err := cs.checkRawSize(len(record)); err != nil {
 		return 0, err
 	}
-	return cs.enqueueEncoded(ctx, func(offset int64) (Req, error) {
-		return cs.enc.encode(offset, record)
+	return cs.enqueueEncoded(ctx, func() (Req, error) {
+		return cs.enc.encode(math.MaxInt64, record)
 	})
 }
 
@@ -333,8 +334,8 @@ func (cs *CoreStream[Req, Resp]) IngestBatch(ctx context.Context, records [][]by
 	if err := cs.checkRawSize(total); err != nil {
 		return 0, err
 	}
-	return cs.enqueueEncoded(ctx, func(offset int64) (Req, error) {
-		return cs.enc.encodeBatch(offset, records)
+	return cs.enqueueEncoded(ctx, func() (Req, error) {
+		return cs.enc.encodeBatch(math.MaxInt64, records)
 	})
 }
 
@@ -346,8 +347,8 @@ func (cs *CoreStream[Req, Resp]) checkRawSize(size int) error {
 	return nil
 }
 
-// enqueueEncoded reserves capacity before assigning an offset.
-func (cs *CoreStream[Req, Resp]) enqueueEncoded(ctx context.Context, encodeFn func(offset int64) (Req, error)) (int64, error) {
+// enqueueEncoded reserves capacity and encodes before assigning an offset.
+func (cs *CoreStream[Req, Resp]) enqueueEncoded(ctx context.Context, encodeFn func() (Req, error)) (int64, error) {
 	if cs.isClosed() {
 		if err := cs.terminalErr(); err != nil {
 			return 0, err
@@ -358,20 +359,22 @@ func (cs *CoreStream[Req, Resp]) enqueueEncoded(ctx context.Context, encodeFn fu
 		return 0, err
 	}
 
-	cs.offsetMu.Lock()
-	offset := cs.nextOffset
-	msg, err := encodeFn(offset)
+	// Encode with the largest possible wire offset so the size check remains
+	// valid after the sender stamps any connection-local physical offset.
+	msg, err := encodeFn()
 	if err != nil {
-		cs.offsetMu.Unlock()
 		cs.buf.release()
 		return 0, err
 	}
 	if size := cs.enc.wireSize(msg); size > cs.cfg.MaxPayloadBytes {
-		cs.offsetMu.Unlock()
 		cs.buf.release()
 		return 0, fmt.Errorf("%w: encoded size %d exceeds MaxPayloadBytes=%d",
 			ErrPayloadTooLarge, size, cs.cfg.MaxPayloadBytes)
 	}
+
+	cs.offsetMu.Lock()
+	offset := cs.nextOffset
+	cs.enc.stampOffset(msg, offset)
 	if err := cs.buf.append(offset, msg); err != nil {
 		cs.offsetMu.Unlock()
 		return 0, err
@@ -510,14 +513,15 @@ func (cs *CoreStream[Req, Resp]) runOnce(ctx context.Context) (cause error, rese
 	openTimedOut := errors.Is(openCtx.Err(), context.DeadlineExceeded)
 	cancelOpen()
 	if err != nil {
+		openErr := &openFailure{cause: fmt.Errorf("stream: open: %w", err)}
 		// Invalid parameters cannot be fixed by reconnecting.
 		if errors.Is(err, transport.ErrInvalidParams) {
-			return wrapValidation(fmt.Errorf("stream: open: %w", err)), false
+			return wrapValidation(openErr), false
 		}
 		if openTimedOut && ctx.Err() == nil {
-			return &openBudgetExceeded{cause: fmt.Errorf("stream: open: %w", err)}, false
+			return &openBudgetExceeded{cause: openErr}, false
 		}
-		return fmt.Errorf("stream: open: %w", err), false
+		return openErr, false
 	}
 	openedAt := time.Now()
 	startAck := cs.wm.current()
@@ -541,23 +545,48 @@ func (cs *CoreStream[Req, Resp]) runOnce(ctx context.Context) (cause error, rese
 	var senderParked bool
 	var senderExited bool
 	var receiverExited bool
+	var observedPause *pauseSignal
+	recordPause := func(ps pauseSignal) {
+		if observedPause == nil {
+			pauseCopy := ps
+			observedPause = &pauseCopy
+		}
+		if !senderParked {
+			cancelSender()
+			senderParked = true
+		}
+	}
+	drainPause := func() {
+		if observedPause != nil {
+			return
+		}
+		select {
+		case ps := <-pauseCh:
+			recordPause(ps)
+		default:
+		}
+	}
 waitLoop:
 	for {
 		select {
 		case senderErr := <-senderExitCh:
 			senderExited = true
+			drainPause()
 			if !senderParked {
 				cause = senderErr
 				break waitLoop
 			}
-		case cause = <-receiverExitCh:
+		case receiverErr := <-receiverExitCh:
 			receiverExited = true
-			break waitLoop
-		case <-pauseCh:
-			if !senderParked {
-				cancelSender()
-				senderParked = true
+			drainPause()
+			if observedPause != nil {
+				cause = *observedPause
+			} else {
+				cause = receiverErr
 			}
+			break waitLoop
+		case ps := <-pauseCh:
+			recordPause(ps)
 		case <-ctx.Done():
 			break waitLoop
 		}

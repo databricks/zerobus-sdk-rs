@@ -85,7 +85,10 @@ func (cs *CoreStream[Req, Resp]) supervise(ctx context.Context) {
 			runErr = fmt.Errorf("stream: server closed the stream")
 		}
 
-		if transport.IsAuthRejection(runErr) && cs.params.HeadersProvider != nil {
+		var openErr *openFailure
+		if !errors.As(runErr, &openErr) &&
+			transport.IsAuthRejection(runErr) &&
+			cs.params.HeadersProvider != nil {
 			cs.params.HeadersProvider.Invalidate(ctx, cs.params.TableName)
 		}
 

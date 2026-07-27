@@ -9,6 +9,8 @@ import (
 	"testing"
 	"time"
 
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/types/known/durationpb"
 
@@ -340,6 +342,88 @@ type blockedSendOpener struct{ rpc *blockedSendRPC }
 
 func (o *blockedSendOpener) Open(_ context.Context, _ transport.StreamParams) (wireStream[encodedMsg, ephemeralResp], error) {
 	return transport.NewFakeStreamForTesting(o.rpc), nil
+}
+
+type countingHeadersProvider struct {
+	invalidations atomic.Int64
+}
+
+func (*countingHeadersProvider) GetHeaders(context.Context, string) (map[string]string, error) {
+	return nil, nil
+}
+
+func (p *countingHeadersProvider) Invalidate(context.Context, string) {
+	p.invalidations.Add(1)
+}
+
+// authRejectingOpener models transport Open, which owns invalidation for
+// handshake failures before returning the rejection to the supervisor.
+type authRejectingOpener struct {
+	provider *countingHeadersProvider
+}
+
+func (o *authRejectingOpener) Open(ctx context.Context, params transport.StreamParams) (wireStream[encodedMsg, ephemeralResp], error) {
+	o.provider.Invalidate(ctx, params.TableName)
+	return nil, status.Error(codes.Unauthenticated, "stale credentials")
+}
+
+type terminalRecvRPC struct {
+	*fakeRPC
+	recvErr chan error
+}
+
+func newTerminalRecvRPC() *terminalRecvRPC {
+	return &terminalRecvRPC{
+		fakeRPC: newFakeRPC(),
+		recvErr: make(chan error, 1),
+	}
+}
+
+func (f *terminalRecvRPC) Recv() (*zerobuspb.EphemeralStreamResponse, error) {
+	select {
+	case resp, ok := <-f.recvs:
+		if !ok {
+			return nil, io.EOF
+		}
+		return resp, nil
+	case err := <-f.recvErr:
+		return nil, err
+	}
+}
+
+type terminalRecvOpener struct{ rpc *terminalRecvRPC }
+
+func (o *terminalRecvOpener) Open(_ context.Context, _ transport.StreamParams) (wireStream[encodedMsg, ephemeralResp], error) {
+	return transport.NewFakeStreamForTesting(o.rpc), nil
+}
+
+type classifiedError struct {
+	retryable bool
+}
+
+func (e *classifiedError) Error() string     { return "classified error" }
+func (e *classifiedError) IsRetryable() bool { return e.retryable }
+
+type concurrentEncoder struct {
+	jsonEncoder
+	entered chan struct{}
+	release <-chan struct{}
+}
+
+func (e *concurrentEncoder) encode(offset int64, record []byte) (encodedMsg, error) {
+	e.entered <- struct{}{}
+	<-e.release
+	return e.jsonEncoder.encode(offset, record)
+}
+
+type timeoutOpener struct {
+	attempts atomic.Int64
+}
+
+func (o *timeoutOpener) Open(ctx context.Context, _ transport.StreamParams) (wireStream[encodedMsg, ephemeralResp], error) {
+	o.attempts.Add(1)
+	<-ctx.Done()
+	return nil, ctx.Err()
 }
 
 // ---- recording ack callback ------------------------------------------------
