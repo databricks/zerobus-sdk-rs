@@ -23,6 +23,9 @@
 
 ### Documentation
 
+- README: document the opt-in variant extension annotation
+  (`ArrowSchemaOptions`) for the Arrow Flight UC→Arrow schema conversion.
+
 ### Internal Changes
 
 ### Breaking Changes

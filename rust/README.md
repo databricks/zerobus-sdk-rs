@@ -905,6 +905,25 @@ match stream.wait_for_offset(offset).await {
 
 `SchemaValidationCause` is `#[non_exhaustive]` and includes an `Unknown(String)` variant, so a newer server cause the SDK doesn't recognize is still surfaced rather than dropped.
 
+### Variant Extension Annotation (Arrow Flight)
+
+*(Beta; requires `features = ["arrow-flight"]`.)*
+
+`arrow_schema_from_uc_columns` / `arrow_schema_from_uc_schema` build an Arrow schema from Unity Catalog columns. By default `VARIANT` columns become a plain `Struct<metadata, value>` with no marker. Pass `ArrowSchemaOptions { annotate_variant_extension: true }` to also tag every variant field (top-level and nested) with the canonical `arrow.parquet.variant` Arrow extension, so downstream consumers can tell which fields are variants:
+
+```rust
+use databricks_zerobus_ingest_sdk::schema::{
+    arrow_schema_from_uc_columns_with_options, ArrowSchemaOptions, UcColumn,
+};
+
+let mut options = ArrowSchemaOptions::default();
+options.annotate_variant_extension = true;
+let schema = arrow_schema_from_uc_columns_with_options(&uc_columns, &options)?;
+# Ok::<(), databricks_zerobus_ingest_sdk::schema::SchemaError>(())
+```
+
+The physical `Struct<metadata, value>` shape is unchanged. Leave it off (the default) unless a consumer needs the marker: the Arrow Flight server's target schema is unmarked, so a marked schema forces a per-batch server-side cast. If you enable it, build your `RecordBatch` from the same marked schema — `ingest_batch` compares schemas including field metadata and rejects a marked-stream/unmarked-batch mismatch locally.
+
 ### Payload Size Limit
 
 The Zerobus server applies a **10 MiB limit** to the raw record bytes of an ingest call, and *additionally* enforces a transport-layer limit on the full serialized request (record bytes plus protobuf framing and stream metadata). The SDK enforces a limit client-side so you get an immediate `InvalidArgument` error rather than a server rejection:
