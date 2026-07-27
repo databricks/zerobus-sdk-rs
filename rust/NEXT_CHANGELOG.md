@@ -21,6 +21,8 @@
 
 ### Bug Fixes
 
+- **Arrow Flight — invalid acknowledgment watermarks are rejected** (Beta): ack progress is now monotonic, so delayed or duplicate responses cannot move the durable watermark backward. A response claiming more records than were actually submitted on the active connection is rejected without making buffered, unsent records appear durable.
+
 ### Documentation
 
 - README: document the opt-in variant extension annotation

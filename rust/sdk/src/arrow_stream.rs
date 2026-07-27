@@ -287,7 +287,11 @@ pub struct ZerobusArrowStream {
     server_error_tx: watch::Sender<Option<ZerobusError>>,
     server_error_rx: watch::Receiver<Option<ZerobusError>>,
     /// Cumulative record count assigned to pending ranges for the current connection.
-    cumulative_records_sent: Arc<AtomicU64>,
+    /// This includes batches buffered while paused.
+    cumulative_records_assigned: Arc<AtomicU64>,
+    /// Connection-local cumulative record count committed to the active Flight sender.
+    /// Unlike `cumulative_records_assigned`, this excludes batches buffered while paused.
+    submitted_records: Arc<AtomicU64>,
     /// Last acknowledged cumulative record count (for recovery slicing).
     last_acked_records: Arc<AtomicU64>,
     /// Pause gate used while draining a close signal or rebuilding after failure; accepted
@@ -339,7 +343,8 @@ impl ZerobusArrowStream {
         let recovery_attempts = Arc::new(AtomicU32::new(0));
         let batch_tx = Arc::new(Mutex::new(None));
         let receiver_task = Arc::new(Mutex::new(None));
-        let cumulative_records_sent = Arc::new(AtomicU64::new(0));
+        let cumulative_records_assigned = Arc::new(AtomicU64::new(0));
+        let submitted_records = Arc::new(AtomicU64::new(0));
         let last_acked_records = Arc::new(AtomicU64::new(0));
         let is_paused = Arc::new(AtomicBool::new(false));
         // Capacity mirrors the batch_tx channel so a permit holder always has a slot.
@@ -369,7 +374,8 @@ impl ZerobusArrowStream {
             inflight,
             server_error_tx,
             server_error_rx,
-            cumulative_records_sent,
+            cumulative_records_assigned,
+            submitted_records,
             last_acked_records,
             is_paused,
             sdk_identifier,
@@ -450,7 +456,8 @@ impl ZerobusArrowStream {
             Arc::clone(&stream.failed_batches),
             Arc::clone(&stream.recovery_attempts),
             stream.server_error_tx.clone(),
-            Arc::clone(&stream.cumulative_records_sent),
+            Arc::clone(&stream.cumulative_records_assigned),
+            Arc::clone(&stream.submitted_records),
             Arc::clone(&stream.last_acked_records),
             Arc::clone(&stream.is_paused),
             Arc::clone(&stream.ingest_mutex),
@@ -748,7 +755,8 @@ impl ZerobusArrowStream {
         failed_batches: Arc<Mutex<Vec<RecordBatch>>>,
         recovery_attempts: Arc<AtomicU32>,
         server_error_tx: watch::Sender<Option<ZerobusError>>,
-        cumulative_records_sent: Arc<AtomicU64>,
+        cumulative_records_assigned: Arc<AtomicU64>,
+        submitted_records: Arc<AtomicU64>,
         last_acked_records: Arc<AtomicU64>,
         is_paused: Arc<AtomicBool>,
         ingest_mutex: Arc<Mutex<()>>,
@@ -790,6 +798,7 @@ impl ZerobusArrowStream {
                         Arc::clone(&pending_batches),
                         ack_timeout,
                         server_error_tx.clone(),
+                        Arc::clone(&submitted_records),
                         Arc::clone(&last_acked_records),
                         Arc::clone(&is_paused),
                         &options,
@@ -878,7 +887,8 @@ impl ZerobusArrowStream {
                                 &headers_provider,
                                 &batch_tx,
                                 &pending_batches,
-                                &cumulative_records_sent,
+                                &cumulative_records_assigned,
+                                &submitted_records,
                                 &last_acked_records,
                                 &sdk_identifier,
                                 &ingest_mutex,
@@ -1002,7 +1012,8 @@ impl ZerobusArrowStream {
         headers_provider: &Arc<dyn HeadersProvider>,
         batch_tx: &BatchSender,
         pending_batches: &Arc<Mutex<Vec<PendingBatch>>>,
-        cumulative_records_sent: &Arc<AtomicU64>,
+        cumulative_records_assigned: &Arc<AtomicU64>,
+        submitted_records: &Arc<AtomicU64>,
         last_acked_records: &Arc<AtomicU64>,
         sdk_identifier: &str,
         ingest_mutex: &Arc<Mutex<()>>,
@@ -1141,7 +1152,8 @@ impl ZerobusArrowStream {
         Self::replay_pending_batches(
             &tx,
             pending_batches,
-            cumulative_records_sent,
+            cumulative_records_assigned,
+            submitted_records,
             last_acked_records,
             acked_before_disconnect,
         )
@@ -1164,7 +1176,8 @@ impl ZerobusArrowStream {
     async fn replay_pending_batches(
         tx: &mpsc::Sender<Result<RecordBatch, FlightError>>,
         pending_batches: &Arc<Mutex<Vec<PendingBatch>>>,
-        cumulative_records_sent: &Arc<AtomicU64>,
+        cumulative_records_assigned: &Arc<AtomicU64>,
+        submitted_records: &Arc<AtomicU64>,
         last_acked_records: &Arc<AtomicU64>,
         acked_before_disconnect: u64,
     ) -> ZerobusResult<()> {
@@ -1208,20 +1221,25 @@ impl ZerobusArrowStream {
             }
 
             // Reset counters together with the range install, before any send.
-            cumulative_records_sent.store(new_cumulative, Ordering::Relaxed);
+            cumulative_records_assigned.store(new_cumulative, Ordering::Relaxed);
+            submitted_records.store(0, Ordering::Release);
             last_acked_records.store(0, Ordering::Release);
 
             replay
         };
 
         // Send only after the pending_batches lock is released (ingest_mutex is still
-        // held by the caller); pending stays intact on failure.
+        // held by the caller); pending stays intact on failure. The replacement response
+        // stream is not polled until replay returns, so publishing after each successful
+        // handoff cannot race a valid acknowledgement on this connection.
         for batch in replay_batches {
+            let record_count = batch.num_rows() as u64;
             if tx.send(Ok(batch)).await.is_err() {
                 return Err(ZerobusError::StreamClosedError(tonic::Status::internal(
                     "Failed to replay batch during recovery",
                 )));
             }
+            submitted_records.fetch_add(record_count, Ordering::Release);
         }
 
         Ok(())
@@ -1284,6 +1302,65 @@ impl ZerobusArrowStream {
         Self::move_pending_to_failed(pending_batches, failed_batches, last_acked_records).await;
     }
 
+    /// Advances the monotonic record watermark and removes fully acknowledged batches.
+    async fn apply_acknowledgment(
+        ack: &FlightAckMetadata,
+        submitted_records: &AtomicU64,
+        last_acked_records: &AtomicU64,
+        pending_batches: &Mutex<Vec<PendingBatch>>,
+        last_ack_tx: &watch::Sender<Option<OffsetId>>,
+        #[cfg(feature = "test-hooks")] ack_applied_gate: &AckAppliedGate,
+    ) -> ZerobusResult<()> {
+        let acked_records = ack.ack_up_to_records;
+        // Ingest publishes submitted_records and commits to the active sender while
+        // holding this same lock. Validation therefore cannot observe a submitted
+        // watermark before its handoff, or a handoff before its watermark.
+        let (effective_acked_records, max_acked_offset) = {
+            let mut pending = pending_batches.lock().await;
+            let submitted_records = submitted_records.load(Ordering::Acquire);
+            if acked_records > submitted_records {
+                return Err(ZerobusError::UnexpectedStreamResponseError(format!(
+                    "Acknowledgment claims {acked_records} records, but only {submitted_records} records were submitted"
+                )));
+            }
+
+            let previous_acked_records =
+                last_acked_records.fetch_max(acked_records, Ordering::AcqRel);
+            let effective_acked_records = previous_acked_records.max(acked_records);
+            let mut max_acked_offset: Option<OffsetId> = None;
+            pending.retain(|pb| {
+                if effective_acked_records >= pb.end_record {
+                    max_acked_offset =
+                        Some(max_acked_offset.map_or(pb.offset_id, |o| o.max(pb.offset_id)));
+                    false
+                } else {
+                    true
+                }
+            });
+            (effective_acked_records, max_acked_offset)
+        };
+
+        debug!(
+            ack_up_to_offset = ack.ack_up_to_offset,
+            ack_up_to_records = acked_records,
+            effective_acked_records,
+            "Received acknowledgment"
+        );
+
+        #[cfg(feature = "test-hooks")]
+        if acked_records > 0 {
+            if let Some(notify) = ack_applied_gate.lock().await.as_ref() {
+                notify.notify_one();
+            }
+        }
+
+        if let Some(offset) = max_acked_offset {
+            let _ = last_ack_tx.send(Some(offset));
+        }
+
+        Ok(())
+    }
+
     /// Processes acknowledgments from the server response stream.
     ///
     /// Uses record-based tracking: the server sends `ack_up_to_records` indicating
@@ -1299,6 +1376,7 @@ impl ZerobusArrowStream {
         pending_batches: Arc<Mutex<Vec<PendingBatch>>>,
         ack_timeout: Duration,
         server_error_tx: watch::Sender<Option<ZerobusError>>,
+        submitted_records: Arc<AtomicU64>,
         last_acked_records: Arc<AtomicU64>,
         is_paused: Arc<AtomicBool>,
         options: &ArrowStreamConfigurationOptions,
@@ -1331,7 +1409,12 @@ impl ZerobusArrowStream {
                 }
             }
 
+            // TODO: Anchor this timeout to the oldest pending batch. The current
+            // per-response timeout can spend most of its window while idle and restarts
+            // whenever any response arrives, even if it makes no ack progress.
             let result = if let Some(deadline) = pause_deadline {
+                // TODO: Race graceful close against the active ack deadline and
+                // preserve the earliest close deadline when repeated signals arrive.
                 tokio::select! {
                     biased;
                     _ = tokio::time::sleep_until(deadline) => {
@@ -1400,43 +1483,16 @@ impl ZerobusArrowStream {
                                 }
                             }
 
-                            let acked_records = ack.ack_up_to_records;
-                            debug!(
-                                ack_up_to_offset = ack.ack_up_to_offset,
-                                ack_up_to_records = acked_records,
-                                "Received acknowledgment"
-                            );
-
-                            // Release so the watermark is observed cross-task (reconnect / drain).
-                            last_acked_records.store(acked_records, Ordering::Release);
-
-                            // Test seam: let a test await a landed partial ack.
-                            #[cfg(feature = "test-hooks")]
-                            if acked_records > 0 {
-                                if let Some(notify) = ack_applied_gate.lock().await.as_ref() {
-                                    notify.notify_one();
-                                }
-                            }
-
-                            let mut max_acked_offset: Option<OffsetId> = None;
-                            {
-                                let mut pending = pending_batches.lock().await;
-                                pending.retain(|pb| {
-                                    if acked_records >= pb.end_record {
-                                        max_acked_offset = Some(
-                                            max_acked_offset
-                                                .map_or(pb.offset_id, |o| o.max(pb.offset_id)),
-                                        );
-                                        false // Remove from pending
-                                    } else {
-                                        true // Keep in pending
-                                    }
-                                });
-                            }
-
-                            if let Some(offset) = max_acked_offset {
-                                let _ = last_ack_tx.send(Some(offset));
-                            }
+                            Self::apply_acknowledgment(
+                                &ack,
+                                &submitted_records,
+                                &last_acked_records,
+                                &pending_batches,
+                                &last_ack_tx,
+                                #[cfg(feature = "test-hooks")]
+                                &ack_applied_gate,
+                            )
+                            .await?;
                         }
                         Err(e) => {
                             warn!("Failed to parse ack metadata: {}", e);
@@ -1591,7 +1647,7 @@ impl ZerobusArrowStream {
         let offset_id = self.offset_generator.next();
         let record_count = batch.num_rows() as u64;
         let start_record = self
-            .cumulative_records_sent
+            .cumulative_records_assigned
             .fetch_add(record_count, Ordering::Relaxed);
         let end_record = start_record + record_count;
 
@@ -1633,15 +1689,18 @@ impl ZerobusArrowStream {
             }
         };
 
-        if let Err(e) = sender.send(Ok(batch)).await {
-            warn!("Send failed: {}", e);
-            if self.options.recovery {
-                debug!(
-                    offset_id = offset_id,
-                    "Send failed but recovery enabled - supervisor will handle recovery"
-                );
-                return Ok(offset_id);
-            } else {
+        let send_permit = match sender.reserve().await {
+            Ok(permit) => permit,
+            Err(e) => {
+                warn!("Send failed: {}", e);
+                if self.options.recovery {
+                    debug!(
+                        offset_id = offset_id,
+                        "Send failed but recovery enabled - supervisor will handle recovery"
+                    );
+                    return Ok(offset_id);
+                }
+
                 {
                     let mut pending = self.pending_batches.lock().await;
                     pending.retain(|pb| pb.offset_id != offset_id);
@@ -1658,6 +1717,14 @@ impl ZerobusArrowStream {
                     "Failed to send batch",
                 )));
             }
+        };
+
+        // Commit the submitted watermark and channel handoff under the same lock used
+        // by acknowledgement validation. The reserved channel slot makes the handoff infallible.
+        {
+            let _pending = self.pending_batches.lock().await;
+            self.submitted_records.store(end_record, Ordering::Release);
+            send_permit.send(Ok(batch));
         }
 
         debug!(offset_id = offset_id, "Batch queued for ingestion");
@@ -2222,6 +2289,193 @@ mod tests {
         }
     }
 
+    /// An acknowledgement beyond the connection-local submitted-record count is a protocol
+    /// violation and must not make unsent records appear durable.
+    #[tokio::test]
+    async fn forward_ack_is_rejected_without_mutating_state() {
+        let schema = one_col_schema();
+        let sem = Arc::new(Semaphore::new(1));
+        let pending_batches = Arc::new(Mutex::new(vec![pending_batch(
+            &sem,
+            batch_with_rows(&schema, 10),
+            0,
+            0,
+            10,
+        )]));
+        let response_stream = futures::stream::iter([Ok(PutResult {
+            app_metadata: serde_json::to_vec(&FlightAckMetadata {
+                ack_up_to_offset: 0,
+                ack_up_to_records: 11,
+                close_stream_duration_ms: None,
+            })
+            .unwrap()
+            .into(),
+        })]);
+        let (last_ack_tx, last_ack_rx) = watch::channel(None);
+        let (server_error_tx, _server_error_rx) = watch::channel(None);
+        let submitted_records = Arc::new(AtomicU64::new(10));
+        let last_acked_records = Arc::new(AtomicU64::new(0));
+
+        let error = ZerobusArrowStream::process_acks(
+            Box::pin(response_stream),
+            Arc::new(AtomicBool::new(false)),
+            last_ack_tx,
+            Arc::clone(&pending_batches),
+            Duration::from_secs(60),
+            server_error_tx,
+            Arc::clone(&submitted_records),
+            Arc::clone(&last_acked_records),
+            Arc::new(AtomicBool::new(false)),
+            &ArrowStreamConfigurationOptions::default(),
+            #[cfg(feature = "test-hooks")]
+            Arc::new(Mutex::new(None)),
+        )
+        .await
+        .expect_err("a forward acknowledgement must be rejected");
+
+        match error {
+            ZerobusError::UnexpectedStreamResponseError(message) => {
+                assert!(message.contains("11 records"));
+                assert!(message.contains("10 records were submitted"));
+            }
+            other => panic!("expected an unexpected-response error, got {other:?}"),
+        }
+        assert_eq!(submitted_records.load(Ordering::Acquire), 10);
+        assert_eq!(last_acked_records.load(Ordering::Acquire), 0);
+        assert_eq!(*last_ack_rx.borrow(), None);
+        let pending = pending_batches.lock().await;
+        assert_eq!(pending.len(), 1);
+        assert_eq!((pending[0].start_record, pending[0].end_record), (0, 10));
+    }
+
+    /// Assigned ranges buffered while paused are not valid acknowledgement targets until replay
+    /// submits them to the active connection.
+    #[tokio::test]
+    async fn forward_ack_through_paused_batch_is_rejected() {
+        let schema = one_col_schema();
+        let sem = Arc::new(Semaphore::new(2));
+        let pending_batches = Arc::new(Mutex::new(vec![
+            pending_batch(&sem, batch_with_rows(&schema, 10), 0, 0, 10),
+            pending_batch(&sem, batch_with_rows(&schema, 10), 1, 10, 20),
+        ]));
+        let response_stream = futures::stream::iter([Ok(PutResult {
+            app_metadata: serde_json::to_vec(&FlightAckMetadata {
+                ack_up_to_offset: 1,
+                ack_up_to_records: 20,
+                close_stream_duration_ms: None,
+            })
+            .unwrap()
+            .into(),
+        })]);
+        let (last_ack_tx, last_ack_rx) = watch::channel(None);
+        let (server_error_tx, _server_error_rx) = watch::channel(None);
+        let submitted_records = Arc::new(AtomicU64::new(10));
+        let last_acked_records = Arc::new(AtomicU64::new(0));
+
+        let error = ZerobusArrowStream::process_acks(
+            Box::pin(response_stream),
+            Arc::new(AtomicBool::new(false)),
+            last_ack_tx,
+            Arc::clone(&pending_batches),
+            Duration::from_secs(60),
+            server_error_tx,
+            Arc::clone(&submitted_records),
+            Arc::clone(&last_acked_records),
+            Arc::new(AtomicBool::new(true)),
+            &ArrowStreamConfigurationOptions::default(),
+            #[cfg(feature = "test-hooks")]
+            Arc::new(Mutex::new(None)),
+        )
+        .await
+        .expect_err("an acknowledgement through a paused, unsent range must be rejected");
+
+        match error {
+            ZerobusError::UnexpectedStreamResponseError(message) => {
+                assert!(message.contains("20 records"));
+                assert!(message.contains("10 records were submitted"));
+            }
+            other => panic!("expected an unexpected-response error, got {other:?}"),
+        }
+        assert_eq!(last_acked_records.load(Ordering::Acquire), 0);
+        assert_eq!(*last_ack_rx.borrow(), None);
+        let pending = pending_batches.lock().await;
+        assert_eq!(pending.len(), 2);
+        assert_eq!((pending[0].start_record, pending[0].end_record), (0, 10));
+        assert_eq!((pending[1].start_record, pending[1].end_record), (10, 20));
+    }
+
+    /// A delayed or duplicate acknowledgement must never move the cumulative watermark backward,
+    /// otherwise recovery can resend a prefix that the server already made durable.
+    #[tokio::test]
+    async fn regressive_ack_replays_only_unacknowledged_suffix() {
+        let schema = one_col_schema();
+        let sem = Arc::new(Semaphore::new(1));
+        let pending_batches = Arc::new(Mutex::new(vec![pending_batch(
+            &sem,
+            batch_with_rows(&schema, 10),
+            0,
+            0,
+            10,
+        )]));
+        let response_stream = futures::stream::iter([5, 0].map(|acked_records| {
+            Ok(PutResult {
+                app_metadata: serde_json::to_vec(&FlightAckMetadata {
+                    ack_up_to_offset: 0,
+                    ack_up_to_records: acked_records,
+                    close_stream_duration_ms: None,
+                })
+                .unwrap()
+                .into(),
+            })
+        }));
+        let (last_ack_tx, _last_ack_rx) = watch::channel(None);
+        let (server_error_tx, _server_error_rx) = watch::channel(None);
+        let last_acked_records = Arc::new(AtomicU64::new(0));
+
+        let _stream_closed = ZerobusArrowStream::process_acks(
+            Box::pin(response_stream),
+            Arc::new(AtomicBool::new(false)),
+            last_ack_tx,
+            Arc::clone(&pending_batches),
+            Duration::from_secs(60),
+            server_error_tx,
+            Arc::new(AtomicU64::new(10)),
+            Arc::clone(&last_acked_records),
+            Arc::new(AtomicBool::new(false)),
+            &ArrowStreamConfigurationOptions::default(),
+            #[cfg(feature = "test-hooks")]
+            Arc::new(Mutex::new(None)),
+        )
+        .await;
+
+        let acked_before_disconnect = last_acked_records.load(Ordering::Acquire);
+        assert_eq!(acked_before_disconnect, 5);
+        let cumulative_records_assigned = Arc::new(AtomicU64::new(10));
+        let submitted_records = Arc::new(AtomicU64::new(10));
+        let (tx, mut rx) = mpsc::channel::<Result<RecordBatch, FlightError>>(1);
+        ZerobusArrowStream::replay_pending_batches(
+            &tx,
+            &pending_batches,
+            &cumulative_records_assigned,
+            &submitted_records,
+            &last_acked_records,
+            acked_before_disconnect,
+        )
+        .await
+        .expect("replay should succeed");
+
+        let pending = pending_batches.lock().await;
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0].batch.num_rows(), 5);
+        assert_eq!((pending[0].start_record, pending[0].end_record), (0, 5));
+        drop(pending);
+        assert_eq!(cumulative_records_assigned.load(Ordering::Relaxed), 5);
+        assert_eq!(submitted_records.load(Ordering::Acquire), 5);
+        assert_eq!(last_acked_records.load(Ordering::Acquire), 0);
+        assert_eq!(rx.try_recv().unwrap().unwrap().num_rows(), 5);
+        assert!(rx.try_recv().is_err());
+    }
+
     /// A replay-send failure must not drop pending batches, their permits, or desync
     /// the counter. A dropped receiver gives a deterministic send failure.
     #[tokio::test]
@@ -2240,15 +2494,22 @@ mod tests {
 
         // Stale values that must be overwritten by the atomic install.
         let cumulative = Arc::new(AtomicU64::new(999));
+        let submitted = Arc::new(AtomicU64::new(999));
         let last_acked = Arc::new(AtomicU64::new(7));
 
         // Receiver dropped -> every send fails.
         let (tx, rx) = mpsc::channel::<Result<RecordBatch, FlightError>>(4);
         drop(rx);
 
-        let res =
-            ZerobusArrowStream::replay_pending_batches(&tx, &pending, &cumulative, &last_acked, 0)
-                .await;
+        let res = ZerobusArrowStream::replay_pending_batches(
+            &tx,
+            &pending,
+            &cumulative,
+            &submitted,
+            &last_acked,
+            0,
+        )
+        .await;
         assert!(res.is_err(), "replay must surface the send failure");
 
         let guard = pending.lock().await;
@@ -2264,7 +2525,12 @@ mod tests {
         assert_eq!(
             cumulative.load(Ordering::Relaxed),
             5,
-            "cumulative_records_sent must match the reinstalled ranges, not the stale value"
+            "cumulative_records_assigned must match the reinstalled ranges, not the stale value"
+        );
+        assert_eq!(
+            submitted.load(Ordering::Acquire),
+            0,
+            "a failed replay must not publish unsent records"
         );
         assert_eq!(
             last_acked.load(Ordering::Relaxed),
@@ -2289,17 +2555,25 @@ mod tests {
             pending_batch(&sem, batch_with_rows(&schema, 2), 1, 3, 5),
         ]));
         let cumulative = Arc::new(AtomicU64::new(0));
+        let submitted = Arc::new(AtomicU64::new(0));
         let last_acked = Arc::new(AtomicU64::new(9));
 
         let (tx, mut rx) = mpsc::channel::<Result<RecordBatch, FlightError>>(4);
 
-        let res =
-            ZerobusArrowStream::replay_pending_batches(&tx, &pending, &cumulative, &last_acked, 0)
-                .await;
+        let res = ZerobusArrowStream::replay_pending_batches(
+            &tx,
+            &pending,
+            &cumulative,
+            &submitted,
+            &last_acked,
+            0,
+        )
+        .await;
         assert!(res.is_ok());
 
         assert_eq!(pending.lock().await.len(), 2);
         assert_eq!(cumulative.load(Ordering::Relaxed), 5);
+        assert_eq!(submitted.load(Ordering::Acquire), 5);
         assert_eq!(last_acked.load(Ordering::Relaxed), 0);
 
         let first = rx.try_recv().expect("first replay batch");
@@ -2322,12 +2596,19 @@ mod tests {
         ]));
         assert_eq!(sem.available_permits(), 2);
         let cumulative = Arc::new(AtomicU64::new(0));
+        let submitted = Arc::new(AtomicU64::new(0));
         let last_acked = Arc::new(AtomicU64::new(4));
         let (tx, mut rx) = mpsc::channel::<Result<RecordBatch, FlightError>>(4);
 
-        let res =
-            ZerobusArrowStream::replay_pending_batches(&tx, &pending, &cumulative, &last_acked, 4)
-                .await;
+        let res = ZerobusArrowStream::replay_pending_batches(
+            &tx,
+            &pending,
+            &cumulative,
+            &submitted,
+            &last_acked,
+            4,
+        )
+        .await;
         assert!(res.is_ok());
 
         // Only the partially-acked batch remains, rebuilt from cumulative 0.
@@ -2336,6 +2617,7 @@ mod tests {
         assert_eq!((guard[0].start_record, guard[0].end_record), (0, 2));
         drop(guard);
         assert_eq!(cumulative.load(Ordering::Relaxed), 2);
+        assert_eq!(submitted.load(Ordering::Acquire), 2);
         assert_eq!(last_acked.load(Ordering::Relaxed), 0);
         // Fully-acked batch's permit was released; one remains.
         assert_eq!(sem.available_permits(), 3);
