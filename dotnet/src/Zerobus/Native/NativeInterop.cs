@@ -246,6 +246,7 @@ internal static class NativeInterop
         byte[] descriptorProto,
         HeadersProviderCallback headersCallback,
         IntPtr userData,
+        HeadersProviderFreeCallback? freeUserData,
         CStreamConfigurationOptions options)
     {
         var tcs = new TaskCompletionSource<IntPtr>(TaskCreationOptions.RunContinuationsAsynchronously);
@@ -267,6 +268,7 @@ internal static class NativeInterop
                     (nuint)descriptorProto.Length,
                     headersCallback,
                     userData,
+                    freeUserData,
                     ref options,
                     completionCallback,
                     IntPtr.Zero,

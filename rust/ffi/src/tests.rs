@@ -561,6 +561,7 @@ fn test_create_stream_with_headers_provider_async_reports_completion_error_via_c
         0,
         headers_callback,
         ptr::null_mut(),
+        None,
         ptr::null(),
         create_callback,
         Box::as_ref(&sender) as *const _ as *mut std::ffi::c_void,
@@ -670,6 +671,7 @@ fn test_async_overloads_fail_fast_on_invalid_input() {
         0,
         headers_cb,
         ptr::null_mut(),
+        None,
         ptr::null(),
         stream_cb,
         ptr::null_mut(),
@@ -1580,6 +1582,58 @@ fn test_create_stream_with_headers_provider_frees_user_data_on_failure() {
     );
 
     zerobus_sdk_free(sdk);
+}
+
+// The async variant also owns `user_data`: a synchronous scheduling failure
+// (null SDK, rejected before the task is spawned) must still invoke
+// `free_user_data` exactly once before returning false — the sync-failure leg
+// of the async free-on-every-path contract.
+#[test]
+fn test_create_stream_with_headers_provider_async_frees_user_data_on_sync_failure() {
+    static FREE_COUNT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+    static FREE_SENTINEL: u8 = 0;
+    extern "C" fn free_user_data(user_data: *mut std::ffi::c_void) {
+        if std::ptr::eq(user_data as *const u8, &FREE_SENTINEL) {
+            FREE_COUNT.fetch_add(1, AtomicOrdering::SeqCst);
+        }
+    }
+    extern "C" fn stream_cb(
+        _stream: *mut crate::CZerobusStream,
+        _result: *const CResult,
+        _user_data: *mut std::ffi::c_void,
+    ) {
+    }
+
+    let table = CString::new("main.default.events").unwrap();
+    let options = zerobus_get_default_config();
+    let mut result = presumed_success_result();
+    let user_data = (&FREE_SENTINEL as *const u8) as *mut std::ffi::c_void;
+
+    let before = FREE_COUNT.load(AtomicOrdering::SeqCst);
+    // Null SDK => rejected synchronously, before any task is spawned.
+    let started = zerobus_sdk_create_stream_with_headers_provider_async(
+        ptr::null_mut(),
+        table.as_ptr(),
+        ptr::null(),
+        0,
+        empty_headers,
+        user_data,
+        Some(free_user_data),
+        &options as *const crate::CStreamConfigurationOptions,
+        stream_cb,
+        ptr::null_mut(),
+        &mut result as *mut CResult,
+    );
+    let after = FREE_COUNT.load(AtomicOrdering::SeqCst);
+
+    assert!(!started, "null SDK should be rejected synchronously");
+    assert_eq!(
+        after - before,
+        1,
+        "expected free_user_data to run exactly once on sync scheduling failure"
+    );
+
+    zerobus_free_error_message(result.error_message);
 }
 
 // ========================================================================

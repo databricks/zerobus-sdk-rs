@@ -17,10 +17,12 @@
   caller-supplied `free_user_data` destroy callback from its `Drop`, which runs
   only after every task that could call `get_headers()` is gone (the supervisor
   task holds its own `Arc` across the in-flight call). The provider is
-  constructed before any fallible work in `create_stream_with_headers_provider` /
-  `create_arrow_stream_with_headers_provider`, so `free_user_data` is invoked
+  constructed before any fallible work in `create_stream_with_headers_provider`,
+  `create_arrow_stream_with_headers_provider`, and
+  `create_stream_with_headers_provider_async`, so `free_user_data` is invoked
   exactly once on every path — on success after the last reference drops, on a
-  failed create before returning.
+  failed create before returning (synchronously for the async variant's
+  scheduling failures, in the spawned task for its asynchronous failures).
 
 ### Documentation
 
@@ -36,13 +38,14 @@
 
 ### Breaking Changes
 
-- `zerobus_sdk_create_stream_with_headers_provider` and
-  `zerobus_sdk_create_arrow_stream_with_headers_provider` take a new
+- `zerobus_sdk_create_stream_with_headers_provider`,
+  `zerobus_sdk_create_arrow_stream_with_headers_provider`, and
+  `zerobus_sdk_create_stream_with_headers_provider_async` take a new
   `free_user_data` parameter (a nullable `void (*)(void *user_data)`) after
   `user_data`. Callers must hand ownership of `user_data` across and supply a
   destroy callback (or pass null to opt out and manage the lifetime themselves).
-  This changes the generated `zerobus.h` signatures, so Go and any other C FFI
-  consumer must update their call sites.
+  This changes the generated `zerobus.h` signatures, so Go, .NET, and any other
+  C FFI consumer must update their call sites.
 
 ### Deprecations
 

@@ -594,14 +594,23 @@ pub extern "C" fn zerobus_sdk_create_stream_with_headers_provider(
 /// success result, or a null stream pointer and a failure result. The SDK
 /// handle must remain valid until the callback runs.
 ///
-/// OWNERSHIP: unlike the synchronous `zerobus_sdk_create_stream_with_headers_provider`,
-/// this variant exposes no `free_user_data` callback, so it does NOT take
-/// ownership of `user_data` — the provider is built with `free_user_data = None`
-/// and the caller stays responsible for freeing `user_data` (only after the
-/// completion callback has fired, since a recovery `get_headers` may still run).
-/// No wrapper currently calls this; before one adopts it, add a `free_user_data`
-/// parameter and hand ownership across (as the sync path does), or it will
-/// reintroduce the recovery-vs-teardown use-after-free this change fixes.
+/// Ownership follows the synchronous `zerobus_sdk_create_stream_with_headers_provider`:
+/// once this function is called, the FFI owns `user_data`. When `free_user_data`
+/// is set it is invoked exactly once, on every path:
+/// - on a synchronous scheduling failure (this call returns false), before returning;
+/// - on an asynchronous creation failure, when the provider drops in the spawned
+///   task before the completion callback fires with the error;
+/// - on success, when the last internal reference to the provider drops — after
+///   any in-flight `get_headers` callback has returned (closing the
+///   recovery-vs-teardown use-after-free).
+///
+/// The caller must therefore hand ownership across and never free `user_data`
+/// itself, not even when creation fails. Pass a null `free_user_data` to opt out
+/// (the caller then owns `user_data` and must keep it alive for the stream's
+/// whole lifetime, including in-flight recovery callbacks).
+///
+/// `free_user_data` may run on an internal SDK thread, so it must be safe to
+/// call from any thread.
 #[no_mangle]
 pub extern "C" fn zerobus_sdk_create_stream_with_headers_provider_async(
     sdk: *mut CZerobusSdk,
@@ -610,12 +619,27 @@ pub extern "C" fn zerobus_sdk_create_stream_with_headers_provider_async(
     descriptor_proto_len: usize,
     headers_callback: HeadersProviderCallback,
     user_data: *mut std::ffi::c_void,
+    // Written inline (not via HeadersProviderFreeCallback) so cbindgen emits a
+    // nullable C function pointer instead of an opaque struct.
+    free_user_data: Option<extern "C" fn(user_data: *mut std::ffi::c_void)>,
     options: *const CStreamConfigurationOptions,
     callback: CreateStreamAsyncCallback,
     callback_user_data: *mut std::ffi::c_void,
     result: *mut CResult,
 ) -> bool {
     ffi_guard(result, false, move || {
+        // INVARIANT: construct the provider Arc *before* any fallible work (as the
+        // synchronous path does). It owns `user_data`, so its Drop invokes
+        // `free_user_data` exactly once on every path — including the synchronous
+        // early-returns below (the local drops here) and the asynchronous failure
+        // in the spawned task. Wrappers rely on free-on-every-path and never free
+        // `user_data` themselves.
+        let headers_provider: Arc<dyn HeadersProvider> = Arc::new(CallbackHeadersProvider::new(
+            headers_callback,
+            user_data,
+            free_user_data,
+        ));
+
         if let Err(msg) = validate_sdk_ptr(sdk) {
             write_error_result(result, msg, false);
             return false;
@@ -648,16 +672,6 @@ pub extern "C" fn zerobus_sdk_create_stream_with_headers_provider_async(
         } else {
             None
         };
-
-        // Build the provider before spawning so it owns `user_data` for the whole
-        // async attempt. This entry point does not expose a `free_user_data`
-        // callback, so it opts out of ownership (None) — the caller retains
-        // responsibility for freeing `user_data` after the completion callback.
-        let headers_provider: Arc<dyn HeadersProvider> = Arc::new(CallbackHeadersProvider::new(
-            headers_callback,
-            user_data,
-            None,
-        ));
 
         let sdk_ptr = SendPtr::new(sdk);
         let callback_user_data = SendPtr::new(callback_user_data);

@@ -1,6 +1,5 @@
 using System.Runtime.CompilerServices;
 using System.Runtime.ExceptionServices;
-using System.Runtime.InteropServices;
 using Databricks.Zerobus.Native;
 
 namespace Databricks.Zerobus;
@@ -35,27 +34,9 @@ public sealed class ZerobusStream : IDisposable, IAsyncDisposable
     private int _inflightAsyncOperations;
     private readonly ManualResetEventSlim _asyncOperationsDrained = new(initialState: true);
 
-    // Only set on the ASYNC headers-provider path, which still borrows the
-    // provider: the stream owns the GCHandle / delegate and frees them on
-    // dispose. The sync path transfers provider ownership to the FFI (freed via
-    // a destroy callback after any in-flight GetHeaders returns), so those
-    // streams leave these at default/null and never free the handle here.
-    // Not readonly: GCHandle is not a readonly struct, so calling Free() on a readonly field
-    // creates a defensive copy — the field is never actually mutated, causing double-free.
-    private GCHandle _bridgeHandle;
-    private readonly HeadersProviderCallback? _callbackRef;
-
     internal ZerobusStream(IntPtr ptr)
     {
         _ptr = ptr;
-    }
-
-    // Async headers-provider path: the stream owns the provider handle/delegate.
-    internal ZerobusStream(IntPtr ptr, GCHandle bridgeHandle, HeadersProviderCallback callbackRef)
-    {
-        _ptr = ptr;
-        _bridgeHandle = bridgeHandle;
-        _callbackRef = callbackRef;
     }
 
     /// <summary>
@@ -334,7 +315,6 @@ public sealed class ZerobusStream : IDisposable, IAsyncDisposable
             ptr = Interlocked.Exchange(ref _ptr, IntPtr.Zero);
             if (ptr == IntPtr.Zero)
             {
-                FreeBridgeHandle();
                 return;
             }
 
@@ -354,7 +334,6 @@ public sealed class ZerobusStream : IDisposable, IAsyncDisposable
         }
 
         NativeMethods.StreamFree(ptr);
-        FreeBridgeHandle();
         GC.SuppressFinalize(this);
 
         if (closeError is not null)
@@ -369,7 +348,6 @@ public sealed class ZerobusStream : IDisposable, IAsyncDisposable
         var ptr = Interlocked.Exchange(ref _ptr, IntPtr.Zero);
         if (ptr == IntPtr.Zero)
         {
-            FreeBridgeHandle();
             return;
         }
 
@@ -388,7 +366,6 @@ public sealed class ZerobusStream : IDisposable, IAsyncDisposable
         }
 
         NativeMethods.StreamFree(ptr);
-        FreeBridgeHandle();
 
         if (closeError is not null)
             ExceptionDispatchInfo.Capture(closeError).Throw();
@@ -406,12 +383,6 @@ public sealed class ZerobusStream : IDisposable, IAsyncDisposable
         Dispose(false);
     }
 
-    private void FreeBridgeHandle()
-    {
-        if (_bridgeHandle.IsAllocated)
-            _bridgeHandle.Free();
-    }
-
     /// <summary>
     /// Returns the raw native pointer to the underlying C stream.
     /// Internal use only.
@@ -425,10 +396,10 @@ public sealed class ZerobusStream : IDisposable, IAsyncDisposable
     }
 
     /// <summary>
-    /// Transfers this stream's native pointer and any provider handle to a new
-    /// wrapper around <paramref name="newPtr"/>, disposing this one. On the async
-    /// headers-provider path the owned bridge handle moves to the new wrapper; the
-    /// sync path owns no handle, so only the pointer moves. Internal use only.
+    /// Transfers this stream's native pointer to a new wrapper around
+    /// <paramref name="newPtr"/>, disposing this one. The provider (when one is
+    /// used) is owned by the FFI, not the stream, so only the pointer moves.
+    /// Internal use only.
     /// </summary>
     internal ZerobusStream Recreate(IntPtr newPtr)
     {
@@ -438,12 +409,7 @@ public sealed class ZerobusStream : IDisposable, IAsyncDisposable
         using var handle = WithWriteLock();
 
         var oldPtr = Interlocked.Exchange(ref _ptr, IntPtr.Zero);
-        var newStream = _bridgeHandle.IsAllocated
-            ? new ZerobusStream(newPtr, _bridgeHandle, _callbackRef!)
-            : new ZerobusStream(newPtr);
-
-        // Prevent accidental double-free of the shared handle from the old wrapper
-        _bridgeHandle = default;
+        var newStream = new ZerobusStream(newPtr);
 
         // Free the old native stream (don't Close — it's already failed/closed)
         if (oldPtr != IntPtr.Zero)

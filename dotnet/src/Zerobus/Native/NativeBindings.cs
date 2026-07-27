@@ -252,6 +252,7 @@ internal static partial class NativeMethods
         nuint descriptorProtoLen,
         HeadersProviderCallback headersCallback,
         IntPtr userData,
+        HeadersProviderFreeCallback? freeUserData,
         ref CStreamConfigurationOptions options,
         CreateStreamAsyncCallback callback,
         IntPtr callbackUserData,

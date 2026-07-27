@@ -463,30 +463,26 @@ public sealed class ZerobusSdk : IDisposable
         var nativeOpts = NativeInterop.ConvertConfig(options);
 
         var bridge = new HeadersProviderBridge(headersProvider);
-        var callback = new HeadersProviderCallback(bridge.NativeCallback);
 
+        // Ownership transfer: the GCHandle to the bridge is handed to the FFI as
+        // user_data. The FFI releases it via the free callback (NativeFree)
+        // exactly once — after any in-flight GetHeaders has returned — which
+        // closes the recovery-vs-teardown use-after-free. The stream therefore
+        // owns nothing and never frees this handle itself, on success or failure.
         var handle = GCHandle.Alloc(bridge);
 
-        IntPtr streamPtr;
-        try
-        {
-            streamPtr = await NativeInterop.SdkCreateStreamWithHeadersProviderAsync(
-                    _ptr,
-                    tableProperties.TableName,
-                    tableProperties.DescriptorProto ?? [],
-                    callback,
-                    GCHandle.ToIntPtr(handle),
-                    nativeOpts)
-                .ConfigureAwait(false);
-        }
-        catch
-        {
-            if (handle.IsAllocated)
-                handle.Free();
-            throw;
-        }
+        var streamPtr = await NativeInterop.SdkCreateStreamWithHeadersProviderAsync(
+                _ptr,
+                tableProperties.TableName,
+                tableProperties.DescriptorProto ?? [],
+                bridge.Callback,
+                GCHandle.ToIntPtr(handle),
+                bridge.FreeCallback,
+                nativeOpts)
+            .ConfigureAwait(false);
 
-        return new ZerobusStream(streamPtr, handle, callback);
+        // The FFI owns the provider handle now; the stream keeps no reference.
+        return new ZerobusStream(streamPtr);
     }
 
     /// <summary>

@@ -79,9 +79,11 @@ When using custom `HeadersProvider` (instead of default OAuth):
 - A `cgo.Handle` wraps the Go interface value and prevents GC collection.
 - The handle is passed to the FFI as `user_data`, and its **ownership is handed to
   the FFI** along with a `free_user_data` destroy callback (`goFreeHeadersProvider`).
-  The FFI invokes it exactly once — after any in-flight `get_headers` returns — and
-  that is where `handle.Delete()` runs. On a failed create (before the provider is
-  installed), the Go side deletes the handle itself.
+  The FFI invokes it exactly once on every path — on success after any in-flight
+  `get_headers` returns, and on a failed create before returning — and that is where
+  `handle.Delete()` runs. The Go side must therefore **never** call `handle.Delete()`
+  itself, not even when create fails; doing so would double-delete the `cgo.Handle`
+  (panic).
 - This replaces the older per-stream handle registry: freeing the handle on `close()`
   could race a recovery `get_headers` still running on a worker thread (use-after-free).
 - Leaking a handle leaks the Go `HeadersProvider` object and any resources it holds.

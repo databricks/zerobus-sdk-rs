@@ -498,14 +498,23 @@ struct CZerobusStream *zerobus_sdk_create_stream_with_headers_provider(struct CZ
  * success result, or a null stream pointer and a failure result. The SDK
  * handle must remain valid until the callback runs.
  *
- * OWNERSHIP: unlike the synchronous `zerobus_sdk_create_stream_with_headers_provider`,
- * this variant exposes no `free_user_data` callback, so it does NOT take
- * ownership of `user_data` — the provider is built with `free_user_data = None`
- * and the caller stays responsible for freeing `user_data` (only after the
- * completion callback has fired, since a recovery `get_headers` may still run).
- * No wrapper currently calls this; before one adopts it, add a `free_user_data`
- * parameter and hand ownership across (as the sync path does), or it will
- * reintroduce the recovery-vs-teardown use-after-free this change fixes.
+ * Ownership follows the synchronous `zerobus_sdk_create_stream_with_headers_provider`:
+ * once this function is called, the FFI owns `user_data`. When `free_user_data`
+ * is set it is invoked exactly once, on every path:
+ * - on a synchronous scheduling failure (this call returns false), before returning;
+ * - on an asynchronous creation failure, when the provider drops in the spawned
+ *   task before the completion callback fires with the error;
+ * - on success, when the last internal reference to the provider drops — after
+ *   any in-flight `get_headers` callback has returned (closing the
+ *   recovery-vs-teardown use-after-free).
+ *
+ * The caller must therefore hand ownership across and never free `user_data`
+ * itself, not even when creation fails. Pass a null `free_user_data` to opt out
+ * (the caller then owns `user_data` and must keep it alive for the stream's
+ * whole lifetime, including in-flight recovery callbacks).
+ *
+ * `free_user_data` may run on an internal SDK thread, so it must be safe to
+ * call from any thread.
  */
 bool zerobus_sdk_create_stream_with_headers_provider_async(struct CZerobusSdk *sdk,
                                                            const char *table_name,
@@ -513,6 +522,7 @@ bool zerobus_sdk_create_stream_with_headers_provider_async(struct CZerobusSdk *s
                                                            uintptr_t descriptor_proto_len,
                                                            HeadersProviderCallback headers_callback,
                                                            void *user_data,
+                                                           void (*free_user_data)(void *user_data),
                                                            const struct CStreamConfigurationOptions *options,
                                                            CreateStreamAsyncCallback callback,
                                                            void *callback_user_data,
