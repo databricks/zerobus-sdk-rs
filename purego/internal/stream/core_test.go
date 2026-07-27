@@ -10,6 +10,93 @@ import (
 )
 
 // ---- tests -----------------------------------------------------------------
+func TestCoreStreamIDsAcrossRecovery(t *testing.T) {
+	first := newFakeRPC()
+	second := newFakeRPC()
+	opener := newFakeOpener(first, second)
+	opener.serverIDs = []string{"server-1", "server-2"}
+	cs := newTestStream(t, opener)
+
+	logicalID := cs.ID()
+	if logicalID == "" {
+		t.Fatal("ID returned an empty logical stream ID")
+	}
+	waitCondition(t, func() bool {
+		return cs.ServerID() == "server-1"
+	}, time.Second)
+
+	stopReads := make(chan struct{})
+	readErr := make(chan string, 1)
+	var readers sync.WaitGroup
+	readers.Add(1)
+	go func() {
+		defer readers.Done()
+		for {
+			select {
+			case <-stopReads:
+				return
+			default:
+				if got := cs.ID(); got != logicalID {
+					select {
+					case readErr <- got:
+					default:
+					}
+					return
+				}
+				_ = cs.ServerID()
+			}
+		}
+	}()
+
+	first.close()
+	waitCondition(t, func() bool {
+		return cs.ServerID() == "server-2"
+	}, time.Second)
+	close(stopReads)
+	readers.Wait()
+
+	select {
+	case got := <-readErr:
+		t.Fatalf("ID changed during recovery: got %q, want %q", got, logicalID)
+	default:
+	}
+	if got := cs.ID(); got != logicalID {
+		t.Fatalf("ID after recovery = %q, want %q", got, logicalID)
+	}
+}
+
+func TestCoreStreamIDsAreUnique(t *testing.T) {
+	cfg := testConfig()
+	cfg.Recovery = RecoveryDisabled
+	first := newCoreForTest(testParams(), cfg, &fakeOpener{openErr: errors.New("open failed")}, nil)
+	second := newCoreForTest(testParams(), cfg, &fakeOpener{openErr: errors.New("open failed")}, nil)
+	t.Cleanup(first.Close)
+	t.Cleanup(second.Close)
+
+	if first.ID() == second.ID() {
+		t.Fatalf("two streams received the same ID %q", first.ID())
+	}
+}
+
+func TestCoreStreamFailedRecoveryPreservesServerID(t *testing.T) {
+	rpc := newFakeRPC()
+	opener := newFakeOpener(rpc)
+	opener.serverIDs = []string{"server-1"}
+	cs := newTestStream(t, opener)
+
+	waitCondition(t, func() bool {
+		return cs.ServerID() == "server-1"
+	}, time.Second)
+	rpc.close()
+	waitCondition(t, func() bool {
+		return opener.openCount() >= 2
+	}, time.Second)
+
+	if got := cs.ServerID(); got != "server-1" {
+		t.Fatalf("ServerID after failed recovery = %q, want %q", got, "server-1")
+	}
+}
+
 func TestCoreStreamIngestAndFlush(t *testing.T) {
 	rpc := newFakeRPC()
 	cs := newTestStream(t, newFakeOpener(rpc))
