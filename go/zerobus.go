@@ -17,9 +17,10 @@
 //
 // Create an SDK instance and stream:
 //
-//	sdk, err := zerobus.NewZerobusSdk(
+//	sdk, err := zerobus.NewZerobusSdkWithOptions(
 //	    "https://your-shard.zerobus.databricks.com",
 //	    "https://your-workspace.databricks.com",
+//	    zerobus.WithApplicationName("my-app/1.0"),
 //	)
 //	if err != nil {
 //	    log.Fatal(err)
@@ -42,14 +43,20 @@
 //
 // # Ingesting Data
 //
-// Recommended API (direct offset return):
+// Queue records in a loop, then wait once for all acknowledgments:
 //
-//	offset, err := stream.IngestRecordOffset(`{"id": 1, "message": "Hello"}`)
-//	if err != nil {
+//	for _, record := range records {
+//	    if _, err := stream.IngestRecordOffset(record); err != nil {
+//	        log.Fatal(err)
+//	    }
+//	}
+//	if err := stream.Flush(); err != nil {
 //	    log.Fatal(err)
 //	}
 //
-// Legacy API (still supported but deprecated):
+// The legacy API is still supported but deprecated. Awaiting each record is
+// appropriate only for low-volume cases that require confirmation before
+// continuing:
 //
 //	ack, err := stream.IngestRecord(`{"id": 1, "message": "Hello"}`)
 //	if err != nil {
@@ -103,20 +110,18 @@
 //
 // # Performance
 //
-// For high throughput, use goroutines for concurrent ingestion:
+// Ingestion is asynchronous and pipelined. Queue records without waiting in
+// the loop, then call Flush once. Prefer IngestRecordsOffset for hot paths to
+// amortize cgo overhead:
 //
-//	var wg sync.WaitGroup
-//	for i := 0; i < 10000; i++ {
-//	    wg.Add(1)
-//	    go func(data []byte) {
-//	        defer wg.Done()
-//	        offset, err := stream.IngestRecordOffset(data)
-//	        if err != nil {
-//	            log.Printf("Failed to ingest: %v", err)
-//	        }
-//	    }(dataToIngest)
+//	for _, data := range records {
+//	    if _, err := stream.IngestRecordOffset(data); err != nil {
+//	        log.Fatal(err)
+//	    }
 //	}
-//	wg.Wait()
+//	if err := stream.Flush(); err != nil {
+//	    log.Fatal(err)
+//	}
 //
 // # Static Linking
 //
@@ -128,6 +133,8 @@ package zerobus
 
 import (
 	"runtime"
+	"strings"
+	"unicode/utf8"
 	"unsafe"
 )
 
@@ -143,6 +150,28 @@ type ZerobusStream struct {
 	ptr unsafe.Pointer
 }
 
+type sdkOptions struct {
+	applicationName string
+}
+
+// SdkOption configures a ZerobusSdk created with NewZerobusSdkWithOptions.
+type SdkOption func(*sdkOptions)
+
+// WithApplicationName appends a caller-supplied identifier, such as
+// "my-app/1.0", to the HTTP user-agent header. Leading and trailing whitespace
+// is trimmed, and empty or whitespace-only names are ignored. The final value
+// is "zerobus-sdk-go/<version> <name>".
+//
+// An invalid UTF-8 name, a name containing a NUL byte, or a name that is not a
+// valid HTTP header value causes NewZerobusSdkWithOptions to return a
+// non-retryable construction error.
+func WithApplicationName(name string) SdkOption {
+	name = strings.TrimSpace(name)
+	return func(options *sdkOptions) {
+		options.applicationName = name
+	}
+}
+
 // NewZerobusSdk creates a new SDK instance.
 //
 // Parameters:
@@ -153,7 +182,60 @@ type ZerobusStream struct {
 //   - Invalid endpoint URLs
 //   - Unable to extract workspace ID from Unity Catalog URL
 func NewZerobusSdk(zerobusEndpoint, unityCatalogURL string) (*ZerobusSdk, error) {
-	ptr, err := sdkNew(zerobusEndpoint, unityCatalogURL)
+	return newZerobusSdk(zerobusEndpoint, unityCatalogURL, sdkOptions{})
+}
+
+// NewZerobusSdkWithOptions creates an SDK instance with optional settings.
+// Use WithApplicationName to add an application identifier to the user-agent
+// header sent on every Zerobus request.
+//
+// Application names are trimmed before use, and blank values are ignored.
+// Invalid UTF-8, NUL bytes, and values that are invalid in an HTTP header cause
+// this function to return a non-retryable construction error.
+//
+// Existing callers that do not need options should continue to use
+// NewZerobusSdk.
+//
+// Example:
+//
+//	sdk, err := zerobus.NewZerobusSdkWithOptions(
+//	    "https://workspace.zerobus.databricks.com",
+//	    "https://workspace.cloud.databricks.com",
+//	    zerobus.WithApplicationName("my-app/1.0"),
+//	)
+func NewZerobusSdkWithOptions(
+	zerobusEndpoint string,
+	unityCatalogURL string,
+	opts ...SdkOption,
+) (*ZerobusSdk, error) {
+	var resolved sdkOptions
+	for _, opt := range opts {
+		if opt != nil {
+			opt(&resolved)
+		}
+	}
+	return newZerobusSdk(zerobusEndpoint, unityCatalogURL, resolved)
+}
+
+func newZerobusSdk(
+	zerobusEndpoint string,
+	unityCatalogURL string,
+	opts sdkOptions,
+) (*ZerobusSdk, error) {
+	if strings.IndexByte(opts.applicationName, 0) >= 0 {
+		return nil, &ZerobusError{
+			Message:     "application name must not contain a NUL byte",
+			IsRetryable: false,
+		}
+	}
+	if !utf8.ValidString(opts.applicationName) {
+		return nil, &ZerobusError{
+			Message:     "application name must be valid UTF-8",
+			IsRetryable: false,
+		}
+	}
+
+	ptr, err := sdkNew(zerobusEndpoint, unityCatalogURL, opts)
 	if err != nil {
 		return nil, err
 	}

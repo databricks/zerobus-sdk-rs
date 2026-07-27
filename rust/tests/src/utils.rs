@@ -13,6 +13,55 @@ use tracing_subscriber::EnvFilter;
 
 static SETUP: Once = Once::new();
 
+/// Moves a paused Tokio clock close enough to the platform's maximum `Instant` that
+/// adding `u64::MAX` milliseconds overflows, while retaining enough headroom for
+/// Tokio's 30-year far-future timer fallback.
+pub async fn advance_tokio_time_near_instant_limit() {
+    const HEADROOM_SECS: u64 = 31 * 365 * 24 * 60 * 60;
+
+    let now = tokio::time::Instant::now();
+    let mut low = 0_u64;
+    let mut high = u64::MAX;
+    while low < high {
+        let mid = ((low as u128 + high as u128 + 1) / 2) as u64;
+        if now
+            .checked_add(std::time::Duration::from_secs(mid))
+            .is_some()
+        {
+            low = mid;
+        } else {
+            high = mid - 1;
+        }
+    }
+
+    assert!(
+        low > HEADROOM_SECS,
+        "platform Instant range must accommodate Tokio's far-future timer"
+    );
+    tokio::time::advance(std::time::Duration::from_secs(low - HEADROOM_SECS)).await;
+}
+
+/// Runs a future while preventing a paused Tokio clock from auto-advancing, with a
+/// wall-clock watchdog so a regression cannot hang the test indefinitely.
+pub async fn run_with_paused_time_watchdog<F: std::future::Future>(future: F) -> F::Output {
+    let keep_clock_active = tokio::spawn(std::future::poll_fn(|cx| {
+        cx.waker().wake_by_ref();
+        std::task::Poll::<()>::Pending
+    }));
+    let (watchdog_tx, watchdog_rx) = tokio::sync::oneshot::channel();
+    std::thread::spawn(move || {
+        std::thread::sleep(std::time::Duration::from_secs(5));
+        let _ = watchdog_tx.send(());
+    });
+
+    let output = tokio::select! {
+        output = future => output,
+        _ = watchdog_rx => panic!("operation exceeded the five-second wall-clock watchdog"),
+    };
+    keep_clock_active.abort();
+    output
+}
+
 #[derive(Default)]
 pub struct TestHeadersProvider {}
 
@@ -26,16 +75,19 @@ impl HeadersProvider for TestHeadersProvider {
     }
 }
 
-/// A headers provider that counts `invalidate()` calls, for asserting credential re-mint
-/// behavior on auth failures.
+/// A headers provider that counts header fetches and `invalidate()` calls, for asserting
+/// credential re-mint behavior on auth failures.
 #[derive(Default)]
 pub struct CountingHeadersProvider {
+    pub get_headers_calls: Arc<std::sync::atomic::AtomicUsize>,
     pub invalidations: Arc<std::sync::atomic::AtomicUsize>,
 }
 
 #[async_trait]
 impl HeadersProvider for CountingHeadersProvider {
     async fn get_headers(&self) -> ZerobusResult<HashMap<&'static str, String>> {
+        self.get_headers_calls
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         let mut headers = HashMap::new();
         headers.insert("authorization", "Bearer test_token".to_string());
         headers.insert("x-databricks-zerobus-table-name", "test_table".to_string());

@@ -14,6 +14,9 @@ Examples are organized by data format and ingestion pattern:
 | Proto Batch  | Protocol Buffers | Batch               | `examples/proto/batch/main.go`  |
 | Arrow Flight | Arrow IPC        | Batch (RecordBatch) | `examples/arrow/main.go`        |
 
+Every example uses `WithApplicationName` to append an application identifier
+to the SDK's HTTP user-agent header.
+
 ## Prerequisites
 
 ### 1. Create a Delta Table

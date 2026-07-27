@@ -1,0 +1,21 @@
+#[allow(clippy::derive_partial_eq_without_eq)]
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct TableOrders {
+    #[prost(int32, optional, tag = "1")]
+    pub id: ::core::option::Option<i32>,
+    #[prost(string, optional, tag = "2")]
+    pub customer_name: ::core::option::Option<::prost::alloc::string::String>,
+    #[prost(string, optional, tag = "3")]
+    pub product_name: ::core::option::Option<::prost::alloc::string::String>,
+    #[prost(int32, optional, tag = "4")]
+    pub quantity: ::core::option::Option<i32>,
+    #[prost(double, optional, tag = "5")]
+    pub price: ::core::option::Option<f64>,
+    #[prost(string, optional, tag = "6")]
+    pub status: ::core::option::Option<::prost::alloc::string::String>,
+    #[prost(int64, optional, tag = "7")]
+    pub created_at: ::core::option::Option<i64>,
+    #[prost(int64, optional, tag = "8")]
+    pub updated_at: ::core::option::Option<i64>,
+}
+

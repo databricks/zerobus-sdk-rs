@@ -10,6 +10,7 @@ import (
 	pb "github.com/databricks/zerobus-sdk/go/tests/pb"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/metadata"
 	grpcstatus "google.golang.org/grpc/status"
 	"google.golang.org/protobuf/types/known/durationpb"
 )
@@ -61,6 +62,10 @@ type MockZerobusServer struct {
 	// Track response index across multiple connection attempts
 	responseIndices      map[string]int
 	responseIndicesMutex sync.Mutex
+
+	// Last user-agent observed on an incoming stream.
+	lastUserAgent      string
+	lastUserAgentMutex sync.RWMutex
 }
 
 // NewMockZerobusServer creates a new mock server
@@ -98,6 +103,13 @@ func (m *MockZerobusServer) GetWriteCount() uint64 {
 	return m.writeCount
 }
 
+// GetLastUserAgent returns the most recent user-agent observed on a stream.
+func (m *MockZerobusServer) GetLastUserAgent() string {
+	m.lastUserAgentMutex.RLock()
+	defer m.lastUserAgentMutex.RUnlock()
+	return m.lastUserAgent
+}
+
 // Reset resets the server state
 func (m *MockZerobusServer) Reset() {
 	m.responsesMutex.Lock()
@@ -119,10 +131,22 @@ func (m *MockZerobusServer) Reset() {
 	m.counterMutex.Lock()
 	m.streamCounter = 0
 	m.counterMutex.Unlock()
+
+	m.lastUserAgentMutex.Lock()
+	m.lastUserAgent = ""
+	m.lastUserAgentMutex.Unlock()
 }
 
 // EphemeralStream implements the bidirectional streaming RPC
 func (m *MockZerobusServer) EphemeralStream(stream pb.Zerobus_EphemeralStreamServer) error {
+	if incoming, ok := metadata.FromIncomingContext(stream.Context()); ok {
+		if values := incoming.Get("user-agent"); len(values) > 0 {
+			m.lastUserAgentMutex.Lock()
+			m.lastUserAgent = values[0]
+			m.lastUserAgentMutex.Unlock()
+		}
+	}
+
 	// Send initial headers/metadata to signal readiness
 	// This triggers the server to send HTTP/2 HEADERS frame
 	// This is CRITICAL: Without this, the Rust SDK will wait indefinitely

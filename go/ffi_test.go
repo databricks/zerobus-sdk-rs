@@ -82,6 +82,79 @@ func TestMockHeadersProviderWithError(t *testing.T) {
 	}
 }
 
+func TestNewZerobusSdkSignatureRemainsCompatible(t *testing.T) {
+	var constructor func(string, string) (*ZerobusSdk, error) = NewZerobusSdk
+	if constructor == nil {
+		t.Fatal("expected NewZerobusSdk constructor")
+	}
+}
+
+func TestSdkIdentifierFormat(t *testing.T) {
+	got := sdkIdentifier()
+	want := "zerobus-sdk-go/" + sdkVersion
+	if got != want {
+		t.Errorf("sdkIdentifier() = %q, want %q", got, want)
+	}
+}
+
+func TestWithApplicationName(t *testing.T) {
+	var options sdkOptions
+	WithApplicationName("  my-app/1.0  ")(&options)
+	if options.applicationName != "my-app/1.0" {
+		t.Errorf("WithApplicationName did not normalize application name, got %q", options.applicationName)
+	}
+}
+
+func TestNewZerobusSdkWithOptionsSkipsNilOption(t *testing.T) {
+	sdk, err := NewZerobusSdkWithOptions(
+		"https://workspace.zerobus.databricks.com",
+		"https://workspace.cloud.databricks.com",
+		nil,
+		WithApplicationName("my-app/1.0"),
+		nil,
+	)
+	if err != nil {
+		t.Fatalf("NewZerobusSdkWithOptions should ignore nil options: %v", err)
+	}
+	sdk.Free()
+}
+
+func TestNewZerobusSdkWithOptionsRejectsInvalidApplicationName(t *testing.T) {
+	sdk, err := NewZerobusSdkWithOptions(
+		"https://workspace.zerobus.databricks.com",
+		"https://workspace.cloud.databricks.com",
+		WithApplicationName("my-app/1.0\ninvalid"),
+	)
+	if err == nil {
+		sdk.Free()
+		t.Fatal("expected an invalid application name error")
+	}
+}
+
+func TestNewZerobusSdkWithOptionsRejectsNULApplicationName(t *testing.T) {
+	sdk, err := NewZerobusSdkWithOptions(
+		"https://workspace.zerobus.databricks.com",
+		"https://workspace.cloud.databricks.com",
+		WithApplicationName("my-app\x00ignored"),
+	)
+	if err == nil {
+		sdk.Free()
+		t.Fatal("expected an embedded NUL error")
+	}
+}
+
+func TestNewZerobusSdkWithOptionsRejectsInvalidUTF8ApplicationName(t *testing.T) {
+	sdk, err := NewZerobusSdkWithOptions(
+		"https://workspace.zerobus.databricks.com",
+		"https://workspace.cloud.databricks.com",
+		WithApplicationName(string([]byte{0xff})),
+	)
+	if err == nil {
+		sdk.Free()
+		t.Fatal("expected an invalid UTF-8 error")
+	}
+}
+
 // TestZerobusError tests the ZerobusError type
 func TestZerobusError(t *testing.T) {
 	err := &ZerobusError{
