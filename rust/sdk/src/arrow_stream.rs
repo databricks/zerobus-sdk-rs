@@ -140,7 +140,9 @@ struct DeadlineTieGrant {
 enum AckEvent {
     Response(Option<Result<PutResult, FlightError>>),
     PendingBatchAvailable,
+    AllPendingBatchesAcknowledged,
     AckDeadline,
+    GracefulCloseDeadline,
 }
 
 fn oldest_pending_ack_deadline(
@@ -1374,8 +1376,17 @@ impl ZerobusArrowStream {
     async fn wait_while_idle(
         response_stream: &mut FlightResponseStream,
         pending_notify: &Notify,
+        graceful_close_deadline: Option<Instant>,
         #[cfg(feature = "test-hooks")] ack_idle_gate: &AckIdleGate,
     ) -> AckEvent {
+        if let Some(deadline) = graceful_close_deadline {
+            return if Instant::now() >= deadline {
+                AckEvent::GracefulCloseDeadline
+            } else {
+                AckEvent::AllPendingBatchesAcknowledged
+            };
+        }
+
         #[cfg(feature = "test-hooks")]
         if let Some(notify) = ack_idle_gate.lock().await.take() {
             notify.notify_one();
@@ -1396,7 +1407,9 @@ impl ZerobusArrowStream {
         head_identity: PendingBatchIdentity,
         acknowledged_records: u64,
         ack_deadline: Instant,
+        graceful_close_deadline: Option<Instant>,
         ack_deadline_tie_grant: &mut Option<DeadlineTieGrant>,
+        graceful_close_deadline_tie_grant: &mut Option<DeadlineTieGrant>,
     ) -> AckEvent {
         let now = Instant::now();
         let current_state = DeadlineTieGrant {
@@ -1407,18 +1420,42 @@ impl ZerobusArrowStream {
             return AckEvent::AckDeadline;
         }
 
-        let event = tokio::select! {
-            biased;
-            res = response_stream.next() => AckEvent::Response(res),
-            _ = tokio::time::sleep_until(ack_deadline) => AckEvent::AckDeadline,
+        if graceful_close_deadline.is_some_and(|deadline| now >= deadline)
+            && *graceful_close_deadline_tie_grant == Some(current_state)
+        {
+            return AckEvent::GracefulCloseDeadline;
+        }
+
+        let event = if let Some(graceful_close_deadline) = graceful_close_deadline {
+            tokio::select! {
+                biased;
+                res = response_stream.next() => AckEvent::Response(res),
+                _ = tokio::time::sleep_until(ack_deadline) => AckEvent::AckDeadline,
+                _ = tokio::time::sleep_until(graceful_close_deadline) => {
+                    AckEvent::GracefulCloseDeadline
+                },
+            }
+        } else {
+            tokio::select! {
+                biased;
+                res = response_stream.next() => AckEvent::Response(res),
+                _ = tokio::time::sleep_until(ack_deadline) => AckEvent::AckDeadline,
+            }
         };
 
         let response_won = matches!(&event, AckEvent::Response(_));
-        *ack_deadline_tie_grant = if response_won && Instant::now() >= ack_deadline {
+        let now = Instant::now();
+        *ack_deadline_tie_grant = if response_won && now >= ack_deadline {
             Some(current_state)
         } else {
             None
         };
+        *graceful_close_deadline_tie_grant =
+            if response_won && graceful_close_deadline.is_some_and(|deadline| now >= deadline) {
+                Some(current_state)
+            } else {
+                None
+            };
         event
     }
 
@@ -1484,6 +1521,47 @@ impl ZerobusArrowStream {
         Ok(())
     }
 
+    /// Starts the server-requested graceful-close period, if recovery is enabled.
+    fn begin_graceful_close(
+        ack: &FlightAckMetadata,
+        options: &ArrowStreamConfigurationOptions,
+        is_paused: &AtomicBool,
+    ) -> ZerobusResult<Option<Instant>> {
+        if !options.recovery {
+            return Ok(None);
+        }
+
+        let server_duration_ms = ack.close_stream_duration_ms.unwrap_or(0);
+        let wait_duration_ms = match options.stream_paused_max_wait_time_ms {
+            None => server_duration_ms,
+            Some(0) => {
+                info!(
+                    "Server will close the stream in {}ms. Triggering stream recovery.",
+                    server_duration_ms
+                );
+                return Err(ZerobusError::StreamClosedError(tonic::Status::unavailable(
+                    "Immediate recovery on close signal",
+                )));
+            }
+            Some(max_wait) => std::cmp::min(max_wait, server_duration_ms),
+        };
+
+        if wait_duration_ms == 0 {
+            info!("Server will close the stream. Triggering immediate recovery.");
+            return Err(ZerobusError::StreamClosedError(tonic::Status::unavailable(
+                "Immediate recovery on close signal",
+            )));
+        }
+
+        is_paused.store(true, Ordering::Relaxed);
+        let deadline = Instant::now() + Duration::from_millis(wait_duration_ms);
+        info!(
+            "Server will close the stream in {}ms. Entering graceful close period (waiting up to {}ms for in-flight acks).",
+            server_duration_ms, wait_duration_ms
+        );
+        Ok(Some(deadline))
+    }
+
     /// Processes acknowledgments from the server response stream.
     ///
     /// Uses record-based tracking: the server sends `ack_up_to_records` indicating
@@ -1509,6 +1587,7 @@ impl ZerobusArrowStream {
     ) -> ZerobusResult<()> {
         let mut pause_deadline: Option<Instant> = None;
         let mut ack_deadline_tie_grant: Option<DeadlineTieGrant> = None;
+        let mut graceful_close_deadline_tie_grant: Option<DeadlineTieGrant> = None;
 
         loop {
             if is_closed.load(Ordering::Relaxed) {
@@ -1516,116 +1595,57 @@ impl ZerobusArrowStream {
                 return Ok(());
             }
 
-            // Check pause state: exit when deadline reached or all batches acked.
-            // Returns a retriable error to trigger recovery in the supervisor.
-            if let Some(deadline) = pause_deadline {
-                let now = tokio::time::Instant::now();
-                let all_acked = pending_batches.lock().await.is_empty();
-
-                if now >= deadline {
-                    info!("Graceful close timeout reached. Triggering recovery.");
-                    return Err(ZerobusError::StreamClosedError(tonic::Status::unavailable(
-                        "Graceful close timeout reached",
-                    )));
-                } else if all_acked {
-                    info!("All in-flight batches acknowledged during graceful close. Triggering recovery.");
-                    return Err(ZerobusError::StreamClosedError(tonic::Status::unavailable(
-                        "All in-flight batches acked during graceful close",
-                    )));
+            let oldest_pending = {
+                let pending = pending_batches.lock().await;
+                oldest_pending_ack_deadline(&pending, ack_timeout)
+            };
+            let event = match oldest_pending {
+                Some((head_identity, ack_deadline)) => {
+                    let acknowledged_records = last_acked_records.load(Ordering::Acquire);
+                    Self::wait_with_pending_deadline(
+                        &mut response_stream,
+                        head_identity,
+                        acknowledged_records,
+                        ack_deadline,
+                        pause_deadline,
+                        &mut ack_deadline_tie_grant,
+                        &mut graceful_close_deadline_tie_grant,
+                    )
+                    .await
                 }
-            }
-
-            let event = if let Some(deadline) = pause_deadline {
-                // TODO: Race graceful close against the active ack deadline and
-                // preserve the earliest close deadline when repeated signals arrive.
-                // Graceful close retains its existing behavior in this change: while
-                // paused, a lack of acknowledgements is tolerated until the close deadline.
-                let result = tokio::select! {
-                    biased;
-                    _ = tokio::time::sleep_until(deadline) => continue,
-                    res = tokio::time::timeout(ack_timeout, response_stream.next()) => res,
-                };
-                match result {
-                    Ok(response) => AckEvent::Response(response),
-                    Err(_) => continue,
-                }
-            } else {
-                let oldest_pending = {
-                    let pending = pending_batches.lock().await;
-                    oldest_pending_ack_deadline(&pending, ack_timeout)
-                };
-                match oldest_pending {
-                    Some((head_identity, ack_deadline)) => {
-                        let acknowledged_records = last_acked_records.load(Ordering::Acquire);
-                        Self::wait_with_pending_deadline(
-                            &mut response_stream,
-                            head_identity,
-                            acknowledged_records,
-                            ack_deadline,
-                            &mut ack_deadline_tie_grant,
-                        )
-                        .await
-                    }
-                    None => {
-                        Self::wait_while_idle(
-                            &mut response_stream,
-                            &pending_notify,
-                            #[cfg(feature = "test-hooks")]
-                            &ack_idle_gate,
-                        )
-                        .await
-                    }
+                None => {
+                    Self::wait_while_idle(
+                        &mut response_stream,
+                        &pending_notify,
+                        pause_deadline,
+                        #[cfg(feature = "test-hooks")]
+                        &ack_idle_gate,
+                    )
+                    .await
                 }
             };
 
             match event {
                 AckEvent::PendingBatchAvailable => continue,
+                AckEvent::AllPendingBatchesAcknowledged => {
+                    info!("All in-flight batches acknowledged during graceful close. Triggering recovery.");
+                    return Err(ZerobusError::StreamClosedError(tonic::Status::unavailable(
+                        "All in-flight batches acked during graceful close",
+                    )));
+                }
                 AckEvent::Response(Some(Ok(put_result))) => {
                     match FlightAckMetadata::from_bytes(&put_result.app_metadata) {
                         Ok(ack) => {
                             // Handle close stream signal.
                             if ack.is_close_signal() {
-                                if options.recovery {
-                                    let server_duration_ms =
-                                        ack.close_stream_duration_ms.unwrap_or(0);
-
-                                    let wait_duration_ms = match options
-                                        .stream_paused_max_wait_time_ms
-                                    {
-                                        None => server_duration_ms,
-                                        Some(0) => {
-                                            info!(
-                                                    "Server will close the stream in {}ms. Triggering stream recovery.",
-                                                    server_duration_ms
-                                                );
-                                            return Err(ZerobusError::StreamClosedError(
-                                                tonic::Status::unavailable(
-                                                    "Immediate recovery on close signal",
-                                                ),
-                                            ));
-                                        }
-                                        Some(max_wait) => {
-                                            std::cmp::min(max_wait, server_duration_ms)
-                                        }
-                                    };
-
-                                    if wait_duration_ms == 0 {
-                                        info!("Server will close the stream. Triggering immediate recovery.");
-                                        return Err(ZerobusError::StreamClosedError(
-                                            tonic::Status::unavailable(
-                                                "Immediate recovery on close signal",
-                                            ),
-                                        ));
-                                    }
-
-                                    is_paused.store(true, Ordering::Relaxed);
+                                if let Some(deadline) =
+                                    Self::begin_graceful_close(&ack, options, &is_paused)?
+                                {
+                                    // Repeated close signals may shorten, never extend,
+                                    // the original recovery bound.
                                     pause_deadline = Some(
-                                        tokio::time::Instant::now()
-                                            + Duration::from_millis(wait_duration_ms),
-                                    );
-                                    info!(
-                                        "Server will close the stream in {}ms. Entering graceful close period (waiting up to {}ms for in-flight acks).",
-                                        server_duration_ms, wait_duration_ms
+                                        pause_deadline
+                                            .map_or(deadline, |current| current.min(deadline)),
                                     );
                                 }
                                 // Process any ack data that came with the close signal.
@@ -1686,6 +1706,12 @@ impl ZerobusArrowStream {
                     // Returned to the supervisor, which publishes it (before + after
                     // finalization) in its terminal branch.
                     return Err(error);
+                }
+                AckEvent::GracefulCloseDeadline => {
+                    info!("Graceful close timeout reached. Triggering recovery.");
+                    return Err(ZerobusError::StreamClosedError(tonic::Status::unavailable(
+                        "Graceful close timeout reached",
+                    )));
                 }
                 AckEvent::AckDeadline => {
                     // Confirm the currently oldest batch is still expired; a ready ack
@@ -2457,6 +2483,231 @@ mod tests {
             enqueued_at: Instant::now(),
             _permit: Arc::clone(sem).try_acquire_owned().unwrap(),
         }
+    }
+
+    /// A graceful-close period does not extend an already-expired ack deadline.
+    #[tokio::test]
+    async fn graceful_close_enforces_ack_deadline() {
+        const ACKNOWLEDGEMENT_TIMEOUT: Duration = Duration::from_millis(10);
+        const GRACEFUL_CLOSE_TIMEOUT: Duration = Duration::from_millis(100);
+
+        let schema = one_col_schema();
+        let sem = Arc::new(Semaphore::new(1));
+        let mut pending = pending_batch(&sem, batch_with_rows(&schema, 1), 0, 0, 1);
+        pending.enqueued_at = Instant::now() - ACKNOWLEDGEMENT_TIMEOUT;
+        let pending_batches = Arc::new(Mutex::new(vec![pending]));
+        let mut close_signal = Some(PutResult {
+            app_metadata: serde_json::to_vec(&FlightAckMetadata {
+                ack_up_to_offset: -1,
+                ack_up_to_records: 0,
+                close_stream_duration_ms: Some(GRACEFUL_CLOSE_TIMEOUT.as_millis() as u64),
+            })
+            .unwrap()
+            .into(),
+        });
+        let response_stream = futures::stream::poll_fn(move |_| match close_signal.take() {
+            Some(response) => Poll::Ready(Some(Ok(response))),
+            None => Poll::Pending,
+        });
+        let (last_ack_tx, _last_ack_rx) = watch::channel(None);
+        let (server_error_tx, _server_error_rx) = watch::channel(None);
+        let is_paused = Arc::new(AtomicBool::new(false));
+        let options = ArrowStreamConfigurationOptions {
+            recovery: true,
+            stream_paused_max_wait_time_ms: None,
+            ..ArrowStreamConfigurationOptions::default()
+        };
+        let process_acks = ZerobusArrowStream::process_acks(
+            Box::pin(response_stream),
+            Arc::new(AtomicBool::new(false)),
+            last_ack_tx,
+            pending_batches,
+            Arc::new(Notify::new()),
+            ACKNOWLEDGEMENT_TIMEOUT,
+            server_error_tx,
+            Arc::new(AtomicU64::new(1)),
+            Arc::new(AtomicU64::new(0)),
+            Arc::clone(&is_paused),
+            &options,
+            #[cfg(feature = "test-hooks")]
+            Arc::new(Mutex::new(None)),
+            #[cfg(feature = "test-hooks")]
+            Arc::new(Mutex::new(None)),
+        );
+        tokio::pin!(process_acks);
+
+        let error = match futures::poll!(process_acks.as_mut()) {
+            Poll::Ready(Err(error)) => error,
+            other => panic!("expected an immediate ack deadline error, got {other:?}"),
+        };
+        assert!(matches!(
+            error,
+            ZerobusError::StreamClosedError(ref status)
+                if status.code() == tonic::Code::DeadlineExceeded
+        ));
+        assert!(is_paused.load(Ordering::Relaxed));
+    }
+
+    /// A ready valid acknowledgement wins when both its ack and graceful-close deadlines expire.
+    #[tokio::test]
+    async fn ready_ack_wins_expired_graceful_close_tie() {
+        const DEADLINE: Duration = Duration::from_millis(10);
+        let schema = one_col_schema();
+        let sem = Arc::new(Semaphore::new(1));
+        let pending_batches = Arc::new(Mutex::new(vec![pending_batch(
+            &sem,
+            batch_with_rows(&schema, 1),
+            0,
+            0,
+            1,
+        )]));
+        let close_signal = PutResult {
+            app_metadata: serde_json::to_vec(&FlightAckMetadata {
+                ack_up_to_offset: -1,
+                ack_up_to_records: 0,
+                close_stream_duration_ms: Some(DEADLINE.as_millis() as u64),
+            })
+            .unwrap()
+            .into(),
+        };
+        let valid_ack = PutResult {
+            app_metadata: serde_json::to_vec(&FlightAckMetadata {
+                ack_up_to_offset: 0,
+                ack_up_to_records: 1,
+                close_stream_duration_ms: None,
+            })
+            .unwrap()
+            .into(),
+        };
+        let ack_ready = Arc::new(AtomicBool::new(false));
+        let observed_ack_ready = Arc::clone(&ack_ready);
+        let mut close_signal = Some(close_signal);
+        let mut valid_ack = Some(valid_ack);
+        let response_stream = futures::stream::poll_fn(move |_| {
+            if let Some(close_signal) = close_signal.take() {
+                return Poll::Ready(Some(Ok(close_signal)));
+            }
+            if observed_ack_ready.load(Ordering::Relaxed) {
+                if let Some(valid_ack) = valid_ack.take() {
+                    return Poll::Ready(Some(Ok(valid_ack)));
+                }
+            }
+            Poll::Pending
+        });
+        let (last_ack_tx, last_ack_rx) = watch::channel(None);
+        let (server_error_tx, _server_error_rx) = watch::channel(None);
+        let last_acked_records = Arc::new(AtomicU64::new(0));
+        let options = ArrowStreamConfigurationOptions {
+            recovery: true,
+            stream_paused_max_wait_time_ms: None,
+            ..ArrowStreamConfigurationOptions::default()
+        };
+        let process_acks = ZerobusArrowStream::process_acks(
+            Box::pin(response_stream),
+            Arc::new(AtomicBool::new(false)),
+            last_ack_tx,
+            Arc::clone(&pending_batches),
+            Arc::new(Notify::new()),
+            DEADLINE,
+            server_error_tx,
+            Arc::new(AtomicU64::new(1)),
+            Arc::clone(&last_acked_records),
+            Arc::new(AtomicBool::new(false)),
+            &options,
+            #[cfg(feature = "test-hooks")]
+            Arc::new(Mutex::new(None)),
+            #[cfg(feature = "test-hooks")]
+            Arc::new(Mutex::new(None)),
+        );
+        tokio::pin!(process_acks);
+
+        assert!(futures::poll!(process_acks.as_mut()).is_pending());
+        tokio::time::sleep(DEADLINE + DEADLINE).await;
+        ack_ready.store(true, Ordering::Relaxed);
+        let error = match futures::poll!(process_acks.as_mut()) {
+            Poll::Ready(Err(error)) => error,
+            other => {
+                panic!("expected graceful-close recovery after acknowledgement, got {other:?}")
+            }
+        };
+        assert!(matches!(
+            error,
+            ZerobusError::StreamClosedError(ref status)
+                if status.code() == tonic::Code::Unavailable
+        ));
+        assert_eq!(last_acked_records.load(Ordering::Acquire), 1);
+        assert_eq!(*last_ack_rx.borrow(), Some(0));
+        assert!(pending_batches.lock().await.is_empty());
+    }
+
+    /// A later close signal may shorten, but cannot extend, the original grace period.
+    #[tokio::test]
+    async fn repeated_close_signal_does_not_extend_grace_deadline() {
+        const FIRST_GRACE: Duration = Duration::from_millis(25);
+        const SECOND_GRACE: Duration = Duration::from_secs(1);
+        const TEST_BOUND: Duration = Duration::from_millis(250);
+
+        let schema = one_col_schema();
+        let sem = Arc::new(Semaphore::new(1));
+        let pending_batches = Arc::new(Mutex::new(vec![pending_batch(
+            &sem,
+            batch_with_rows(&schema, 1),
+            0,
+            0,
+            1,
+        )]));
+        let mut responses = [FIRST_GRACE, SECOND_GRACE]
+            .into_iter()
+            .map(|duration| PutResult {
+                app_metadata: serde_json::to_vec(&FlightAckMetadata {
+                    ack_up_to_offset: -1,
+                    ack_up_to_records: 0,
+                    close_stream_duration_ms: Some(duration.as_millis() as u64),
+                })
+                .unwrap()
+                .into(),
+            });
+        let response_stream = futures::stream::poll_fn(move |_| match responses.next() {
+            Some(response) => Poll::Ready(Some(Ok(response))),
+            None => Poll::Pending,
+        });
+        let (last_ack_tx, _last_ack_rx) = watch::channel(None);
+        let (server_error_tx, _server_error_rx) = watch::channel(None);
+        let options = ArrowStreamConfigurationOptions {
+            recovery: true,
+            stream_paused_max_wait_time_ms: None,
+            ..ArrowStreamConfigurationOptions::default()
+        };
+
+        let error = tokio::time::timeout(
+            TEST_BOUND,
+            ZerobusArrowStream::process_acks(
+                Box::pin(response_stream),
+                Arc::new(AtomicBool::new(false)),
+                last_ack_tx,
+                Arc::clone(&pending_batches),
+                Arc::new(Notify::new()),
+                Duration::from_secs(2),
+                server_error_tx,
+                Arc::new(AtomicU64::new(1)),
+                Arc::new(AtomicU64::new(0)),
+                Arc::new(AtomicBool::new(false)),
+                &options,
+                #[cfg(feature = "test-hooks")]
+                Arc::new(Mutex::new(None)),
+                #[cfg(feature = "test-hooks")]
+                Arc::new(Mutex::new(None)),
+            ),
+        )
+        .await
+        .expect("the first graceful-close deadline must remain in force")
+        .expect_err("graceful-close expiry must trigger recovery");
+        assert!(matches!(
+            error,
+            ZerobusError::StreamClosedError(ref status)
+                if status.code() == tonic::Code::Unavailable
+        ));
+        assert_eq!(pending_batches.lock().await.len(), 1);
     }
 
     /// A valid acknowledgement already ready at expiry is applied before timeout handling.

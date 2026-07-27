@@ -804,8 +804,9 @@ For Arrow Flight streams *(Beta)*, `server_lack_of_ack_timeout_ms` is an
 absolute limit on how long a batch may remain pending, not an inactivity
 timeout. No timer runs while the stream is idle. Each batch's timer starts when
 it becomes pending and is not refreshed when earlier batches are acknowledged.
-Partial acknowledgments do not extend it. If recovery replays pending batches
-on a new connection, their deadlines restart relative to that connection.
+Partial acknowledgments and graceful close do not pause or extend it. If
+recovery replays pending batches on a new connection, their deadlines restart
+relative to that connection.
 Configure the timeout together with `max_inflight_batches` so the server can
 acknowledge a full allowed backlog within the timeout.
 
