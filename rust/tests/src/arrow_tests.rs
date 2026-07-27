@@ -2133,6 +2133,90 @@ mod arrow_flight_tests {
     mod timeout_tests {
         use super::*;
 
+        /// Idle time before ingestion must not consume a future batch's ack deadline.
+        #[tokio::test]
+        async fn test_ack_timeout_starts_when_batch_becomes_pending(
+        ) -> Result<(), Box<dyn std::error::Error>> {
+            setup_tracing();
+
+            const ACKNOWLEDGEMENT_TIMEOUT_MS: u64 = 1_000;
+            const IDLE_MS: u64 = 800;
+            const TARGET_ACKNOWLEDGEMENT_DELAY_MS: u64 = 400;
+
+            let (mock_server, server_url) = start_mock_flight_server().await?;
+            let schema = create_test_arrow_schema();
+            mock_server
+                .inject_responses(
+                    TABLE_NAME,
+                    vec![MockFlightResponse::BatchAck {
+                        ack_up_to_offset: 0,
+                        delay_ms: TARGET_ACKNOWLEDGEMENT_DELAY_MS,
+                        ack_up_to_records: 1,
+                    }],
+                )
+                .await;
+
+            let sdk = ZerobusSdk::builder()
+                .endpoint(server_url)
+                .unity_catalog_url("https://mock-uc.com")
+                .tls_config(Arc::new(NoTlsConfig))
+                .build()?;
+            let stream = sdk
+                .stream_builder()
+                .table(TABLE_NAME)
+                .headers_provider(Arc::new(TestHeadersProvider::default()))
+                .arrow(schema.clone())
+                .server_lack_of_ack_timeout_ms(ACKNOWLEDGEMENT_TIMEOUT_MS)
+                .flush_timeout_ms(ACKNOWLEDGEMENT_TIMEOUT_MS * 2)
+                .recovery(false)
+                .build_arrow()
+                .await?;
+
+            let ack_idle = stream.arm_ack_idle_notify().await;
+            tokio::time::timeout(std::time::Duration::from_secs(5), ack_idle.notified())
+                .await
+                .expect("ack processor should enter its no-pending wait");
+
+            tokio::time::pause();
+            tokio::time::advance(std::time::Duration::from_millis(IDLE_MS)).await;
+
+            let delayed_ack_armed = mock_server.delayed_ack_armed();
+            let batch = create_test_record_batch(schema, vec![2], vec![Some("target")]);
+            let offset = stream.ingest_batch(batch).await?;
+
+            // Keep the current-thread runtime runnable while the batch crosses the real
+            // loopback socket, so paused time cannot auto-advance first.
+            let delayed_ack_armed = delayed_ack_armed.notified();
+            tokio::pin!(delayed_ack_armed);
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+            while futures::poll!(delayed_ack_armed.as_mut()).is_pending() {
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "mock server did not arm the delayed ack"
+                );
+                tokio::task::yield_now().await;
+            }
+
+            tokio::time::advance(std::time::Duration::from_millis(
+                ACKNOWLEDGEMENT_TIMEOUT_MS - IDLE_MS + 1,
+            ))
+            .await;
+            tokio::task::yield_now().await;
+            assert!(
+                !stream.is_closed(),
+                "idle time must not consume the target batch's ack deadline"
+            );
+
+            tokio::time::advance(std::time::Duration::from_millis(
+                TARGET_ACKNOWLEDGEMENT_DELAY_MS,
+            ))
+            .await;
+            tokio::task::yield_now().await;
+            stream.wait_for_offset(offset).await?;
+            assert_eq!(mock_server.get_batch_count().await, 1);
+            Ok(())
+        }
+
         #[tokio::test]
         async fn test_ack_timeout() -> Result<(), Box<dyn std::error::Error>> {
             setup_tracing();
@@ -2184,6 +2268,64 @@ mod arrow_flight_tests {
                 err
             );
 
+            Ok(())
+        }
+
+        /// Recovery must give a replayed batch a fresh full ack deadline.
+        #[tokio::test]
+        async fn test_ack_timeout_recovery_refreshes_replay_deadline(
+        ) -> Result<(), Box<dyn std::error::Error>> {
+            setup_tracing();
+
+            const ACKNOWLEDGEMENT_TIMEOUT_MS: u64 = 500;
+            const REPLAY_ACKNOWLEDGEMENT_DELAY_MS: u64 = 100;
+
+            let (mock_server, server_url) = start_mock_flight_server().await?;
+            let schema = create_test_arrow_schema();
+            mock_server
+                .inject_responses(
+                    TABLE_NAME,
+                    vec![
+                        MockFlightResponse::WithholdAck,
+                        MockFlightResponse::BatchAck {
+                            ack_up_to_offset: 0,
+                            delay_ms: REPLAY_ACKNOWLEDGEMENT_DELAY_MS,
+                            ack_up_to_records: 1,
+                        },
+                    ],
+                )
+                .await;
+
+            let sdk = ZerobusSdk::builder()
+                .endpoint(server_url)
+                .unity_catalog_url("https://mock-uc.com")
+                .tls_config(Arc::new(NoTlsConfig))
+                .build()?;
+            let stream = sdk
+                .stream_builder()
+                .table(TABLE_NAME)
+                .headers_provider(Arc::new(TestHeadersProvider::default()))
+                .arrow(schema.clone())
+                .server_lack_of_ack_timeout_ms(ACKNOWLEDGEMENT_TIMEOUT_MS)
+                .flush_timeout_ms(5_000)
+                .recovery(true)
+                .recovery_timeout_ms(5_000)
+                .recovery_backoff_ms(100)
+                .recovery_retries(3)
+                .build_arrow()
+                .await?;
+
+            let batch = create_test_record_batch(schema, vec![1], vec![Some("test")]);
+            let offset = stream.ingest_batch(batch).await?;
+            tokio::time::timeout(
+                std::time::Duration::from_secs(3),
+                stream.wait_for_offset(offset),
+            )
+            .await
+            .expect("timeout-triggered recovery should complete")?;
+
+            assert_eq!(mock_server.get_batch_count().await, 2);
+            assert_eq!(mock_server.get_total_records_received().await, 2);
             Ok(())
         }
 
@@ -2444,7 +2586,7 @@ mod arrow_flight_tests {
     mod backpressure_tests {
         use super::*;
 
-        /// `max_inflight_batches` bounds batches awaiting ACK, not just batches
+        /// `max_inflight_batches` bounds batches awaiting acknowledgement, not just batches
         /// buffered before the encoder drains. With capacity 1 the second ingest must
         /// block until the first is acked.
         #[tokio::test]

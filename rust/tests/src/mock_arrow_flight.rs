@@ -13,7 +13,7 @@ use arrow_flight::{
 use futures::Stream;
 use rcgen::{generate_simple_self_signed, CertifiedKey};
 use serde::{Deserialize, Serialize};
-use tokio::sync::{mpsc, Mutex};
+use tokio::sync::{mpsc, Mutex, Notify};
 use tokio::time::sleep;
 use tonic::transport::{Identity, ServerTlsConfig};
 use tonic::{Request, Response, Status, Streaming};
@@ -58,6 +58,9 @@ pub enum MockFlightResponse {
         /// Cumulative records acknowledged.
         ack_up_to_records: u64,
     },
+    /// Consume this scripted response when a batch arrives without sending anything.
+    /// This leaves the connection open so the client can exercise its ack deadline.
+    WithholdAck,
     /// Error response - sent immediately when a batch arrives.
     Error { status: Status, delay_ms: u64 },
     /// Reject a connection's setup: send this error instead of the ready signal on the
@@ -98,6 +101,8 @@ pub struct MockFlightServer {
     /// Observation of every `ack_up_to_records` value emitted on the auto-ack path,
     /// in emission order. Used by tests to assert acks are connection-relative.
     auto_ack_records: Arc<Mutex<Vec<u64>>>,
+    /// Signals immediately before a scripted delayed ack registers its timer.
+    delayed_ack_armed: Arc<Notify>,
 }
 
 impl MockFlightServer {
@@ -109,7 +114,13 @@ impl MockFlightServer {
             row_count: Arc::new(Mutex::new(0)),
             response_indices: Arc::new(Mutex::new(HashMap::new())),
             auto_ack_records: Arc::new(Mutex::new(Vec::new())),
+            delayed_ack_armed: Arc::new(Notify::new()),
         }
+    }
+
+    /// Returns a notification fired immediately before a delayed ack starts waiting.
+    pub fn delayed_ack_armed(&self) -> Arc<Notify> {
+        Arc::clone(&self.delayed_ack_armed)
     }
 
     /// Inject responses for a specific table
@@ -233,6 +244,7 @@ impl FlightService for MockFlightServer {
         let row_count = Arc::clone(&self.row_count);
         let response_indices = Arc::clone(&self.response_indices);
         let auto_ack_records = Arc::clone(&self.auto_ack_records);
+        let delayed_ack_armed = Arc::clone(&self.delayed_ack_armed);
 
         tokio::spawn(async move {
             let mut stream_responses: Vec<MockFlightResponse> = Vec::new();
@@ -380,6 +392,7 @@ impl FlightService for MockFlightServer {
                                 .unwrap_or(false)
                             {
                                 if *delay_ms > 0 {
+                                    delayed_ack_armed.notify_one();
                                     sleep(Duration::from_millis(*delay_ms)).await;
                                 }
 
@@ -409,6 +422,12 @@ impl FlightService for MockFlightServer {
                                     indices.insert(table_name.clone(), response_index);
                                 }
                             }
+                        }
+                        MockFlightResponse::WithholdAck => {
+                            info!("Withholding acknowledgment as configured");
+                            response_index += 1;
+                            let mut indices = response_indices.lock().await;
+                            indices.insert(table_name.clone(), response_index);
                         }
                         MockFlightResponse::Error { status, delay_ms } => {
                             // Error responses trigger immediately on first batch
@@ -595,6 +614,7 @@ async fn start_mock_flight_server_inner(
         row_count: Arc::clone(&mock_server.row_count),
         response_indices: Arc::clone(&mock_server.response_indices),
         auto_ack_records: Arc::clone(&mock_server.auto_ack_records),
+        delayed_ack_armed: Arc::clone(&mock_server.delayed_ack_armed),
     };
 
     let addr: std::net::SocketAddr = "127.0.0.1:0".parse()?;

@@ -21,7 +21,8 @@
 
 ### Bug Fixes
 
-- **Arrow Flight — invalid acknowledgment watermarks are rejected** (Beta): ack progress is now monotonic, so delayed or duplicate responses cannot move the durable watermark backward. A response claiming more records than were actually submitted on the active connection is rejected without making buffered, unsent records appear durable.
+- **Arrow Flight — acknowledgment deadlines now start when work becomes pending** (Beta): no timer runs while the stream is idle. The timeout is an absolute deadline for the oldest pending batch: acknowledgments that leave that batch pending do not refresh it, replayed batches receive a fresh deadline on their recovered connection, and malformed or non-progressing responses cannot indefinitely postpone recovery. A valid acknowledgment already ready at expiry is applied before recovery is considered.
+- **Arrow Flight — acknowledgment watermarks are handled monotonically** (Beta): delayed, duplicate, or backward watermarks are absorbed without moving durable progress backward. A forward watermark that claims more records than were submitted on the active connection is rejected without making buffered, unsent records appear durable.
 
 ### Documentation
 

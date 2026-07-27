@@ -65,10 +65,16 @@ pub struct ArrowStreamConfigurationOptions {
     /// Default: 4
     pub recovery_retries: u32,
 
-    /// Timeout in milliseconds for waiting for server acknowledgements.
+    /// Maximum time in milliseconds that a batch may remain pending without being fully
+    /// acknowledged on the active connection.
     ///
-    /// If no acknowledgement is received within this time (and there are pending batches),
-    /// the stream will be considered failed and recovery will be triggered (if enabled).
+    /// No timer runs while there are no pending batches. Each batch's timer starts when it
+    /// becomes pending and is not refreshed when earlier batches are acknowledged. Partial
+    /// acknowledgments do not extend it. Configure this timeout and `max_inflight_batches`
+    /// so the server can acknowledge a full allowed backlog within the timeout.
+    /// After recovery, replayed batches receive a fresh deadline relative to the recovered
+    /// connection. If a batch remains pending when its deadline expires, the stream is
+    /// considered failed and recovery is triggered (if enabled).
     ///
     /// Default: 60,000 (60 seconds)
     pub server_lack_of_ack_timeout_ms: u64,

@@ -19,10 +19,8 @@ use arrow_flight::{FlightClient, PutResult};
 use arrow_ipc::writer::IpcWriteOptions;
 use bytes::Bytes;
 use futures::{Stream, StreamExt};
-#[cfg(feature = "test-hooks")]
-use tokio::sync::Notify;
-use tokio::sync::{mpsc, watch, Mutex, OwnedSemaphorePermit, Semaphore};
-use tokio::time::{sleep, Duration};
+use tokio::sync::{mpsc, watch, Mutex, Notify, OwnedSemaphorePermit, Semaphore};
+use tokio::time::{sleep, Duration, Instant};
 use tokio_retry::strategy::FixedInterval;
 use tokio_retry::RetryIf;
 use tonic::metadata::MetadataValue;
@@ -45,6 +43,9 @@ use crate::ZerobusResult;
 /// Type alias for the batch sender channel, wrapped for thread-safe sharing.
 type BatchSender = Arc<Mutex<Option<mpsc::Sender<Result<RecordBatch, FlightError>>>>>;
 
+/// Stream of Arrow Flight responses carrying acknowledgments from the server.
+type FlightResponseStream = Pin<Box<dyn Stream<Item = Result<PutResult, FlightError>> + Send>>;
+
 /// Test-only barrier used to pause `reconnect` at a precise point — the new connection
 /// is established but pending ranges are not yet rebuilt — so a test can schedule a
 /// concurrent ingest or `close()`.
@@ -65,6 +66,11 @@ struct ReconnectRebuildBarrier {
 /// partial ack has landed before it proceeds.
 #[cfg(feature = "test-hooks")]
 type AckAppliedGate = Arc<Mutex<Option<Arc<Notify>>>>;
+
+/// Test-only gate: when armed, `process_acks` fires after observing an empty pending
+/// set and immediately before parking without an ack deadline.
+#[cfg(feature = "test-hooks")]
+type AckIdleGate = Arc<Mutex<Option<Arc<Notify>>>>;
 
 /// Test-only barrier that parks `close()` after the supervisor and sender are gone but
 /// before pending batches are finalized, allowing cancellation-safe teardown tests.
@@ -102,8 +108,51 @@ struct PendingBatch {
     /// Cumulative record count after this batch.
     /// Batch is fully acked when `acked_records >= end_record`.
     end_record: u64,
+    /// Time this batch most recently became pending on the active connection.
+    enqueued_at: Instant,
     /// Backpressure permit; dropping it frees one `max_inflight_batches` slot.
     _permit: OwnedSemaphorePermit,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct PendingBatchIdentity {
+    offset_id: OffsetId,
+    start_record: u64,
+    end_record: u64,
+}
+
+impl From<&PendingBatch> for PendingBatchIdentity {
+    fn from(batch: &PendingBatch) -> Self {
+        Self {
+            offset_id: batch.offset_id,
+            start_record: batch.start_record,
+            end_record: batch.end_record,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct DeadlineTieGrant {
+    head_identity: PendingBatchIdentity,
+    acknowledged_records: u64,
+}
+
+enum AckEvent {
+    Response(Option<Result<PutResult, FlightError>>),
+    PendingBatchAvailable,
+    AckDeadline,
+}
+
+fn oldest_pending_ack_deadline(
+    pending: &[PendingBatch],
+    ack_timeout: Duration,
+) -> Option<(PendingBatchIdentity, Instant)> {
+    pending.first().map(|batch| {
+        (
+            PendingBatchIdentity::from(batch),
+            batch.enqueued_at + ack_timeout,
+        )
+    })
 }
 
 /// Returns the batch portion not durably acknowledged, avoiding duplicate retry of an
@@ -267,6 +316,8 @@ pub struct ZerobusArrowStream {
     receiver_task: Arc<Mutex<Option<tokio::task::JoinHandle<ZerobusResult<()>>>>>,
     /// Accepted batches not yet fully acknowledged; retained for replay or retrieval.
     pending_batches: Arc<Mutex<Vec<PendingBatch>>>,
+    /// Wakes the ack processor when the pending set transitions from empty to non-empty.
+    pending_notify: Arc<Notify>,
     /// Unacknowledged batch suffixes finalized after terminal failure or failed close.
     failed_batches: Arc<Mutex<Vec<RecordBatch>>>,
     /// Count of recovery attempts.
@@ -307,6 +358,9 @@ pub struct ZerobusArrowStream {
     /// Test seam (see [`AckAppliedGate`]); compiled only under `test-hooks`.
     #[cfg(feature = "test-hooks")]
     ack_applied_gate: AckAppliedGate,
+    /// Test seam (see [`AckIdleGate`]); compiled only under `test-hooks`.
+    #[cfg(feature = "test-hooks")]
+    ack_idle_gate: AckIdleGate,
     /// Test seam (see [`CloseFinalizeGate`]); compiled only under `test-hooks`.
     #[cfg(feature = "test-hooks")]
     close_finalize_gate: CloseFinalizeGate,
@@ -339,6 +393,7 @@ impl ZerobusArrowStream {
         let (last_ack_tx, _last_ack_rx) = tokio::sync::watch::channel(None);
         let is_closed = Arc::new(AtomicBool::new(false));
         let pending_batches = Arc::new(Mutex::new(Vec::new()));
+        let pending_notify = Arc::new(Notify::new());
         let failed_batches = Arc::new(Mutex::new(Vec::new()));
         let recovery_attempts = Arc::new(AtomicU32::new(0));
         let batch_tx = Arc::new(Mutex::new(None));
@@ -364,6 +419,7 @@ impl ZerobusArrowStream {
             close_flush_error: Mutex::new(None),
             receiver_task,
             pending_batches,
+            pending_notify,
             failed_batches,
             recovery_attempts,
             endpoint: endpoint.to_string(),
@@ -383,6 +439,8 @@ impl ZerobusArrowStream {
             reconnect_rebuild_gate: Arc::new(Mutex::new(None)),
             #[cfg(feature = "test-hooks")]
             ack_applied_gate: Arc::new(Mutex::new(None)),
+            #[cfg(feature = "test-hooks")]
+            ack_idle_gate: Arc::new(Mutex::new(None)),
             #[cfg(feature = "test-hooks")]
             close_finalize_gate: Arc::new(Mutex::new(None)),
         };
@@ -453,6 +511,7 @@ impl ZerobusArrowStream {
             Arc::clone(&stream.is_closed),
             stream.last_ack_tx.clone(),
             Arc::clone(&stream.pending_batches),
+            Arc::clone(&stream.pending_notify),
             Arc::clone(&stream.failed_batches),
             Arc::clone(&stream.recovery_attempts),
             stream.server_error_tx.clone(),
@@ -467,6 +526,8 @@ impl ZerobusArrowStream {
             Arc::clone(&stream.reconnect_rebuild_gate),
             #[cfg(feature = "test-hooks")]
             Arc::clone(&stream.ack_applied_gate),
+            #[cfg(feature = "test-hooks")]
+            Arc::clone(&stream.ack_idle_gate),
         );
 
         {
@@ -752,6 +813,7 @@ impl ZerobusArrowStream {
         is_closed: Arc<AtomicBool>,
         last_ack_tx: tokio::sync::watch::Sender<Option<OffsetId>>,
         pending_batches: Arc<Mutex<Vec<PendingBatch>>>,
+        pending_notify: Arc<Notify>,
         failed_batches: Arc<Mutex<Vec<RecordBatch>>>,
         recovery_attempts: Arc<AtomicU32>,
         server_error_tx: watch::Sender<Option<ZerobusError>>,
@@ -764,6 +826,7 @@ impl ZerobusArrowStream {
         sdk_identifier: Arc<str>,
         #[cfg(feature = "test-hooks")] reconnect_rebuild_gate: ReconnectRebuildGate,
         #[cfg(feature = "test-hooks")] ack_applied_gate: AckAppliedGate,
+        #[cfg(feature = "test-hooks")] ack_idle_gate: AckIdleGate,
     ) -> tokio::task::JoinHandle<ZerobusResult<()>> {
         tokio::spawn(async move {
             let ack_timeout = Duration::from_millis(options.server_lack_of_ack_timeout_ms);
@@ -796,6 +859,7 @@ impl ZerobusArrowStream {
                         Arc::clone(&is_closed),
                         last_ack_tx.clone(),
                         Arc::clone(&pending_batches),
+                        Arc::clone(&pending_notify),
                         ack_timeout,
                         server_error_tx.clone(),
                         Arc::clone(&submitted_records),
@@ -804,6 +868,8 @@ impl ZerobusArrowStream {
                         &options,
                         #[cfg(feature = "test-hooks")]
                         Arc::clone(&ack_applied_gate),
+                        #[cfg(feature = "test-hooks")]
+                        Arc::clone(&ack_idle_gate),
                     )
                     .await
                 };
@@ -1187,6 +1253,7 @@ impl ZerobusArrowStream {
             let mut new_pending = Vec::with_capacity(pending.len());
             let mut replay = Vec::with_capacity(pending.len());
             let mut new_cumulative: u64 = 0;
+            let replay_enqueued_at = Instant::now();
 
             if !pending.is_empty() {
                 info!(
@@ -1212,6 +1279,7 @@ impl ZerobusArrowStream {
                         offset_id: pb.offset_id,
                         start_record,
                         end_record,
+                        enqueued_at: replay_enqueued_at,
                         // Carry the permit across recovery; skipped batches drop theirs.
                         _permit: pb._permit,
                     });
@@ -1302,6 +1370,58 @@ impl ZerobusArrowStream {
         Self::move_pending_to_failed(pending_batches, failed_batches, last_acked_records).await;
     }
 
+    /// Waits for a server response or newly pending work while no ack deadline is armed.
+    async fn wait_while_idle(
+        response_stream: &mut FlightResponseStream,
+        pending_notify: &Notify,
+        #[cfg(feature = "test-hooks")] ack_idle_gate: &AckIdleGate,
+    ) -> AckEvent {
+        #[cfg(feature = "test-hooks")]
+        if let Some(notify) = ack_idle_gate.lock().await.take() {
+            notify.notify_one();
+        }
+
+        tokio::select! {
+            biased;
+            res = response_stream.next() => AckEvent::Response(res),
+            _ = pending_notify.notified() => AckEvent::PendingBatchAvailable,
+        }
+    }
+
+    /// Waits for a server response while enforcing the oldest pending ack deadline.
+    /// A ready progressive response wins one expiry tie; non-progressing traffic cannot
+    /// repeatedly postpone recovery after the deadline.
+    async fn wait_with_pending_deadline(
+        response_stream: &mut FlightResponseStream,
+        head_identity: PendingBatchIdentity,
+        acknowledged_records: u64,
+        ack_deadline: Instant,
+        ack_deadline_tie_grant: &mut Option<DeadlineTieGrant>,
+    ) -> AckEvent {
+        let now = Instant::now();
+        let current_state = DeadlineTieGrant {
+            head_identity,
+            acknowledged_records,
+        };
+        if *ack_deadline_tie_grant == Some(current_state) && now >= ack_deadline {
+            return AckEvent::AckDeadline;
+        }
+
+        let event = tokio::select! {
+            biased;
+            res = response_stream.next() => AckEvent::Response(res),
+            _ = tokio::time::sleep_until(ack_deadline) => AckEvent::AckDeadline,
+        };
+
+        let response_won = matches!(&event, AckEvent::Response(_));
+        *ack_deadline_tie_grant = if response_won && Instant::now() >= ack_deadline {
+            Some(current_state)
+        } else {
+            None
+        };
+        event
+    }
+
     /// Advances the monotonic record watermark and removes fully acknowledged batches.
     async fn apply_acknowledgment(
         ack: &FlightAckMetadata,
@@ -1373,10 +1493,11 @@ impl ZerobusArrowStream {
     /// by `FlightDataEncoderBuilder`.
     #[allow(clippy::too_many_arguments)]
     async fn process_acks(
-        mut response_stream: Pin<Box<dyn Stream<Item = Result<PutResult, FlightError>> + Send>>,
+        mut response_stream: FlightResponseStream,
         is_closed: Arc<AtomicBool>,
         last_ack_tx: tokio::sync::watch::Sender<Option<OffsetId>>,
         pending_batches: Arc<Mutex<Vec<PendingBatch>>>,
+        pending_notify: Arc<Notify>,
         ack_timeout: Duration,
         server_error_tx: watch::Sender<Option<ZerobusError>>,
         submitted_records: Arc<AtomicU64>,
@@ -1384,8 +1505,10 @@ impl ZerobusArrowStream {
         is_paused: Arc<AtomicBool>,
         options: &ArrowStreamConfigurationOptions,
         #[cfg(feature = "test-hooks")] ack_applied_gate: AckAppliedGate,
+        #[cfg(feature = "test-hooks")] ack_idle_gate: AckIdleGate,
     ) -> ZerobusResult<()> {
-        let mut pause_deadline: Option<tokio::time::Instant> = None;
+        let mut pause_deadline: Option<Instant> = None;
+        let mut ack_deadline_tie_grant: Option<DeadlineTieGrant> = None;
 
         loop {
             if is_closed.load(Ordering::Relaxed) {
@@ -1412,25 +1535,52 @@ impl ZerobusArrowStream {
                 }
             }
 
-            // TODO: Anchor this timeout to the oldest pending batch. The current
-            // per-response timeout can spend most of its window while idle and restarts
-            // whenever any response arrives, even if it makes no ack progress.
-            let result = if let Some(deadline) = pause_deadline {
+            let event = if let Some(deadline) = pause_deadline {
                 // TODO: Race graceful close against the active ack deadline and
                 // preserve the earliest close deadline when repeated signals arrive.
-                tokio::select! {
+                // Graceful close retains its existing behavior in this change: while
+                // paused, a lack of acknowledgements is tolerated until the close deadline.
+                let result = tokio::select! {
                     biased;
-                    _ = tokio::time::sleep_until(deadline) => {
-                        continue;
-                    }
+                    _ = tokio::time::sleep_until(deadline) => continue,
                     res = tokio::time::timeout(ack_timeout, response_stream.next()) => res,
+                };
+                match result {
+                    Ok(response) => AckEvent::Response(response),
+                    Err(_) => continue,
                 }
             } else {
-                tokio::time::timeout(ack_timeout, response_stream.next()).await
+                let oldest_pending = {
+                    let pending = pending_batches.lock().await;
+                    oldest_pending_ack_deadline(&pending, ack_timeout)
+                };
+                match oldest_pending {
+                    Some((head_identity, ack_deadline)) => {
+                        let acknowledged_records = last_acked_records.load(Ordering::Acquire);
+                        Self::wait_with_pending_deadline(
+                            &mut response_stream,
+                            head_identity,
+                            acknowledged_records,
+                            ack_deadline,
+                            &mut ack_deadline_tie_grant,
+                        )
+                        .await
+                    }
+                    None => {
+                        Self::wait_while_idle(
+                            &mut response_stream,
+                            &pending_notify,
+                            #[cfg(feature = "test-hooks")]
+                            &ack_idle_gate,
+                        )
+                        .await
+                    }
+                }
             };
 
-            match result {
-                Ok(Some(Ok(put_result))) => {
+            match event {
+                AckEvent::PendingBatchAvailable => continue,
+                AckEvent::Response(Some(Ok(put_result))) => {
                     match FlightAckMetadata::from_bytes(&put_result.app_metadata) {
                         Ok(ack) => {
                             // Handle close stream signal.
@@ -1502,7 +1652,7 @@ impl ZerobusArrowStream {
                         }
                     }
                 }
-                Ok(Some(Err(e))) => {
+                AckEvent::Response(Some(Err(e))) => {
                     // A stream error while paused ends the graceful-close wait and
                     // triggers recovery.
                     if pause_deadline.is_some() {
@@ -1520,7 +1670,7 @@ impl ZerobusArrowStream {
                     let _ = server_error_tx.send(Some(error.clone()));
                     return Err(error);
                 }
-                Ok(None) => {
+                AckEvent::Response(None) => {
                     // During graceful close, stream end is expected.
                     // Return retriable error to trigger recovery.
                     if pause_deadline.is_some() {
@@ -1537,25 +1687,24 @@ impl ZerobusArrowStream {
                     // finalization) in its terminal branch.
                     return Err(error);
                 }
-                Err(_timeout) => {
-                    // During graceful close, ack timeout is not an error.
-                    if pause_deadline.is_some() {
+                AckEvent::AckDeadline => {
+                    // Confirm the currently oldest batch is still expired; a ready ack
+                    // may have removed the head immediately before this event.
+                    let pending = pending_batches.lock().await;
+                    let deadline_expired = oldest_pending_ack_deadline(&pending, ack_timeout)
+                        .map(|(_, deadline)| Instant::now() >= deadline)
+                        .unwrap_or(false);
+                    if !deadline_expired {
                         continue;
                     }
-                    // Check if there are pending acks that should have been received.
-                    let pending = pending_batches.lock().await;
-                    if !pending.is_empty() {
-                        error!(
-                            pending_count = pending.len(),
-                            "Server ack timeout with pending batches"
-                        );
-                        let error = ZerobusError::StreamClosedError(
-                            tonic::Status::deadline_exceeded("Server ack timeout"),
-                        );
-                        // Returned to the supervisor, which publishes it (before + after
-                        // finalization) in its terminal branch.
-                        return Err(error);
-                    }
+
+                    error!(
+                        pending_count = pending.len(),
+                        "Server ack timeout with pending batches"
+                    );
+                    return Err(ZerobusError::StreamClosedError(
+                        tonic::Status::deadline_exceeded("Server ack timeout"),
+                    ));
                 }
             }
         }
@@ -1654,15 +1803,21 @@ impl ZerobusArrowStream {
             .fetch_add(record_count, Ordering::Relaxed);
         let end_record = start_record + record_count;
 
-        {
+        let became_pending = {
             let mut pending = self.pending_batches.lock().await;
+            let became_pending = pending.is_empty();
             pending.push(PendingBatch {
                 batch: batch.clone(),
                 offset_id,
                 start_record,
                 end_record,
+                enqueued_at: Instant::now(),
                 _permit: permit,
             });
+            became_pending
+        };
+        if became_pending {
+            self.pending_notify.notify_one();
         }
 
         // While paused for a close signal or recovery handoff, retain the batch as
@@ -2169,6 +2324,15 @@ impl ZerobusArrowStream {
         notify
     }
 
+    /// Test-only: arms a one-shot notification for the next no-pending ack wait.
+    #[cfg(feature = "test-hooks")]
+    #[doc(hidden)]
+    pub async fn arm_ack_idle_notify(&self) -> Arc<Notify> {
+        let notify = Arc::new(Notify::new());
+        *self.ack_idle_gate.lock().await = Some(Arc::clone(&notify));
+        notify
+    }
+
     /// Test-only: parks the next `close()` after supervisor/sender teardown but before
     /// finalization. Dropping the close future at that point simulates cancellation.
     #[cfg(feature = "test-hooks")]
@@ -2223,6 +2387,8 @@ mod tests {
     use arrow_schema::{DataType, Field};
     use async_trait::async_trait;
     use std::collections::HashMap;
+    use std::sync::atomic::AtomicUsize;
+    use std::task::Poll;
 
     struct PassthroughTlsConfig;
 
@@ -2288,8 +2454,162 @@ mod tests {
             offset_id,
             start_record,
             end_record,
+            enqueued_at: Instant::now(),
             _permit: Arc::clone(sem).try_acquire_owned().unwrap(),
         }
+    }
+
+    /// A valid acknowledgement already ready at expiry is applied before timeout handling.
+    #[tokio::test]
+    async fn ready_valid_ack_wins_expired_deadline_tie() {
+        const ACKNOWLEDGEMENT_TIMEOUT: Duration = Duration::from_millis(10);
+        let schema = one_col_schema();
+        let sem = Arc::new(Semaphore::new(1));
+        let mut pending = pending_batch(&sem, batch_with_rows(&schema, 1), 0, 0, 1);
+        pending.enqueued_at = Instant::now() - ACKNOWLEDGEMENT_TIMEOUT;
+        let pending_batches = Arc::new(Mutex::new(vec![pending]));
+        let mut ack = Some(PutResult {
+            app_metadata: serde_json::to_vec(&FlightAckMetadata {
+                ack_up_to_offset: 0,
+                ack_up_to_records: 1,
+                close_stream_duration_ms: None,
+            })
+            .unwrap()
+            .into(),
+        });
+        let response_stream = futures::stream::poll_fn(move |_| match ack.take() {
+            Some(ack) => Poll::Ready(Some(Ok(ack))),
+            None => Poll::Pending,
+        });
+        let (last_ack_tx, last_ack_rx) = watch::channel(None);
+        let (server_error_tx, _server_error_rx) = watch::channel(None);
+        let last_acked_records = Arc::new(AtomicU64::new(0));
+        let options = ArrowStreamConfigurationOptions::default();
+        let process_acks = ZerobusArrowStream::process_acks(
+            Box::pin(response_stream),
+            Arc::new(AtomicBool::new(false)),
+            last_ack_tx,
+            Arc::clone(&pending_batches),
+            Arc::new(Notify::new()),
+            ACKNOWLEDGEMENT_TIMEOUT,
+            server_error_tx,
+            Arc::new(AtomicU64::new(1)),
+            Arc::clone(&last_acked_records),
+            Arc::new(AtomicBool::new(false)),
+            &options,
+            #[cfg(feature = "test-hooks")]
+            Arc::new(Mutex::new(None)),
+            #[cfg(feature = "test-hooks")]
+            Arc::new(Mutex::new(None)),
+        );
+        tokio::pin!(process_acks);
+
+        assert!(futures::poll!(process_acks.as_mut()).is_pending());
+        assert!(pending_batches.lock().await.is_empty());
+        assert_eq!(*last_ack_rx.borrow(), Some(0));
+        assert_eq!(last_acked_records.load(Ordering::Acquire), 1);
+    }
+
+    /// Partial progress does not refresh the oldest batch's original deadline.
+    #[tokio::test]
+    async fn partial_ack_does_not_refresh_ack_deadline() {
+        const ACKNOWLEDGEMENT_TIMEOUT: Duration = Duration::from_millis(10);
+        let schema = one_col_schema();
+        let sem = Arc::new(Semaphore::new(1));
+        let mut pending = pending_batch(&sem, batch_with_rows(&schema, 10), 0, 0, 10);
+        pending.enqueued_at = Instant::now() - ACKNOWLEDGEMENT_TIMEOUT;
+        let pending_batches = Arc::new(Mutex::new(vec![pending]));
+        let mut ready_acks = [5, 5].into_iter().map(|records| PutResult {
+            app_metadata: serde_json::to_vec(&FlightAckMetadata {
+                ack_up_to_offset: 0,
+                ack_up_to_records: records,
+                close_stream_duration_ms: None,
+            })
+            .unwrap()
+            .into(),
+        });
+        let response_stream = futures::stream::poll_fn(move |_| match ready_acks.next() {
+            Some(ack) => Poll::Ready(Some(Ok(ack))),
+            None => Poll::Pending,
+        });
+        let (last_ack_tx, _last_ack_rx) = watch::channel(None);
+        let (server_error_tx, _server_error_rx) = watch::channel(None);
+        let last_acked_records = Arc::new(AtomicU64::new(0));
+        let error = ZerobusArrowStream::process_acks(
+            Box::pin(response_stream),
+            Arc::new(AtomicBool::new(false)),
+            last_ack_tx,
+            Arc::clone(&pending_batches),
+            Arc::new(Notify::new()),
+            ACKNOWLEDGEMENT_TIMEOUT,
+            server_error_tx,
+            Arc::new(AtomicU64::new(10)),
+            Arc::clone(&last_acked_records),
+            Arc::new(AtomicBool::new(false)),
+            &ArrowStreamConfigurationOptions::default(),
+            #[cfg(feature = "test-hooks")]
+            Arc::new(Mutex::new(None)),
+            #[cfg(feature = "test-hooks")]
+            Arc::new(Mutex::new(None)),
+        )
+        .await
+        .expect_err("the original ack deadline must expire");
+
+        assert!(matches!(
+            error,
+            ZerobusError::StreamClosedError(ref status)
+                if status.code() == tonic::Code::DeadlineExceeded
+        ));
+        assert_eq!(last_acked_records.load(Ordering::Acquire), 5);
+        assert_eq!(pending_batches.lock().await.len(), 1);
+    }
+
+    /// Ready malformed or non-progressing responses cannot starve an expired deadline.
+    #[tokio::test]
+    async fn ready_non_progressing_responses_cannot_starve_expired_deadline() {
+        const ACKNOWLEDGEMENT_TIMEOUT: Duration = Duration::from_millis(10);
+        let schema = one_col_schema();
+        let sem = Arc::new(Semaphore::new(1));
+        let mut pending = pending_batch(&sem, batch_with_rows(&schema, 1), 0, 0, 1);
+        pending.enqueued_at = Instant::now() - ACKNOWLEDGEMENT_TIMEOUT;
+        let pending_batches = Arc::new(Mutex::new(vec![pending]));
+        let polls = Arc::new(AtomicUsize::new(0));
+        let observed_polls = Arc::clone(&polls);
+        let response_stream = futures::stream::poll_fn(move |_| {
+            let poll = observed_polls.fetch_add(1, Ordering::Relaxed);
+            assert!(poll < 2, "responses starved the expired ack deadline");
+            Poll::Ready(Some(Ok(PutResult {
+                app_metadata: Bytes::from_static(b"malformed ack metadata"),
+            })))
+        });
+        let (last_ack_tx, _last_ack_rx) = watch::channel(None);
+        let (server_error_tx, _server_error_rx) = watch::channel(None);
+        let error = ZerobusArrowStream::process_acks(
+            Box::pin(response_stream),
+            Arc::new(AtomicBool::new(false)),
+            last_ack_tx,
+            pending_batches,
+            Arc::new(Notify::new()),
+            ACKNOWLEDGEMENT_TIMEOUT,
+            server_error_tx,
+            Arc::new(AtomicU64::new(1)),
+            Arc::new(AtomicU64::new(0)),
+            Arc::new(AtomicBool::new(false)),
+            &ArrowStreamConfigurationOptions::default(),
+            #[cfg(feature = "test-hooks")]
+            Arc::new(Mutex::new(None)),
+            #[cfg(feature = "test-hooks")]
+            Arc::new(Mutex::new(None)),
+        )
+        .await
+        .expect_err("the expired ack deadline must be enforced");
+
+        assert!(matches!(
+            error,
+            ZerobusError::StreamClosedError(ref status)
+                if status.code() == tonic::Code::DeadlineExceeded
+        ));
+        assert_eq!(polls.load(Ordering::Relaxed), 1);
     }
 
     /// An acknowledgement beyond the connection-local submitted-record count is a protocol
@@ -2324,12 +2644,15 @@ mod tests {
             Arc::new(AtomicBool::new(false)),
             last_ack_tx,
             Arc::clone(&pending_batches),
+            Arc::new(Notify::new()),
             Duration::from_secs(60),
             server_error_tx,
             Arc::clone(&submitted_records),
             Arc::clone(&last_acked_records),
             Arc::new(AtomicBool::new(false)),
             &ArrowStreamConfigurationOptions::default(),
+            #[cfg(feature = "test-hooks")]
+            Arc::new(Mutex::new(None)),
             #[cfg(feature = "test-hooks")]
             Arc::new(Mutex::new(None)),
         )
@@ -2384,12 +2707,15 @@ mod tests {
             Arc::new(AtomicBool::new(false)),
             last_ack_tx,
             Arc::clone(&pending_batches),
+            Arc::new(Notify::new()),
             Duration::from_secs(60),
             server_error_tx,
             Arc::clone(&submitted_records),
             Arc::clone(&last_acked_records),
             Arc::new(AtomicBool::new(true)),
             &ArrowStreamConfigurationOptions::default(),
+            #[cfg(feature = "test-hooks")]
+            Arc::new(Mutex::new(None)),
             #[cfg(feature = "test-hooks")]
             Arc::new(Mutex::new(None)),
         )
@@ -2448,12 +2774,15 @@ mod tests {
             Arc::new(AtomicBool::new(false)),
             last_ack_tx,
             Arc::clone(&pending_batches),
+            Arc::new(Notify::new()),
             Duration::from_secs(60),
             server_error_tx,
             Arc::new(AtomicU64::new(10)),
             Arc::clone(&last_acked_records),
             Arc::new(AtomicBool::new(false)),
             &ArrowStreamConfigurationOptions::default(),
+            #[cfg(feature = "test-hooks")]
+            Arc::new(Mutex::new(None)),
             #[cfg(feature = "test-hooks")]
             Arc::new(Mutex::new(None)),
         )

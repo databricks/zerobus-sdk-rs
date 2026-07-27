@@ -800,6 +800,15 @@ Also accepts `0` or `no`.
 | `ack_callback` | `Option<Arc<dyn AckCallback>>` | `None` | Optional callback for acknowledgment notifications |
 | `callback_max_wait_time_ms` | `Option<u64>` | `None` | Maximum time to wait for callback processing to complete after closing the stream (`None` = wait indefinitely, `Some(x)` = wait up to `x` ms) |
 
+For Arrow Flight streams *(Beta)*, `server_lack_of_ack_timeout_ms` is an
+absolute limit on how long a batch may remain pending, not an inactivity
+timeout. No timer runs while the stream is idle. Each batch's timer starts when
+it becomes pending and is not refreshed when earlier batches are acknowledged.
+Partial acknowledgments do not extend it. If recovery replays pending batches
+on a new connection, their deadlines restart relative to that connection.
+Configure the timeout together with `max_inflight_batches` so the server can
+acknowledge a full allowed backlog within the timeout.
+
 
 **Example:**
 
