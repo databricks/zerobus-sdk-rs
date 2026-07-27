@@ -26,6 +26,24 @@ type fetchedToken struct {
 	receivedAt time.Time
 }
 
+func (f fetchedToken) expiredAt(now time.Time) bool {
+	if f.expiresIn == nil || *f.expiresIn <= 0 {
+		return false
+	}
+	receivedAt := f.receivedAt
+	if receivedAt.IsZero() {
+		receivedAt = now
+	}
+	return !now.Before(receivedAt.Add(*f.expiresIn))
+}
+
+func newExpiredOnArrivalError() *TokenError {
+	return &TokenError{
+		msg:       "minted token already expired on arrival",
+		retryable: true,
+	}
+}
+
 // mintReason is passed to the mint callback so it can distinguish a cold start
 // from a proactive refresh from caching being off (e.g. for logging or metrics).
 type mintReason int
@@ -200,6 +218,9 @@ func (c *tokenCache) getOrFetch(
 		if err != nil {
 			return "", err
 		}
+		if fetched.expiredAt(time.Now()) {
+			return "", newExpiredOnArrivalError()
+		}
 		return fetched.token, nil
 	}
 
@@ -293,13 +314,14 @@ func (c *tokenCache) tryGetOrFetch(
 			token, resErr = entry.cached.value, nil
 		}
 		// Publish to waiters: writes before close(done) happen-before <-done.
-		// Stamp leaderCanceled only when the leader's own caller-cancel produced a
-		// non-retryable failure, so a live-ctx waiter re-attempts rather than
-		// inherits it. A successful cached fallback (resErr == nil) or a retryable
-		// outcome is still shared: those don't need re-minting, and the context can
-		// only be inspected for provenance, not blamed for the error itself.
+		// Cancellation provenance was captured before synchronous logging, while
+		// the error and context still described the same event.
+		var tokenErr *TokenError
 		flight.token, flight.err = token, resErr
-		flight.leaderCanceled = resErr != nil && !isRetryable(resErr) && isCallerCancellation(ctx)
+		flight.leaderCanceled = resErr != nil &&
+			!isRetryable(resErr) &&
+			errors.As(resErr, &tokenErr) &&
+			tokenErr.callerCanceled
 		close(flight.done)
 		entry.mu.Unlock()
 		return token, resErr, false
@@ -310,12 +332,13 @@ func (c *tokenCache) tryGetOrFetch(
 	// Anchor the TTL to response receipt so post-receipt work (e.g. a custom
 	// logger) can't extend the cached lifetime. That same delay can consume a
 	// short TTL entirely, so a token can arrive already expired.
+	now := time.Now()
 	mintedAt := fetched.receivedAt
 	if mintedAt.IsZero() {
-		mintedAt = time.Now()
+		mintedAt = now
 	}
 	usableTTL := fetched.expiresIn != nil && *fetched.expiresIn > 0
-	alreadyExpired := usableTTL && !time.Now().Before(mintedAt.Add(*fetched.expiresIn))
+	alreadyExpired := fetched.expiredAt(now)
 	keepExisting := entry.cached != nil && !entry.cached.isExpired()
 	switch {
 	case usableTTL && !alreadyExpired:
@@ -330,7 +353,7 @@ func (c *tokenCache) tryGetOrFetch(
 		// surface later as an opaque server-side auth rejection. Fail here, where
 		// the cause is known. Retryable, since the next cold mint may succeed.
 		entry.cached = nil
-		err := &TokenError{msg: "minted token already expired on arrival", retryable: true}
+		err := newExpiredOnArrivalError()
 		flight.token, flight.err = "", err
 		close(flight.done)
 		entry.mu.Unlock()

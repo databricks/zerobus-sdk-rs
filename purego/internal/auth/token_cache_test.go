@@ -3,6 +3,7 @@ package auth
 import (
 	"context"
 	"errors"
+	"fmt"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -38,6 +39,36 @@ type timeoutRetryErr struct{}
 func (e *timeoutRetryErr) Error() string     { return "request timeout" }
 func (e *timeoutRetryErr) IsRetryable() bool { return true }
 func (e *timeoutRetryErr) Unwrap() error     { return context.DeadlineExceeded }
+
+type observedDoneContext struct {
+	context.Context
+	observed chan struct{}
+	once     sync.Once
+}
+
+func newObservedDoneContext(t *testing.T) *observedDoneContext {
+	t.Helper()
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	return &observedDoneContext{
+		Context:  ctx,
+		observed: make(chan struct{}),
+	}
+}
+
+func (c *observedDoneContext) Done() <-chan struct{} {
+	c.once.Do(func() { close(c.observed) })
+	return c.Context.Done()
+}
+
+func awaitSignal(t *testing.T, signal <-chan struct{}, name string) {
+	t.Helper()
+	select {
+	case <-signal:
+	case <-time.After(2 * time.Second):
+		t.Fatalf("timed out waiting for %s", name)
+	}
+}
 
 func makeMint(token string, ttlSecs int) func(context.Context, mintReason) (fetchedToken, error) {
 	return func(_ context.Context, _ mintReason) (fetchedToken, error) {
@@ -326,16 +357,39 @@ func TestTokenCacheSingleFlightMintOnce(t *testing.T) {
 
 	const goroutines = 16
 	var wg sync.WaitGroup
-	wg.Add(goroutines)
 	results := make([]string, goroutines)
 
-	for i := range goroutines {
+	leaderMinting := make(chan struct{})
+	release := make(chan struct{})
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		tok, err := c.getOrFetch(context.Background(), "id", "secret", "c.s.t", "",
+			func(_ context.Context, _ mintReason) (fetchedToken, error) {
+				calls.Add(1)
+				close(leaderMinting)
+				<-release
+				return fetchedToken{token: "tok", expiresIn: dur(3600)}, nil
+			},
+		)
+		if err != nil {
+			t.Errorf("leader: %v", err)
+			return
+		}
+		results[0] = tok
+	}()
+	awaitSignal(t, leaderMinting, "leader mint")
+
+	waiterContexts := make([]*observedDoneContext, goroutines-1)
+	wg.Add(goroutines - 1)
+	for i := 1; i < goroutines; i++ {
+		waiterCtx := newObservedDoneContext(t)
+		waiterContexts[i-1] = waiterCtx
 		go func(i int) {
 			defer wg.Done()
-			tok, err := c.getOrFetch(context.Background(), "id", "secret", "c.s.t", "",
+			tok, err := c.getOrFetch(waiterCtx, "id", "secret", "c.s.t", "",
 				func(_ context.Context, _ mintReason) (fetchedToken, error) {
 					calls.Add(1)
-					time.Sleep(20 * time.Millisecond) // hold lock so others queue up
 					return fetchedToken{token: "tok", expiresIn: dur(3600)}, nil
 				},
 			)
@@ -346,6 +400,10 @@ func TestTokenCacheSingleFlightMintOnce(t *testing.T) {
 			results[i] = tok
 		}(i)
 	}
+	for i, waiterCtx := range waiterContexts {
+		awaitSignal(t, waiterCtx.observed, fmt.Sprintf("waiter %d", i))
+	}
+	close(release)
 	wg.Wait()
 
 	for i, tok := range results {
@@ -388,11 +446,14 @@ func TestTokenCacheConcurrentMintFailureSharesError(t *testing.T) {
 
 	<-leaderMinting // leader holds the flight; inflight stays set until release
 
+	waiterContexts := make([]*observedDoneContext, waiters)
 	wg.Add(waiters)
 	for i := range waiters {
+		waiterCtx := newObservedDoneContext(t)
+		waiterContexts[i] = waiterCtx
 		go func(i int) {
 			defer wg.Done()
-			_, errs[i+1] = c.getOrFetch(context.Background(), "id", "secret", "c.s.t", "",
+			_, errs[i+1] = c.getOrFetch(waiterCtx, "id", "secret", "c.s.t", "",
 				func(_ context.Context, _ mintReason) (fetchedToken, error) {
 					calls.Add(1) // a waiter reaching here means single-flight broke
 					return fetchedToken{}, &fatalErr{"boom"}
@@ -401,12 +462,9 @@ func TestTokenCacheConcurrentMintFailureSharesError(t *testing.T) {
 		}(i)
 	}
 
-	// Let the waiters reach getOrFetch and park on the leader's in-flight mint.
-	// The leader has no deadline — it blocks on release — so this only needs to
-	// outlast goroutine scheduling, not race a wall clock as the old sleep did.
-	// Any waiter that parks before release shares the leader's failure and never
-	// mints; the calls==1 assertion below catches it if one slips through.
-	time.Sleep(100 * time.Millisecond)
+	for i, waiterCtx := range waiterContexts {
+		awaitSignal(t, waiterCtx.observed, fmt.Sprintf("waiter %d", i))
+	}
 	close(release) // fail the leader's mint; parked waiters share its error
 	wg.Wait()
 
@@ -557,7 +615,11 @@ func TestTokenCacheWaiterRemintsWhenLeaderContextCancelled(t *testing.T) {
 				mints.Add(1)
 				close(mintStarted)
 				<-ctx.Done()
-				return fetchedToken{}, ctx.Err()
+				return fetchedToken{}, &TokenError{
+					msg:            ctx.Err().Error(),
+					cause:          ctx.Err(),
+					callerCanceled: true,
+				}
 			},
 		)
 	}()
@@ -565,10 +627,11 @@ func TestTokenCacheWaiterRemintsWhenLeaderContextCancelled(t *testing.T) {
 	<-mintStarted // leader holds the in-flight slot
 
 	// Waiter with a healthy context parks on the leader's flight.
+	waiterCtx := newObservedDoneContext(t)
 	waiterResult := make(chan string, 1)
 	waiterErr := make(chan error, 1)
 	go func() {
-		tok, err := c.getOrFetch(context.Background(), "id", "secret", "c.s.t", "",
+		tok, err := c.getOrFetch(waiterCtx, "id", "secret", "c.s.t", "",
 			func(_ context.Context, _ mintReason) (fetchedToken, error) {
 				mints.Add(1)
 				return fetchedToken{token: "waiter-tok", expiresIn: dur(3600)}, nil
@@ -578,8 +641,7 @@ func TestTokenCacheWaiterRemintsWhenLeaderContextCancelled(t *testing.T) {
 		waiterResult <- tok
 	}()
 
-	// Give the waiter time to park before cancelling the leader.
-	time.Sleep(50 * time.Millisecond)
+	awaitSignal(t, waiterCtx.observed, "waiter flight join")
 	cancelLeader() // leader's mint fails with context.Canceled
 
 	<-leaderDone
@@ -626,9 +688,10 @@ func TestTokenCacheWaiterSharesLeaderCancelWithCachedFallback(t *testing.T) {
 
 	<-mintStarted
 
+	waiterCtx := newObservedDoneContext(t)
 	waiterTok := make(chan string, 1)
 	go func() {
-		tok, _ := c.getOrFetch(context.Background(), "id", "secret", "c.s.t", "",
+		tok, _ := c.getOrFetch(waiterCtx, "id", "secret", "c.s.t", "",
 			func(_ context.Context, _ mintReason) (fetchedToken, error) {
 				mints.Add(1) // a waiter minting here means it wrongly re-attempted
 				return fetchedToken{token: "waiter-tok", expiresIn: dur(3600)}, nil
@@ -637,7 +700,7 @@ func TestTokenCacheWaiterSharesLeaderCancelWithCachedFallback(t *testing.T) {
 		waiterTok <- tok
 	}()
 
-	time.Sleep(50 * time.Millisecond)
+	awaitSignal(t, waiterCtx.observed, "waiter flight join")
 	cancelLeader()
 
 	<-leaderDone
@@ -681,9 +744,10 @@ func TestTokenCacheWaiterSharesLeaderRetryableErrorDespiteLeaderCancel(t *testin
 
 	<-mintStarted
 
+	waiterCtx := newObservedDoneContext(t)
 	waiterErr := make(chan error, 1)
 	go func() {
-		_, err := c.getOrFetch(context.Background(), "id", "secret", "c.s.t", "",
+		_, err := c.getOrFetch(waiterCtx, "id", "secret", "c.s.t", "",
 			func(_ context.Context, _ mintReason) (fetchedToken, error) {
 				mints.Add(1) // a waiter minting here means it wrongly re-attempted
 				return fetchedToken{token: "waiter-tok", expiresIn: dur(3600)}, nil
@@ -692,7 +756,7 @@ func TestTokenCacheWaiterSharesLeaderRetryableErrorDespiteLeaderCancel(t *testin
 		waiterErr <- err
 	}()
 
-	time.Sleep(50 * time.Millisecond)
+	awaitSignal(t, waiterCtx.observed, "waiter flight join")
 	cancelLeader()
 
 	<-leaderDone
@@ -743,11 +807,14 @@ func TestTokenCacheWaiterSharesLeaderRetryableTimeout(t *testing.T) {
 
 	<-leaderMinting
 
+	waiterContexts := make([]*observedDoneContext, waiters)
 	wg.Add(waiters)
 	for i := range waiters {
+		waiterCtx := newObservedDoneContext(t)
+		waiterContexts[i] = waiterCtx
 		go func(i int) {
 			defer wg.Done()
-			_, errs[i+1] = c.getOrFetch(context.Background(), "id", "secret", "c.s.t", "",
+			_, errs[i+1] = c.getOrFetch(waiterCtx, "id", "secret", "c.s.t", "",
 				func(_ context.Context, _ mintReason) (fetchedToken, error) {
 					mints.Add(1) // a waiter minting here means single-flight broke
 					return fetchedToken{}, leaderErr
@@ -756,7 +823,9 @@ func TestTokenCacheWaiterSharesLeaderRetryableTimeout(t *testing.T) {
 		}(i)
 	}
 
-	time.Sleep(100 * time.Millisecond)
+	for i, waiterCtx := range waiterContexts {
+		awaitSignal(t, waiterCtx.observed, fmt.Sprintf("waiter %d", i))
+	}
 	close(release)
 	wg.Wait()
 
@@ -869,6 +938,75 @@ func TestTokenCacheAnchorsExpiryToReceivedAt(t *testing.T) {
 	want := receivedAt.Add(d)
 	if diff := got.Sub(want); diff < -time.Second || diff > time.Second {
 		t.Fatalf("expiresAt = %v, want ~%v (anchored to receivedAt+ttl)", got, want)
+	}
+}
+
+func TestFetchedTokenExpiredAt(t *testing.T) {
+	now := time.Now()
+	positive := time.Minute
+	zero := time.Duration(0)
+	negative := -time.Minute
+
+	tests := []struct {
+		name  string
+		token fetchedToken
+		want  bool
+	}{
+		{name: "missing TTL", token: fetchedToken{}, want: false},
+		{name: "zero TTL", token: fetchedToken{expiresIn: &zero}, want: false},
+		{name: "negative TTL", token: fetchedToken{expiresIn: &negative}, want: false},
+		{name: "zero receipt time", token: fetchedToken{expiresIn: &positive}, want: false},
+		{
+			name:  "before expiry",
+			token: fetchedToken{expiresIn: &positive, receivedAt: now.Add(-positive + time.Nanosecond)},
+			want:  false,
+		},
+		{
+			name:  "at expiry",
+			token: fetchedToken{expiresIn: &positive, receivedAt: now.Add(-positive)},
+			want:  true,
+		},
+		{
+			name:  "after expiry",
+			token: fetchedToken{expiresIn: &positive, receivedAt: now.Add(-positive - time.Nanosecond)},
+			want:  true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := tt.token.expiredAt(now); got != tt.want {
+				t.Fatalf("expiredAt() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestTokenCacheDisabledRejectsExpiredToken(t *testing.T) {
+	c := newTokenCache(CacheEnabled(false))
+	ttl := time.Second
+	var reason mintReason
+
+	token, err := c.getOrFetch(context.Background(), "id", "secret", "c.s.t", "",
+		func(_ context.Context, gotReason mintReason) (fetchedToken, error) {
+			reason = gotReason
+			return fetchedToken{
+				token:      "expired",
+				expiresIn:  &ttl,
+				receivedAt: time.Now().Add(-time.Hour),
+			}, nil
+		},
+	)
+
+	if token != "" {
+		t.Fatalf("expired token = %q, want empty", token)
+	}
+	var tokenErr *TokenError
+	if !errors.As(err, &tokenErr) || !tokenErr.IsRetryable() {
+		t.Fatalf("error = %v, want retryable TokenError", err)
+	}
+	if reason != mintReasonCacheDisabled {
+		t.Fatalf("mint reason = %v, want %v", reason, mintReasonCacheDisabled)
 	}
 }
 

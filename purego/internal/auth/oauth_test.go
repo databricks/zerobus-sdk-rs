@@ -25,6 +25,42 @@ type tokenServer struct {
 	calls       atomic.Int32
 }
 
+type blockingLogHandler struct {
+	entered     chan struct{}
+	release     chan struct{}
+	enteredOnce sync.Once
+	releaseOnce sync.Once
+}
+
+func newBlockingLogHandler() *blockingLogHandler {
+	return &blockingLogHandler{
+		entered: make(chan struct{}),
+		release: make(chan struct{}),
+	}
+}
+
+func (h *blockingLogHandler) Enabled(context.Context, slog.Level) bool {
+	return true
+}
+
+func (h *blockingLogHandler) Handle(context.Context, slog.Record) error {
+	h.enteredOnce.Do(func() { close(h.entered) })
+	<-h.release
+	return nil
+}
+
+func (h *blockingLogHandler) WithAttrs([]slog.Attr) slog.Handler {
+	return h
+}
+
+func (h *blockingLogHandler) WithGroup(string) slog.Handler {
+	return h
+}
+
+func (h *blockingLogHandler) unblock() {
+	h.releaseOnce.Do(func() { close(h.release) })
+}
+
 func (s *tokenServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	s.calls.Add(1)
 	code := s.statusCode
@@ -426,15 +462,16 @@ func TestOAuthTokenProviderWaiterRemintsWhenLeaderCancelCauseHTTP1(t *testing.T)
 	<-leaderArrived // leader holds the in-flight slot
 
 	// Waiter with a healthy context parks on the leader's flight.
+	waiterCtx := newObservedDoneContext(t)
 	waiterTok := make(chan string, 1)
 	waiterErr := make(chan error, 1)
 	go func() {
-		tok, err := p.Token(context.Background(), "c.s.t")
+		tok, err := p.Token(waiterCtx, "c.s.t")
 		waiterErr <- err
 		waiterTok <- tok
 	}()
 
-	time.Sleep(50 * time.Millisecond)                        // let the waiter park on the flight
+	awaitSignal(t, waiterCtx.observed, "waiter flight join")
 	cancelLeader(errors.New("caller gave up with a reason")) // custom cause, not the budget
 
 	<-leaderDone
@@ -446,6 +483,72 @@ func TestOAuthTokenProviderWaiterRemintsWhenLeaderCancelCauseHTTP1(t *testing.T)
 	}
 	if !waiterSeen.Load() {
 		t.Fatal("waiter never issued its own mint request; it inherited the leader's outcome")
+	}
+}
+
+func TestOAuthTokenProviderWaiterShares401WhenLeaderCancelsDuringLogging(t *testing.T) {
+	srv := &tokenServer{statusCode: http.StatusUnauthorized}
+	ts := httptest.NewServer(srv)
+	defer ts.Close()
+
+	handler := newBlockingLogHandler()
+	defer handler.unblock()
+	p, err := NewOAuthTokenProvider("id", "secret", "https://ws.zerobus.databricks.com", ts.URL,
+		WithHTTPClient(ts.Client()),
+		WithLogger(slog.New(handler)),
+	)
+	if err != nil {
+		t.Fatalf("NewOAuthTokenProvider: %v", err)
+	}
+
+	type result struct {
+		token string
+		err   error
+	}
+
+	leaderCtx, cancelLeader := context.WithCancelCause(context.Background())
+	leaderResult := make(chan result, 1)
+	go func() {
+		token, err := p.Token(leaderCtx, "c.s.t")
+		leaderResult <- result{token: token, err: err}
+	}()
+	awaitSignal(t, handler.entered, "leader error log")
+
+	waiterCtx := newObservedDoneContext(t)
+	waiterResult := make(chan result, 1)
+	go func() {
+		token, err := p.Token(waiterCtx, "c.s.t")
+		waiterResult <- result{token: token, err: err}
+	}()
+	awaitSignal(t, waiterCtx.observed, "waiter flight join")
+
+	cancelLeader(errors.New("cancelled after server response"))
+	handler.unblock()
+
+	awaitResult := func(name string, ch <-chan result) result {
+		t.Helper()
+		select {
+		case got := <-ch:
+			return got
+		case <-time.After(2 * time.Second):
+			t.Fatalf("timed out waiting for %s result", name)
+			return result{}
+		}
+	}
+	leader := awaitResult("leader", leaderResult)
+	waiter := awaitResult("waiter", waiterResult)
+	for name, got := range map[string]result{"leader": leader, "waiter": waiter} {
+		if got.token != "" {
+			t.Errorf("%s token = %q, want empty", name, got.token)
+		}
+		var tokenErr *TokenError
+		if !errors.As(got.err, &tokenErr) || tokenErr.IsRetryable() ||
+			!strings.Contains(got.err.Error(), "HTTP 401") {
+			t.Errorf("%s error = %v, want shared non-retryable HTTP 401", name, got.err)
+		}
+	}
+	if calls := srv.calls.Load(); calls != 1 {
+		t.Fatalf("HTTP requests = %d, want 1 shared request", calls)
 	}
 }
 
@@ -653,6 +756,67 @@ func TestIsCallerCancellationDistinguishesBudgetFromCaller(t *testing.T) {
 	if isRetryableTransportError(causeCtx, context.Cause(causeCtx)) {
 		t.Error("WithCancelCause cancellation must not be retryable")
 	}
+}
+
+func TestMarkCallerCancellationRequiresMatchingCause(t *testing.T) {
+	t.Run("custom cause", func(t *testing.T) {
+		ctx, cancel := context.WithCancelCause(context.Background())
+		cause := errors.New("caller stopped")
+		cancel(cause)
+		tokenErr := &TokenError{cause: cause}
+
+		markCallerCancellation(ctx, tokenErr)
+
+		if !tokenErr.callerCanceled {
+			t.Fatal("matching custom cause was not recorded")
+		}
+	})
+
+	t.Run("standard cancellation", func(t *testing.T) {
+		ctx, cancel := context.WithCancel(context.Background())
+		cancel()
+		tokenErr := &TokenError{cause: context.Canceled}
+
+		markCallerCancellation(ctx, tokenErr)
+
+		if !tokenErr.callerCanceled {
+			t.Fatal("matching standard cancellation was not recorded")
+		}
+	})
+
+	t.Run("unrelated error after cancellation", func(t *testing.T) {
+		ctx, cancel := context.WithCancel(context.Background())
+		cancel()
+		tokenErr := &TokenError{msg: "HTTP 401"}
+
+		markCallerCancellation(ctx, tokenErr)
+
+		if tokenErr.callerCanceled {
+			t.Fatal("unrelated error was attributed to caller cancellation")
+		}
+	})
+
+	t.Run("internal budget", func(t *testing.T) {
+		ctx, cancel := context.WithCancelCause(context.Background())
+		cancel(authctx.ErrHeadersBudgetExceeded)
+		tokenErr := &TokenError{cause: authctx.ErrHeadersBudgetExceeded}
+
+		markCallerCancellation(ctx, tokenErr)
+
+		if tokenErr.callerCanceled {
+			t.Fatal("internal budget was attributed to caller cancellation")
+		}
+	})
+
+	t.Run("live context", func(t *testing.T) {
+		tokenErr := &TokenError{cause: context.DeadlineExceeded}
+
+		markCallerCancellation(context.Background(), tokenErr)
+
+		if tokenErr.callerCanceled {
+			t.Fatal("live context was attributed to caller cancellation")
+		}
+	})
 }
 
 func TestOAuthTokenProviderNilOptionsKeepDefaults(t *testing.T) {
@@ -941,6 +1105,85 @@ func TestOAuthTokenProviderCacheDisabledAlwaysMints(t *testing.T) {
 	}
 	if got := srv.calls.Load(); got != 2 {
 		t.Fatalf("want 2 server calls with caching disabled, got %d", got)
+	}
+}
+
+func TestOAuthTokenProviderUncachedPathsRejectTokenExpiredDuringLogging(t *testing.T) {
+	tests := []struct {
+		name         string
+		direct       bool
+		disableCache bool
+	}{
+		{name: "cache disabled", disableCache: true},
+		{name: "direct fetch", direct: true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			srv := &tokenServer{accessToken: "short-lived", expiresIn: 1}
+			ts := httptest.NewServer(srv)
+			defer ts.Close()
+
+			handler := newBlockingLogHandler()
+			defer handler.unblock()
+			opts := []OAuthOption{
+				WithHTTPClient(ts.Client()),
+				WithLogger(slog.New(handler)),
+			}
+			if tt.disableCache {
+				opts = append(opts, WithTokenCacheEnabled(false))
+			}
+			p, err := NewOAuthTokenProvider(
+				"id",
+				"secret",
+				"https://ws.zerobus.databricks.com",
+				ts.URL,
+				opts...,
+			)
+			if err != nil {
+				t.Fatalf("NewOAuthTokenProvider: %v", err)
+			}
+
+			type result struct {
+				token string
+				err   error
+			}
+			resultCh := make(chan result, 1)
+			go func() {
+				var token string
+				var err error
+				if tt.direct {
+					token, err = p.FetchToken(context.Background(), "c.s.t")
+				} else {
+					token, err = p.Token(context.Background(), "c.s.t")
+				}
+				resultCh <- result{token: token, err: err}
+			}()
+
+			awaitSignal(t, handler.entered, "success log")
+			timer := time.NewTimer(1200 * time.Millisecond)
+			<-timer.C
+			handler.unblock()
+
+			var got result
+			select {
+			case got = <-resultCh:
+			case <-time.After(2 * time.Second):
+				t.Fatal("timed out waiting for token result")
+			}
+			if got.token != "" {
+				t.Fatalf("expired token = %q, want empty", got.token)
+			}
+			var tokenErr *TokenError
+			if !errors.As(got.err, &tokenErr) || !tokenErr.IsRetryable() {
+				t.Fatalf("error = %v, want retryable TokenError", got.err)
+			}
+			if calls := srv.calls.Load(); calls != 1 {
+				t.Fatalf("HTTP requests = %d, want 1", calls)
+			}
+		})
 	}
 }
 

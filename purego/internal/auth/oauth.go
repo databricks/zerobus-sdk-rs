@@ -227,6 +227,9 @@ func (p *OAuthTokenProvider) FetchToken(ctx context.Context, tableName string) (
 	if err != nil {
 		return "", err
 	}
+	if fetched.expiredAt(time.Now()) {
+		return "", newExpiredOnArrivalError()
+	}
 	return fetched.token, nil
 }
 
@@ -236,6 +239,7 @@ func (p *OAuthTokenProvider) mint(ctx context.Context, tableName string, reason 
 	started := time.Now()
 	fetched, err := p.fetchToken(ctx, tableName)
 	elapsed := time.Since(started)
+	markCallerCancellation(ctx, err)
 
 	switch {
 	case err != nil:
@@ -473,10 +477,11 @@ func buildAuthorizationDetails(catalog, schema, fullTable string) (string, error
 // body. The raw body is retained on ResponseBody for diagnostics without
 // widening the logged message.
 type TokenError struct {
-	msg          string
-	retryable    bool
-	cause        error
-	ResponseBody string // raw (bounded) HTTP error body, empty for non-HTTP failures
+	msg            string
+	retryable      bool
+	cause          error
+	callerCanceled bool
+	ResponseBody   string // raw (bounded) HTTP error body, empty for non-HTTP failures
 }
 
 func (e *TokenError) Error() string     { return "auth: oauth: " + e.msg }
@@ -484,6 +489,18 @@ func (e *TokenError) IsRetryable() bool { return e.retryable }
 
 // Unwrap exposes the cause so [errors.Is]/[errors.As] can inspect it.
 func (e *TokenError) Unwrap() error { return e.cause }
+
+// markCallerCancellation records whether err was caused by the caller's
+// context. It runs before synchronous logging can change the context state.
+func markCallerCancellation(ctx context.Context, err error) {
+	var tokenErr *TokenError
+	if err == nil || !errors.As(err, &tokenErr) || !isCallerCancellation(ctx) {
+		return
+	}
+	tokenErr.callerCanceled =
+		errors.Is(err, context.Cause(ctx)) ||
+			errors.Is(err, ctx.Err())
+}
 
 // isRetryableStatus reports whether an HTTP status is a transient failure worth
 // suppressing when a cached token can be served. Only 5xx responses qualify;
