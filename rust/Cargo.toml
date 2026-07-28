@@ -27,6 +27,7 @@ prost-reflect = "0.16"
 tonic = "0.14"
 tonic-prost = "0.14"
 tonic-prost-build = "0.14"
+tonic-types = "0.14"
 protoc-bin-vendored = "3.0.0"
 
 # Async runtime
@@ -42,8 +43,10 @@ serde_json = "1.0"
 
 # HTTP / networking
 reqwest = { version = "0.12", features = ["json", "rustls-tls-native-roots", "rustls-tls-webpki-roots"], default-features = false }
-hyper-http-proxy = { version = "1.1", default-features = false, features = ["rustls-tls-native-roots"] }
+hyper-http-proxy = { version = "1.1", default-features = false }
+hyper-rustls = { version = "0.27", default-features = false, features = ["http1", "native-tokio", "ring", "tls12"] }
 hyper-util = { version = "0.1", features = ["client-legacy", "tokio"] }
+tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12"] }
 
 # Error handling
 thiserror = "1.0"

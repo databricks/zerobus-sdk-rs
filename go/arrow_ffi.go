@@ -36,6 +36,7 @@ typedef struct CHeaders {
 } CHeaders;
 
 typedef CHeaders (*HeadersProviderCallback)(void *user_data);
+typedef void (*HeadersProviderFreeCallback)(void *user_data);
 
 // Arrow stream opaque handle.
 typedef struct CArrowStream { uint8_t _private[0]; } CArrowStream;
@@ -62,8 +63,9 @@ typedef struct CArrowBatchArray {
     uintptr_t  count;
 } CArrowBatchArray;
 
-// Forward declare the Go-exported headers callback (defined in ffi.go).
+// Forward declare the Go-exported callbacks (defined in ffi.go).
 extern void goGetHeaders(void *userData, CHeader **headers, uintptr_t *count, char **error);
+extern void goFreeHeadersProvider(void *userData);
 
 // C callback wrapper for arrow streams — calls the same Go function as the
 // regular stream callback. We define it here as a static so it exists in this
@@ -84,6 +86,16 @@ static HeadersProviderCallback getArrowHeadersCallback() {
     return (HeadersProviderCallback)cArrowHeadersCallback;
 }
 
+// Same as ffi.go's cFreeHeadersProvider; a distinct static keeps this
+// translation unit self-contained.
+static void cArrowFreeHeadersProvider(void *userData) {
+    goFreeHeadersProvider(userData);
+}
+
+static HeadersProviderFreeCallback getArrowFreeHeadersProviderCallback() {
+    return (HeadersProviderFreeCallback)cArrowFreeHeadersProvider;
+}
+
 // Arrow FFI function declarations.
 extern CArrowStream *zerobus_sdk_create_arrow_stream(
     CZerobusSdk *sdk,
@@ -102,6 +114,7 @@ extern CArrowStream *zerobus_sdk_create_arrow_stream_with_headers_provider(
     uintptr_t schema_ipc_len,
     HeadersProviderCallback headers_callback,
     void *user_data,
+    HeadersProviderFreeCallback free_user_data,
     const CArrowStreamConfigurationOptions *options,
     CResult *result);
 
@@ -122,15 +135,7 @@ import "C"
 import (
 	"runtime"
 	"runtime/cgo"
-	"sync"
 	"unsafe"
-)
-
-// arrowStreamHandleRegistry holds cgo.Handles for arrow streams created with a
-// custom headers provider so the Go object stays alive for the stream lifetime.
-var (
-	arrowStreamHandleRegistry   = make(map[unsafe.Pointer]cgo.Handle)
-	arrowStreamHandleRegistryMu sync.Mutex
 )
 
 // arrowFfiResult converts a C.CResult (from this translation unit) to a Go error.
@@ -279,6 +284,8 @@ func sdkCreateArrowStreamWithHeadersProvider(
 	cSchema := (*C.uint8_t)(unsafe.SliceData(schemaIpcBytes))
 	pinner.Pin(cSchema)
 
+	// Hand the provider handle's ownership to the FFI; it is released via
+	// goFreeHeadersProvider once the core is done with it (see ffi.go).
 	handle := cgo.NewHandle(headersProvider)
 	handlePtr := *(*unsafe.Pointer)(unsafe.Pointer(&handle))
 
@@ -291,32 +298,26 @@ func sdkCreateArrowStreamWithHeadersProvider(
 		C.uintptr_t(len(schemaIpcBytes)),
 		C.getArrowHeadersCallback(),
 		handlePtr,
+		C.getArrowFreeHeadersProviderCallback(),
 		&cOpts,
 		&cres,
 	)
 	if ptr == nil {
-		handle.Delete()
+		// The FFI owns the handle once create is called and releases it via
+		// goFreeHeadersProvider on every path — including this failure — so we
+		// must NOT delete it here (that would double-free the handle).
 		return nil, arrowFfiResult(cres)
 	}
-
-	arrowStreamHandleRegistryMu.Lock()
-	arrowStreamHandleRegistry[unsafe.Pointer(ptr)] = handle
-	arrowStreamHandleRegistryMu.Unlock()
 
 	return unsafe.Pointer(ptr), nil
 }
 
-// arrowStreamFree frees an Arrow Flight stream and its associated handle.
+// arrowStreamFree frees an Arrow Flight stream. The provider handle (if any) is
+// released by the FFI via goFreeHeadersProvider, not here.
 func arrowStreamFree(ptr unsafe.Pointer) {
 	if ptr == nil {
 		return
 	}
-	arrowStreamHandleRegistryMu.Lock()
-	if handle, ok := arrowStreamHandleRegistry[ptr]; ok {
-		handle.Delete()
-		delete(arrowStreamHandleRegistry, ptr)
-	}
-	arrowStreamHandleRegistryMu.Unlock()
 	C.zerobus_arrow_stream_free((*C.CArrowStream)(ptr))
 }
 

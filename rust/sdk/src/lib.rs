@@ -47,6 +47,7 @@ mod builder;
 mod callbacks;
 mod client_warnings;
 mod default_token_factory;
+mod dynamic_proto;
 mod errors;
 mod headers_provider;
 mod landing_zone;
@@ -70,7 +71,11 @@ pub use arrow_stream::{ArrowSchema, DataType, Field, RecordBatch, TimeUnit, Zero
 pub use builder::{StreamBuilder, ZerobusSdkBuilder};
 pub use callbacks::AckCallback;
 pub use default_token_factory::DefaultTokenFactory;
-pub use errors::ZerobusError;
+pub use dynamic_proto::{
+    message_descriptor, missing_required_fields, DynamicMessage, DynamicRecord, IntoDynamicValue,
+    MessageDescriptor, Value,
+};
+pub use errors::{SchemaValidationCause, ZerobusError};
 #[cfg(feature = "testing")]
 pub use headers_provider::NoAuthHeadersProvider;
 pub use headers_provider::{HeadersProvider, OAuthHeadersProvider};
@@ -119,6 +124,7 @@ pub enum StreamType {
 pub(crate) struct TableProperties {
     pub(crate) table_name: String,
     pub(crate) descriptor_proto: Option<prost_types::DescriptorProto>,
+    pub(crate) message_descriptor: Option<MessageDescriptor>,
 }
 
 pub type ZerobusResult<T> = Result<T, ZerobusError>;

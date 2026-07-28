@@ -10,6 +10,7 @@ JOBS ?= 4
 # undefined). Empty by default, so normal builds are unaffected.
 SANITIZE ?=
 SANITIZE_FLAG := $(if $(SANITIZE),-DZEROBUS_SANITIZE=$(SANITIZE),)
+RUST_NIGHTLY_TOOLCHAIN ?= nightly
 
 # Sanitizer builds use their own build dir so they don't clash with a normal
 # (GCC) build dir — CMake caches the compiler, so reusing one build dir across
@@ -23,7 +24,8 @@ BUILD_DIR ?= $(if $(SANITIZE),build-$(SANITIZE),build)
 CLANG_CC ?= clang
 CLANG_CXX ?= clang++
 ifneq ($(filter $(SANITIZE),address thread),)
-SANITIZE_FLAG += -DCMAKE_C_COMPILER=$(CLANG_CC) -DCMAKE_CXX_COMPILER=$(CLANG_CXX)
+SANITIZE_FLAG += -DCMAKE_C_COMPILER=$(CLANG_CC) -DCMAKE_CXX_COMPILER=$(CLANG_CXX) \
+	-DZEROBUS_RUST_NIGHTLY_TOOLCHAIN=$(RUST_NIGHTLY_TOOLCHAIN)
 endif
 
 # All hand-written C++ sources (excludes the CMake build tree and fetched deps).

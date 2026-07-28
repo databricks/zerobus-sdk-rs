@@ -93,14 +93,18 @@ instead, configure with `-DZEROBUS_FFI_LIBRARY=<path-to-.a>` and
 
 When using a custom `HeadersProvider`:
 - `detail::zerobus_cpp_headers_trampoline` is an `extern "C"` function passed to
-  `zerobus_sdk_create_stream_with_headers_provider`. `user_data` is the raw
-  `HeadersProvider*`.
-- The `Stream` / `ArrowStream` keeps a `std::shared_ptr<HeadersProvider>` alive
-  for its whole lifetime; the handle is freed in the destructor **before** the
-  shared_ptr member is destroyed. Necessary but not always sufficient (see
-  `headers_provider.hpp`): a `get_headers()` call still running when `close()`
-  times out (~1s) can be invoked on a freed provider. Keep `get_headers()` well
-  under that budget, or keep the provider alive past the stream.
+  `zerobus_sdk_create_stream_with_headers_provider`. `user_data` is a
+  heap-allocated `std::shared_ptr<HeadersProvider>*` whose **ownership is handed
+  to the FFI**, alongside `detail::zerobus_cpp_headers_free` as the FFI's
+  provider `free_user_data` destroy callback.
+- The FFI invokes `zerobus_cpp_headers_free` exactly once, on every path (on
+  success after the core's last reference drops — i.e. after any in-flight
+  `get_headers()` has returned; on a failed create before returning). This is
+  what closes the recovery-vs-teardown use-after-free: a slow `get_headers()`
+  racing stream teardown can no longer run on a freed provider. Because the FFI
+  owns the provider, the `Stream` / `ArrowStream` no longer keeps a
+  `shared_ptr<HeadersProvider>` member, and the wrapper must **not** free
+  `user_data` itself (doing so would double-free).
 - The trampoline marshals the returned map into `CHeaders` using the allocators
   the Rust core's `zerobus_free_headers` expects to free. Do not change the
   allocator without checking `zerobus_free_headers` in the FFI crate.
@@ -188,25 +192,33 @@ Public API is everything under `include/zerobus/`:
 
 ## Release
 
-The intended distribution model is CMake + GitHub Releases only — no package
-manager (no Conan, vcpkg, etc.), mirroring the C FFI. Consumers build from
-source via CMake (`add_subdirectory` / `FetchContent` / `find_package` against a
-`cmake --install` tree). The install tree already produces headers, the
-`libzerobus_cpp` static library, the bundled `libzerobus_ffi` archive, and the
-`find_package(zerobus)` package config; the tag-triggered release workflow that
-publishes prebuilt per-platform archives is not yet implemented (no
-`release-cpp.yml` exists — the other SDKs each have a `release-<sdk>.yml`).
+The distribution model is CMake + GitHub Releases only — no package manager (no
+Conan, vcpkg, etc.), mirroring the C FFI. The C++ wrapper is always built from
+the consumer's own compiler (its C++ ABI is not stable across compiler/stdlib),
+so we do **not** ship a prebuilt `libzerobus_cpp`. What we ship prebuilt is the
+Rust C FFI archive (`libzerobus_ffi.a`) — a stable C ABI, and the one piece a
+consumer can't build without a Rust toolchain. A consumer then either builds
+everything from source (needs Rust) via `add_subdirectory` / `FetchContent` /
+`find_package`, or points `-DZEROBUS_FFI_LIBRARY=` at the matching prebuilt FFI
+archive from a release and builds only the C++ (no Rust needed).
 
+- Create the `cpp/v<semver>` tag.
+- Manually dispatch the `release-zerobus-sdk-cpp.yml` orchestrator (in
+  `secure-public-registry-releases-eng`) with the tag as `ref`. It invokes
+  `release-cpp.yml` in this repo to build the per-platform bundles (the Rust C
+  FFI archive cross-built with `cargo-zigbuild`, plus the platform-neutral C++
+  source tree), scans the artifacts, and cuts the GitHub Release with a
+  per-platform `tar.gz` attached and notes from `cpp/CHANGELOG.md`.
 - Version source: `cpp/include/zerobus/version.hpp` (`ZEROBUS_CPP_VERSION`) and
   the `project(... VERSION ...)` line in `cpp/CMakeLists.txt` — keep them in
-  sync (CMake fails configuration if they disagree).
-- Tag pattern (planned): `cpp/v<semver>`, to trigger the C++ release workflow
-  once it is added.
+  sync (CMake fails configuration if they disagree). The release validates the
+  tag version against `ZEROBUS_CPP_VERSION`.
 - The C++ SDK links the FFI static library. If Rust FFI code changed, an FFI
   release (`ffi/v*`) must happen first; for source builds the workspace must be
   present.
-- On version bump PR: move `NEXT_CHANGELOG.md` contents to `CHANGELOG.md`, reset
-  `NEXT_CHANGELOG.md`.
+- On version bump PR: move `NEXT_CHANGELOG.md` contents to `CHANGELOG.md` under a
+  `## Release v<semver>` heading (the release notes are extracted by matching
+  that heading), reset `NEXT_CHANGELOG.md`.
 
 ## Config / requirements
 

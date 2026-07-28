@@ -2,6 +2,7 @@ package transport
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 
@@ -9,6 +10,13 @@ import (
 
 	"github.com/databricks/zerobus-sdk/purego/internal/zerobuspb"
 )
+
+// ErrInvalidParams marks an Open failure caused by invalid stream parameters
+// (empty table name, unsupported record type, missing descriptor). These are
+// deterministic: reopening with the same params reproduces the failure, so
+// higher layers can use errors.Is to treat them as non-retryable rather than
+// reconnecting in a loop.
+var ErrInvalidParams = errors.New("transport: invalid stream parameters")
 
 // StreamParams describes the stream to open: which table to ingest into, how
 // records are encoded, and which headers provider supplies its credentials.
@@ -54,16 +62,16 @@ func (c *Conn) Open(ctx context.Context, p StreamParams) (*Stream, error) {
 	// the validation below also governs the value actually sent.
 	p.TableName = strings.TrimSpace(p.TableName)
 	if p.TableName == "" {
-		return nil, fmt.Errorf("transport: open: table name is required")
+		return nil, fmt.Errorf("transport: open: table name is required: %w", ErrInvalidParams)
 	}
 	switch p.RecordType {
 	case zerobuspb.RecordType_PROTO, zerobuspb.RecordType_JSON:
 		// Supported.
 	default:
-		return nil, fmt.Errorf("transport: open %q: unsupported record type %v", p.TableName, p.RecordType)
+		return nil, fmt.Errorf("transport: open %q: unsupported record type %v: %w", p.TableName, p.RecordType, ErrInvalidParams)
 	}
 	if p.RecordType == zerobuspb.RecordType_PROTO && len(p.DescriptorProto) == 0 {
-		return nil, fmt.Errorf("transport: open %q: descriptor proto required for PROTO records", p.TableName)
+		return nil, fmt.Errorf("transport: open %q: descriptor proto required for PROTO records: %w", p.TableName, ErrInvalidParams)
 	}
 	headersCtx := ctx
 	useDefaultBudgets := false
@@ -178,8 +186,41 @@ func confirmCreateStream(resp *zerobuspb.EphemeralStreamResponse) (string, error
 	return id, nil
 }
 
+// FakeStreamRPC is the wire interface a test fake must satisfy to be wrapped by
+// [NewFakeStreamForTesting]. It exists only for tests in other internal
+// packages that must supply a fake RPC; production callers do not use it.
+type FakeStreamRPC interface {
+	Send(*zerobuspb.EphemeralStreamRequest) error
+	Recv() (*zerobuspb.EphemeralStreamResponse, error)
+	CloseSend() error
+}
+
+// NewFakeStreamForTesting wraps a test fake as a Stream, skipping the handshake.
+// It is exported because Go tests in other internal packages cannot reach
+// Stream's unexported fields; production code must not use it.
+//
+// Close cancels the stream (abrupt abort). If the RPC implements Abort() the
+// fake can model gRPC's context-cancel (distinct from CloseSend's half-close)
+// and unblock a Recv parked on a channel. Otherwise Close falls back to
+// CloseSend, which suffices for fakes whose Recv returns io.EOF on half-close.
+func NewFakeStreamForTesting(rpc FakeStreamRPC) *Stream {
+	s := &Stream{}
+	s.rpc = rpc
+	if a, ok := rpc.(interface{ Abort() }); ok {
+		s.cancel = a.Abort
+	} else {
+		s.cancel = func() { _ = rpc.CloseSend() }
+	}
+	s.setID("fake-stream")
+	return s
+}
+
+// ServerID returns the server-assigned stream identifier from the handshake.
+func (s *Stream) ServerID() string { return s.name() }
+
 // ID returns the server-assigned stream identifier from the handshake.
-func (s *Stream) ID() string { return s.name() }
+// Deprecated: use ServerID.
+func (s *Stream) ID() string { return s.ServerID() }
 
 // Send writes one request to the server. It is not safe for concurrent use.
 func (s *Stream) Send(req *zerobuspb.EphemeralStreamRequest) error { return s.send(req) }

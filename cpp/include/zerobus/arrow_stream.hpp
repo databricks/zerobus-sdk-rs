@@ -86,11 +86,12 @@ class ArrowStream {
 
  private:
   friend class Sdk;
-  ArrowStream(CArrowStream* handle, std::shared_ptr<HeadersProvider> provider)
-      : handle_(handle), provider_(std::move(provider)) {}
+  ArrowStream(CArrowStream* handle, std::shared_ptr<HeadersProvider> /*unused*/)
+      : handle_(handle) {}
 
   CArrowStream* handle_;
-  std::shared_ptr<HeadersProvider> provider_;
+  // The headers provider (if any) is owned by the FFI, not the ArrowStream (see
+  // Sdk::create_arrow_stream / headers_provider.hpp).
 };
 
 }  // namespace zerobus

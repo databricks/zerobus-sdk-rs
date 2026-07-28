@@ -106,10 +106,18 @@ export DATABRICKS_CLIENT_SECRET="<your_databricks_client_secret>"
 For Azure, use `.azuredatabricks.net` hosts in the endpoint and workspace URL.
 
 The proto examples additionally read the Unity Catalog table metadata JSON from
-the environment (see the [Protocol Buffers README](proto/README.md)):
+the environment (the JSON examples don't). See the [Protocol Buffers
+README](proto/README.md#how-the-schema-is-built-dynamic-proto) for why it's
+needed and the full two-step fetch:
 
 ```bash
-export ZEROBUS_UC_TABLE_JSON="$(curl -s \
+DATABRICKS_TOKEN="$(curl -sS --fail --request POST \
+  --user "$DATABRICKS_CLIENT_ID:$DATABRICKS_CLIENT_SECRET" \
+  "$DATABRICKS_WORKSPACE_URL/oidc/v1/token" \
+  --data 'grant_type=client_credentials&scope=all-apis' \
+  | jq -r .access_token)"
+
+export ZEROBUS_UC_TABLE_JSON="$(curl -sS --fail \
   -H "Authorization: Bearer $DATABRICKS_TOKEN" \
   "$DATABRICKS_WORKSPACE_URL/api/2.1/unity-catalog/tables/$ZEROBUS_TABLE_NAME")"
 ```
@@ -240,7 +248,7 @@ destructor swallows it.
 | **Method** | `ingest_json_record()` / `ingest_proto_record()` | `ingest_json_records()` / `ingest_proto_records()` |
 | **Use case** | Records arrive one at a time | Multiple records ready at once |
 | **Semantics** | Each record independent | All-or-nothing (atomic) |
-| **Acknowledgment** | Per record | Per batch (offset of last record) |
+| **Acknowledgment** | Per record | Per batch (one offset for the batch) |
 | **Throughput** | Lower | Higher (amortizes the FFI crossing) |
 
 **Single-record:**
@@ -253,9 +261,9 @@ stream.flush();
 
 **Batch:**
 ```cpp
-std::int64_t last = stream.ingest_json_records(records);
-if (last >= 0) {
-  stream.wait_for_offset(last);   // one wait confirms the whole batch
+std::int64_t batch_offset = stream.ingest_json_records(records);
+if (batch_offset >= 0) {
+  stream.wait_for_offset(batch_offset);   // one wait confirms the whole batch
 }
 ```
 

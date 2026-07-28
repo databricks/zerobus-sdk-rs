@@ -15,6 +15,7 @@
 
 #include <cstdint>
 #include <map>
+#include <memory>
 #include <string>
 
 #include "zerobus/headers_provider.hpp"
@@ -65,7 +66,14 @@ extern "C" CHeaders zerobus_cpp_headers_trampoline(void* user_data) {
   if (user_data == nullptr) {
     return make_error("null headers provider");
   }
-  auto* provider = static_cast<HeadersProvider*>(user_data);
+  // user_data is a heap-owned shared_ptr<HeadersProvider> (see
+  // zerobus_cpp_headers_free); deref it to reach the provider.
+  auto& provider_sp =
+      *static_cast<std::shared_ptr<HeadersProvider>*>(user_data);
+  HeadersProvider* provider = provider_sp.get();
+  if (provider == nullptr) {
+    return make_error("null headers provider");
+  }
 
   std::map<std::string, std::string> headers;
   try {
@@ -113,6 +121,15 @@ extern "C" CHeaders zerobus_cpp_headers_trampoline(void* user_data) {
   result.headers = arr;
   result.count = headers.size();
   return result;
+}
+
+extern "C" void zerobus_cpp_headers_free(void* user_data) noexcept {
+  // Frees the heap shared_ptr that Sdk::create_* allocated with new; the
+  // trampoline dereferences the same pointer. The FFI calls this once, after
+  // any in-flight get_headers has returned, so deleting here cannot race a
+  // callback. delete on a null pointer is a no-op, and ~shared_ptr / provider
+  // destructors are assumed not to throw (noexcept contains it if they do).
+  delete static_cast<std::shared_ptr<HeadersProvider>*>(user_data);
 }
 
 }  // namespace detail

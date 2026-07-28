@@ -130,7 +130,7 @@ jobs:
         if: matrix.zigbuild && matrix.static_only
         env:
           RUSTFLAGS: ${{ matrix.rustflags }}
-        run: cargo zigbuild rustc --release -p zerobus-ffi --target ${{ matrix.target }} --crate-type staticlib
+        run: cargo-zigbuild rustc --release -p zerobus-ffi --target ${{ matrix.target }} --crate-type staticlib
 
       - name: Prepare artifacts
         shell: bash
