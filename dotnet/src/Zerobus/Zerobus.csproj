@@ -85,6 +85,22 @@
       PackagePath="runtimes/linux-arm64/native"
       Condition="Exists('runtimes/linux-arm64/native/libzerobus_ffi.so')" />
 
+    <!-- Linux musl x64 (Alpine) -->
+    <None Include="runtimes/linux-musl-x64/native/libzerobus_ffi.so"
+      CopyToOutputDirectory="PreserveNewest"
+      Link="runtimes/linux-musl-x64/native/libzerobus_ffi.so"
+      Pack="true"
+      PackagePath="runtimes/linux-musl-x64/native"
+      Condition="Exists('runtimes/linux-musl-x64/native/libzerobus_ffi.so')" />
+
+    <!-- Linux musl arm64 (Alpine) -->
+    <None Include="runtimes/linux-musl-arm64/native/libzerobus_ffi.so"
+      CopyToOutputDirectory="PreserveNewest"
+      Link="runtimes/linux-musl-arm64/native/libzerobus_ffi.so"
+      Pack="true"
+      PackagePath="runtimes/linux-musl-arm64/native"
+      Condition="Exists('runtimes/linux-musl-arm64/native/libzerobus_ffi.so')" />
+
     <!-- macOS x64 -->
     <None Include="runtimes/osx-x64/native/libzerobus_ffi.dylib"
       CopyToOutputDirectory="PreserveNewest"

@@ -1,20 +1,15 @@
-name: Build & Release .NET SDK
-run-name: "Release .NET SDK ${{ github.ref_name }}"
+name: Build .NET SDK
+run-name: "Build .NET SDK ${{ github.ref_name }}"
+
+# Build-only: packs the NuGet package with all native runtimes and uploads it
+# as an artifact. Publishing and the GitHub Release happen downstream.
 
 on:
-  push:
-    tags:
-      - 'dotnet/v*'
   workflow_dispatch:
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
-
-permissions:
-  contents: write
-  id-token: write # Required for attestation
-  attestations: write # Required for attestation
 
 jobs:
   build-ffi:
@@ -34,27 +29,37 @@ jobs:
             dynamic_lib: libzerobus_ffi.so
             artifact_dir: linux-arm64
             cross: true
+          - runner: { group: databricks-protected-runner-group, labels: linux-ubuntu-latest }
+            target: x86_64-unknown-linux-musl
+            static_lib: libzerobus_ffi.a
+            dynamic_lib: libzerobus_ffi.so
+            artifact_dir: linux-musl-x64
+            cross: false
+            zigbuild: true
+            rustflags: "-C target-feature=-crt-static"
+          - runner: { group: databricks-protected-runner-group, labels: linux-ubuntu-latest }
+            target: aarch64-unknown-linux-musl
+            static_lib: libzerobus_ffi.a
+            dynamic_lib: libzerobus_ffi.so
+            artifact_dir: linux-musl-arm64
+            cross: false
+            zigbuild: true
+            rustflags: "-C target-feature=-crt-static"
           - runner: { group: databricks-protected-runner-group, labels: windows-server-latest }
             target: x86_64-pc-windows-msvc
             static_lib: zerobus_ffi.lib
             dynamic_lib: zerobus_ffi.dll
             artifact_dir: win-x64
             cross: false
-          - runner: [self-hosted, macOS, ARM64, zerobus-sdk]
-            target: aarch64-apple-darwin
-            static_lib: libzerobus_ffi.a
-            dynamic_lib: libzerobus_ffi.dylib
-            artifact_dir: osx-arm64
-            cross: false
-          - runner: [self-hosted, macOS, ARM64, zerobus-sdk]
-            target: x86_64-apple-darwin
-            static_lib: libzerobus_ffi.a
-            dynamic_lib: libzerobus_ffi.dylib
-            artifact_dir: osx-x64
-            cross: false
+          # macOS is omitted: the runtime .dylib must be linked against Apple's
+          # Security/CoreFoundation frameworks, which are unavailable when
+          # cross-compiling from Linux. Add macOS once a Mac build host exists.
 
     name: Build FFI - ${{ matrix.artifact_dir }}
     runs-on: ${{ matrix.runner }}
+    permissions:
+      contents: read
+      id-token: write
 
     defaults:
       run:
@@ -63,8 +68,18 @@ jobs:
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
 
+      - name: Get JFrog OIDC token
+        shell: bash
+        run: bash "$GITHUB_WORKSPACE/.github/scripts/jfrog-oidc-token.sh"
+
+      - name: Configure cargo for JFrog
+        shell: bash
+        run: bash "$GITHUB_WORKSPACE/.github/scripts/configure-cargo.sh"
+
       - name: Install protoc
         uses: arduino/setup-protoc@c65c819552d16ad3c9b72d9dfd5ba5237b9c906b # v3
+        with:
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Install cross-compilation toolchain (Linux ARM64)
         if: matrix.cross
@@ -80,8 +95,26 @@ jobs:
         with:
           targets: ${{ matrix.target }}
 
+      - name: Install Zig (zigbuild targets)
+        if: matrix.zigbuild
+        uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2.2.1
+        with:
+          version: 0.13.0
+
+      - name: Install cargo-zigbuild (zigbuild targets)
+        if: matrix.zigbuild
+        run: cargo install cargo-zigbuild --locked --version 0.19.8
+
       - name: Build FFI library
+        if: '!matrix.zigbuild'
         run: cargo build --release -p zerobus-ffi --target ${{ matrix.target }}
+
+      # musl (Alpine) libraries are cross-compiled from glibc Linux via zigbuild.
+      - name: Build FFI library (zigbuild)
+        if: matrix.zigbuild
+        env:
+          RUSTFLAGS: ${{ matrix.rustflags }}
+        run: cargo zigbuild --release -p zerobus-ffi --target ${{ matrix.target }}
 
       - name: Prepare artifacts
         shell: bash
@@ -95,12 +128,16 @@ jobs:
         with:
           name: ffi-${{ matrix.artifact_dir }}
           path: rust/artifacts/${{ matrix.artifact_dir }}
+          if-no-files-found: error
 
-  publish:
+  package:
+    name: Pack NuGet package
     needs: build-ffi
     runs-on:
       group: databricks-protected-runner-group
       labels: linux-ubuntu-latest
+    permissions:
+      contents: read
     defaults:
       run:
         working-directory: dotnet
@@ -114,24 +151,45 @@ jobs:
           dotnet-version: 10.0.x
 
       - name: Download all native libraries
+        # download-artifact paths are relative to the workspace root, not the
+        # job working-directory, so download under dotnet/ explicitly.
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
         with:
-          path: native
+          path: dotnet/native
           pattern: ffi-*
           merge-multiple: false
 
       - name: Consolidate native libraries
+        # Each ffi-<rid> artifact holds native/<libs>; place it at runtimes/<rid>/native.
         run: |
-          mkdir -p src/Zerobus/runtimes
-          cp -r native/ffi-linux-x64/linux-x64 src/Zerobus/runtimes/
-          cp -r native/ffi-linux-arm64/linux-arm64 src/Zerobus/runtimes/
-          cp -r native/ffi-osx-x64/osx-x64 src/Zerobus/runtimes/
-          cp -r native/ffi-osx-arm64/osx-arm64 src/Zerobus/runtimes/
-          cp -r native/ffi-win-x64/win-x64 src/Zerobus/runtimes/
+          for dir in native/ffi-*/; do
+            rid=$(basename "$dir" | sed 's/^ffi-//')
+            mkdir -p "src/Zerobus/runtimes/$rid"
+            cp -r "$dir/native" "src/Zerobus/runtimes/$rid/"
+          done
+          echo "Consolidated runtimes:"
+          find src/Zerobus/runtimes -type f | sort
 
-      - name: Extract version from tag
-        id: version
-        run: echo "version=${GITHUB_REF#refs/tags/dotnet/v}" >> "$GITHUB_OUTPUT"
+      - name: Assert expected native RID payloads are present
+        run: |
+          expected=(
+            "src/Zerobus/runtimes/linux-x64/native/libzerobus_ffi.so"
+            "src/Zerobus/runtimes/linux-arm64/native/libzerobus_ffi.so"
+            "src/Zerobus/runtimes/linux-musl-x64/native/libzerobus_ffi.so"
+            "src/Zerobus/runtimes/linux-musl-arm64/native/libzerobus_ffi.so"
+            "src/Zerobus/runtimes/win-x64/native/zerobus_ffi.dll"
+          )
+          missing=0
+          for f in "${expected[@]}"; do
+            if [ ! -f "$f" ]; then
+              echo "Missing expected native artifact: $f"
+              missing=1
+            fi
+          done
+          if [ "$missing" -ne 0 ]; then
+            echo "RID payload assertion failed; refusing to pack incomplete nupkg."
+            exit 1
+          fi
 
       - name: Package NuGet
         env:
@@ -141,54 +199,11 @@ jobs:
             --configuration Release \
             --output ./packages \
             -p:SkipNativeBuild=true \
-            -p:Version=${{ steps.version.outputs.version }} \
-            -p:PackageVersion=${{ steps.version.outputs.version }} \
-            -p:AssemblyVersion=${{ steps.version.outputs.version }} \
-            -p:FileVersion=${{ steps.version.outputs.version }} \
-            -p:InformationalVersion=${{ steps.version.outputs.version }} \
             -p:CI=true
 
-      - name: Generate attestation
-        uses: actions/attest-build-provenance@0f67c3f4856b2e3261c31976d6725780e5e4c373 # v4
+      - name: Upload NuGet package
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
-          subject-path: "packages/*.nupkg"
-
-      - name: NuGet login (OIDC → temp API key)
-        uses: NuGet/login@8d196754b4036150537f80ac539e15c2f1028841 # v1
-        id: login
-        with:
-          user: ${{ secrets.NUGET_USERNAME }}
-
-      - name: Publish to Nuget Packages
-        env:
-          NUGET_AUTH_TOKEN: ${{ steps.login.outputs.NUGET_API_KEY }}
-        run: |
-          dotnet nuget push packages/*.nupkg \
-            --api-key "${{ steps.login.outputs.NUGET_API_KEY }}" \
-            --skip-duplicate  \
-            --source https://api.nuget.org/v3/index.json
-
-  release:
-    name: Create GitHub Release
-    runs-on:
-      group: databricks-protected-runner-group
-      labels: linux-ubuntu-latest
-    needs: publish
-
-    steps:
-      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
-
-      - name: Extract version from tag
-        id: version
-        run: echo "version=${GITHUB_REF#refs/tags/dotnet/v}" >> "$GITHUB_OUTPUT"
-
-      - name: Extract release notes from changelog
-        run: |
-          version="v${{ steps.version.outputs.version }}"
-          awk "/^## Release ${version}/{found=1; next} /^## /{if(found) exit} found{print}" dotnet/CHANGELOG.md > /tmp/release-notes.md
-
-      - name: Create GitHub Release
-        uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2
-        with:
-          name: .NET SDK v${{ steps.version.outputs.version }}
-          body_path: /tmp/release-notes.md
+          name: dotnet-package
+          path: dotnet/packages/*.nupkg
+          if-no-files-found: error
