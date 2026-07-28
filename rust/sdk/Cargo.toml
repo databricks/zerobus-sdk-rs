@@ -1,6 +1,6 @@
 [package]
 name = "databricks-zerobus-ingest-sdk"
-version = "2.4.0"
+version = "2.5.0"
 authors = ["Databricks"]
 edition = "2021"
 rust-version = "1.70"
@@ -21,6 +21,7 @@ all-features = true
 async-trait.workspace = true
 prost.workspace = true
 prost-types.workspace = true
+prost-reflect.workspace = true
 reqwest.workspace = true
 serde.workspace = true
 serde_json.workspace = true

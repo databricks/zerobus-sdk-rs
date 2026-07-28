@@ -31,8 +31,8 @@ use tracing::instrument;
 use crate::databricks::zerobus::zerobus_client::ZerobusClient;
 use crate::landing_zone::LandingZone;
 use crate::{
-    HeadersProvider, OffsetId, OffsetIdGenerator, StreamConfigurationOptions, StreamType,
-    TableProperties, ZerobusError, ZerobusResult,
+    DynamicRecord, HeadersProvider, MessageDescriptor, OffsetId, OffsetIdGenerator,
+    StreamConfigurationOptions, StreamType, TableProperties, ZerobusError, ZerobusResult,
 };
 
 mod acks;
@@ -128,6 +128,9 @@ pub struct ZerobusStream {
     cancellation_token: CancellationToken,
     /// Callback handler task that executes callbacks in a separate thread.
     callback_handler_task: Option<tokio::task::JoinHandle<()>>,
+    /// Resolved message descriptor for building dynamic-proto records, supplied by
+    /// the builder. `None` for JSON and compiled-proto streams.
+    dynamic_message_descriptor: Option<MessageDescriptor>,
 }
 
 impl ZerobusStream {
@@ -189,6 +192,8 @@ impl ZerobusStream {
             )
         })??);
 
+        // Cloned out before `table_properties` is moved into the struct below.
+        let dynamic_message_descriptor = table_properties.message_descriptor.clone();
         let stream = Self {
             stream_type: StreamType::Ephemeral,
             headers_provider,
@@ -207,9 +212,34 @@ impl ZerobusStream {
             server_error_rx,
             cancellation_token,
             callback_handler_task,
+            dynamic_message_descriptor,
         };
 
         Ok(stream)
+    }
+
+    /// The [`MessageDescriptor`] for this stream's schema, for building records
+    /// with [`crate::DynamicRecord`]. Supplied at build time; the
+    /// returned clone is cheap (Arc-backed).
+    ///
+    /// # Errors
+    ///
+    /// [`ZerobusError::InvalidArgument`] if this isn't a dynamic-proto stream
+    /// (i.e. not built with [`dynamic_proto`](crate::StreamBuilder::dynamic_proto)).
+    pub fn message_descriptor(&self) -> ZerobusResult<MessageDescriptor> {
+        self.dynamic_message_descriptor.clone().ok_or_else(|| {
+            ZerobusError::InvalidArgument(
+                "stream was not built with .dynamic_proto(); no message descriptor available"
+                    .into(),
+            )
+        })
+    }
+
+    /// Create an empty [`DynamicRecord`] bound to this stream's schema.
+    ///
+    /// Convenience over [`message_descriptor`](Self::message_descriptor); same errors.
+    pub fn new_record(&self) -> ZerobusResult<DynamicRecord> {
+        Ok(DynamicRecord::new(self.message_descriptor()?))
     }
 }
 

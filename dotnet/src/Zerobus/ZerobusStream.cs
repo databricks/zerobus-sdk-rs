@@ -1,6 +1,5 @@
 using System.Runtime.CompilerServices;
 using System.Runtime.ExceptionServices;
-using System.Runtime.InteropServices;
 using Databricks.Zerobus.Native;
 
 namespace Databricks.Zerobus;
@@ -35,22 +34,9 @@ public sealed class ZerobusStream : IDisposable, IAsyncDisposable
     private int _inflightAsyncOperations;
     private readonly ManualResetEventSlim _asyncOperationsDrained = new(initialState: true);
 
-    // Prevent the GCHandle / delegate from being collected while the native code holds a reference.
-    // Not readonly: GCHandle is not a readonly struct, so calling Free() on a readonly field
-    // creates a defensive copy — the field is never actually mutated, causing double-free.
-    private GCHandle _bridgeHandle;
-    private readonly HeadersProviderCallback? _callbackRef;
-
     internal ZerobusStream(IntPtr ptr)
     {
         _ptr = ptr;
-    }
-
-    internal ZerobusStream(IntPtr ptr, GCHandle bridgeHandle, HeadersProviderCallback callbackRef)
-    {
-        _ptr = ptr;
-        _bridgeHandle = bridgeHandle;
-        _callbackRef = callbackRef;
     }
 
     /// <summary>
@@ -329,7 +315,6 @@ public sealed class ZerobusStream : IDisposable, IAsyncDisposable
             ptr = Interlocked.Exchange(ref _ptr, IntPtr.Zero);
             if (ptr == IntPtr.Zero)
             {
-                FreeBridgeHandle();
                 return;
             }
 
@@ -349,7 +334,6 @@ public sealed class ZerobusStream : IDisposable, IAsyncDisposable
         }
 
         NativeMethods.StreamFree(ptr);
-        FreeBridgeHandle();
         GC.SuppressFinalize(this);
 
         if (closeError is not null)
@@ -364,7 +348,6 @@ public sealed class ZerobusStream : IDisposable, IAsyncDisposable
         var ptr = Interlocked.Exchange(ref _ptr, IntPtr.Zero);
         if (ptr == IntPtr.Zero)
         {
-            FreeBridgeHandle();
             return;
         }
 
@@ -383,7 +366,6 @@ public sealed class ZerobusStream : IDisposable, IAsyncDisposable
         }
 
         NativeMethods.StreamFree(ptr);
-        FreeBridgeHandle();
 
         if (closeError is not null)
             ExceptionDispatchInfo.Capture(closeError).Throw();
@@ -401,12 +383,6 @@ public sealed class ZerobusStream : IDisposable, IAsyncDisposable
         Dispose(false);
     }
 
-    private void FreeBridgeHandle()
-    {
-        if (_bridgeHandle.IsAllocated)
-            _bridgeHandle.Free();
-    }
-
     /// <summary>
     /// Returns the raw native pointer to the underlying C stream.
     /// Internal use only.
@@ -420,7 +396,9 @@ public sealed class ZerobusStream : IDisposable, IAsyncDisposable
     }
 
     /// <summary>
-    /// Attempts to retrieve the bridge handle and callback reference for the stream.
+    /// Transfers this stream's native pointer to a new wrapper around
+    /// <paramref name="newPtr"/>, disposing this one. The provider (when one is
+    /// used) is owned by the FFI, not the stream, so only the pointer moves.
     /// Internal use only.
     /// </summary>
     internal ZerobusStream Recreate(IntPtr newPtr)
@@ -431,12 +409,7 @@ public sealed class ZerobusStream : IDisposable, IAsyncDisposable
         using var handle = WithWriteLock();
 
         var oldPtr = Interlocked.Exchange(ref _ptr, IntPtr.Zero);
-        var newStream = _bridgeHandle.IsAllocated
-            ? new ZerobusStream(newPtr, _bridgeHandle, _callbackRef!)
-            : new ZerobusStream(newPtr);
-
-        // Prevent accidental double-free of the shared handle from the old wrapper
-        _bridgeHandle = default;
+        var newStream = new ZerobusStream(newPtr);
 
         // Free the old native stream (don't Close — it's already failed/closed)
         if (oldPtr != IntPtr.Zero)

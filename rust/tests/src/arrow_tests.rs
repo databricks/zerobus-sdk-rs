@@ -578,6 +578,161 @@ mod arrow_flight_tests {
             Ok(())
         }
 
+        /// The client-side ingest gate compares batch and stream schemas with
+        /// metadata included, so a stream created from a variant-annotated schema
+        /// rejects a batch whose (physically identical) schema lacks the
+        /// `arrow.parquet.variant` marker. This pins the marker as load-bearing:
+        /// a caller who annotates the stream schema must also annotate its
+        /// batches.
+        #[tokio::test]
+        async fn test_ingest_rejects_variant_marker_schema_mismatch(
+        ) -> Result<(), Box<dyn std::error::Error>> {
+            use std::sync::Arc;
+
+            use arrow_array::{LargeBinaryArray, RecordBatch, StructArray};
+            use arrow_schema::{DataType, Schema as ArrowSchema};
+            use databricks_zerobus_ingest_sdk::schema::{
+                arrow_schema_from_uc_columns, arrow_schema_from_uc_columns_with_options,
+                ArrowSchemaOptions, UcColumn,
+            };
+
+            setup_tracing();
+            info!("Starting test_ingest_rejects_variant_marker_schema_mismatch");
+
+            let (mock_server, server_url) = start_mock_flight_server().await?;
+            mock_server.inject_responses(TABLE_NAME, vec![]).await;
+
+            let cols = vec![UcColumn {
+                name: "attrs".into(),
+                type_name: "VARIANT".into(),
+                type_text: "variant".into(),
+                type_json: String::new(),
+                nullable: false,
+                position: 0,
+            }];
+            // Stream schema is annotated; the batch schema is not (same physical
+            // shape). The marker is the only difference between them.
+            let mut annotate = ArrowSchemaOptions::default();
+            annotate.annotate_variant_extension = true;
+            let marked_schema =
+                Arc::new(arrow_schema_from_uc_columns_with_options(&cols, &annotate)?);
+            let unmarked_schema = Arc::new(arrow_schema_from_uc_columns(&cols)?);
+
+            let sdk = ZerobusSdk::builder()
+                .endpoint(server_url.clone())
+                .unity_catalog_url("https://mock-uc.com")
+                .tls_config(Arc::new(NoTlsConfig))
+                .build()?;
+            let stream = sdk
+                .stream_builder()
+                .table(TABLE_NAME)
+                .headers_provider(Arc::new(TestHeadersProvider::default()))
+                .arrow(Arc::clone(&marked_schema))
+                .build_arrow()
+                .await?;
+
+            // Build a variant batch against the unmarked schema.
+            let DataType::Struct(child_fields) = unmarked_schema.field(0).data_type() else {
+                panic!("expected VARIANT Struct");
+            };
+            let attrs = StructArray::new(
+                child_fields.clone(),
+                vec![
+                    Arc::new(LargeBinaryArray::from(vec![b"m".as_slice()])),
+                    Arc::new(LargeBinaryArray::from(vec![b"v".as_slice()])),
+                ],
+                None,
+            );
+            let batch = RecordBatch::try_new(Arc::clone(&unmarked_schema), vec![Arc::new(attrs)])?;
+            // Sanity: the two schemas differ only by the marker metadata.
+            assert_ne!(
+                batch.schema().as_ref(),
+                marked_schema.as_ref() as &ArrowSchema,
+                "test setup: marked and unmarked schemas must differ"
+            );
+
+            let err = stream
+                .ingest_batch(batch)
+                .await
+                .expect_err("a schema differing only by the variant marker must be rejected");
+            assert!(
+                err.to_string()
+                    .to_lowercase()
+                    .contains("schema does not match"),
+                "expected a schema-mismatch InvalidArgument, got: {}",
+                err
+            );
+            assert!(
+                !err.is_retryable(),
+                "schema-mismatch rejection is non-retryable, got: {}",
+                err
+            );
+
+            Ok(())
+        }
+
+        /// A forward acknowledgement is a protocol violation, not a transient connection
+        /// failure. Recovery must not hide it from a waiter or replay the pending batch.
+        #[tokio::test]
+        async fn test_forward_acknowledgement_is_terminal_with_recovery_enabled(
+        ) -> Result<(), Box<dyn std::error::Error>> {
+            setup_tracing();
+
+            let (mock_server, server_url) = start_mock_flight_server().await?;
+            let schema = create_test_arrow_schema();
+            mock_server
+                .inject_responses(
+                    TABLE_NAME,
+                    vec![MockFlightResponse::BatchAck {
+                        ack_up_to_offset: 0,
+                        delay_ms: 0,
+                        ack_up_to_records: 3,
+                    }],
+                )
+                .await;
+
+            let sdk = ZerobusSdk::builder()
+                .endpoint(server_url)
+                .unity_catalog_url("https://mock-uc.com")
+                .tls_config(Arc::new(NoTlsConfig))
+                .build()?;
+            let stream = sdk
+                .stream_builder()
+                .table(TABLE_NAME)
+                .headers_provider(Arc::new(TestHeadersProvider::default()))
+                .arrow(schema.clone())
+                .recovery(true)
+                .recovery_retries(3)
+                .recovery_backoff_ms(0)
+                .flush_timeout_ms(1_000)
+                .build_arrow()
+                .await?;
+
+            let batch =
+                create_test_record_batch(schema, vec![1, 2], vec![Some("first"), Some("second")]);
+            let offset = stream.ingest_batch(batch).await?;
+            let error = stream
+                .wait_for_offset(offset)
+                .await
+                .expect_err("the invalid acknowledgement must reach the waiter");
+
+            assert!(!error.is_retryable());
+            match error {
+                ZerobusError::InvalidStateError(message) => {
+                    assert!(message.contains("3 records"));
+                    assert!(message.contains("2 records were submitted"));
+                }
+                other => panic!("expected an invalid-state error, got {other:?}"),
+            }
+            assert_eq!(
+                mock_server.get_batch_count().await,
+                1,
+                "a terminal protocol violation must not replay the batch"
+            );
+
+            Ok(())
+        }
+
         #[tokio::test]
         async fn test_ingest_single_batch() -> Result<(), Box<dyn std::error::Error>> {
             setup_tracing();
@@ -3585,11 +3740,12 @@ mod arrow_flight_tests {
                 status: tonic::Status::unavailable("Simulated disconnect"),
                 delay_ms: 0,
             });
-            // On the new connection offsets restart from 0.  Ack covers all replayed rows.
+            // On the new connection offsets and record counts restart from 0. Ack both
+            // replayed rows after the second batch arrives.
             responses.push(MockFlightResponse::BatchAck {
-                ack_up_to_offset: 0,
+                ack_up_to_offset: 1,
                 delay_ms: 0,
-                ack_up_to_records: (INITIAL_BATCHES + 2) as u64,
+                ack_up_to_records: 2,
             });
 
             mock_server.inject_responses(TABLE_NAME, responses).await;

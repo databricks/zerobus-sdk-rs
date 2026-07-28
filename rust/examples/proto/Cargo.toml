@@ -5,12 +5,20 @@ edition = "2021"
 publish = false
 
 [[example]]
-name = "proto_batch"
-path = "batch.rs"
+name = "proto_compiled_batch"
+path = "compiled/batch.rs"
 
 [[example]]
-name = "proto_single"
-path = "single.rs"
+name = "proto_compiled_single"
+path = "compiled/single.rs"
+
+[[example]]
+name = "proto_dynamic_batch"
+path = "dynamic/batch.rs"
+
+[[example]]
+name = "proto_dynamic_single"
+path = "dynamic/single.rs"
 
 [dependencies]
 databricks-zerobus-ingest-sdk = { path = "../../sdk" }

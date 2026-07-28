@@ -27,7 +27,9 @@ use crate::databricks::zerobus::RecordType;
 use crate::headers_provider::NoAuthHeadersProvider;
 use crate::headers_provider::{HeadersProvider, OAuthHeadersProvider};
 use crate::stream_configuration::StreamConfigurationOptions;
-use crate::{TableProperties, ZerobusError, ZerobusResult, ZerobusSdk, ZerobusStream};
+use crate::{
+    MessageDescriptor, TableProperties, ZerobusError, ZerobusResult, ZerobusSdk, ZerobusStream,
+};
 
 #[cfg(feature = "arrow-flight")]
 use crate::arrow_configuration::ArrowStreamConfigurationOptions;
@@ -49,6 +51,7 @@ enum AuthConfig {
 enum FormatConfig {
     Json,
     CompiledProto(Box<prost_types::DescriptorProto>),
+    DynamicProto(MessageDescriptor),
     #[cfg(feature = "arrow-flight")]
     Arrow(Arc<ArrowSchema>),
 }
@@ -114,6 +117,7 @@ impl fmt::Debug for StreamBuilder<'_> {
         let format_kind = match &self.format {
             Some(FormatConfig::Json) => "Json",
             Some(FormatConfig::CompiledProto(_)) => "CompiledProto",
+            Some(FormatConfig::DynamicProto(_)) => "DynamicProto",
             #[cfg(feature = "arrow-flight")]
             Some(FormatConfig::Arrow(_)) => "Arrow",
             None => "None",
@@ -191,6 +195,21 @@ impl<'a> StreamBuilder<'a> {
     /// Select compiled protobuf record format.
     pub fn compiled_proto(mut self, descriptor: prost_types::DescriptorProto) -> Self {
         self.format = Some(FormatConfig::CompiledProto(Box::new(descriptor)));
+        self
+    }
+
+    /// Select dynamic protobuf record format, for a schema known only at runtime.
+    ///
+    /// Takes a resolved [`MessageDescriptor`](crate::MessageDescriptor). Get one
+    /// from [`message_descriptor`](crate::message_descriptor), which resolves a
+    /// [`prost_types::DescriptorProto`] (built with
+    /// [`crate::schema::descriptor_from_uc_columns`] or fetched from Unity
+    /// Catalog), or from your own [`prost_reflect::DescriptorPool`].
+    ///
+    /// Fill records with [`DynamicRecord`](crate::DynamicRecord). Wire-identical to
+    /// [`compiled_proto`](Self::compiled_proto).
+    pub fn dynamic_proto(mut self, descriptor: MessageDescriptor) -> Self {
+        self.format = Some(FormatConfig::DynamicProto(descriptor));
         self
     }
 
@@ -358,7 +377,7 @@ impl<'a> StreamBuilder<'a> {
         }
         if self.format.is_none() {
             return Err(ZerobusError::InvalidArgument(
-                "record format is required: call .json(), .compiled_proto(), or .arrow()".into(),
+                "record format is required: call .json(), .compiled_proto(), .dynamic_proto(), or .arrow()".into(),
             ));
         }
         Ok(())
@@ -393,9 +412,15 @@ impl<'a> StreamBuilder<'a> {
         self.validate()?;
         let headers_provider = self.resolve_headers_provider()?;
 
-        let (record_type, descriptor_proto) = match self.format {
-            Some(FormatConfig::Json) => (RecordType::Json, None),
-            Some(FormatConfig::CompiledProto(desc)) => (RecordType::Proto, Some(*desc)),
+        let (record_type, descriptor_proto, message_descriptor) = match self.format {
+            Some(FormatConfig::Json) => (RecordType::Json, None, None),
+            Some(FormatConfig::CompiledProto(desc)) => (RecordType::Proto, Some(*desc), None),
+            Some(FormatConfig::DynamicProto(md)) => {
+                // The wire descriptor is recovered from the already-resolved
+                // MessageDescriptor the caller supplied.
+                let desc = md.descriptor_proto().clone();
+                (RecordType::Proto, Some(desc), Some(md))
+            }
             #[cfg(feature = "arrow-flight")]
             Some(FormatConfig::Arrow(_)) => {
                 return Err(ZerobusError::InvalidArgument(
@@ -404,7 +429,7 @@ impl<'a> StreamBuilder<'a> {
             }
             None => {
                 return Err(ZerobusError::InvalidArgument(
-                    "record format is required: call .json() or .compiled_proto() before .build()"
+                    "record format is required: call .json(), .compiled_proto(), or .dynamic_proto() before .build()"
                         .into(),
                 ));
             }
@@ -414,6 +439,7 @@ impl<'a> StreamBuilder<'a> {
         let table_properties = TableProperties {
             table_name: self.table_name,
             descriptor_proto,
+            message_descriptor,
         };
 
         let channel = self.sdk.get_or_create_channel_zerobus_client().await?;
@@ -535,6 +561,23 @@ mod tests {
             .table("catalog.schema.table")
             .headers_provider(provider)
             .compiled_proto(prost_types::DescriptorProto::default());
+    }
+
+    #[test]
+    fn dynamic_proto_sets_format_and_validates() {
+        let sdk = test_sdk();
+        let md = crate::message_descriptor(&prost_types::DescriptorProto {
+            name: Some("T".to_string()),
+            ..Default::default()
+        })
+        .unwrap();
+        let builder = sdk
+            .stream_builder()
+            .table("t")
+            .oauth("a", "b")
+            .dynamic_proto(md);
+        assert!(format!("{builder:?}").contains("DynamicProto"));
+        builder.validate().expect("validation should succeed");
     }
 
     #[test]

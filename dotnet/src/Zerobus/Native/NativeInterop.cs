@@ -208,6 +208,7 @@ internal static class NativeInterop
         ReadOnlySpan<byte> descriptorProto,
         HeadersProviderCallback callback,
         IntPtr userData,
+        HeadersProviderFreeCallback freeUserData,
         ref CStreamConfigurationOptions options)
     {
         var result = new CResult();
@@ -222,6 +223,7 @@ internal static class NativeInterop
                 (nuint)descriptorProto.Length,
                 callback,
                 userData,
+                freeUserData,
                 ref options,
                 ref result);
         }
@@ -244,6 +246,7 @@ internal static class NativeInterop
         byte[] descriptorProto,
         HeadersProviderCallback headersCallback,
         IntPtr userData,
+        HeadersProviderFreeCallback? freeUserData,
         CStreamConfigurationOptions options)
     {
         var tcs = new TaskCompletionSource<IntPtr>(TaskCreationOptions.RunContinuationsAsynchronously);
@@ -265,6 +268,7 @@ internal static class NativeInterop
                     (nuint)descriptorProto.Length,
                     headersCallback,
                     userData,
+                    freeUserData,
                     ref options,
                     completionCallback,
                     IntPtr.Zero,
