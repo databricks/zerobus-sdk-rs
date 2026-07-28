@@ -3740,11 +3740,12 @@ mod arrow_flight_tests {
                 status: tonic::Status::unavailable("Simulated disconnect"),
                 delay_ms: 0,
             });
-            // On the new connection offsets restart from 0.  Ack covers all replayed rows.
+            // On the new connection offsets and record counts restart from 0. Ack both
+            // replayed rows after the second batch arrives.
             responses.push(MockFlightResponse::BatchAck {
-                ack_up_to_offset: 0,
+                ack_up_to_offset: 1,
                 delay_ms: 0,
-                ack_up_to_records: (INITIAL_BATCHES + 2) as u64,
+                ack_up_to_records: 2,
             });
 
             mock_server.inject_responses(TABLE_NAME, responses).await;
