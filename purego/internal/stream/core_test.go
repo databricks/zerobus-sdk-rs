@@ -104,6 +104,23 @@ func TestCoreStreamFlushContextExpires(t *testing.T) {
 	}
 }
 
+func TestCoreStreamWaitForOffsetNoDeadlineStillTimesOut(t *testing.T) {
+	rpc := newFakeRPC()
+	cfg := testConfig()
+	cfg.FlushTimeout = 25 * time.Millisecond
+	cs := newCoreForTest(testParams(), cfg, newFakeOpener(rpc), nil)
+	t.Cleanup(func() { cs.Close() })
+
+	start := time.Now()
+	err := cs.WaitForOffset(context.Background(), 42)
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("want DeadlineExceeded, got %v", err)
+	}
+	if time.Since(start) > 500*time.Millisecond {
+		t.Fatalf("WaitForOffset exceeded FlushTimeout hard cap: %v", time.Since(start))
+	}
+}
+
 func TestCoreStreamCloseIsIdempotent(t *testing.T) {
 	rpc := newFakeRPC()
 	cs := newTestStream(t, newFakeOpener(rpc))
@@ -111,10 +128,43 @@ func TestCoreStreamCloseIsIdempotent(t *testing.T) {
 	cs.Close() // must not panic or block
 }
 
-// TestCoreStreamCloseDrainsGracefully verifies that a clean Close half-closes
-// the send side (CloseSend) and keeps the receiver draining acks to io.EOF,
-// rather than abruptly aborting the stream. An ack delivered after the
-// half-close must still advance the watermark; an abrupt teardown would drop it.
+func TestCoreStreamCloseWaitsForFlushBeforeShutdown(t *testing.T) {
+	rpc := newFakeRPC()
+	cfg := testConfig()
+	cfg.FlushTimeout = time.Second
+	cs := newCoreForTest(testParams(), cfg, newFakeOpener(rpc), nil)
+	t.Cleanup(func() { cs.Close() })
+
+	offset, err := cs.Ingest(context.Background(), []byte(`{}`))
+	if err != nil {
+		t.Fatalf("Ingest: %v", err)
+	}
+	waitCondition(t, func() bool { return len(rpc.sends) == 1 }, time.Second)
+	<-rpc.sends
+
+	done := make(chan struct{})
+	go func() {
+		cs.Close()
+		close(done)
+	}()
+
+	select {
+	case <-done:
+		t.Fatal("Close returned before flush ack")
+	case <-time.After(50 * time.Millisecond):
+		// expected: still waiting for durability
+	}
+
+	rpc.ack(offset)
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("Close did not return after ack")
+	}
+}
+
+// TestCoreStreamCloseDrainsGracefully verifies that Close flushes first, then
+// half-closes the send side and drains Recv to EOF.
 func TestCoreStreamCloseDrainsGracefully(t *testing.T) {
 	rpc := newGracefulFakeRPC()
 	cb := &recordingCallback{}
@@ -127,20 +177,26 @@ func TestCoreStreamCloseDrainsGracefully(t *testing.T) {
 	waitCondition(t, func() bool { return len(rpc.sends) > 0 }, time.Second)
 	<-rpc.sends
 
-	// Close in the background; it blocks until the graceful drain completes.
+	// Close in the background; it must wait for flush before teardown.
 	done := make(chan struct{})
 	go func() { cs.Close(); close(done) }()
 
-	// Close must half-close the send side rather than hard-abort.
+	select {
+	case <-done:
+		t.Fatal("Close returned before flush ack")
+	case <-time.After(50 * time.Millisecond):
+		// expected: waiting for ack
+	}
+
+	// Ack to unblock the flush phase, then expect graceful half-close.
+	rpc.ack(off)
 	select {
 	case <-rpc.closeSent:
 	case <-time.After(time.Second):
-		t.Fatal("Close did not half-close the send side (CloseSend) — it hard-aborted")
+		t.Fatal("Close did not half-close the send side after flush")
 	}
 
-	// Deliver a late ack after the half-close, then end the stream. A graceful
-	// drain observes this ack; an abrupt teardown would have dropped it.
-	rpc.ack(off)
+	// End the stream so Recv returns EOF and graceful drain completes.
 	rpc.serverEnd()
 
 	select {
@@ -149,22 +205,23 @@ func TestCoreStreamCloseDrainsGracefully(t *testing.T) {
 		t.Fatal("Close did not return after the server ended the stream")
 	}
 
-	if got := cb.ackCount(); got != 1 {
-		t.Fatalf("want the post-half-close ack drained (ackCount=1), got %d", got)
-	}
+	waitCondition(t, func() bool { return cb.ackCount() == 1 }, time.Second)
 }
 
 func TestCoreStreamCloseAbortsBlockedGracefulRecv(t *testing.T) {
 	rpc := newGracefulFakeRPC()
 	cfg := testConfig()
 	cfg.DrainTimeout = 25 * time.Millisecond
+	cfg.FlushTimeout = time.Second
 	cs := newCoreForTest(testParams(), cfg, &gracefulOpener{rpc: rpc}, nil)
 
-	if _, err := cs.Ingest(context.Background(), []byte(`{}`)); err != nil {
+	offset, err := cs.Ingest(context.Background(), []byte(`{}`))
+	if err != nil {
 		t.Fatalf("Ingest: %v", err)
 	}
 	waitCondition(t, func() bool { return len(rpc.sends) == 1 }, time.Second)
 	<-rpc.sends
+	rpc.ack(offset) // make flush succeed before graceful teardown
 
 	done := make(chan struct{})
 	go func() {
@@ -208,12 +265,16 @@ func TestCoreStreamGetUnackedReturnsItems(t *testing.T) {
 	if _, err := cs.Ingest(context.Background(), record); err != nil {
 		t.Fatalf("Ingest: %v", err)
 	}
-	unacked := cs.GetUnacked()
+	if _, err := cs.GetUnacked(); !errors.Is(err, ErrStreamStillActive) {
+		t.Fatalf("want ErrStreamStillActive on active stream, got %v", err)
+	}
+	cs.Close()
+	unacked, err := cs.GetUnacked()
+	if err != nil {
+		t.Fatalf("GetUnacked: %v", err)
+	}
 	if len(unacked) != 1 || !bytes.Equal(unacked[0], record) {
 		t.Fatalf("want exact unacked record %q, got %q", record, unacked)
-	}
-	if !cs.IsClosed() {
-		t.Fatal("GetUnacked should close the stream")
 	}
 }
 
@@ -226,8 +287,12 @@ func TestCoreStreamGetUnackedRepeatable(t *testing.T) {
 	if _, err := cs.Ingest(context.Background(), record); err != nil {
 		t.Fatalf("Ingest: %v", err)
 	}
+	cs.Close()
 
-	first := cs.GetUnacked()
+	first, err := cs.GetUnacked()
+	if err != nil {
+		t.Fatalf("first GetUnacked: %v", err)
+	}
 	if len(first) != 1 || !bytes.Equal(first[0], record) {
 		t.Fatalf("first GetUnacked: want %q, got %q", record, first)
 	}
@@ -236,7 +301,10 @@ func TestCoreStreamGetUnackedRepeatable(t *testing.T) {
 		first[0][i] = 'X'
 	}
 
-	second := cs.GetUnacked()
+	second, err := cs.GetUnacked()
+	if err != nil {
+		t.Fatalf("second GetUnacked: %v", err)
+	}
 	if len(second) != 1 || !bytes.Equal(second[0], record) {
 		t.Fatalf("second GetUnacked: want original %q, got %q", record, second)
 	}
@@ -617,6 +685,7 @@ func TestCoreStreamCloseUnblocksEnqueueAtCapacity(t *testing.T) {
 	rpc := newFakeRPC()
 	cfg := testConfig()
 	cfg.MaxInflight = 1
+	cfg.FlushTimeout = 25 * time.Millisecond
 	cs := newCoreForTest(testParams(), cfg, newFakeOpener(rpc), nil)
 	t.Cleanup(func() { cs.Close() })
 
@@ -661,7 +730,10 @@ func TestCoreStreamGetUnackedWithoutCallback(t *testing.T) {
 	rpc.malformedAck()
 
 	waitCondition(t, cs.IsClosed, 2*time.Second)
-	unacked := cs.GetUnacked()
+	unacked, err := cs.GetUnacked()
+	if err != nil {
+		t.Fatalf("GetUnacked: %v", err)
+	}
 	if len(unacked) != len(records) {
 		t.Fatalf("GetUnacked returned %d records, want %d", len(unacked), len(records))
 	}
@@ -752,6 +824,28 @@ func TestCoreStreamLiveAuthRejectionInvalidatesOnce(t *testing.T) {
 	}
 }
 
+func TestCoreStreamLiveAuthRejectionIsTerminalEvenWithRecoveryEnabled(t *testing.T) {
+	provider := &countingHeadersProvider{}
+	params := testParams()
+	params.HeadersProvider = provider
+	rpc := newTerminalRecvRPC()
+	opener := &terminalRecvCountingOpener{rpc: rpc}
+	cfg := testConfig()
+	cfg.Recovery = RecoveryEnabled
+	cfg.RecoveryRetries = 3
+	cs := newCoreForTest(params, cfg, opener, nil)
+
+	waitCondition(t, func() bool { return opener.attempts.Load() == 1 }, time.Second)
+	rpc.recvErr <- status.Error(codes.Unauthenticated, "expired credentials")
+	waitCondition(t, cs.IsClosed, time.Second)
+	if got := provider.invalidations.Load(); got != 1 {
+		t.Fatalf("Invalidate calls = %d, want 1", got)
+	}
+	if got := opener.attempts.Load(); got != 1 {
+		t.Fatalf("unexpected recovery attempt count = %d, want 1", got)
+	}
+}
+
 func TestCoreStreamIngestBatch(t *testing.T) {
 	rpc := newFakeRPC()
 	cs := newTestStream(t, newFakeOpener(rpc))
@@ -780,6 +874,30 @@ func TestCoreStreamIngestBatch(t *testing.T) {
 	}
 }
 
+func TestCoreStreamIngestBatchEmptyIsNoOp(t *testing.T) {
+	rpc := newFakeRPC()
+	cs := newTestStream(t, newFakeOpener(rpc))
+
+	offset, err := cs.IngestBatch(context.Background(), nil)
+	if err != nil {
+		t.Fatalf("IngestBatch(nil): %v", err)
+	}
+	if offset != -1 {
+		t.Fatalf("empty batch offset = %d, want -1 sentinel", offset)
+	}
+	if len(rpc.sends) != 0 {
+		t.Fatalf("empty batch should not send, got %d sends", len(rpc.sends))
+	}
+
+	nextOffset, err := cs.Ingest(context.Background(), []byte(`{}`))
+	if err != nil {
+		t.Fatalf("Ingest after empty batch: %v", err)
+	}
+	if nextOffset != 0 {
+		t.Fatalf("empty batch consumed offset; next offset = %d, want 0", nextOffset)
+	}
+}
+
 func TestWatermarkAlreadyCancelledContextReturnsImmediately(t *testing.T) {
 	w := newWatermark()
 	ctx, cancel := context.WithCancel(context.Background())
@@ -801,6 +919,7 @@ func TestCoreStreamCloseUnblocksBlockedSend(t *testing.T) {
 	rpc := newBlockedSendRPC()
 	cfg := testConfig()
 	cfg.DrainTimeout = 25 * time.Millisecond
+	cfg.FlushTimeout = 25 * time.Millisecond
 	cs := newCoreForTest(testParams(), cfg, &blockedSendOpener{rpc: rpc}, nil)
 
 	if _, err := cs.Ingest(context.Background(), []byte(`{}`)); err != nil {
@@ -826,7 +945,9 @@ func TestCoreStreamCloseUnblocksBlockedSend(t *testing.T) {
 
 func TestCoreStreamCloseWakesOffsetWaiters(t *testing.T) {
 	rpc := newFakeRPC()
-	cs := newCoreForTest(testParams(), testConfig(), newFakeOpener(rpc), nil)
+	cfg := testConfig()
+	cfg.FlushTimeout = 25 * time.Millisecond
+	cs := newCoreForTest(testParams(), cfg, newFakeOpener(rpc), nil)
 	offset, err := cs.Ingest(context.Background(), []byte(`{}`))
 	if err != nil {
 		t.Fatalf("Ingest: %v", err)
@@ -840,8 +961,8 @@ func TestCoreStreamCloseWakesOffsetWaiters(t *testing.T) {
 
 	select {
 	case err := <-waitDone:
-		if !errors.Is(err, errWatermarkClosed) {
-			t.Fatalf("want errWatermarkClosed, got %v", err)
+		if !errors.Is(err, errWatermarkClosed) && !errors.Is(err, context.DeadlineExceeded) {
+			t.Fatalf("want errWatermarkClosed or DeadlineExceeded, got %v", err)
 		}
 	case <-time.After(500 * time.Millisecond):
 		t.Fatal("WaitForOffset remained blocked after Close")
@@ -878,7 +999,9 @@ func TestCoreStreamAckCallbackCanClose(t *testing.T) {
 func TestCoreStreamCloseReportsAbandonedOffsets(t *testing.T) {
 	rpc := newFakeRPC()
 	cb := &recordingCallback{}
-	cs := newCoreForTest(testParams(), testConfig(), newFakeOpener(rpc), cb)
+	cfg := testConfig()
+	cfg.FlushTimeout = 25 * time.Millisecond
+	cs := newCoreForTest(testParams(), cfg, newFakeOpener(rpc), cb)
 
 	record := []byte(`{"retained":true}`)
 	offset, err := cs.Ingest(context.Background(), record)
@@ -891,7 +1014,10 @@ func TestCoreStreamCloseReportsAbandonedOffsets(t *testing.T) {
 	if got := cb.errorOffsets()[0]; got != offset {
 		t.Fatalf("want OnError offset %d, got %d", offset, got)
 	}
-	unacked := cs.GetUnacked()
+	unacked, err := cs.GetUnacked()
+	if err != nil {
+		t.Fatalf("GetUnacked: %v", err)
+	}
 	if len(unacked) != 1 || !bytes.Equal(unacked[0], record) {
 		t.Fatalf("callback drain lost GetUnacked payload: %q", unacked)
 	}
@@ -907,7 +1033,9 @@ func TestCoreStreamErrorCallbackCanClose(t *testing.T) {
 			close(callbackDone)
 		},
 	}
-	cs = newCoreForTest(testParams(), testConfig(), newFakeOpener(rpc), cb)
+	cfg := testConfig()
+	cfg.FlushTimeout = 25 * time.Millisecond
+	cs = newCoreForTest(testParams(), cfg, newFakeOpener(rpc), cb)
 	if _, err := cs.Ingest(context.Background(), []byte(`{}`)); err != nil {
 		t.Fatalf("Ingest: %v", err)
 	}

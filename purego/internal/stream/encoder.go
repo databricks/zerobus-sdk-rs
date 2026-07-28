@@ -99,9 +99,6 @@ func (protoEncoder) stampOffset(msg encodedMsg, offset int64) {
 type jsonEncoder struct{}
 
 func (jsonEncoder) encode(offset int64, record []byte) (encodedMsg, error) {
-	if len(record) == 0 {
-		return nil, fmt.Errorf("stream: json record must not be empty")
-	}
 	return &zerobuspb.EphemeralStreamRequest{
 		Payload: &zerobuspb.EphemeralStreamRequest_IngestRecord{
 			IngestRecord: &zerobuspb.IngestRecordRequest{
@@ -118,9 +115,6 @@ func (jsonEncoder) encodeBatch(offset int64, records [][]byte) (encodedMsg, erro
 	}
 	jsonRecords := make([]string, len(records))
 	for i, r := range records {
-		if len(r) == 0 {
-			return nil, fmt.Errorf("stream: json batch record %d must not be empty", i)
-		}
 		jsonRecords[i] = string(r)
 	}
 	return &zerobuspb.EphemeralStreamRequest{

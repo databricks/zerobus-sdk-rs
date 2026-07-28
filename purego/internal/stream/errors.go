@@ -19,6 +19,10 @@ var errWatermarkClosed = errors.New("stream: closed before offset was acknowledg
 // configured per-message limit.
 var ErrPayloadTooLarge = errors.New("stream: ingest payload too large")
 
+// ErrStreamStillActive is returned by GetUnacked when called before the stream
+// reaches a terminal/closed state.
+var ErrStreamStillActive = errors.New("stream: cannot get unacked records from an active stream")
+
 // errUnsupportedRecordType is returned when no encoder/ackModel exists for a
 // record type (e.g. RECORD_TYPE_UNSPECIFIED).
 func errUnsupportedRecordType(rt zerobuspb.RecordType) error {

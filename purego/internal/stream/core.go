@@ -29,7 +29,7 @@ const (
 	// DefaultMaxBatchRecords bounds per-batch allocation.
 	DefaultMaxBatchRecords = 100_000
 	// DefaultCallbackTeardownTimeout bounds callback shutdown.
-	DefaultCallbackTeardownTimeout = 500 * time.Millisecond
+	DefaultCallbackTeardownTimeout = 5 * time.Second
 	// DefaultDrainTimeout bounds graceful shutdown.
 	DefaultDrainTimeout = 500 * time.Millisecond
 )
@@ -66,7 +66,8 @@ type Config struct {
 	RecoveryTimeout time.Duration
 	// RecoveryResetAfter marks a connection healthy after this duration.
 	RecoveryResetAfter time.Duration
-	// FlushTimeout bounds Flush when the caller's context has no deadline.
+	// FlushTimeout is the maximum wait budget for Flush and WaitForOffset.
+	// The caller's context may shorten this budget, but cannot extend it.
 	FlushTimeout time.Duration
 	// LackOfAckTimeout bounds ack silence while records are in flight.
 	LackOfAckTimeout time.Duration
@@ -322,6 +323,11 @@ func (cs *CoreStream[Req, Resp]) Ingest(ctx context.Context, record []byte) (int
 // the server acks it atomically. Returns that offset. Prefer this over Ingest in
 // hot paths: it amortizes per-message overhead across the batch.
 func (cs *CoreStream[Req, Resp]) IngestBatch(ctx context.Context, records [][]byte) (int64, error) {
+	if len(records) == 0 {
+		// Rust returns Ok(None) for empty batches; in Go we model that as a
+		// no-op with sentinel offset -1 and no queueing.
+		return -1, nil
+	}
 	if len(records) > cs.cfg.MaxBatchRecords {
 		return 0, fmt.Errorf("%w: %d records exceeds MaxBatchRecords=%d",
 			ErrPayloadTooLarge, len(records), cs.cfg.MaxBatchRecords)
@@ -390,46 +396,47 @@ func (cs *CoreStream[Req, Resp]) enqueueEncoded(ctx context.Context, encodeFn fu
 
 // Flush blocks until every record ingested so far is acknowledged by the
 // server. Returns nil once all are durable, or an error if the stream fails
-// or ctx expires.
+// or the wait budget expires.
 //
-// When ctx has no deadline, Flush applies DefaultFlushTimeout.
+// Flush always enforces Config.FlushTimeout as an upper bound, even when the
+// caller context has no deadline.
 func (cs *CoreStream[Req, Resp]) Flush(ctx context.Context) error {
 	target := cs.lastEnqueued.Load()
 	if target < 0 {
 		return nil // nothing successfully ingested yet
 	}
-	if _, ok := ctx.Deadline(); !ok {
-		var cancel context.CancelFunc
-		ctx, cancel = context.WithTimeout(ctx, cs.cfg.FlushTimeout)
-		defer cancel()
-	}
 	return cs.WaitForOffset(ctx, target)
 }
 
 // WaitForOffset blocks until the server has acknowledged all records up to and
-// including offset, or until ctx expires or the stream fails terminally.
+// including offset, or until the stream fails terminally.
 //
 // offset must be one returned by a successful Ingest. Passing an offset that was
 // never enqueued (e.g. a value above the last assigned offset) is a caller error:
-// since the watermark can never reach it, the call blocks until ctx expires (or
-// the stream fails). Prefer Flush, which waits for exactly the records ingested
-// so far.
+// since the watermark can never reach it, the call blocks until either the
+// caller context expires, FlushTimeout expires, or the stream fails. Prefer
+// Flush, which waits for exactly the records ingested so far.
 func (cs *CoreStream[Req, Resp]) WaitForOffset(ctx context.Context, offset int64) error {
-	return cs.wm.waitFor(ctx, offset)
+	boundedCtx, cancel := context.WithTimeout(ctx, cs.cfg.FlushTimeout)
+	defer cancel()
+	return cs.wm.waitFor(boundedCtx, offset)
 }
 
 // GetUnacked returns records that were ingested but never acknowledged, one
 // entry per record. A batched buffer item expands to all of its records (not
-// just the first), so no unacked record is silently dropped. It closes the
-// stream first (idempotent) to ensure the buffer is fully drained and no new
-// items are added.
+// just the first), so no unacked record is silently dropped.
 //
 // The result is a fresh copy on every call: the unacked set is consolidated
 // into retained storage once, and each call decodes a clone. A diagnostic read
 // therefore never removes the records a later retry or persistence path needs,
 // and mutating the returned bytes never corrupts the retained payloads.
-func (cs *CoreStream[Req, Resp]) GetUnacked() [][]byte {
-	cs.Close()
+//
+// Calling GetUnacked on an active stream returns ErrStreamStillActive; callers
+// must close or wait for terminal failure first.
+func (cs *CoreStream[Req, Resp]) GetUnacked() ([][]byte, error) {
+	if !cs.isClosed() {
+		return nil, ErrStreamStillActive
+	}
 	items := cs.consolidateUnacked()
 	out := make([][]byte, 0, len(items))
 	for _, it := range items {
@@ -438,22 +445,23 @@ func (cs *CoreStream[Req, Resp]) GetUnacked() [][]byte {
 		// clones, so the retained payload is never aliased.
 		out = append(out, cs.enc.decode(it.payload)...)
 	}
-	return out
+	return out, nil
 }
 
-// Close terminates the stream and releases its transport and buffer resources.
-// It is idempotent and blocks until that lifecycle teardown completes.
+// Close flushes pending records first, then terminates the stream and releases
+// its transport and buffer resources. It is idempotent and blocks until
+// lifecycle teardown completes.
 // AckCallback delivery is asynchronous and may finish after Close returns.
 //
-// Close does NOT wait for pending records to be acknowledged: any records still
-// in flight when Close is called are abandoned (retrievable via GetUnacked, or
-// reported through the AckCallback's OnError). Callers that need durability must
-// Flush first, then Close — the standard loop-then-Flush pattern. On this clean
-// shutdown the live stream is torn down gracefully (half-close, then drain any
-// straggling acks to EOF, bounded by DrainTimeout) so the server observes an
-// orderly END_STREAM rather than an abrupt reset; see gracefulTeardown.
+// If flush cannot complete within FlushTimeout, Close proceeds with teardown and
+// any remaining records are abandoned (retrievable via GetUnacked, or reported
+// through the AckCallback's OnError). On a clean shutdown the live stream is
+// torn down gracefully (half-close, then drain any straggling acks to EOF,
+// bounded by DrainTimeout) so the server observes an orderly END_STREAM rather
+// than an abrupt reset; see gracefulTeardown.
 func (cs *CoreStream[Req, Resp]) Close() {
 	cs.closeOnce.Do(func() {
+		_ = cs.Flush(context.Background())
 		cs.cancelSupervisor()
 		cs.buf.close()
 		<-cs.done // wait for the supervisor to exit

@@ -397,6 +397,16 @@ func (o *terminalRecvOpener) Open(_ context.Context, _ transport.StreamParams) (
 	return transport.NewFakeStreamForTesting(o.rpc), nil
 }
 
+type terminalRecvCountingOpener struct {
+	rpc      *terminalRecvRPC
+	attempts atomic.Int64
+}
+
+func (o *terminalRecvCountingOpener) Open(_ context.Context, _ transport.StreamParams) (wireStream[encodedMsg, ephemeralResp], error) {
+	o.attempts.Add(1)
+	return transport.NewFakeStreamForTesting(o.rpc), nil
+}
+
 func durationPtr(d time.Duration) *time.Duration { return &d }
 
 type classifiedError struct {

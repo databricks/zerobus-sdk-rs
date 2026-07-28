@@ -93,14 +93,22 @@ func TestJSONBatchEncoderSetsOffsetAndPayload(t *testing.T) {
 	}
 }
 
-// JSON records are text and must be non-empty; proto records may legitimately
-// be empty (an all-default message), so only JSON rejects empty input.
-func TestJSONEncoderRejectsEmptyRecord(t *testing.T) {
-	if _, err := (jsonEncoder{}).encode(1, nil); err == nil {
-		t.Error("want error for empty json record, got nil")
+// Empty JSON payloads are valid and must be preserved end-to-end.
+func TestJSONEncoderAcceptsEmptyRecord(t *testing.T) {
+	msg, err := (jsonEncoder{}).encode(1, nil)
+	if err != nil {
+		t.Fatalf("encode empty json record: %v", err)
 	}
-	if _, err := (jsonEncoder{}).encode(1, []byte{}); err == nil {
-		t.Error("want error for zero-length json record, got nil")
+	if got := msg.GetIngestRecord().GetJsonRecord(); got != "" {
+		t.Fatalf("want empty json string, got %q", got)
+	}
+
+	msg, err = (jsonEncoder{}).encode(1, []byte{})
+	if err != nil {
+		t.Fatalf("encode zero-length json record: %v", err)
+	}
+	if got := msg.GetIngestRecord().GetJsonRecord(); got != "" {
+		t.Fatalf("want empty json string, got %q", got)
 	}
 }
 
@@ -130,9 +138,14 @@ func TestBatchEncodersRejectEmptyBatch(t *testing.T) {
 			t.Errorf("%T: want error for empty batch, got nil", enc)
 		}
 	}
-	// A JSON batch containing an empty record is still rejected.
-	if _, err := (jsonEncoder{}).encodeBatch(1, [][]byte{[]byte("ok"), {}}); err == nil {
-		t.Error("jsonEncoder: want error for empty record within batch, got nil")
+	// Empty JSON records inside a non-empty batch are valid.
+	msg, err := (jsonEncoder{}).encodeBatch(1, [][]byte{[]byte("ok"), {}})
+	if err != nil {
+		t.Fatalf("jsonEncoder: empty record in batch should be accepted: %v", err)
+	}
+	got := msg.GetIngestRecordBatch().GetJsonBatch().GetRecords()
+	if len(got) != 2 || got[1] != "" {
+		t.Fatalf("json batch: want second record empty, got %v", got)
 	}
 }
 
