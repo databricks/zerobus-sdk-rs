@@ -397,6 +397,8 @@ func (o *terminalRecvOpener) Open(_ context.Context, _ transport.StreamParams) (
 	return transport.NewFakeStreamForTesting(o.rpc), nil
 }
 
+func durationPtr(d time.Duration) *time.Duration { return &d }
+
 type classifiedError struct {
 	retryable bool
 }

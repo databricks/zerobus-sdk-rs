@@ -165,3 +165,18 @@ func IsAuthRejection(err error) bool {
 	code := status.Code(err)
 	return code == codes.Unauthenticated || code == codes.PermissionDenied
 }
+
+// IsTerminalStatus reports whether err carries a gRPC status code that a retry
+// cannot fix. Reconnecting on these only burns the recovery budget and resends
+// pending data; the caller must fail fast instead. Errors that carry no gRPC
+// status (code Unknown) are treated as transient and are not classified here.
+func IsTerminalStatus(err error) bool {
+	switch status.Code(err) {
+	case codes.InvalidArgument, codes.Unauthenticated, codes.PermissionDenied,
+		codes.OutOfRange, codes.Unimplemented, codes.NotFound,
+		codes.FailedPrecondition:
+		return true
+	default:
+		return false
+	}
+}

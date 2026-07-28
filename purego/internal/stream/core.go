@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"math"
+	"slices"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -80,9 +81,11 @@ type Config struct {
 	MaxBatchRecords int
 	// CallbackTeardownTimeout bounds asynchronous callback worker teardown.
 	CallbackTeardownTimeout time.Duration
-	// StreamPausedMaxWait caps a server-requested pause.
-	// A non-positive value applies no client cap.
-	StreamPausedMaxWait time.Duration
+	// StreamPausedMaxWait caps how long the client honors a server-requested
+	// pause before reconnecting. Nil means no client cap (wait the full
+	// server-requested duration); a non-nil value caps the wait, and an explicit
+	// zero means reconnect immediately without honoring the pause duration.
+	StreamPausedMaxWait *time.Duration
 }
 
 // DefaultConfig returns a Config with SDK-standard defaults.
@@ -420,14 +423,19 @@ func (cs *CoreStream[Req, Resp]) WaitForOffset(ctx context.Context, offset int64
 // just the first), so no unacked record is silently dropped. It closes the
 // stream first (idempotent) to ensure the buffer is fully drained and no new
 // items are added.
+//
+// The result is a fresh copy on every call: the unacked set is consolidated
+// into retained storage once, and each call decodes a clone. A diagnostic read
+// therefore never removes the records a later retry or persistence path needs,
+// and mutating the returned bytes never corrupts the retained payloads.
 func (cs *CoreStream[Req, Resp]) GetUnacked() [][]byte {
 	cs.Close()
-	items := cs.takeRetainedUnacked()
-	items = append(items, cs.buf.drain()...)
+	items := cs.consolidateUnacked()
 	out := make([][]byte, 0, len(items))
 	for _, it := range items {
 		// Re-extract the raw record bytes from the encoded message so callers get
-		// back the original record content; a batch yields all its records.
+		// back the original record content; a batch yields all its records. decode
+		// clones, so the retained payload is never aliased.
 		out = append(out, cs.enc.decode(it.payload)...)
 	}
 	return out
@@ -489,12 +497,17 @@ func (cs *CoreStream[Req, Resp]) retainUnacked(items []item[Req]) {
 	cs.termMu.Unlock()
 }
 
-func (cs *CoreStream[Req, Resp]) takeRetainedUnacked() []item[Req] {
+// consolidateUnacked folds any still-buffered items into retained storage once,
+// then returns a clone of the retained set without clearing it. Call only after
+// Close, so the buffer is drained and no new items can arrive. Repeated or
+// concurrent calls all observe the same snapshot rather than racing to empty it.
+func (cs *CoreStream[Req, Resp]) consolidateUnacked() []item[Req] {
 	cs.termMu.Lock()
-	items := cs.retainedUnacked
-	cs.retainedUnacked = nil
-	cs.termMu.Unlock()
-	return items
+	defer cs.termMu.Unlock()
+	if items := cs.buf.drain(); len(items) > 0 {
+		cs.retainedUnacked = append(cs.retainedUnacked, items...)
+	}
+	return slices.Clone(cs.retainedUnacked)
 }
 
 type sendEvent struct {
@@ -630,11 +643,14 @@ func (cs *CoreStream[Req, Resp]) gracefulTeardown(
 	senderExited, receiverExited bool,
 	senderExitCh, receiverExitCh <-chan error,
 ) {
+	// One shared deadline bounds the whole graceful shutdown, so the sender-exit
+	// wait and the receiver-drain wait can't each consume a full DrainTimeout.
+	timer := time.NewTimer(cs.cfg.DrainTimeout)
+	defer timer.Stop()
+
 	if !senderExited {
-		timer := time.NewTimer(cs.cfg.DrainTimeout)
 		select {
 		case <-senderExitCh:
-			timer.Stop()
 		case <-timer.C:
 			// Abort a blocked Send so Close can finish.
 			stream.Close()
@@ -655,8 +671,6 @@ func (cs *CoreStream[Req, Resp]) gracefulTeardown(
 		<-receiverExitCh
 		return
 	}
-	timer := time.NewTimer(cs.cfg.DrainTimeout)
-	defer timer.Stop()
 	select {
 	case <-receiverExitCh:
 		// Receiver drained to EOF; release resources (Close is idempotent).
@@ -1019,8 +1033,10 @@ func (cs *CoreStream[Req, Resp]) receiver(
 
 func (cs *CoreStream[Req, Resp]) effectivePauseWait(serverDuration time.Duration) time.Duration {
 	wait := serverDuration
-	if cap := cs.cfg.StreamPausedMaxWait; cap > 0 && (wait <= 0 || cap < wait) {
-		wait = cap
+	// An explicit cap (including zero) overrides the server duration when it is
+	// shorter; nil leaves the server-requested wait untouched.
+	if cap := cs.cfg.StreamPausedMaxWait; cap != nil && (wait <= 0 || *cap < wait) {
+		wait = *cap
 	}
 	return wait
 }

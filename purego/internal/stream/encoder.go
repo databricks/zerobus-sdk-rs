@@ -182,10 +182,10 @@ func extractEphemeralRecords(msg encodedMsg) [][]byte {
 	}
 	if ir := msg.GetIngestRecord(); ir != nil {
 		// Switch on oneof type, not nil: an empty proto record must not be read
-		// as JSON.
+		// as JSON. Clone so callers (GetUnacked) never alias the retained payload.
 		switch r := ir.GetRecord().(type) {
 		case *zerobuspb.IngestRecordRequest_ProtoEncodedRecord:
-			return [][]byte{r.ProtoEncodedRecord}
+			return [][]byte{bytes.Clone(r.ProtoEncodedRecord)}
 		case *zerobuspb.IngestRecordRequest_JsonRecord:
 			return [][]byte{[]byte(r.JsonRecord)}
 		}
@@ -193,7 +193,12 @@ func extractEphemeralRecords(msg encodedMsg) [][]byte {
 	}
 	if ib := msg.GetIngestRecordBatch(); ib != nil {
 		if pb := ib.GetProtoEncodedBatch(); pb != nil {
-			return pb.GetRecords()
+			recs := pb.GetRecords()
+			out := make([][]byte, len(recs))
+			for i, r := range recs {
+				out[i] = bytes.Clone(r)
+			}
+			return out
 		}
 		if jb := ib.GetJsonBatch(); jb != nil {
 			recs := jb.GetRecords()

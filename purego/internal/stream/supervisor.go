@@ -145,6 +145,11 @@ func isRetryable(err error) bool {
 	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 		return false
 	}
+	// Permanent gRPC status codes (bad request, auth, unimplemented, ...) can't
+	// be fixed by reconnecting; retrying only burns the budget and resends data.
+	if transport.IsTerminalStatus(err) {
+		return false
+	}
 	// Treat remaining failures as transient.
 	return true
 }

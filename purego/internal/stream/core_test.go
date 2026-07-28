@@ -217,6 +217,31 @@ func TestCoreStreamGetUnackedReturnsItems(t *testing.T) {
 	}
 }
 
+// GetUnacked must be a repeatable, non-destructive read: a diagnostic call must
+// not empty the retained set, and mutating the result must not corrupt it.
+func TestCoreStreamGetUnackedRepeatable(t *testing.T) {
+	rpc := newFakeRPC()
+	cs := newCoreForTest(testParams(), testConfig(), newFakeOpener(rpc), nil)
+	record := []byte(`{"a":1}`)
+	if _, err := cs.Ingest(context.Background(), record); err != nil {
+		t.Fatalf("Ingest: %v", err)
+	}
+
+	first := cs.GetUnacked()
+	if len(first) != 1 || !bytes.Equal(first[0], record) {
+		t.Fatalf("first GetUnacked: want %q, got %q", record, first)
+	}
+	// Mutate the first result; it must not be an alias of the retained payload.
+	for i := range first[0] {
+		first[0][i] = 'X'
+	}
+
+	second := cs.GetUnacked()
+	if len(second) != 1 || !bytes.Equal(second[0], record) {
+		t.Fatalf("second GetUnacked: want original %q, got %q", record, second)
+	}
+}
+
 func TestCoreStreamConcurrentIngest(t *testing.T) {
 	rpc := newFakeRPC()
 	cs := newTestStream(t, newFakeOpener(rpc))
@@ -661,6 +686,14 @@ func TestIsRetryable(t *testing.T) {
 		{name: "open budget", err: &openBudgetExceeded{cause: context.DeadlineExceeded}, want: true},
 		{name: "context deadline", err: context.DeadlineExceeded, want: false},
 		{name: "ordinary transport", err: errors.New("connection reset"), want: true},
+		{name: "status invalid argument", err: status.Error(codes.InvalidArgument, "bad"), want: false},
+		{name: "status unauthenticated", err: status.Error(codes.Unauthenticated, "auth"), want: false},
+		{name: "status permission denied", err: status.Error(codes.PermissionDenied, "denied"), want: false},
+		{name: "status out of range", err: status.Error(codes.OutOfRange, "range"), want: false},
+		{name: "status unimplemented", err: status.Error(codes.Unimplemented, "nope"), want: false},
+		{name: "status not found", err: status.Error(codes.NotFound, "gone"), want: false},
+		{name: "status wrapped invalid argument", err: fmt.Errorf("recv: %w", status.Error(codes.InvalidArgument, "bad")), want: false},
+		{name: "status unavailable", err: status.Error(codes.Unavailable, "try later"), want: true},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -1040,7 +1073,7 @@ func TestCoreStreamPauseDrainsLateAck(t *testing.T) {
 	rpc2 := newFakeRPC()
 	fo := newFakeOpener(rpc, rpc2)
 	cfg := testConfig()
-	cfg.StreamPausedMaxWait = 200 * time.Millisecond
+	cfg.StreamPausedMaxWait = durationPtr(200 * time.Millisecond)
 	cs := newCoreForTest(testParams(), cfg, fo, nil)
 	t.Cleanup(func() { cs.Close() })
 
@@ -1059,6 +1092,32 @@ func TestCoreStreamPauseDrainsLateAck(t *testing.T) {
 		t.Fatalf("late ack was not drained during pause: %v", err)
 	}
 	waitCondition(t, func() bool { return fo.openCount() == 2 }, time.Second)
+}
+
+// An explicit zero StreamPausedMaxWait must reconnect immediately, ignoring the
+// server-requested pause duration. A nil cap (the zero value) cannot express
+// this, which is why the field is a pointer.
+func TestCoreStreamPauseZeroCapReconnectsImmediately(t *testing.T) {
+	rpc := newFakeRPC()
+	rpc2 := newFakeRPC()
+	fo := newFakeOpener(rpc, rpc2)
+	cfg := testConfig()
+	cfg.StreamPausedMaxWait = durationPtr(0) // explicit zero: don't honor the pause
+	cs := newCoreForTest(testParams(), cfg, fo, nil)
+	t.Cleanup(func() { cs.Close() })
+
+	offset, err := cs.Ingest(context.Background(), []byte(`{}`))
+	if err != nil {
+		t.Fatalf("Ingest: %v", err)
+	}
+	waitCondition(t, func() bool { return len(rpc.sends) == 1 }, time.Second)
+	<-rpc.sends
+	// A record stays in flight (never acked) and the server asks for a long pause.
+	// Without the explicit zero cap the supervisor would wait ~1h before reopening.
+	rpc.closeSignalWithDuration(time.Hour)
+
+	waitCondition(t, func() bool { return fo.openCount() == 2 }, time.Second)
+	_ = offset
 }
 
 func TestCoreStreamPauseHonorsRecoveryDisabled(t *testing.T) {
@@ -1083,7 +1142,7 @@ func TestCoreStreamPauseRemainsStickyAcrossEOF(t *testing.T) {
 	rpc := newFakeRPC()
 	cfg := testConfig()
 	cfg.Recovery = RecoveryDisabled
-	cfg.StreamPausedMaxWait = time.Second
+	cfg.StreamPausedMaxWait = durationPtr(time.Second)
 	cs := newCoreForTest(testParams(), cfg, newFakeOpener(rpc), nil)
 
 	if _, err := cs.Ingest(context.Background(), []byte(`{}`)); err != nil {
@@ -1107,7 +1166,7 @@ func TestCoreStreamPauseRecoveryPreservesAckMapping(t *testing.T) {
 	fo := newFakeOpener(rpc1, rpc2)
 	cb := &recordingCallback{}
 	cfg := testConfig()
-	cfg.StreamPausedMaxWait = 30 * time.Millisecond
+	cfg.StreamPausedMaxWait = durationPtr(30 * time.Millisecond)
 	cs := newCoreForTest(testParams(), cfg, fo, cb)
 	t.Cleanup(func() { cs.Close() })
 
