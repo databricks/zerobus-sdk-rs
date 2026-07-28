@@ -26,8 +26,11 @@ Implemented packages:
   tokens (client-credentials flow) via `OAuthTokenProvider`, with per-table
   token caching and proactive refresh; `StaticHeadersProvider` returns a fixed
   header set for tests or externally managed credentials.
+- `internal/stream` — buffers records, tracks acknowledgements, and reconnects
+  interrupted streams. Each logical stream has a stable client ID, while
+  `ServerID` identifies its most recently opened server stream.
 
-Planned layers: ingest/ack state management, recovery, and the public API.
+Planned layer: the public API.
 
 ## Regenerating the protobuf bindings
 

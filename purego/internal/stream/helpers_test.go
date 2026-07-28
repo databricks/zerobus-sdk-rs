@@ -185,11 +185,12 @@ func (f *fakeRPC) closeSignalWithDuration(d time.Duration) {
 // from it. Each call to Open returns the same underlying fakeRPC so tests
 // can send acks from it.
 type fakeOpener struct {
-	mu       sync.Mutex
-	rpcs     []*fakeRPC
-	idx      int
-	openErr  error // if non-nil, all opens fail with this error
-	attempts int   // number of Open calls, for asserting retry behavior
+	mu        sync.Mutex
+	rpcs      []*fakeRPC
+	serverIDs []string
+	idx       int
+	openErr   error // if non-nil, all opens fail with this error
+	attempts  int   // number of Open calls, for asserting retry behavior
 }
 
 func newFakeOpener(rpcs ...*fakeRPC) *fakeOpener {
@@ -213,8 +214,24 @@ func (fo *fakeOpener) Open(_ context.Context, _ transport.StreamParams) (wireStr
 		return nil, fmt.Errorf("fakeOpener: no more RPCs")
 	}
 	rpc := fo.rpcs[fo.idx]
+	serverID := "fake-stream"
+	if fo.idx < len(fo.serverIDs) {
+		serverID = fo.serverIDs[fo.idx]
+	}
 	fo.idx++
-	return transport.NewFakeStreamForTesting(rpc), nil
+	return &serverIDStream{
+		wireStream: transport.NewFakeStreamForTesting(rpc),
+		serverID:   serverID,
+	}, nil
+}
+
+type serverIDStream struct {
+	wireStream[encodedMsg, ephemeralResp]
+	serverID string
+}
+
+func (s *serverIDStream) ServerID() string {
+	return s.serverID
 }
 
 // gracefulFakeRPC models real gRPC teardown semantics more faithfully than

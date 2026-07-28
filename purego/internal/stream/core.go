@@ -3,10 +3,13 @@ package stream
 import (
 	"bytes"
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
 	"math"
+	"os"
 	"slices"
 	"sync"
 	"sync/atomic"
@@ -253,6 +256,9 @@ type CoreStream[Req, Resp any] struct {
 	wm         *watermark
 	dispatcher *callbackDispatcher
 
+	clientID string
+	serverID atomic.Pointer[string]
+
 	// offsetMu protects offset assignment.
 	offsetMu sync.Mutex
 	// nextOffset is the next logical offset to assign.
@@ -270,6 +276,21 @@ type CoreStream[Req, Resp any] struct {
 	closeOnce sync.Once
 	// cancelSupervisor cancels the supervisor's context so Close unblocks it.
 	cancelSupervisor context.CancelFunc
+}
+
+var fallbackStreamIDCounter atomic.Uint64
+
+func newClientStreamID() string {
+	var id [16]byte
+	if _, err := rand.Read(id[:]); err == nil {
+		return "client-stream-" + hex.EncodeToString(id[:])
+	}
+	return fmt.Sprintf(
+		"client-stream-%d-%d-%d",
+		os.Getpid(),
+		time.Now().UnixNano(),
+		fallbackStreamIDCounter.Add(1),
+	)
 }
 
 // NewCoreStream constructs a CoreStream and starts the supervisor goroutine.
@@ -298,12 +319,31 @@ func NewCoreStream[Req, Resp any](
 		buf:              newBuffer[Req](cfg.MaxInflight),
 		wm:               newWatermark(),
 		dispatcher:       newCallbackDispatcher(callback),
+		clientID:         newClientStreamID(),
 		done:             make(chan struct{}),
 		cancelSupervisor: cancel,
 	}
 	cs.lastEnqueued.Store(-1)
 	go cs.supervise(ctx)
 	return cs
+}
+
+// ID returns the stable client-generated logical stream ID.
+func (cs *CoreStream[Req, Resp]) ID() string {
+	return cs.clientID
+}
+
+// ServerID returns the most recently opened server-assigned stream ID.
+func (cs *CoreStream[Req, Resp]) ServerID() string {
+	id := cs.serverID.Load()
+	if id == nil {
+		return ""
+	}
+	return *id
+}
+
+func (cs *CoreStream[Req, Resp]) setServerID(id string) {
+	cs.serverID.Store(&id)
 }
 
 // Ingest encodes record and enqueues it in the buffer, blocking if the buffer
@@ -544,6 +584,7 @@ func (cs *CoreStream[Req, Resp]) runOnce(ctx context.Context) (cause error, rese
 		}
 		return openErr, false
 	}
+	cs.setServerID(stream.ServerID())
 	openedAt := time.Now()
 	startAck := cs.wm.current()
 
