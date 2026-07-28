@@ -225,8 +225,11 @@ func TestOpenHandshake(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Open: %v", err)
 	}
-	if got, want := stream.ID(), "stream-123"; got != want {
-		t.Errorf("stream ID = %q, want %q", got, want)
+	if got, want := stream.ServerID(), "stream-123"; got != want {
+		t.Errorf("server stream ID = %q, want %q", got, want)
+	}
+	if got, want := stream.ID(), stream.ServerID(); got != want {
+		t.Errorf("deprecated ID = %q, want %q", got, want)
 	}
 
 	got := <-srv.seen

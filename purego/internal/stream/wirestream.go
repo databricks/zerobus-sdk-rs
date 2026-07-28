@@ -9,6 +9,8 @@ import (
 // wireStream abstracts an open bidirectional transport stream.
 // The core uses one sender goroutine.
 type wireStream[Req, Resp any] interface {
+	// ServerID returns the identifier assigned when this connection opened.
+	ServerID() string
 	// Send writes one request to the server.
 	Send(req Req) error
 	// Recv returns io.EOF when the server ends the stream.

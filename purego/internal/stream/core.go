@@ -2,10 +2,14 @@ package stream
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
+	"os"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/databricks/zerobus-sdk/purego/internal/transport"
@@ -152,6 +156,9 @@ type CoreStream[Req, Resp any] struct {
 	wm       *watermark
 	callback AckCallback
 
+	clientID string
+	serverID atomic.Pointer[string]
+
 	// ingestMu serializes offset assignment and enqueue.
 	ingestMu sync.Mutex
 	// nextOffset is protected by ingestMu.
@@ -168,6 +175,21 @@ type CoreStream[Req, Resp any] struct {
 	closeOnce sync.Once
 	// cancelSupervisor cancels the supervisor's context so Close unblocks it.
 	cancelSupervisor context.CancelFunc
+}
+
+var fallbackStreamIDCounter atomic.Uint64
+
+func newClientStreamID() string {
+	var id [16]byte
+	if _, err := rand.Read(id[:]); err == nil {
+		return "client-stream-" + hex.EncodeToString(id[:])
+	}
+	return fmt.Sprintf(
+		"client-stream-%d-%d-%d",
+		os.Getpid(),
+		time.Now().UnixNano(),
+		fallbackStreamIDCounter.Add(1),
+	)
 }
 
 // NewCoreStream constructs a stream and starts its supervisor.
@@ -189,12 +211,31 @@ func NewCoreStream[Req, Resp any](
 		buf:              newBuffer[Req](cfg.MaxInflight),
 		wm:               newWatermark(),
 		callback:         callback,
+		clientID:         newClientStreamID(),
 		lastEnqueued:     -1,
 		done:             make(chan struct{}),
 		cancelSupervisor: cancel,
 	}
 	go cs.supervise(ctx)
 	return cs
+}
+
+// ID returns the stable client-generated logical stream ID.
+func (cs *CoreStream[Req, Resp]) ID() string {
+	return cs.clientID
+}
+
+// ServerID returns the most recently opened server-assigned stream ID.
+func (cs *CoreStream[Req, Resp]) ServerID() string {
+	id := cs.serverID.Load()
+	if id == nil {
+		return ""
+	}
+	return *id
+}
+
+func (cs *CoreStream[Req, Resp]) setServerID(id string) {
+	cs.serverID.Store(&id)
 }
 
 // Ingest queues one record and returns its durability offset.
@@ -330,6 +371,7 @@ func (cs *CoreStream[Req, Resp]) runOnce(ctx context.Context) (cause error, rese
 		}
 		return fmt.Errorf("stream: open: %w", err), false
 	}
+	cs.setServerID(stream.ServerID())
 	openedAt := time.Now()
 	startAck := cs.wm.current()
 

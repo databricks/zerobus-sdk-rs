@@ -215,8 +215,12 @@ func NewFakeStreamForTesting(rpc FakeStreamRPC) *Stream {
 	return s
 }
 
+// ServerID returns the server-assigned stream identifier from the handshake.
+func (s *Stream) ServerID() string { return s.name() }
+
 // ID returns the server-assigned stream identifier from the handshake.
-func (s *Stream) ID() string { return s.name() }
+// Deprecated: use ServerID.
+func (s *Stream) ID() string { return s.ServerID() }
 
 // Send writes one request to the server. It is not safe for concurrent use.
 func (s *Stream) Send(req *zerobuspb.EphemeralStreamRequest) error { return s.send(req) }
