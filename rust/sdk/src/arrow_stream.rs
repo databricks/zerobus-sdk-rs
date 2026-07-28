@@ -1319,8 +1319,8 @@ impl ZerobusArrowStream {
             let mut pending = pending_batches.lock().await;
             let submitted_records = submitted_records.load(Ordering::Acquire);
             if acked_records > submitted_records {
-                return Err(ZerobusError::UnexpectedStreamResponseError(format!(
-                    "Acknowledgment claims {acked_records} records, but only {submitted_records} records were submitted"
+                return Err(ZerobusError::InvalidStateError(format!(
+                    "Acknowledgement claims {acked_records} records, but only {submitted_records} records were submitted"
                 )));
             }
 
@@ -2333,12 +2333,16 @@ mod tests {
         .await
         .expect_err("a forward acknowledgement must be rejected");
 
+        assert!(
+            !error.is_retryable(),
+            "a protocol violation must be terminal"
+        );
         match error {
-            ZerobusError::UnexpectedStreamResponseError(message) => {
+            ZerobusError::InvalidStateError(message) => {
                 assert!(message.contains("11 records"));
                 assert!(message.contains("10 records were submitted"));
             }
-            other => panic!("expected an unexpected-response error, got {other:?}"),
+            other => panic!("expected an invalid-state error, got {other:?}"),
         }
         assert_eq!(submitted_records.load(Ordering::Acquire), 10);
         assert_eq!(last_acked_records.load(Ordering::Acquire), 0);
@@ -2389,12 +2393,16 @@ mod tests {
         .await
         .expect_err("an acknowledgement through a paused, unsent range must be rejected");
 
+        assert!(
+            !error.is_retryable(),
+            "a protocol violation must be terminal"
+        );
         match error {
-            ZerobusError::UnexpectedStreamResponseError(message) => {
+            ZerobusError::InvalidStateError(message) => {
                 assert!(message.contains("20 records"));
                 assert!(message.contains("10 records were submitted"));
             }
-            other => panic!("expected an unexpected-response error, got {other:?}"),
+            other => panic!("expected an invalid-state error, got {other:?}"),
         }
         assert_eq!(last_acked_records.load(Ordering::Acquire), 0);
         assert_eq!(*last_ack_rx.borrow(), None);
