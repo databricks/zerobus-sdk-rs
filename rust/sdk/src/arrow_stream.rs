@@ -1312,10 +1312,13 @@ impl ZerobusArrowStream {
         #[cfg(feature = "test-hooks")] ack_applied_gate: &AckAppliedGate,
     ) -> ZerobusResult<()> {
         let acked_records = ack.ack_up_to_records;
-        // Ingest publishes submitted_records and commits to the active sender while
-        // holding this same lock. Validation therefore cannot observe a submitted
-        // watermark before its handoff, or a handoff before its watermark.
+        // `ack_up_to_records` is the durability boundary. Derive completed SDK offsets
+        // from local pending ranges so an inconsistent `ack_up_to_offset` cannot advance
+        // a waiter; keep the server-provided offset only for diagnostics.
         let (effective_acked_records, max_acked_offset) = {
+            // Ingest publishes submitted_records and commits to the active sender while
+            // holding this same lock. Validation therefore cannot observe a submitted
+            // watermark before its handoff, or a handoff before its watermark.
             let mut pending = pending_batches.lock().await;
             let submitted_records = submitted_records.load(Ordering::Acquire);
             if acked_records > submitted_records {
