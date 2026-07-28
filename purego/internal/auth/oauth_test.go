@@ -25,6 +25,15 @@ type tokenServer struct {
 	calls       atomic.Int32
 }
 
+type ctxDoneErrRoundTripper struct {
+	err error
+}
+
+func (rt ctxDoneErrRoundTripper) RoundTrip(req *http.Request) (*http.Response, error) {
+	<-req.Context().Done()
+	return nil, rt.err
+}
+
 type blockingLogHandler struct {
 	entered     chan struct{}
 	release     chan struct{}
@@ -414,6 +423,101 @@ func TestOAuthTokenProviderHeaderBudgetRefreshServesCachedTokenHTTP1(t *testing.
 	}
 	if tok != "cached-valid" {
 		t.Fatalf("want cached token served, got %q", tok)
+	}
+}
+
+func TestOAuthTokenProviderDecodeTimeoutRefreshServesCachedToken(t *testing.T) {
+	unblock := make(chan struct{})
+	partial := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		// Valid prefix + stalled body: decode blocks on read.
+		_, _ = w.Write([]byte(`{"access_token":"tok","expires_in":`))
+		if f, ok := w.(http.Flusher); ok {
+			f.Flush()
+		}
+		select {
+		case <-unblock:
+		case <-r.Context().Done():
+		}
+	}))
+	defer partial.Close()
+	defer close(unblock)
+
+	t.Run("client timeout", func(t *testing.T) {
+		client := partial.Client()
+		client.Timeout = 50 * time.Millisecond
+		p, err := NewOAuthTokenProvider(
+			"id", "secret", "https://ws.zerobus.databricks.com", partial.URL,
+			WithHTTPClient(client),
+		)
+		if err != nil {
+			t.Fatalf("NewOAuthTokenProvider: %v", err)
+		}
+		seedRefreshable(p.cache, "id", "secret", "c.s.t", p.cacheScope(), "cached-valid")
+		tok, err := p.Token(context.Background(), "c.s.t")
+		if err != nil {
+			t.Fatalf("want fallback to cached token on decode timeout, got: %v", err)
+		}
+		if tok != "cached-valid" {
+			t.Fatalf("want cached token served, got %q", tok)
+		}
+	})
+
+	t.Run("headers budget timeoutcause", func(t *testing.T) {
+		p, err := NewOAuthTokenProvider(
+			"id", "secret", "https://ws.zerobus.databricks.com", partial.URL,
+			WithHTTPClient(partial.Client()),
+		)
+		if err != nil {
+			t.Fatalf("NewOAuthTokenProvider: %v", err)
+		}
+		seedRefreshable(p.cache, "id", "secret", "c.s.t", p.cacheScope(), "cached-valid")
+		ctx, cancel := context.WithTimeoutCause(
+			context.Background(), 50*time.Millisecond, authctx.ErrHeadersBudgetExceeded,
+		)
+		defer cancel()
+		tok, err := p.Token(ctx, "c.s.t")
+		if err != nil {
+			t.Fatalf("want fallback to cached token on budget decode timeout, got: %v", err)
+		}
+		if tok != "cached-valid" {
+			t.Fatalf("want cached token served, got %q", tok)
+		}
+	})
+}
+
+func TestOAuthTokenProviderBudgetCtxDoesNotMaskPermanentTransportError(t *testing.T) {
+	permanent := errors.New("permanent transport configuration error")
+	client := &http.Client{Transport: ctxDoneErrRoundTripper{err: permanent}}
+
+	p, err := NewOAuthTokenProvider(
+		"id", "secret", "https://ws.zerobus.databricks.com", "https://workspace.databricks.com",
+		WithHTTPClient(client),
+	)
+	if err != nil {
+		t.Fatalf("NewOAuthTokenProvider: %v", err)
+	}
+	seedRefreshable(p.cache, "id", "secret", "c.s.t", p.cacheScope(), "cached-valid")
+
+	ctx, cancel := context.WithTimeoutCause(
+		context.Background(), 50*time.Millisecond, authctx.ErrHeadersBudgetExceeded,
+	)
+	defer cancel()
+	tok, err := p.Token(ctx, "c.s.t")
+	if err == nil {
+		t.Fatalf("want error, got cached token %q", tok)
+	}
+	if tok != "" {
+		t.Fatalf("want empty token on permanent transport error, got %q", tok)
+	}
+	if !errors.Is(err, permanent) {
+		t.Fatalf("want wrapped permanent transport error, got: %v", err)
+	}
+	var te *TokenError
+	if !errors.As(err, &te) || te.IsRetryable() {
+		t.Fatalf("want non-retryable TokenError, got %T (retryable=%v): %v",
+			err, te != nil && te.IsRetryable(), err)
 	}
 }
 

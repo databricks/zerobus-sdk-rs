@@ -365,7 +365,7 @@ func (p *OAuthTokenProvider) fetchToken(ctx context.Context, tableName string) (
 	if err := json.NewDecoder(io.LimitReader(resp.Body, maxTokenResponseBytes)).Decode(&body); err != nil {
 		return fetchedToken{}, &TokenError{
 			msg:       fmt.Sprintf("parse token response: %v", err),
-			retryable: false,
+			retryable: isRetryableTransportError(ctx, err),
 			cause:     err,
 		}
 	}
@@ -544,9 +544,15 @@ func isHTTPSuccess(code int) bool { return code >= 200 && code < 300 }
 // isContextError alone would miss the SDK's own budget. Check the context first.
 func isRetryableTransportError(ctx context.Context, err error) bool {
 	if ctx.Err() != nil {
-		// Only the SDK's own header budget is retryable; any other cause is the
-		// caller stopping.
-		return context.Cause(ctx) == authctx.ErrHeadersBudgetExceeded
+		// Only the SDK's own header budget is retryable, and only when the
+		// returned error chain actually reflects that budget expiration.
+		cause := context.Cause(ctx)
+		if cause != authctx.ErrHeadersBudgetExceeded {
+			return false
+		}
+		if errors.Is(err, cause) || errors.Is(err, ctx.Err()) {
+			return true
+		}
 	}
 	// Context still live: a wrapped context error is a client/transport timeout.
 	if isContextError(err) {
