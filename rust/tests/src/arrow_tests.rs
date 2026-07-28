@@ -623,7 +623,6 @@ mod arrow_flight_tests {
                 .unity_catalog_url("https://mock-uc.com")
                 .tls_config(Arc::new(NoTlsConfig))
                 .build()?;
-
             let stream = sdk
                 .stream_builder()
                 .table(TABLE_NAME)
@@ -667,6 +666,68 @@ mod arrow_flight_tests {
                 !err.is_retryable(),
                 "schema-mismatch rejection is non-retryable, got: {}",
                 err
+            );
+
+            Ok(())
+        }
+
+        /// A forward acknowledgement is a protocol violation, not a transient connection
+        /// failure. Recovery must not hide it from a waiter or replay the pending batch.
+        #[tokio::test]
+        async fn test_forward_acknowledgement_is_terminal_with_recovery_enabled(
+        ) -> Result<(), Box<dyn std::error::Error>> {
+            setup_tracing();
+
+            let (mock_server, server_url) = start_mock_flight_server().await?;
+            let schema = create_test_arrow_schema();
+            mock_server
+                .inject_responses(
+                    TABLE_NAME,
+                    vec![MockFlightResponse::BatchAck {
+                        ack_up_to_offset: 0,
+                        delay_ms: 0,
+                        ack_up_to_records: 3,
+                    }],
+                )
+                .await;
+
+            let sdk = ZerobusSdk::builder()
+                .endpoint(server_url)
+                .unity_catalog_url("https://mock-uc.com")
+                .tls_config(Arc::new(NoTlsConfig))
+                .build()?;
+            let stream = sdk
+                .stream_builder()
+                .table(TABLE_NAME)
+                .headers_provider(Arc::new(TestHeadersProvider::default()))
+                .arrow(schema.clone())
+                .recovery(true)
+                .recovery_retries(3)
+                .recovery_backoff_ms(0)
+                .flush_timeout_ms(1_000)
+                .build_arrow()
+                .await?;
+
+            let batch =
+                create_test_record_batch(schema, vec![1, 2], vec![Some("first"), Some("second")]);
+            let offset = stream.ingest_batch(batch).await?;
+            let error = stream
+                .wait_for_offset(offset)
+                .await
+                .expect_err("the invalid acknowledgement must reach the waiter");
+
+            assert!(!error.is_retryable());
+            match error {
+                ZerobusError::InvalidStateError(message) => {
+                    assert!(message.contains("3 records"));
+                    assert!(message.contains("2 records were submitted"));
+                }
+                other => panic!("expected an invalid-state error, got {other:?}"),
+            }
+            assert_eq!(
+                mock_server.get_batch_count().await,
+                1,
+                "a terminal protocol violation must not replay the batch"
             );
 
             Ok(())
@@ -3679,11 +3740,12 @@ mod arrow_flight_tests {
                 status: tonic::Status::unavailable("Simulated disconnect"),
                 delay_ms: 0,
             });
-            // On the new connection offsets restart from 0.  Ack covers all replayed rows.
+            // On the new connection offsets and record counts restart from 0. Ack both
+            // replayed rows after the second batch arrives.
             responses.push(MockFlightResponse::BatchAck {
-                ack_up_to_offset: 0,
+                ack_up_to_offset: 1,
                 delay_ms: 0,
-                ack_up_to_records: (INITIAL_BATCHES + 2) as u64,
+                ack_up_to_records: 2,
             });
 
             mock_server.inject_responses(TABLE_NAME, responses).await;
