@@ -428,16 +428,19 @@ public sealed class ZerobusSdk : IDisposable
         // closes the recovery-vs-teardown use-after-free. The stream therefore
         // owns nothing and never frees this handle itself.
         var handle = GCHandle.Alloc(bridge);
+        var handlePtr = GCHandle.ToIntPtr(handle);
+        var tableName = tableProperties.TableName;
+        var descriptorProto = tableProperties.DescriptorProto ?? [];
 
         IntPtr streamPtr;
         try
         {
             streamPtr = NativeInterop.SdkCreateStreamWithHeadersProvider(
                 _ptr,
-                tableProperties.TableName,
-                tableProperties.DescriptorProto ?? [],
+                tableName,
+                descriptorProto,
                 bridge.Callback,
-                GCHandle.ToIntPtr(handle),
+                handlePtr,
                 bridge.FreeCallback,
                 ref nativeOpts);
         }
@@ -470,16 +473,29 @@ public sealed class ZerobusSdk : IDisposable
         // closes the recovery-vs-teardown use-after-free. The stream therefore
         // owns nothing and never frees this handle itself, on success or failure.
         var handle = GCHandle.Alloc(bridge);
+        var handlePtr = GCHandle.ToIntPtr(handle);
+        var tableName = tableProperties.TableName;
+        var descriptorProto = tableProperties.DescriptorProto ?? [];
 
-        var streamPtr = await NativeInterop.SdkCreateStreamWithHeadersProviderAsync(
-                _ptr,
-                tableProperties.TableName,
-                tableProperties.DescriptorProto ?? [],
-                bridge.Callback,
-                GCHandle.ToIntPtr(handle),
-                bridge.FreeCallback,
-                nativeOpts)
-            .ConfigureAwait(false);
+        IntPtr streamPtr;
+        try
+        {
+            streamPtr = await NativeInterop.SdkCreateStreamWithHeadersProviderAsync(
+                    _ptr,
+                    tableName,
+                    descriptorProto,
+                    bridge.Callback,
+                    handlePtr,
+                    bridge.FreeCallback,
+                    nativeOpts)
+                .ConfigureAwait(false);
+        }
+        catch
+        {
+            // The invocation above is the ownership-transfer point. If it throws,
+            // the native side has already run the free callback on failure.
+            throw;
+        }
 
         // The FFI owns the provider handle now; the stream keeps no reference.
         return new ZerobusStream(streamPtr);
