@@ -6,6 +6,16 @@
 
 ### Bug Fixes
 
+- Fixed a use-after-free in which a custom `HeadersProvider` could be destroyed
+  while the Rust core was still inside a `get_headers()` call into it during
+  connection recovery. Provider ownership is now handed to the FFI as a
+  heap-allocated `shared_ptr` released by a destroy callback
+  (`detail::zerobus_cpp_headers_free`) only after any in-flight `get_headers()`
+  has returned; the `Stream` / `ArrowStream` no longer keeps its own provider
+  `shared_ptr`. Public API is unchanged — `create_stream` /
+  `create_arrow_stream` still take a `std::shared_ptr<HeadersProvider>` — and you
+  no longer need to keep your own reference alive past `create_stream`.
+
 ### Documentation
 
 ### Internal Changes

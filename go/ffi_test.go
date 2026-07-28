@@ -6,113 +6,28 @@ import (
 	"unsafe"
 )
 
-// TestStreamHandleRegistry tests the stream handle registry
-func TestStreamHandleRegistry(t *testing.T) {
-	// Create a test handle
-	testProvider := &mockHeadersProvider{}
-	handle := cgo.NewHandle(testProvider)
+// TestGoFreeHeadersProviderReleasesHandle verifies the FFI-owned destroy path:
+// goFreeHeadersProvider must delete the cgo.Handle it is handed, releasing the
+// Go provider. This is the Go side of the ownership transfer that closes the
+// recovery-vs-teardown use-after-free.
+func TestGoFreeHeadersProviderReleasesHandle(t *testing.T) {
+	handle := cgo.NewHandle(&mockHeadersProvider{})
+	handlePtr := *(*unsafe.Pointer)(unsafe.Pointer(&handle))
 
-	// Create a real allocated pointer (not a fake one)
-	dummyStream := struct{ id int }{1234}
-	dummyStreamPtr := unsafe.Pointer(&dummyStream)
-
-	// Store in registry
-	streamHandleRegistryMu.Lock()
-	streamHandleRegistry[dummyStreamPtr] = handle
-	streamHandleRegistryMu.Unlock()
-
-	// Verify it's stored
-	streamHandleRegistryMu.Lock()
-	storedHandle, exists := streamHandleRegistry[dummyStreamPtr]
-	streamHandleRegistryMu.Unlock()
-
-	if !exists {
-		t.Fatal("Handle not found in registry")
+	// The handle resolves to the provider while live.
+	if _, ok := handle.Value().(HeadersProvider); !ok {
+		t.Fatal("handle should resolve to the provider before free")
 	}
 
-	if storedHandle != handle {
-		t.Fatal("Retrieved handle doesn't match stored handle")
-	}
+	// The destroy callback releases it; the handle must no longer be valid.
+	goFreeHeadersProvider(handlePtr)
 
-	// Clean up
-	streamHandleRegistryMu.Lock()
-	delete(streamHandleRegistry, dummyStreamPtr)
-	streamHandleRegistryMu.Unlock()
-	handle.Delete()
-}
-
-// TestStreamHandleCleanup tests that handles are properly cleaned up
-func TestStreamHandleCleanup(t *testing.T) {
-	testProvider := &mockHeadersProvider{}
-	handle := cgo.NewHandle(testProvider)
-
-	dummyStream := struct{ id int }{5678}
-	dummyStreamPtr := unsafe.Pointer(&dummyStream)
-
-	// Store in registry
-	streamHandleRegistryMu.Lock()
-	streamHandleRegistry[dummyStreamPtr] = handle
-	streamHandleRegistryMu.Unlock()
-
-	// Simulate streamFree cleanup logic
-	streamHandleRegistryMu.Lock()
-	if h, exists := streamHandleRegistry[dummyStreamPtr]; exists {
-		h.Delete()
-		delete(streamHandleRegistry, dummyStreamPtr)
-	}
-	streamHandleRegistryMu.Unlock()
-
-	// Verify it's removed
-	streamHandleRegistryMu.Lock()
-	_, exists := streamHandleRegistry[dummyStreamPtr]
-	streamHandleRegistryMu.Unlock()
-
-	if exists {
-		t.Fatal("Handle should have been removed from registry")
-	}
-}
-
-// TestHandleConcurrency tests concurrent access to the handle registry
-func TestHandleConcurrency(t *testing.T) {
-	const numGoroutines = 10
-
-	done := make(chan bool, numGoroutines)
-
-	for i := 0; i < numGoroutines; i++ {
-		go func(id int) {
-			testProvider := &mockHeadersProvider{}
-			handle := cgo.NewHandle(testProvider)
-			dummyStream := struct{ id int }{1000 + id}
-			ptr := unsafe.Pointer(&dummyStream)
-
-			// Store
-			streamHandleRegistryMu.Lock()
-			streamHandleRegistry[ptr] = handle
-			streamHandleRegistryMu.Unlock()
-
-			// Retrieve
-			streamHandleRegistryMu.Lock()
-			_, exists := streamHandleRegistry[ptr]
-			streamHandleRegistryMu.Unlock()
-
-			if !exists {
-				t.Errorf("Handle %d not found", id)
-			}
-
-			// Clean up
-			streamHandleRegistryMu.Lock()
-			delete(streamHandleRegistry, ptr)
-			streamHandleRegistryMu.Unlock()
-			handle.Delete()
-
-			done <- true
-		}(i)
-	}
-
-	// Wait for all goroutines
-	for i := 0; i < numGoroutines; i++ {
-		<-done
-	}
+	defer func() {
+		if r := recover(); r == nil {
+			t.Fatal("expected handle.Value() to panic after goFreeHeadersProvider")
+		}
+	}()
+	_ = handle.Value() // panics: handle was deleted
 }
 
 // Mock HeadersProvider for testing

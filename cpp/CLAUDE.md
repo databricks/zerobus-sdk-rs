@@ -93,14 +93,18 @@ instead, configure with `-DZEROBUS_FFI_LIBRARY=<path-to-.a>` and
 
 When using a custom `HeadersProvider`:
 - `detail::zerobus_cpp_headers_trampoline` is an `extern "C"` function passed to
-  `zerobus_sdk_create_stream_with_headers_provider`. `user_data` is the raw
-  `HeadersProvider*`.
-- The `Stream` / `ArrowStream` keeps a `std::shared_ptr<HeadersProvider>` alive
-  for its whole lifetime; the handle is freed in the destructor **before** the
-  shared_ptr member is destroyed. Necessary but not always sufficient (see
-  `headers_provider.hpp`): a `get_headers()` call still running when `close()`
-  times out (~1s) can be invoked on a freed provider. Keep `get_headers()` well
-  under that budget, or keep the provider alive past the stream.
+  `zerobus_sdk_create_stream_with_headers_provider`. `user_data` is a
+  heap-allocated `std::shared_ptr<HeadersProvider>*` whose **ownership is handed
+  to the FFI**, alongside `detail::zerobus_cpp_headers_free` as the FFI's
+  provider `free_user_data` destroy callback.
+- The FFI invokes `zerobus_cpp_headers_free` exactly once, on every path (on
+  success after the core's last reference drops — i.e. after any in-flight
+  `get_headers()` has returned; on a failed create before returning). This is
+  what closes the recovery-vs-teardown use-after-free: a slow `get_headers()`
+  racing stream teardown can no longer run on a freed provider. Because the FFI
+  owns the provider, the `Stream` / `ArrowStream` no longer keeps a
+  `shared_ptr<HeadersProvider>` member, and the wrapper must **not** free
+  `user_data` itself (doing so would double-free).
 - The trampoline marshals the returned map into `CHeaders` using the allocators
   the Rust core's `zerobus_free_headers` expects to free. Do not change the
   allocator without checking `zerobus_free_headers` in the FFI crate.

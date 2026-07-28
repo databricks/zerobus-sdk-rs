@@ -331,6 +331,13 @@ func (s *ZerobusSdk) CreateStream(
 //	        "x-databricks-zerobus-table-name": "catalog.schema.table",
 //	    }, nil
 //	}
+//
+// The SDK owns the provider for the stream's lifetime and releases it only
+// after any in-flight GetHeaders call (including one during connection
+// recovery) has returned — so a slow GetHeaders racing stream teardown is
+// never invoked on a released provider. GetHeaders may be called from an
+// internal SDK worker thread, so implementations must be safe to use from a
+// goroutine other than the one that created the stream.
 type HeadersProvider interface {
 	// GetHeaders returns the headers to be used for authentication.
 	// This method will be called by the SDK when authentication is needed.

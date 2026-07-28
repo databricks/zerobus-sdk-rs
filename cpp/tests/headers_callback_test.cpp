@@ -9,6 +9,7 @@
 #include <cstddef>
 #include <cstdio>
 #include <map>
+#include <memory>
 #include <stdexcept>
 #include <string>
 
@@ -24,6 +25,17 @@ void fail(const char* msg) {
 }
 
 using zerobus::HeadersProvider;
+
+// The trampoline's user_data is a heap std::shared_ptr<HeadersProvider>*, owned
+// by the FFI (see Sdk::create_*). Mirror that here: run the trampoline against
+// a provider wrapped that way, then release it via the FFI's free trampoline.
+zerobus::CHeaders run_trampoline(std::shared_ptr<HeadersProvider> provider) {
+  auto* owned = new std::shared_ptr<HeadersProvider>(std::move(provider));
+  zerobus::CHeaders out =
+      zerobus::detail::zerobus_cpp_headers_trampoline(owned);
+  zerobus::detail::zerobus_cpp_headers_free(owned);
+  return out;
+}
 
 // Returns a caller-set map.
 class MapProvider : public HeadersProvider {
@@ -49,10 +61,10 @@ int main() {
 
   // Populated map: key/value pairs round-trip, no error.
   {
-    MapProvider provider;
-    provider.headers = {{"Authorization", "Bearer abc"}, {"X-Custom", "v1"}};
+    auto provider = std::make_shared<MapProvider>();
+    provider->headers = {{"Authorization", "Bearer abc"}, {"X-Custom", "v1"}};
 
-    CHeaders out = zerobus_cpp_headers_trampoline(&provider);
+    CHeaders out = run_trampoline(provider);
     if (out.error_message != nullptr) {
       fail("marshalling valid headers set an error_message");
     }
@@ -77,8 +89,8 @@ int main() {
 
   // Empty map: null array, zero count, no error.
   {
-    MapProvider provider;  // no headers
-    CHeaders out = zerobus_cpp_headers_trampoline(&provider);
+    CHeaders out =
+        run_trampoline(std::make_shared<MapProvider>());  // no headers
     if (out.count != 0 || out.headers != nullptr ||
         out.error_message != nullptr) {
       fail("empty provider did not yield an empty, error-free CHeaders");
@@ -89,8 +101,7 @@ int main() {
   // Throwing provider: message surfaces via error_message, no exception
   // escapes.
   {
-    ThrowingProvider provider;
-    CHeaders out = zerobus_cpp_headers_trampoline(&provider);
+    CHeaders out = run_trampoline(std::make_shared<ThrowingProvider>());
     if (out.error_message == nullptr) {
       fail("throwing provider did not set an error_message");
     } else if (std::string(out.error_message).find("provider boom") ==
@@ -105,9 +116,9 @@ int main() {
 
   // Embedded-NUL header value is rejected, not truncated.
   {
-    MapProvider provider;
-    provider.headers = {{"X-Bad", std::string("a\0b", 3)}};
-    CHeaders out = zerobus_cpp_headers_trampoline(&provider);
+    auto provider = std::make_shared<MapProvider>();
+    provider->headers = {{"X-Bad", std::string("a\0b", 3)}};
+    CHeaders out = run_trampoline(provider);
     if (out.error_message == nullptr) {
       fail("embedded-NUL header value was not rejected");
     }

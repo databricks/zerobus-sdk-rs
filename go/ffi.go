@@ -92,6 +92,10 @@ extern CZerobusStream* zerobus_sdk_create_stream(CZerobusSdk* sdk,
                                                    const char* client_secret,
                                                    const CStreamConfigurationOptions* options,
                                                    CResult* result);
+// Releases the headers provider user_data. The FFI owns user_data and invokes
+// this once, after any in-flight get_headers callback has returned.
+typedef void (*HeadersProviderFreeCallback)(void* user_data);
+
 extern CZerobusStream* zerobus_sdk_create_stream_with_headers_provider(
     CZerobusSdk* sdk,
     const char* table_name,
@@ -99,6 +103,7 @@ extern CZerobusStream* zerobus_sdk_create_stream_with_headers_provider(
     uintptr_t descriptor_proto_len,
     HeadersProviderCallback headers_callback,
     void* user_data,
+    HeadersProviderFreeCallback free_user_data,
     const CStreamConfigurationOptions* options,
     CResult* result);
 extern void zerobus_stream_free(CZerobusStream* stream);
@@ -144,8 +149,9 @@ extern bool zerobus_stream_close(CZerobusStream* stream, CResult* result);
 extern void zerobus_free_error_message(char* error_message);
 extern CStreamConfigurationOptions zerobus_get_default_config();
 
-// Forward declaration of Go function
+// Forward declaration of Go functions
 extern void goGetHeaders(void* userData, CHeader** headers, uintptr_t* count, char** error);
+extern void goFreeHeadersProvider(void* userData);
 
 // C callback that matches the HeadersProviderCallback signature
 static CHeaders cHeadersCallback(void* userData) {
@@ -167,20 +173,22 @@ static CHeaders cHeadersCallback(void* userData) {
 static HeadersProviderCallback getHeadersCallback() {
     return (HeadersProviderCallback)cHeadersCallback;
 }
+
+// C callback matching HeadersProviderFreeCallback; deletes the cgo.Handle so the
+// Go provider is released once the Rust core is done with it.
+static void cFreeHeadersProvider(void* userData) {
+    goFreeHeadersProvider(userData);
+}
+
+static HeadersProviderFreeCallback getFreeHeadersProviderCallback() {
+    return (HeadersProviderFreeCallback)cFreeHeadersProvider;
+}
 */
 import "C"
 import (
 	"runtime"
 	"runtime/cgo"
-	"sync"
 	"unsafe"
-)
-
-// Registry to map stream pointers to their handles for cleanup
-// This allows us to properly release cgo.Handle when streams are freed
-var (
-	streamHandleRegistry   = make(map[unsafe.Pointer]cgo.Handle)
-	streamHandleRegistryMu sync.Mutex
 )
 
 // ffiResult converts a C.CResult to a Go error
@@ -452,6 +460,21 @@ func goGetHeaders(userData unsafe.Pointer, headers **C.CHeader, count *C.uintptr
 	*errorMsg = nil
 }
 
+//export goFreeHeadersProvider
+func goFreeHeadersProvider(userData unsafe.Pointer) {
+	// The FFI owns the provider handle and calls this once, after any in-flight
+	// get_headers has returned. Delete the cgo.Handle to release the Go object.
+	//
+	// A zero handle can't occur on the ownership-transfer path (cgo.NewHandle
+	// never returns 0, and we only pass real handles to the FFI), but guard
+	// anyway: Delete() panics on a zero/invalid handle, which would unwind
+	// across the C boundary.
+	if userData == nil {
+		return
+	}
+	cgo.Handle(userData).Delete()
+}
+
 // sdkCreateStreamWithHeadersProvider creates a stream with custom headers provider via FFI
 func sdkCreateStreamWithHeadersProvider(
 	sdkPtr unsafe.Pointer,
@@ -474,8 +497,10 @@ func sdkCreateStreamWithHeadersProvider(
 		descriptorLen = C.size_t(len(descriptorProto))
 	}
 
-	// Create a cgo.Handle for the provider
-	// This keeps it alive and gives us a safe uintptr to pass to C
+	// Create a cgo.Handle for the provider and hand its ownership to the FFI.
+	// The FFI releases it via goFreeHeadersProvider once the Rust core is done
+	// with the provider — after any in-flight get_headers callback returns —
+	// which closes the recovery-vs-teardown use-after-free window.
 	handle := cgo.NewHandle(headersProvider)
 	// Convert handle to unsafe.Pointer using a pattern the linter accepts
 	handlePtr := *(*unsafe.Pointer)(unsafe.Pointer(&handle))
@@ -490,35 +515,26 @@ func sdkCreateStreamWithHeadersProvider(
 		descriptorLen,
 		C.getHeadersCallback(),
 		handlePtr,
+		C.getFreeHeadersProviderCallback(),
 		&cOpts,
 		&cres,
 	)
 
 	if ptr == nil {
-		// Clean up handle on error
-		handle.Delete()
+		// The FFI owns the handle once create is called and releases it via
+		// goFreeHeadersProvider on every path — including this failure — so we
+		// must NOT delete it here (that would double-free the handle).
 		return nil, ffiResult(cres)
 	}
-
-	// Store the handle so we can clean it up when the stream is freed
-	streamHandleRegistryMu.Lock()
-	streamHandleRegistry[unsafe.Pointer(ptr)] = handle
-	streamHandleRegistryMu.Unlock()
 
 	return unsafe.Pointer(ptr), nil
 }
 
-// streamFree frees a stream instance
+// streamFree frees a stream instance. The provider handle (if any) is released
+// by the FFI via goFreeHeadersProvider, not here, so there is no registry to
+// clean up.
 func streamFree(ptr unsafe.Pointer) {
 	if ptr != nil {
-		// Clean up the associated handle BEFORE freeing the stream
-		streamHandleRegistryMu.Lock()
-		if handle, exists := streamHandleRegistry[ptr]; exists {
-			handle.Delete() // This releases the Go object reference
-			delete(streamHandleRegistry, ptr)
-		}
-		streamHandleRegistryMu.Unlock()
-
 		C.zerobus_stream_free((*C.CZerobusStream)(ptr))
 	}
 }
