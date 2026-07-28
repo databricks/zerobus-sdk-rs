@@ -341,13 +341,19 @@ cd dotnet
 
 The native library is placed in the standard .NET runtime identifier layout:
 
-| Platform    | Path                                             |
-| ----------- | ------------------------------------------------ |
-| Linux x64   | `runtimes/linux-x64/native/libzerobus_ffi.so`    |
-| Linux arm64 | `runtimes/linux-arm64/native/libzerobus_ffi.so`  |
-| macOS x64   | `runtimes/osx-x64/native/libzerobus_ffi.dylib`   |
-| macOS arm64 | `runtimes/osx-arm64/native/libzerobus_ffi.dylib` |
-| Windows x64 | `runtimes/win-x64/native/zerobus_ffi.dll`        |
+| Platform               | RID                 | Path                                                | NuGet package payload today |
+| ---------------------- | ------------------- | --------------------------------------------------- | --------------------------- |
+| Linux x64 (glibc)      | `linux-x64`         | `runtimes/linux-x64/native/libzerobus_ffi.so`       | Included                    |
+| Linux arm64 (glibc)    | `linux-arm64`       | `runtimes/linux-arm64/native/libzerobus_ffi.so`     | Included                    |
+| Linux x64 (musl/Alpine) | `linux-musl-x64`    | `runtimes/linux-musl-x64/native/libzerobus_ffi.so`  | Included                    |
+| Linux arm64 (musl)      | `linux-musl-arm64`  | `runtimes/linux-musl-arm64/native/libzerobus_ffi.so` | Included                    |
+| Windows x64            | `win-x64`           | `runtimes/win-x64/native/zerobus_ffi.dll`           | Included                    |
+| macOS x64              | `osx-x64`           | `runtimes/osx-x64/native/libzerobus_ffi.dylib`      | Source build only           |
+| macOS arm64            | `osx-arm64`         | `runtimes/osx-arm64/native/libzerobus_ffi.dylib`    | Source build only           |
+
+Published packages currently omit macOS native binaries. Source builds via
+`build_native.sh` still produce and place the macOS `.dylib` in the runtime
+layout above.
 
 ## Testing
 

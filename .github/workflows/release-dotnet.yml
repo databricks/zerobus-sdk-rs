@@ -170,6 +170,27 @@ jobs:
           echo "Consolidated runtimes:"
           find src/Zerobus/runtimes -type f | sort
 
+      - name: Assert expected native RID payloads are present
+        run: |
+          expected=(
+            "src/Zerobus/runtimes/linux-x64/native/libzerobus_ffi.so"
+            "src/Zerobus/runtimes/linux-arm64/native/libzerobus_ffi.so"
+            "src/Zerobus/runtimes/linux-musl-x64/native/libzerobus_ffi.so"
+            "src/Zerobus/runtimes/linux-musl-arm64/native/libzerobus_ffi.so"
+            "src/Zerobus/runtimes/win-x64/native/zerobus_ffi.dll"
+          )
+          missing=0
+          for f in "${expected[@]}"; do
+            if [ ! -f "$f" ]; then
+              echo "Missing expected native artifact: $f"
+              missing=1
+            fi
+          done
+          if [ "$missing" -ne 0 ]; then
+            echo "RID payload assertion failed; refusing to pack incomplete nupkg."
+            exit 1
+          fi
+
       - name: Package NuGet
         env:
           CI: true
