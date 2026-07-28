@@ -467,35 +467,23 @@ public sealed class ZerobusSdk : IDisposable
 
         var bridge = new HeadersProviderBridge(headersProvider);
 
-        // Ownership transfer: the GCHandle to the bridge is handed to the FFI as
-        // user_data. The FFI releases it via the free callback (NativeFree)
-        // exactly once — after any in-flight GetHeaders has returned — which
-        // closes the recovery-vs-teardown use-after-free. The stream therefore
-        // owns nothing and never frees this handle itself, on success or failure.
         var handle = GCHandle.Alloc(bridge);
         var handlePtr = GCHandle.ToIntPtr(handle);
         var tableName = tableProperties.TableName;
         var descriptorProto = tableProperties.DescriptorProto ?? [];
 
-        IntPtr streamPtr;
-        try
-        {
-            streamPtr = await NativeInterop.SdkCreateStreamWithHeadersProviderAsync(
-                    _ptr,
-                    tableName,
-                    descriptorProto,
-                    bridge.Callback,
-                    handlePtr,
-                    bridge.FreeCallback,
-                    nativeOpts)
-                .ConfigureAwait(false);
-        }
-        catch
-        {
-            // The invocation above is the ownership-transfer point. If it throws,
-            // the native side has already run the free callback on failure.
-            throw;
-        }
+        // Ownership transfer point: this call hands the bridge GCHandle to the
+        // FFI as user_data. On failure, the native side has already invoked the
+        // free callback; on success, it owns cleanup for the full stream lifetime.
+        var streamPtr = await NativeInterop.SdkCreateStreamWithHeadersProviderAsync(
+                _ptr,
+                tableName,
+                descriptorProto,
+                bridge.Callback,
+                handlePtr,
+                bridge.FreeCallback,
+                nativeOpts)
+            .ConfigureAwait(false);
 
         // The FFI owns the provider handle now; the stream keeps no reference.
         return new ZerobusStream(streamPtr);
