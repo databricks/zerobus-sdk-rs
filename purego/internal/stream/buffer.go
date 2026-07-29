@@ -1,9 +1,12 @@
 // Package stream is the generic ingestion core: offset assignment, send/recv
 // goroutines, ack watermark, Flush/WaitForOffset, and the recovery supervisor.
 // Protocol-specific behaviour (encoding, ack parsing, wire transport) is
-// injected through the encoder, ackModel, and wireStream interfaces, so the
-// core is written once and instantiated per wire protocol (proto/JSON today,
-// Arrow Flight later) without editing this package's core logic.
+// injected through the encoder, ackModel, and wireStream interfaces, so
+// proto and JSON share one implementation.
+//
+// Arrow Flight will reuse these seams but not unchanged: buffer entries carry no
+// record count, and recovery replays whole entries, so a partially acknowledged
+// batch cannot be sliced. Both are core changes, not encoder changes.
 package stream
 
 import (

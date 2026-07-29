@@ -1362,26 +1362,36 @@ func TestCoreStreamCloseUnblocksBlockedSend(t *testing.T) {
 	}
 }
 
+// A waiter on an offset the stream will never reach must be woken by Close with
+// errWatermarkClosed. FlushTimeout stays long on purpose: if the wait could time
+// out on its own, the test would pass without the wakeup happening at all.
 func TestCoreStreamCloseWakesOffsetWaiters(t *testing.T) {
 	rpc := newFakeRPC()
 	cfg := testConfig()
-	cfg.FlushTimeout = 25 * time.Millisecond
+	cfg.FlushTimeout = 30 * time.Second
 	cs := newCoreForTest(testParams(), cfg, newFakeOpener(rpc), nil)
 	offset, err := cs.Ingest(context.Background(), []byte(`{}`))
 	if err != nil {
 		t.Fatalf("Ingest: %v", err)
 	}
+	waitCondition(t, func() bool { return len(rpc.sends) == 1 }, time.Second)
+	<-rpc.sends
+	// Ack what was ingested so Close's own flush completes and cannot be the
+	// thing that fails the watermark: only the clean-close path is left.
+	rpc.ack(offset)
+	waitCondition(t, func() bool { return cs.wm.current() == offset }, time.Second)
 
 	waitDone := make(chan error, 1)
 	go func() {
-		waitDone <- cs.WaitForOffset(context.Background(), offset)
+		// One past the close boundary, so the target is unreachable by design.
+		waitDone <- cs.WaitForOffset(context.Background(), offset+1)
 	}()
 	cs.Close()
 
 	select {
 	case err := <-waitDone:
-		if !errors.Is(err, errWatermarkClosed) && !errors.Is(err, context.DeadlineExceeded) {
-			t.Fatalf("want errWatermarkClosed or DeadlineExceeded, got %v", err)
+		if !errors.Is(err, errWatermarkClosed) {
+			t.Fatalf("WaitForOffset = %v, want errWatermarkClosed", err)
 		}
 	case <-time.After(500 * time.Millisecond):
 		t.Fatal("WaitForOffset remained blocked after Close")

@@ -55,7 +55,10 @@ func (r RecoverySetting) enabled() bool { return r == RecoveryEnabled }
 // Config holds per-stream configuration. All fields have sane defaults via
 // DefaultConfig(); override individual fields before passing to NewCoreStream.
 type Config struct {
-	// MaxInflight is the maximum number of unacknowledged records in the buffer.
+	// MaxInflight is the maximum number of unacknowledged buffer entries, not
+	// records: one Ingest or IngestBatch call occupies one entry regardless of
+	// how many records it carries. Total buffered bytes are bounded only by
+	// MaxInflight * MaxPayloadBytes.
 	MaxInflight int
 	// Recovery controls whether stream reconnection is attempted on failure. The
 	// zero value (RecoveryEnabled) recovers; set RecoveryDisabled to opt out.
