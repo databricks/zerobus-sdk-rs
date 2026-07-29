@@ -993,11 +993,17 @@ func TestIsRetryable(t *testing.T) {
 		// A server-sent Canceled status is not the caller's context.Canceled.
 		{name: "status canceled", err: status.Error(codes.Canceled, "server canceled"), want: true},
 		{name: "status resource exhausted", err: status.Error(codes.ResourceExhausted, "throttled"), want: true},
-		// A self-classifying wrapper still outranks the status code, which is why
-		// runOnce must not wrap a terminal cause in the first place. That
-		// invariant is covered by TestCoreStreamOpenTimeoutKeepsTerminalStatus.
+		// The outermost self-classifying error outranks both the status code and any
+		// classification beneath it, which is why runOnce must not wrap a cause that
+		// is already known to be permanent. TestCoreStreamOpenTimeoutKeepsTerminalStatus
+		// covers that for a terminal status and
+		// TestCoreStreamOpenTimeoutKeepsNonRetryableClassification for an error that
+		// carries no status at all.
 		{name: "open budget outranks wrapped status", err: &openBudgetExceeded{
 			cause: &openFailure{cause: status.Error(codes.InvalidArgument, "bad table")},
+		}, want: true},
+		{name: "open budget outranks wrapped classification", err: &openBudgetExceeded{
+			cause: &openFailure{cause: &classifiedError{retryable: false}},
 		}, want: true},
 	}
 	for _, tc := range tests {
@@ -1045,6 +1051,84 @@ func TestCoreStreamOpenTimeoutKeepsTerminalStatus(t *testing.T) {
 	if err := cs.terminalErr(); err == nil ||
 		!strings.Contains(err.Error(), "bad table name") {
 		t.Fatalf("terminal error = %v, want the InvalidArgument rejection", err)
+	}
+}
+
+// The same masking applies to a rejection that carries no gRPC status at all: an
+// OAuth TokenError is codes.Unknown, so IsTerminalStatus cannot see it and the
+// openBudgetExceeded wrapper outranked its own non-retryable classification,
+// re-requesting a rejected credential for the whole recovery budget.
+func TestCoreStreamOpenTimeoutKeepsNonRetryableClassification(t *testing.T) {
+	opener := &classifiedTimeoutOpener{err: &classifiedError{retryable: false}}
+	cfg := testConfig()
+	cfg.RecoveryRetries = 2
+	cfg.RecoveryTimeout = 10 * time.Millisecond
+	cfg.RecoveryBackoff = time.Millisecond
+	cs := newCoreForTest(testParams(), cfg, opener, nil)
+	t.Cleanup(func() { cs.Close() })
+
+	waitCondition(t, cs.IsClosed, time.Second)
+	if got := opener.attempts.Load(); got != 1 {
+		t.Fatalf("Open attempts = %d, want 1 (a self-classified rejection must not be retried)", got)
+	}
+	err := cs.terminalErr()
+	if err == nil || !strings.Contains(err.Error(), "classified error") {
+		t.Fatalf("terminal error = %v, want the provider rejection", err)
+	}
+	if strings.Contains(err.Error(), "open budget exceeded") {
+		t.Fatalf("terminal error = %v, want no budget wrapper over a classified rejection", err)
+	}
+}
+
+// The converse must keep working: an error that reports itself non-retryable only
+// because the open budget cut it short is the timeout openBudgetExceeded exists
+// for, so it must still be retried rather than killing the stream on one slow
+// token fetch.
+func TestCoreStreamOpenTimeoutRetriesDeadlineClassifiedError(t *testing.T) {
+	opener := &classifiedTimeoutOpener{err: &deadlineClassifiedError{}}
+	cfg := testConfig()
+	cfg.RecoveryRetries = 2
+	cfg.RecoveryTimeout = 10 * time.Millisecond
+	cfg.RecoveryBackoff = time.Millisecond
+	cs := newCoreForTest(testParams(), cfg, opener, nil)
+	t.Cleanup(func() { cs.Close() })
+
+	waitCondition(t, cs.IsClosed, time.Second)
+	if got := opener.attempts.Load(); got != 3 {
+		t.Fatalf("Open attempts = %d, want the initial attempt plus two retries", got)
+	}
+	if err := cs.terminalErr(); err == nil ||
+		!strings.Contains(err.Error(), "open budget exceeded") {
+		t.Fatalf("terminal error = %v, want open budget exhaustion", err)
+	}
+}
+
+func TestDeniesRetry(t *testing.T) {
+	tests := []struct {
+		name string
+		err  error
+		want bool
+	}{
+		{name: "nil", err: nil, want: false},
+		{name: "unclassified", err: errors.New("connection reset"), want: false},
+		{name: "classified retryable", err: &classifiedError{retryable: true}, want: false},
+		{name: "classified terminal", err: &classifiedError{retryable: false}, want: true},
+		{
+			name: "classified terminal when wrapped",
+			err:  fmt.Errorf("open: %w", &classifiedError{retryable: false}),
+			want: true,
+		},
+		// Non-retryable only because a deadline cut it short: still a timeout.
+		{name: "classified deadline", err: &deadlineClassifiedError{}, want: false},
+		{name: "bare deadline", err: context.DeadlineExceeded, want: false},
+		{name: "status rejection carries no classification", err: status.Error(codes.InvalidArgument, "bad"), want: false},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := deniesRetry(tc.err); got != tc.want {
+				t.Fatalf("deniesRetry(%v) = %v, want %v", tc.err, got, tc.want)
+			}
+		})
 	}
 }
 
@@ -1240,6 +1324,47 @@ func TestCoreStreamLiveAuthRejectionInvalidatesOnce(t *testing.T) {
 	waitCondition(t, cs.IsClosed, time.Second)
 	if got := provider.invalidations.Load(); got != 1 {
 		t.Fatalf("Invalidate calls = %d, want 1", got)
+	}
+}
+
+// gRPC reports a server-side abort to Send as an opaque io.EOF and puts the real
+// status on Recv. Taking the send error as the cause and discarding the receiver's
+// result made a permanent rejection look like a generic disconnect: the stream
+// reconnected with rejected credentials and resent the records.
+func TestCoreStreamSendEOFYieldsToReceiverStatus(t *testing.T) {
+	provider := &countingHeadersProvider{}
+	params := testParams()
+	params.HeadersProvider = provider
+	rpc := newEOFSendRPC()
+	opener := &eofSendOpener{rpc: rpc}
+	cfg := testConfig()
+	cfg.RecoveryRetries = 3
+	cfg.RecoveryBackoff = time.Millisecond
+	cs := newCoreForTest(params, cfg, opener, nil)
+	t.Cleanup(func() { cs.Close() })
+
+	if _, err := cs.Ingest(context.Background(), []byte(`{}`)); err != nil {
+		t.Fatalf("Ingest: %v", err)
+	}
+	// Recv stays parked until the status below, so the sender's io.EOF is
+	// necessarily the cause that ends the run — the case that used to be misread.
+	select {
+	case <-rpc.sendStarted:
+	case <-time.After(time.Second):
+		t.Fatal("Send did not run")
+	}
+	rpc.recvErr <- status.Error(codes.Unauthenticated, "credentials rejected")
+
+	waitCondition(t, cs.IsClosed, 2*time.Second)
+	err := cs.terminalErr()
+	if status.Code(err) != codes.Unauthenticated {
+		t.Fatalf("terminal error = %v, want the Unauthenticated status rather than the send EOF", err)
+	}
+	if got := provider.invalidations.Load(); got != 1 {
+		t.Fatalf("Invalidate calls = %d, want 1", got)
+	}
+	if got := opener.opens.Load(); got != 1 {
+		t.Fatalf("Open attempts = %d, want no reconnect after a permanent rejection", got)
 	}
 }
 

@@ -493,6 +493,40 @@ func (o *terminalRecvCountingOpener) Open(_ context.Context, _ transport.StreamP
 	return transport.NewFakeStreamForTesting(o.rpc), nil
 }
 
+// eofSendRPC models the stream a server terminated mid-send: Send fails with the
+// opaque io.EOF gRPC uses for a server-side abort, while the authoritative status
+// is delivered through Recv (via the embedded recvErr channel). sendStarted lets
+// a test order the two so the sender's exit is the one that ends the run.
+type eofSendRPC struct {
+	*terminalRecvRPC
+	sendStarted chan struct{}
+	startOnce   sync.Once
+}
+
+func newEOFSendRPC() *eofSendRPC {
+	return &eofSendRPC{
+		terminalRecvRPC: newTerminalRecvRPC(),
+		sendStarted:     make(chan struct{}),
+	}
+}
+
+func (f *eofSendRPC) Send(*zerobuspb.EphemeralStreamRequest) error {
+	f.startOnce.Do(func() { close(f.sendStarted) })
+	return io.EOF
+}
+
+type eofSendOpener struct {
+	rpc   *eofSendRPC
+	opens atomic.Int64
+}
+
+func (o *eofSendOpener) Open(_ context.Context, _ transport.StreamParams) (wireStream[encodedMsg, ephemeralResp], error) {
+	if o.opens.Add(1) > 1 {
+		return nil, fmt.Errorf("eofSendOpener: unexpected reconnect")
+	}
+	return transport.NewFakeStreamForTesting(o.rpc), nil
+}
+
 func durationPtr(d time.Duration) *time.Duration { return &d }
 
 type classifiedError struct {
@@ -501,6 +535,15 @@ type classifiedError struct {
 
 func (e *classifiedError) Error() string     { return "classified error" }
 func (e *classifiedError) IsRetryable() bool { return e.retryable }
+
+// deadlineClassifiedError models a provider error that reports itself
+// non-retryable only because a deadline cut it short — the shape an OAuth mint
+// takes when the open budget expires mid-request. It must still be retried.
+type deadlineClassifiedError struct{}
+
+func (*deadlineClassifiedError) Error() string     { return "classified deadline error" }
+func (*deadlineClassifiedError) IsRetryable() bool { return false }
+func (*deadlineClassifiedError) Unwrap() error     { return context.DeadlineExceeded }
 
 type concurrentEncoder struct {
 	jsonEncoder
@@ -550,6 +593,20 @@ func (o *terminalTimeoutOpener) Open(ctx context.Context, _ transport.StreamPara
 	o.attempts.Add(1)
 	<-ctx.Done()
 	return nil, status.Error(codes.InvalidArgument, "bad table name")
+}
+
+// classifiedTimeoutOpener reports a self-classifying failure at the moment the
+// open deadline expires, modelling a HeadersProvider rejection that carries no
+// gRPC status (an OAuth TokenError is codes.Unknown).
+type classifiedTimeoutOpener struct {
+	err      error
+	attempts atomic.Int64
+}
+
+func (o *classifiedTimeoutOpener) Open(ctx context.Context, _ transport.StreamParams) (wireStream[encodedMsg, ephemeralResp], error) {
+	o.attempts.Add(1)
+	<-ctx.Done()
+	return nil, o.err
 }
 
 // ---- recording ack callback ------------------------------------------------

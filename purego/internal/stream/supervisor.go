@@ -174,6 +174,22 @@ func isRetryable(err error) bool {
 	return true
 }
 
+// deniesRetry reports whether err already classifies itself as permanently
+// failed for a reason other than a deadline. A provider failure can be permanent
+// without carrying a terminal gRPC status — an OAuth TokenError for HTTP 401 is
+// codes.Unknown — and isRetryable consults the outermost classification, so
+// wrapping such an error as a retryable timeout would turn a rejected credential
+// into repeated token requests. An error that reports itself non-retryable only
+// because a deadline cut it short does not qualify: that is the timeout
+// openBudgetExceeded exists to retry.
+func deniesRetry(err error) bool {
+	var re retryableError
+	if !errors.As(err, &re) || re.IsRetryable() {
+		return false
+	}
+	return !errors.Is(err, context.DeadlineExceeded)
+}
+
 // validationError marks errors that are configuration/validation failures
 // rather than transient transport failures.
 type validationError struct{ cause error }

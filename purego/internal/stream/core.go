@@ -635,8 +635,10 @@ func (cs *CoreStream[Req, Resp]) runOnce(ctx context.Context) (cause error, rese
 			return wrapValidation(openErr), false
 		}
 		// A deadline that happens to expire alongside a permanent rejection must
-		// not promote it to retryable: the status still decides.
-		if openTimedOut && ctx.Err() == nil && !transport.IsTerminalStatus(err) {
+		// not promote it to retryable: the status, or the error's own
+		// classification, still decides.
+		if openTimedOut && ctx.Err() == nil &&
+			!transport.IsTerminalStatus(err) && !deniesRetry(err) {
 			return &openBudgetExceeded{cause: openErr}, false
 		}
 		return openErr, false
@@ -732,6 +734,25 @@ waitLoop:
 			<-receiverExitCh
 		}
 	default:
+		// gRPC reports a server-side abort to Send as an opaque io.EOF and carries
+		// the real status (auth, schema, protocol) on Recv, so an EOF cause is not
+		// authoritative yet. Let the receiver report first, bounded by DrainTimeout:
+		// the Close below would otherwise replace that status with a cancellation,
+		// leaving recovery to retry a permanent rejection and skip credential
+		// invalidation. A failed send does not end the receiver, so it is still
+		// reading and the server's status is what unblocks it.
+		if !receiverExited && errors.Is(cause, io.EOF) {
+			timer := time.NewTimer(cs.cfg.DrainTimeout)
+			select {
+			case receiverErr := <-receiverExitCh:
+				receiverExited = true
+				if receiverErr != nil && !errors.Is(receiverErr, context.Canceled) {
+					cause = receiverErr
+				}
+			case <-timer.C:
+			}
+			timer.Stop()
+		}
 		// Failure/recovery path: the stream is already broken, so hard-abort to
 		// unblock the receiver's Recv immediately.
 		stream.Close()
