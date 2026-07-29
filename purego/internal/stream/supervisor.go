@@ -33,6 +33,7 @@ func (cs *CoreStream[Req, Resp]) supervise(ctx context.Context) {
 
 	var err error
 	failedAttempts := 0
+	openedOnce := false
 	for {
 		if ctx.Err() != nil {
 			// Cancelled by Close — clean exit, no error.
@@ -86,14 +87,24 @@ func (cs *CoreStream[Req, Resp]) supervise(ctx context.Context) {
 		}
 
 		var openErr *openFailure
-		if !errors.As(runErr, &openErr) &&
+		isOpenFailure := errors.As(runErr, &openErr)
+		initialAuthRefresh := !openedOnce &&
+			failedAttempts == 0 &&
+			isOpenFailure &&
+			transport.IsAuthRejection(runErr) &&
+			cs.cfg.Recovery.enabled() &&
+			cs.cfg.RecoveryRetries > 0
+		if !isOpenFailure {
+			openedOnce = true
+		}
+		if !isOpenFailure &&
 			transport.IsAuthRejection(runErr) &&
 			cs.params.HeadersProvider != nil {
 			cs.params.HeadersProvider.Invalidate(ctx, cs.params.TableName)
 		}
 
 		err = runErr
-		if !isRetryable(runErr) {
+		if !isRetryable(runErr) && !initialAuthRefresh {
 			break
 		}
 		failedAttempts++

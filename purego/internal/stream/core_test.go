@@ -77,8 +77,8 @@ func TestCoreStreamIDsAreUnique(t *testing.T) {
 	cfg.Recovery = RecoveryDisabled
 	first := newCoreForTest(testParams(), cfg, &fakeOpener{openErr: errors.New("open failed")}, nil)
 	second := newCoreForTest(testParams(), cfg, &fakeOpener{openErr: errors.New("open failed")}, nil)
-	t.Cleanup(first.Close)
-	t.Cleanup(second.Close)
+	t.Cleanup(func() { first.Close() })
+	t.Cleanup(func() { second.Close() })
 
 	if first.ID() == second.ID() {
 		t.Fatalf("two streams received the same ID %q", first.ID())
@@ -211,8 +211,91 @@ func TestCoreStreamWaitForOffsetNoDeadlineStillTimesOut(t *testing.T) {
 func TestCoreStreamCloseIsIdempotent(t *testing.T) {
 	rpc := newFakeRPC()
 	cs := newTestStream(t, newFakeOpener(rpc))
-	cs.Close()
-	cs.Close() // must not panic or block
+	if err := cs.Close(); err != nil {
+		t.Fatalf("first Close: %v", err)
+	}
+	if err := cs.Close(); err != nil {
+		t.Fatalf("second Close: %v", err)
+	}
+}
+
+func TestCoreStreamCloseMemoizesFlushError(t *testing.T) {
+	rpc := newFakeRPC()
+	cfg := testConfig()
+	cfg.FlushTimeout = 25 * time.Millisecond
+	cs := newCoreForTest(testParams(), cfg, newFakeOpener(rpc), nil)
+
+	if _, err := cs.Ingest(context.Background(), []byte(`{}`)); err != nil {
+		t.Fatalf("Ingest: %v", err)
+	}
+	waitCondition(t, func() bool { return len(rpc.sends) == 1 }, time.Second)
+
+	firstErr := cs.Close()
+	if !errors.Is(firstErr, context.DeadlineExceeded) {
+		t.Fatalf("first Close error = %v, want DeadlineExceeded", firstErr)
+	}
+	if secondErr := cs.Close(); secondErr != firstErr {
+		t.Fatalf("second Close error = %v, want memoized %v", secondErr, firstErr)
+	}
+}
+
+func TestCoreStreamCloseLinearizesWithIngest(t *testing.T) {
+	rpc := newFakeRPC()
+	release := make(chan struct{})
+	enc := &blockingNthEncoder{
+		blockAt: 2,
+		entered: make(chan struct{}),
+		release: release,
+	}
+	cs := NewCoreStream[encodedMsg, ephemeralResp](
+		testParams(),
+		testConfig(),
+		newFakeOpener(rpc),
+		enc,
+		offsetAckModel{},
+		nil,
+	)
+
+	firstOffset, err := cs.Ingest(context.Background(), []byte(`{"first":true}`))
+	if err != nil {
+		t.Fatalf("first Ingest: %v", err)
+	}
+	waitCondition(t, func() bool { return len(rpc.sends) == 1 }, time.Second)
+	<-rpc.sends
+
+	ingestErr := make(chan error, 1)
+	go func() {
+		_, err := cs.Ingest(context.Background(), []byte(`{"second":true}`))
+		ingestErr <- err
+	}()
+	select {
+	case <-enc.entered:
+	case <-time.After(time.Second):
+		t.Fatal("second Ingest did not enter encoder")
+	}
+
+	closeDone := make(chan error, 1)
+	go func() { closeDone <- cs.Close() }()
+	waitCondition(t, func() bool {
+		cs.offsetMu.Lock()
+		defer cs.offsetMu.Unlock()
+		return cs.closing
+	}, time.Second)
+
+	close(release)
+	if err := <-ingestErr; !errors.Is(err, errClosed) {
+		t.Fatalf("concurrent Ingest error = %v, want errClosed", err)
+	}
+
+	rpc.ack(firstOffset)
+	select {
+	case err := <-closeDone:
+		if err != nil {
+			t.Fatalf("Close: %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("Close did not return after its captured target was acknowledged")
+	}
 }
 
 func TestCoreStreamCloseWaitsForFlushBeforeShutdown(t *testing.T) {
@@ -894,6 +977,56 @@ func TestCoreStreamOpenAuthRejectionInvalidatesOnce(t *testing.T) {
 	}
 }
 
+func TestCoreStreamInitialAuthRejectionRefreshesOnce(t *testing.T) {
+	provider := &countingHeadersProvider{}
+	params := testParams()
+	params.HeadersProvider = provider
+	opener := &authRefreshOpener{
+		provider:   provider,
+		rpc:        newFakeRPC(),
+		rejections: 1,
+	}
+	cfg := testConfig()
+	cfg.Recovery = RecoveryEnabled
+	cfg.RecoveryRetries = 3
+	cfg.RecoveryBackoff = time.Millisecond
+	cs := newCoreForTest(params, cfg, opener, nil)
+	t.Cleanup(func() { cs.Close() })
+
+	waitCondition(t, func() bool { return opener.openCount() == 2 }, time.Second)
+	if cs.IsClosed() {
+		t.Fatal("stream closed instead of retrying with refreshed credentials")
+	}
+	if got := provider.invalidations.Load(); got != 1 {
+		t.Fatalf("Invalidate calls = %d, want 1", got)
+	}
+}
+
+func TestCoreStreamSecondInitialAuthRejectionIsTerminal(t *testing.T) {
+	provider := &countingHeadersProvider{}
+	params := testParams()
+	params.HeadersProvider = provider
+	opener := &authRefreshOpener{
+		provider:   provider,
+		rpc:        newFakeRPC(),
+		rejections: 2,
+	}
+	cfg := testConfig()
+	cfg.Recovery = RecoveryEnabled
+	cfg.RecoveryRetries = 3
+	cfg.RecoveryBackoff = time.Millisecond
+	cs := newCoreForTest(params, cfg, opener, nil)
+
+	waitCondition(t, cs.IsClosed, time.Second)
+	if got := opener.openCount(); got != 2 {
+		t.Fatalf("Open attempts = %d, want 2", got)
+	}
+	if got := provider.invalidations.Load(); got != 2 {
+		t.Fatalf("Invalidate calls = %d, want one per rejection", got)
+	}
+	cs.Close()
+}
+
 func TestCoreStreamLiveAuthRejectionInvalidatesOnce(t *testing.T) {
 	provider := &countingHeadersProvider{}
 	params := testParams()
@@ -1333,6 +1466,31 @@ func TestCoreStreamPauseZeroCapReconnectsImmediately(t *testing.T) {
 
 	waitCondition(t, func() bool { return fo.openCount() == 2 }, time.Second)
 	_ = offset
+}
+
+func TestCoreStreamCopiesPauseCap(t *testing.T) {
+	rpc := newFakeRPC()
+	rpc2 := newFakeRPC()
+	fo := newFakeOpener(rpc, rpc2)
+	pauseCap := time.Duration(0)
+	cfg := testConfig()
+	cfg.FlushTimeout = 25 * time.Millisecond
+	cfg.StreamPausedMaxWait = &pauseCap
+	cs := newCoreForTest(testParams(), cfg, fo, nil)
+	t.Cleanup(func() { cs.Close() })
+
+	// Mutating the caller-owned config after construction must not affect the
+	// live stream's explicit-zero pause cap.
+	pauseCap = time.Hour
+
+	if _, err := cs.Ingest(context.Background(), []byte(`{}`)); err != nil {
+		t.Fatalf("Ingest: %v", err)
+	}
+	waitCondition(t, func() bool { return len(rpc.sends) == 1 }, time.Second)
+	<-rpc.sends
+	rpc.closeSignalWithDuration(time.Hour)
+
+	waitCondition(t, func() bool { return fo.openCount() == 2 }, time.Second)
 }
 
 func TestCoreStreamPauseHonorsRecoveryDisabled(t *testing.T) {

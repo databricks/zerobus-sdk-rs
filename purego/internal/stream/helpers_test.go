@@ -384,6 +384,33 @@ func (o *authRejectingOpener) Open(ctx context.Context, params transport.StreamP
 	return nil, status.Error(codes.Unauthenticated, "stale credentials")
 }
 
+// authRefreshOpener rejects a configured number of initial Open attempts,
+// modelling transport-owned credential invalidation, then succeeds.
+type authRefreshOpener struct {
+	mu         sync.Mutex
+	provider   *countingHeadersProvider
+	rpc        *fakeRPC
+	rejections int
+	attempts   int
+}
+
+func (o *authRefreshOpener) Open(ctx context.Context, params transport.StreamParams) (wireStream[encodedMsg, ephemeralResp], error) {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	o.attempts++
+	if o.attempts <= o.rejections {
+		o.provider.Invalidate(ctx, params.TableName)
+		return nil, status.Error(codes.Unauthenticated, "stale credentials")
+	}
+	return transport.NewFakeStreamForTesting(o.rpc), nil
+}
+
+func (o *authRefreshOpener) openCount() int {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	return o.attempts
+}
+
 type terminalRecvRPC struct {
 	*fakeRPC
 	recvErr chan error
@@ -442,6 +469,22 @@ type concurrentEncoder struct {
 func (e *concurrentEncoder) encode(offset int64, record []byte) (encodedMsg, error) {
 	e.entered <- struct{}{}
 	<-e.release
+	return e.jsonEncoder.encode(offset, record)
+}
+
+type blockingNthEncoder struct {
+	jsonEncoder
+	blockAt int64
+	calls   atomic.Int64
+	entered chan struct{}
+	release <-chan struct{}
+}
+
+func (e *blockingNthEncoder) encode(offset int64, record []byte) (encodedMsg, error) {
+	if e.calls.Add(1) == e.blockAt {
+		close(e.entered)
+		<-e.release
+	}
 	return e.jsonEncoder.encode(offset, record)
 }
 

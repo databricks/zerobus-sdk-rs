@@ -263,6 +263,9 @@ type CoreStream[Req, Resp any] struct {
 	offsetMu sync.Mutex
 	// nextOffset is the next logical offset to assign.
 	nextOffset int64
+	// closing prevents new items from being admitted once Close snapshots its
+	// durability target. It is protected by offsetMu.
+	closing bool
 	// lastEnqueued is the highest queued offset.
 	lastEnqueued atomic.Int64
 
@@ -274,6 +277,7 @@ type CoreStream[Req, Resp any] struct {
 	termMu          sync.Mutex
 
 	closeOnce sync.Once
+	closeErr  error
 	// cancelSupervisor cancels the supervisor's context so Close unblocks it.
 	cancelSupervisor context.CancelFunc
 }
@@ -306,6 +310,10 @@ func NewCoreStream[Req, Resp any](
 	callback AckCallback,
 ) *CoreStream[Req, Resp] {
 	cfg = sanitizeConfig(cfg)
+	if cfg.StreamPausedMaxWait != nil {
+		pauseCap := *cfg.StreamPausedMaxWait
+		cfg.StreamPausedMaxWait = &pauseCap
+	}
 	if len(params.DescriptorProto) > 0 {
 		params.DescriptorProto = bytes.Clone(params.DescriptorProto)
 	}
@@ -404,6 +412,12 @@ func (cs *CoreStream[Req, Resp]) enqueueEncoded(ctx context.Context, encodeFn fu
 		}
 		return 0, errClosed
 	}
+	cs.offsetMu.Lock()
+	closing := cs.closing
+	cs.offsetMu.Unlock()
+	if closing {
+		return 0, errClosed
+	}
 	if err := cs.buf.reserve(ctx); err != nil {
 		return 0, err
 	}
@@ -422,6 +436,11 @@ func (cs *CoreStream[Req, Resp]) enqueueEncoded(ctx context.Context, encodeFn fu
 	}
 
 	cs.offsetMu.Lock()
+	if cs.closing {
+		cs.offsetMu.Unlock()
+		cs.buf.release()
+		return 0, errClosed
+	}
 	offset := cs.nextOffset
 	cs.enc.stampOffset(msg, offset)
 	if err := cs.buf.append(offset, msg); err != nil {
@@ -442,6 +461,10 @@ func (cs *CoreStream[Req, Resp]) enqueueEncoded(ctx context.Context, encodeFn fu
 // caller context has no deadline.
 func (cs *CoreStream[Req, Resp]) Flush(ctx context.Context) error {
 	target := cs.lastEnqueued.Load()
+	return cs.flushThrough(ctx, target)
+}
+
+func (cs *CoreStream[Req, Resp]) flushThrough(ctx context.Context, target int64) error {
 	if target < 0 {
 		return nil // nothing successfully ingested yet
 	}
@@ -488,9 +511,10 @@ func (cs *CoreStream[Req, Resp]) GetUnacked() ([][]byte, error) {
 	return out, nil
 }
 
-// Close flushes pending records first, then terminates the stream and releases
-// its transport and buffer resources. It is idempotent and blocks until
-// lifecycle teardown completes.
+// Close stops admission, flushes every record admitted before the close
+// boundary, then terminates the stream and releases its transport and buffer
+// resources. It is idempotent, blocks until lifecycle teardown completes, and
+// returns the same durability result to every caller.
 // AckCallback delivery is asynchronous and may finish after Close returns.
 //
 // If flush cannot complete within FlushTimeout, Close proceeds with teardown and
@@ -499,13 +523,22 @@ func (cs *CoreStream[Req, Resp]) GetUnacked() ([][]byte, error) {
 // torn down gracefully (half-close, then drain any straggling acks to EOF,
 // bounded by DrainTimeout) so the server observes an orderly END_STREAM rather
 // than an abrupt reset; see gracefulTeardown.
-func (cs *CoreStream[Req, Resp]) Close() {
+func (cs *CoreStream[Req, Resp]) Close() error {
 	cs.closeOnce.Do(func() {
-		_ = cs.Flush(context.Background())
+		// Publish closing under the same lock used for the final admission
+		// check. Every successful Ingest is therefore either included in target
+		// or linearizes after this boundary and returns errClosed.
+		cs.offsetMu.Lock()
+		cs.closing = true
+		target := cs.lastEnqueued.Load()
+		cs.offsetMu.Unlock()
+
+		cs.closeErr = cs.flushThrough(context.Background(), target)
 		cs.cancelSupervisor()
 		cs.buf.close()
 		<-cs.done // wait for the supervisor to exit
 	})
+	return cs.closeErr
 }
 
 // IsClosed reports whether the stream has been closed or failed terminally.
