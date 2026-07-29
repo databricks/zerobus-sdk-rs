@@ -172,6 +172,10 @@ func (s *rawStream[Req, Resp]) gracefulClose(ctx context.Context) error {
 // outlives the call. teardown must cancel the RPC's context and is safe to call
 // more than once. Reusers (e.g. a future Arrow/Flight wireStream) must supply it.
 //
+// An hctx expiry always fails the handshake, but a terminal status the server
+// managed to send first is reported in place of hctx.Err(), so a rejection racing
+// the deadline still reaches the caller as a rejection.
+//
 // The hooks are protocol-specific: sendSetup writes the first message;
 // confirmReady validates the first response and returns the stream ID ("" if
 // none).
@@ -198,29 +202,39 @@ func (s *rawStream[Req, Resp]) handshake(
 		done <- recvResult{resp, err}
 	}()
 
-	var resp *Resp
+	var r recvResult
 	select {
 	case <-hctx.Done():
 		// Unblock recv, then wait so the goroutine can't outlive this call.
 		teardown()
-		r := <-done
-		if r.err != nil &&
-			!errors.Is(r.err, context.Canceled) &&
-			!errors.Is(r.err, context.DeadlineExceeded) &&
-			!errors.Is(r.err, io.EOF) &&
-			status.Code(r.err) != codes.Canceled &&
-			status.Code(r.err) != codes.DeadlineExceeded {
+		r = <-done
+	case r = <-done:
+	}
+
+	// An expired hctx always fails the handshake. Decide on hctx's state rather
+	// than on which case above won, because when both are ready select picks
+	// between them at random — keying off the winner would make the reported cause
+	// a coin flip.
+	if hctx.Err() != nil {
+		// The hctx branch above already tore down; this covers the recv branch, where
+		// the expiry landed a moment later. teardown tolerates repeat calls.
+		teardown()
+		// Cancelling the RPC makes recv report that cancellation instead of anything
+		// the server said, so such an outcome describes the expiry rather than a
+		// rejection. A terminal status the server did manage to send outranks
+		// hctx.Err(): Open keys credential invalidation on it, and the stream layer
+		// keys terminal-vs-transient recovery on it.
+		if r.err != nil && !isTeardownArtifact(r.err) {
 			return fmt.Errorf("await ready response: %w", r.err)
 		}
 		return fmt.Errorf("await ready response: %w", hctx.Err())
-	case r := <-done:
-		if r.err != nil {
-			return fmt.Errorf("await ready response: %w", r.err)
-		}
-		resp = r.resp
 	}
 
-	id, err := confirmReady(resp)
+	if r.err != nil {
+		return fmt.Errorf("await ready response: %w", r.err)
+	}
+
+	id, err := confirmReady(r.resp)
 	if err != nil {
 		return err
 	}
@@ -228,4 +242,21 @@ func (s *rawStream[Req, Resp]) handshake(
 		s.setID(id)
 	}
 	return nil
+}
+
+// isTeardownArtifact reports whether err describes the RPC being cancelled rather
+// than something the server said, in which case the expiry that triggered the
+// cancellation is the truer cause. The canceller may be handshake's own teardown
+// or a caller-side bridge onto the same context (as Conn.Open installs), so this
+// keys on the shape of the error, not on who cancelled. gRPC reports a cancelled
+// RPC context as codes.Canceled; a non-gRPC bidiRPC may surface a bare context
+// error instead, and EOF carries no status at all.
+func isTeardownArtifact(err error) bool {
+	switch status.Code(err) {
+	case codes.Canceled, codes.DeadlineExceeded:
+		return true
+	}
+	return errors.Is(err, context.Canceled) ||
+		errors.Is(err, context.DeadlineExceeded) ||
+		errors.Is(err, io.EOF)
 }
