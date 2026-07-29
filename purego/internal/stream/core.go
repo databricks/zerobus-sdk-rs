@@ -86,9 +86,10 @@ type Config struct {
 	// CallbackTeardownTimeout bounds asynchronous callback worker teardown.
 	CallbackTeardownTimeout time.Duration
 	// StreamPausedMaxWait caps how long the client honors a server-requested
-	// pause before reconnecting. Nil means no client cap (wait the full
-	// server-requested duration); a non-nil value caps the wait, and an explicit
-	// zero means reconnect immediately without honoring the pause duration.
+	// pause before reconnecting: the wait is min(StreamPausedMaxWait, server
+	// duration). Nil means no client cap (wait the full server-requested
+	// duration); an explicit zero means reconnect immediately. A pause carrying
+	// no duration reconnects immediately either way.
 	StreamPausedMaxWait *time.Duration
 }
 
@@ -674,10 +675,14 @@ waitLoop:
 		case receiverErr := <-receiverExitCh:
 			receiverExited = true
 			drainPause()
-			if observedPause != nil {
-				cause = *observedPause
-			} else {
+			// Whatever the receiver reported wins, so a real failure still
+			// consumes the recovery budget and reaches credential invalidation.
+			// An earlier pause only stands in for a clean exit, which is how a
+			// server EOF after a pause signal surfaces.
+			if receiverErr != nil || observedPause == nil {
 				cause = receiverErr
+			} else {
+				cause = *observedPause
 			}
 			break waitLoop
 		case ps := <-pauseCh:
@@ -870,8 +875,18 @@ func (cs *CoreStream[Req, Resp]) receiver(
 		}
 		lackTimerArmed = false
 	}
-	resetLackTimer := func() {
-		disarmLackTimer()
+	// syncLackTimer realigns the ack-silence budget with the in-flight set. Only
+	// durable progress restarts it: a stale or duplicate cumulative ack must not
+	// extend the budget, or a server repeating one offset could postpone recovery
+	// indefinitely while later offsets stay unacknowledged.
+	syncLackTimer := func(progressed bool) {
+		if cs.buf.inFlight() == 0 {
+			disarmLackTimer()
+			return
+		}
+		if progressed {
+			disarmLackTimer()
+		}
 		armLackTimer()
 	}
 	defer disarmLackTimer()
@@ -896,11 +911,7 @@ func (cs *CoreStream[Req, Resp]) receiver(
 	applyLogicalAck := func(offset int64) error {
 		current := cs.wm.current()
 		if offset <= current {
-			if cs.buf.inFlight() == 0 {
-				disarmLackTimer()
-			} else {
-				resetLackTimer()
-			}
+			syncLackTimer(false)
 			return nil
 		}
 		highest, ok := cs.buf.highestInFlight()
@@ -915,20 +926,16 @@ func (cs *CoreStream[Req, Resp]) receiver(
 			cs.wm.advance(discarded.last)
 			cs.dispatcher.enqueueAcks(discarded.first, discarded.last)
 		}
-		if cs.buf.inFlight() == 0 {
-			disarmLackTimer()
-			if pauseState != nil {
-				stopPauseTimer()
-				return *pauseState
-			}
-		} else {
-			resetLackTimer()
+		syncLackTimer(discarded.count > 0)
+		if cs.buf.inFlight() == 0 && pauseState != nil {
+			stopPauseTimer()
+			return *pauseState
 		}
 		return nil
 	}
 	applyPhysicalAck := func(offset int64) error {
-		resetLackTimer()
 		if offset <= lastAckedPhysical {
+			syncLackTimer(false)
 			return nil
 		}
 		index := offset - sentBasePhysical
@@ -1096,7 +1103,6 @@ func (cs *CoreStream[Req, Resp]) receiver(
 				}
 			}
 		sendsDrained:
-			resetLackTimer()
 			if sendingPhysical >= 0 && offset == sendingPhysical {
 				if offset > pendingPhysicalAck {
 					pendingPhysicalAck = offset
@@ -1115,10 +1121,11 @@ func (cs *CoreStream[Req, Resp]) receiver(
 
 func (cs *CoreStream[Req, Resp]) effectivePauseWait(serverDuration time.Duration) time.Duration {
 	wait := serverDuration
-	// An explicit cap (including zero) overrides the server duration when it is
-	// shorter; nil leaves the server-requested wait untouched.
-	if cap := cs.cfg.StreamPausedMaxWait; cap != nil && (wait <= 0 || *cap < wait) {
-		wait = *cap
+	// The cap is an upper bound only: min(cap, server duration). An unspecified
+	// server duration stays zero so the stream reconnects immediately, the same as
+	// with no cap set.
+	if maxWait := cs.cfg.StreamPausedMaxWait; maxWait != nil && *maxWait < wait {
+		wait = *maxWait
 	}
 	return wait
 }

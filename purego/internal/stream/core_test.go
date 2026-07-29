@@ -1582,6 +1582,53 @@ func TestCoreStreamPauseZeroCapReconnectsImmediately(t *testing.T) {
 	_ = offset
 }
 
+// StreamPausedMaxWait is an upper bound — min(cap, server duration) — so a pause
+// carrying no duration must reconnect immediately rather than wait out the cap.
+func TestCoreStreamPauseCapDoesNotExtendUnspecifiedDuration(t *testing.T) {
+	rpc := newFakeRPC()
+	fo := newFakeOpener(rpc, newFakeRPC())
+	cfg := testConfig()
+	cfg.StreamPausedMaxWait = durationPtr(time.Hour)
+	cfg.FlushTimeout = 25 * time.Millisecond // the record is never acked
+	cs := newCoreForTest(testParams(), cfg, fo, nil)
+	t.Cleanup(func() { cs.Close() })
+
+	if _, err := cs.Ingest(context.Background(), []byte(`{}`)); err != nil {
+		t.Fatalf("Ingest: %v", err)
+	}
+	waitCondition(t, func() bool { return len(rpc.sends) == 1 }, time.Second)
+	<-rpc.sends
+	// A record stays in flight, so the pause is not short-circuited as idle.
+	rpc.closeSignal() // no duration
+
+	waitCondition(t, func() bool { return fo.openCount() == 2 }, time.Second)
+}
+
+func TestEffectivePauseWaitCapsWithoutExtending(t *testing.T) {
+	hour := time.Hour
+	tests := []struct {
+		name    string
+		maxWait *time.Duration
+		server  time.Duration
+		want    time.Duration
+	}{
+		{name: "no cap honors server", server: time.Minute, want: time.Minute},
+		{name: "no cap unspecified", server: 0, want: 0},
+		{name: "cap shortens server", maxWait: durationPtr(time.Second), server: time.Minute, want: time.Second},
+		{name: "cap above server", maxWait: &hour, server: time.Minute, want: time.Minute},
+		{name: "cap does not extend unspecified", maxWait: &hour, server: 0, want: 0},
+		{name: "explicit zero cap", maxWait: durationPtr(0), server: time.Minute, want: 0},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			cs := &testStream{cfg: Config{StreamPausedMaxWait: tc.maxWait}}
+			if got := cs.effectivePauseWait(tc.server); got != tc.want {
+				t.Fatalf("effectivePauseWait(%v) = %v, want %v", tc.server, got, tc.want)
+			}
+		})
+	}
+}
+
 func TestCoreStreamCopiesPauseCap(t *testing.T) {
 	rpc := newFakeRPC()
 	rpc2 := newFakeRPC()
@@ -1644,6 +1691,62 @@ func TestCoreStreamPauseRemainsStickyAcrossEOF(t *testing.T) {
 	if err := cs.terminalErr(); err == nil ||
 		!strings.Contains(err.Error(), "server requested pause and recovery is disabled") {
 		t.Fatalf("terminal error = %v, want recovery-disabled pause", err)
+	}
+}
+
+// A real receiver failure after a pause must not be reported as the pause: it has
+// to surface to the caller and consume the recovery budget.
+func TestCoreStreamReceiverErrorAfterPauseWins(t *testing.T) {
+	rpc := newFakeRPC()
+	cfg := testConfig()
+	cfg.Recovery = RecoveryDisabled
+	cfg.StreamPausedMaxWait = durationPtr(2 * time.Second)
+	cs := newCoreForTest(testParams(), cfg, newFakeOpener(rpc), nil)
+	t.Cleanup(func() { cs.Close() })
+
+	if _, err := cs.Ingest(context.Background(), []byte(`{}`)); err != nil {
+		t.Fatalf("Ingest: %v", err)
+	}
+	waitCondition(t, func() bool { return len(rpc.sends) == 1 }, time.Second)
+	<-rpc.sends
+
+	rpc.closeSignalWithDuration(2 * time.Second)
+	rpc.malformedAck()
+
+	waitCondition(t, cs.IsClosed, 3*time.Second)
+	if err := cs.terminalErr(); err == nil ||
+		!strings.Contains(err.Error(), "unusable server response") {
+		t.Fatalf("terminal error = %v, want the protocol violation, not the pause", err)
+	}
+}
+
+// The same masking also bypassed credential invalidation, so a rejected cached
+// token could be reused indefinitely.
+func TestCoreStreamAuthRejectionAfterPauseInvalidates(t *testing.T) {
+	provider := &countingHeadersProvider{}
+	params := testParams()
+	params.HeadersProvider = provider
+	rpc := newTerminalRecvRPC()
+	cfg := testConfig()
+	cfg.StreamPausedMaxWait = durationPtr(2 * time.Second)
+	cs := newCoreForTest(params, cfg, &terminalRecvOpener{rpc: rpc}, nil)
+	t.Cleanup(func() { cs.Close() })
+
+	if _, err := cs.Ingest(context.Background(), []byte(`{}`)); err != nil {
+		t.Fatalf("Ingest: %v", err)
+	}
+	waitCondition(t, func() bool { return len(rpc.sends) == 1 }, time.Second)
+	<-rpc.sends
+
+	// Let the pause be consumed before injecting the rejection, so Recv does not
+	// pick between the two.
+	rpc.closeSignalWithDuration(2 * time.Second)
+	waitCondition(t, func() bool { return len(rpc.recvs) == 0 }, time.Second)
+	rpc.recvErr <- status.Error(codes.Unauthenticated, "credentials rejected")
+
+	waitCondition(t, cs.IsClosed, 2*time.Second)
+	if got := provider.invalidations.Load(); got != 1 {
+		t.Fatalf("Invalidate calls = %d, want 1", got)
 	}
 }
 
@@ -1727,6 +1830,57 @@ func TestCoreStreamLackOfAckBudgetStartsWithFlight(t *testing.T) {
 		t.Fatal("record inherited an almost-expired idle ack timer")
 	}
 	rpc.ack(offset)
+}
+
+// A cumulative ack legitimately repeats, so a stale one must not refresh the
+// ack-silence budget: otherwise a server re-sending one offset could postpone
+// recovery indefinitely while later offsets stay unacknowledged.
+func TestCoreStreamStaleAckDoesNotPostponeLackOfAck(t *testing.T) {
+	rpc := newGracefulFakeRPC()
+	cfg := testConfig()
+	cfg.Recovery = RecoveryDisabled
+	cfg.LackOfAckTimeout = 150 * time.Millisecond
+	cs := newCoreForTest(testParams(), cfg, &gracefulOpener{rpc: rpc}, nil)
+	t.Cleanup(func() { cs.Close() })
+
+	for range 3 {
+		if _, err := cs.Ingest(context.Background(), []byte(`{}`)); err != nil {
+			t.Fatalf("Ingest: %v", err)
+		}
+	}
+	waitCondition(t, func() bool { return len(rpc.sends) == 3 }, time.Second)
+	for range 3 {
+		<-rpc.sends
+	}
+
+	// Ack offset 0, then keep re-sending that same ack for longer than the wait
+	// below, so the teardown cannot be an artifact of the acks stopping. Offsets 1
+	// and 2 stay unacknowledged, so the budget must expire while acks still
+	// arrive. ack is a no-op once the stream has torn down.
+	rpc.ack(0)
+	stopAcks := make(chan struct{})
+	acksDone := make(chan struct{})
+	go func() {
+		defer close(acksDone)
+		for {
+			select {
+			case <-stopAcks:
+				return
+			case <-time.After(20 * time.Millisecond):
+				rpc.ack(0)
+			}
+		}
+	}()
+	t.Cleanup(func() {
+		close(stopAcks)
+		<-acksDone
+	})
+
+	waitCondition(t, cs.IsClosed, time.Second)
+	if err := cs.terminalErr(); err == nil ||
+		!strings.Contains(err.Error(), "no ack from server") {
+		t.Fatalf("terminal error = %v, want lack-of-ack teardown", err)
+	}
 }
 
 func TestCoreStreamRejectsOversizedPayloadWithoutConsumingOffset(t *testing.T) {
