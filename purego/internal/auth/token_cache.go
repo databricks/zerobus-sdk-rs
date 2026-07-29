@@ -6,6 +6,8 @@ import (
 	"errors"
 	"sync"
 	"time"
+
+	"github.com/databricks/zerobus-sdk/purego/internal/authctx"
 )
 
 // defaultRefreshBuffer is the lead time before a token's expiry at which the
@@ -22,6 +24,24 @@ type fetchedToken struct {
 	token      string
 	expiresIn  *time.Duration
 	receivedAt time.Time
+}
+
+func (f fetchedToken) expiredAt(now time.Time) bool {
+	if f.expiresIn == nil || *f.expiresIn <= 0 {
+		return false
+	}
+	receivedAt := f.receivedAt
+	if receivedAt.IsZero() {
+		receivedAt = now
+	}
+	return !now.Before(receivedAt.Add(*f.expiresIn))
+}
+
+func newExpiredOnArrivalError() *TokenError {
+	return &TokenError{
+		msg:       "minted token already expired on arrival",
+		retryable: true,
+	}
 }
 
 // mintReason is passed to the mint callback so it can distinguish a cold start
@@ -128,6 +148,11 @@ type tokenFlight struct {
 	done  chan struct{} // closed when the mint completes
 	token string        // resolved token (empty on error)
 	err   error         // resolved error (nil on success)
+	// leaderCanceled marks that the mint failed because the leader's own context
+	// was cancelled (not the SDK budget), stamped from the live context since the
+	// final error can't reveal a custom WithCancelCause cause on HTTP/1. Lets a
+	// live-ctx waiter re-attempt instead of inheriting a cancel it never made.
+	leaderCanceled bool
 }
 
 // tokenCache caches OAuth tokens per (clientID, secret, tableName, scope).
@@ -193,6 +218,9 @@ func (c *tokenCache) getOrFetch(
 		if err != nil {
 			return "", err
 		}
+		if fetched.expiredAt(time.Now()) {
+			return "", newExpiredOnArrivalError()
+		}
 		return fetched.token, nil
 	}
 
@@ -248,15 +276,11 @@ func (c *tokenCache) tryGetOrFetch(
 		entry.mu.Unlock()
 		select {
 		case <-flight.done:
-			// If the leader failed solely because its own caller cancelled its
-			// context, don't propagate that cancel to a waiter whose context is
-			// still live; signal a re-attempt so this caller can mint for itself.
-			//
-			// A leader mint that timed out on its own (a slow endpoint tripping a
-			// client/transport deadline) is reported retryable, not a cancellation,
-			// so it is excluded here: the waiter shares that one outcome instead of
-			// each re-minting, which is what single-flight is for.
-			if flight.err != nil && isContextError(flight.err) && !isRetryable(flight.err) && ctx.Err() == nil {
+			// The leader failed because its own caller cancelled: don't propagate
+			// that to a live-ctx waiter, signal a re-attempt instead. A leader that
+			// timed out on its own has leaderCanceled false, so waiters share that
+			// one outcome rather than each re-minting (the point of single-flight).
+			if flight.leaderCanceled && ctx.Err() == nil {
 				return "", nil, true
 			}
 			return flight.token, flight.err, false
@@ -290,9 +314,14 @@ func (c *tokenCache) tryGetOrFetch(
 			token, resErr = entry.cached.value, nil
 		}
 		// Publish to waiters: writes before close(done) happen-before <-done.
-		// A caller-cancellation error published here lets a live-ctx waiter
-		// re-attempt instead of inheriting a cancellation it never requested.
+		// Cancellation provenance was captured before synchronous logging, while
+		// the error and context still described the same event.
+		var tokenErr *TokenError
 		flight.token, flight.err = token, resErr
+		flight.leaderCanceled = resErr != nil &&
+			!isRetryable(resErr) &&
+			errors.As(resErr, &tokenErr) &&
+			tokenErr.callerCanceled
 		close(flight.done)
 		entry.mu.Unlock()
 		return token, resErr, false
@@ -303,12 +332,13 @@ func (c *tokenCache) tryGetOrFetch(
 	// Anchor the TTL to response receipt so post-receipt work (e.g. a custom
 	// logger) can't extend the cached lifetime. That same delay can consume a
 	// short TTL entirely, so a token can arrive already expired.
+	now := time.Now()
 	mintedAt := fetched.receivedAt
 	if mintedAt.IsZero() {
-		mintedAt = time.Now()
+		mintedAt = now
 	}
 	usableTTL := fetched.expiresIn != nil && *fetched.expiresIn > 0
-	alreadyExpired := usableTTL && !time.Now().Before(mintedAt.Add(*fetched.expiresIn))
+	alreadyExpired := fetched.expiredAt(now)
 	keepExisting := entry.cached != nil && !entry.cached.isExpired()
 	switch {
 	case usableTTL && !alreadyExpired:
@@ -317,6 +347,17 @@ func (c *tokenCache) tryGetOrFetch(
 		// Dead mint but a still-valid token is cached: serve the cached one so
 		// the caller doesn't get a token we already know is expired.
 		token = entry.cached.value
+	case alreadyExpired:
+		// Expired on arrival with nothing valid to fall back on: don't hand the
+		// caller a token we already know is dead behind a nil error — it would
+		// surface later as an opaque server-side auth rejection. Fail here, where
+		// the cause is known. Retryable, since the next cold mint may succeed.
+		entry.cached = nil
+		err := newExpiredOnArrivalError()
+		flight.token, flight.err = "", err
+		close(flight.done)
+		entry.mu.Unlock()
+		return "", err, false
 	case !keepExisting:
 		entry.cached = nil
 	}
@@ -328,27 +369,27 @@ func (c *tokenCache) tryGetOrFetch(
 	return token, nil, false
 }
 
-// isContextError reports whether err is (or wraps) a context cancellation or
-// deadline. This alone does not say where the cancellation came from: an
-// http.Client.Timeout or transport deadline surfaces as a wrapped context error
-// just as a caller's own cancellation does. Use [isCallerCancellation] to tell
-// the two apart when the request context is in hand.
+// isContextError reports whether err is (or wraps) a standard context cancel or
+// deadline. It sees only the standard sentinels, not a custom WithTimeoutCause /
+// WithCancelCause cause, so use it only where ctx is known live (to spot a
+// client/transport timeout). To tell caller cancel from the SDK budget, use
+// [isCallerCancellation], which reads the context instead.
 func isContextError(err error) bool {
 	return errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded)
 }
 
-// isCallerCancellation reports whether err is a context error that originated
-// from the caller stopping, not from the request or an SDK-internal budget.
-// Only such failures are non-retryable; a client/transport timeout or a
-// WithTimeoutCause budget stays retryable so a cached token can be served.
-// When ctx is done, context.Cause tells the caller's own cancel/deadline (plain
-// context.Canceled/DeadlineExceeded) apart from an intermediate budget cause.
-func isCallerCancellation(ctx context.Context, err error) bool {
-	if !isContextError(err) || ctx.Err() == nil {
+// isCallerCancellation reports whether ctx finished because the caller stopped,
+// as opposed to the SDK's own header-resolution budget (which stays retryable).
+//
+// Provenance comes from context.Cause, not the error's shape: on HTTP/1 the
+// transport wraps a custom cause into the error, so a shape check misses the
+// budget. The budget (authctx.ErrHeadersBudgetExceeded) is the one non-caller
+// cause; everything else is the caller stopping.
+func isCallerCancellation(ctx context.Context) bool {
+	if ctx.Err() == nil {
 		return false
 	}
-	cause := context.Cause(ctx)
-	return cause == context.Canceled || cause == context.DeadlineExceeded
+	return context.Cause(ctx) != authctx.ErrHeadersBudgetExceeded
 }
 
 // invalidate drops the cached token for the given credentials, table, and

@@ -8,12 +8,15 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"github.com/databricks/zerobus-sdk/purego/internal/authctx"
 )
 
 // errHeadersBudgetExceeded tags the internal header-resolution budget (see
 // defaultHeadersTimeout) so a HeadersProvider can distinguish the SDK's own
-// budget firing from a caller-owned cancel via context.Cause.
-var errHeadersBudgetExceeded = errors.New("transport: open header budget exceeded")
+// budget firing from a caller-owned cancel via context.Cause. It aliases the
+// shared authctx sentinel so the auth layer matches the same value.
+var errHeadersBudgetExceeded = authctx.ErrHeadersBudgetExceeded
 
 // defaultHeadersTimeout bounds header resolution during Open when the caller's
 // context has no deadline. A var so tests can shrink it via export_test.go;

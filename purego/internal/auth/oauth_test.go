@@ -12,6 +12,8 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/databricks/zerobus-sdk/purego/internal/authctx"
 )
 
 // tokenServer is a minimal OAuth 2.0 token endpoint stub.
@@ -21,6 +23,51 @@ type tokenServer struct {
 	rawExpires  string // when non-empty, emitted verbatim as expires_in (overrides expiresIn)
 	statusCode  int    // 0 defaults to 200
 	calls       atomic.Int32
+}
+
+type ctxDoneErrRoundTripper struct {
+	err error
+}
+
+func (rt ctxDoneErrRoundTripper) RoundTrip(req *http.Request) (*http.Response, error) {
+	<-req.Context().Done()
+	return nil, rt.err
+}
+
+type blockingLogHandler struct {
+	entered     chan struct{}
+	release     chan struct{}
+	enteredOnce sync.Once
+	releaseOnce sync.Once
+}
+
+func newBlockingLogHandler() *blockingLogHandler {
+	return &blockingLogHandler{
+		entered: make(chan struct{}),
+		release: make(chan struct{}),
+	}
+}
+
+func (h *blockingLogHandler) Enabled(context.Context, slog.Level) bool {
+	return true
+}
+
+func (h *blockingLogHandler) Handle(context.Context, slog.Record) error {
+	h.enteredOnce.Do(func() { close(h.entered) })
+	<-h.release
+	return nil
+}
+
+func (h *blockingLogHandler) WithAttrs([]slog.Attr) slog.Handler {
+	return h
+}
+
+func (h *blockingLogHandler) WithGroup(string) slog.Handler {
+	return h
+}
+
+func (h *blockingLogHandler) unblock() {
+	h.releaseOnce.Do(func() { close(h.release) })
 }
 
 func (s *tokenServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -133,6 +180,75 @@ func TestOAuthTokenProvider4xxIsNonRetryable(t *testing.T) {
 	var te *TokenError
 	if !asTokenError(err, &te) || te.IsRetryable() {
 		t.Fatalf("want non-retryable TokenError, got %T (retryable=%v): %v", err, te != nil && te.IsRetryable(), err)
+	}
+}
+
+// A redirect from the token endpoint must not be followed: Go re-sends the
+// client credentials on a same-host redirect without re-checking the scheme, so
+// following an https→http redirect would leak them in the clear. The mint must
+// instead fail on the redirect status via the normal error path.
+func TestOAuthTokenProviderDoesNotFollowSameHostRedirect(t *testing.T) {
+	var followed atomic.Bool
+	mux := http.NewServeMux()
+	// The credential-leaking target: reaching it means the redirect was followed.
+	mux.HandleFunc("/leak", func(w http.ResponseWriter, r *http.Request) {
+		followed.Store(true)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"access_token":"leaked","expires_in":3600}`))
+	})
+	mux.HandleFunc("/oidc/v1/token", func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, "/leak", http.StatusFound)
+	})
+	ts := httptest.NewServer(mux)
+	defer ts.Close()
+
+	p, err := NewOAuthTokenProvider("id", "secret", "https://ws.zerobus.databricks.com", ts.URL,
+		WithHTTPClient(ts.Client()),
+	)
+	if err != nil {
+		t.Fatalf("NewOAuthTokenProvider: %v", err)
+	}
+
+	tok, err := p.Token(context.Background(), "c.s.t")
+	if err == nil {
+		t.Fatalf("want error on redirect, got token %q", tok)
+	}
+	if followed.Load() {
+		t.Fatal("redirect was followed; credentials would be re-sent to the redirect target")
+	}
+	var te *TokenError
+	if !asTokenError(err, &te) {
+		t.Fatalf("want TokenError from the redirect status, got %T: %v", err, err)
+	}
+}
+
+// A cross-host redirect must likewise not be followed.
+func TestOAuthTokenProviderDoesNotFollowCrossHostRedirect(t *testing.T) {
+	var reached atomic.Bool
+	other := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		reached.Store(true)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"access_token":"leaked","expires_in":3600}`))
+	}))
+	defer other.Close()
+
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, other.URL+"/oidc/v1/token", http.StatusFound)
+	}))
+	defer ts.Close()
+
+	p, err := NewOAuthTokenProvider("id", "secret", "https://ws.zerobus.databricks.com", ts.URL,
+		WithHTTPClient(ts.Client()),
+	)
+	if err != nil {
+		t.Fatalf("NewOAuthTokenProvider: %v", err)
+	}
+
+	if tok, err := p.Token(context.Background(), "c.s.t"); err == nil {
+		t.Fatalf("want error on cross-host redirect, got token %q", tok)
+	}
+	if reached.Load() {
+		t.Fatal("cross-host redirect was followed")
 	}
 }
 
@@ -271,6 +387,272 @@ func TestOAuthTokenProviderClientTimeoutRefreshServesCachedToken(t *testing.T) {
 	}
 	if tok != "cached-valid" {
 		t.Fatalf("want cached token served, got %q", tok)
+	}
+}
+
+func TestOAuthTokenProviderHeaderBudgetRefreshServesCachedTokenHTTP1(t *testing.T) {
+	// Over HTTP/1.1, a refresh whose context trips the SDK header budget must be
+	// retryable so the still-valid cached token is served. HTTP/1 wraps the budget
+	// cause into the error, not context.DeadlineExceeded, so classification must
+	// read the context — otherwise the budget is missed and the refresh fails.
+	unblock := make(chan struct{})
+	hang := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		select {
+		case <-unblock:
+		case <-r.Context().Done():
+		}
+	}))
+	defer hang.Close()   // executed second: server is now idle
+	defer close(unblock) // executed first: unblocks the handler
+
+	p, err := NewOAuthTokenProvider("id", "secret", "https://ws.zerobus.databricks.com", hang.URL,
+		WithHTTPClient(hang.Client()),
+	)
+	if err != nil {
+		t.Fatalf("NewOAuthTokenProvider: %v", err)
+	}
+	// Still-valid-but-refresh-due token, so the mint runs and its budget can fire.
+	seedRefreshable(p.cache, "id", "secret", "c.s.t", p.cacheScope(), "cached-valid")
+
+	ctx, cancel := context.WithTimeoutCause(context.Background(), 50*time.Millisecond, authctx.ErrHeadersBudgetExceeded)
+	defer cancel()
+
+	tok, err := p.Token(ctx, "c.s.t")
+	if err != nil {
+		t.Fatalf("want fallback to cached token on header-budget refresh, got error: %v", err)
+	}
+	if tok != "cached-valid" {
+		t.Fatalf("want cached token served, got %q", tok)
+	}
+}
+
+func TestOAuthTokenProviderDecodeTimeoutRefreshServesCachedToken(t *testing.T) {
+	unblock := make(chan struct{})
+	partial := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		// Valid prefix + stalled body: decode blocks on read.
+		_, _ = w.Write([]byte(`{"access_token":"tok","expires_in":`))
+		if f, ok := w.(http.Flusher); ok {
+			f.Flush()
+		}
+		select {
+		case <-unblock:
+		case <-r.Context().Done():
+		}
+	}))
+	defer partial.Close()
+	defer close(unblock)
+
+	t.Run("client timeout", func(t *testing.T) {
+		client := partial.Client()
+		client.Timeout = 50 * time.Millisecond
+		p, err := NewOAuthTokenProvider(
+			"id", "secret", "https://ws.zerobus.databricks.com", partial.URL,
+			WithHTTPClient(client),
+		)
+		if err != nil {
+			t.Fatalf("NewOAuthTokenProvider: %v", err)
+		}
+		seedRefreshable(p.cache, "id", "secret", "c.s.t", p.cacheScope(), "cached-valid")
+		tok, err := p.Token(context.Background(), "c.s.t")
+		if err != nil {
+			t.Fatalf("want fallback to cached token on decode timeout, got: %v", err)
+		}
+		if tok != "cached-valid" {
+			t.Fatalf("want cached token served, got %q", tok)
+		}
+	})
+
+	t.Run("headers budget timeoutcause", func(t *testing.T) {
+		p, err := NewOAuthTokenProvider(
+			"id", "secret", "https://ws.zerobus.databricks.com", partial.URL,
+			WithHTTPClient(partial.Client()),
+		)
+		if err != nil {
+			t.Fatalf("NewOAuthTokenProvider: %v", err)
+		}
+		seedRefreshable(p.cache, "id", "secret", "c.s.t", p.cacheScope(), "cached-valid")
+		ctx, cancel := context.WithTimeoutCause(
+			context.Background(), 50*time.Millisecond, authctx.ErrHeadersBudgetExceeded,
+		)
+		defer cancel()
+		tok, err := p.Token(ctx, "c.s.t")
+		if err != nil {
+			t.Fatalf("want fallback to cached token on budget decode timeout, got: %v", err)
+		}
+		if tok != "cached-valid" {
+			t.Fatalf("want cached token served, got %q", tok)
+		}
+	})
+}
+
+func TestOAuthTokenProviderBudgetCtxDoesNotMaskPermanentTransportError(t *testing.T) {
+	permanent := errors.New("permanent transport configuration error")
+	client := &http.Client{Transport: ctxDoneErrRoundTripper{err: permanent}}
+
+	p, err := NewOAuthTokenProvider(
+		"id", "secret", "https://ws.zerobus.databricks.com", "https://workspace.databricks.com",
+		WithHTTPClient(client),
+	)
+	if err != nil {
+		t.Fatalf("NewOAuthTokenProvider: %v", err)
+	}
+	seedRefreshable(p.cache, "id", "secret", "c.s.t", p.cacheScope(), "cached-valid")
+
+	ctx, cancel := context.WithTimeoutCause(
+		context.Background(), 50*time.Millisecond, authctx.ErrHeadersBudgetExceeded,
+	)
+	defer cancel()
+	tok, err := p.Token(ctx, "c.s.t")
+	if err == nil {
+		t.Fatalf("want error, got cached token %q", tok)
+	}
+	if tok != "" {
+		t.Fatalf("want empty token on permanent transport error, got %q", tok)
+	}
+	if !errors.Is(err, permanent) {
+		t.Fatalf("want wrapped permanent transport error, got: %v", err)
+	}
+	var te *TokenError
+	if !errors.As(err, &te) || te.IsRetryable() {
+		t.Fatalf("want non-retryable TokenError, got %T (retryable=%v): %v",
+			err, te != nil && te.IsRetryable(), err)
+	}
+}
+
+func TestOAuthTokenProviderWaiterRemintsWhenLeaderCancelCauseHTTP1(t *testing.T) {
+	// Over HTTP/1.1, a leader cancelled via WithCancelCause (a custom cause) must
+	// not poison a live waiter on its single-flight mint. HTTP/1 wraps the custom
+	// cause into the error, not context.Canceled, so the re-attempt decision must
+	// come from the leader's context (leaderCanceled), not the error's shape.
+	leaderArrived := make(chan struct{})
+	unblock := make(chan struct{}) // frees the parked leader handler at teardown
+	var leaderSeen, waiterSeen atomic.Bool
+	srv := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// First request is the leader: park until its context is cancelled (or
+		// teardown). The waiter's later re-mint is served a token.
+		if leaderSeen.CompareAndSwap(false, true) {
+			close(leaderArrived)
+			select {
+			case <-r.Context().Done():
+			case <-unblock:
+			}
+			return
+		}
+		waiterSeen.Store(true)
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{"access_token": "waiter-tok", "expires_in": 3600})
+	})
+	ts := httptest.NewServer(srv)
+	defer ts.Close()     // executed second: server is now idle
+	defer close(unblock) // executed first: frees the parked leader handler
+
+	p, err := NewOAuthTokenProvider("id", "secret", "https://ws.zerobus.databricks.com", ts.URL,
+		WithHTTPClient(ts.Client()),
+	)
+	if err != nil {
+		t.Fatalf("NewOAuthTokenProvider: %v", err)
+	}
+
+	// Leader mints under a cancel-cause context and parks in the handler.
+	leaderCtx, cancelLeader := context.WithCancelCause(context.Background())
+	leaderDone := make(chan struct{})
+	go func() {
+		defer close(leaderDone)
+		_, _ = p.Token(leaderCtx, "c.s.t")
+	}()
+
+	<-leaderArrived // leader holds the in-flight slot
+
+	// Waiter with a healthy context parks on the leader's flight.
+	waiterCtx := newObservedDoneContext(t)
+	waiterTok := make(chan string, 1)
+	waiterErr := make(chan error, 1)
+	go func() {
+		tok, err := p.Token(waiterCtx, "c.s.t")
+		waiterErr <- err
+		waiterTok <- tok
+	}()
+
+	awaitSignal(t, waiterCtx.observed, "waiter flight join")
+	cancelLeader(errors.New("caller gave up with a reason")) // custom cause, not the budget
+
+	<-leaderDone
+	if err := <-waiterErr; err != nil {
+		t.Fatalf("live waiter should not inherit leader's custom-cause cancel, got %v", err)
+	}
+	if tok := <-waiterTok; tok != "waiter-tok" {
+		t.Fatalf("waiter should have re-minted its own token, got %q", tok)
+	}
+	if !waiterSeen.Load() {
+		t.Fatal("waiter never issued its own mint request; it inherited the leader's outcome")
+	}
+}
+
+func TestOAuthTokenProviderWaiterShares401WhenLeaderCancelsDuringLogging(t *testing.T) {
+	srv := &tokenServer{statusCode: http.StatusUnauthorized}
+	ts := httptest.NewServer(srv)
+	defer ts.Close()
+
+	handler := newBlockingLogHandler()
+	defer handler.unblock()
+	p, err := NewOAuthTokenProvider("id", "secret", "https://ws.zerobus.databricks.com", ts.URL,
+		WithHTTPClient(ts.Client()),
+		WithLogger(slog.New(handler)),
+	)
+	if err != nil {
+		t.Fatalf("NewOAuthTokenProvider: %v", err)
+	}
+
+	type result struct {
+		token string
+		err   error
+	}
+
+	leaderCtx, cancelLeader := context.WithCancelCause(context.Background())
+	leaderResult := make(chan result, 1)
+	go func() {
+		token, err := p.Token(leaderCtx, "c.s.t")
+		leaderResult <- result{token: token, err: err}
+	}()
+	awaitSignal(t, handler.entered, "leader error log")
+
+	waiterCtx := newObservedDoneContext(t)
+	waiterResult := make(chan result, 1)
+	go func() {
+		token, err := p.Token(waiterCtx, "c.s.t")
+		waiterResult <- result{token: token, err: err}
+	}()
+	awaitSignal(t, waiterCtx.observed, "waiter flight join")
+
+	cancelLeader(errors.New("cancelled after server response"))
+	handler.unblock()
+
+	awaitResult := func(name string, ch <-chan result) result {
+		t.Helper()
+		select {
+		case got := <-ch:
+			return got
+		case <-time.After(2 * time.Second):
+			t.Fatalf("timed out waiting for %s result", name)
+			return result{}
+		}
+	}
+	leader := awaitResult("leader", leaderResult)
+	waiter := awaitResult("waiter", waiterResult)
+	for name, got := range map[string]result{"leader": leader, "waiter": waiter} {
+		if got.token != "" {
+			t.Errorf("%s token = %q, want empty", name, got.token)
+		}
+		var tokenErr *TokenError
+		if !errors.As(got.err, &tokenErr) || tokenErr.IsRetryable() ||
+			!strings.Contains(got.err.Error(), "HTTP 401") {
+			t.Errorf("%s error = %v, want shared non-retryable HTTP 401", name, got.err)
+		}
+	}
+	if calls := srv.calls.Load(); calls != 1 {
+		t.Fatalf("HTTP requests = %d, want 1 shared request", calls)
 	}
 }
 
@@ -433,27 +815,29 @@ func TestTokenErrorUnwrapsContextCancellation(t *testing.T) {
 	}
 }
 
-// isCallerCancellation must classify only the caller's own cancel/deadline as
-// caller cancellation. An SDK-internal budget wrapping a live caller context via
-// WithTimeoutCause carries a custom cause, so it is a request/budget timeout —
-// retryable — not the caller giving up.
+// isCallerCancellation must classify the SDK's own header-resolution budget as
+// the sole non-caller cause and treat everything else — plain cancel/deadline
+// and a caller-supplied custom cause via WithCancelCause alike — as the caller
+// giving up. Only the budget stays retryable so a cached token can be served.
 func TestIsCallerCancellationDistinguishesBudgetFromCaller(t *testing.T) {
 	// Caller cancelled their own context.
 	cancelledCtx, cancel := context.WithCancel(context.Background())
 	cancel()
-	if !isCallerCancellation(cancelledCtx, context.Canceled) {
+	if !isCallerCancellation(cancelledCtx) {
 		t.Error("caller cancel must be classified as caller cancellation")
 	}
 
-	// SDK-internal budget with a custom cause over a still-live caller context.
-	budgetCause := errors.New("open budget exceeded")
-	budgetCtx, cancelBudget := context.WithTimeoutCause(context.Background(), time.Nanosecond, budgetCause)
+	// The SDK-internal header budget, tagged with the shared sentinel, over a
+	// still-live caller context. This is the one cause that is NOT the caller.
+	budgetCtx, cancelBudget := context.WithTimeoutCause(context.Background(), time.Nanosecond, authctx.ErrHeadersBudgetExceeded)
 	defer cancelBudget()
 	<-budgetCtx.Done() // budget fires; underlying caller context never cancelled
-	if isCallerCancellation(budgetCtx, context.DeadlineExceeded) {
+	if isCallerCancellation(budgetCtx) {
 		t.Error("internal budget timeout must NOT be classified as caller cancellation")
 	}
-	if !isRetryableTransportError(budgetCtx, context.DeadlineExceeded) {
+	// The transport error carries the budget cause, not a standard context
+	// sentinel — mirroring HTTP/1, where classification must read the context.
+	if !isRetryableTransportError(budgetCtx, context.Cause(budgetCtx)) {
 		t.Error("internal budget timeout must be retryable so a cached token can be served")
 	}
 
@@ -461,9 +845,82 @@ func TestIsCallerCancellationDistinguishesBudgetFromCaller(t *testing.T) {
 	deadlineCtx, cancelDeadline := context.WithTimeout(context.Background(), time.Nanosecond)
 	defer cancelDeadline()
 	<-deadlineCtx.Done()
-	if !isCallerCancellation(deadlineCtx, context.DeadlineExceeded) {
+	if !isCallerCancellation(deadlineCtx) {
 		t.Error("caller's own deadline must be classified as caller cancellation")
 	}
+
+	// A caller cancelling via WithCancelCause supplies a custom cause. It must
+	// still be honored as a caller cancellation (not misread as a retryable
+	// budget timeout) so we stop as asked instead of serving a cached token.
+	causeCtx, cancelCause := context.WithCancelCause(context.Background())
+	cancelCause(errors.New("caller gave up with a reason"))
+	if !isCallerCancellation(causeCtx) {
+		t.Error("WithCancelCause cancellation must be classified as caller cancellation")
+	}
+	if isRetryableTransportError(causeCtx, context.Cause(causeCtx)) {
+		t.Error("WithCancelCause cancellation must not be retryable")
+	}
+}
+
+func TestMarkCallerCancellationRequiresMatchingCause(t *testing.T) {
+	t.Run("custom cause", func(t *testing.T) {
+		ctx, cancel := context.WithCancelCause(context.Background())
+		cause := errors.New("caller stopped")
+		cancel(cause)
+		tokenErr := &TokenError{cause: cause}
+
+		markCallerCancellation(ctx, tokenErr)
+
+		if !tokenErr.callerCanceled {
+			t.Fatal("matching custom cause was not recorded")
+		}
+	})
+
+	t.Run("standard cancellation", func(t *testing.T) {
+		ctx, cancel := context.WithCancel(context.Background())
+		cancel()
+		tokenErr := &TokenError{cause: context.Canceled}
+
+		markCallerCancellation(ctx, tokenErr)
+
+		if !tokenErr.callerCanceled {
+			t.Fatal("matching standard cancellation was not recorded")
+		}
+	})
+
+	t.Run("unrelated error after cancellation", func(t *testing.T) {
+		ctx, cancel := context.WithCancel(context.Background())
+		cancel()
+		tokenErr := &TokenError{msg: "HTTP 401"}
+
+		markCallerCancellation(ctx, tokenErr)
+
+		if tokenErr.callerCanceled {
+			t.Fatal("unrelated error was attributed to caller cancellation")
+		}
+	})
+
+	t.Run("internal budget", func(t *testing.T) {
+		ctx, cancel := context.WithCancelCause(context.Background())
+		cancel(authctx.ErrHeadersBudgetExceeded)
+		tokenErr := &TokenError{cause: authctx.ErrHeadersBudgetExceeded}
+
+		markCallerCancellation(ctx, tokenErr)
+
+		if tokenErr.callerCanceled {
+			t.Fatal("internal budget was attributed to caller cancellation")
+		}
+	})
+
+	t.Run("live context", func(t *testing.T) {
+		tokenErr := &TokenError{cause: context.DeadlineExceeded}
+
+		markCallerCancellation(context.Background(), tokenErr)
+
+		if tokenErr.callerCanceled {
+			t.Fatal("live context was attributed to caller cancellation")
+		}
+	})
 }
 
 func TestOAuthTokenProviderNilOptionsKeepDefaults(t *testing.T) {
@@ -752,6 +1209,85 @@ func TestOAuthTokenProviderCacheDisabledAlwaysMints(t *testing.T) {
 	}
 	if got := srv.calls.Load(); got != 2 {
 		t.Fatalf("want 2 server calls with caching disabled, got %d", got)
+	}
+}
+
+func TestOAuthTokenProviderUncachedPathsRejectTokenExpiredDuringLogging(t *testing.T) {
+	tests := []struct {
+		name         string
+		direct       bool
+		disableCache bool
+	}{
+		{name: "cache disabled", disableCache: true},
+		{name: "direct fetch", direct: true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			srv := &tokenServer{accessToken: "short-lived", expiresIn: 1}
+			ts := httptest.NewServer(srv)
+			defer ts.Close()
+
+			handler := newBlockingLogHandler()
+			defer handler.unblock()
+			opts := []OAuthOption{
+				WithHTTPClient(ts.Client()),
+				WithLogger(slog.New(handler)),
+			}
+			if tt.disableCache {
+				opts = append(opts, WithTokenCacheEnabled(false))
+			}
+			p, err := NewOAuthTokenProvider(
+				"id",
+				"secret",
+				"https://ws.zerobus.databricks.com",
+				ts.URL,
+				opts...,
+			)
+			if err != nil {
+				t.Fatalf("NewOAuthTokenProvider: %v", err)
+			}
+
+			type result struct {
+				token string
+				err   error
+			}
+			resultCh := make(chan result, 1)
+			go func() {
+				var token string
+				var err error
+				if tt.direct {
+					token, err = p.FetchToken(context.Background(), "c.s.t")
+				} else {
+					token, err = p.Token(context.Background(), "c.s.t")
+				}
+				resultCh <- result{token: token, err: err}
+			}()
+
+			awaitSignal(t, handler.entered, "success log")
+			timer := time.NewTimer(1200 * time.Millisecond)
+			<-timer.C
+			handler.unblock()
+
+			var got result
+			select {
+			case got = <-resultCh:
+			case <-time.After(2 * time.Second):
+				t.Fatal("timed out waiting for token result")
+			}
+			if got.token != "" {
+				t.Fatalf("expired token = %q, want empty", got.token)
+			}
+			var tokenErr *TokenError
+			if !errors.As(got.err, &tokenErr) || !tokenErr.IsRetryable() {
+				t.Fatalf("error = %v, want retryable TokenError", got.err)
+			}
+			if calls := srv.calls.Load(); calls != 1 {
+				t.Fatalf("HTTP requests = %d, want 1", calls)
+			}
+		})
 	}
 }
 
