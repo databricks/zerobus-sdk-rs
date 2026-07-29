@@ -978,51 +978,165 @@ func TestCoreStreamOpenAuthRejectionInvalidatesOnce(t *testing.T) {
 }
 
 func TestCoreStreamInitialAuthRejectionRefreshesOnce(t *testing.T) {
+	for _, code := range []codes.Code{codes.Unauthenticated, codes.PermissionDenied} {
+		t.Run(code.String(), func(t *testing.T) {
+			provider := &countingHeadersProvider{}
+			params := testParams()
+			params.HeadersProvider = provider
+			opener := &authRefreshOpener{
+				provider:   provider,
+				rpc:        newFakeRPC(),
+				rejections: 1,
+				code:       code,
+			}
+			cfg := testConfig()
+			cfg.Recovery = RecoveryEnabled
+			cfg.RecoveryRetries = 3
+			cfg.RecoveryBackoff = time.Millisecond
+			cs := newCoreForTest(params, cfg, opener, nil)
+			t.Cleanup(func() { cs.Close() })
+
+			waitCondition(t, func() bool { return opener.openCount() == 2 }, time.Second)
+			if cs.IsClosed() {
+				t.Fatal("stream closed instead of retrying with refreshed credentials")
+			}
+			if got := provider.invalidations.Load(); got != 1 {
+				t.Fatalf("Invalidate calls = %d, want 1", got)
+			}
+		})
+	}
+}
+
+func TestCoreStreamSecondInitialAuthRejectionIsTerminal(t *testing.T) {
+	for _, code := range []codes.Code{codes.Unauthenticated, codes.PermissionDenied} {
+		t.Run(code.String(), func(t *testing.T) {
+			provider := &countingHeadersProvider{}
+			params := testParams()
+			params.HeadersProvider = provider
+			opener := &authRefreshOpener{
+				provider:   provider,
+				rpc:        newFakeRPC(),
+				rejections: 2,
+				code:       code,
+			}
+			cfg := testConfig()
+			cfg.Recovery = RecoveryEnabled
+			cfg.RecoveryRetries = 3
+			cfg.RecoveryBackoff = time.Millisecond
+			cs := newCoreForTest(params, cfg, opener, nil)
+
+			waitCondition(t, cs.IsClosed, time.Second)
+			if got := opener.openCount(); got != 2 {
+				t.Fatalf("Open attempts = %d, want 2", got)
+			}
+			if got := provider.invalidations.Load(); got != 2 {
+				t.Fatalf("Invalidate calls = %d, want one per rejection", got)
+			}
+			cs.Close()
+		})
+	}
+}
+
+func TestCoreStreamInitialAuthRefreshAfterTransientOpenFailure(t *testing.T) {
 	provider := &countingHeadersProvider{}
 	params := testParams()
 	params.HeadersProvider = provider
-	opener := &authRefreshOpener{
-		provider:   provider,
-		rpc:        newFakeRPC(),
-		rejections: 1,
+	opener := &scriptedOpenOpener{
+		provider: provider,
+		steps: []openStep{
+			{err: errors.New("temporary connection failure")},
+			{err: status.Error(codes.Unauthenticated, "stale credentials")},
+			{rpc: newFakeRPC()},
+		},
 	}
 	cfg := testConfig()
-	cfg.Recovery = RecoveryEnabled
 	cfg.RecoveryRetries = 3
 	cfg.RecoveryBackoff = time.Millisecond
 	cs := newCoreForTest(params, cfg, opener, nil)
 	t.Cleanup(func() { cs.Close() })
 
-	waitCondition(t, func() bool { return opener.openCount() == 2 }, time.Second)
+	waitCondition(t, func() bool { return opener.openCount() == 3 }, time.Second)
 	if cs.IsClosed() {
-		t.Fatal("stream closed instead of retrying with refreshed credentials")
+		t.Fatal("stream closed instead of trying refreshed credentials")
 	}
 	if got := provider.invalidations.Load(); got != 1 {
 		t.Fatalf("Invalidate calls = %d, want 1", got)
 	}
 }
 
-func TestCoreStreamSecondInitialAuthRejectionIsTerminal(t *testing.T) {
+func TestCoreStreamInitialAuthRefreshConsumesRetryBudget(t *testing.T) {
 	provider := &countingHeadersProvider{}
 	params := testParams()
 	params.HeadersProvider = provider
-	opener := &authRefreshOpener{
-		provider:   provider,
-		rpc:        newFakeRPC(),
-		rejections: 2,
+	opener := &scriptedOpenOpener{
+		provider: provider,
+		steps: []openStep{
+			{err: status.Error(codes.Unauthenticated, "stale credentials")},
+			{err: errors.New("first transient failure")},
+			{err: errors.New("second transient failure")},
+			{rpc: newFakeRPC()},
+		},
 	}
 	cfg := testConfig()
-	cfg.Recovery = RecoveryEnabled
-	cfg.RecoveryRetries = 3
+	cfg.RecoveryRetries = 2
 	cfg.RecoveryBackoff = time.Millisecond
 	cs := newCoreForTest(params, cfg, opener, nil)
 
 	waitCondition(t, cs.IsClosed, time.Second)
-	if got := opener.openCount(); got != 2 {
-		t.Fatalf("Open attempts = %d, want 2", got)
+	if got := opener.openCount(); got != 3 {
+		t.Fatalf("Open attempts = %d, want initial attempt plus two retries", got)
 	}
-	if got := provider.invalidations.Load(); got != 2 {
-		t.Fatalf("Invalidate calls = %d, want one per rejection", got)
+	if got := provider.invalidations.Load(); got != 1 {
+		t.Fatalf("Invalidate calls = %d, want 1", got)
+	}
+	cs.Close()
+}
+
+func TestCoreStreamAuthRejectionWithoutProviderIsTerminal(t *testing.T) {
+	opener := &scriptedOpenOpener{
+		steps: []openStep{
+			{err: status.Error(codes.Unauthenticated, "credentials rejected")},
+			{rpc: newFakeRPC()},
+		},
+	}
+	cfg := testConfig()
+	cfg.RecoveryRetries = 3
+	cfg.RecoveryBackoff = time.Millisecond
+	cs := newCoreForTest(testParams(), cfg, opener, nil)
+
+	waitCondition(t, cs.IsClosed, time.Second)
+	if got := opener.openCount(); got != 1 {
+		t.Fatalf("Open attempts = %d, want 1 without a refreshable provider", got)
+	}
+	cs.Close()
+}
+
+func TestCoreStreamAuthRejectionAfterPauseIsTerminal(t *testing.T) {
+	provider := &countingHeadersProvider{}
+	params := testParams()
+	params.HeadersProvider = provider
+	rpc := newFakeRPC()
+	opener := &scriptedOpenOpener{
+		provider: provider,
+		steps: []openStep{
+			{rpc: rpc},
+			{err: status.Error(codes.Unauthenticated, "reconnect credentials rejected")},
+			{rpc: newFakeRPC()},
+		},
+	}
+	cfg := testConfig()
+	cfg.RecoveryRetries = 3
+	cfg.RecoveryBackoff = time.Millisecond
+	cs := newCoreForTest(params, cfg, opener, nil)
+
+	waitCondition(t, func() bool { return opener.openCount() == 1 }, time.Second)
+	rpc.closeSignal()
+	waitCondition(t, cs.IsClosed, time.Second)
+	if got := opener.openCount(); got != 2 {
+		t.Fatalf("Open attempts = %d, want pause reconnect plus terminal auth rejection", got)
+	}
+	if got := provider.invalidations.Load(); got != 1 {
+		t.Fatalf("Invalidate calls = %d, want 1", got)
 	}
 	cs.Close()
 }

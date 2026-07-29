@@ -34,6 +34,7 @@ func (cs *CoreStream[Req, Resp]) supervise(ctx context.Context) {
 	var err error
 	failedAttempts := 0
 	openedOnce := false
+	initialAuthRefreshUsed := false
 	for {
 		if ctx.Err() != nil {
 			// Cancelled by Close — clean exit, no error.
@@ -69,6 +70,10 @@ func (cs *CoreStream[Req, Resp]) supervise(ctx context.Context) {
 		// Pauses do not consume the retry budget.
 		var ps pauseSignal
 		if errors.As(runErr, &ps) {
+			// A pause can only come from an established stream. Authentication
+			// failures on the following Open are therefore reconnect failures,
+			// not candidates for the one initial credential refresh.
+			openedOnce = true
 			if !cs.cfg.Recovery.enabled() {
 				err = fmt.Errorf(
 					"stream: server requested pause and recovery is disabled: %w",
@@ -89,11 +94,15 @@ func (cs *CoreStream[Req, Resp]) supervise(ctx context.Context) {
 		var openErr *openFailure
 		isOpenFailure := errors.As(runErr, &openErr)
 		initialAuthRefresh := !openedOnce &&
-			failedAttempts == 0 &&
+			!initialAuthRefreshUsed &&
 			isOpenFailure &&
 			transport.IsAuthRejection(runErr) &&
+			cs.params.HeadersProvider != nil &&
 			cs.cfg.Recovery.enabled() &&
-			cs.cfg.RecoveryRetries > 0
+			failedAttempts < cs.cfg.RecoveryRetries
+		if initialAuthRefresh {
+			initialAuthRefreshUsed = true
+		}
 		if !isOpenFailure {
 			openedOnce = true
 		}

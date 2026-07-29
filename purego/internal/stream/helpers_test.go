@@ -392,6 +392,7 @@ type authRefreshOpener struct {
 	rpc        *fakeRPC
 	rejections int
 	attempts   int
+	code       codes.Code
 }
 
 func (o *authRefreshOpener) Open(ctx context.Context, params transport.StreamParams) (wireStream[encodedMsg, ephemeralResp], error) {
@@ -400,12 +401,53 @@ func (o *authRefreshOpener) Open(ctx context.Context, params transport.StreamPar
 	o.attempts++
 	if o.attempts <= o.rejections {
 		o.provider.Invalidate(ctx, params.TableName)
-		return nil, status.Error(codes.Unauthenticated, "stale credentials")
+		code := o.code
+		if code == codes.OK {
+			code = codes.Unauthenticated
+		}
+		return nil, status.Error(code, "stale credentials")
 	}
 	return transport.NewFakeStreamForTesting(o.rpc), nil
 }
 
 func (o *authRefreshOpener) openCount() int {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	return o.attempts
+}
+
+type openStep struct {
+	rpc *fakeRPC
+	err error
+}
+
+// scriptedOpenOpener returns one result per Open. It models transport-owned
+// invalidation when a handshake result rejects authentication.
+type scriptedOpenOpener struct {
+	mu       sync.Mutex
+	provider *countingHeadersProvider
+	steps    []openStep
+	attempts int
+}
+
+func (o *scriptedOpenOpener) Open(ctx context.Context, params transport.StreamParams) (wireStream[encodedMsg, ephemeralResp], error) {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	o.attempts++
+	if o.attempts > len(o.steps) {
+		return nil, fmt.Errorf("scriptedOpenOpener: no result for attempt %d", o.attempts)
+	}
+	step := o.steps[o.attempts-1]
+	if step.err != nil {
+		if o.provider != nil && transport.IsAuthRejection(step.err) {
+			o.provider.Invalidate(ctx, params.TableName)
+		}
+		return nil, step.err
+	}
+	return transport.NewFakeStreamForTesting(step.rpc), nil
+}
+
+func (o *scriptedOpenOpener) openCount() int {
 	o.mu.Lock()
 	defer o.mu.Unlock()
 	return o.attempts
