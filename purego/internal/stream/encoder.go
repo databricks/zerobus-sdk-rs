@@ -99,9 +99,6 @@ func (protoEncoder) stampOffset(msg encodedMsg, offset int64) {
 type jsonEncoder struct{}
 
 func (jsonEncoder) encode(offset int64, record []byte) (encodedMsg, error) {
-	if len(record) == 0 {
-		return nil, fmt.Errorf("stream: json record must not be empty")
-	}
 	return &zerobuspb.EphemeralStreamRequest{
 		Payload: &zerobuspb.EphemeralStreamRequest_IngestRecord{
 			IngestRecord: &zerobuspb.IngestRecordRequest{
@@ -118,9 +115,6 @@ func (jsonEncoder) encodeBatch(offset int64, records [][]byte) (encodedMsg, erro
 	}
 	jsonRecords := make([]string, len(records))
 	for i, r := range records {
-		if len(r) == 0 {
-			return nil, fmt.Errorf("stream: json batch record %d must not be empty", i)
-		}
 		jsonRecords[i] = string(r)
 	}
 	return &zerobuspb.EphemeralStreamRequest{
@@ -182,10 +176,10 @@ func extractEphemeralRecords(msg encodedMsg) [][]byte {
 	}
 	if ir := msg.GetIngestRecord(); ir != nil {
 		// Switch on oneof type, not nil: an empty proto record must not be read
-		// as JSON.
+		// as JSON. Clone so callers (GetUnacked) never alias the retained payload.
 		switch r := ir.GetRecord().(type) {
 		case *zerobuspb.IngestRecordRequest_ProtoEncodedRecord:
-			return [][]byte{r.ProtoEncodedRecord}
+			return [][]byte{bytes.Clone(r.ProtoEncodedRecord)}
 		case *zerobuspb.IngestRecordRequest_JsonRecord:
 			return [][]byte{[]byte(r.JsonRecord)}
 		}
@@ -193,7 +187,12 @@ func extractEphemeralRecords(msg encodedMsg) [][]byte {
 	}
 	if ib := msg.GetIngestRecordBatch(); ib != nil {
 		if pb := ib.GetProtoEncodedBatch(); pb != nil {
-			return pb.GetRecords()
+			recs := pb.GetRecords()
+			out := make([][]byte, len(recs))
+			for i, r := range recs {
+				out[i] = bytes.Clone(r)
+			}
+			return out
 		}
 		if jb := ib.GetJsonBatch(); jb != nil {
 			recs := jb.GetRecords()

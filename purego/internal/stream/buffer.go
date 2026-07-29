@@ -1,9 +1,12 @@
 // Package stream is the generic ingestion core: offset assignment, send/recv
 // goroutines, ack watermark, Flush/WaitForOffset, and the recovery supervisor.
 // Protocol-specific behaviour (encoding, ack parsing, wire transport) is
-// injected through the encoder, ackModel, and wireStream interfaces, so the
-// core is written once and instantiated per wire protocol (proto/JSON today,
-// Arrow Flight later) without editing this package's core logic.
+// injected through the encoder, ackModel, and wireStream interfaces, so
+// proto and JSON share one implementation.
+//
+// Arrow Flight will reuse these seams but not unchanged: buffer entries carry no
+// record count, and recovery replays whole entries, so a partially acknowledged
+// batch cannot be sliced. Both are core changes, not encoder changes.
 package stream
 
 import (
@@ -22,6 +25,12 @@ const defaultMaxInflight = 1_000_000
 type item[Req any] struct {
 	offset  int64
 	payload Req
+}
+
+type discardResult struct {
+	first int64
+	last  int64
+	count int
 }
 
 // buffer is the bounded, offset-assigning queue between the caller's Ingest
@@ -75,30 +84,31 @@ func (b *buffer[Req]) closeDone() {
 	b.doneOnce.Do(func() { close(b.doneCh) })
 }
 
-// enqueue adds an already-encoded message to the pending queue, blocking until
-// a slot is available (backpressure) or ctx is cancelled. The offset must be
-// monotonically increasing; the caller (coreStream) is responsible for that.
-// Returns ctx.Err() if ctx fires before a slot opens.
-func (b *buffer[Req]) enqueue(ctx context.Context, offset int64, msg Req) error {
-	// Honor an already-cancelled ctx first: select picks randomly among ready
-	// cases, so a free slot could otherwise mask cancellation.
+// reserve acquires one backpressure slot.
+func (b *buffer[Req]) reserve(ctx context.Context) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	// Acquire a slot before touching the queue so callers block here rather than
-	// inside the mutex. ctx cancellation wakes up the select immediately.
 	select {
 	case b.sem <- struct{}{}:
+		return nil
 	case <-ctx.Done():
 		return ctx.Err()
 	case <-b.doneCh:
 		return errClosed
 	}
+}
 
+func (b *buffer[Req]) release() {
+	<-b.sem
+}
+
+// append adds an item after reserve succeeds.
+func (b *buffer[Req]) append(offset int64, msg Req) error {
 	b.mu.Lock()
 	if b.closed {
 		b.mu.Unlock()
-		<-b.sem // release the slot we just took
+		b.release()
 		return errClosed
 	}
 	b.queue = append(b.queue, item[Req]{offset: offset, payload: msg})
@@ -156,23 +166,28 @@ func (b *buffer[Req]) next(ctx context.Context) (item[Req], error) {
 // now acknowledged by the server) and releases one semaphore slot per removed
 // item so blocked enqueue callers can proceed. It is the sender/receiver's only
 // hook for ack-driven eviction, keeping the buffer's internals (flight, sem,
-// cond) private. Returns the number of items discarded.
-func (b *buffer[Req]) discardThrough(offset int64) int {
+// cond) private. Returns the contiguous discarded offset range without
+// allocating per-item callback metadata.
+func (b *buffer[Req]) discardThrough(offset int64) discardResult {
 	b.mu.Lock()
-	n := 0
+	var result discardResult
 	for len(b.flight) > 0 && b.flight[0].offset <= offset {
+		if result.count == 0 {
+			result.first = b.flight[0].offset
+		}
+		result.last = b.flight[0].offset
+		result.count++
 		b.flight[0] = item[Req]{} // release the acked payload for GC
 		b.flight = b.flight[1:]
-		n++
 	}
 	b.mu.Unlock()
-	for range n {
+	for range result.count {
 		<-b.sem
 	}
-	if n > 0 {
+	if result.count > 0 {
 		b.cond.Broadcast()
 	}
-	return n
+	return result
 }
 
 // requeue moves all in-flight items back to the front of the pending queue so
@@ -180,6 +195,9 @@ func (b *buffer[Req]) discardThrough(offset int64) int {
 func (b *buffer[Req]) requeue() {
 	b.mu.Lock()
 	defer b.mu.Unlock()
+	if len(b.flight) == 0 {
+		return
+	}
 	// Prepend in-flight items (in order) before any still-pending ones.
 	requeued := make([]item[Req], 0, len(b.flight)+len(b.queue))
 	requeued = append(requeued, b.flight...)
@@ -192,6 +210,18 @@ func (b *buffer[Req]) requeue() {
 	}
 	b.flight = b.flight[:0]
 	b.cond.Broadcast()
+}
+
+// highestInFlight returns the greatest offset the sender has observed on the
+// current connection. Pending records are deliberately excluded: the server
+// cannot legitimately acknowledge work that has not entered the send path.
+func (b *buffer[Req]) highestInFlight() (int64, bool) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if len(b.flight) == 0 {
+		return 0, false
+	}
+	return b.flight[len(b.flight)-1].offset, true
 }
 
 // drain returns all items currently in the buffer (pending + in-flight) and
@@ -215,7 +245,7 @@ func (b *buffer[Req]) drain() []item[Req] {
 	return all
 }
 
-// close marks the buffer closed and wakes any blocked next or enqueue calls.
+// close marks the buffer closed and wakes blocked operations.
 // Pending items are not discarded — drain must be called to retrieve them.
 func (b *buffer[Req]) close() {
 	b.mu.Lock()
@@ -223,13 +253,6 @@ func (b *buffer[Req]) close() {
 	b.mu.Unlock()
 	b.cond.Broadcast()
 	b.closeDone()
-}
-
-// len returns the total number of items in the buffer (pending + in-flight).
-func (b *buffer[Req]) len() int {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	return len(b.queue) + len(b.flight)
 }
 
 // inFlight returns the number of items observed by the sender but not yet
