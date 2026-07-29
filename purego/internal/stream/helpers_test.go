@@ -540,6 +540,18 @@ func (o *timeoutOpener) Open(ctx context.Context, _ transport.StreamParams) (wir
 	return nil, ctx.Err()
 }
 
+// terminalTimeoutOpener reports a permanent rejection at the moment the open
+// deadline expires, so both the timeout and the status describe the same failure.
+type terminalTimeoutOpener struct {
+	attempts atomic.Int64
+}
+
+func (o *terminalTimeoutOpener) Open(ctx context.Context, _ transport.StreamParams) (wireStream[encodedMsg, ephemeralResp], error) {
+	o.attempts.Add(1)
+	<-ctx.Done()
+	return nil, status.Error(codes.InvalidArgument, "bad table name")
+}
+
 // ---- recording ack callback ------------------------------------------------
 
 type recordingCallback struct {

@@ -77,7 +77,9 @@ func (d *callbackDispatcher) invoke(event callbackEvent) {
 	d.callback.OnError(event.offset, event.err)
 }
 
-// enqueueAcks queues and coalesces acknowledged offsets.
+// enqueueAcks queues and coalesces acknowledged offsets. Coalescing a range into
+// its predecessor assumes dense offsets: run dispatches every offset in
+// [first, last], so a gap would fabricate callbacks for offsets never ingested.
 func (d *callbackDispatcher) enqueueAcks(first, last int64) {
 	if d == nil || first > last {
 		return

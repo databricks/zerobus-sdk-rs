@@ -44,7 +44,10 @@ func (e *openFailure) Error() string { return e.cause.Error() }
 
 func (e *openFailure) Unwrap() error { return e.cause }
 
-// openBudgetExceeded marks a timed-out Open as retryable.
+// openBudgetExceeded marks a timed-out Open as retryable. Because isRetryable
+// consults self-classifying errors before the status code, only wrap causes that
+// carry no terminal status; otherwise a permanent rejection racing the deadline
+// would be retried for the full budget.
 type openBudgetExceeded struct{ cause error }
 
 func (e *openBudgetExceeded) Error() string {

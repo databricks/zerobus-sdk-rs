@@ -480,6 +480,57 @@ func TestCoreStreamGetUnackedRepeatable(t *testing.T) {
 	}
 }
 
+// Replaying unacked records requires knowing which of them shared an offset,
+// since the server acks a batch atomically. GetUnackedBatches keeps that
+// grouping; GetUnacked is its flattening.
+func TestCoreStreamGetUnackedBatchesPreservesGrouping(t *testing.T) {
+	rpc := newFakeRPC()
+	cs := newCoreForTest(testParams(), testConfig(), newFakeOpener(rpc), nil)
+	single := []byte(`{"a":1}`)
+	batch := [][]byte{[]byte(`{"b":2}`), []byte(`{"c":3}`)}
+	if _, err := cs.Ingest(context.Background(), single); err != nil {
+		t.Fatalf("Ingest: %v", err)
+	}
+	if _, err := cs.IngestBatch(context.Background(), batch); err != nil {
+		t.Fatalf("IngestBatch: %v", err)
+	}
+	cs.Close()
+
+	groups, err := cs.GetUnackedBatches()
+	if err != nil {
+		t.Fatalf("GetUnackedBatches: %v", err)
+	}
+	want := [][][]byte{{single}, batch}
+	equalGroups := slices.EqualFunc(groups, want, func(got, exp [][]byte) bool {
+		return slices.EqualFunc(got, exp, bytes.Equal)
+	})
+	if !equalGroups {
+		t.Fatalf("GetUnackedBatches = %q, want %q", groups, want)
+	}
+
+	flat, err := cs.GetUnacked()
+	if err != nil {
+		t.Fatalf("GetUnacked: %v", err)
+	}
+	wantFlat := [][]byte{single, batch[0], batch[1]}
+	if !slices.EqualFunc(flat, wantFlat, bytes.Equal) {
+		t.Fatalf("GetUnacked = %q, want %q", flat, wantFlat)
+	}
+
+	// The grouped view clones too, so a caller mutating it cannot corrupt the
+	// retained payloads that a later replay reads.
+	for i := range groups[0][0] {
+		groups[0][0][i] = 'X'
+	}
+	again, err := cs.GetUnackedBatches()
+	if err != nil {
+		t.Fatalf("second GetUnackedBatches: %v", err)
+	}
+	if !bytes.Equal(again[0][0], single) {
+		t.Fatalf("second GetUnackedBatches = %q, want original %q", again[0][0], single)
+	}
+}
+
 func TestCoreStreamConcurrentIngest(t *testing.T) {
 	rpc := newFakeRPC()
 	cs := newTestStream(t, newFakeOpener(rpc))
@@ -936,6 +987,18 @@ func TestIsRetryable(t *testing.T) {
 		{name: "status not found", err: status.Error(codes.NotFound, "gone"), want: false},
 		{name: "status wrapped invalid argument", err: fmt.Errorf("recv: %w", status.Error(codes.InvalidArgument, "bad")), want: false},
 		{name: "status unavailable", err: status.Error(codes.Unavailable, "try later"), want: true},
+		// Terminal here but retryable in the Rust core; pinned so the divergence
+		// cannot change silently.
+		{name: "status failed precondition", err: status.Error(codes.FailedPrecondition, "schema changed"), want: false},
+		// A server-sent Canceled status is not the caller's context.Canceled.
+		{name: "status canceled", err: status.Error(codes.Canceled, "server canceled"), want: true},
+		{name: "status resource exhausted", err: status.Error(codes.ResourceExhausted, "throttled"), want: true},
+		// A self-classifying wrapper still outranks the status code, which is why
+		// runOnce must not wrap a terminal cause in the first place. That
+		// invariant is covered by TestCoreStreamOpenTimeoutKeepsTerminalStatus.
+		{name: "open budget outranks wrapped status", err: &openBudgetExceeded{
+			cause: &openFailure{cause: status.Error(codes.InvalidArgument, "bad table")},
+		}, want: true},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -960,6 +1023,28 @@ func TestCoreStreamRetriesOpenTimeout(t *testing.T) {
 	}
 	if err := cs.terminalErr(); err == nil || !strings.Contains(err.Error(), "open budget exceeded") {
 		t.Fatalf("terminal error = %v, want open budget exhaustion", err)
+	}
+}
+
+// An Open that returns a permanent rejection just as its deadline expires must
+// stay terminal. Wrapping it as openBudgetExceeded made it self-classify as
+// retryable, so a bad table name burned the whole recovery budget.
+func TestCoreStreamOpenTimeoutKeepsTerminalStatus(t *testing.T) {
+	opener := &terminalTimeoutOpener{}
+	cfg := testConfig()
+	cfg.RecoveryRetries = 2
+	cfg.RecoveryTimeout = 10 * time.Millisecond
+	cfg.RecoveryBackoff = time.Millisecond
+	cs := newCoreForTest(testParams(), cfg, opener, nil)
+	t.Cleanup(func() { cs.Close() })
+
+	waitCondition(t, cs.IsClosed, time.Second)
+	if got := opener.attempts.Load(); got != 1 {
+		t.Fatalf("Open attempts = %d, want 1 (terminal status must not be retried)", got)
+	}
+	if err := cs.terminalErr(); err == nil ||
+		!strings.Contains(err.Error(), "bad table name") {
+		t.Fatalf("terminal error = %v, want the InvalidArgument rejection", err)
 	}
 }
 

@@ -9,7 +9,6 @@ import (
 	"fmt"
 	"io"
 	"math"
-	"os"
 	"slices"
 	"sync"
 	"sync/atomic"
@@ -67,7 +66,8 @@ type Config struct {
 	RecoveryBackoff time.Duration
 	// RecoveryTimeout bounds each Open attempt.
 	RecoveryTimeout time.Duration
-	// RecoveryResetAfter marks a connection healthy after this duration.
+	// RecoveryResetAfter resets the retry budget once a connection stays open
+	// this long without failing.
 	RecoveryResetAfter time.Duration
 	// FlushTimeout is the maximum wait budget for Flush and WaitForOffset.
 	// The caller's context may shorten this budget, but cannot extend it.
@@ -239,14 +239,18 @@ func (w *watermark) waitFor(ctx context.Context, target int64) error {
 // wireStream returned by opener — are injected, so this core is written once
 // and never names a concrete proto type.
 //
-// The three goroutines:
+// The per-stream goroutines:
 //
 //	sender   — pulls items from the buffer, writes them to the wire stream.
 //	receiver — reads acks from the wire stream, advances the watermark.
 //	supervisor — create → run → recover loop; wires sender+receiver together.
+//	dispatcher — delivers AckCallback events off the receiver's path.
+//
+// The receiver also runs one short-lived goroutine per Recv so ack silence stays
+// observable while a Recv is blocked.
 //
 // Callers interact only through Ingest, IngestBatch, Flush, WaitForOffset,
-// GetUnacked, and Close.
+// GetUnacked, GetUnackedBatches, and Close.
 type CoreStream[Req, Resp any] struct {
 	params     StreamParams
 	cfg        Config
@@ -283,19 +287,13 @@ type CoreStream[Req, Resp any] struct {
 	cancelSupervisor context.CancelFunc
 }
 
-var fallbackStreamIDCounter atomic.Uint64
-
+// newClientStreamID mints the client-side stream identifier sent at handshake.
+// crypto/rand.Read never returns an error: it fills the buffer completely or
+// crashes the program, so there is no degraded-entropy path to fall back to.
 func newClientStreamID() string {
 	var id [16]byte
-	if _, err := rand.Read(id[:]); err == nil {
-		return "client-stream-" + hex.EncodeToString(id[:])
-	}
-	return fmt.Sprintf(
-		"client-stream-%d-%d-%d",
-		os.Getpid(),
-		time.Now().UnixNano(),
-		fallbackStreamIDCounter.Add(1),
-	)
+	rand.Read(id[:])
+	return "client-stream-" + hex.EncodeToString(id[:])
 }
 
 // NewCoreStream constructs a CoreStream and starts the supervisor goroutine.
@@ -369,8 +367,9 @@ func (cs *CoreStream[Req, Resp]) Ingest(ctx context.Context, record []byte) (int
 
 // IngestBatch encodes records as a single atomic batch and enqueues it, blocking
 // if the buffer is at capacity. The whole batch occupies one logical offset and
-// the server acks it atomically. Returns that offset. Prefer this over Ingest in
-// hot paths: it amortizes per-message overhead across the batch.
+// the server acks it atomically. Returns that offset, or -1 for an empty batch,
+// which is a no-op. Prefer this over Ingest in hot paths: it amortizes
+// per-message overhead across the batch.
 func (cs *CoreStream[Req, Resp]) IngestBatch(ctx context.Context, records [][]byte) (int64, error) {
 	if len(records) == 0 {
 		// Rust returns Ok(None) for empty batches; in Go we model that as a
@@ -486,28 +485,47 @@ func (cs *CoreStream[Req, Resp]) WaitForOffset(ctx context.Context, offset int64
 	return cs.wm.waitFor(boundedCtx, offset)
 }
 
-// GetUnacked returns records that were ingested but never acknowledged, one
-// entry per record. A batched buffer item expands to all of its records (not
-// just the first), so no unacked record is silently dropped.
+// GetUnackedBatches returns records that were ingested but never acknowledged,
+// grouped as they were submitted: one entry per Ingest or IngestBatch call, in
+// offset order. The grouping is the unit the server acks atomically, so a caller
+// replaying after a failure can resubmit each group as one batch and reproduce
+// the original durability boundaries. Recovering a partial batch requires
+// knowing which records shared an offset, which a flat list cannot express.
 //
-// The result is a fresh copy on every call: the unacked set is consolidated
-// into retained storage once, and each call decodes a clone. A diagnostic read
+// The result is a fresh copy on every call: the unacked set is consolidated into
+// retained storage once, and each call decodes a clone. A diagnostic read
 // therefore never removes the records a later retry or persistence path needs,
 // and mutating the returned bytes never corrupts the retained payloads.
 //
-// Calling GetUnacked on an active stream returns ErrStreamStillActive; callers
-// must close or wait for terminal failure first.
-func (cs *CoreStream[Req, Resp]) GetUnacked() ([][]byte, error) {
+// Calling this on an active stream returns ErrStreamStillActive; callers must
+// close or wait for terminal failure first.
+func (cs *CoreStream[Req, Resp]) GetUnackedBatches() ([][][]byte, error) {
 	if !cs.isClosed() {
 		return nil, ErrStreamStillActive
 	}
 	items := cs.consolidateUnacked()
-	out := make([][]byte, 0, len(items))
+	out := make([][][]byte, 0, len(items))
 	for _, it := range items {
 		// Re-extract the raw record bytes from the encoded message so callers get
-		// back the original record content; a batch yields all its records. decode
-		// clones, so the retained payload is never aliased.
-		out = append(out, cs.enc.decode(it.payload)...)
+		// back the original record content. decode clones, so the retained payload
+		// is never aliased.
+		out = append(out, cs.enc.decode(it.payload))
+	}
+	return out, nil
+}
+
+// GetUnacked is the flattened form of GetUnackedBatches: one entry per record,
+// batch boundaries discarded. A batched item expands to all of its records (not
+// just the first), so no unacked record is silently dropped. Prefer
+// GetUnackedBatches when the records will be replayed rather than only inspected.
+func (cs *CoreStream[Req, Resp]) GetUnacked() ([][]byte, error) {
+	batches, err := cs.GetUnackedBatches()
+	if err != nil {
+		return nil, err
+	}
+	out := make([][]byte, 0, len(batches))
+	for _, batch := range batches {
+		out = append(out, batch...)
 	}
 	return out, nil
 }
@@ -613,7 +631,9 @@ func (cs *CoreStream[Req, Resp]) runOnce(ctx context.Context) (cause error, rese
 		if errors.Is(err, transport.ErrInvalidParams) {
 			return wrapValidation(openErr), false
 		}
-		if openTimedOut && ctx.Err() == nil {
+		// A deadline that happens to expire alongside a permanent rejection must
+		// not promote it to retryable: the status still decides.
+		if openTimedOut && ctx.Err() == nil && !transport.IsTerminalStatus(err) {
 			return &openBudgetExceeded{cause: openErr}, false
 		}
 		return openErr, false
@@ -633,6 +653,7 @@ func (cs *CoreStream[Req, Resp]) runOnce(ctx context.Context) (cause error, rese
 	receiverExitCh := make(chan error, 1)
 	pauseCh := make(chan pauseSignal, 1)
 	flightSignal := make(chan struct{}, 1)
+	// cap 2: at most a {start, completed} pair for the one record in flight.
 	sendEvents := make(chan sendEvent, 2)
 
 	go cs.sender(senderCtx, stream, senderExitCh, flightSignal, sendEvents)
