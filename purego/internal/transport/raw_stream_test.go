@@ -6,6 +6,7 @@ import (
 	"io"
 	"strings"
 	"testing"
+	"time"
 
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
@@ -166,6 +167,59 @@ func TestRawStreamHandshakeReapsGoroutineOnCancel(t *testing.T) {
 	case <-rpc.recvDone:
 	default:
 		t.Fatal("handshake returned before its recv goroutine exited")
+	}
+}
+
+// rejectingAfterTeardownRPC blocks Recv until teardown then returns the server's
+// rejection status. This models the race where the handshake deadline fires as
+// the server response becomes available.
+type rejectingAfterTeardownRPC struct {
+	release chan struct{}
+	err     error
+}
+
+func (r *rejectingAfterTeardownRPC) Send(_ *string) error { return nil }
+
+func (r *rejectingAfterTeardownRPC) Recv() (*string, error) {
+	<-r.release
+	return nil, r.err
+}
+
+func (r *rejectingAfterTeardownRPC) CloseSend() error { return nil }
+
+// TestRawStreamHandshakeTimeoutPrefersServerRejection verifies that when the
+// handshake deadline fires but the reaped Recv result carries a real terminal
+// server status, handshake returns that status instead of DeadlineExceeded.
+func TestRawStreamHandshakeTimeoutPrefersServerRejection(t *testing.T) {
+	rejected := status.Error(codes.Unauthenticated, "bad credentials")
+	rpc := &rejectingAfterTeardownRPC{
+		release: make(chan struct{}),
+		err:     rejected,
+	}
+	s := &rawStream[string, string]{rpc: rpc}
+
+	hctx, cancel := context.WithDeadline(context.Background(), time.Now().Add(-time.Second))
+	defer cancel()
+
+	teardown := func() {
+		select {
+		case <-rpc.release:
+		default:
+			close(rpc.release)
+		}
+	}
+
+	err := s.handshake(
+		hctx,
+		teardown,
+		func(_ bidiRPC[string, string]) error { return nil },
+		func(_ *string) (string, error) { return "", nil },
+	)
+	if err == nil {
+		t.Fatal("handshake with expired deadline: got nil error, want rejection")
+	}
+	if !isAuthRejection(err) {
+		t.Fatalf("handshake error = %v, want auth rejection recovered from reaped recv", err)
 	}
 }
 

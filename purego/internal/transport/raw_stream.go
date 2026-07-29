@@ -10,6 +10,8 @@ import (
 	"time"
 
 	"github.com/databricks/zerobus-sdk/purego/internal/authctx"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 )
 
 // errHeadersBudgetExceeded tags the internal header-resolution budget (see
@@ -201,7 +203,15 @@ func (s *rawStream[Req, Resp]) handshake(
 	case <-hctx.Done():
 		// Unblock recv, then wait so the goroutine can't outlive this call.
 		teardown()
-		<-done
+		r := <-done
+		if r.err != nil &&
+			!errors.Is(r.err, context.Canceled) &&
+			!errors.Is(r.err, context.DeadlineExceeded) &&
+			!errors.Is(r.err, io.EOF) &&
+			status.Code(r.err) != codes.Canceled &&
+			status.Code(r.err) != codes.DeadlineExceeded {
+			return fmt.Errorf("await ready response: %w", r.err)
+		}
 		return fmt.Errorf("await ready response: %w", hctx.Err())
 	case r := <-done:
 		if r.err != nil {
