@@ -10,7 +10,10 @@
 package stream
 
 import (
+	"container/list"
 	"context"
+	"fmt"
+	"math"
 	"sync"
 )
 
@@ -25,12 +28,21 @@ const defaultMaxInflight = 1_000_000
 type item[Req any] struct {
 	offset  int64
 	payload Req
+	weight  int64
 }
 
 type discardResult struct {
 	first int64
 	last  int64
 	count int
+}
+
+type capacityWaiter struct {
+	weight  int64
+	ready   chan struct{}
+	granted bool
+	err     error
+	elem    *list.Element
 }
 
 // buffer is the bounded, offset-assigning queue between the caller's Ingest
@@ -46,72 +58,136 @@ type discardResult struct {
 //   - The supervisor calls requeue and drain, but only while the sender is
 //     stopped — so next never runs concurrently with requeue or drain.
 //
-// All state (queue, flight, sem, cond) is private; the sender and receiver
+// All state (queue, flight, capacity, cond) is private; the sender and receiver
 // interact only through these methods, never by touching the fields directly.
 //
-// The semaphore enforces the MaxInflight cap: enqueue blocks once the cap is
-// reached and unblocks as acks arrive and discardThrough releases permits.
+// Count and payload-byte limits apply to queued plus in-flight items.
 type buffer[Req any] struct {
-	mu       sync.Mutex
-	cond     *sync.Cond
-	queue    []item[Req] // pending: enqueued but not yet observed by the sender
-	flight   []item[Req] // in-flight: observed by the sender, waiting for ack
-	closed   bool
-	sem      chan struct{} // capacity = maxInflight; held while item is in queue or flight
-	doneOnce sync.Once
-	doneCh   chan struct{} // closed when the buffer is closed/drained; unblocks sem waiters
+	mu               sync.Mutex
+	cond             *sync.Cond
+	queue            []item[Req] // pending: enqueued but not yet observed by the sender
+	flight           []item[Req] // in-flight: observed by the sender, waiting for ack
+	closed           bool
+	maxInflight      int
+	maxBufferedBytes int64
+	usedItems        int
+	usedBytes        int64
+	waiters          *list.List
 }
 
-func newBuffer[Req any](maxInflight int) *buffer[Req] {
+func newBuffer[Req any](maxInflight int, byteLimit ...int64) *buffer[Req] {
 	// Normalize a non-positive cap, which would otherwise deadlock (0) or
 	// panic (<0) at the semaphore.
 	if maxInflight <= 0 {
 		maxInflight = defaultMaxInflight
 	}
-	// queue/flight grow on demand; don't preallocate to maxInflight, which with
-	// the default 1M cap would reserve tens of MB per stream before a single
-	// record is ingested. Only the semaphore is sized to the cap, since it is the
-	// backpressure gate and its capacity defines the bound.
+	maxBufferedBytes := int64(math.MaxInt64)
+	if len(byteLimit) > 0 && byteLimit[0] > 0 {
+		maxBufferedBytes = byteLimit[0]
+	}
 	b := &buffer[Req]{
-		sem:    make(chan struct{}, maxInflight),
-		doneCh: make(chan struct{}),
+		maxInflight:      maxInflight,
+		maxBufferedBytes: maxBufferedBytes,
+		waiters:          list.New(),
 	}
 	b.cond = sync.NewCond(&b.mu)
 	return b
 }
 
-func (b *buffer[Req]) closeDone() {
-	b.doneOnce.Do(func() { close(b.doneCh) })
-}
-
-// reserve acquires one backpressure slot.
-func (b *buffer[Req]) reserve(ctx context.Context) error {
+// reserve acquires one item slot and payload-byte weight.
+func (b *buffer[Req]) reserve(ctx context.Context, weight int64) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	select {
-	case b.sem <- struct{}{}:
-		return nil
-	case <-ctx.Done():
-		return ctx.Err()
-	case <-b.doneCh:
-		return errClosed
+	if weight < 0 || weight > b.maxBufferedBytes {
+		return fmt.Errorf("%w: buffered payload weight %d exceeds limit %d",
+			ErrPayloadTooLarge, weight, b.maxBufferedBytes)
 	}
-}
-
-func (b *buffer[Req]) release() {
-	<-b.sem
-}
-
-// append adds an item after reserve succeeds.
-func (b *buffer[Req]) append(offset int64, msg Req) error {
 	b.mu.Lock()
 	if b.closed {
 		b.mu.Unlock()
-		b.release()
 		return errClosed
 	}
-	b.queue = append(b.queue, item[Req]{offset: offset, payload: msg})
+	if b.waiters.Len() == 0 && b.canReserveLocked(weight) {
+		b.usedItems++
+		b.usedBytes += weight
+		b.mu.Unlock()
+		return nil
+	}
+	waiter := &capacityWaiter{weight: weight, ready: make(chan struct{})}
+	waiter.elem = b.waiters.PushBack(waiter)
+	b.mu.Unlock()
+
+	select {
+	case <-waiter.ready:
+		return waiter.err
+	case <-ctx.Done():
+		b.mu.Lock()
+		if waiter.granted {
+			b.usedItems--
+			b.usedBytes -= weight
+		} else if waiter.err == nil {
+			if waiter.elem != nil {
+				b.waiters.Remove(waiter.elem)
+				waiter.elem = nil
+			}
+		}
+		b.grantWaitersLocked()
+		b.mu.Unlock()
+		return ctx.Err()
+	}
+}
+
+func (b *buffer[Req]) canReserveLocked(weight int64) bool {
+	return b.usedItems < b.maxInflight &&
+		weight <= b.maxBufferedBytes-b.usedBytes
+}
+
+func (b *buffer[Req]) grantWaitersLocked() {
+	for !b.closed && b.waiters.Len() > 0 {
+		front := b.waiters.Front()
+		waiter := front.Value.(*capacityWaiter)
+		if !b.canReserveLocked(waiter.weight) {
+			return
+		}
+		b.waiters.Remove(front)
+		waiter.elem = nil
+		b.usedItems++
+		b.usedBytes += waiter.weight
+		waiter.granted = true
+		close(waiter.ready)
+	}
+}
+
+func (b *buffer[Req]) failWaitersLocked(err error) {
+	for element := b.waiters.Front(); element != nil; element = element.Next() {
+		waiter := element.Value.(*capacityWaiter)
+		waiter.err = err
+		waiter.elem = nil
+		close(waiter.ready)
+	}
+	b.waiters.Init()
+}
+
+func (b *buffer[Req]) release(weight int64) {
+	b.mu.Lock()
+	b.usedItems--
+	b.usedBytes -= weight
+	b.grantWaitersLocked()
+	b.mu.Unlock()
+}
+
+// append adds an item after reserve succeeds.
+func (b *buffer[Req]) append(offset int64, msg Req, weight int64) error {
+	b.mu.Lock()
+	if b.closed {
+		b.usedItems--
+		b.usedBytes -= weight
+		b.mu.Unlock()
+		b.cond.Broadcast()
+		return errClosed
+	}
+	b.queue = append(b.queue, item[Req]{offset: offset, payload: msg, weight: weight})
 	b.mu.Unlock()
 	b.cond.Signal()
 	return nil
@@ -171,22 +247,21 @@ func (b *buffer[Req]) next(ctx context.Context) (item[Req], error) {
 func (b *buffer[Req]) discardThrough(offset int64) discardResult {
 	b.mu.Lock()
 	var result discardResult
+	var releasedBytes int64
 	for len(b.flight) > 0 && b.flight[0].offset <= offset {
 		if result.count == 0 {
 			result.first = b.flight[0].offset
 		}
 		result.last = b.flight[0].offset
 		result.count++
+		releasedBytes += b.flight[0].weight
 		b.flight[0] = item[Req]{} // release the acked payload for GC
 		b.flight = b.flight[1:]
 	}
+	b.usedItems -= result.count
+	b.usedBytes -= releasedBytes
+	b.grantWaitersLocked()
 	b.mu.Unlock()
-	for range result.count {
-		<-b.sem
-	}
-	if result.count > 0 {
-		b.cond.Broadcast()
-	}
 	return result
 }
 
@@ -239,9 +314,11 @@ func (b *buffer[Req]) drain() []item[Req] {
 	b.queue = nil
 	b.flight = nil
 	b.closed = true
+	b.usedItems = 0
+	b.usedBytes = 0
+	b.failWaitersLocked(errClosed)
 	b.mu.Unlock()
 	b.cond.Broadcast()
-	b.closeDone()
 	return all
 }
 
@@ -250,9 +327,9 @@ func (b *buffer[Req]) drain() []item[Req] {
 func (b *buffer[Req]) close() {
 	b.mu.Lock()
 	b.closed = true
+	b.failWaitersLocked(errClosed)
 	b.mu.Unlock()
 	b.cond.Broadcast()
-	b.closeDone()
 }
 
 // inFlight returns the number of items observed by the sender but not yet

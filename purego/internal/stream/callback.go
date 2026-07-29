@@ -1,6 +1,7 @@
 package stream
 
 import (
+	"math"
 	"sync"
 	"time"
 )
@@ -89,7 +90,10 @@ func (d *callbackDispatcher) enqueueAcks(first, last int64) {
 		d.mu.Unlock()
 		return
 	}
-	if n := len(d.queue); n > 0 && d.queue[n-1].err == nil && d.queue[n-1].last+1 == first {
+	if n := len(d.queue); n > 0 &&
+		d.queue[n-1].err == nil &&
+		d.queue[n-1].last < math.MaxInt64 &&
+		d.queue[n-1].last+1 == first {
 		d.queue[n-1].last = last
 	} else {
 		d.queue = append(d.queue, callbackRange{first: first, last: last})

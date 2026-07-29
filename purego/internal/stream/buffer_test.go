@@ -10,7 +10,8 @@ import (
 
 // dummyMsg returns a non-nil encodedMsg for use in buffer tests.
 func dummyMsg(offset int64) encodedMsg {
-	msg, _ := protoEncoder{}.encode(offset, []byte("x"))
+	msg, _ := protoEncoder{}.encode([]byte("x"))
+	protoEncoder{}.stampOffset(msg, offset)
 	return msg
 }
 
@@ -85,6 +86,148 @@ func TestBufferBackpressure(t *testing.T) {
 	}
 	if !enqueued.Load() {
 		t.Fatal("enqueue did not unblock after discard")
+	}
+}
+
+func TestBufferByteBackpressureAndRelease(t *testing.T) {
+	b := newBuffer[encodedMsg](4, 3)
+	if err := b.reserve(context.Background(), 3); err != nil {
+		t.Fatalf("reserve: %v", err)
+	}
+	if err := b.append(1, dummyMsg(1), 3); err != nil {
+		t.Fatalf("append: %v", err)
+	}
+
+	done := make(chan error, 1)
+	go func() {
+		if err := b.reserve(context.Background(), 1); err != nil {
+			done <- err
+			return
+		}
+		done <- b.append(2, dummyMsg(2), 1)
+	}()
+	select {
+	case err := <-done:
+		t.Fatalf("byte-limited append completed early: %v", err)
+	case <-time.After(20 * time.Millisecond):
+	}
+
+	it, err := b.next(context.Background())
+	if err != nil {
+		t.Fatalf("next: %v", err)
+	}
+	b.discardThrough(it.offset)
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("blocked append: %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("byte-limited append did not unblock")
+	}
+	if items, bytes := b.usage(); items != 1 || bytes != 1 {
+		t.Fatalf("usage = (%d, %d), want (1, 1)", items, bytes)
+	}
+}
+
+func TestBufferCapacityWaitersAreFIFO(t *testing.T) {
+	b := newBuffer[encodedMsg](3, 3)
+	if err := b.reserve(context.Background(), 3); err != nil {
+		t.Fatalf("initial reserve: %v", err)
+	}
+	if err := b.append(0, dummyMsg(0), 3); err != nil {
+		t.Fatalf("initial append: %v", err)
+	}
+
+	firstDone := make(chan error, 1)
+	go func() {
+		if err := b.reserve(context.Background(), 3); err != nil {
+			firstDone <- err
+			return
+		}
+		firstDone <- b.append(1, dummyMsg(1), 3)
+	}()
+	waitCondition(t, func() bool { return b.waiterCount() == 1 }, time.Second)
+
+	secondDone := make(chan error, 1)
+	go func() {
+		if err := b.reserve(context.Background(), 1); err != nil {
+			secondDone <- err
+			return
+		}
+		secondDone <- b.append(2, dummyMsg(2), 1)
+	}()
+	waitCondition(t, func() bool { return b.waiterCount() == 2 }, time.Second)
+
+	it, err := b.next(context.Background())
+	if err != nil {
+		t.Fatalf("next initial: %v", err)
+	}
+	b.discardThrough(it.offset)
+	select {
+	case err := <-firstDone:
+		if err != nil {
+			t.Fatalf("first waiter: %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("first waiter did not unblock")
+	}
+	select {
+	case err := <-secondDone:
+		t.Fatalf("second waiter bypassed FIFO order: %v", err)
+	default:
+	}
+
+	it, err = b.next(context.Background())
+	if err != nil {
+		t.Fatalf("next first waiter: %v", err)
+	}
+	b.discardThrough(it.offset)
+	select {
+	case err := <-secondDone:
+		if err != nil {
+			t.Fatalf("second waiter: %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("second waiter did not unblock")
+	}
+}
+
+func TestBufferRecoveryDoesNotDoubleChargeBytes(t *testing.T) {
+	b := newBuffer[encodedMsg](4, 10)
+	if err := b.reserve(context.Background(), 7); err != nil {
+		t.Fatalf("reserve: %v", err)
+	}
+	if err := b.append(1, dummyMsg(1), 7); err != nil {
+		t.Fatalf("append: %v", err)
+	}
+	if _, err := b.next(context.Background()); err != nil {
+		t.Fatalf("next: %v", err)
+	}
+	b.requeue()
+	if items, bytes := b.usage(); items != 1 || bytes != 7 {
+		t.Fatalf("usage after requeue = (%d, %d), want (1, 7)", items, bytes)
+	}
+}
+
+func TestBufferByteWaiterUnblocksOnClose(t *testing.T) {
+	b := newBuffer[encodedMsg](4, 1)
+	if err := b.reserve(context.Background(), 1); err != nil {
+		t.Fatalf("reserve: %v", err)
+	}
+	if err := b.append(1, dummyMsg(1), 1); err != nil {
+		t.Fatalf("append: %v", err)
+	}
+	errCh := make(chan error, 1)
+	go func() { errCh <- b.reserve(context.Background(), 1) }()
+	b.close()
+	select {
+	case err := <-errCh:
+		if err != errClosed {
+			t.Fatalf("reserve after close = %v, want errClosed", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("byte waiter did not unblock on close")
 	}
 }
 

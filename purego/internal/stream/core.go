@@ -10,6 +10,7 @@ import (
 	"io"
 	"math"
 	"slices"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -28,6 +29,8 @@ const (
 	DefaultLackOfAckTimeout   = 60 * time.Second
 	// DefaultMaxPayloadBytes leaves room below the 10 MiB service limit.
 	DefaultMaxPayloadBytes = 10*1024*1024 - 64*1024
+	// DefaultMaxBufferedPayloadBytes bounds raw queued and in-flight payload bytes.
+	DefaultMaxBufferedPayloadBytes = 64 * 1024 * 1024
 	// DefaultMaxBatchRecords bounds per-batch allocation.
 	DefaultMaxBatchRecords = 100_000
 	// DefaultCallbackTeardownTimeout bounds callback shutdown.
@@ -86,6 +89,8 @@ type Config struct {
 	// MaxBatchRecords caps the number of records in one batch independently of
 	// byte size. Non-positive values use DefaultMaxBatchRecords.
 	MaxBatchRecords int
+	// MaxBufferedPayloadBytes caps raw payload bytes retained by the stream.
+	MaxBufferedPayloadBytes int64
 	// CallbackTeardownTimeout bounds asynchronous callback worker teardown.
 	CallbackTeardownTimeout time.Duration
 	// StreamPausedMaxWait caps how long the client honors a server-requested
@@ -110,6 +115,7 @@ func DefaultConfig() Config {
 		DrainTimeout:            DefaultDrainTimeout,
 		MaxPayloadBytes:         DefaultMaxPayloadBytes,
 		MaxBatchRecords:         DefaultMaxBatchRecords,
+		MaxBufferedPayloadBytes: DefaultMaxBufferedPayloadBytes,
 		CallbackTeardownTimeout: DefaultCallbackTeardownTimeout,
 	}
 }
@@ -145,6 +151,9 @@ func sanitizeConfig(c Config) Config {
 	}
 	if c.MaxBatchRecords <= 0 {
 		c.MaxBatchRecords = DefaultMaxBatchRecords
+	}
+	if c.MaxBufferedPayloadBytes <= 0 {
+		c.MaxBufferedPayloadBytes = DefaultMaxBufferedPayloadBytes
 	}
 	if c.CallbackTeardownTimeout <= 0 {
 		c.CallbackTeardownTimeout = DefaultCallbackTeardownTimeout
@@ -255,14 +264,16 @@ func (w *watermark) waitFor(ctx context.Context, target int64) error {
 // Callers interact only through Ingest, IngestBatch, Flush, WaitForOffset,
 // GetUnacked, GetUnackedBatches, and Close.
 type CoreStream[Req, Resp any] struct {
-	params     StreamParams
-	cfg        Config
-	opener     opener[Req, Resp]
-	enc        encoder[Req]
-	ackMdl     ackModel[Resp]
-	buf        *buffer[Req]
-	wm         *watermark
-	dispatcher *callbackDispatcher
+	params          StreamParams
+	cfg             Config
+	opener          opener[Req, Resp]
+	enc             encoder[Req]
+	ackMdl          ackModel[Resp]
+	buf             *buffer[Req]
+	wm              *watermark
+	dispatcher      *callbackDispatcher
+	pauseWait       func(context.Context, time.Time) bool
+	onPauseObserved func()
 
 	clientID string
 	serverID atomic.Pointer[string]
@@ -274,6 +285,8 @@ type CoreStream[Req, Resp any] struct {
 	// closing prevents new items from being admitted once Close snapshots its
 	// durability target. It is protected by offsetMu.
 	closing bool
+	// offsetExhausted is set after assigning math.MaxInt64.
+	offsetExhausted atomic.Bool
 	// lastEnqueued is the highest queued offset.
 	lastEnqueued atomic.Int64
 
@@ -316,6 +329,7 @@ func NewCoreStream[Req, Resp any](
 		pauseCap := *cfg.StreamPausedMaxWait
 		cfg.StreamPausedMaxWait = &pauseCap
 	}
+	params.TableName = strings.TrimSpace(params.TableName)
 	if len(params.DescriptorProto) > 0 {
 		params.DescriptorProto = bytes.Clone(params.DescriptorProto)
 	}
@@ -326,10 +340,11 @@ func NewCoreStream[Req, Resp any](
 		opener:           opener,
 		enc:              enc,
 		ackMdl:           ackMdl,
-		buf:              newBuffer[Req](cfg.MaxInflight),
+		buf:              newBuffer[Req](cfg.MaxInflight, cfg.MaxBufferedPayloadBytes),
 		wm:               newWatermark(),
 		dispatcher:       newCallbackDispatcher(callback),
 		clientID:         newClientStreamID(),
+		pauseWait:        waitUntil,
 		done:             make(chan struct{}),
 		cancelSupervisor: cancel,
 	}
@@ -356,6 +371,20 @@ func (cs *CoreStream[Req, Resp]) setServerID(id string) {
 	cs.serverID.Store(&id)
 }
 
+func waitUntil(ctx context.Context, deadline time.Time) bool {
+	if wait := time.Until(deadline); wait > 0 {
+		timer := time.NewTimer(wait)
+		defer timer.Stop()
+		select {
+		case <-timer.C:
+			return true
+		case <-ctx.Done():
+			return false
+		}
+	}
+	return true
+}
+
 // Ingest encodes record and enqueues it in the buffer, blocking if the buffer
 // is at capacity (backpressure). Returns the logical offset assigned to this
 // record; pass it to WaitForOffset to confirm durability.
@@ -363,8 +392,8 @@ func (cs *CoreStream[Req, Resp]) Ingest(ctx context.Context, record []byte) (int
 	if err := cs.checkRawSize(len(record)); err != nil {
 		return 0, err
 	}
-	return cs.enqueueEncoded(ctx, func() (Req, error) {
-		return cs.enc.encode(math.MaxInt64, record)
+	return cs.enqueueEncoded(ctx, int64(len(record)), func() (Req, error) {
+		return cs.enc.encode(record)
 	})
 }
 
@@ -394,8 +423,8 @@ func (cs *CoreStream[Req, Resp]) IngestBatch(ctx context.Context, records [][]by
 	if err := cs.checkRawSize(total); err != nil {
 		return 0, err
 	}
-	return cs.enqueueEncoded(ctx, func() (Req, error) {
-		return cs.enc.encodeBatch(math.MaxInt64, records)
+	return cs.enqueueEncoded(ctx, int64(total), func() (Req, error) {
+		return cs.enc.encodeBatch(records)
 	})
 }
 
@@ -408,7 +437,11 @@ func (cs *CoreStream[Req, Resp]) checkRawSize(size int) error {
 }
 
 // enqueueEncoded reserves capacity and encodes before assigning an offset.
-func (cs *CoreStream[Req, Resp]) enqueueEncoded(ctx context.Context, encodeFn func() (Req, error)) (int64, error) {
+func (cs *CoreStream[Req, Resp]) enqueueEncoded(
+	ctx context.Context,
+	weight int64,
+	encodeFn func() (Req, error),
+) (int64, error) {
 	if cs.isClosed() {
 		if err := cs.terminalErr(); err != nil {
 			return 0, err
@@ -421,19 +454,20 @@ func (cs *CoreStream[Req, Resp]) enqueueEncoded(ctx context.Context, encodeFn fu
 	if closing {
 		return 0, errClosed
 	}
-	if err := cs.buf.reserve(ctx); err != nil {
+	if cs.offsetExhausted.Load() {
+		return 0, ErrOffsetExhausted
+	}
+	if err := cs.buf.reserve(ctx, weight); err != nil {
 		return 0, err
 	}
 
-	// Encode with the largest possible wire offset so the size check remains
-	// valid after the sender stamps any connection-local physical offset.
 	msg, err := encodeFn()
 	if err != nil {
-		cs.buf.release()
+		cs.buf.release(weight)
 		return 0, err
 	}
-	if size := cs.enc.wireSize(msg); size > cs.cfg.MaxPayloadBytes {
-		cs.buf.release()
+	if size := cs.enc.maxWireSize(msg); size > cs.cfg.MaxPayloadBytes {
+		cs.buf.release(weight)
 		return 0, fmt.Errorf("%w: encoded size %d exceeds MaxPayloadBytes=%d",
 			ErrPayloadTooLarge, size, cs.cfg.MaxPayloadBytes)
 	}
@@ -441,16 +475,25 @@ func (cs *CoreStream[Req, Resp]) enqueueEncoded(ctx context.Context, encodeFn fu
 	cs.offsetMu.Lock()
 	if cs.closing {
 		cs.offsetMu.Unlock()
-		cs.buf.release()
+		cs.buf.release(weight)
 		return 0, errClosed
+	}
+	if cs.offsetExhausted.Load() {
+		cs.offsetMu.Unlock()
+		cs.buf.release(weight)
+		return 0, ErrOffsetExhausted
 	}
 	offset := cs.nextOffset
 	cs.enc.stampOffset(msg, offset)
-	if err := cs.buf.append(offset, msg); err != nil {
+	if err := cs.buf.append(offset, msg, weight); err != nil {
 		cs.offsetMu.Unlock()
 		return 0, err
 	}
-	cs.nextOffset++
+	if offset == math.MaxInt64 {
+		cs.offsetExhausted.Store(true)
+	} else {
+		cs.nextOffset++
+	}
 	cs.lastEnqueued.Store(offset)
 	cs.offsetMu.Unlock()
 	return offset, nil
@@ -618,7 +661,6 @@ type sendEvent struct {
 	physicalOffset int64
 	completed      bool
 	err            error
-	consumed       chan struct{}
 }
 
 // runOnce operates one transport stream until a worker exits.
@@ -660,31 +702,32 @@ func (cs *CoreStream[Req, Resp]) runOnce(ctx context.Context) (cause error, rese
 	flightSignal := make(chan struct{}, 1)
 	// cap 2: at most a {start, completed} pair for the one record in flight.
 	sendEvents := make(chan sendEvent, 2)
+	sendConsumed := make(chan struct{}, 1)
 
-	go cs.sender(senderCtx, stream, senderExitCh, flightSignal, sendEvents)
-	go cs.receiver(stream, receiverExitCh, pauseCh, flightSignal, sendEvents)
+	go cs.sender(senderCtx, stream, senderExitCh, flightSignal, sendEvents, sendConsumed)
+	go cs.receiver(stream, receiverExitCh, pauseCh, flightSignal, sendEvents, sendConsumed)
 
 	var senderParked bool
 	var senderExited bool
 	var receiverExited bool
-	var observedPause *pauseSignal
-	recordPause := func(ps pauseSignal) {
-		if observedPause == nil {
-			pauseCopy := ps
-			observedPause = &pauseCopy
+	var pauseObserved bool
+	recordPause := func() {
+		if !pauseObserved && cs.onPauseObserved != nil {
+			cs.onPauseObserved()
 		}
+		pauseObserved = true
 		if !senderParked {
 			cancelSender()
 			senderParked = true
 		}
 	}
 	drainPause := func() {
-		if observedPause != nil {
+		if pauseObserved {
 			return
 		}
 		select {
-		case ps := <-pauseCh:
-			recordPause(ps)
+		case <-pauseCh:
+			recordPause()
 		default:
 		}
 	}
@@ -694,25 +737,22 @@ waitLoop:
 		case senderErr := <-senderExitCh:
 			senderExited = true
 			drainPause()
-			if !senderParked {
-				cause = senderErr
-				break waitLoop
+			if senderParked {
+				continue
 			}
+			cause = senderErr
+			break waitLoop
 		case receiverErr := <-receiverExitCh:
 			receiverExited = true
 			drainPause()
-			// Whatever the receiver reported wins, so a real failure still
-			// consumes the recovery budget and reaches credential invalidation.
-			// An earlier pause only stands in for a clean exit, which is how a
-			// server EOF after a pause signal surfaces.
-			if receiverErr != nil || observedPause == nil {
-				cause = receiverErr
-			} else {
-				cause = *observedPause
-			}
+			// The receiver surfaces a pause as its own exit error, so whatever it
+			// reports is authoritative: a real failure still consumes the recovery
+			// budget and reaches credential invalidation rather than being masked
+			// by an earlier pause.
+			cause = receiverErr
 			break waitLoop
-		case ps := <-pauseCh:
-			recordPause(ps)
+		case <-pauseCh:
+			recordPause()
 		case <-ctx.Done():
 			break waitLoop
 		}
@@ -821,6 +861,7 @@ func (cs *CoreStream[Req, Resp]) sender(
 	errCh chan<- error,
 	flightSignal chan<- struct{},
 	sendEvents chan<- sendEvent,
+	sendConsumed <-chan struct{},
 ) {
 	publish := func(event sendEvent) bool {
 		select {
@@ -831,7 +872,12 @@ func (cs *CoreStream[Req, Resp]) sender(
 		}
 	}
 	physicalOffset := int64(0)
+	physicalExhausted := false
 	for {
+		if physicalExhausted {
+			errCh <- fmt.Errorf("stream: physical offset space exhausted")
+			return
+		}
 		it, err := cs.buf.next(senderCtx)
 		if err != nil {
 			errCh <- nil // ctx cancelled or buffer closed — clean exit
@@ -850,21 +896,23 @@ func (cs *CoreStream[Req, Resp]) sender(
 		default:
 		}
 		err = stream.Send(it.payload)
-		consumed := make(chan struct{})
 		sendEvents <- sendEvent{
 			logicalOffset:  it.offset,
 			physicalOffset: physicalOffset,
 			completed:      true,
 			err:            err,
-			consumed:       consumed,
 		}
 		if err != nil {
 			errCh <- fmt.Errorf("stream: send offset %d: %w", it.offset, err)
 			return
 		}
-		physicalOffset++
+		if physicalOffset == math.MaxInt64 {
+			physicalExhausted = true
+		} else {
+			physicalOffset++
+		}
 		select {
-		case <-consumed:
+		case <-sendConsumed:
 		case <-senderCtx.Done():
 			errCh <- nil
 			return
@@ -873,28 +921,44 @@ func (cs *CoreStream[Req, Resp]) sender(
 }
 
 // receiver processes responses and advances the ack watermark.
-// Each Recv runs separately so the ack timer remains responsive.
 func (cs *CoreStream[Req, Resp]) receiver(
 	stream wireStream[Req, Resp],
 	errCh chan<- error,
 	pauseCh chan<- pauseSignal,
 	flightSignal <-chan struct{},
 	sendEvents <-chan sendEvent,
+	sendConsumed chan<- struct{},
 ) {
 	type recvResult struct {
 		resp Resp
 		err  error
 	}
 
-	// Keep exactly one Recv active.
-	recvCh := make(chan recvResult, 1)
-	spawnRecv := func() {
-		go func() {
+	recvCh := make(chan recvResult)
+	recvStop := make(chan struct{})
+	recvDone := make(chan struct{})
+	go func() {
+		defer close(recvDone)
+		for {
 			resp, err := stream.Recv()
-			recvCh <- recvResult{resp, err}
-		}()
+			select {
+			case recvCh <- recvResult{resp, err}:
+			case <-recvStop:
+				return
+			}
+			if err != nil {
+				return
+			}
+		}
+	}()
+	var stopRecvOnce sync.Once
+	stopRecv := func() {
+		stopRecvOnce.Do(func() {
+			close(recvStop)
+			stream.Close()
+		})
+		<-recvDone
 	}
-	spawnRecv()
 
 	lackTimer := time.NewTimer(cs.cfg.LackOfAckTimeout)
 	if !lackTimer.Stop() {
@@ -1008,16 +1072,17 @@ func (cs *CoreStream[Req, Resp]) receiver(
 			sendingLogical = event.logicalOffset
 			return nil
 		}
-		close(event.consumed)
+		var result error
 		if event.err == nil {
 			expected := sentBasePhysical + int64(len(sentLogical))
 			if event.physicalOffset != expected {
-				return fmt.Errorf(
+				result = fmt.Errorf(
 					"stream: physical send offset %d is not contiguous after %d",
 					event.physicalOffset, expected-1,
 				)
+			} else {
+				sentLogical = append(sentLogical, event.logicalOffset)
 			}
-			sentLogical = append(sentLogical, event.logicalOffset)
 		}
 		sendingPhysical = -1
 		sendingLogical = -1
@@ -1026,7 +1091,11 @@ func (cs *CoreStream[Req, Resp]) receiver(
 			ackErr = applyPhysicalAck(pendingPhysicalAck)
 		}
 		pendingPhysicalAck = -1
-		return ackErr
+		if result == nil {
+			result = ackErr
+		}
+		sendConsumed <- struct{}{}
+		return result
 	}
 	resolvePendingOnExit := func() error {
 		if pendingPhysicalAck < 0 || sendingPhysical < 0 {
@@ -1039,9 +1108,13 @@ func (cs *CoreStream[Req, Resp]) receiver(
 		return handleSendEvent(<-sendEvents)
 	}
 	handleTerminal := func(err error) {
-		if pendingErr := resolvePendingOnExit(); pendingErr != nil && err == nil {
-			err = pendingErr
+		if pendingErr := resolvePendingOnExit(); pendingErr != nil {
+			var ps pauseSignal
+			if err == nil || errors.As(err, &ps) {
+				err = pendingErr
+			}
 		}
+		stopRecv()
 		errCh <- err
 	}
 
@@ -1073,8 +1146,6 @@ func (cs *CoreStream[Req, Resp]) receiver(
 			if cs.buf.inFlight() == 0 {
 				continue
 			}
-			stream.Close()
-			<-recvCh // reap the outstanding Recv goroutine
 			handleTerminal(fmt.Errorf(
 				"stream: no ack from server for %s", cs.cfg.LackOfAckTimeout,
 			))
@@ -1087,7 +1158,11 @@ func (cs *CoreStream[Req, Resp]) receiver(
 		}
 
 		if r.err == io.EOF {
-			handleTerminal(nil)
+			if pauseState != nil {
+				handleTerminal(*pauseState)
+			} else {
+				handleTerminal(nil)
+			}
 			return
 		}
 		if r.err != nil {
@@ -1108,32 +1183,27 @@ func (cs *CoreStream[Req, Resp]) receiver(
 		if kind == pauseResponse {
 			if pauseState == nil {
 				pauseCopy := pause
+				wait := cs.effectivePauseWait(pause.duration)
+				pauseCopy.resumeAt = time.Now().Add(wait)
 				pauseState = &pauseCopy
 				select {
-				case pauseCh <- pause:
+				case pauseCh <- pauseCopy:
 				default:
 				}
 				if cs.buf.inFlight() == 0 {
-					// Recover immediately when nothing needs draining.
-					handleTerminal(pause)
+					handleTerminal(pauseCopy)
 					return
 				}
-				wait := cs.effectivePauseWait(pause.duration)
 				if wait <= 0 {
-					handleTerminal(pause)
+					handleTerminal(pauseCopy)
 					return
 				}
 				pauseTimer = time.NewTimer(wait)
 				disarmLackTimer()
 			}
 			// Drain late acks during the pause.
-			spawnRecv()
 			continue
 		}
-
-		// Not a terminal response — keep reading. Spawn the next Recv before
-		// handling this one so the loop always has exactly one outstanding.
-		spawnRecv()
 
 		if kind == ackResponse {
 			for {

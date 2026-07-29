@@ -81,7 +81,9 @@ func (cs *CoreStream[Req, Resp]) supervise(ctx context.Context) {
 				)
 				break
 			}
-			// The receiver already drained the pause window.
+			if !cs.pauseWait(ctx, ps.resumeAt) {
+				return
+			}
 			continue
 		}
 
@@ -106,8 +108,7 @@ func (cs *CoreStream[Req, Resp]) supervise(ctx context.Context) {
 		if !isOpenFailure {
 			openedOnce = true
 		}
-		if !isOpenFailure &&
-			transport.IsAuthRejection(runErr) &&
+		if transport.IsAuthRejection(runErr) &&
 			cs.params.HeadersProvider != nil {
 			cs.params.HeadersProvider.Invalidate(ctx, cs.params.TableName)
 		}

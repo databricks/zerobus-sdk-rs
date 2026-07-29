@@ -36,11 +36,10 @@ type HeadersProvider interface {
 	GetHeaders(ctx context.Context, tableName string) (map[string]string, error)
 
 	// Invalidate drops any cached credentials so the next GetHeaders re-derives
-	// them. Open calls this when the server rejects the supplied credentials
-	// with Unauthenticated or PermissionDenied during stream creation.
+	// them. The stream lifecycle calls this when an Open or live stream rejects
+	// credentials with Unauthenticated or PermissionDenied.
 	//
-	// It must not block: Open calls it synchronously on the failure path, and
-	// the ctx it receives may already be cancelled.
+	// It must not block: recovery calls it synchronously on the failure path.
 	Invalidate(ctx context.Context, tableName string)
 }
 
