@@ -15,6 +15,8 @@ import (
 	"strings"
 	"time"
 	"unicode"
+
+	"github.com/databricks/zerobus-sdk/purego/internal/authctx"
 )
 
 // OAuthTokenProvider obtains Unity Catalog OAuth 2.0 tokens using the client
@@ -225,6 +227,9 @@ func (p *OAuthTokenProvider) FetchToken(ctx context.Context, tableName string) (
 	if err != nil {
 		return "", err
 	}
+	if fetched.expiredAt(time.Now()) {
+		return "", newExpiredOnArrivalError()
+	}
 	return fetched.token, nil
 }
 
@@ -234,6 +239,7 @@ func (p *OAuthTokenProvider) mint(ctx context.Context, tableName string, reason 
 	started := time.Now()
 	fetched, err := p.fetchToken(ctx, tableName)
 	elapsed := time.Since(started)
+	markCallerCancellation(ctx, err)
 
 	switch {
 	case err != nil:
@@ -315,7 +321,17 @@ func (p *OAuthTokenProvider) fetchToken(ctx context.Context, tableName string) (
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	req.SetBasicAuth(p.clientID, p.clientSecret)
 
-	resp, err := p.client.Do(req)
+	// Don't follow redirects: a same-host https→http redirect would re-send the
+	// client credentials in the clear, since Go re-attaches them without checking
+	// the scheme. A token endpoint has no reason to redirect, so one surfaces as a
+	// non-success response and fails through classifyHTTPError. Copy the client so
+	// a caller-supplied one (WithHTTPClient) is not mutated.
+	client := *p.client
+	client.CheckRedirect = func(*http.Request, []*http.Request) error {
+		return http.ErrUseLastResponse
+	}
+
+	resp, err := client.Do(req)
 	if err != nil {
 		return fetchedToken{}, &TokenError{msg: fmt.Sprintf("token request: %v", err), retryable: isRetryableTransportError(ctx, err), cause: err}
 	}
@@ -349,7 +365,7 @@ func (p *OAuthTokenProvider) fetchToken(ctx context.Context, tableName string) (
 	if err := json.NewDecoder(io.LimitReader(resp.Body, maxTokenResponseBytes)).Decode(&body); err != nil {
 		return fetchedToken{}, &TokenError{
 			msg:       fmt.Sprintf("parse token response: %v", err),
-			retryable: false,
+			retryable: isRetryableTransportError(ctx, err),
 			cause:     err,
 		}
 	}
@@ -461,10 +477,11 @@ func buildAuthorizationDetails(catalog, schema, fullTable string) (string, error
 // body. The raw body is retained on ResponseBody for diagnostics without
 // widening the logged message.
 type TokenError struct {
-	msg          string
-	retryable    bool
-	cause        error
-	ResponseBody string // raw (bounded) HTTP error body, empty for non-HTTP failures
+	msg            string
+	retryable      bool
+	cause          error
+	callerCanceled bool
+	ResponseBody   string // raw (bounded) HTTP error body, empty for non-HTTP failures
 }
 
 func (e *TokenError) Error() string     { return "auth: oauth: " + e.msg }
@@ -472,6 +489,18 @@ func (e *TokenError) IsRetryable() bool { return e.retryable }
 
 // Unwrap exposes the cause so [errors.Is]/[errors.As] can inspect it.
 func (e *TokenError) Unwrap() error { return e.cause }
+
+// markCallerCancellation records whether err was caused by the caller's
+// context. It runs before synchronous logging can change the context state.
+func markCallerCancellation(ctx context.Context, err error) {
+	var tokenErr *TokenError
+	if err == nil || !errors.As(err, &tokenErr) || !isCallerCancellation(ctx) {
+		return
+	}
+	tokenErr.callerCanceled =
+		errors.Is(err, context.Cause(ctx)) ||
+			errors.Is(err, ctx.Err())
+}
 
 // isRetryableStatus reports whether an HTTP status is a transient failure worth
 // suppressing when a cached token can be served. Only 5xx responses qualify;
@@ -508,13 +537,26 @@ func isHTTPSuccess(code int) bool { return code >= 200 && code < 300 }
 // isRetryableTransportError reports whether a transport-level error from the
 // token request is transient and safe to retry. Network timeouts, dial
 // failures, and request/budget timeouts qualify; a caller-owned cancel or
-// deadline does not — that is the caller's signal to stop, not a server fault.
-// isCallerCancellation tells the two apart when the error is a context error.
+// deadline does not.
+//
+// Provenance comes from the context, not the error's shape: on HTTP/1 the
+// transport wraps a WithTimeoutCause/WithCancelCause cause into the error, so
+// isContextError alone would miss the SDK's own budget. Check the context first.
 func isRetryableTransportError(ctx context.Context, err error) bool {
+	if ctx.Err() != nil {
+		// Only the SDK's own header budget is retryable, and only when the
+		// returned error chain actually reflects that budget expiration.
+		cause := context.Cause(ctx)
+		if cause != authctx.ErrHeadersBudgetExceeded {
+			return false
+		}
+		if errors.Is(err, cause) || errors.Is(err, ctx.Err()) {
+			return true
+		}
+	}
+	// Context still live: a wrapped context error is a client/transport timeout.
 	if isContextError(err) {
-		// A context error is retryable only when it came from the request itself
-		// (client Timeout / transport deadline), not from the caller's own context.
-		return !isCallerCancellation(ctx, err)
+		return true
 	}
 	// Network-level timeouts (dial/read deadlines, i/o timeout) are transient.
 	var ne net.Error
