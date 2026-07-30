@@ -232,7 +232,6 @@ func TestRawStreamHandshakeTimeoutKeepsDeadlineForTeardownArtifacts(t *testing.T
 		recvErr error
 	}{
 		{"grpc cancelled", status.Error(codes.Canceled, "context canceled")},
-		{"grpc deadline exceeded", status.Error(codes.DeadlineExceeded, "deadline")},
 		{"bare context canceled", context.Canceled},
 		{"bare context deadline exceeded", context.DeadlineExceeded},
 		{"clean server close", io.EOF},
@@ -251,6 +250,25 @@ func TestRawStreamHandshakeTimeoutKeepsDeadlineForTeardownArtifacts(t *testing.T
 				t.Fatalf("handshake error = %v, want DeadlineExceeded for a teardown artifact", err)
 			}
 		})
+	}
+}
+
+// TestRawStreamHandshakeTimeoutPreservesServerDeadline verifies that a gRPC
+// DeadlineExceeded status from Recv is treated as server signal, not teardown
+// noise, and therefore survives an expired handshake context.
+func TestRawStreamHandshakeTimeoutPreservesServerDeadline(t *testing.T) {
+	serverErr := status.Error(codes.DeadlineExceeded, "server deadline")
+	rpc := newBlockingRPC(serverErr)
+	s := &rawStream[string, string]{rpc: rpc}
+
+	err := s.handshake(
+		expiredContext(t),
+		rpc.releaseOnce,
+		func(_ bidiRPC[string, string]) error { return nil },
+		func(_ *string) (string, error) { return "", nil },
+	)
+	if !errors.Is(err, serverErr) {
+		t.Fatalf("handshake error = %v, want preserved server status %v", err, serverErr)
 	}
 }
 

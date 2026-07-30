@@ -248,12 +248,14 @@ func (s *rawStream[Req, Resp]) handshake(
 // than something the server said, in which case the expiry that triggered the
 // cancellation is the truer cause. The canceller may be handshake's own teardown
 // or a caller-side bridge onto the same context (as Conn.Open installs), so this
-// keys on the shape of the error, not on who cancelled. gRPC reports a cancelled
-// RPC context as codes.Canceled; a non-gRPC bidiRPC may surface a bare context
-// error instead, and EOF carries no status at all.
+// keys on the shape of the error, not on who cancelled. On this path, gRPC
+// reports a cancelled RPC context as codes.Canceled; codes.DeadlineExceeded can
+// therefore represent a real server status and must not be masked as teardown
+// noise. A non-gRPC bidiRPC may surface a bare context error instead, and EOF
+// carries no status at all.
 func isTeardownArtifact(err error) bool {
 	switch status.Code(err) {
-	case codes.Canceled, codes.DeadlineExceeded:
+	case codes.Canceled:
 		return true
 	}
 	return errors.Is(err, context.Canceled) ||
