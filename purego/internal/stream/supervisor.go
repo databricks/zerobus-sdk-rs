@@ -155,6 +155,12 @@ type retryableError interface {
 	IsRetryable() bool
 }
 
+// IsRetryable reports whether err represents a transient failure that a retry
+// or a fresh stream could recover from, using the same classification the
+// supervisor applies to reconnect decisions. It is exported for the public
+// zerobus package to derive the retryability of the errors it surfaces.
+func IsRetryable(err error) bool { return isRetryable(err) }
+
 // isRetryable reports whether reconnecting may succeed.
 func isRetryable(err error) bool {
 	if err == nil {
