@@ -17,9 +17,9 @@ import (
 // objects.
 type encodedMsg = *zerobuspb.EphemeralStreamRequest
 
-// encoder turns user records into wire messages for a given offset and recovers
-// them again for GetUnacked. It is the send-side per-encoding
-// seam. The core is generic over the wire message type Req and
+// encoder turns user records into offset-independent wire messages and recovers
+// them again for GetUnacked. It is the send-side per-encoding seam. The core is
+// generic over the wire message type Req and
 // never names a concrete proto type — proto/JSON supply encoder[encodedMsg];
 // Arrow will supply encoder[flightFrame].
 //
@@ -40,6 +40,20 @@ type encoder[Req any] interface {
 	decode(msg Req) [][]byte
 	// maxWireSize reports an upper bound across every offset stamp.
 	maxWireSize(msg Req) int
+	// retainedSize estimates the heap retained by an encoded message before it
+	// is built. It includes raw bytes, per-record containers, framing, and
+	// request-object overhead so aggregate backpressure cannot be bypassed by
+	// batches of tiny or empty records.
+	retainedSize(rawBytes, recordCount int) int64
+}
+
+const encodedRequestOverhead = int64(512)
+const encodedRecordOverhead = int64(32)
+
+func ephemeralRetainedSize(rawBytes, recordCount int) int64 {
+	return int64(rawBytes) +
+		int64(recordCount)*encodedRecordOverhead +
+		encodedRequestOverhead
 }
 
 // protoEncoder builds EphemeralStream payloads for proto-encoded records (raw
@@ -96,6 +110,10 @@ func (protoEncoder) stampOffset(msg encodedMsg, offset int64) {
 	stampEphemeralOffset(msg, offset)
 }
 
+func (protoEncoder) retainedSize(rawBytes, recordCount int) int64 {
+	return ephemeralRetainedSize(rawBytes, recordCount)
+}
+
 // jsonEncoder builds EphemeralStream payloads for JSON-encoded records, single
 // and batched.
 type jsonEncoder struct{}
@@ -144,6 +162,10 @@ func (jsonEncoder) maxWireSize(msg encodedMsg) int {
 
 func (jsonEncoder) stampOffset(msg encodedMsg, offset int64) {
 	stampEphemeralOffset(msg, offset)
+}
+
+func (jsonEncoder) retainedSize(rawBytes, recordCount int) int64 {
+	return ephemeralRetainedSize(rawBytes, recordCount)
 }
 
 func stampEphemeralOffset(msg encodedMsg, offset int64) {

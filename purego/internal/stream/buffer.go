@@ -76,8 +76,8 @@ type buffer[Req any] struct {
 }
 
 func newBuffer[Req any](maxInflight int, byteLimit ...int64) *buffer[Req] {
-	// Normalize a non-positive cap, which would otherwise deadlock (0) or
-	// panic (<0) at the semaphore.
+	// Normalize a non-positive count cap, which would otherwise prevent every
+	// reservation from being granted.
 	if maxInflight <= 0 {
 		maxInflight = defaultMaxInflight
 	}
@@ -239,11 +239,10 @@ func (b *buffer[Req]) next(ctx context.Context) (item[Req], error) {
 }
 
 // discardThrough removes every in-flight item whose offset is <= offset (all
-// now acknowledged by the server) and releases one semaphore slot per removed
-// item so blocked enqueue callers can proceed. It is the sender/receiver's only
-// hook for ack-driven eviction, keeping the buffer's internals (flight, sem,
-// cond) private. Returns the contiguous discarded offset range without
-// allocating per-item callback metadata.
+// now acknowledged by the server), releases its count and byte capacity, and
+// grants queued admission waiters in FIFO order. It is the receiver's only hook
+// for ack-driven eviction. Returns the contiguous discarded offset range
+// without allocating per-item callback metadata.
 func (b *buffer[Req]) discardThrough(offset int64) discardResult {
 	b.mu.Lock()
 	var result discardResult

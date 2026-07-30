@@ -849,6 +849,65 @@ func TestCoreStreamRecvPumpStaysOutstandingDuringClassification(t *testing.T) {
 	}
 }
 
+func TestCoreStreamReceiverFailureWinsWhileSendIsBlocked(t *testing.T) {
+	tests := []struct {
+		name       string
+		fail       func(*blockedSendTerminalRPC)
+		wantText   string
+		wantCode   codes.Code
+		wantAuthIn int64
+	}{
+		{
+			name: "authentication rejection",
+			fail: func(rpc *blockedSendTerminalRPC) {
+				rpc.recvErr <- status.Error(codes.Unauthenticated, "expired credentials")
+			},
+			wantText:   "expired credentials",
+			wantCode:   codes.Unauthenticated,
+			wantAuthIn: 1,
+		},
+		{
+			name:     "malformed response",
+			fail:     func(rpc *blockedSendTerminalRPC) { rpc.malformedAck() },
+			wantText: "unusable server response",
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			provider := &countingHeadersProvider{}
+			params := testParams()
+			params.HeadersProvider = provider
+			rpc := newBlockedSendTerminalRPC()
+			cfg := testConfig()
+			cfg.Recovery = RecoveryDisabled
+			cs := newCoreForTest(params, cfg, &blockedSendTerminalOpener{rpc: rpc}, nil)
+
+			if _, err := cs.Ingest(context.Background(), []byte(`{}`)); err != nil {
+				t.Fatalf("Ingest: %v", err)
+			}
+			select {
+			case <-rpc.started:
+			case <-time.After(time.Second):
+				t.Fatal("Send did not block")
+			}
+			tc.fail(rpc)
+
+			waitCondition(t, cs.IsClosed, time.Second)
+			err := cs.terminalErr()
+			if err == nil || !strings.Contains(err.Error(), tc.wantText) {
+				t.Fatalf("terminal error = %v, want %q", err, tc.wantText)
+			}
+			if tc.wantCode != codes.OK && status.Code(err) != tc.wantCode {
+				t.Fatalf("status code = %v, want %v", status.Code(err), tc.wantCode)
+			}
+			if got := provider.invalidations.Load(); got != tc.wantAuthIn {
+				t.Fatalf("Invalidate calls = %d, want %d", got, tc.wantAuthIn)
+			}
+			cs.Close()
+		})
+	}
+}
+
 func TestCoreStreamDefersTranslatedAckAfterReconnect(t *testing.T) {
 	firstRPC := newFakeRPC()
 	secondRPC := newControlledSendRPC()
@@ -1032,6 +1091,51 @@ func TestCoreStreamCloseUnblocksEnqueueAtCapacity(t *testing.T) {
 	case <-time.After(500 * time.Millisecond):
 		t.Fatal("Ingest did not unblock after Close")
 	}
+}
+
+func TestCoreStreamByteBackpressureResumesAfterAck(t *testing.T) {
+	rpc := newFakeRPC()
+	cfg := testConfig()
+	record := []byte(`{"value":1}`)
+	cfg.MaxInflight = 2
+	cfg.MaxBufferedPayloadBytes = jsonEncoder{}.retainedSize(len(record), 1)
+	cs := newCoreForTest(testParams(), cfg, newFakeOpener(rpc), nil)
+	t.Cleanup(func() { cs.Close() })
+
+	first, err := cs.Ingest(context.Background(), record)
+	if err != nil {
+		t.Fatalf("first Ingest: %v", err)
+	}
+	waitCondition(t, func() bool { return len(rpc.sends) == 1 }, time.Second)
+	<-rpc.sends
+
+	secondResult := make(chan struct {
+		offset int64
+		err    error
+	}, 1)
+	go func() {
+		offset, ingestErr := cs.Ingest(context.Background(), record)
+		secondResult <- struct {
+			offset int64
+			err    error
+		}{offset: offset, err: ingestErr}
+	}()
+	waitCondition(t, func() bool { return cs.buf.waiterCount() == 1 }, time.Second)
+
+	rpc.ack(first)
+	var second int64
+	select {
+	case result := <-secondResult:
+		if result.err != nil {
+			t.Fatalf("second Ingest: %v", result.err)
+		}
+		second = result.offset
+	case <-time.After(time.Second):
+		t.Fatal("second Ingest did not resume after ack released byte capacity")
+	}
+	waitCondition(t, func() bool { return len(rpc.sends) == 1 }, time.Second)
+	<-rpc.sends
+	rpc.ack(second)
 }
 
 func TestCoreStreamGetUnackedWithoutCallback(t *testing.T) {
@@ -1240,6 +1344,50 @@ func TestCoreStreamOpenAuthRejectionInvalidatesOnce(t *testing.T) {
 	cs := newCoreForTest(params, cfg, &authRejectingOpener{}, nil)
 
 	waitCondition(t, cs.IsClosed, time.Second)
+	if got := provider.invalidations.Load(); got != 1 {
+		t.Fatalf("Invalidate calls = %d, want 1", got)
+	}
+}
+
+func TestCoreStreamCloseRacingAuthRejectionStillInvalidates(t *testing.T) {
+	provider := &countingHeadersProvider{}
+	params := testParams()
+	params.HeadersProvider = provider
+	opener := &cancelThenAuthOpener{started: make(chan struct{})}
+	cfg := testConfig()
+	cfg.Recovery = RecoveryDisabled
+	cs := newCoreForTest(params, cfg, opener, nil)
+
+	select {
+	case <-opener.started:
+	case <-time.After(time.Second):
+		t.Fatal("Open did not start")
+	}
+	if err := cs.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	if got := provider.invalidations.Load(); got != 1 {
+		t.Fatalf("Invalidate calls = %d, want 1", got)
+	}
+}
+
+func TestCoreStreamCloseRacingLiveAuthRejectionStillInvalidates(t *testing.T) {
+	provider := &countingHeadersProvider{}
+	params := testParams()
+	params.HeadersProvider = provider
+	stream := newAuthOnCloseStream()
+	cs := newCoreForTest(
+		params, testConfig(), &authOnCloseOpener{stream: stream}, nil,
+	)
+
+	select {
+	case <-stream.recvStarted:
+	case <-time.After(time.Second):
+		t.Fatal("Recv did not start")
+	}
+	if err := cs.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
 	if got := provider.invalidations.Load(); got != 1 {
 		t.Fatalf("Invalidate calls = %d, want 1", got)
 	}
@@ -1532,6 +1680,21 @@ func TestCoreStreamIngestBatch(t *testing.T) {
 
 	if err := cs.Flush(context.Background()); err != nil {
 		t.Fatalf("Flush: %v", err)
+	}
+}
+
+func TestCoreStreamEmptyBatchRecordsConsumeBufferedByteBudget(t *testing.T) {
+	cfg := testConfig()
+	cfg.MaxBufferedPayloadBytes = 1024
+	cs := newCoreForTest(testParams(), cfg, newFakeOpener(newFakeRPC()), nil)
+	t.Cleanup(func() { cs.Close() })
+
+	records := make([][]byte, 100)
+	if _, err := cs.IngestBatch(context.Background(), records); !errors.Is(err, ErrPayloadTooLarge) {
+		t.Fatalf("IngestBatch error = %v, want ErrPayloadTooLarge", err)
+	}
+	if items, bytes := cs.buf.usage(); items != 0 || bytes != 0 {
+		t.Fatalf("buffer usage after rejection = (%d, %d), want (0, 0)", items, bytes)
 	}
 }
 

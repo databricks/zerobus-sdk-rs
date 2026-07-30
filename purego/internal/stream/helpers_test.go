@@ -130,6 +130,78 @@ func (o *controlledSendOpener) Open(_ context.Context, _ transport.StreamParams)
 	return transport.NewFakeStreamForTesting(o.rpc), nil
 }
 
+// blockedSendTerminalRPC keeps Send blocked until Abort while allowing Recv to
+// report an authoritative server failure first.
+type blockedSendTerminalRPC struct {
+	*controlledSendRPC
+	recvErr chan error
+}
+
+func newBlockedSendTerminalRPC() *blockedSendTerminalRPC {
+	return &blockedSendTerminalRPC{
+		controlledSendRPC: newControlledSendRPC(),
+		recvErr:           make(chan error, 1),
+	}
+}
+
+func (f *blockedSendTerminalRPC) Recv() (*zerobuspb.EphemeralStreamResponse, error) {
+	select {
+	case resp, ok := <-f.recvs:
+		if !ok {
+			return nil, io.EOF
+		}
+		return resp, nil
+	case err := <-f.recvErr:
+		return nil, err
+	case <-f.aborted:
+		return nil, io.ErrClosedPipe
+	}
+}
+
+type blockedSendTerminalOpener struct{ rpc *blockedSendTerminalRPC }
+
+func (o *blockedSendTerminalOpener) Open(_ context.Context, _ transport.StreamParams) (wireStream[encodedMsg, ephemeralResp], error) {
+	return transport.NewFakeStreamForTesting(o.rpc), nil
+}
+
+// authOnCloseStream models a live Recv whose authentication rejection becomes
+// observable while Close is tearing the connection down.
+type authOnCloseStream struct {
+	recvStarted chan struct{}
+	closed      chan struct{}
+	startOnce   sync.Once
+	closeOnce   sync.Once
+}
+
+func newAuthOnCloseStream() *authOnCloseStream {
+	return &authOnCloseStream{
+		recvStarted: make(chan struct{}),
+		closed:      make(chan struct{}),
+	}
+}
+
+func (*authOnCloseStream) ServerID() string { return "auth-on-close" }
+
+func (*authOnCloseStream) Send(encodedMsg) error { return nil }
+
+func (s *authOnCloseStream) Recv() (ephemeralResp, error) {
+	s.startOnce.Do(func() { close(s.recvStarted) })
+	<-s.closed
+	return nil, status.Error(codes.Unauthenticated, "expired credentials")
+}
+
+func (*authOnCloseStream) CloseSend() error { return io.ErrClosedPipe }
+
+func (s *authOnCloseStream) Close() {
+	s.closeOnce.Do(func() { close(s.closed) })
+}
+
+type authOnCloseOpener struct{ stream *authOnCloseStream }
+
+func (o *authOnCloseOpener) Open(_ context.Context, _ transport.StreamParams) (wireStream[encodedMsg, ephemeralResp], error) {
+	return o.stream, nil
+}
+
 type reconnectControlledOpener struct {
 	mu     sync.Mutex
 	first  *fakeRPC
@@ -381,6 +453,17 @@ func (p *countingHeadersProvider) Invalidate(_ context.Context, tableName string
 type authRejectingOpener struct{}
 
 func (*authRejectingOpener) Open(context.Context, transport.StreamParams) (wireStream[encodedMsg, ephemeralResp], error) {
+	return nil, status.Error(codes.Unauthenticated, "stale credentials")
+}
+
+type cancelThenAuthOpener struct {
+	started chan struct{}
+	once    sync.Once
+}
+
+func (o *cancelThenAuthOpener) Open(ctx context.Context, _ transport.StreamParams) (wireStream[encodedMsg, ephemeralResp], error) {
+	o.once.Do(func() { close(o.started) })
+	<-ctx.Done()
 	return nil, status.Error(codes.Unauthenticated, "stale credentials")
 }
 

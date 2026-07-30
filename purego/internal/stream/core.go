@@ -29,7 +29,8 @@ const (
 	DefaultLackOfAckTimeout   = 60 * time.Second
 	// DefaultMaxPayloadBytes leaves room below the 10 MiB service limit.
 	DefaultMaxPayloadBytes = 10*1024*1024 - 64*1024
-	// DefaultMaxBufferedPayloadBytes bounds raw queued and in-flight payload bytes.
+	// DefaultMaxBufferedPayloadBytes bounds estimated encoded memory retained by
+	// queued and in-flight payloads.
 	DefaultMaxBufferedPayloadBytes = 64 * 1024 * 1024
 	// DefaultMaxBatchRecords bounds per-batch allocation.
 	DefaultMaxBatchRecords = 100_000
@@ -60,8 +61,9 @@ func (r RecoverySetting) enabled() bool { return r == RecoveryEnabled }
 type Config struct {
 	// MaxInflight is the maximum number of unacknowledged buffer entries, not
 	// records: one Ingest or IngestBatch call occupies one entry regardless of
-	// how many records it carries. Total buffered bytes are bounded only by
-	// MaxInflight * MaxPayloadBytes.
+	// how many records it carries. MaxBufferedPayloadBytes bounds the same set
+	// by estimated retained size; whichever limit binds first applies
+	// backpressure.
 	MaxInflight int
 	// Recovery controls whether stream reconnection is attempted on failure. The
 	// zero value (RecoveryEnabled) recovers; set RecoveryDisabled to opt out.
@@ -89,7 +91,8 @@ type Config struct {
 	// MaxBatchRecords caps the number of records in one batch independently of
 	// byte size. Non-positive values use DefaultMaxBatchRecords.
 	MaxBatchRecords int
-	// MaxBufferedPayloadBytes caps raw payload bytes retained by the stream.
+	// MaxBufferedPayloadBytes caps estimated encoded memory retained by queued
+	// and in-flight payloads, including per-record and request-object overhead.
 	MaxBufferedPayloadBytes int64
 	// CallbackTeardownTimeout bounds asynchronous callback worker teardown.
 	CallbackTeardownTimeout time.Duration
@@ -258,8 +261,8 @@ func (w *watermark) waitFor(ctx context.Context, target int64) error {
 //	supervisor — create → run → recover loop; wires sender+receiver together.
 //	dispatcher — delivers AckCallback events off the receiver's path.
 //
-// The receiver also runs one short-lived goroutine per Recv so ack silence stays
-// observable while a Recv is blocked.
+// The receiver owns a persistent pump that keeps one Recv outstanding so ack
+// silence stays observable while a Recv is blocked.
 //
 // Callers interact only through Ingest, IngestBatch, Flush, WaitForOffset,
 // GetUnacked, GetUnackedBatches, and Close.
@@ -387,12 +390,14 @@ func waitUntil(ctx context.Context, deadline time.Time) bool {
 
 // Ingest encodes record and enqueues it in the buffer, blocking if the buffer
 // is at capacity (backpressure). Returns the logical offset assigned to this
-// record; pass it to WaitForOffset to confirm durability.
+// record. For throughput, queue records in a loop and call Flush once; waiting
+// for every offset serializes ingestion on server round trips.
 func (cs *CoreStream[Req, Resp]) Ingest(ctx context.Context, record []byte) (int64, error) {
 	if err := cs.checkRawSize(len(record)); err != nil {
 		return 0, err
 	}
-	return cs.enqueueEncoded(ctx, int64(len(record)), func() (Req, error) {
+	weight := cs.enc.retainedSize(len(record), 1)
+	return cs.enqueueEncoded(ctx, weight, func() (Req, error) {
 		return cs.enc.encode(record)
 	})
 }
@@ -423,7 +428,8 @@ func (cs *CoreStream[Req, Resp]) IngestBatch(ctx context.Context, records [][]by
 	if err := cs.checkRawSize(total); err != nil {
 		return 0, err
 	}
-	return cs.enqueueEncoded(ctx, int64(total), func() (Req, error) {
+	weight := cs.enc.retainedSize(total, len(records))
+	return cs.enqueueEncoded(ctx, weight, func() (Req, error) {
 		return cs.enc.encodeBatch(records)
 	})
 }
@@ -698,6 +704,7 @@ func (cs *CoreStream[Req, Resp]) runOnce(ctx context.Context) (cause error, rese
 
 	senderExitCh := make(chan error, 1)
 	receiverExitCh := make(chan error, 1)
+	receiverDone := make(chan struct{})
 	pauseCh := make(chan pauseSignal, 1)
 	flightSignal := make(chan struct{}, 1)
 	// cap 2: at most a {start, completed} pair for the one record in flight.
@@ -705,11 +712,14 @@ func (cs *CoreStream[Req, Resp]) runOnce(ctx context.Context) (cause error, rese
 	sendConsumed := make(chan struct{}, 1)
 
 	go cs.sender(senderCtx, stream, senderExitCh, flightSignal, sendEvents, sendConsumed)
-	go cs.receiver(stream, receiverExitCh, pauseCh, flightSignal, sendEvents, sendConsumed)
+	go func() {
+		defer close(receiverDone)
+		cs.receiver(stream, receiverExitCh, pauseCh, flightSignal, sendEvents, sendConsumed)
+	}()
 
 	var senderParked bool
 	var senderExited bool
-	var receiverExited bool
+	var receiverReported bool
 	var pauseObserved bool
 	recordPause := func() {
 		if !pauseObserved && cs.onPauseObserved != nil {
@@ -741,9 +751,20 @@ waitLoop:
 				continue
 			}
 			cause = senderErr
+			// A receiver-triggered teardown publishes its authoritative cause
+			// before closing the stream. If that close unblocked Send, the
+			// receiver cause is already available and must win arbitration.
+			select {
+			case receiverErr := <-receiverExitCh:
+				receiverReported = true
+				if receiverErr != nil && !errors.Is(receiverErr, context.Canceled) {
+					cause = receiverErr
+				}
+			default:
+			}
 			break waitLoop
 		case receiverErr := <-receiverExitCh:
-			receiverExited = true
+			receiverReported = true
 			drainPause()
 			// The receiver surfaces a pause as its own exit error, so whatever it
 			// reports is authoritative: a real failure still consumes the recovery
@@ -763,16 +784,24 @@ waitLoop:
 	switch {
 	case ctx.Err() != nil:
 		cs.gracefulTeardown(
-			stream, senderExited, receiverExited, senderExitCh, receiverExitCh,
+			stream, senderExited, senderExitCh, receiverDone,
 		)
+		// gracefulTeardown may have unblocked a Recv that was already
+		// returning a definitive rejection as Close cancelled the lifecycle.
+		// Preserve that result so the supervisor still invalidates credentials.
+		select {
+		case receiverErr := <-receiverExitCh:
+			if transport.IsAuthRejection(receiverErr) {
+				cause = receiverErr
+			}
+		default:
+		}
 	case errors.As(cause, &ps):
 		stream.Close()
 		if !senderExited {
 			<-senderExitCh
 		}
-		if !receiverExited {
-			<-receiverExitCh
-		}
+		<-receiverDone
 	default:
 		// gRPC reports a server-side abort to Send as an opaque io.EOF and carries
 		// the real status (auth, schema, protocol) on Recv, so an EOF cause is not
@@ -781,11 +810,11 @@ waitLoop:
 		// leaving recovery to retry a permanent rejection and skip credential
 		// invalidation. A failed send does not end the receiver, so it is still
 		// reading and the server's status is what unblocks it.
-		if !receiverExited && errors.Is(cause, io.EOF) {
+		if !receiverReported && errors.Is(cause, io.EOF) {
 			timer := time.NewTimer(cs.cfg.DrainTimeout)
 			select {
 			case receiverErr := <-receiverExitCh:
-				receiverExited = true
+				receiverReported = true
 				if receiverErr != nil && !errors.Is(receiverErr, context.Canceled) {
 					cause = receiverErr
 				}
@@ -799,9 +828,7 @@ waitLoop:
 		if !senderExited {
 			<-senderExitCh
 		}
-		if !receiverExited {
-			<-receiverExitCh
-		}
+		<-receiverDone
 	}
 	resetRecoveryBudget = cs.wm.current() > startAck ||
 		time.Since(openedAt) >= cs.cfg.RecoveryResetAfter
@@ -812,8 +839,9 @@ waitLoop:
 // DrainTimeout prevents shutdown from hanging.
 func (cs *CoreStream[Req, Resp]) gracefulTeardown(
 	stream wireStream[Req, Resp],
-	senderExited, receiverExited bool,
-	senderExitCh, receiverExitCh <-chan error,
+	senderExited bool,
+	senderExitCh <-chan error,
+	receiverDone <-chan struct{},
 ) {
 	// One shared deadline bounds the whole graceful shutdown, so the sender-exit
 	// wait and the receiver-drain wait can't each consume a full DrainTimeout.
@@ -827,30 +855,30 @@ func (cs *CoreStream[Req, Resp]) gracefulTeardown(
 			// Abort a blocked Send so Close can finish.
 			stream.Close()
 			<-senderExitCh
-			if !receiverExited {
-				<-receiverExitCh
-			}
+			<-receiverDone
 			return
 		}
 	}
-	if receiverExited {
+	select {
+	case <-receiverDone:
 		stream.Close()
 		return
+	default:
 	}
 	if err := stream.CloseSend(); err != nil {
 		// Send side already broken; fall back to a hard abort.
 		stream.Close()
-		<-receiverExitCh
+		<-receiverDone
 		return
 	}
 	select {
-	case <-receiverExitCh:
+	case <-receiverDone:
 		// Receiver drained to EOF; release resources (Close is idempotent).
 		stream.Close()
 	case <-timer.C:
 		// Drain budget exceeded; force the receiver out and reap it.
 		stream.Close()
-		<-receiverExitCh
+		<-receiverDone
 	}
 }
 
@@ -1108,14 +1136,22 @@ func (cs *CoreStream[Req, Resp]) receiver(
 		return handleSendEvent(<-sendEvents)
 	}
 	handleTerminal := func(err error) {
+		var ps pauseSignal
+		if err != nil && !errors.As(err, &ps) {
+			// Real receiver failures are authoritative. Publish before any
+			// operation that can close the transport and unblock Send.
+			errCh <- err
+			stopRecv()
+			return
+		}
 		if pendingErr := resolvePendingOnExit(); pendingErr != nil {
-			var ps pauseSignal
 			if err == nil || errors.As(err, &ps) {
 				err = pendingErr
 			}
 		}
-		stopRecv()
+		// Publish the resolved clean/pause outcome before final pump teardown.
 		errCh <- err
+		stopRecv()
 	}
 
 	for {
@@ -1175,8 +1211,7 @@ func (cs *CoreStream[Req, Resp]) receiver(
 			// A response the ack model can't interpret (unrecognized type, or an
 			// ack missing/with a negative offset) is a protocol violation. Tear the
 			// stream down rather than silently dropping it; the supervisor decides
-			// whether to reconnect. The current Recv already delivered and no new
-			// one is outstanding, so there's nothing to reap.
+			// whether to reconnect. handleTerminal reaps the pump's next Recv.
 			handleTerminal(fmt.Errorf("stream: unusable server response (kind %d)", kind))
 			return
 		}
