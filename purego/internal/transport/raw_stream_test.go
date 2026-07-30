@@ -67,7 +67,7 @@ func TestRawStreamHandshakeSendEOFFallsThroughToRecv(t *testing.T) {
 	if err == nil {
 		t.Fatal("handshake with Send io.EOF: got nil error, want the recv status")
 	}
-	if !isAuthRejection(err) {
+	if !IsAuthRejection(err) {
 		t.Fatalf("handshake error = %v, want an auth rejection recovered from recv", err)
 	}
 }
@@ -213,7 +213,7 @@ func TestRawStreamHandshakeTimeoutPrefersServerRejection(t *testing.T) {
 	if err == nil {
 		t.Fatal("handshake with expired deadline: got nil error, want rejection")
 	}
-	if !isAuthRejection(err) {
+	if !IsAuthRejection(err) {
 		t.Fatalf("handshake error = %v, want auth rejection recovered from reaped recv", err)
 	}
 	// The point of preferring the status is that the deadline no longer shadows it:
@@ -271,7 +271,7 @@ func TestRawStreamHandshakeTimeoutRejectionIsDeterministic(t *testing.T) {
 			func(_ bidiRPC[string, string]) error { return nil },
 			func(_ *string) (string, error) { return "", nil },
 		)
-		if !isAuthRejection(err) {
+		if !IsAuthRejection(err) {
 			t.Fatalf("iteration %d: handshake error = %v, want auth rejection every time", i, err)
 		}
 	}

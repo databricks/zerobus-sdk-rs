@@ -108,9 +108,6 @@ func (c *Conn) Open(ctx context.Context, p StreamParams) (*Stream, error) {
 
 	stream, err := c.open(handshakeCtx, streamCtx, cancelStream, p)
 	if err != nil {
-		if p.HeadersProvider != nil && isAuthRejection(err) {
-			p.HeadersProvider.Invalidate(ctx, p.TableName)
-		}
 		// Deregister the bridge before returning so its AfterFunc doesn't linger
 		// until handshakeCtx ends (which, on the default-budget path, is bounded,
 		// but on a caller-supplied long-lived ctx would otherwise stay pinned).
@@ -148,6 +145,9 @@ func (c *Conn) open(hctx, streamCtx context.Context, teardown context.CancelFunc
 		},
 		confirmCreateStream,
 	); err != nil {
+		if p.HeadersProvider != nil && IsAuthRejection(err) {
+			p.HeadersProvider.Invalidate(hctx, p.TableName)
+		}
 		return nil, fmt.Errorf("transport: open %q: %w", p.TableName, err)
 	}
 	return s, nil

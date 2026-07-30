@@ -156,9 +156,8 @@ func isUsableAsHeaderValue(value string) bool {
 	return true
 }
 
-// isAuthRejection reports whether err is a gRPC auth rejection
-// (Unauthenticated or PermissionDenied), unwrapping wrapped errors.
-func isAuthRejection(err error) bool {
+// IsAuthRejection reports whether err rejects authentication.
+func IsAuthRejection(err error) bool {
 	code := status.Code(err)
 	return code == codes.Unauthenticated || code == codes.PermissionDenied
 }
