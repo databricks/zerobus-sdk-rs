@@ -68,7 +68,7 @@ func BenchmarkBufferRequeue(b *testing.B) {
 			b.ReportAllocs()
 			for range b.N {
 				b.StopTimer()
-				buf := newBuffer[encodedMsg](depth)
+				buf := newBuffer[encodedMsg](depth, 0)
 				for i := range depth {
 					if err := buf.enqueue(context.Background(), int64(i), dummyMsg(int64(i))); err != nil {
 						b.Fatal(err)

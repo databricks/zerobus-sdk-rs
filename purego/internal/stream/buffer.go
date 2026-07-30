@@ -72,18 +72,19 @@ type buffer[Req any] struct {
 	maxBufferedBytes int64
 	usedItems        int
 	usedBytes        int64
+	accountingReset  bool
 	waiters          *list.List
 }
 
-func newBuffer[Req any](maxInflight int, byteLimit ...int64) *buffer[Req] {
+func newBuffer[Req any](maxInflight int, byteLimit int64) *buffer[Req] {
 	// Normalize a non-positive count cap, which would otherwise prevent every
 	// reservation from being granted.
 	if maxInflight <= 0 {
 		maxInflight = defaultMaxInflight
 	}
 	maxBufferedBytes := int64(math.MaxInt64)
-	if len(byteLimit) > 0 && byteLimit[0] > 0 {
-		maxBufferedBytes = byteLimit[0]
+	if byteLimit > 0 {
+		maxBufferedBytes = byteLimit
 	}
 	b := &buffer[Req]{
 		maxInflight:      maxInflight,
@@ -124,8 +125,12 @@ func (b *buffer[Req]) reserve(ctx context.Context, weight int64) error {
 	case <-ctx.Done():
 		b.mu.Lock()
 		if waiter.granted {
-			b.usedItems--
-			b.usedBytes -= weight
+			// drain may have closed the buffer and reset accounting after this
+			// reservation was granted but before cancellation won the select.
+			if !b.accountingReset {
+				b.usedItems--
+				b.usedBytes -= weight
+			}
 		} else if waiter.err == nil {
 			if waiter.elem != nil {
 				b.waiters.Remove(waiter.elem)
@@ -171,9 +176,11 @@ func (b *buffer[Req]) failWaitersLocked(err error) {
 
 func (b *buffer[Req]) release(weight int64) {
 	b.mu.Lock()
-	b.usedItems--
-	b.usedBytes -= weight
-	b.grantWaitersLocked()
+	if !b.accountingReset {
+		b.usedItems--
+		b.usedBytes -= weight
+		b.grantWaitersLocked()
+	}
 	b.mu.Unlock()
 }
 
@@ -181,8 +188,10 @@ func (b *buffer[Req]) release(weight int64) {
 func (b *buffer[Req]) append(offset int64, msg Req, weight int64) error {
 	b.mu.Lock()
 	if b.closed {
-		b.usedItems--
-		b.usedBytes -= weight
+		if !b.accountingReset {
+			b.usedItems--
+			b.usedBytes -= weight
+		}
 		b.mu.Unlock()
 		b.cond.Broadcast()
 		return errClosed
@@ -313,6 +322,7 @@ func (b *buffer[Req]) drain() []item[Req] {
 	b.queue = nil
 	b.flight = nil
 	b.closed = true
+	b.accountingReset = true
 	b.usedItems = 0
 	b.usedBytes = 0
 	b.failWaitersLocked(errClosed)

@@ -68,7 +68,10 @@ func (d *callbackDispatcher) run() {
 	}
 }
 
-// invoke prevents callback panics from stopping the stream.
+// invoke prevents callback panics from stopping later callback delivery.
+// Recovered values are intentionally discarded until the public SDK exposes a
+// logger or callback-error sink; this internal package must not write to the
+// process-global standard logger.
 func (d *callbackDispatcher) invoke(event callbackEvent) {
 	defer func() { _ = recover() }()
 	if event.err == nil {

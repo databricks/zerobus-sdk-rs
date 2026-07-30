@@ -267,16 +267,15 @@ func (w *watermark) waitFor(ctx context.Context, target int64) error {
 // Callers interact only through Ingest, IngestBatch, Flush, WaitForOffset,
 // GetUnacked, GetUnackedBatches, and Close.
 type CoreStream[Req, Resp any] struct {
-	params          StreamParams
-	cfg             Config
-	opener          opener[Req, Resp]
-	enc             encoder[Req]
-	ackMdl          ackModel[Resp]
-	buf             *buffer[Req]
-	wm              *watermark
-	dispatcher      *callbackDispatcher
-	pauseWait       func(context.Context, time.Time) bool
-	onPauseObserved func()
+	params     StreamParams
+	cfg        Config
+	opener     opener[Req, Resp]
+	enc        encoder[Req]
+	ackMdl     ackModel[Resp]
+	buf        *buffer[Req]
+	wm         *watermark
+	dispatcher *callbackDispatcher
+	pauseWait  func(context.Context, time.Time) bool
 
 	clientID string
 	serverID atomic.Pointer[string]
@@ -722,9 +721,6 @@ func (cs *CoreStream[Req, Resp]) runOnce(ctx context.Context) (cause error, rese
 	var receiverReported bool
 	var pauseObserved bool
 	recordPause := func() {
-		if !pauseObserved && cs.onPauseObserved != nil {
-			cs.onPauseObserved()
-		}
 		pauseObserved = true
 		if !senderParked {
 			cancelSender()
@@ -989,9 +985,7 @@ func (cs *CoreStream[Req, Resp]) receiver(
 	}
 
 	lackTimer := time.NewTimer(cs.cfg.LackOfAckTimeout)
-	if !lackTimer.Stop() {
-		<-lackTimer.C
-	}
+	lackTimer.Stop()
 	lackTimerArmed := false
 	armLackTimer := func() {
 		if lackTimerArmed || cs.buf.inFlight() == 0 {
@@ -1004,12 +998,8 @@ func (cs *CoreStream[Req, Resp]) receiver(
 		if !lackTimerArmed {
 			return
 		}
-		if !lackTimer.Stop() {
-			select {
-			case <-lackTimer.C:
-			default:
-			}
-		}
+		// Go 1.23+ guarantees that Stop prevents stale timer values.
+		lackTimer.Stop()
 		lackTimerArmed = false
 	}
 	// syncLackTimer realigns the ack-silence budget with the in-flight set. Only

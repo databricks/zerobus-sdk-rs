@@ -16,7 +16,7 @@ func dummyMsg(offset int64) encodedMsg {
 }
 
 func TestBufferEnqueueNext(t *testing.T) {
-	b := newBuffer[encodedMsg](4)
+	b := newBuffer[encodedMsg](4, 0)
 
 	if err := b.enqueue(context.Background(), 1, dummyMsg(1)); err != nil {
 		t.Fatalf("enqueue: %v", err)
@@ -32,7 +32,7 @@ func TestBufferEnqueueNext(t *testing.T) {
 }
 
 func TestBufferFIFOOrder(t *testing.T) {
-	b := newBuffer[encodedMsg](8)
+	b := newBuffer[encodedMsg](8, 0)
 	for i := int64(1); i <= 5; i++ {
 		if err := b.enqueue(context.Background(), i, dummyMsg(i)); err != nil {
 			t.Fatalf("enqueue %d: %v", i, err)
@@ -51,7 +51,7 @@ func TestBufferFIFOOrder(t *testing.T) {
 
 func TestBufferBackpressure(t *testing.T) {
 	const cap = 2
-	b := newBuffer[encodedMsg](cap)
+	b := newBuffer[encodedMsg](cap, 0)
 
 	// Fill the buffer to capacity.
 	for i := int64(1); i <= cap; i++ {
@@ -210,6 +210,62 @@ func TestBufferRecoveryDoesNotDoubleChargeBytes(t *testing.T) {
 	}
 }
 
+func TestBufferDrainMakesReservationRollbackIdempotent(t *testing.T) {
+	t.Run("release", func(t *testing.T) {
+		b := newBuffer[encodedMsg](4, 10)
+		if err := b.reserve(context.Background(), 7); err != nil {
+			t.Fatalf("reserve: %v", err)
+		}
+		b.drain()
+		b.release(7)
+		if items, bytes := b.usage(); items != 0 || bytes != 0 {
+			t.Fatalf("usage after drain and release = (%d, %d), want (0, 0)", items, bytes)
+		}
+	})
+
+	t.Run("append", func(t *testing.T) {
+		b := newBuffer[encodedMsg](4, 10)
+		if err := b.reserve(context.Background(), 7); err != nil {
+			t.Fatalf("reserve: %v", err)
+		}
+		b.drain()
+		if err := b.append(1, dummyMsg(1), 7); err != errClosed {
+			t.Fatalf("append after drain = %v, want errClosed", err)
+		}
+		if items, bytes := b.usage(); items != 0 || bytes != 0 {
+			t.Fatalf("usage after drain and append = (%d, %d), want (0, 0)", items, bytes)
+		}
+	})
+}
+
+func TestBufferClosePreservesReservationRollback(t *testing.T) {
+	t.Run("release", func(t *testing.T) {
+		b := newBuffer[encodedMsg](4, 10)
+		if err := b.reserve(context.Background(), 7); err != nil {
+			t.Fatalf("reserve: %v", err)
+		}
+		b.close()
+		b.release(7)
+		if items, bytes := b.usage(); items != 0 || bytes != 0 {
+			t.Fatalf("usage after close and release = (%d, %d), want (0, 0)", items, bytes)
+		}
+	})
+
+	t.Run("append", func(t *testing.T) {
+		b := newBuffer[encodedMsg](4, 10)
+		if err := b.reserve(context.Background(), 7); err != nil {
+			t.Fatalf("reserve: %v", err)
+		}
+		b.close()
+		if err := b.append(1, dummyMsg(1), 7); err != errClosed {
+			t.Fatalf("append after close = %v, want errClosed", err)
+		}
+		if items, bytes := b.usage(); items != 0 || bytes != 0 {
+			t.Fatalf("usage after close and append = (%d, %d), want (0, 0)", items, bytes)
+		}
+	})
+}
+
 func TestBufferByteWaiterUnblocksOnClose(t *testing.T) {
 	b := newBuffer[encodedMsg](4, 1)
 	if err := b.reserve(context.Background(), 1); err != nil {
@@ -220,6 +276,7 @@ func TestBufferByteWaiterUnblocksOnClose(t *testing.T) {
 	}
 	errCh := make(chan error, 1)
 	go func() { errCh <- b.reserve(context.Background(), 1) }()
+	waitCondition(t, func() bool { return b.waiterCount() == 1 }, time.Second)
 	b.close()
 	select {
 	case err := <-errCh:
@@ -232,7 +289,7 @@ func TestBufferByteWaiterUnblocksOnClose(t *testing.T) {
 }
 
 func TestBufferContextCancelUnblocksEnqueue(t *testing.T) {
-	b := newBuffer[encodedMsg](1)
+	b := newBuffer[encodedMsg](1, 0)
 	if err := b.enqueue(context.Background(), 1, dummyMsg(1)); err != nil {
 		t.Fatalf("enqueue: %v", err)
 	}
@@ -257,7 +314,7 @@ func TestBufferContextCancelUnblocksEnqueue(t *testing.T) {
 }
 
 func TestBufferRequeueResendsInOrder(t *testing.T) {
-	b := newBuffer[encodedMsg](4)
+	b := newBuffer[encodedMsg](4, 0)
 	for i := int64(1); i <= 3; i++ {
 		if err := b.enqueue(context.Background(), i, dummyMsg(i)); err != nil {
 			t.Fatalf("enqueue %d: %v", i, err)
@@ -286,7 +343,7 @@ func TestBufferRequeueResendsInOrder(t *testing.T) {
 }
 
 func TestBufferDrainReturnsAll(t *testing.T) {
-	b := newBuffer[encodedMsg](8)
+	b := newBuffer[encodedMsg](8, 0)
 	for i := int64(1); i <= 4; i++ {
 		if err := b.enqueue(context.Background(), i, dummyMsg(i)); err != nil {
 			t.Fatalf("enqueue: %v", err)
@@ -312,7 +369,7 @@ func TestBufferDrainReturnsAll(t *testing.T) {
 }
 
 func TestBufferEnqueueAfterCloseErrors(t *testing.T) {
-	b := newBuffer[encodedMsg](4)
+	b := newBuffer[encodedMsg](4, 0)
 	b.close()
 	err := b.enqueue(context.Background(), 1, dummyMsg(1))
 	if err != errClosed {
@@ -321,7 +378,7 @@ func TestBufferEnqueueAfterCloseErrors(t *testing.T) {
 }
 
 func TestBufferNextAfterCloseAndDrainErrors(t *testing.T) {
-	b := newBuffer[encodedMsg](4)
+	b := newBuffer[encodedMsg](4, 0)
 	b.drain()
 	_, err := b.next(context.Background())
 	if err != errClosed {
@@ -331,7 +388,7 @@ func TestBufferNextAfterCloseAndDrainErrors(t *testing.T) {
 
 func TestBufferConcurrentEnqueueDiscard(t *testing.T) {
 	const n = 100
-	b := newBuffer[encodedMsg](16)
+	b := newBuffer[encodedMsg](16, 0)
 
 	var wg sync.WaitGroup
 	wg.Add(1)
@@ -362,7 +419,7 @@ func TestBufferConcurrentEnqueueDiscard(t *testing.T) {
 // The AfterFunc broadcast has to be ordered under b.mu against cond.Wait, or
 // the wake-up can be lost and next sleeps forever on a cancelled ctx.
 func TestBufferNextContextCancelUnblocks(t *testing.T) {
-	b := newBuffer[encodedMsg](4)
+	b := newBuffer[encodedMsg](4, 0)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	errCh := make(chan error, 1)
@@ -387,7 +444,7 @@ func TestBufferNextContextCancelUnblocks(t *testing.T) {
 // next must return immediately on an already-cancelled ctx and leave a queued
 // item untouched, so a stopping sender never drains one more record.
 func TestBufferNextAlreadyCancelledCtx(t *testing.T) {
-	b := newBuffer[encodedMsg](4)
+	b := newBuffer[encodedMsg](4, 0)
 	if err := b.enqueue(context.Background(), 1, dummyMsg(1)); err != nil {
 		t.Fatalf("enqueue: %v", err)
 	}
@@ -405,7 +462,7 @@ func TestBufferNextAlreadyCancelledCtx(t *testing.T) {
 // or panicking (<0), so the primitive stays live on a bad value.
 func TestNewBufferNormalizesNonPositiveCap(t *testing.T) {
 	for _, cap := range []int{0, -1} {
-		b := newBuffer[encodedMsg](cap)
+		b := newBuffer[encodedMsg](cap, 0)
 		if err := b.enqueue(context.Background(), 1, dummyMsg(1)); err != nil {
 			t.Fatalf("cap %d: enqueue should not block/fail, got %v", cap, err)
 		}

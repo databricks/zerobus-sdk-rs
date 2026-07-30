@@ -91,16 +91,18 @@ type controlledSendRPC struct {
 	started   chan struct{}
 	result    chan error
 	aborted   chan struct{}
+	pauseRead chan struct{}
 	startOnce sync.Once
 	abortOnce sync.Once
 }
 
 func newControlledSendRPC() *controlledSendRPC {
 	return &controlledSendRPC{
-		fakeRPC: newFakeRPC(),
-		started: make(chan struct{}),
-		result:  make(chan error, 1),
-		aborted: make(chan struct{}),
+		fakeRPC:   newFakeRPC(),
+		started:   make(chan struct{}),
+		result:    make(chan error, 1),
+		aborted:   make(chan struct{}),
+		pauseRead: make(chan struct{}, 1),
 	}
 }
 
@@ -115,6 +117,17 @@ func (f *controlledSendRPC) Send(req *zerobuspb.EphemeralStreamRequest) error {
 	case <-f.aborted:
 		return io.ErrClosedPipe
 	}
+}
+
+func (f *controlledSendRPC) Recv() (*zerobuspb.EphemeralStreamResponse, error) {
+	resp, err := f.fakeRPC.Recv()
+	if resp != nil && resp.GetCloseStreamSignal() != nil {
+		select {
+		case f.pauseRead <- struct{}{}:
+		default:
+		}
+	}
+	return resp, err
 }
 
 func (f *controlledSendRPC) Abort() {

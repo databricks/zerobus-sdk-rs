@@ -2303,10 +2303,8 @@ func TestCoreStreamPauseOwnsConcurrentSendFailure(t *testing.T) {
 	rpc := newControlledSendRPC()
 	cfg := testConfig()
 	cfg.Recovery = RecoveryDisabled
-	cfg.StreamPausedMaxWait = durationPtr(20 * time.Millisecond)
+	cfg.StreamPausedMaxWait = durationPtr(time.Second)
 	cs := newCoreForTest(testParams(), cfg, &controlledSendOpener{rpc: rpc}, nil)
-	pauseObserved := make(chan struct{})
-	cs.onPauseObserved = func() { close(pauseObserved) }
 
 	if _, err := cs.Ingest(context.Background(), []byte(`{}`)); err != nil {
 		t.Fatalf("Ingest: %v", err)
@@ -2316,12 +2314,16 @@ func TestCoreStreamPauseOwnsConcurrentSendFailure(t *testing.T) {
 	case <-time.After(time.Second):
 		t.Fatal("Send did not start")
 	}
-	rpc.closeSignalWithDuration(20 * time.Millisecond)
+	rpc.closeSignalWithDuration(time.Second)
 	select {
-	case <-pauseObserved:
+	case <-rpc.pauseRead:
 	case <-time.After(time.Second):
-		t.Fatal("pause was not observed")
+		t.Fatal("pause response was not read")
 	}
+	// The receive pump hands the response to the receiver immediately after
+	// Recv returns. Leave the send blocked long enough for the supervisor to
+	// observe the buffered pause before releasing the transport failure.
+	time.Sleep(10 * time.Millisecond)
 	rpc.result <- io.ErrClosedPipe
 
 	waitCondition(t, cs.IsClosed, time.Second)
