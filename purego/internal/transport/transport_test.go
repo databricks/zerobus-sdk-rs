@@ -213,12 +213,17 @@ func dialFakeWithExtraDialOptions(t *testing.T, srv *fakeServer, extraOpts ...gr
 	lis := bufconn.Listen(1 << 20)
 	gsrv := grpc.NewServer()
 	zerobuspb.RegisterZerobusServer(gsrv, srv)
+	serveDone := make(chan struct{})
 	go func() {
-		if err := gsrv.Serve(lis); err != nil {
+		defer close(serveDone)
+		if err := gsrv.Serve(lis); err != nil && !errors.Is(err, grpc.ErrServerStopped) {
 			t.Errorf("fake server stopped: %v", err)
 		}
 	}()
-	t.Cleanup(gsrv.Stop)
+	t.Cleanup(func() {
+		gsrv.Stop()
+		<-serveDone
+	})
 
 	dialer := grpc.WithContextDialer(func(ctx context.Context, _ string) (net.Conn, error) {
 		return lis.DialContext(ctx)

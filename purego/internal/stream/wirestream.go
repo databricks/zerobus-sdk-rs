@@ -17,7 +17,8 @@ type wireStream[Req, Resp any] interface {
 	Recv() (Resp, error)
 	// CloseSend half-closes sending while Recv drains.
 	CloseSend() error
-	// Close aborts the stream and releases resources. Idempotent.
+	// Close aborts the stream and releases resources. Idempotent. It must also
+	// unblock an in-progress Send, which teardown relies on to reap the sender.
 	Close()
 }
 

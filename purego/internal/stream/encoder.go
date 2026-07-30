@@ -3,6 +3,7 @@ package stream
 import (
 	"bytes"
 	"fmt"
+	"math"
 
 	"google.golang.org/protobuf/proto"
 
@@ -16,37 +17,51 @@ import (
 // objects.
 type encodedMsg = *zerobuspb.EphemeralStreamRequest
 
-// encoder turns user records into wire messages for a given offset and recovers
-// them again for GetUnacked. It is the send-side per-encoding
-// seam. The core is generic over the wire message type Req and
+// encoder turns user records into offset-independent wire messages and recovers
+// them again for GetUnacked. It is the send-side per-encoding seam. The core is
+// generic over the wire message type Req and
 // never names a concrete proto type — proto/JSON supply encoder[encodedMsg];
 // Arrow will supply encoder[flightFrame].
 //
 // The sender replaces the encoded offset with a connection-local wire offset.
 type encoder[Req any] interface {
-	// encode turns a single user record into one wire message.
-	encode(offset int64, record []byte) (Req, error)
+	// encode turns a single user record into an offset-independent wire message.
+	encode(record []byte) (Req, error)
 	// encodeBatch turns many already-encoded records into one wire message. All
 	// records share a single offset and are atomic to the server (it acks the
 	// whole batch or none of it), so the batch occupies exactly one logical
 	// offset in the core's buffer.
-	encodeBatch(offset int64, records [][]byte) (Req, error)
+	encodeBatch(records [][]byte) (Req, error)
 	// stampOffset assigns the connection-local wire offset.
 	stampOffset(msg Req, offset int64)
 	// decode recovers the raw record bytes from a wire message so GetUnacked can
 	// return original content. A single-record message yields one entry; a batch
 	// yields all of its records so no unacked record is silently dropped.
 	decode(msg Req) [][]byte
-	// wireSize reports the serialized message size (incl. proto framing) so a
-	// payload cap can be enforced against what the server actually receives.
-	wireSize(msg Req) int
+	// maxWireSize reports an upper bound across every offset stamp.
+	maxWireSize(msg Req) int
+	// retainedSize estimates the heap retained by an encoded message before it
+	// is built. It includes raw bytes, per-record containers, framing, and
+	// request-object overhead so aggregate backpressure cannot be bypassed by
+	// batches of tiny or empty records.
+	retainedSize(rawBytes, recordCount int) int64
+}
+
+const encodedRequestOverhead = int64(512)
+const encodedRecordOverhead = int64(32)
+
+func ephemeralRetainedSize(rawBytes, recordCount int) int64 {
+	return int64(rawBytes) +
+		int64(recordCount)*encodedRecordOverhead +
+		encodedRequestOverhead
 }
 
 // protoEncoder builds EphemeralStream payloads for proto-encoded records (raw
 // serialized protobuf bytes), single and batched.
 type protoEncoder struct{}
 
-func (protoEncoder) encode(offset int64, record []byte) (encodedMsg, error) {
+func (protoEncoder) encode(record []byte) (encodedMsg, error) {
+	offset := int64(math.MaxInt64)
 	// Empty is a valid proto encoding (all-default message). Clone so a reused
 	// caller buffer can't mutate the queued payload before it's serialized.
 	return &zerobuspb.EphemeralStreamRequest{
@@ -59,7 +74,7 @@ func (protoEncoder) encode(offset int64, record []byte) (encodedMsg, error) {
 	}, nil
 }
 
-func (protoEncoder) encodeBatch(offset int64, records [][]byte) (encodedMsg, error) {
+func (protoEncoder) encodeBatch(records [][]byte) (encodedMsg, error) {
 	if len(records) == 0 {
 		return nil, fmt.Errorf("stream: proto batch must not be empty")
 	}
@@ -69,6 +84,7 @@ func (protoEncoder) encodeBatch(offset int64, records [][]byte) (encodedMsg, err
 	for i, r := range records {
 		copied[i] = bytes.Clone(r)
 	}
+	offset := int64(math.MaxInt64)
 	return &zerobuspb.EphemeralStreamRequest{
 		Payload: &zerobuspb.EphemeralStreamRequest_IngestRecordBatch{
 			IngestRecordBatch: &zerobuspb.IngestRecordBatchRequest{
@@ -83,7 +99,7 @@ func (protoEncoder) encodeBatch(offset int64, records [][]byte) (encodedMsg, err
 
 func (protoEncoder) decode(msg encodedMsg) [][]byte { return extractEphemeralRecords(msg) }
 
-func (protoEncoder) wireSize(msg encodedMsg) int {
+func (protoEncoder) maxWireSize(msg encodedMsg) int {
 	if msg == nil {
 		return 0
 	}
@@ -94,14 +110,16 @@ func (protoEncoder) stampOffset(msg encodedMsg, offset int64) {
 	stampEphemeralOffset(msg, offset)
 }
 
+func (protoEncoder) retainedSize(rawBytes, recordCount int) int64 {
+	return ephemeralRetainedSize(rawBytes, recordCount)
+}
+
 // jsonEncoder builds EphemeralStream payloads for JSON-encoded records, single
 // and batched.
 type jsonEncoder struct{}
 
-func (jsonEncoder) encode(offset int64, record []byte) (encodedMsg, error) {
-	if len(record) == 0 {
-		return nil, fmt.Errorf("stream: json record must not be empty")
-	}
+func (jsonEncoder) encode(record []byte) (encodedMsg, error) {
+	offset := int64(math.MaxInt64)
 	return &zerobuspb.EphemeralStreamRequest{
 		Payload: &zerobuspb.EphemeralStreamRequest_IngestRecord{
 			IngestRecord: &zerobuspb.IngestRecordRequest{
@@ -112,17 +130,15 @@ func (jsonEncoder) encode(offset int64, record []byte) (encodedMsg, error) {
 	}, nil
 }
 
-func (jsonEncoder) encodeBatch(offset int64, records [][]byte) (encodedMsg, error) {
+func (jsonEncoder) encodeBatch(records [][]byte) (encodedMsg, error) {
 	if len(records) == 0 {
 		return nil, fmt.Errorf("stream: json batch must not be empty")
 	}
 	jsonRecords := make([]string, len(records))
 	for i, r := range records {
-		if len(r) == 0 {
-			return nil, fmt.Errorf("stream: json batch record %d must not be empty", i)
-		}
 		jsonRecords[i] = string(r)
 	}
+	offset := int64(math.MaxInt64)
 	return &zerobuspb.EphemeralStreamRequest{
 		Payload: &zerobuspb.EphemeralStreamRequest_IngestRecordBatch{
 			IngestRecordBatch: &zerobuspb.IngestRecordBatchRequest{
@@ -137,7 +153,7 @@ func (jsonEncoder) encodeBatch(offset int64, records [][]byte) (encodedMsg, erro
 
 func (jsonEncoder) decode(msg encodedMsg) [][]byte { return extractEphemeralRecords(msg) }
 
-func (jsonEncoder) wireSize(msg encodedMsg) int {
+func (jsonEncoder) maxWireSize(msg encodedMsg) int {
 	if msg == nil {
 		return 0
 	}
@@ -148,16 +164,28 @@ func (jsonEncoder) stampOffset(msg encodedMsg, offset int64) {
 	stampEphemeralOffset(msg, offset)
 }
 
+func (jsonEncoder) retainedSize(rawBytes, recordCount int) int64 {
+	return ephemeralRetainedSize(rawBytes, recordCount)
+}
+
 func stampEphemeralOffset(msg encodedMsg, offset int64) {
 	if msg == nil {
 		return
 	}
 	if record := msg.GetIngestRecord(); record != nil {
-		record.OffsetId = proto.Int64(offset)
+		if record.OffsetId == nil {
+			record.OffsetId = proto.Int64(offset)
+		} else {
+			*record.OffsetId = offset
+		}
 		return
 	}
 	if batch := msg.GetIngestRecordBatch(); batch != nil {
-		batch.OffsetId = proto.Int64(offset)
+		if batch.OffsetId == nil {
+			batch.OffsetId = proto.Int64(offset)
+		} else {
+			*batch.OffsetId = offset
+		}
 	}
 }
 
@@ -182,10 +210,10 @@ func extractEphemeralRecords(msg encodedMsg) [][]byte {
 	}
 	if ir := msg.GetIngestRecord(); ir != nil {
 		// Switch on oneof type, not nil: an empty proto record must not be read
-		// as JSON.
+		// as JSON. Clone so callers (GetUnacked) never alias the retained payload.
 		switch r := ir.GetRecord().(type) {
 		case *zerobuspb.IngestRecordRequest_ProtoEncodedRecord:
-			return [][]byte{r.ProtoEncodedRecord}
+			return [][]byte{bytes.Clone(r.ProtoEncodedRecord)}
 		case *zerobuspb.IngestRecordRequest_JsonRecord:
 			return [][]byte{[]byte(r.JsonRecord)}
 		}
@@ -193,7 +221,12 @@ func extractEphemeralRecords(msg encodedMsg) [][]byte {
 	}
 	if ib := msg.GetIngestRecordBatch(); ib != nil {
 		if pb := ib.GetProtoEncodedBatch(); pb != nil {
-			return pb.GetRecords()
+			recs := pb.GetRecords()
+			out := make([][]byte, len(recs))
+			for i, r := range recs {
+				out[i] = bytes.Clone(r)
+			}
+			return out
 		}
 		if jb := ib.GetJsonBatch(); jb != nil {
 			recs := jb.GetRecords()
