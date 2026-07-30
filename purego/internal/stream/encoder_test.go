@@ -1,12 +1,15 @@
 package stream
 
 import (
+	"math"
 	"testing"
+
+	"google.golang.org/protobuf/proto"
 )
 
 func TestProtoEncoderSetsOffsetAndPayload(t *testing.T) {
 	enc := protoEncoder{}
-	msg, err := enc.encode(42, []byte{0x0a, 0x01, 0x78})
+	msg, err := enc.encode([]byte{0x0a, 0x01, 0x78})
 	if err != nil {
 		t.Fatalf("encode: %v", err)
 	}
@@ -14,12 +17,9 @@ func TestProtoEncoderSetsOffsetAndPayload(t *testing.T) {
 	if ir == nil {
 		t.Fatal("want IngestRecord payload, got nil")
 	}
+	enc.stampOffset(msg, 42)
 	if ir.GetOffsetId() != 42 {
-		t.Fatalf("want offset 42, got %d", ir.GetOffsetId())
-	}
-	enc.stampOffset(msg, 0)
-	if ir.GetOffsetId() != 0 {
-		t.Fatalf("want stamped offset 0, got %d", ir.GetOffsetId())
+		t.Fatalf("want stamped offset 42, got %d", ir.GetOffsetId())
 	}
 	if len(ir.GetProtoEncodedRecord()) == 0 {
 		t.Fatal("want non-empty proto record")
@@ -28,7 +28,7 @@ func TestProtoEncoderSetsOffsetAndPayload(t *testing.T) {
 
 func TestJSONEncoderSetsOffsetAndPayload(t *testing.T) {
 	enc := jsonEncoder{}
-	msg, err := enc.encode(7, []byte(`{"x":1}`))
+	msg, err := enc.encode([]byte(`{"x":1}`))
 	if err != nil {
 		t.Fatalf("encode: %v", err)
 	}
@@ -36,9 +36,7 @@ func TestJSONEncoderSetsOffsetAndPayload(t *testing.T) {
 	if ir == nil {
 		t.Fatal("want IngestRecord payload, got nil")
 	}
-	if ir.GetOffsetId() != 7 {
-		t.Fatalf("want offset 7, got %d", ir.GetOffsetId())
-	}
+	enc.stampOffset(msg, 7)
 	if ir.GetJsonRecord() != `{"x":1}` {
 		t.Fatalf("want json record, got %q", ir.GetJsonRecord())
 	}
@@ -46,7 +44,7 @@ func TestJSONEncoderSetsOffsetAndPayload(t *testing.T) {
 
 func TestProtoBatchEncoderSetsOffsetAndPayload(t *testing.T) {
 	enc := protoEncoder{}
-	msg, err := enc.encodeBatch(3, [][]byte{{0x01, 0x02}, {0x03, 0x04}, {0x05}})
+	msg, err := enc.encodeBatch([][]byte{{0x01, 0x02}, {0x03, 0x04}, {0x05}})
 	if err != nil {
 		t.Fatalf("encodeBatch: %v", err)
 	}
@@ -54,9 +52,7 @@ func TestProtoBatchEncoderSetsOffsetAndPayload(t *testing.T) {
 	if ib == nil {
 		t.Fatal("want IngestRecordBatch payload, got nil")
 	}
-	if ib.GetOffsetId() != 3 {
-		t.Fatalf("want offset 3, got %d", ib.GetOffsetId())
-	}
+	enc.stampOffset(msg, 3)
 	pb := ib.GetProtoEncodedBatch()
 	if pb == nil {
 		t.Fatal("want ProtoEncodedBatch, got nil")
@@ -69,7 +65,7 @@ func TestProtoBatchEncoderSetsOffsetAndPayload(t *testing.T) {
 
 func TestJSONBatchEncoderSetsOffsetAndPayload(t *testing.T) {
 	enc := jsonEncoder{}
-	msg, err := enc.encodeBatch(5, [][]byte{[]byte(`{"a":1}`), []byte(`{"b":2}`)})
+	msg, err := enc.encodeBatch([][]byte{[]byte(`{"a":1}`), []byte(`{"b":2}`)})
 	if err != nil {
 		t.Fatalf("encodeBatch: %v", err)
 	}
@@ -77,12 +73,9 @@ func TestJSONBatchEncoderSetsOffsetAndPayload(t *testing.T) {
 	if ib == nil {
 		t.Fatal("want IngestRecordBatch payload, got nil")
 	}
+	enc.stampOffset(msg, 5)
 	if ib.GetOffsetId() != 5 {
-		t.Fatalf("want offset 5, got %d", ib.GetOffsetId())
-	}
-	enc.stampOffset(msg, 0)
-	if ib.GetOffsetId() != 0 {
-		t.Fatalf("want stamped offset 0, got %d", ib.GetOffsetId())
+		t.Fatalf("want stamped offset 5, got %d", ib.GetOffsetId())
 	}
 	jb := ib.GetJsonBatch()
 	if jb == nil {
@@ -95,7 +88,7 @@ func TestJSONBatchEncoderSetsOffsetAndPayload(t *testing.T) {
 
 // Empty JSON payloads are valid and must be preserved end-to-end.
 func TestJSONEncoderAcceptsEmptyRecord(t *testing.T) {
-	msg, err := (jsonEncoder{}).encode(1, nil)
+	msg, err := (jsonEncoder{}).encode(nil)
 	if err != nil {
 		t.Fatalf("encode empty json record: %v", err)
 	}
@@ -103,7 +96,7 @@ func TestJSONEncoderAcceptsEmptyRecord(t *testing.T) {
 		t.Fatalf("want empty json string, got %q", got)
 	}
 
-	msg, err = (jsonEncoder{}).encode(1, []byte{})
+	msg, err = (jsonEncoder{}).encode([]byte{})
 	if err != nil {
 		t.Fatalf("encode zero-length json record: %v", err)
 	}
@@ -115,7 +108,7 @@ func TestJSONEncoderAcceptsEmptyRecord(t *testing.T) {
 // Empty proto records are valid in single and batch requests.
 func TestProtoEncoderAcceptsEmptyRecord(t *testing.T) {
 	def := []byte{} // zero-length serialization of an all-default message
-	msg, err := protoEncoder{}.encode(1, def)
+	msg, err := protoEncoder{}.encode(def)
 	if err != nil {
 		t.Fatalf("encode empty proto record: %v", err)
 	}
@@ -123,7 +116,7 @@ func TestProtoEncoderAcceptsEmptyRecord(t *testing.T) {
 		t.Fatalf("want one empty record back, got %v", got)
 	}
 
-	batch, err := protoEncoder{}.encodeBatch(1, [][]byte{def, {0x01}})
+	batch, err := protoEncoder{}.encodeBatch([][]byte{def, {0x01}})
 	if err != nil {
 		t.Fatalf("encodeBatch with empty proto record: %v", err)
 	}
@@ -134,12 +127,12 @@ func TestProtoEncoderAcceptsEmptyRecord(t *testing.T) {
 
 func TestBatchEncodersRejectEmptyBatch(t *testing.T) {
 	for _, enc := range []encoder[encodedMsg]{protoEncoder{}, jsonEncoder{}} {
-		if _, err := enc.encodeBatch(1, nil); err == nil {
+		if _, err := enc.encodeBatch(nil); err == nil {
 			t.Errorf("%T: want error for empty batch, got nil", enc)
 		}
 	}
 	// Empty JSON records inside a non-empty batch are valid.
-	msg, err := (jsonEncoder{}).encodeBatch(1, [][]byte{[]byte("ok"), {}})
+	msg, err := (jsonEncoder{}).encodeBatch([][]byte{[]byte("ok"), {}})
 	if err != nil {
 		t.Fatalf("jsonEncoder: empty record in batch should be accepted: %v", err)
 	}
@@ -152,7 +145,7 @@ func TestBatchEncodersRejectEmptyBatch(t *testing.T) {
 func TestExtractRecordsReturnsAllBatchRecords(t *testing.T) {
 	// A batch message must yield every record, not just the first, so GetUnacked
 	// doesn't silently drop the tail of an unacked batch.
-	protoMsg, err := protoEncoder{}.encodeBatch(1, [][]byte{{0x01}, {0x02}, {0x03}})
+	protoMsg, err := protoEncoder{}.encodeBatch([][]byte{{0x01}, {0x02}, {0x03}})
 	if err != nil {
 		t.Fatalf("encodeBatch: %v", err)
 	}
@@ -160,7 +153,7 @@ func TestExtractRecordsReturnsAllBatchRecords(t *testing.T) {
 		t.Fatalf("proto batch: want 3 records extracted, got %d", len(got))
 	}
 
-	jsonMsg, err := jsonEncoder{}.encodeBatch(1, [][]byte{[]byte(`{"a":1}`), []byte(`{"b":2}`)})
+	jsonMsg, err := jsonEncoder{}.encodeBatch([][]byte{[]byte(`{"a":1}`), []byte(`{"b":2}`)})
 	if err != nil {
 		t.Fatalf("encodeBatch: %v", err)
 	}
@@ -170,7 +163,7 @@ func TestExtractRecordsReturnsAllBatchRecords(t *testing.T) {
 	}
 
 	// A single-record message still yields exactly one entry.
-	single, err := jsonEncoder{}.encode(1, []byte(`{"x":1}`))
+	single, err := jsonEncoder{}.encode([]byte(`{"x":1}`))
 	if err != nil {
 		t.Fatalf("encode: %v", err)
 	}
@@ -183,7 +176,7 @@ func TestExtractRecordsReturnsAllBatchRecords(t *testing.T) {
 // buffer after Ingest returns must not be able to mutate the queued payload.
 func TestProtoEncoderClonesRecord(t *testing.T) {
 	rec := []byte{0x01, 0x02, 0x03}
-	msg, err := protoEncoder{}.encode(1, rec)
+	msg, err := protoEncoder{}.encode(rec)
 	if err != nil {
 		t.Fatalf("encode: %v", err)
 	}
@@ -196,7 +189,7 @@ func TestProtoEncoderClonesRecord(t *testing.T) {
 
 func TestProtoBatchEncoderClonesRecords(t *testing.T) {
 	recs := [][]byte{{0x01}, {0x02}}
-	msg, err := protoEncoder{}.encodeBatch(1, recs)
+	msg, err := protoEncoder{}.encodeBatch(recs)
 	if err != nil {
 		t.Fatalf("encodeBatch: %v", err)
 	}
@@ -207,17 +200,56 @@ func TestProtoBatchEncoderClonesRecords(t *testing.T) {
 	}
 }
 
-// wireSize reports the serialized size including proto framing, so it exceeds
-// the raw record length.
+// maxWireSize includes proto framing and the worst-case offset.
 func TestWireSizeIncludesFraming(t *testing.T) {
 	rec := []byte("hello")
 	for _, enc := range []encoder[encodedMsg]{protoEncoder{}, jsonEncoder{}} {
-		msg, err := enc.encode(1, rec)
+		msg, err := enc.encode(rec)
 		if err != nil {
 			t.Fatalf("%T encode: %v", enc, err)
 		}
-		if got := enc.wireSize(msg); got <= len(rec) {
-			t.Errorf("%T: wireSize %d should exceed raw len %d", enc, got, len(rec))
+		if got := enc.maxWireSize(msg); got <= len(rec) {
+			t.Errorf("%T: maxWireSize %d should exceed raw len %d", enc, got, len(rec))
 		}
+	}
+}
+
+func TestEncoderMaxWireSizeCoversEveryOffset(t *testing.T) {
+	for _, enc := range []encoder[encodedMsg]{protoEncoder{}, jsonEncoder{}} {
+		single, err := enc.encode([]byte("hello"))
+		if err != nil {
+			t.Fatalf("%T encode: %v", enc, err)
+		}
+		batch, err := enc.encodeBatch([][]byte{[]byte("hello"), []byte("world")})
+		if err != nil {
+			t.Fatalf("%T encodeBatch: %v", enc, err)
+		}
+		for _, msg := range []encodedMsg{single, batch} {
+			maxSize := enc.maxWireSize(msg)
+			for _, offset := range []int64{0, 127, 128, 16_384, math.MaxInt64} {
+				enc.stampOffset(msg, offset)
+				if got := proto.Size(msg); got > maxSize {
+					t.Fatalf("%T offset %d size = %d, maxWireSize = %d",
+						enc, offset, got, maxSize)
+				}
+			}
+		}
+	}
+}
+
+func TestEncoderReusesOffsetPointer(t *testing.T) {
+	enc := jsonEncoder{}
+	msg, err := enc.encode([]byte(`{"x":1}`))
+	if err != nil {
+		t.Fatalf("encode: %v", err)
+	}
+	offsetPtr := msg.GetIngestRecord().OffsetId
+	enc.stampOffset(msg, 1)
+	enc.stampOffset(msg, 2)
+	if msg.GetIngestRecord().OffsetId != offsetPtr {
+		t.Fatal("stampOffset replaced the offset pointer")
+	}
+	if got := *offsetPtr; got != 2 {
+		t.Fatalf("offset = %d, want 2", got)
 	}
 }

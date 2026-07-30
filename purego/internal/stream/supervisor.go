@@ -10,7 +10,8 @@ import (
 )
 
 // supervise runs the connect, stream, and recovery lifecycle.
-// Successful connections reset the retry budget.
+// Durable progress or a connection that survives RecoveryResetAfter resets the
+// retry budget.
 func (cs *CoreStream[Req, Resp]) supervise(ctx context.Context) {
 	defer func() {
 		if ctx.Err() != nil {
@@ -59,10 +60,19 @@ func (cs *CoreStream[Req, Resp]) supervise(ctx context.Context) {
 
 		// ctx cancelled = clean exit via Close. Don't treat server-side EOF as clean.
 		if ctx.Err() != nil {
+			// A definitive rejection still invalidates the credential that
+			// caused it, even when Close raced the completed Open/Recv. The
+			// provider contract requires Invalidate to be non-blocking.
+			if transport.IsAuthRejection(runErr) &&
+				cs.params.HeadersProvider != nil {
+				cs.params.HeadersProvider.Invalidate(
+					context.WithoutCancel(ctx), cs.params.TableName,
+				)
+			}
 			return
 		}
 
-		// Reset the retry budget after a successful Open.
+		// Reset after durable progress or sufficient connection uptime.
 		if resetRecoveryBudget {
 			failedAttempts = 0
 		}
@@ -81,7 +91,9 @@ func (cs *CoreStream[Req, Resp]) supervise(ctx context.Context) {
 				)
 				break
 			}
-			// The receiver already drained the pause window.
+			if !cs.pauseWait(ctx, ps.resumeAt) {
+				return
+			}
 			continue
 		}
 
@@ -106,8 +118,7 @@ func (cs *CoreStream[Req, Resp]) supervise(ctx context.Context) {
 		if !isOpenFailure {
 			openedOnce = true
 		}
-		if !isOpenFailure &&
-			transport.IsAuthRejection(runErr) &&
+		if transport.IsAuthRejection(runErr) &&
 			cs.params.HeadersProvider != nil {
 			cs.params.HeadersProvider.Invalidate(ctx, cs.params.TableName)
 		}

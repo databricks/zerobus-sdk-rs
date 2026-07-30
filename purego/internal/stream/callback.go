@@ -1,6 +1,7 @@
 package stream
 
 import (
+	"math"
 	"sync"
 	"time"
 )
@@ -67,7 +68,10 @@ func (d *callbackDispatcher) run() {
 	}
 }
 
-// invoke prevents callback panics from stopping the stream.
+// invoke prevents callback panics from stopping later callback delivery.
+// Recovered values are intentionally discarded until the public SDK exposes a
+// logger or callback-error sink; this internal package must not write to the
+// process-global standard logger.
 func (d *callbackDispatcher) invoke(event callbackEvent) {
 	defer func() { _ = recover() }()
 	if event.err == nil {
@@ -89,7 +93,10 @@ func (d *callbackDispatcher) enqueueAcks(first, last int64) {
 		d.mu.Unlock()
 		return
 	}
-	if n := len(d.queue); n > 0 && d.queue[n-1].err == nil && d.queue[n-1].last+1 == first {
+	if n := len(d.queue); n > 0 &&
+		d.queue[n-1].err == nil &&
+		d.queue[n-1].last < math.MaxInt64 &&
+		d.queue[n-1].last+1 == first {
 		d.queue[n-1].last = last
 	} else {
 		d.queue = append(d.queue, callbackRange{first: first, last: last})

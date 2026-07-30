@@ -188,12 +188,17 @@ func dialFake(t *testing.T, srv *fakeServer) *transport.Conn {
 	lis := bufconn.Listen(1 << 20)
 	gsrv := grpc.NewServer()
 	zerobuspb.RegisterZerobusServer(gsrv, srv)
+	serveDone := make(chan struct{})
 	go func() {
-		if err := gsrv.Serve(lis); err != nil {
+		defer close(serveDone)
+		if err := gsrv.Serve(lis); err != nil && !errors.Is(err, grpc.ErrServerStopped) {
 			t.Errorf("fake server stopped: %v", err)
 		}
 	}()
-	t.Cleanup(gsrv.Stop)
+	t.Cleanup(func() {
+		gsrv.Stop()
+		<-serveDone
+	})
 
 	dialer := grpc.WithContextDialer(func(ctx context.Context, _ string) (net.Conn, error) {
 		return lis.DialContext(ctx)
@@ -526,7 +531,7 @@ func TestOpenHeadersProviderNoAuthSendsNoAuthHeader(t *testing.T) {
 	}
 }
 
-func TestOpenAuthRejectionInvalidatesHeadersProvider(t *testing.T) {
+func TestOpenAuthRejectionPreservesStatusForLifecycle(t *testing.T) {
 	for _, tc := range []struct {
 		name string
 		code codes.Code
@@ -549,11 +554,11 @@ func TestOpenAuthRejectionInvalidatesHeadersProvider(t *testing.T) {
 			if err == nil {
 				t.Fatal("Open with server auth rejection: got nil error")
 			}
-			if p.invalidateCalls.Load() != 1 {
-				t.Fatalf("Invalidate calls = %d, want 1", p.invalidateCalls.Load())
+			if got := status.Code(err); got != tc.code {
+				t.Fatalf("status code = %v, want %v", got, tc.code)
 			}
-			if last, _ := p.lastTable.Load().(string); last != "c.s.t" {
-				t.Fatalf("Invalidate saw table %q, want %q", last, "c.s.t")
+			if p.invalidateCalls.Load() != 0 {
+				t.Fatalf("transport invalidated credentials %d time(s)", p.invalidateCalls.Load())
 			}
 		})
 	}

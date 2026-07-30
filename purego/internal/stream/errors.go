@@ -23,6 +23,9 @@ var ErrPayloadTooLarge = errors.New("stream: ingest payload too large")
 // reaches a terminal/closed state.
 var ErrStreamStillActive = errors.New("stream: cannot get unacked records from an active stream")
 
+// ErrOffsetExhausted marks a stream that assigned every logical offset.
+var ErrOffsetExhausted = errors.New("stream: logical offset space exhausted")
+
 // errUnsupportedRecordType is returned when no encoder/ackModel exists for a
 // record type (e.g. RECORD_TYPE_UNSPECIFIED).
 func errUnsupportedRecordType(rt zerobuspb.RecordType) error {
@@ -33,15 +36,17 @@ func errUnsupportedRecordType(rt zerobuspb.RecordType) error {
 type pauseSignal struct {
 	// duration is the server-requested pause window; zero if unspecified.
 	duration time.Duration
+	// resumeAt is the effective client-capped reconnect deadline.
+	resumeAt time.Time
 }
 
 func (pauseSignal) Error() string { return "stream: server requested pause (close-stream signal)" }
 
-// openFailure marks an error already handled by the transport Open path.
+// openFailure distinguishes failures before a transport stream is established
+// from failures on a live or recovering stream.
 type openFailure struct{ cause error }
 
 func (e *openFailure) Error() string { return e.cause.Error() }
-
 func (e *openFailure) Unwrap() error { return e.cause }
 
 // openBudgetExceeded marks a timed-out Open as retryable. Because isRetryable

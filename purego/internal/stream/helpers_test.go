@@ -91,16 +91,18 @@ type controlledSendRPC struct {
 	started   chan struct{}
 	result    chan error
 	aborted   chan struct{}
+	pauseRead chan struct{}
 	startOnce sync.Once
 	abortOnce sync.Once
 }
 
 func newControlledSendRPC() *controlledSendRPC {
 	return &controlledSendRPC{
-		fakeRPC: newFakeRPC(),
-		started: make(chan struct{}),
-		result:  make(chan error, 1),
-		aborted: make(chan struct{}),
+		fakeRPC:   newFakeRPC(),
+		started:   make(chan struct{}),
+		result:    make(chan error, 1),
+		aborted:   make(chan struct{}),
+		pauseRead: make(chan struct{}, 1),
 	}
 }
 
@@ -117,6 +119,17 @@ func (f *controlledSendRPC) Send(req *zerobuspb.EphemeralStreamRequest) error {
 	}
 }
 
+func (f *controlledSendRPC) Recv() (*zerobuspb.EphemeralStreamResponse, error) {
+	resp, err := f.fakeRPC.Recv()
+	if resp != nil && resp.GetCloseStreamSignal() != nil {
+		select {
+		case f.pauseRead <- struct{}{}:
+		default:
+		}
+	}
+	return resp, err
+}
+
 func (f *controlledSendRPC) Abort() {
 	f.abortOnce.Do(func() {
 		close(f.aborted)
@@ -128,6 +141,78 @@ type controlledSendOpener struct{ rpc *controlledSendRPC }
 
 func (o *controlledSendOpener) Open(_ context.Context, _ transport.StreamParams) (wireStream[encodedMsg, ephemeralResp], error) {
 	return transport.NewFakeStreamForTesting(o.rpc), nil
+}
+
+// blockedSendTerminalRPC keeps Send blocked until Abort while allowing Recv to
+// report an authoritative server failure first.
+type blockedSendTerminalRPC struct {
+	*controlledSendRPC
+	recvErr chan error
+}
+
+func newBlockedSendTerminalRPC() *blockedSendTerminalRPC {
+	return &blockedSendTerminalRPC{
+		controlledSendRPC: newControlledSendRPC(),
+		recvErr:           make(chan error, 1),
+	}
+}
+
+func (f *blockedSendTerminalRPC) Recv() (*zerobuspb.EphemeralStreamResponse, error) {
+	select {
+	case resp, ok := <-f.recvs:
+		if !ok {
+			return nil, io.EOF
+		}
+		return resp, nil
+	case err := <-f.recvErr:
+		return nil, err
+	case <-f.aborted:
+		return nil, io.ErrClosedPipe
+	}
+}
+
+type blockedSendTerminalOpener struct{ rpc *blockedSendTerminalRPC }
+
+func (o *blockedSendTerminalOpener) Open(_ context.Context, _ transport.StreamParams) (wireStream[encodedMsg, ephemeralResp], error) {
+	return transport.NewFakeStreamForTesting(o.rpc), nil
+}
+
+// authOnCloseStream models a live Recv whose authentication rejection becomes
+// observable while Close is tearing the connection down.
+type authOnCloseStream struct {
+	recvStarted chan struct{}
+	closed      chan struct{}
+	startOnce   sync.Once
+	closeOnce   sync.Once
+}
+
+func newAuthOnCloseStream() *authOnCloseStream {
+	return &authOnCloseStream{
+		recvStarted: make(chan struct{}),
+		closed:      make(chan struct{}),
+	}
+}
+
+func (*authOnCloseStream) ServerID() string { return "auth-on-close" }
+
+func (*authOnCloseStream) Send(encodedMsg) error { return nil }
+
+func (s *authOnCloseStream) Recv() (ephemeralResp, error) {
+	s.startOnce.Do(func() { close(s.recvStarted) })
+	<-s.closed
+	return nil, status.Error(codes.Unauthenticated, "expired credentials")
+}
+
+func (*authOnCloseStream) CloseSend() error { return io.ErrClosedPipe }
+
+func (s *authOnCloseStream) Close() {
+	s.closeOnce.Do(func() { close(s.closed) })
+}
+
+type authOnCloseOpener struct{ stream *authOnCloseStream }
+
+func (o *authOnCloseOpener) Open(_ context.Context, _ transport.StreamParams) (wireStream[encodedMsg, ephemeralResp], error) {
+	return o.stream, nil
 }
 
 type reconnectControlledOpener struct {
@@ -362,45 +447,54 @@ func (o *blockedSendOpener) Open(_ context.Context, _ transport.StreamParams) (w
 }
 
 type countingHeadersProvider struct {
-	invalidations atomic.Int64
+	invalidations  atomic.Int64
+	getErr         error
+	lastGet        atomic.Value
+	lastInvalidate atomic.Value
 }
 
-func (*countingHeadersProvider) GetHeaders(context.Context, string) (map[string]string, error) {
-	return nil, nil
+func (p *countingHeadersProvider) GetHeaders(_ context.Context, tableName string) (map[string]string, error) {
+	p.lastGet.Store(tableName)
+	return nil, p.getErr
 }
 
-func (p *countingHeadersProvider) Invalidate(context.Context, string) {
+func (p *countingHeadersProvider) Invalidate(_ context.Context, tableName string) {
 	p.invalidations.Add(1)
+	p.lastInvalidate.Store(tableName)
 }
 
-// authRejectingOpener models transport Open, which owns invalidation for
-// handshake failures before returning the rejection to the supervisor.
-type authRejectingOpener struct {
-	provider *countingHeadersProvider
+type authRejectingOpener struct{}
+
+func (*authRejectingOpener) Open(context.Context, transport.StreamParams) (wireStream[encodedMsg, ephemeralResp], error) {
+	return nil, status.Error(codes.Unauthenticated, "stale credentials")
 }
 
-func (o *authRejectingOpener) Open(ctx context.Context, params transport.StreamParams) (wireStream[encodedMsg, ephemeralResp], error) {
-	o.provider.Invalidate(ctx, params.TableName)
+type cancelThenAuthOpener struct {
+	started chan struct{}
+	once    sync.Once
+}
+
+func (o *cancelThenAuthOpener) Open(ctx context.Context, _ transport.StreamParams) (wireStream[encodedMsg, ephemeralResp], error) {
+	o.once.Do(func() { close(o.started) })
+	<-ctx.Done()
 	return nil, status.Error(codes.Unauthenticated, "stale credentials")
 }
 
 // authRefreshOpener rejects a configured number of initial Open attempts,
-// modelling transport-owned credential invalidation, then succeeds.
+// then succeeds. The supervisor owns credential invalidation.
 type authRefreshOpener struct {
 	mu         sync.Mutex
-	provider   *countingHeadersProvider
 	rpc        *fakeRPC
 	rejections int
 	attempts   int
 	code       codes.Code
 }
 
-func (o *authRefreshOpener) Open(ctx context.Context, params transport.StreamParams) (wireStream[encodedMsg, ephemeralResp], error) {
+func (o *authRefreshOpener) Open(context.Context, transport.StreamParams) (wireStream[encodedMsg, ephemeralResp], error) {
 	o.mu.Lock()
 	defer o.mu.Unlock()
 	o.attempts++
 	if o.attempts <= o.rejections {
-		o.provider.Invalidate(ctx, params.TableName)
 		code := o.code
 		if code == codes.OK {
 			code = codes.Unauthenticated
@@ -416,21 +510,27 @@ func (o *authRefreshOpener) openCount() int {
 	return o.attempts
 }
 
+type headersResolvingOpener struct{}
+
+func (*headersResolvingOpener) Open(ctx context.Context, params transport.StreamParams) (wireStream[encodedMsg, ephemeralResp], error) {
+	_, err := params.HeadersProvider.GetHeaders(ctx, params.TableName)
+	return nil, err
+}
+
 type openStep struct {
 	rpc *fakeRPC
 	err error
 }
 
-// scriptedOpenOpener returns one result per Open. It models transport-owned
-// invalidation when a handshake result rejects authentication.
+// scriptedOpenOpener returns one result per Open. Credential invalidation is the
+// supervisor's job, so a rejecting step only returns the status.
 type scriptedOpenOpener struct {
 	mu       sync.Mutex
-	provider *countingHeadersProvider
 	steps    []openStep
 	attempts int
 }
 
-func (o *scriptedOpenOpener) Open(ctx context.Context, params transport.StreamParams) (wireStream[encodedMsg, ephemeralResp], error) {
+func (o *scriptedOpenOpener) Open(context.Context, transport.StreamParams) (wireStream[encodedMsg, ephemeralResp], error) {
 	o.mu.Lock()
 	defer o.mu.Unlock()
 	o.attempts++
@@ -439,9 +539,6 @@ func (o *scriptedOpenOpener) Open(ctx context.Context, params transport.StreamPa
 	}
 	step := o.steps[o.attempts-1]
 	if step.err != nil {
-		if o.provider != nil && transport.IsAuthRejection(step.err) {
-			o.provider.Invalidate(ctx, params.TableName)
-		}
 		return nil, step.err
 	}
 	return transport.NewFakeStreamForTesting(step.rpc), nil
@@ -529,6 +626,118 @@ func (o *eofSendOpener) Open(_ context.Context, _ transport.StreamParams) (wireS
 
 func durationPtr(d time.Duration) *time.Duration { return &d }
 
+type recvStep struct {
+	resp *zerobuspb.EphemeralStreamResponse
+	err  error
+}
+
+type scriptedRPC struct {
+	*fakeRPC
+	steps       chan recvStep
+	recvStarted chan int64
+	recvCalls   atomic.Int64
+	aborted     chan struct{}
+	abortOnce   sync.Once
+}
+
+func newScriptedRPC() *scriptedRPC {
+	return &scriptedRPC{
+		fakeRPC:     newFakeRPC(),
+		steps:       make(chan recvStep, 16),
+		recvStarted: make(chan int64, 16),
+		aborted:     make(chan struct{}),
+	}
+}
+
+func (f *scriptedRPC) Recv() (*zerobuspb.EphemeralStreamResponse, error) {
+	f.recvStarted <- f.recvCalls.Add(1)
+	select {
+	case step := <-f.steps:
+		return step.resp, step.err
+	case <-f.aborted:
+		return nil, io.ErrClosedPipe
+	}
+}
+
+type blockingAckModel struct {
+	entered chan struct{}
+	release <-chan struct{}
+	once    sync.Once
+}
+
+func (m *blockingAckModel) classify(resp ephemeralResp) (respKind, int64, pauseSignal) {
+	m.once.Do(func() { close(m.entered) })
+	<-m.release
+	return (offsetAckModel{}).classify(resp)
+}
+
+func (f *scriptedRPC) Abort() {
+	f.abortOnce.Do(func() {
+		close(f.aborted)
+		f.fakeRPC.close()
+	})
+}
+
+func (f *scriptedRPC) pause(d time.Duration) {
+	f.steps <- recvStep{resp: &zerobuspb.EphemeralStreamResponse{
+		Payload: &zerobuspb.EphemeralStreamResponse_CloseStreamSignal{
+			CloseStreamSignal: &zerobuspb.CloseStreamSignal{Duration: durationpb.New(d)},
+		},
+	}}
+}
+
+func (f *scriptedRPC) malformed() {
+	f.steps <- recvStep{resp: &zerobuspb.EphemeralStreamResponse{
+		Payload: &zerobuspb.EphemeralStreamResponse_IngestRecordResponse{
+			IngestRecordResponse: &zerobuspb.IngestRecordResponse{},
+		},
+	}}
+}
+
+func (f *scriptedRPC) ack(offset int64) {
+	f.steps <- recvStep{resp: &zerobuspb.EphemeralStreamResponse{
+		Payload: &zerobuspb.EphemeralStreamResponse_IngestRecordResponse{
+			IngestRecordResponse: &zerobuspb.IngestRecordResponse{
+				DurabilityAckUpToOffset: proto.Int64(offset),
+			},
+		},
+	}}
+}
+
+func (f *scriptedRPC) fail(err error) {
+	f.steps <- recvStep{err: err}
+}
+
+type scriptedOpener struct{ rpc *scriptedRPC }
+
+func (o *scriptedOpener) Open(_ context.Context, _ transport.StreamParams) (wireStream[encodedMsg, ephemeralResp], error) {
+	return transport.NewFakeStreamForTesting(o.rpc), nil
+}
+
+type streamSequenceOpener struct {
+	mu       sync.Mutex
+	streams  []wireStream[encodedMsg, ephemeralResp]
+	attempts int
+}
+
+func (o *streamSequenceOpener) Open(_ context.Context, _ transport.StreamParams) (wireStream[encodedMsg, ephemeralResp], error) {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	o.attempts++
+	if len(o.streams) == 0 {
+		return nil, fmt.Errorf("streamSequenceOpener: no more streams")
+	}
+	stream := o.streams[0]
+	o.streams = o.streams[1:]
+	return stream, nil
+}
+
+func (o *streamSequenceOpener) openCount() int {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	return o.attempts
+}
+
 type classifiedError struct {
 	retryable bool
 }
@@ -551,10 +760,23 @@ type concurrentEncoder struct {
 	release <-chan struct{}
 }
 
-func (e *concurrentEncoder) encode(offset int64, record []byte) (encodedMsg, error) {
+func (e *concurrentEncoder) encode(record []byte) (encodedMsg, error) {
 	e.entered <- struct{}{}
 	<-e.release
-	return e.jsonEncoder.encode(offset, record)
+	return e.jsonEncoder.encode(record)
+}
+
+type failingEncoder struct {
+	jsonEncoder
+	err error
+}
+
+func (e failingEncoder) encode(record []byte) (encodedMsg, error) {
+	return nil, e.err
+}
+
+func (e failingEncoder) encodeBatch(records [][]byte) (encodedMsg, error) {
+	return nil, e.err
 }
 
 type blockingNthEncoder struct {
@@ -565,12 +787,12 @@ type blockingNthEncoder struct {
 	release <-chan struct{}
 }
 
-func (e *blockingNthEncoder) encode(offset int64, record []byte) (encodedMsg, error) {
+func (e *blockingNthEncoder) encode(record []byte) (encodedMsg, error) {
 	if e.calls.Add(1) == e.blockAt {
 		close(e.entered)
 		<-e.release
 	}
-	return e.jsonEncoder.encode(offset, record)
+	return e.jsonEncoder.encode(record)
 }
 
 type timeoutOpener struct {

@@ -66,7 +66,7 @@ func TestRawStreamHandshakeSendEOFFallsThroughToRecv(t *testing.T) {
 	if err == nil {
 		t.Fatal("handshake with Send io.EOF: got nil error, want the recv status")
 	}
-	if !isAuthRejection(err) {
+	if !IsAuthRejection(err) {
 		t.Fatalf("handshake error = %v, want an auth rejection recovered from recv", err)
 	}
 }
