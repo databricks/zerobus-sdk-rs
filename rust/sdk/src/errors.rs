@@ -105,7 +105,7 @@ pub enum ZerobusError {
     /// mismatch is recoverable — e.g. by re-resolving the table schema and
     /// rebuilding the stream — is a caller-side policy decision. Per-field
     /// detail (offending column names) is carried in `message` for diagnostics,
-    /// not structurally. `error_code` is the server's numeric Shinkansen code
+    /// not structurally. `error_code` is the server's numeric Zerobus code
     /// (e.g. `"8001"`) when present, useful for telemetry correlation. This
     /// error is not SDK-retryable, since the SDK holds a fixed schema and its
     /// recovery loop would re-send the same rejected schema.
@@ -388,7 +388,7 @@ mod tests {
     }
 
     /// Build an InvalidArgument status carrying the server's schema-validation
-    /// ErrorInfo, mirroring what Shinkansen sends on a schema mismatch.
+    /// ErrorInfo, mirroring what Zerobus sends on a schema mismatch.
     #[cfg(feature = "arrow-flight")]
     fn schema_validation_status(causes: &str) -> tonic::Status {
         use std::collections::HashMap;

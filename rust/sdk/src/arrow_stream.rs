@@ -9,25 +9,51 @@
 //! (Go, Python, Java, TypeScript) can use `ingest_ipc_batch` with pre-serialised
 //! Arrow IPC bytes.
 
+use std::future::Future;
 use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::Arc;
+use std::task::Poll;
 
 use arrow_flight::encode::FlightDataEncoderBuilder;
 use arrow_flight::error::FlightError;
-use arrow_flight::{FlightClient, PutResult};
+use arrow_flight::{FlightClient, FlightData, PutResult};
 use arrow_ipc::writer::IpcWriteOptions;
 use bytes::Bytes;
 use futures::{Stream, StreamExt};
 #[cfg(feature = "test-hooks")]
 use tokio::sync::Notify;
 use tokio::sync::{mpsc, watch, Mutex, OwnedSemaphorePermit, Semaphore};
-use tokio::time::{sleep, Duration};
+use tokio::time::{sleep, Duration, Instant};
 use tokio_retry::strategy::FixedInterval;
 use tokio_retry::RetryIf;
+use tokio_util::sync::CancellationToken;
 use tonic::metadata::MetadataValue;
 use tonic::transport::Channel;
 use tracing::{debug, error, info, instrument, warn};
+
+/// Maximum combined time for request EOF and response draining during rotation.
+///
+/// When the advertised server grace is shorter, this also provides a local
+/// best-effort window for tonic to observe request EOF. The server may already have
+/// hard-closed in that case, so peer status always takes precedence over clean drain.
+const CLOSE_SIGNAL_DRAIN_TIMEOUT_MS: u64 = 500;
+/// Scheduling headroom after the transport deadline for the supervisor to publish its result.
+const EXPLICIT_CLOSE_JOIN_GRACE_MS: u64 = 50;
+/// Shared prefix for close-owned timeout errors admitted through the published-error filter.
+const EXPLICIT_CLOSE_TIMEOUT_PREFIX: &str = "Explicit close timed out";
+/// Timeout when a replacement DoPut never yields a drainable response before close's deadline.
+const EXPLICIT_CLOSE_RECONNECT_TIMEOUT: &str =
+    "Explicit close timed out while waiting for the replacement Flight response stream";
+/// Timeout when close aborts the supervisor after the cleanup deadline.
+const EXPLICIT_CLOSE_ABORTED_TIMEOUT: &str =
+    "Explicit close timed out while shutting down the Arrow Flight stream";
+/// Timeout when tonic does not poll the controlled request body to EOF.
+const EXPLICIT_CLOSE_REQUEST_EOF_TIMEOUT: &str =
+    "Explicit close timed out before the Flight request reached EOF";
+/// Timeout when the peer does not finish the response after request EOF.
+const EXPLICIT_CLOSE_RESPONSE_DRAIN_TIMEOUT: &str =
+    "Explicit close timed out while draining the Flight response";
 
 // Re-export arrow types for public API
 pub use arrow_array::RecordBatch;
@@ -45,37 +71,381 @@ use crate::ZerobusResult;
 /// Type alias for the batch sender channel, wrapped for thread-safe sharing.
 type BatchSender = Arc<Mutex<Option<mpsc::Sender<Result<RecordBatch, FlightError>>>>>;
 
+/// Stream of Arrow Flight responses carrying acknowledgments from the server.
+type FlightResponseStream = Pin<Box<dyn Stream<Item = Result<PutResult, FlightError>> + Send>>;
+
+/// Encoded request body supplied to Arrow Flight `DoPut`.
+type FlightRequestStream = Pin<Box<dyn Stream<Item = Result<FlightData, FlightError>> + Send>>;
+
+/// Per-connection handle used to stop the outbound body and observe when tonic has
+/// polled it to EOF. Sender detachment alone is insufficient because mpsc and the
+/// Flight encoder may still contain queued batches or chunks.
+#[derive(Clone)]
+struct RequestBodyControl {
+    /// Cancellation observed by the controlled Flight request stream before it polls
+    /// any additional encoded data.
+    shutdown: CancellationToken,
+    /// Becomes `true` only after tonic polls the controlled request stream to `None`.
+    eof_rx: watch::Receiver<bool>,
+}
+
+impl RequestBodyControl {
+    /// Stops the request stream from yielding queued or partially encoded batches.
+    fn shutdown(&self) {
+        self.shutdown.cancel();
+    }
+
+    /// Returns whether tonic has already polled the controlled request stream to EOF.
+    fn reached_eof(&self) -> bool {
+        *self.eof_rx.borrow()
+    }
+
+    /// Waits until tonic observes request-body EOF. A dropped observer that never
+    /// published EOF is not a clean half-close, so keep waiting for the caller's
+    /// surrounding deadline instead of treating channel closure as success.
+    async fn wait_for_eof(&self) {
+        let mut eof_rx = self.eof_rx.clone();
+        loop {
+            if *eof_rx.borrow_and_update() {
+                return;
+            }
+            if eof_rx.changed().await.is_err() {
+                std::future::pending::<()>().await;
+            }
+        }
+    }
+
+    /// Waits until tonic observes request-body EOF, bounded by the rotation deadline.
+    async fn wait_for_eof_until(&self, deadline: Instant) -> bool {
+        if self.reached_eof() {
+            return true;
+        }
+        tokio::time::timeout_at(deadline, self.wait_for_eof())
+            .await
+            .is_ok()
+    }
+}
+
+/// Connection-local handles used by ACK processing to stop outbound data and reach
+/// request EOF. Grouping them keeps state-machine transitions focused on why shutdown
+/// occurs instead of repeating the transport mechanics at every terminal branch.
+struct AckRequestControl<'a> {
+    request_body: &'a RequestBodyControl,
+    ingest_mutex: &'a Arc<Mutex<()>>,
+    is_paused: &'a Arc<AtomicBool>,
+    batch_tx: &'a BatchSender,
+}
+
+impl AckRequestControl<'_> {
+    /// Stops the request body by an explicit deadline.
+    async fn shutdown_until(&self, deadline: Instant) -> bool {
+        ZerobusArrowStream::shutdown_request_body(
+            self.request_body,
+            deadline,
+            self.ingest_mutex,
+            self.is_paused,
+            self.batch_tx,
+        )
+        .await
+    }
+
+    /// Stops the request body within the cleanup budget of the current close phase.
+    async fn shutdown_for_phase(&self, phase: &GracefulClosePhase) -> bool {
+        self.shutdown_until(ZerobusArrowStream::request_cleanup_deadline(phase))
+            .await
+    }
+
+    /// Transitions a server-initiated close from ACK waiting to response draining.
+    async fn begin_response_drain(
+        &self,
+        phase: &mut GracefulClosePhase,
+        recovery_reason: ZerobusError,
+    ) {
+        ZerobusArrowStream::begin_response_drain(
+            phase,
+            recovery_reason,
+            self.request_body,
+            self.ingest_mutex,
+            self.is_paused,
+            self.batch_tx,
+        )
+        .await;
+    }
+}
+
+/// All state created for one Arrow Flight `DoPut` connection.
+///
+/// The supervisor replaces this bundle atomically across recovery so response polling,
+/// batch submission, and request shutdown always refer to the same HTTP/2 stream.
+struct FlightConnection {
+    /// Server-to-client acknowledgments and terminal statuses.
+    response_stream: FlightResponseStream,
+    /// Client-facing sender feeding batches into this connection's encoder.
+    batch_tx: mpsc::Sender<Result<RecordBatch, FlightError>>,
+    /// Control plane for cancelling and observing the outbound request body.
+    request_body: RequestBodyControl,
+    /// Whether pending ranges and counters describe this connection, making positive ACKs safe.
+    replay_state_installed: bool,
+}
+
+/// Result of rebuilding an Arrow Flight connection during recovery.
+enum ReconnectOutcome {
+    /// Recovery completed and the replacement connection is ready for normal ACK processing.
+    Connected(FlightConnection),
+    /// Explicit close arrived before reconnect created a Flight request.
+    ClosedBeforeRequest,
+    /// Explicit close arrived after the replacement `DoPut` started. The supervisor must hand
+    /// this connection to ACK processing so it is half-closed and drained rather than dropped.
+    Closing(FlightConnection),
+    /// The replacement request started, but did not produce a drainable response stream before
+    /// the explicit-close deadline.
+    CloseTimedOutAfterRequest,
+}
+
+/// Error carried from a failed reconnect into the supervisor's next loop iteration.
+struct PendingSupervisorError {
+    /// The original reconnect failure exposed to waiters and explicit close.
+    error: ZerobusError,
+    /// Whether this exact authentication rejection has already invalidated cached credentials.
+    auth_invalidated: bool,
+}
+
+/// Result of waiting for the next ACK-side state-machine input.
+enum AckEvent {
+    /// A response item, peer error, or clean response EOF.
+    Response(Option<Result<PutResult, FlightError>>),
+    /// No acknowledgment arrived while ordinary pending work existed.
+    AckTimeout,
+    /// The ACK-wait portion of server-initiated graceful close expired.
+    GracefulCloseDeadline,
+    /// The bounded concurrent request/response drain period expired.
+    ResponseDrainDeadline,
+    /// Tonic polled the controlled request stream to clean EOF.
+    RequestEof,
+    /// Explicit `close()` requested a clean request half-close by this deadline.
+    ExplicitClose { deadline: Instant },
+}
+
+/// Explicit phases of Arrow Flight stream shutdown and server-initiated rotation.
+///
+/// A single enum prevents invalid combinations that were possible with separate optional
+/// targets, ACK deadlines, drain deadlines, and recovery errors.
+enum GracefulClosePhase {
+    /// Normal bidirectional ingestion; no server close signal is active.
+    Open,
+    /// New sends are paused while acknowledgments for the pre-signal snapshot may arrive.
+    AwaitingAcks {
+        /// Connection-local cumulative record watermark captured at the first signal.
+        target_records: u64,
+        /// End of the user-configurable ACK-wait portion of the grace period.
+        ack_deadline: Instant,
+        /// End of the bounded local close attempt. Normally this is the server deadline;
+        /// very short server grace periods receive a best-effort local EOF settle window.
+        close_deadline: Instant,
+    },
+    /// Request shutdown has started and both HTTP/2 directions are being drained.
+    DrainingResponse {
+        /// Earliest of the total server deadline and the private drain cap.
+        deadline: Instant,
+        /// Synthetic rotation reason used only for clean response EOF or local timeout.
+        recovery_reason: ZerobusError,
+        /// Whether tonic has observed request-body EOF.
+        request_reached_eof: bool,
+        /// Whether the server response has reached EOF.
+        response_reached_eof: bool,
+    },
+    /// Explicit `close()` is driving request EOF and response draining concurrently.
+    DrainingExplicitClose {
+        /// End of the bounded explicit-close transport cleanup.
+        deadline: Instant,
+        /// Whether tonic observed request-body EOF.
+        request_reached_eof: bool,
+        /// Whether the server response has reached EOF.
+        response_reached_eof: bool,
+    },
+}
+
+impl GracefulClosePhase {
+    /// Returns whether the connection is in ordinary ACK processing.
+    fn is_open(&self) -> bool {
+        match self {
+            Self::Open => true,
+            Self::AwaitingAcks { .. }
+            | Self::DrainingResponse { .. }
+            | Self::DrainingExplicitClose { .. } => false,
+        }
+    }
+
+    /// Returns whether request shutdown has completed and response draining is active.
+    fn is_draining(&self) -> bool {
+        match self {
+            Self::DrainingResponse { .. } | Self::DrainingExplicitClose { .. } => true,
+            Self::Open | Self::AwaitingAcks { .. } => false,
+        }
+    }
+
+    /// Returns the outer transport-cleanup deadline for the active close phase.
+    fn close_deadline(&self) -> Option<Instant> {
+        match self {
+            Self::Open => None,
+            Self::AwaitingAcks { close_deadline, .. } => Some(*close_deadline),
+            Self::DrainingResponse { deadline, .. }
+            | Self::DrainingExplicitClose { deadline, .. } => Some(*deadline),
+        }
+    }
+
+    /// Returns transport progress while either close path owns the connection.
+    fn drain_progress(&self) -> Option<(bool, bool)> {
+        match self {
+            Self::DrainingResponse {
+                request_reached_eof,
+                response_reached_eof,
+                ..
+            }
+            | Self::DrainingExplicitClose {
+                request_reached_eof,
+                response_reached_eof,
+                ..
+            } => Some((*request_reached_eof, *response_reached_eof)),
+            Self::Open | Self::AwaitingAcks { .. } => None,
+        }
+    }
+
+    fn mark_request_eof(&mut self) {
+        match self {
+            Self::DrainingResponse {
+                request_reached_eof,
+                ..
+            }
+            | Self::DrainingExplicitClose {
+                request_reached_eof,
+                ..
+            } => *request_reached_eof = true,
+            Self::Open | Self::AwaitingAcks { .. } => {}
+        }
+    }
+
+    fn mark_response_eof(&mut self) {
+        match self {
+            Self::DrainingResponse {
+                response_reached_eof,
+                ..
+            }
+            | Self::DrainingExplicitClose {
+                response_reached_eof,
+                ..
+            } => *response_reached_eof = true,
+            Self::Open | Self::AwaitingAcks { .. } => {}
+        }
+    }
+}
+
+/// Publishes whether the ACK processor is handling a server close signal for test observers.
+/// Production `close()` waits by joining the supervisor, not by reading this watch channel.
+struct GracefulCloseActivity {
+    /// Watch publisher used by test hooks to observe the active close deadline.
+    tx: watch::Sender<Option<Instant>>,
+    /// Ensures duplicate close signals publish activity only once.
+    active: bool,
+}
+
+impl GracefulCloseActivity {
+    /// Creates an inactive activity guard for one invocation of `process_acks`.
+    fn new(tx: watch::Sender<Option<Instant>>) -> Self {
+        Self { tx, active: false }
+    }
+
+    /// Publishes the active close deadline. Duplicate signals can shorten it.
+    fn activate(&mut self, deadline: Instant) {
+        self.tx.send_replace(Some(deadline));
+        self.active = true;
+    }
+}
+
+impl Drop for GracefulCloseActivity {
+    fn drop(&mut self) {
+        if self.active {
+            self.tx.send_replace(None);
+        }
+    }
+}
+
 /// Test-only barrier used to pause `reconnect` at a precise point — the new connection
 /// is established but pending ranges are not yet rebuilt — so a test can schedule a
 /// concurrent ingest or `close()`.
 #[cfg(feature = "test-hooks")]
 type ReconnectRebuildGate = Arc<Mutex<Option<ReconnectRebuildBarrier>>>;
 
-/// Paired notifications for [`ReconnectRebuildGate`]: `reached` fires when reconnect
-/// hits the barrier; `proceed` releases it (or a test aborts via `close()` instead).
+/// Notifications that deterministically park and release reconnect range rebuilding.
+/// `reached` fires when reconnect hits the barrier; `proceed` releases it, while an
+/// explicit-close signal transfers the live connection to bounded shutdown.
 #[cfg(feature = "test-hooks")]
 #[derive(Clone)]
 struct ReconnectRebuildBarrier {
+    /// Fired after the new connection exists but before replay state is rebuilt.
     reached: Arc<Notify>,
+    /// Released by the test to let reconnect continue.
     proceed: Arc<Notify>,
 }
 
-/// Test-only gate: when armed, `process_acks` fires the notify right after applying a
-/// non-empty ack (i.e. after storing `last_acked_records`), letting a test confirm a
-/// partial ack has landed before it proceeds.
+/// Test-only hook fired after `process_acks` fully applies a non-empty ack. Tests can
+/// either observe `reached`, or also provide `proceed` to park the ack processor there.
 #[cfg(feature = "test-hooks")]
-type AckAppliedGate = Arc<Mutex<Option<Arc<Notify>>>>;
+type AckAppliedGate = Arc<Mutex<Option<AckAppliedHook>>>;
+
+/// Notification, and optional barrier, after a non-empty ACK is fully applied.
+#[cfg(feature = "test-hooks")]
+#[derive(Clone)]
+struct AckAppliedHook {
+    /// Fired after the durable watermark and waiter-visible offset are published.
+    reached: Arc<Notify>,
+    /// When present, keeps `process_acks` parked until the test releases it.
+    proceed: Option<Arc<Notify>>,
+}
+
+/// Test-only observations proving that the client consumed a response after request
+/// EOF and then finished the response drain.
+#[cfg(feature = "test-hooks")]
+type ResponseDrainGate = Arc<Mutex<Option<ResponseDrainHook>>>;
+
+/// Client-side observations for the two important response-drain milestones.
+#[cfg(feature = "test-hooks")]
+#[derive(Clone)]
+struct ResponseDrainHook {
+    /// Fired when the SDK polls a response after request EOF.
+    response_consumed: Arc<Notify>,
+    /// Fired on response EOF, peer error, or drain timeout.
+    drain_completed: Arc<Notify>,
+}
 
 /// Test-only barrier that parks `close()` after the supervisor and sender are gone but
 /// before pending batches are finalized, allowing cancellation-safe teardown tests.
 #[cfg(feature = "test-hooks")]
 type CloseFinalizeGate = Arc<Mutex<Option<CloseFinalizeBarrier>>>;
 
+/// Notifications that park explicit close between supervisor teardown and finalization.
 #[cfg(feature = "test-hooks")]
 #[derive(Clone)]
 struct CloseFinalizeBarrier {
+    /// Fired once close teardown is irreversible but pending batches remain unfinalized.
     reached: Arc<Notify>,
+    /// Released by the test to let finalization continue.
     proceed: Arc<Notify>,
+}
+
+/// Shared record-watermark state needed to validate and apply an acknowledgment.
+struct AckProgress<'a> {
+    /// Number of records handed to the active connection.
+    submitted_records: &'a AtomicU64,
+    /// Highest cumulative record watermark applied on the active connection.
+    last_acked_records: &'a AtomicU64,
+    /// Pending batch ranges used to translate record progress into SDK offsets.
+    pending_batches: &'a Mutex<Vec<PendingBatch>>,
+    /// Publishes the highest fully acknowledged SDK offset to waiters.
+    last_ack_tx: &'a watch::Sender<Option<OffsetId>>,
+    /// Deterministic test hook run after an acknowledgment is fully applied.
+    #[cfg(feature = "test-hooks")]
+    ack_applied_gate: &'a AckAppliedGate,
 }
 
 /// Properties for an Arrow Flight ingestion table.
@@ -261,8 +631,10 @@ pub struct ZerobusArrowStream {
     /// Separates resumable teardown from final closure so retries skip flushing while
     /// new ingests remain rejected.
     close_teardown_started: AtomicBool,
-    /// Retains the first flush failure so resumed close calls return the same outcome.
-    close_flush_error: Mutex<Option<ZerobusError>>,
+    /// Retains the highest-precedence error resolved so far during explicit close. It begins
+    /// with the flush result and is finalized after supervisor shutdown, making repeated and
+    /// resumed close calls return one stable outcome.
+    close_error: Mutex<Option<ZerobusError>>,
     /// Handle to the supervisor task that processes acknowledgments and recovery.
     receiver_task: Arc<Mutex<Option<tokio::task::JoinHandle<ZerobusResult<()>>>>>,
     /// Accepted batches not yet fully acknowledged; retained for replay or retrieval.
@@ -286,6 +658,9 @@ pub struct ZerobusArrowStream {
     /// Watch channel carrying the latest cross-task stream error.
     server_error_tx: watch::Sender<Option<ZerobusError>>,
     server_error_rx: watch::Receiver<Option<ZerobusError>>,
+    /// Permanent recovery cause retained only for explicit close; ordinary waiters must not
+    /// observe an authentication rejection while its credential-refresh retry is active.
+    recovery_close_error_rx: watch::Receiver<Option<ZerobusError>>,
     /// Cumulative record count assigned to pending ranges for the current connection.
     /// This includes batches buffered while paused.
     cumulative_records_assigned: Arc<AtomicU64>,
@@ -297,6 +672,11 @@ pub struct ZerobusArrowStream {
     /// Pause gate used while draining a close signal or rebuilding after failure; accepted
     /// ingests remain pending until recovery replays or finalizes them.
     is_paused: Arc<AtomicBool>,
+    /// Observes server-initiated request/response teardown for test hooks.
+    #[cfg(feature = "test-hooks")]
+    graceful_close_rx: watch::Receiver<Option<Instant>>,
+    /// Requests that the ACK processor cleanly half-close the current request body.
+    explicit_close_tx: watch::Sender<Option<Instant>>,
     /// Final value sent as the HTTP `user-agent` header on every request.
     /// Either `"zerobus-sdk-rs/<version>"` or `"zerobus-sdk-rs/<version> <application_name>"`.
     /// Re-applied to each fresh Channel built during recovery.
@@ -307,6 +687,9 @@ pub struct ZerobusArrowStream {
     /// Test seam (see [`AckAppliedGate`]); compiled only under `test-hooks`.
     #[cfg(feature = "test-hooks")]
     ack_applied_gate: AckAppliedGate,
+    /// Test seam (see [`ResponseDrainGate`]); compiled only under `test-hooks`.
+    #[cfg(feature = "test-hooks")]
+    response_drain_gate: ResponseDrainGate,
     /// Test seam (see [`CloseFinalizeGate`]); compiled only under `test-hooks`.
     #[cfg(feature = "test-hooks")]
     close_finalize_gate: CloseFinalizeGate,
@@ -347,10 +730,15 @@ impl ZerobusArrowStream {
         let submitted_records = Arc::new(AtomicU64::new(0));
         let last_acked_records = Arc::new(AtomicU64::new(0));
         let is_paused = Arc::new(AtomicBool::new(false));
+        let (graceful_close_tx, graceful_close_rx) = watch::channel(None);
+        #[cfg(not(feature = "test-hooks"))]
+        drop(graceful_close_rx);
+        let (explicit_close_tx, explicit_close_rx) = watch::channel(None);
         // Capacity mirrors the batch_tx channel so a permit holder always has a slot.
         let inflight = Arc::new(Semaphore::new(options.max_inflight_batches));
 
         let (server_error_tx, server_error_rx) = watch::channel(None);
+        let (recovery_close_error_tx, recovery_close_error_rx) = watch::channel(None);
 
         let stream = Self {
             table_properties,
@@ -361,7 +749,7 @@ impl ZerobusArrowStream {
             _last_ack_rx,
             is_closed,
             close_teardown_started: AtomicBool::new(false),
-            close_flush_error: Mutex::new(None),
+            close_error: Mutex::new(None),
             receiver_task,
             pending_batches,
             failed_batches,
@@ -374,15 +762,21 @@ impl ZerobusArrowStream {
             inflight,
             server_error_tx,
             server_error_rx,
+            recovery_close_error_rx,
             cumulative_records_assigned,
             submitted_records,
             last_acked_records,
             is_paused,
+            #[cfg(feature = "test-hooks")]
+            graceful_close_rx,
+            explicit_close_tx,
             sdk_identifier,
             #[cfg(feature = "test-hooks")]
             reconnect_rebuild_gate: Arc::new(Mutex::new(None)),
             #[cfg(feature = "test-hooks")]
             ack_applied_gate: Arc::new(Mutex::new(None)),
+            #[cfg(feature = "test-hooks")]
+            response_drain_gate: Arc::new(Mutex::new(None)),
             #[cfg(feature = "test-hooks")]
             close_finalize_gate: Arc::new(Mutex::new(None)),
         };
@@ -427,7 +821,12 @@ impl ZerobusArrowStream {
         };
         let creation = RetryIf::spawn(strategy, create_attempt, should_retry).await;
 
-        let (response_stream, tx) = match creation {
+        let FlightConnection {
+            response_stream,
+            batch_tx: tx,
+            request_body,
+            replay_state_installed,
+        } = match creation {
             Ok(result) => result,
             Err(e) => {
                 error!("Arrow Flight stream creation failed after retries: {}", e);
@@ -456,17 +855,24 @@ impl ZerobusArrowStream {
             Arc::clone(&stream.failed_batches),
             Arc::clone(&stream.recovery_attempts),
             stream.server_error_tx.clone(),
+            recovery_close_error_tx,
             Arc::clone(&stream.cumulative_records_assigned),
             Arc::clone(&stream.submitted_records),
             Arc::clone(&stream.last_acked_records),
             Arc::clone(&stream.is_paused),
             Arc::clone(&stream.ingest_mutex),
             response_stream,
+            request_body,
+            replay_state_installed,
+            graceful_close_tx,
+            explicit_close_rx,
             Arc::clone(&stream.sdk_identifier),
             #[cfg(feature = "test-hooks")]
             Arc::clone(&stream.reconnect_rebuild_gate),
             #[cfg(feature = "test-hooks")]
             Arc::clone(&stream.ack_applied_gate),
+            #[cfg(feature = "test-hooks")]
+            Arc::clone(&stream.response_drain_gate),
         );
 
         {
@@ -483,7 +889,7 @@ impl ZerobusArrowStream {
     }
 
     /// Attempts to establish a Flight connection.
-    /// Returns the response stream and batch sender on success.
+    /// Returns the response stream, batch sender, and request-body control on success.
     async fn try_connect(
         endpoint: &str,
         tls_config: &Arc<dyn TlsConfig>,
@@ -492,10 +898,7 @@ impl ZerobusArrowStream {
         options: &ArrowStreamConfigurationOptions,
         headers_provider: &Arc<dyn HeadersProvider>,
         sdk_identifier: &str,
-    ) -> ZerobusResult<(
-        Pin<Box<dyn Stream<Item = Result<PutResult, FlightError>> + Send>>,
-        mpsc::Sender<Result<RecordBatch, FlightError>>,
-    )> {
+    ) -> ZerobusResult<FlightConnection> {
         // Share one deadline across connection setup and auth-rejection invalidation.
         // This preserves the original auth error if a custom provider stalls instead of
         // reclassifying the attempt as a retryable setup timeout.
@@ -615,8 +1018,73 @@ impl ZerobusArrowStream {
         Ok(client)
     }
 
+    /// Builds an encoded Flight request stream together with a control handle that can
+    /// discard queued encoder output and report when tonic has polled the body to EOF.
+    fn make_request_stream(
+        batch_rx: mpsc::Receiver<Result<RecordBatch, FlightError>>,
+        table_properties: &ArrowTableProperties,
+        options: &ArrowStreamConfigurationOptions,
+    ) -> ZerobusResult<(FlightRequestStream, RequestBodyControl)> {
+        let ipc_write_options = make_ipc_write_options(options.ipc_compression)?;
+        let schema = Arc::clone(&table_properties.schema);
+        let batch_stream = tokio_stream::wrappers::ReceiverStream::new(batch_rx);
+
+        // FlightDataEncoderBuilder handles schema framing, dictionary encoding, and
+        // automatic batch chunking at 2 MiB. Each non-schema FlightData message gets a
+        // sequential wire offset in app_metadata (the schema is message zero).
+        let offset_counter = Arc::new(std::sync::atomic::AtomicI64::new(0));
+        let offset_counter_clone = Arc::clone(&offset_counter);
+        let encoded: FlightRequestStream = Box::pin(
+            FlightDataEncoderBuilder::new()
+                .with_schema(schema)
+                .with_options(ipc_write_options)
+                .build(batch_stream)
+                .enumerate()
+                .map(move |(idx, result)| {
+                    result.map(|mut flight_data| {
+                        if idx > 0 {
+                            let offset = offset_counter_clone
+                                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                            let metadata = FlightBatchMetadata::new(offset);
+                            if let Ok(bytes) = metadata.to_bytes() {
+                                flight_data.app_metadata = bytes.into();
+                            }
+                        }
+                        flight_data
+                    })
+                }),
+        );
+
+        let shutdown = CancellationToken::new();
+        let mut cancelled = Box::pin(shutdown.clone().cancelled_owned());
+        let (eof_tx, eof_rx) = watch::channel(false);
+        let mut encoded = encoded;
+        // Cancellation is observed between complete FlightData items. A large logical
+        // RecordBatch may therefore stop between independently decodable Arrow chunks,
+        // but an item already yielded to tonic is never truncated mid-message.
+        let controlled = futures::stream::poll_fn(move |cx| {
+            if cancelled.as_mut().poll(cx).is_ready() {
+                eof_tx.send_replace(true);
+                return Poll::Ready(None);
+            }
+
+            match encoded.as_mut().poll_next(cx) {
+                Poll::Ready(None) => {
+                    eof_tx.send_replace(true);
+                    Poll::Ready(None)
+                }
+                result => result,
+            }
+        });
+
+        Ok((
+            Box::pin(controlled),
+            RequestBodyControl { shutdown, eof_rx },
+        ))
+    }
+
     /// Starts the Flight stream with the given client.
-    /// Returns the response stream and batch sender for use by the supervisor.
+    /// Returns all per-connection state needed by the supervisor.
     ///
     /// This method waits for the server's "ready" signal (ack_up_to_offset = -1)
     /// to confirm that stream setup succeeded (auth, schema validation, table access).
@@ -626,43 +1094,13 @@ impl ZerobusArrowStream {
         mut client: FlightClient,
         table_properties: &ArrowTableProperties,
         options: &ArrowStreamConfigurationOptions,
-    ) -> ZerobusResult<(
-        Pin<Box<dyn Stream<Item = Result<PutResult, FlightError>> + Send>>,
-        mpsc::Sender<Result<RecordBatch, FlightError>>,
-    )> {
+    ) -> ZerobusResult<FlightConnection> {
         // Create channel for sending RecordBatches.
         let (batch_tx, batch_rx) =
             mpsc::channel::<Result<RecordBatch, FlightError>>(options.max_inflight_batches);
 
-        let ipc_write_options = make_ipc_write_options(options.ipc_compression)?;
-        let schema = Arc::clone(&table_properties.schema);
-        let batch_stream = tokio_stream::wrappers::ReceiverStream::new(batch_rx);
-
-        // Build the Flight data stream. FlightDataEncoderBuilder handles schema
-        // framing, dictionary encoding, and automatic batch chunking at 2 MiB.
-        // Each non-schema FlightData message gets a sequential wire offset in
-        // its app_metadata (index 0 is the schema message; data messages start at 1).
-        let offset_counter = Arc::new(std::sync::atomic::AtomicI64::new(0));
-        let offset_counter_clone = Arc::clone(&offset_counter);
-        let flight_data_stream = FlightDataEncoderBuilder::new()
-            .with_schema(schema)
-            .with_options(ipc_write_options)
-            .build(batch_stream)
-            .enumerate()
-            .map(move |(idx, result)| {
-                result.map(|mut flight_data| {
-                    // Skip schema message (idx 0); add metadata to data messages.
-                    if idx > 0 {
-                        let offset =
-                            offset_counter_clone.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                        let metadata = FlightBatchMetadata::new(offset);
-                        if let Ok(bytes) = metadata.to_bytes() {
-                            flight_data.app_metadata = bytes.into();
-                        }
-                    }
-                    flight_data
-                })
-            });
+        let (flight_data_stream, request_body) =
+            Self::make_request_stream(batch_rx, table_properties, options)?;
 
         // Start the DoPut stream.
         let mut response_stream = client
@@ -731,7 +1169,94 @@ impl ZerobusArrowStream {
             }
         }
 
-        Ok((response_stream, batch_tx))
+        Ok(FlightConnection {
+            response_stream: Box::pin(response_stream),
+            batch_tx,
+            request_body,
+            replay_state_installed: true,
+        })
+    }
+
+    /// Publishes a terminal supervisor error around finalization so both new and already
+    /// parked waiters observe the same cause.
+    async fn publish_and_finalize_terminal_error(
+        error: &ZerobusError,
+        server_error_tx: &watch::Sender<Option<ZerobusError>>,
+        ingest_mutex: &Arc<Mutex<()>>,
+        is_closed: &Arc<AtomicBool>,
+        pending_batches: &Arc<Mutex<Vec<PendingBatch>>>,
+        failed_batches: &Arc<Mutex<Vec<RecordBatch>>>,
+        last_acked_records: &Arc<AtomicU64>,
+    ) {
+        let _ = server_error_tx.send(Some(error.clone()));
+        Self::finalize_closed(
+            ingest_mutex,
+            is_closed,
+            pending_batches,
+            failed_batches,
+            last_acked_records,
+        )
+        .await;
+        let _ = server_error_tx.send(Some(error.clone()));
+    }
+
+    /// Returns the permanent recovery cause retained for a later explicit close.
+    fn retained_permanent_recovery_error(
+        recovery_close_error_tx: &watch::Sender<Option<ZerobusError>>,
+    ) -> Option<ZerobusError> {
+        recovery_close_error_tx
+            .borrow()
+            .clone()
+            .filter(|error| !error.is_retryable())
+    }
+
+    /// Pauses new sends and waits the configured recovery backoff unless explicit close
+    /// takes ownership first.
+    async fn prepare_recovery_attempt(
+        ingest_mutex: &Arc<Mutex<()>>,
+        is_paused: &Arc<AtomicBool>,
+        batch_tx: &BatchSender,
+        backoff: Duration,
+        explicit_close_rx: &mut watch::Receiver<Option<Instant>>,
+    ) -> bool {
+        // Pause + detach is atomic relative to ingest_batch: an in-flight ingest either
+        // completes first or observes the pause and buffers for replay.
+        tokio::select! {
+            biased;
+            _ = Self::pause_and_detach_sender(ingest_mutex, is_paused, batch_tx) => {}
+            _ = Self::wait_for_explicit_close(explicit_close_rx) => {
+                debug!("Supervisor: explicit close interrupted recovery pause");
+                return false;
+            }
+        }
+
+        tokio::select! {
+            _ = sleep(backoff) => true,
+            _ = Self::wait_for_explicit_close(explicit_close_rx) => {
+                debug!("Supervisor: explicit close interrupted recovery backoff");
+                false
+            }
+        }
+    }
+
+    /// Drives reconnect until it completes or explicit close takes ownership. Reconnect
+    /// enforces its own recovery deadline so a live replacement request can be half-closed
+    /// before the future returns.
+    async fn wait_for_reconnect_result<F>(
+        reconnect: F,
+        explicit_close_rx: &mut watch::Receiver<Option<Instant>>,
+    ) -> ZerobusResult<ReconnectOutcome>
+    where
+        F: Future<Output = ZerobusResult<ReconnectOutcome>>,
+    {
+        tokio::pin!(reconnect);
+        tokio::select! {
+            biased;
+            result = &mut reconnect => result,
+            _ = Self::wait_for_explicit_close(explicit_close_rx) => {
+                reconnect.await
+            }
+        }
     }
 
     /// Spawns the supervisor task that manages the stream lifecycle and recovery.
@@ -755,27 +1280,33 @@ impl ZerobusArrowStream {
         failed_batches: Arc<Mutex<Vec<RecordBatch>>>,
         recovery_attempts: Arc<AtomicU32>,
         server_error_tx: watch::Sender<Option<ZerobusError>>,
+        recovery_close_error_tx: watch::Sender<Option<ZerobusError>>,
         cumulative_records_assigned: Arc<AtomicU64>,
         submitted_records: Arc<AtomicU64>,
         last_acked_records: Arc<AtomicU64>,
         is_paused: Arc<AtomicBool>,
         ingest_mutex: Arc<Mutex<()>>,
-        initial_response_stream: Pin<Box<dyn Stream<Item = Result<PutResult, FlightError>> + Send>>,
+        initial_response_stream: FlightResponseStream,
+        initial_request_body: RequestBodyControl,
+        initial_replay_state_installed: bool,
+        graceful_close_tx: watch::Sender<Option<Instant>>,
+        mut explicit_close_rx: watch::Receiver<Option<Instant>>,
         sdk_identifier: Arc<str>,
         #[cfg(feature = "test-hooks")] reconnect_rebuild_gate: ReconnectRebuildGate,
         #[cfg(feature = "test-hooks")] ack_applied_gate: AckAppliedGate,
+        #[cfg(feature = "test-hooks")] response_drain_gate: ResponseDrainGate,
     ) -> tokio::task::JoinHandle<ZerobusResult<()>> {
         tokio::spawn(async move {
             let ack_timeout = Duration::from_millis(options.server_lack_of_ack_timeout_ms);
             let mut response_stream = Some(initial_response_stream);
+            let mut request_body = Some(initial_request_body);
+            let mut replay_state_installed = initial_replay_state_installed;
             // Carries a failed reconnect's real error into the next iteration's handling
             // instead of round-tripping a synthetic error through a dummy stream.
-            let mut pending_error: Option<ZerobusError> = None;
-            // True when `pending_error` is a reconnect auth rejection: the cached token was
-            // invalidated and we want to retry (mint a fresh one) even though auth errors
-            // classify as non-retryable — while still surfacing the original error if
-            // retries are ultimately exhausted.
-            let mut reconnect_auth_retry = false;
+            let mut pending_error: Option<PendingSupervisorError> = None;
+            // Retains a permanent recovery-arm error while an explicit close drains a
+            // replacement connection. Clean transport teardown must not erase its cause.
+            let mut pending_close_error: Option<PendingSupervisorError> = None;
 
             loop {
                 if is_closed.load(Ordering::Relaxed) {
@@ -786,27 +1317,67 @@ impl ZerobusArrowStream {
                 // Run process_acks until it returns — unless a prior reconnect attempt
                 // failed, in which case carry that real error into the handling below
                 // (preserving its message and retry classification).
-                let result = if let Some(e) = pending_error.take() {
-                    Err(e)
+                let (result, auth_already_invalidated) = if let Some(pending) = pending_error.take()
+                {
+                    (Err(pending.error), pending.auth_invalidated)
                 } else {
-                    Self::process_acks(
-                        response_stream
-                            .take()
-                            .expect("response_stream present when no pending reconnect error"),
-                        Arc::clone(&is_closed),
-                        last_ack_tx.clone(),
-                        Arc::clone(&pending_batches),
-                        ack_timeout,
-                        server_error_tx.clone(),
-                        Arc::clone(&submitted_records),
-                        Arc::clone(&last_acked_records),
-                        Arc::clone(&is_paused),
-                        &options,
-                        #[cfg(feature = "test-hooks")]
-                        Arc::clone(&ack_applied_gate),
+                    (
+                        Self::process_acks(
+                            response_stream
+                                .take()
+                                .expect("response_stream present when no pending reconnect error"),
+                            Arc::clone(&is_closed),
+                            last_ack_tx.clone(),
+                            Arc::clone(&pending_batches),
+                            ack_timeout,
+                            server_error_tx.clone(),
+                            Arc::clone(&submitted_records),
+                            Arc::clone(&last_acked_records),
+                            Arc::clone(&is_paused),
+                            Arc::clone(&ingest_mutex),
+                            Arc::clone(&batch_tx),
+                            request_body
+                                .take()
+                                .expect("request_body present when processing a response stream"),
+                            graceful_close_tx.clone(),
+                            explicit_close_rx.clone(),
+                            &options,
+                            replay_state_installed,
+                            #[cfg(feature = "test-hooks")]
+                            Arc::clone(&ack_applied_gate),
+                            #[cfg(feature = "test-hooks")]
+                            Arc::clone(&response_drain_gate),
+                        )
+                        .await,
+                        false,
                     )
-                    .await
                 };
+                let (result, auth_already_invalidated) = match pending_close_error.take() {
+                    // A retained auth rejection is a fallback for clean or retryable
+                    // shutdown outcomes. A newer permanent peer error is more specific.
+                    Some(_) if result.as_ref().is_err_and(|error| !error.is_retryable()) => {
+                        (result, auth_already_invalidated)
+                    }
+                    Some(pending) => (Err(pending.error), pending.auth_invalidated),
+                    None => (result, auth_already_invalidated),
+                };
+
+                // Explicit close owns teardown from this point. `process_acks` either
+                // completed its clean half-close/drain or returned an error while doing so;
+                // in both cases, do not reconnect a stream the caller is closing.
+                if explicit_close_rx.borrow().is_some() {
+                    debug!("Supervisor: explicit close completed, skipping recovery");
+                    let close_deadline =
+                        (*explicit_close_rx.borrow()).expect("explicit close was checked above");
+                    return Self::finish_explicit_close_result(
+                        result,
+                        auth_already_invalidated,
+                        close_deadline,
+                        &headers_provider,
+                        &server_error_tx,
+                    )
+                    .await;
+                }
 
                 // Check if stream was closed during processing.
                 if is_closed.load(Ordering::Relaxed) {
@@ -822,11 +1393,21 @@ impl ZerobusArrowStream {
                         return Ok(());
                     }
                     Err(ref error)
-                        if (error.is_retryable() || reconnect_auth_retry) && options.recovery =>
+                        if (error.is_retryable() || auth_already_invalidated)
+                            && options.recovery =>
                     {
                         // Retriable error (or a reconnect auth rejection we've chosen to
                         // retry with re-minted credentials) - attempt recovery.
-                        reconnect_auth_retry = false;
+                        if auth_already_invalidated {
+                            recovery_close_error_tx.send_replace(Some(error.clone()));
+                        } else if !error.is_retryable()
+                            || Self::retained_permanent_recovery_error(&recovery_close_error_tx)
+                                .is_none()
+                        {
+                            // Keep a permanent retained cause across a later retryable
+                            // reconnect failure; otherwise clear stale close-only state.
+                            recovery_close_error_tx.send_replace(None);
+                        }
                         let attempts = recovery_attempts.fetch_add(1, Ordering::Relaxed);
                         if attempts >= options.recovery_retries {
                             error!(
@@ -834,14 +1415,14 @@ impl ZerobusArrowStream {
                                 max_retries = options.recovery_retries,
                                 "Supervisor: Max recovery retries exceeded"
                             );
-                            // Publish the terminal error before finalization (so a waiter
-                            // checking is_closed right after it already sees the real error;
-                            // reconnect-failure errors carried via pending_error are never
-                            // pre-published in process_acks) and again after (to wake
-                            // already-parked waiters). finalize_closed also drains pending
-                            // under ingest_mutex so a concurrent ingest can't be omitted.
-                            let _ = server_error_tx.send(Some(error.clone()));
-                            Self::finalize_closed(
+                            // Prefer a permanent retained auth/peer cause over the latest
+                            // retryable reconnect failure that exhausted the budget.
+                            let terminal =
+                                Self::retained_permanent_recovery_error(&recovery_close_error_tx)
+                                    .unwrap_or_else(|| error.clone());
+                            Self::publish_and_finalize_terminal_error(
+                                &terminal,
+                                &server_error_tx,
                                 &ingest_mutex,
                                 &is_closed,
                                 &pending_batches,
@@ -849,8 +1430,7 @@ impl ZerobusArrowStream {
                                 &last_acked_records,
                             )
                             .await;
-                            let _ = server_error_tx.send(Some(error.clone()));
-                            return result;
+                            return Err(terminal);
                         }
 
                         info!(
@@ -860,66 +1440,159 @@ impl ZerobusArrowStream {
                             "Supervisor: Attempting recovery after retriable error"
                         );
 
-                        // Atomically pause ingest and detach the sender under
-                        // ingest_mutex, so an in-flight ingest_batch either completes
-                        // before the pause or observes is_paused and buffers — it never
-                        // sees is_paused=false with a detached sender. Successful replay
-                        // lifts the gate; failed attempts remain paused for retry/finalization.
-                        Self::pause_and_detach_sender(&ingest_mutex, &is_paused, &batch_tx).await;
+                        if !Self::prepare_recovery_attempt(
+                            &ingest_mutex,
+                            &is_paused,
+                            &batch_tx,
+                            Duration::from_millis(options.recovery_backoff_ms),
+                            &mut explicit_close_rx,
+                        )
+                        .await
+                        {
+                            return Self::explicit_close_result(
+                                Err(error.clone()),
+                                &server_error_tx,
+                            );
+                        }
 
-                        sleep(Duration::from_millis(options.recovery_backoff_ms)).await;
-
+                        // The current error is being retried, so do not expose it to ordinary
+                        // waiters as terminal. Explicit-close outcomes publish a retained
+                        // permanent cause when close actually takes ownership.
                         let _ = server_error_tx.send(None);
+
+                        if explicit_close_rx.borrow().is_some() {
+                            debug!("Supervisor: explicit close skipped reconnect");
+                            return Self::explicit_close_result(
+                                Err(error.clone()),
+                                &server_error_tx,
+                            );
+                        }
 
                         // Share one deadline across reconnect and auth-rejection
                         // invalidation so refresh receives only the remaining recovery
                         // timeout instead of starting a second full timeout.
                         let recovery_deadline = tokio::time::Instant::now()
                             + Duration::from_millis(options.recovery_timeout_ms);
-                        let reconnect_result = tokio::time::timeout_at(
+                        let mut reconnect_close_rx = explicit_close_rx.clone();
+                        let reconnect = Self::reconnect(
+                            &endpoint,
+                            &tls_config,
+                            connector_factory.as_ref(),
+                            &table_properties,
+                            &options,
+                            &headers_provider,
+                            &batch_tx,
+                            &pending_batches,
+                            &last_ack_tx,
+                            &cumulative_records_assigned,
+                            &submitted_records,
+                            &last_acked_records,
+                            &sdk_identifier,
+                            &ingest_mutex,
+                            &is_paused,
+                            &mut reconnect_close_rx,
                             recovery_deadline,
-                            Self::reconnect(
-                                &endpoint,
-                                &tls_config,
-                                connector_factory.as_ref(),
-                                &table_properties,
-                                &options,
-                                &headers_provider,
-                                &batch_tx,
-                                &pending_batches,
-                                &cumulative_records_assigned,
-                                &submitted_records,
-                                &last_acked_records,
-                                &sdk_identifier,
-                                &ingest_mutex,
-                                &is_paused,
-                                #[cfg(feature = "test-hooks")]
-                                &reconnect_rebuild_gate,
-                            ),
-                        )
-                        .await;
+                            #[cfg(feature = "test-hooks")]
+                            &reconnect_rebuild_gate,
+                            #[cfg(feature = "test-hooks")]
+                            &ack_applied_gate,
+                        );
+                        let reconnect_result =
+                            Self::wait_for_reconnect_result(reconnect, &mut explicit_close_rx)
+                                .await;
 
                         match reconnect_result {
-                            Ok(Ok(new_response_stream)) => {
+                            Ok(ReconnectOutcome::Connected(connection)) => {
                                 info!("Supervisor: Recovery successful, resuming");
                                 recovery_attempts.store(0, Ordering::Relaxed);
+                                recovery_close_error_tx.send_replace(None);
+                                // Clear any transient error published by the prior connection.
+                                let _ = server_error_tx.send(None);
                                 // is_paused was already cleared inside reconnect().
-                                response_stream = Some(new_response_stream);
+                                response_stream = Some(connection.response_stream);
+                                request_body = Some(connection.request_body);
+                                replay_state_installed = connection.replay_state_installed;
                             }
-                            Ok(Err(e)) => {
+                            Ok(ReconnectOutcome::ClosedBeforeRequest) => {
+                                debug!(
+                                    "Supervisor: explicit close interrupted reconnect before a \
+                                     replacement Flight request was created"
+                                );
+                                // Preserve the recovery-arm error (including auth rejections
+                                // cleared from server_error_tx before this reconnect attempt).
+                                return Self::explicit_close_result(
+                                    Err(error.clone()),
+                                    &server_error_tx,
+                                );
+                            }
+                            Ok(ReconnectOutcome::Closing(connection)) => {
+                                debug!(
+                                    "Supervisor: handing replacement connection to explicit-close cleanup"
+                                );
+                                if auth_already_invalidated {
+                                    let _ = server_error_tx.send(Some(error.clone()));
+                                    pending_close_error = Some(PendingSupervisorError {
+                                        error: error.clone(),
+                                        auth_invalidated: true,
+                                    });
+                                }
+                                response_stream = Some(connection.response_stream);
+                                request_body = Some(connection.request_body);
+                                replay_state_installed = connection.replay_state_installed;
+                                continue;
+                            }
+                            Ok(ReconnectOutcome::CloseTimedOutAfterRequest) => {
+                                if auth_already_invalidated {
+                                    return Self::explicit_close_result(
+                                        Err(error.clone()),
+                                        &server_error_tx,
+                                    );
+                                }
+                                let error = Self::explicit_close_reconnect_timeout();
+                                let _ = server_error_tx.send(Some(error.clone()));
+                                return Err(error);
+                            }
+                            Err(e) => {
                                 warn!("Supervisor: Reconnection failed: {}", e);
                                 // Ask the provider to invalidate cached authentication
                                 // state after an auth rejection, then retry even though
                                 // such errors are otherwise non-retryable. Preserve this
                                 // reconnect error if refresh or later recovery cannot proceed.
+                                let mut auth_invalidated = false;
                                 if e.is_auth_rejection() {
-                                    match tokio::time::timeout_at(
-                                        recovery_deadline,
-                                        headers_provider.invalidate(),
-                                    )
-                                    .await
-                                    {
-                                        Ok(()) => reconnect_auth_retry = true,
+                                    let invalidation = headers_provider.invalidate();
+                                    tokio::pin!(invalidation);
+                                    let invalidation_result = tokio::select! {
+                                        biased;
+                                        result = tokio::time::timeout_at(
+                                            recovery_deadline,
+                                            &mut invalidation,
+                                        ) => result,
+                                        close_deadline = Self::wait_for_explicit_close(
+                                            &mut explicit_close_rx,
+                                        ) => {
+                                            // Publish before cleanup so close() cannot lose the
+                                            // permanent rejection if invalidation stalls.
+                                            let _ = server_error_tx.send(Some(e.clone()));
+                                            let invalidation_deadline =
+                                                close_deadline.min(recovery_deadline);
+                                            if tokio::time::timeout_at(
+                                                invalidation_deadline,
+                                                &mut invalidation,
+                                            )
+                                            .await
+                                            .is_err()
+                                            {
+                                                warn!(
+                                                    "Explicit close ended while invalidating the \
+                                                     rejected reconnect credential"
+                                                );
+                                            }
+                                            return Err(e);
+                                        }
+                                    };
+                                    match invalidation_result {
+                                        Ok(()) => auth_invalidated = true,
                                         Err(_) => {
                                             warn!(
                                                 timeout_ms = options.recovery_timeout_ms,
@@ -928,10 +1601,10 @@ impl ZerobusArrowStream {
                                             );
                                             // A custom provider must not stall recovery
                                             // indefinitely. Close with the original auth
-                                            // rejection; publish before and after
-                                            // finalization for waiter race-freedom.
-                                            let _ = server_error_tx.send(Some(e.clone()));
-                                            Self::finalize_closed(
+                                            // rejection.
+                                            Self::publish_and_finalize_terminal_error(
+                                                &e,
+                                                &server_error_tx,
                                                 &ingest_mutex,
                                                 &is_closed,
                                                 &pending_batches,
@@ -939,32 +1612,49 @@ impl ZerobusArrowStream {
                                                 &last_acked_records,
                                             )
                                             .await;
-                                            let _ = server_error_tx.send(Some(e.clone()));
                                             return Err(e);
                                         }
                                     }
                                 }
-                                pending_error = Some(e);
-                            }
-                            Err(_timeout) => {
-                                warn!("Supervisor: Reconnection timed out");
-                                pending_error = Some(ZerobusError::ConnectionTimeout(format!(
-                                    "Reconnection timed out after {}ms",
-                                    options.recovery_timeout_ms
-                                )));
+                                if explicit_close_rx.borrow().is_some() {
+                                    // A retryable reconnect failure is only cleanup context;
+                                    // retain the earlier permanent auth rejection. Any newer
+                                    // permanent peer error supersedes it.
+                                    let close_error = Self::preferred_close_error(
+                                        auth_already_invalidated.then(|| error.clone()),
+                                        Some(e),
+                                    )
+                                    .expect("reconnect supplied a close error");
+                                    return Self::explicit_close_result(
+                                        Err(close_error),
+                                        &server_error_tx,
+                                    );
+                                }
+                                // Supersede the retained close-only cause only when this
+                                // reconnect outcome replaces it. Retryable failures must keep
+                                // any permanent retained auth cause for a later close() or
+                                // retry-budget exhaustion.
+                                if e.is_auth_rejection()
+                                    || !e.is_retryable()
+                                    || Self::retained_permanent_recovery_error(
+                                        &recovery_close_error_tx,
+                                    )
+                                    .is_none()
+                                {
+                                    recovery_close_error_tx.send_replace(None);
+                                }
+                                pending_error = Some(PendingSupervisorError {
+                                    error: e,
+                                    auth_invalidated,
+                                });
                             }
                         }
                     }
                     Err(error) => {
                         error!("Supervisor: Non-retriable error, closing stream: {}", error);
-                        // Publish the terminal error before finalization (so a waiter
-                        // checking is_closed right after it already sees the real error;
-                        // reconnect-failure errors carried via pending_error are never
-                        // pre-published in process_acks) and again after (to wake
-                        // already-parked waiters). finalize_closed drains pending under
-                        // ingest_mutex so a concurrent ingest can't be omitted.
-                        let _ = server_error_tx.send(Some(error.clone()));
-                        Self::finalize_closed(
+                        Self::publish_and_finalize_terminal_error(
+                            &error,
+                            &server_error_tx,
                             &ingest_mutex,
                             &is_closed,
                             &pending_batches,
@@ -972,7 +1662,6 @@ impl ZerobusArrowStream {
                             &last_acked_records,
                         )
                         .await;
-                        let _ = server_error_tx.send(Some(error.clone()));
                         // Ask the provider to invalidate cached authentication state after
                         // a terminal rejection. The stream is already finalized and waiters
                         // have the real error; bound the callback so the supervisor cannot
@@ -997,6 +1686,77 @@ impl ZerobusArrowStream {
         })
     }
 
+    fn reconnect_timeout_error(recovery_timeout_ms: u64) -> ZerobusError {
+        ZerobusError::ConnectionTimeout(format!(
+            "Reconnection timed out after {recovery_timeout_ms}ms"
+        ))
+    }
+
+    /// Half-closes and drains a replacement connection after a setup or recovery timeout.
+    /// The triggering timeout remains the primary result unless cleanup observes a newer
+    /// permanent peer error.
+    async fn finish_timed_out_reconnect(
+        connection: FlightConnection,
+        cleanup_deadline: Instant,
+        timeout_error: ZerobusError,
+        ack_progress: &AckProgress<'_>,
+    ) -> ZerobusResult<ReconnectOutcome> {
+        let FlightConnection {
+            mut response_stream,
+            request_body,
+            replay_state_installed,
+            ..
+        } = connection;
+        request_body.shutdown();
+
+        let drain_response = async {
+            loop {
+                // `timeout_at` polls its inner future first. Without this precheck, an
+                // always-ready response stream could win every poll past the deadline.
+                if Instant::now() >= cleanup_deadline {
+                    return None;
+                }
+                match tokio::time::timeout_at(cleanup_deadline, response_stream.next()).await {
+                    Ok(Some(Ok(put_result))) => {
+                        match FlightAckMetadata::from_bytes(&put_result.app_metadata) {
+                            Ok(ack) if ack.ack_up_to_records > 0 && replay_state_installed => {
+                                if let Err(error) =
+                                    Self::apply_acknowledgment(&ack, ack_progress).await
+                                {
+                                    return Some(error);
+                                }
+                            }
+                            Ok(ack) if ack.ack_up_to_records > 0 => {
+                                return Some(Self::pre_replay_ack_error(&ack));
+                            }
+                            Ok(_) => {}
+                            Err(error) => {
+                                warn!(%error, "Failed to parse ack metadata during reconnect cleanup");
+                            }
+                        }
+                    }
+                    Ok(Some(Err(flight_error))) => {
+                        let status: tonic::Status = flight_error.into();
+                        return Some(ZerobusError::StreamClosedError(status));
+                    }
+                    Ok(None) | Err(_) => return None,
+                }
+            }
+        };
+        let (request_reached_eof, peer_error) = tokio::join!(
+            request_body.wait_for_eof_until(cleanup_deadline),
+            drain_response,
+        );
+        if !request_reached_eof {
+            warn!("Replacement request did not reach EOF before recovery cleanup ended");
+        }
+
+        if let Some(error) = peer_error.filter(|error| !error.is_retryable()) {
+            return Err(error);
+        }
+        Err(timeout_error)
+    }
+
     /// Reconnects to the server and replays pending batches.
     ///
     /// On successful replay, holds `ingest_mutex` until `is_paused` is cleared so
@@ -1012,67 +1772,170 @@ impl ZerobusArrowStream {
         headers_provider: &Arc<dyn HeadersProvider>,
         batch_tx: &BatchSender,
         pending_batches: &Arc<Mutex<Vec<PendingBatch>>>,
+        last_ack_tx: &watch::Sender<Option<OffsetId>>,
         cumulative_records_assigned: &Arc<AtomicU64>,
         submitted_records: &Arc<AtomicU64>,
         last_acked_records: &Arc<AtomicU64>,
         sdk_identifier: &str,
         ingest_mutex: &Arc<Mutex<()>>,
         is_paused: &Arc<AtomicBool>,
+        explicit_close_rx: &mut watch::Receiver<Option<Instant>>,
+        recovery_deadline: Instant,
         #[cfg(feature = "test-hooks")] reconnect_rebuild_gate: &ReconnectRebuildGate,
-    ) -> ZerobusResult<Pin<Box<dyn Stream<Item = Result<PutResult, FlightError>> + Send>>> {
-        // Create new client.
-        let client = Self::create_flight_client(
-            endpoint,
-            tls_config,
-            connector_factory,
-            table_properties,
-            options,
-            headers_provider,
-            sdk_identifier,
-        )
-        .await?;
+        #[cfg(feature = "test-hooks")] ack_applied_gate: &AckAppliedGate,
+    ) -> ZerobusResult<ReconnectOutcome> {
+        // Positive ACKs from the replacement are meaningful only after replay has
+        // installed connection-local ranges and reset the record counters.
+        let replay_state_installed = AtomicBool::new(false);
+        let ack_progress = AckProgress {
+            submitted_records,
+            last_acked_records,
+            pending_batches,
+            last_ack_tx,
+            #[cfg(feature = "test-hooks")]
+            ack_applied_gate,
+        };
+
+        // No Flight request exists yet, so reconnect can stop immediately if explicit close
+        // arrives while credentials or client setup are still in progress.
+        let client = tokio::select! {
+            biased;
+            result = Self::create_flight_client(
+                endpoint,
+                tls_config,
+                connector_factory,
+                table_properties,
+                options,
+                headers_provider,
+                sdk_identifier,
+            ) => result?,
+            _ = Self::wait_for_explicit_close(explicit_close_rx) => {
+                return Ok(ReconnectOutcome::ClosedBeforeRequest);
+            }
+            _ = tokio::time::sleep_until(recovery_deadline) => {
+                return Err(Self::reconnect_timeout_error(options.recovery_timeout_ms));
+            }
+        };
 
         // Create new channel.
         let (tx, batch_rx) =
             mpsc::channel::<Result<RecordBatch, FlightError>>(options.max_inflight_batches);
 
-        let ipc_write_options = make_ipc_write_options(options.ipc_compression)?;
-        let schema = Arc::clone(&table_properties.schema);
-        let batch_stream = tokio_stream::wrappers::ReceiverStream::new(batch_rx);
+        let (flight_data_stream, request_body) =
+            Self::make_request_stream(batch_rx, table_properties, options)?;
 
-        let offset_counter = Arc::new(std::sync::atomic::AtomicI64::new(0));
-        let offset_counter_clone = Arc::clone(&offset_counter);
-        let flight_data_stream = FlightDataEncoderBuilder::new()
-            .with_schema(schema)
-            .with_options(ipc_write_options)
-            .build(batch_stream)
-            .enumerate()
-            .map(move |(idx, result)| {
-                result.map(|mut flight_data| {
-                    if idx > 0 {
-                        let offset =
-                            offset_counter_clone.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                        let metadata = FlightBatchMetadata::new(offset);
-                        if let Ok(bytes) = metadata.to_bytes() {
-                            flight_data.app_metadata = bytes.into();
-                        }
-                    }
-                    flight_data
-                })
-            });
-
-        // Start the DoPut stream.
+        // Start the DoPut stream. Once this future has created a response stream, explicit
+        // close must return the whole connection to the supervisor instead of dropping it.
         let mut flight_client = client;
-        let mut response_stream = flight_client
-            .do_put(flight_data_stream)
-            .await
-            // `.into()` preserves the inner gRPC code; `Status::from_error` would
-            // flatten it to `Unknown` and break auth/retry classification.
-            .map_err(|e| ZerobusError::CreateStreamError(e.into()))?;
+        let mut do_put = Box::pin(flight_client.do_put(flight_data_stream));
+        let mut response_stream = tokio::select! {
+            biased;
+            result = &mut do_put => result
+                // `.into()` preserves the inner gRPC code; `Status::from_error` would
+                // flatten it to `Unknown` and break auth/retry classification.
+                .map_err(|e| ZerobusError::CreateStreamError(e.into()))?,
+            close_deadline = Self::wait_for_explicit_close(explicit_close_rx) => {
+                // The request may already be live even though tonic has not returned its
+                // response stream. Stop its body, then keep driving tonic so the supervisor
+                // can recover a drainable response until the caller's original close deadline.
+                request_body.shutdown();
+                let response_and_eof = tokio::time::timeout_at(close_deadline, async {
+                    tokio::join!(
+                        &mut do_put,
+                        request_body.wait_for_eof_until(close_deadline),
+                    )
+                })
+                .await;
+                match response_and_eof {
+                    Ok((Ok(response_stream), _)) => {
+                        return Ok(ReconnectOutcome::Closing(FlightConnection {
+                            response_stream: Box::pin(response_stream),
+                            batch_tx: tx,
+                            request_body,
+                            replay_state_installed: replay_state_installed.load(Ordering::Acquire),
+                        }));
+                    }
+                    Ok((Err(error), _)) => {
+                        debug!(%error, "Replacement DoPut ended while explicit close was starting");
+                        return Err(ZerobusError::CreateStreamError(error.into()));
+                    }
+                    Err(_) => {
+                        warn!(
+                            "Explicit close reached its deadline before replacement DoPut \
+                             returned a response stream"
+                        );
+                        return Ok(ReconnectOutcome::CloseTimedOutAfterRequest);
+                    }
+                }
+            }
+            _ = tokio::time::sleep_until(recovery_deadline) => {
+                // Unlike the old outer timeout, keep ownership of the live DoPut long
+                // enough to send request EOF and drain any response the peer provides.
+                let cleanup_deadline =
+                    Instant::now() + Duration::from_millis(CLOSE_SIGNAL_DRAIN_TIMEOUT_MS);
+                request_body.shutdown();
+                let response_and_eof = tokio::time::timeout_at(cleanup_deadline, async {
+                    tokio::join!(
+                        &mut do_put,
+                        request_body.wait_for_eof_until(cleanup_deadline),
+                    )
+                })
+                .await;
+                return match response_and_eof {
+                    Ok((Ok(response_stream), _)) => Self::finish_timed_out_reconnect(
+                        FlightConnection {
+                            response_stream: Box::pin(response_stream),
+                            batch_tx: tx,
+                            request_body,
+                            replay_state_installed: replay_state_installed.load(Ordering::Acquire),
+                        },
+                        cleanup_deadline,
+                        Self::reconnect_timeout_error(options.recovery_timeout_ms),
+                        &ack_progress,
+                    )
+                    .await,
+                    Ok((Err(error), _)) => {
+                        Err(ZerobusError::CreateStreamError(error.into()))
+                    }
+                    Err(_) => Err(Self::reconnect_timeout_error(
+                        options.recovery_timeout_ms,
+                    )),
+                };
+            }
+        };
 
         // Wait for server's "ready" signal to confirm reconnection succeeded.
         let setup_timeout = Duration::from_millis(options.connection_timeout_ms);
-        match tokio::time::timeout(setup_timeout, response_stream.next()).await {
+        let setup_result = tokio::select! {
+            biased;
+            result = tokio::time::timeout(setup_timeout, response_stream.next()) => Some(result),
+            _ = Self::wait_for_explicit_close(explicit_close_rx) => None,
+            _ = tokio::time::sleep_until(recovery_deadline) => {
+                let cleanup_deadline =
+                    Instant::now() + Duration::from_millis(CLOSE_SIGNAL_DRAIN_TIMEOUT_MS);
+                return Self::finish_timed_out_reconnect(
+                    FlightConnection {
+                        response_stream: Box::pin(response_stream),
+                        batch_tx: tx,
+                        request_body,
+                        replay_state_installed: replay_state_installed.load(Ordering::Acquire),
+                    },
+                    cleanup_deadline,
+                    Self::reconnect_timeout_error(options.recovery_timeout_ms),
+                    &ack_progress,
+                )
+                .await;
+            }
+        };
+        let Some(setup_result) = setup_result else {
+            return Ok(ReconnectOutcome::Closing(FlightConnection {
+                response_stream: Box::pin(response_stream),
+                batch_tx: tx,
+                request_body,
+                replay_state_installed: replay_state_installed.load(Ordering::Acquire),
+            }));
+        };
+        match setup_result {
             Ok(Some(Ok(put_result))) => {
                 // Verify it's the ready signal.
                 match FlightAckMetadata::from_bytes(&put_result.app_metadata) {
@@ -1115,19 +1978,68 @@ impl ZerobusArrowStream {
                     "Timed out waiting for server reconnect confirmation ({}ms)",
                     options.connection_timeout_ms
                 );
-                return Err(ZerobusError::ConnectionTimeout(format!(
+                let timeout_error = ZerobusError::ConnectionTimeout(format!(
                     "Timed out waiting for server reconnect confirmation ({}ms)",
                     options.connection_timeout_ms
-                )));
+                ));
+                let cleanup_deadline =
+                    Instant::now() + Duration::from_millis(CLOSE_SIGNAL_DRAIN_TIMEOUT_MS);
+                return Self::finish_timed_out_reconnect(
+                    FlightConnection {
+                        response_stream: Box::pin(response_stream),
+                        batch_tx: tx,
+                        request_body,
+                        replay_state_installed: replay_state_installed.load(Ordering::Acquire),
+                    },
+                    cleanup_deadline,
+                    timeout_error,
+                    &ack_progress,
+                )
+                .await;
             }
         }
 
         // Store the new sender before taking ingest_mutex for the rebuild. Safe only
         // because is_paused stays true until after replay: a concurrent ingest that
         // observes this new sender still buffers rather than sending out of order.
-        {
-            let mut tx_guard = batch_tx.lock().await;
-            *tx_guard = Some(tx.clone());
+        let mut tx_guard = tokio::select! {
+            biased;
+            guard = batch_tx.lock() => guard,
+            _ = Self::wait_for_explicit_close(explicit_close_rx) => {
+                return Ok(ReconnectOutcome::Closing(FlightConnection {
+                    response_stream: Box::pin(response_stream),
+                    batch_tx: tx,
+                    request_body,
+                    replay_state_installed: replay_state_installed.load(Ordering::Acquire),
+                }));
+            }
+            _ = tokio::time::sleep_until(recovery_deadline) => {
+                let cleanup_deadline =
+                    Instant::now() + Duration::from_millis(CLOSE_SIGNAL_DRAIN_TIMEOUT_MS);
+                return Self::finish_timed_out_reconnect(
+                    FlightConnection {
+                        response_stream: Box::pin(response_stream),
+                        batch_tx: tx,
+                        request_body,
+                        replay_state_installed: replay_state_installed.load(Ordering::Acquire),
+                    },
+                    cleanup_deadline,
+                    Self::reconnect_timeout_error(options.recovery_timeout_ms),
+                    &ack_progress,
+                )
+                .await;
+            }
+        };
+        *tx_guard = Some(tx.clone());
+        drop(tx_guard);
+
+        if explicit_close_rx.borrow().is_some() {
+            return Ok(ReconnectOutcome::Closing(FlightConnection {
+                response_stream: Box::pin(response_stream),
+                batch_tx: tx,
+                request_body,
+                replay_state_installed: replay_state_installed.load(Ordering::Acquire),
+            }));
         }
 
         // Counters are reset atomically with the range rebuild inside
@@ -1143,26 +2055,120 @@ impl ZerobusArrowStream {
             let barrier = reconnect_rebuild_gate.lock().await.take();
             if let Some(barrier) = barrier {
                 barrier.reached.notify_one();
-                barrier.proceed.notified().await;
+                let proceed = tokio::select! {
+                    biased;
+                    _ = barrier.proceed.notified() => true,
+                    _ = Self::wait_for_explicit_close(explicit_close_rx) => false,
+                    _ = tokio::time::sleep_until(recovery_deadline) => {
+                        let cleanup_deadline = Instant::now()
+                            + Duration::from_millis(CLOSE_SIGNAL_DRAIN_TIMEOUT_MS);
+                        return Self::finish_timed_out_reconnect(
+                            FlightConnection {
+                                response_stream: Box::pin(response_stream),
+                                batch_tx: tx,
+                                request_body,
+                                replay_state_installed: replay_state_installed.load(Ordering::Acquire),
+                            },
+                            cleanup_deadline,
+                            Self::reconnect_timeout_error(options.recovery_timeout_ms),
+                            &ack_progress,
+                        )
+                        .await;
+                    }
+                };
+                if !proceed {
+                    return Ok(ReconnectOutcome::Closing(FlightConnection {
+                        response_stream: Box::pin(response_stream),
+                        batch_tx: tx,
+                        request_body,
+                        replay_state_installed: replay_state_installed.load(Ordering::Acquire),
+                    }));
+                }
             }
         }
 
         // Hold ingest_mutex across the replay so no concurrent ingest interleaves.
-        let _ingest_guard = ingest_mutex.lock().await;
-        Self::replay_pending_batches(
-            &tx,
-            pending_batches,
-            cumulative_records_assigned,
-            submitted_records,
-            last_acked_records,
-            acked_before_disconnect,
-        )
-        .await?;
+        let _ingest_guard = tokio::select! {
+            biased;
+            guard = ingest_mutex.lock() => guard,
+            _ = Self::wait_for_explicit_close(explicit_close_rx) => {
+                return Ok(ReconnectOutcome::Closing(FlightConnection {
+                    response_stream: Box::pin(response_stream),
+                    batch_tx: tx,
+                    request_body,
+                    replay_state_installed: replay_state_installed.load(Ordering::Acquire),
+                }));
+            }
+            _ = tokio::time::sleep_until(recovery_deadline) => {
+                let cleanup_deadline =
+                    Instant::now() + Duration::from_millis(CLOSE_SIGNAL_DRAIN_TIMEOUT_MS);
+                return Self::finish_timed_out_reconnect(
+                    FlightConnection {
+                        response_stream: Box::pin(response_stream),
+                        batch_tx: tx,
+                        request_body,
+                        replay_state_installed: replay_state_installed.load(Ordering::Acquire),
+                    },
+                    cleanup_deadline,
+                    Self::reconnect_timeout_error(options.recovery_timeout_ms),
+                    &ack_progress,
+                )
+                .await;
+            }
+        };
+        let replay_completed = tokio::select! {
+            biased;
+            result = Self::replay_pending_batches(
+                &tx,
+                pending_batches,
+                cumulative_records_assigned,
+                submitted_records,
+                last_acked_records,
+                acked_before_disconnect,
+                &replay_state_installed,
+            ) => {
+                result?;
+                true
+            }
+            _ = Self::wait_for_explicit_close(explicit_close_rx) => false,
+            _ = tokio::time::sleep_until(recovery_deadline) => {
+                let cleanup_deadline =
+                    Instant::now() + Duration::from_millis(CLOSE_SIGNAL_DRAIN_TIMEOUT_MS);
+                return Self::finish_timed_out_reconnect(
+                    FlightConnection {
+                        response_stream: Box::pin(response_stream),
+                        batch_tx: tx,
+                        request_body,
+                        replay_state_installed: replay_state_installed.load(Ordering::Acquire),
+                    },
+                    cleanup_deadline,
+                    Self::reconnect_timeout_error(options.recovery_timeout_ms),
+                    &ack_progress,
+                )
+                .await;
+            }
+        };
+        if !replay_completed {
+            // replay_pending_batches commits its rebuilt ranges before sending and publishes
+            // submitted_records after each successful handoff. Cancelling between sends
+            // therefore leaves a consistent prefix for process_acks to acknowledge.
+            return Ok(ReconnectOutcome::Closing(FlightConnection {
+                response_stream: Box::pin(response_stream),
+                batch_tx: tx,
+                request_body,
+                replay_state_installed: replay_state_installed.load(Ordering::Acquire),
+            }));
+        }
 
         // Clear the pause gate while still holding ingest_mutex.
         is_paused.store(false, Ordering::Relaxed);
 
-        Ok(response_stream)
+        Ok(ReconnectOutcome::Connected(FlightConnection {
+            response_stream: Box::pin(response_stream),
+            batch_tx: tx,
+            request_body,
+            replay_state_installed: replay_state_installed.load(Ordering::Acquire),
+        }))
     }
 
     /// Rebuilds `pending_batches` for replay after a reconnect and replays them over
@@ -1180,6 +2186,7 @@ impl ZerobusArrowStream {
         submitted_records: &Arc<AtomicU64>,
         last_acked_records: &Arc<AtomicU64>,
         acked_before_disconnect: u64,
+        replay_state_installed: &AtomicBool,
     ) -> ZerobusResult<()> {
         let replay_batches: Vec<RecordBatch> = {
             let mut pending = pending_batches.lock().await;
@@ -1224,6 +2231,7 @@ impl ZerobusArrowStream {
             cumulative_records_assigned.store(new_cumulative, Ordering::Relaxed);
             submitted_records.store(0, Ordering::Release);
             last_acked_records.store(0, Ordering::Release);
+            replay_state_installed.store(true, Ordering::Release);
 
             replay
         };
@@ -1260,6 +2268,19 @@ impl ZerobusArrowStream {
         is_paused.store(true, Ordering::Relaxed);
         let mut tx = batch_tx.lock().await;
         *tx = None;
+    }
+
+    /// Atomically pauses new sends and snapshots the cumulative record target for
+    /// batches that were already sent. Batches accepted after this transition remain
+    /// pending for replay, but do not extend the graceful-close ack wait.
+    async fn pause_sender_and_snapshot_ack_target(
+        ingest_mutex: &Arc<Mutex<()>>,
+        is_paused: &Arc<AtomicBool>,
+        submitted_records: &Arc<AtomicU64>,
+    ) -> u64 {
+        let _guard = ingest_mutex.lock().await;
+        is_paused.store(true, Ordering::Relaxed);
+        submitted_records.load(Ordering::Acquire)
     }
 
     /// Moves each pending batch's unacknowledged suffix to the failed list, dropping
@@ -1302,14 +2323,17 @@ impl ZerobusArrowStream {
         Self::move_pending_to_failed(pending_batches, failed_batches, last_acked_records).await;
     }
 
+    fn pre_replay_ack_error(ack: &FlightAckMetadata) -> ZerobusError {
+        ZerobusError::InvalidStateError(format!(
+            "Replacement connection acknowledged {} records before replay state was installed",
+            ack.ack_up_to_records
+        ))
+    }
+
     /// Advances the monotonic record watermark and removes fully acknowledged batches.
     async fn apply_acknowledgment(
         ack: &FlightAckMetadata,
-        submitted_records: &AtomicU64,
-        last_acked_records: &AtomicU64,
-        pending_batches: &Mutex<Vec<PendingBatch>>,
-        last_ack_tx: &watch::Sender<Option<OffsetId>>,
-        #[cfg(feature = "test-hooks")] ack_applied_gate: &AckAppliedGate,
+        progress: &AckProgress<'_>,
     ) -> ZerobusResult<()> {
         let acked_records = ack.ack_up_to_records;
         // `ack_up_to_records` is the durability boundary. Derive completed SDK offsets
@@ -1319,16 +2343,17 @@ impl ZerobusArrowStream {
             // Ingest publishes submitted_records and commits to the active sender while
             // holding this same lock. Validation therefore cannot observe a submitted
             // watermark before its handoff, or a handoff before its watermark.
-            let mut pending = pending_batches.lock().await;
-            let submitted_records = submitted_records.load(Ordering::Acquire);
+            let mut pending = progress.pending_batches.lock().await;
+            let submitted_records = progress.submitted_records.load(Ordering::Acquire);
             if acked_records > submitted_records {
                 return Err(ZerobusError::InvalidStateError(format!(
                     "Acknowledgement claims {acked_records} records, but only {submitted_records} records were submitted"
                 )));
             }
 
-            let previous_acked_records =
-                last_acked_records.fetch_max(acked_records, Ordering::AcqRel);
+            let previous_acked_records = progress
+                .last_acked_records
+                .fetch_max(acked_records, Ordering::AcqRel);
             let effective_acked_records = previous_acked_records.max(acked_records);
             let mut max_acked_offset: Option<OffsetId> = None;
             pending.retain(|pb| {
@@ -1350,30 +2375,600 @@ impl ZerobusArrowStream {
             "Received acknowledgment"
         );
 
-        #[cfg(feature = "test-hooks")]
-        if acked_records > 0 {
-            if let Some(notify) = ack_applied_gate.lock().await.as_ref() {
-                notify.notify_one();
-            }
+        if let Some(offset) = max_acked_offset {
+            let _ = progress.last_ack_tx.send(Some(offset));
         }
 
-        if let Some(offset) = max_acked_offset {
-            let _ = last_ack_tx.send(Some(offset));
+        // Test seam: observe a fully-applied ack, optionally parking here before the
+        // graceful-close state machine can half-close the request.
+        #[cfg(feature = "test-hooks")]
+        if acked_records > 0 {
+            let hook = {
+                let mut gate = progress.ack_applied_gate.lock().await;
+                if gate.as_ref().is_some_and(|hook| hook.proceed.is_some()) {
+                    gate.take()
+                } else {
+                    gate.clone()
+                }
+            };
+            if let Some(hook) = hook {
+                hook.reached.notify_one();
+                if let Some(proceed) = hook.proceed {
+                    proceed.notified().await;
+                }
+            }
         }
 
         Ok(())
     }
 
+    /// Waits until explicit `close()` publishes its bounded transport-cleanup deadline.
+    async fn wait_for_explicit_close(
+        explicit_close_rx: &mut watch::Receiver<Option<Instant>>,
+    ) -> Instant {
+        loop {
+            if let Some(deadline) = *explicit_close_rx.borrow_and_update() {
+                return deadline;
+            }
+            if explicit_close_rx.changed().await.is_err() {
+                // A dropped sender without a close value is not an explicit-close request.
+                return std::future::pending().await;
+            }
+        }
+    }
+
+    /// Finishes supervisor work after explicit close takes ownership of teardown.
+    /// Permanent errors still reach the caller; transient transport failures are ignored
+    /// because a stream being explicitly closed must not enter recovery.
+    fn explicit_close_result(
+        result: ZerobusResult<()>,
+        server_error_tx: &watch::Sender<Option<ZerobusError>>,
+    ) -> ZerobusResult<()> {
+        match result {
+            Err(error)
+                if !error.is_retryable() || Self::is_explicit_close_owned_timeout(&error) =>
+            {
+                let _ = server_error_tx.send(Some(error.clone()));
+                Err(error)
+            }
+            Ok(()) | Err(_) => Ok(()),
+        }
+    }
+
+    /// Resolves ACK/recovery work after explicit close, invalidating a newly observed auth
+    /// rejection exactly once while preserving one already invalidated by reconnect.
+    async fn finish_explicit_close_result(
+        result: ZerobusResult<()>,
+        auth_already_invalidated: bool,
+        close_deadline: Instant,
+        headers_provider: &Arc<dyn HeadersProvider>,
+        server_error_tx: &watch::Sender<Option<ZerobusError>>,
+    ) -> ZerobusResult<()> {
+        if let Err(error) = &result {
+            if error.is_auth_rejection() {
+                // Publish first so a stalled callback cannot hide the permanent error from
+                // close(). A reconnect-carried rejection has already completed this step.
+                let _ = server_error_tx.send(Some(error.clone()));
+                if !auth_already_invalidated
+                    && tokio::time::timeout_at(close_deadline, headers_provider.invalidate())
+                        .await
+                        .is_err()
+                {
+                    warn!("Explicit close ended while invalidating a rejected credential");
+                }
+                return result;
+            }
+        }
+        Self::explicit_close_result(result, server_error_tx)
+    }
+
+    fn explicit_close_reconnect_timeout() -> ZerobusError {
+        ZerobusError::ConnectionTimeout(EXPLICIT_CLOSE_RECONNECT_TIMEOUT.to_string())
+    }
+
+    fn explicit_close_aborted_timeout() -> ZerobusError {
+        ZerobusError::ConnectionTimeout(EXPLICIT_CLOSE_ABORTED_TIMEOUT.to_string())
+    }
+
+    fn is_explicit_close_owned_timeout(error: &ZerobusError) -> bool {
+        matches!(
+            error,
+            ZerobusError::ConnectionTimeout(message)
+                if message.starts_with(EXPLICIT_CLOSE_TIMEOUT_PREFIX)
+        )
+    }
+
+    /// Chooses between an older permanent recovery cause and the latest close outcome.
+    /// A newer permanent peer error is authoritative; an older permanent cause only
+    /// outranks retryable transport cleanup failures.
+    fn preferred_close_error(
+        retained: Option<ZerobusError>,
+        latest: Option<ZerobusError>,
+    ) -> Option<ZerobusError> {
+        match latest {
+            Some(error) if !error.is_retryable() => Some(error),
+            latest => retained.or(latest),
+        }
+    }
+
+    /// Flush first, then permanent retained/published errors, then supervisor (including
+    /// abort), then any close-owned published timeout. A permanent peer/auth failure known
+    /// before a forced abort must not be overwritten by an invented timeout.
+    fn compose_explicit_close_result(
+        flush_result: ZerobusResult<()>,
+        supervisor_result: ZerobusResult<()>,
+        published_close_result: ZerobusResult<()>,
+    ) -> ZerobusResult<()> {
+        flush_result?;
+        if let Err(error) = &published_close_result {
+            if !error.is_retryable() {
+                return Err(error.clone());
+            }
+        }
+        supervisor_result?;
+        published_close_result
+    }
+
+    /// Waits for the next response or the deadline associated with the current close
+    /// phase. Keeping the select logic here leaves `process_acks` focused on transitions.
+    async fn wait_for_ack_event(
+        response_stream: &mut FlightResponseStream,
+        request_body: &RequestBodyControl,
+        phase: &GracefulClosePhase,
+        ack_timeout: Duration,
+        explicit_close_rx: &mut watch::Receiver<Option<Instant>>,
+    ) -> AckEvent {
+        match phase {
+            GracefulClosePhase::Open => {
+                // Once close is already visible, do not let an always-ready response stream
+                // starve request shutdown. If close arrives concurrently with a response,
+                // the biased select may consume that one response; this precheck wins on the
+                // following iteration.
+                if let Some(deadline) = *explicit_close_rx.borrow_and_update() {
+                    return AckEvent::ExplicitClose { deadline };
+                }
+
+                tokio::select! {
+                    biased;
+                    response = response_stream.next() => AckEvent::Response(response),
+                    deadline = Self::wait_for_explicit_close(explicit_close_rx) => {
+                        AckEvent::ExplicitClose { deadline }
+                    }
+                    _ = tokio::time::sleep(ack_timeout) => AckEvent::AckTimeout,
+                }
+            }
+            GracefulClosePhase::AwaitingAcks { ack_deadline, .. } => {
+                if let Some(deadline) = *explicit_close_rx.borrow_and_update() {
+                    return AckEvent::ExplicitClose { deadline };
+                }
+                if Instant::now() >= *ack_deadline {
+                    return AckEvent::GracefulCloseDeadline;
+                }
+
+                tokio::select! {
+                    biased;
+                    response = response_stream.next() => AckEvent::Response(response),
+                    deadline = Self::wait_for_explicit_close(explicit_close_rx) => {
+                        AckEvent::ExplicitClose { deadline }
+                    }
+                    _ = tokio::time::sleep_until(*ack_deadline) => {
+                        AckEvent::GracefulCloseDeadline
+                    }
+                }
+            }
+            GracefulClosePhase::DrainingResponse {
+                deadline,
+                request_reached_eof,
+                response_reached_eof,
+                ..
+            } => {
+                if !*request_reached_eof && request_body.reached_eof() {
+                    return AckEvent::RequestEof;
+                }
+                if let Some(deadline) = *explicit_close_rx.borrow_and_update() {
+                    return AckEvent::ExplicitClose { deadline };
+                }
+                if Instant::now() >= *deadline {
+                    return AckEvent::ResponseDrainDeadline;
+                }
+
+                tokio::select! {
+                    biased;
+                    _ = request_body.wait_for_eof(), if !*request_reached_eof => {
+                        AckEvent::RequestEof
+                    }
+                    close_deadline = Self::wait_for_explicit_close(explicit_close_rx) => {
+                        AckEvent::ExplicitClose { deadline: close_deadline }
+                    }
+                    response = response_stream.next(), if !*response_reached_eof => {
+                        AckEvent::Response(response)
+                    }
+                    _ = tokio::time::sleep_until(*deadline) => {
+                        AckEvent::ResponseDrainDeadline
+                    }
+                }
+            }
+            GracefulClosePhase::DrainingExplicitClose {
+                deadline,
+                request_reached_eof,
+                response_reached_eof,
+            } => {
+                if !*request_reached_eof && request_body.reached_eof() {
+                    return AckEvent::RequestEof;
+                }
+                if Instant::now() >= *deadline {
+                    return AckEvent::ResponseDrainDeadline;
+                }
+
+                tokio::select! {
+                    biased;
+                    _ = request_body.wait_for_eof(), if !*request_reached_eof => {
+                        AckEvent::RequestEof
+                    }
+                    response = response_stream.next(), if !*response_reached_eof => {
+                        AckEvent::Response(response)
+                    }
+                    _ = tokio::time::sleep_until(*deadline) => {
+                        AckEvent::ResponseDrainDeadline
+                    }
+                }
+            }
+        }
+    }
+
+    /// Adds a peer/configured duration without assuming every platform can represent the
+    /// full `u64` millisecond range in `Instant`. On overflow, retain the largest duration
+    /// reached by repeatedly halving; absurd values remain effectively unbounded while
+    /// close-signal handling cannot panic.
+    fn saturating_deadline(now: Instant, duration: Duration) -> Instant {
+        let mut bounded = duration;
+        loop {
+            if let Some(deadline) = now.checked_add(bounded) {
+                return deadline;
+            }
+            bounded /= 2;
+        }
+    }
+
+    /// Calculates the ACK and close deadlines. The server grace normally bounds the
+    /// whole operation, with its final portion reserved for request EOF and response
+    /// draining. If the advertised grace is shorter than the cleanup cap, ACK waiting is
+    /// skipped and the close deadline is extended locally so EOF is still attempted.
+    fn graceful_close_deadlines(
+        server_duration_ms: u64,
+        configured_ack_wait_ms: Option<u64>,
+    ) -> (Instant, Instant) {
+        let now = Instant::now();
+        let requested_server_duration = Duration::from_millis(server_duration_ms);
+        let server_deadline = Self::saturating_deadline(now, requested_server_duration);
+        let server_duration = server_deadline.saturating_duration_since(now);
+        let cleanup_budget =
+            Duration::from_millis(CLOSE_SIGNAL_DRAIN_TIMEOUT_MS).min(server_duration);
+        let protocol_ack_wait = server_duration - cleanup_budget;
+        // Cap the public configuration before adding it to Instant. Besides avoiding
+        // overflow, values above the server allowance cannot affect behavior anyway.
+        let ack_wait = configured_ack_wait_ms
+            .map(Duration::from_millis)
+            .unwrap_or(protocol_ack_wait)
+            .min(protocol_ack_wait);
+        let ack_deadline = Self::saturating_deadline(now, ack_wait);
+        let local_cleanup_deadline =
+            Self::saturating_deadline(now, Duration::from_millis(CLOSE_SIGNAL_DRAIN_TIMEOUT_MS));
+        let close_deadline = server_deadline.max(local_cleanup_deadline);
+
+        (ack_deadline, close_deadline)
+    }
+
+    /// Enters (or tightens) the ACK-wait phase. Duplicate signals retain the first
+    /// snapshot target and can only shorten the original deadlines.
+    async fn register_graceful_close(
+        phase: &mut GracefulClosePhase,
+        server_duration_ms: u64,
+        configured_ack_wait_ms: Option<u64>,
+        ingest_mutex: &Arc<Mutex<()>>,
+        is_paused: &Arc<AtomicBool>,
+        submitted_records: &Arc<AtomicU64>,
+    ) -> u64 {
+        let (new_ack_deadline, new_close_deadline) =
+            Self::graceful_close_deadlines(server_duration_ms, configured_ack_wait_ms);
+
+        match phase {
+            GracefulClosePhase::Open => {
+                let target_records = Self::pause_sender_and_snapshot_ack_target(
+                    ingest_mutex,
+                    is_paused,
+                    submitted_records,
+                )
+                .await;
+                *phase = GracefulClosePhase::AwaitingAcks {
+                    target_records,
+                    ack_deadline: new_ack_deadline,
+                    close_deadline: new_close_deadline,
+                };
+                target_records
+            }
+            GracefulClosePhase::AwaitingAcks {
+                target_records,
+                ack_deadline,
+                close_deadline,
+            } => {
+                *ack_deadline = (*ack_deadline).min(new_ack_deadline);
+                *close_deadline = (*close_deadline).min(new_close_deadline);
+                *target_records
+            }
+            GracefulClosePhase::DrainingResponse { deadline, .. } => {
+                *deadline = (*deadline).min(new_close_deadline);
+                submitted_records.load(Ordering::Acquire)
+            }
+            GracefulClosePhase::DrainingExplicitClose { deadline, .. } => {
+                // The caller already owns shutdown. A late server close signal may only
+                // tighten the shared transport-cleanup deadline, not trigger recovery.
+                *deadline = (*deadline).min(new_close_deadline);
+                submitted_records.load(Ordering::Acquire)
+            }
+        }
+    }
+
+    /// Stops new sends on the connection and requests outbound EOF.
+    async fn start_request_shutdown(
+        request_body: &RequestBodyControl,
+        ingest_mutex: &Arc<Mutex<()>>,
+        is_paused: &Arc<AtomicBool>,
+        batch_tx: &BatchSender,
+    ) {
+        Self::pause_and_detach_sender(ingest_mutex, is_paused, batch_tx).await;
+        request_body.shutdown();
+    }
+
+    async fn shutdown_request_body(
+        request_body: &RequestBodyControl,
+        deadline: Instant,
+        ingest_mutex: &Arc<Mutex<()>>,
+        is_paused: &Arc<AtomicBool>,
+        batch_tx: &BatchSender,
+    ) -> bool {
+        Self::start_request_shutdown(request_body, ingest_mutex, is_paused, batch_tx).await;
+        request_body.wait_for_eof_until(deadline).await
+    }
+
+    /// Gives every terminal path a short positive EOF-settle window without letting
+    /// request cleanup outlive the active close attempt by more than the local cap.
+    fn request_cleanup_deadline(phase: &GracefulClosePhase) -> Instant {
+        if let GracefulClosePhase::DrainingExplicitClose { deadline, .. } = phase {
+            // Explicit close carries one absolute deadline across every cleanup path;
+            // never restart its budget after it expires.
+            return *deadline;
+        }
+        let now = Instant::now();
+        let local_cap = now + Duration::from_millis(CLOSE_SIGNAL_DRAIN_TIMEOUT_MS);
+        match phase.close_deadline() {
+            Some(deadline) if deadline > now => deadline.min(local_cap),
+            Some(_) | None => local_cap,
+        }
+    }
+
+    /// Stops accepting data on the current connection, cancels queued encoder output,
+    /// and enters a phase that drives request EOF and response draining concurrently.
+    async fn begin_response_drain(
+        phase: &mut GracefulClosePhase,
+        recovery_reason: ZerobusError,
+        request_body: &RequestBodyControl,
+        ingest_mutex: &Arc<Mutex<()>>,
+        is_paused: &Arc<AtomicBool>,
+        batch_tx: &BatchSender,
+    ) {
+        let deadline = Self::request_cleanup_deadline(phase);
+        Self::start_request_shutdown(request_body, ingest_mutex, is_paused, batch_tx).await;
+
+        *phase = GracefulClosePhase::DrainingResponse {
+            deadline,
+            recovery_reason,
+            request_reached_eof: request_body.reached_eof(),
+            response_reached_eof: false,
+        };
+    }
+
+    #[cfg(feature = "test-hooks")]
+    async fn notify_response_consumed(response_drain_gate: &ResponseDrainGate) {
+        if let Some(hook) = response_drain_gate.lock().await.clone() {
+            hook.response_consumed.notify_one();
+        }
+    }
+
+    #[cfg(feature = "test-hooks")]
+    async fn notify_response_drain_completed(response_drain_gate: &ResponseDrainGate) {
+        if let Some(hook) = response_drain_gate.lock().await.take() {
+            hook.drain_completed.notify_one();
+        }
+    }
+
+    /// Half-closes the request, enters response draining, and publishes close activity.
+    async fn start_response_drain(
+        phase: &mut GracefulClosePhase,
+        graceful_close_activity: &mut GracefulCloseActivity,
+        recovery_reason: ZerobusError,
+        request: &AckRequestControl<'_>,
+    ) {
+        request.begin_response_drain(phase, recovery_reason).await;
+        graceful_close_activity.activate(
+            phase
+                .close_deadline()
+                .expect("response drain installs a close deadline"),
+        );
+    }
+
+    /// Applies the close-state transition carried by a successful ACK, when present.
+    async fn register_close_signal_ack(
+        ack: &FlightAckMetadata,
+        phase: &mut GracefulClosePhase,
+        graceful_close_activity: &mut GracefulCloseActivity,
+        options: &ArrowStreamConfigurationOptions,
+        request: &AckRequestControl<'_>,
+        submitted_records: &Arc<AtomicU64>,
+    ) {
+        if !ack.is_close_signal() {
+            return;
+        }
+
+        let server_duration_ms = ack.close_stream_duration_ms.unwrap_or(0);
+        let target_records = Self::register_graceful_close(
+            phase,
+            server_duration_ms,
+            options.stream_paused_max_wait_time_ms,
+            request.ingest_mutex,
+            request.is_paused,
+            submitted_records,
+        )
+        .await;
+        let close_deadline = phase
+            .close_deadline()
+            .expect("close signal registration installs a deadline");
+        graceful_close_activity.activate(close_deadline);
+        let ack_wait_ms = match phase {
+            GracefulClosePhase::AwaitingAcks { ack_deadline, .. } => ack_deadline
+                .saturating_duration_since(Instant::now())
+                .as_millis(),
+            _ => 0,
+        };
+        info!(
+            server_duration_ms,
+            ack_target_records = target_records,
+            ack_wait_ms,
+            "Server requested graceful stream close"
+        );
+    }
+
+    /// Publishes a peer status before request cleanup and returns it to the supervisor.
+    async fn finish_peer_error(
+        flight_error: FlightError,
+        phase: &GracefulClosePhase,
+        server_error_tx: &watch::Sender<Option<ZerobusError>>,
+        request: &AckRequestControl<'_>,
+        #[cfg(feature = "test-hooks")] response_drain_gate: &ResponseDrainGate,
+    ) -> ZerobusResult<()> {
+        // Publishing permanent errors before bounded request cleanup prevents a short or
+        // nearly-expired flush from replacing the real status with a retryable timeout.
+        // Open-stream retryable errors remain observable to supervisor recovery as before.
+        let status: tonic::Status = flight_error.into();
+        let error = ZerobusError::StreamClosedError(status);
+        if phase.is_open() || !error.is_retryable() {
+            let _ = server_error_tx.send(Some(error.clone()));
+        }
+
+        let _ = request.shutdown_for_phase(phase).await;
+        #[cfg(feature = "test-hooks")]
+        if phase.is_draining() {
+            Self::notify_response_drain_completed(response_drain_gate).await;
+        }
+        Err(error)
+    }
+
+    /// Maps response EOF according to the active close phase and stops any open request.
+    async fn finish_response_eof(
+        phase: &GracefulClosePhase,
+        request: &AckRequestControl<'_>,
+        #[cfg(feature = "test-hooks")] response_drain_gate: &ResponseDrainGate,
+    ) -> ZerobusResult<()> {
+        if let GracefulClosePhase::DrainingExplicitClose {
+            request_reached_eof,
+            ..
+        } = phase
+        {
+            #[cfg(feature = "test-hooks")]
+            Self::notify_response_drain_completed(response_drain_gate).await;
+            if !*request_reached_eof {
+                return Err(ZerobusError::ConnectionTimeout(
+                    EXPLICIT_CLOSE_REQUEST_EOF_TIMEOUT.to_string(),
+                ));
+            }
+            info!("Explicit close drained the server response");
+            return Ok(());
+        }
+
+        if let GracefulClosePhase::DrainingResponse {
+            recovery_reason, ..
+        } = phase
+        {
+            #[cfg(feature = "test-hooks")]
+            Self::notify_response_drain_completed(response_drain_gate).await;
+            info!("Server sent END_STREAM after request half-close");
+            return Err(recovery_reason.clone());
+        }
+
+        let _ = request.shutdown_for_phase(phase).await;
+        if !phase.is_open() {
+            return Err(ZerobusError::StreamClosedError(tonic::Status::unavailable(
+                "Server closed stream during graceful close",
+            )));
+        }
+
+        debug!("Server closed the stream");
+        Err(ZerobusError::StreamClosedError(tonic::Status::unknown(
+            "Server closed the stream",
+        )))
+    }
+
+    /// Returns a terminal timeout only when unacknowledged batches still exist.
+    async fn ack_timeout_error(
+        phase: &GracefulClosePhase,
+        pending_batches: &Arc<Mutex<Vec<PendingBatch>>>,
+        request: &AckRequestControl<'_>,
+    ) -> Option<ZerobusError> {
+        let pending_count = pending_batches.lock().await.len();
+        if pending_count == 0 {
+            return None;
+        }
+
+        let _ = request.shutdown_for_phase(phase).await;
+        error!(pending_count, "Server ack timeout with pending batches");
+        Some(ZerobusError::StreamClosedError(
+            tonic::Status::deadline_exceeded("Server ack timeout"),
+        ))
+    }
+
+    /// Completes the result associated with an expired response-drain deadline.
+    async fn finish_response_drain_deadline(
+        phase: &GracefulClosePhase,
+        #[cfg(feature = "test-hooks")] response_drain_gate: &ResponseDrainGate,
+    ) -> ZerobusResult<()> {
+        #[cfg(feature = "test-hooks")]
+        Self::notify_response_drain_completed(response_drain_gate).await;
+        if let GracefulClosePhase::DrainingExplicitClose {
+            request_reached_eof,
+            ..
+        } = phase
+        {
+            let message = if *request_reached_eof {
+                EXPLICIT_CLOSE_RESPONSE_DRAIN_TIMEOUT
+            } else {
+                EXPLICIT_CLOSE_REQUEST_EOF_TIMEOUT
+            };
+            warn!(
+                message,
+                "Explicit close transport cleanup reached its deadline"
+            );
+            return Err(ZerobusError::ConnectionTimeout(message.to_string()));
+        }
+        if let GracefulClosePhase::DrainingResponse {
+            recovery_reason, ..
+        } = phase
+        {
+            info!("Graceful close response drain reached its deadline");
+            return Err(recovery_reason.clone());
+        }
+        Err(ZerobusError::InvalidStateError(
+            "Response-drain deadline received outside the drain phase".to_string(),
+        ))
+    }
+
     /// Processes acknowledgments from the server response stream.
     ///
     /// Uses record-based tracking: the server sends `ack_up_to_records` indicating
-    /// the cumulative number of records durably stored. We match this against
-    /// pending batches' record ranges to determine which batches are fully acked.
-    /// This correctly handles batches that were split into multiple Flight chunks
-    /// by `FlightDataEncoderBuilder`.
+    /// the cumulative number of records durably stored. We match this against pending
+    /// batch ranges, including batches split into multiple Flight chunks.
     #[allow(clippy::too_many_arguments)]
     async fn process_acks(
-        mut response_stream: Pin<Box<dyn Stream<Item = Result<PutResult, FlightError>> + Send>>,
+        mut response_stream: FlightResponseStream,
         is_closed: Arc<AtomicBool>,
         last_ack_tx: tokio::sync::watch::Sender<Option<OffsetId>>,
         pending_batches: Arc<Mutex<Vec<PendingBatch>>>,
@@ -1382,180 +2977,215 @@ impl ZerobusArrowStream {
         submitted_records: Arc<AtomicU64>,
         last_acked_records: Arc<AtomicU64>,
         is_paused: Arc<AtomicBool>,
+        ingest_mutex: Arc<Mutex<()>>,
+        batch_tx: BatchSender,
+        request_body: RequestBodyControl,
+        graceful_close_tx: watch::Sender<Option<Instant>>,
+        mut explicit_close_rx: watch::Receiver<Option<Instant>>,
         options: &ArrowStreamConfigurationOptions,
+        replay_state_installed: bool,
         #[cfg(feature = "test-hooks")] ack_applied_gate: AckAppliedGate,
+        #[cfg(feature = "test-hooks")] response_drain_gate: ResponseDrainGate,
     ) -> ZerobusResult<()> {
-        let mut pause_deadline: Option<tokio::time::Instant> = None;
+        let mut phase = GracefulClosePhase::Open;
+        let mut graceful_close_activity = GracefulCloseActivity::new(graceful_close_tx);
+        let request = AckRequestControl {
+            request_body: &request_body,
+            ingest_mutex: &ingest_mutex,
+            is_paused: &is_paused,
+            batch_tx: &batch_tx,
+        };
 
         loop {
             if is_closed.load(Ordering::Relaxed) {
                 debug!("Stream closed, stopping ack processor");
+                let _ = request.shutdown_for_phase(&phase).await;
                 return Ok(());
             }
 
-            // Check pause state: exit when deadline reached or all batches acked.
-            // Returns a retriable error to trigger recovery in the supervisor.
-            if let Some(deadline) = pause_deadline {
-                let now = tokio::time::Instant::now();
-                let all_acked = pending_batches.lock().await.is_empty();
-
-                if now >= deadline {
-                    info!("Graceful close timeout reached. Triggering recovery.");
-                    return Err(ZerobusError::StreamClosedError(tonic::Status::unavailable(
-                        "Graceful close timeout reached",
-                    )));
-                } else if all_acked {
-                    info!("All in-flight batches acknowledged during graceful close. Triggering recovery.");
-                    return Err(ZerobusError::StreamClosedError(tonic::Status::unavailable(
-                        "All in-flight batches acked during graceful close",
-                    )));
+            let ack_target_reached = match &phase {
+                GracefulClosePhase::AwaitingAcks { target_records, .. } => {
+                    (last_acked_records.load(Ordering::Acquire) >= *target_records)
+                        .then_some(*target_records)
                 }
+                _ => None,
+            };
+            if let Some(target_records) = ack_target_reached {
+                info!(
+                    target_records,
+                    "All pre-close batches were acknowledged; half-closing request"
+                );
+                Self::start_response_drain(
+                    &mut phase,
+                    &mut graceful_close_activity,
+                    ZerobusError::StreamClosedError(tonic::Status::unavailable(
+                        "All submitted batches acknowledged during graceful close",
+                    )),
+                    &request,
+                )
+                .await;
+                continue;
             }
 
-            // TODO: Anchor this timeout to the oldest pending batch. The current
-            // per-response timeout can spend most of its window while idle and restarts
-            // whenever any response arrives, even if it makes no ack progress.
-            let result = if let Some(deadline) = pause_deadline {
-                // TODO: Race graceful close against the active ack deadline and
-                // preserve the earliest close deadline when repeated signals arrive.
-                tokio::select! {
-                    biased;
-                    _ = tokio::time::sleep_until(deadline) => {
-                        continue;
+            match Self::wait_for_ack_event(
+                &mut response_stream,
+                request.request_body,
+                &phase,
+                ack_timeout,
+                &mut explicit_close_rx,
+            )
+            .await
+            {
+                AckEvent::Response(Some(Ok(put_result))) => {
+                    if phase.is_draining() {
+                        #[cfg(feature = "test-hooks")]
+                        Self::notify_response_consumed(&response_drain_gate).await;
                     }
-                    res = tokio::time::timeout(ack_timeout, response_stream.next()) => res,
-                }
-            } else {
-                tokio::time::timeout(ack_timeout, response_stream.next()).await
-            };
 
-            match result {
-                Ok(Some(Ok(put_result))) => {
                     match FlightAckMetadata::from_bytes(&put_result.app_metadata) {
                         Ok(ack) => {
-                            // Handle close stream signal.
-                            if ack.is_close_signal() {
-                                if options.recovery {
-                                    let server_duration_ms =
-                                        ack.close_stream_duration_ms.unwrap_or(0);
+                            Self::register_close_signal_ack(
+                                &ack,
+                                &mut phase,
+                                &mut graceful_close_activity,
+                                options,
+                                &request,
+                                &submitted_records,
+                            )
+                            .await;
 
-                                    let wait_duration_ms = match options
-                                        .stream_paused_max_wait_time_ms
-                                    {
-                                        None => server_duration_ms,
-                                        Some(0) => {
-                                            info!(
-                                                    "Server will close the stream in {}ms. Triggering stream recovery.",
-                                                    server_duration_ms
-                                                );
-                                            return Err(ZerobusError::StreamClosedError(
-                                                tonic::Status::unavailable(
-                                                    "Immediate recovery on close signal",
-                                                ),
-                                            ));
-                                        }
-                                        Some(max_wait) => {
-                                            std::cmp::min(max_wait, server_duration_ms)
-                                        }
-                                    };
-
-                                    if wait_duration_ms == 0 {
-                                        info!("Server will close the stream. Triggering immediate recovery.");
-                                        return Err(ZerobusError::StreamClosedError(
-                                            tonic::Status::unavailable(
-                                                "Immediate recovery on close signal",
-                                            ),
-                                        ));
-                                    }
-
-                                    is_paused.store(true, Ordering::Relaxed);
-                                    pause_deadline = Some(
-                                        tokio::time::Instant::now()
-                                            + Duration::from_millis(wait_duration_ms),
-                                    );
-                                    info!(
-                                        "Server will close the stream in {}ms. Entering graceful close period (waiting up to {}ms for in-flight acks).",
-                                        server_duration_ms, wait_duration_ms
-                                    );
+                            if ack.ack_up_to_records > 0 {
+                                if !replay_state_installed {
+                                    let error = Self::pre_replay_ack_error(&ack);
+                                    let _ = server_error_tx.send(Some(error.clone()));
+                                    let _ = request.shutdown_for_phase(&phase).await;
+                                    return Err(error);
                                 }
-                                // Process any ack data that came with the close signal.
-                                // Fall through to ack processing below only if there's
-                                // meaningful ack data (non-zero records count).
-                                if ack.ack_up_to_records == 0 {
-                                    continue;
+                                let progress = AckProgress {
+                                    submitted_records: &submitted_records,
+                                    last_acked_records: &last_acked_records,
+                                    pending_batches: &pending_batches,
+                                    last_ack_tx: &last_ack_tx,
+                                    #[cfg(feature = "test-hooks")]
+                                    ack_applied_gate: &ack_applied_gate,
+                                };
+                                if let Err(error) =
+                                    Self::apply_acknowledgment(&ack, &progress).await
+                                {
+                                    let _ = server_error_tx.send(Some(error.clone()));
+                                    let _ = request.shutdown_for_phase(&phase).await;
+                                    return Err(error);
                                 }
                             }
-
-                            Self::apply_acknowledgment(
-                                &ack,
-                                &submitted_records,
-                                &last_acked_records,
-                                &pending_batches,
-                                &last_ack_tx,
-                                #[cfg(feature = "test-hooks")]
-                                &ack_applied_gate,
-                            )
-                            .await?;
                         }
-                        Err(e) => {
-                            warn!("Failed to parse ack metadata: {}", e);
+                        Err(e) => warn!("Failed to parse ack metadata: {}", e),
+                    }
+                }
+                AckEvent::Response(Some(Err(flight_error))) => {
+                    return Self::finish_peer_error(
+                        flight_error,
+                        &phase,
+                        &server_error_tx,
+                        &request,
+                        #[cfg(feature = "test-hooks")]
+                        &response_drain_gate,
+                    )
+                    .await;
+                }
+                AckEvent::Response(None) => {
+                    if phase.is_draining() {
+                        phase.mark_response_eof();
+                        let (request_reached_eof, response_reached_eof) = phase
+                            .drain_progress()
+                            .expect("draining phase exposes transport progress");
+                        if !request_reached_eof || !response_reached_eof {
+                            debug!(
+                                request_reached_eof,
+                                "Server response reached EOF; waiting for request EOF"
+                            );
+                            continue;
                         }
                     }
+                    return Self::finish_response_eof(
+                        &phase,
+                        &request,
+                        #[cfg(feature = "test-hooks")]
+                        &response_drain_gate,
+                    )
+                    .await;
                 }
-                Ok(Some(Err(e))) => {
-                    // A stream error while paused ends the graceful-close wait and
-                    // triggers recovery.
-                    if pause_deadline.is_some() {
-                        info!(
-                            "Stream error during graceful close period, triggering recovery: {}",
-                            e
-                        );
-                        return Err(ZerobusError::StreamClosedError(tonic::Status::unavailable(
-                            "Stream error during graceful close",
-                        )));
-                    }
-                    error!("Flight stream error: {}", e);
-                    let status: tonic::Status = e.into();
-                    let error = ZerobusError::StreamClosedError(status);
-                    let _ = server_error_tx.send(Some(error.clone()));
-                    return Err(error);
-                }
-                Ok(None) => {
-                    // During graceful close, stream end is expected.
-                    // Return retriable error to trigger recovery.
-                    if pause_deadline.is_some() {
-                        info!("Server closed stream during graceful close period, triggering recovery.");
-                        return Err(ZerobusError::StreamClosedError(tonic::Status::unavailable(
-                            "Server closed stream during graceful close",
-                        )));
-                    }
-                    debug!("Server closed the stream");
-                    let error = ZerobusError::StreamClosedError(tonic::Status::unknown(
-                        "Server closed the stream",
-                    ));
-                    // Returned to the supervisor, which publishes it (before + after
-                    // finalization) in its terminal branch.
-                    return Err(error);
-                }
-                Err(_timeout) => {
-                    // During graceful close, ack timeout is not an error.
-                    if pause_deadline.is_some() {
-                        continue;
-                    }
-                    // Check if there are pending acks that should have been received.
-                    let pending = pending_batches.lock().await;
-                    if !pending.is_empty() {
-                        error!(
-                            pending_count = pending.len(),
-                            "Server ack timeout with pending batches"
-                        );
-                        let error = ZerobusError::StreamClosedError(
-                            tonic::Status::deadline_exceeded("Server ack timeout"),
-                        );
-                        // Returned to the supervisor, which publishes it (before + after
-                        // finalization) in its terminal branch.
+                AckEvent::AckTimeout => {
+                    if let Some(error) =
+                        Self::ack_timeout_error(&phase, &pending_batches, &request).await
+                    {
                         return Err(error);
                     }
+                }
+                AckEvent::GracefulCloseDeadline => {
+                    info!("Graceful close ACK wait ended; half-closing request");
+                    Self::start_response_drain(
+                        &mut phase,
+                        &mut graceful_close_activity,
+                        ZerobusError::StreamClosedError(tonic::Status::unavailable(
+                            "Graceful close ACK wait reached its deadline",
+                        )),
+                        &request,
+                    )
+                    .await;
+                }
+                AckEvent::ExplicitClose { deadline } => {
+                    if phase.is_draining() {
+                        let active_deadline = phase
+                            .close_deadline()
+                            .expect("draining phase has a close deadline");
+                        let (request_reached_eof, response_reached_eof) = phase
+                            .drain_progress()
+                            .expect("draining phase exposes transport progress");
+                        phase = GracefulClosePhase::DrainingExplicitClose {
+                            deadline: active_deadline.min(deadline),
+                            request_reached_eof,
+                            response_reached_eof,
+                        };
+                        debug!("Explicit close adopted the in-flight transport drain");
+                    } else {
+                        info!("Explicit close requested; half-closing request");
+                        Self::start_request_shutdown(
+                            request.request_body,
+                            request.ingest_mutex,
+                            request.is_paused,
+                            request.batch_tx,
+                        )
+                        .await;
+                        phase = GracefulClosePhase::DrainingExplicitClose {
+                            deadline,
+                            request_reached_eof: request.request_body.reached_eof(),
+                            response_reached_eof: false,
+                        };
+                    }
+                }
+                AckEvent::RequestEof => {
+                    phase.mark_request_eof();
+                    debug!("Flight request body reached EOF");
+                    let (_, response_reached_eof) = phase
+                        .drain_progress()
+                        .expect("request EOF is observed only while draining");
+                    if response_reached_eof {
+                        return Self::finish_response_eof(
+                            &phase,
+                            &request,
+                            #[cfg(feature = "test-hooks")]
+                            &response_drain_gate,
+                        )
+                        .await;
+                    }
+                }
+                AckEvent::ResponseDrainDeadline => {
+                    return Self::finish_response_drain_deadline(
+                        &phase,
+                        #[cfg(feature = "test-hooks")]
+                        &response_drain_gate,
+                    )
+                    .await;
                 }
             }
         }
@@ -1770,17 +3400,16 @@ impl ZerobusArrowStream {
         self.ingest_batch(batch).await
     }
 
-    /// Internal method to wait for a specific offset to be acknowledged.
-    /// Used by both `flush()` and `wait_for_offset()`.
-    async fn wait_for_offset_internal(
-        &self,
+    /// Waits on the ACK and error watches while preserving ACK-first terminal precedence.
+    async fn wait_for_offset_state(
         offset_to_wait: OffsetId,
         operation_name: &str,
+        flush_timeout: Duration,
+        is_closed: &AtomicBool,
+        close_teardown_started: &AtomicBool,
+        mut offset_rx: watch::Receiver<Option<OffsetId>>,
+        mut error_rx: watch::Receiver<Option<ZerobusError>>,
     ) -> ZerobusResult<()> {
-        let flush_timeout = Duration::from_millis(self.options.flush_timeout_ms);
-        let mut offset_rx = self.last_ack_tx.subscribe();
-        let mut error_rx = self.server_error_rx.clone();
-
         let wait_future = async {
             loop {
                 // Check the published watermark first so an acknowledged target wins over
@@ -1803,12 +3432,22 @@ impl ZerobusArrowStream {
                     );
                 }
 
+                // A permanent server or protocol error cannot recover. Surface it as soon
+                // as it is published instead of letting bounded transport cleanup consume
+                // the remaining flush budget. The target ACK check above intentionally wins
+                // when both updates become visible together.
+                if let Some(server_error) = error_rx.borrow_and_update().clone() {
+                    if !server_error.is_retryable() {
+                        return Err(server_error);
+                    }
+                }
+
                 // Only after confirming the target isn't acked, honor terminal/teardown
                 // state. Re-read first because the watermark can be published between the
                 // read above and observing that state. Otherwise prefer the real terminal
                 // error over a generic one.
-                if self.is_closed.load(Ordering::Relaxed)
-                    || self.close_teardown_started.load(Ordering::Acquire)
+                if is_closed.load(Ordering::Relaxed)
+                    || close_teardown_started.load(Ordering::Acquire)
                 {
                     if let Some(ack_offset) = *offset_rx.borrow_and_update() {
                         if ack_offset >= offset_to_wait {
@@ -1853,6 +3492,25 @@ impl ZerobusArrowStream {
                     operation_name
                 )))
             })?
+    }
+
+    /// Internal method to wait for a specific offset to be acknowledged.
+    /// Used by both `flush()` and `wait_for_offset()`.
+    async fn wait_for_offset_internal(
+        &self,
+        offset_to_wait: OffsetId,
+        operation_name: &str,
+    ) -> ZerobusResult<()> {
+        Self::wait_for_offset_state(
+            offset_to_wait,
+            operation_name,
+            Duration::from_millis(self.options.flush_timeout_ms),
+            &self.is_closed,
+            &self.close_teardown_started,
+            self.last_ack_tx.subscribe(),
+            self.server_error_rx.clone(),
+        )
+        .await
     }
 
     /// Flushes all currently pending batches and waits for their acknowledgments.
@@ -1956,6 +3614,66 @@ impl ZerobusArrowStream {
             .await
     }
 
+    /// Reaps the supervisor after giving deadline-bound cleanup a short scheduling grace.
+    async fn join_supervisor_for_close(&self, close_deadline: Instant) -> ZerobusResult<()> {
+        let join_deadline = close_deadline + Duration::from_millis(EXPLICIT_CLOSE_JOIN_GRACE_MS);
+        let mut task = self.receiver_task.lock().await;
+        let Some(handle) = task.as_mut() else {
+            return Ok(());
+        };
+
+        let result = match tokio::time::timeout_at(join_deadline, &mut *handle).await {
+            Ok(Ok(supervisor_result)) => supervisor_result,
+            Ok(Err(join_error)) => {
+                warn!(%join_error, "Explicit close supervisor task failed");
+                Err(Self::explicit_close_aborted_timeout())
+            }
+            Err(_) => {
+                // Give close work scheduled on the transport deadline one final poll before
+                // aborting a task that is still live after the join grace.
+                tokio::task::yield_now().await;
+                if !handle.is_finished() {
+                    warn!("Explicit close cleanup exceeded its deadline; aborting supervisor");
+                    handle.abort();
+                }
+
+                match handle.await {
+                    Ok(supervisor_result) => supervisor_result,
+                    Err(join_error) if join_error.is_cancelled() => {
+                        Err(Self::explicit_close_aborted_timeout())
+                    }
+                    Err(join_error) => {
+                        warn!(%join_error, "Explicit close supervisor task failed");
+                        Err(Self::explicit_close_aborted_timeout())
+                    }
+                }
+            }
+        };
+        *task = None;
+        result
+    }
+
+    /// Applies explicit-close error precedence after supervisor teardown.
+    fn resolve_close_result(
+        &self,
+        flush_result: ZerobusResult<()>,
+        supervisor_result: ZerobusResult<()>,
+    ) -> ZerobusResult<()> {
+        let published_close_error =
+            self.server_error_rx.borrow().clone().filter(|error| {
+                !error.is_retryable() || Self::is_explicit_close_owned_timeout(error)
+            });
+        let retained_recovery_error = self.recovery_close_error_rx.borrow().clone();
+        let close_error =
+            Self::preferred_close_error(retained_recovery_error, published_close_error);
+
+        Self::compose_explicit_close_result(
+            flush_result,
+            supervisor_result,
+            close_error.map_or(Ok(()), Err),
+        )
+    }
+
     /// Flushes pending work, stops background I/O, and retains unacknowledged batches for
     /// retrieval.
     ///
@@ -1992,17 +3710,18 @@ impl ZerobusArrowStream {
     pub async fn close(&mut self) -> ZerobusResult<()> {
         let close_teardown_started = self.close_teardown_started.load(Ordering::Acquire);
         if self.is_closed.load(Ordering::Relaxed) && !close_teardown_started {
-            // Already closed. If the supervisor closed it on a terminal failure, surface
-            // that error rather than reporting success — otherwise the common
-            // ingest-then-close() pattern would hide failed batches (retrievable via
-            // get_unacked_batches()). A clean prior close() has no stored error.
-            if let Some(server_error) = self.server_error_rx.borrow().clone() {
-                return Err(server_error);
+            // Explicit close has one stable result. Otherwise return the background error
+            // that closed the stream.
+            if self.explicit_close_tx.borrow().is_some() {
+                return match self.close_error.lock().await.clone() {
+                    Some(error) => Err(error),
+                    None => Ok(()),
+                };
             }
-            if let Some(close_error) = self.close_flush_error.lock().await.clone() {
-                return Err(close_error);
-            }
-            return Ok(());
+            return match self.server_error_rx.borrow().clone() {
+                Some(error) => Err(error),
+                None => Ok(()),
+            };
         }
 
         info!(
@@ -2010,39 +3729,38 @@ impl ZerobusArrowStream {
             "Closing Arrow Flight stream"
         );
 
-        // Retain a completed flush result before publishing teardown so retries after
-        // teardown starts skip another flush and return the same outcome.
+        // Retain the first flush result so cancellation-safe retries do not flush again.
         let flush_result = if close_teardown_started {
-            match self.close_flush_error.lock().await.clone() {
+            match self.close_error.lock().await.clone() {
                 Some(error) => Err(error),
                 None => Ok(()),
             }
         } else {
             let result = self.flush().await;
-            *self.close_flush_error.lock().await = result.as_ref().err().cloned();
+            *self.close_error.lock().await = result.as_ref().err().cloned();
             self.close_teardown_started.store(true, Ordering::Release);
+            if let Err(error) = &result {
+                warn!(
+                    "Flush failed during close: {}. Draining pending batches to the failed set.",
+                    error
+                );
+            }
             result
         };
-        if let Err(e) = &flush_result {
-            warn!(
-                "Flush failed during close: {}. Draining pending batches to the failed set.",
-                e
-            );
-        }
 
-        // Reap the supervisor (abort + await) BEFORE clearing the sender, so an in-flight
-        // reconnect can't reinstall batch_tx after we clear it, and no process_acks /
-        // reconnect mutates pending_batches or last_acked_records while we drain. Join in
-        // place and only clear receiver_task once the join completes, so a close()
-        // cancelled during the await doesn't drop the handle — a retry re-joins it.
-        {
-            let mut task = self.receiver_task.lock().await;
-            if let Some(handle) = task.as_mut() {
-                handle.abort();
-                let _ = handle.await;
-            }
-            *task = None;
-        }
+        // Copy the watch value before publishing; holding borrow() across send_replace()
+        // would deadlock the first close on the channel's read lock.
+        let existing_close_deadline = *self.explicit_close_tx.borrow();
+        let explicit_close_deadline = existing_close_deadline.unwrap_or_else(|| {
+            let deadline = Instant::now() + Duration::from_millis(CLOSE_SIGNAL_DRAIN_TIMEOUT_MS);
+            self.explicit_close_tx.send_replace(Some(deadline));
+            deadline
+        });
+        let supervisor_result = self
+            .join_supervisor_for_close(explicit_close_deadline)
+            .await;
+        let close_result = self.resolve_close_result(flush_result, supervisor_result);
+        *self.close_error.lock().await = close_result.as_ref().err().cloned();
 
         // Detach the sender now that nothing can reinstall it.
         {
@@ -2074,7 +3792,7 @@ impl ZerobusArrowStream {
         .await;
         self.close_teardown_started.store(false, Ordering::Release);
 
-        flush_result
+        close_result
     }
 
     /// Returns the un-acknowledged batches after the stream has been closed, for manual
@@ -2144,8 +3862,8 @@ impl ZerobusArrowStream {
     /// Test-only: arms the reconnect rebuild barrier. The next `reconnect` pauses after
     /// establishing the connection but before rebuilding pending ranges/watermark,
     /// firing the returned `reached` notify, then waits on `proceed`. A test either
-    /// releases `proceed` to let recovery finish, or drives a concurrent `close()`
-    /// (which reaps the paused supervisor) without releasing it.
+    /// releases `proceed` to let recovery finish, or drives a concurrent `close()` that
+    /// transfers the replacement connection to bounded shutdown without releasing it.
     #[cfg(feature = "test-hooks")]
     #[doc(hidden)]
     pub async fn arm_reconnect_rebuild_barrier(&self) -> (Arc<Notify>, Arc<Notify>) {
@@ -2165,8 +3883,51 @@ impl ZerobusArrowStream {
     #[doc(hidden)]
     pub async fn arm_ack_applied_notify(&self) -> Arc<Notify> {
         let notify = Arc::new(Notify::new());
-        *self.ack_applied_gate.lock().await = Some(Arc::clone(&notify));
+        *self.ack_applied_gate.lock().await = Some(AckAppliedHook {
+            reached: Arc::clone(&notify),
+            proceed: None,
+        });
         notify
+    }
+
+    /// Test-only: parks `process_acks` after fully applying the next non-empty ack.
+    #[cfg(feature = "test-hooks")]
+    #[doc(hidden)]
+    pub async fn arm_ack_applied_barrier(&self) -> (Arc<Notify>, Arc<Notify>) {
+        let reached = Arc::new(Notify::new());
+        let proceed = Arc::new(Notify::new());
+        *self.ack_applied_gate.lock().await = Some(AckAppliedHook {
+            reached: Arc::clone(&reached),
+            proceed: Some(Arc::clone(&proceed)),
+        });
+        (reached, proceed)
+    }
+
+    /// Test-only: observes one response consumed after request EOF and completion of
+    /// the response-drain phase.
+    #[cfg(feature = "test-hooks")]
+    #[doc(hidden)]
+    pub async fn arm_response_drain_hook(&self) -> (Arc<Notify>, Arc<Notify>) {
+        let response_consumed = Arc::new(Notify::new());
+        let drain_completed = Arc::new(Notify::new());
+        *self.response_drain_gate.lock().await = Some(ResponseDrainHook {
+            response_consumed: Arc::clone(&response_consumed),
+            drain_completed: Arc::clone(&drain_completed),
+        });
+        (response_consumed, drain_completed)
+    }
+
+    /// Test-only: waits until the ACK processor has entered server-initiated graceful
+    /// close handling.
+    #[cfg(feature = "test-hooks")]
+    #[doc(hidden)]
+    pub async fn wait_for_graceful_close_start(&self) {
+        let mut rx = self.graceful_close_rx.clone();
+        while rx.borrow_and_update().is_none() {
+            if rx.changed().await.is_err() {
+                return;
+            }
+        }
     }
 
     /// Test-only: parks the next `close()` after supervisor/sender teardown but before
@@ -2223,6 +3984,7 @@ mod tests {
     use arrow_schema::{DataType, Field};
     use async_trait::async_trait;
     use std::collections::HashMap;
+    use std::sync::atomic::AtomicUsize;
 
     struct PassthroughTlsConfig;
 
@@ -2244,6 +4006,21 @@ mod tests {
                 ("authorization", "Bearer secret-token".to_string()),
                 ("x-custom-header", "custom-value".to_string()),
             ]))
+        }
+    }
+
+    struct CountingInvalidationHeadersProvider {
+        invalidations: Arc<AtomicUsize>,
+    }
+
+    #[async_trait]
+    impl HeadersProvider for CountingInvalidationHeadersProvider {
+        async fn get_headers(&self) -> ZerobusResult<HashMap<&'static str, String>> {
+            Ok(HashMap::new())
+        }
+
+        async fn invalidate(&self) {
+            self.invalidations.fetch_add(1, Ordering::SeqCst);
         }
     }
 
@@ -2292,6 +4069,25 @@ mod tests {
         }
     }
 
+    fn completed_request_body() -> RequestBodyControl {
+        let (_eof_tx, eof_rx) = watch::channel(true);
+        RequestBodyControl {
+            shutdown: CancellationToken::new(),
+            eof_rx,
+        }
+    }
+
+    fn stalled_request_body() -> (RequestBodyControl, watch::Sender<bool>) {
+        let (eof_tx, eof_rx) = watch::channel(false);
+        (
+            RequestBodyControl {
+                shutdown: CancellationToken::new(),
+                eof_rx,
+            },
+            eof_tx,
+        )
+    }
+
     /// An acknowledgement beyond the connection-local submitted-record count is a protocol
     /// violation and must not make unsent records appear durable.
     #[tokio::test]
@@ -2315,11 +4111,13 @@ mod tests {
             .into(),
         })]);
         let (last_ack_tx, last_ack_rx) = watch::channel(None);
-        let (server_error_tx, _server_error_rx) = watch::channel(None);
+        let (server_error_tx, mut server_error_rx) = watch::channel(None);
         let submitted_records = Arc::new(AtomicU64::new(10));
         let last_acked_records = Arc::new(AtomicU64::new(0));
+        let (request_body, eof_tx) = stalled_request_body();
+        let options = ArrowStreamConfigurationOptions::default();
 
-        let error = ZerobusArrowStream::process_acks(
+        let process_acks = ZerobusArrowStream::process_acks(
             Box::pin(response_stream),
             Arc::new(AtomicBool::new(false)),
             last_ack_tx,
@@ -2329,12 +4127,46 @@ mod tests {
             Arc::clone(&submitted_records),
             Arc::clone(&last_acked_records),
             Arc::new(AtomicBool::new(false)),
-            &ArrowStreamConfigurationOptions::default(),
+            Arc::new(Mutex::new(())),
+            Arc::new(Mutex::new(None)),
+            request_body,
+            watch::channel(None).0,
+            watch::channel(None).1,
+            &options,
+            true,
             #[cfg(feature = "test-hooks")]
             Arc::new(Mutex::new(None)),
-        )
+            #[cfg(feature = "test-hooks")]
+            Arc::new(Mutex::new(None)),
+        );
+        tokio::pin!(process_acks);
+
+        tokio::time::timeout(Duration::from_millis(100), async {
+            tokio::select! {
+                result = &mut process_acks => {
+                    panic!("request cleanup completed before stalled EOF was released: {result:?}")
+                }
+                changed = server_error_rx.changed() => {
+                    changed.expect("error receiver should remain open");
+                }
+            }
+        })
         .await
-        .expect_err("a forward acknowledgement must be rejected");
+        .expect("invalid ACK must be published before request cleanup finishes");
+        assert!(matches!(
+            server_error_rx.borrow().as_ref(),
+            Some(ZerobusError::InvalidStateError(_))
+        ));
+        assert!(
+            futures::poll!(process_acks.as_mut()).is_pending(),
+            "ACK processing should still be waiting for request EOF"
+        );
+
+        eof_tx.send_replace(true);
+        let error = tokio::time::timeout(Duration::from_millis(100), &mut process_acks)
+            .await
+            .expect("ACK processing should finish after request EOF")
+            .expect_err("a forward acknowledgement must be rejected");
 
         assert!(
             !error.is_retryable(),
@@ -2353,6 +4185,171 @@ mod tests {
         let pending = pending_batches.lock().await;
         assert_eq!(pending.len(), 1);
         assert_eq!((pending[0].start_record, pending[0].end_record), (0, 10));
+    }
+
+    /// A permanent peer status must reach waiters before bounded request cleanup, which
+    /// can consume more time than a caller's remaining flush budget.
+    #[tokio::test]
+    async fn terminal_peer_error_is_published_before_request_cleanup() {
+        let response_stream = futures::stream::iter([Err(FlightError::from(
+            tonic::Status::invalid_argument("permanent peer failure"),
+        ))]);
+        let (last_ack_tx, _last_ack_rx) = watch::channel(None);
+        let (server_error_tx, mut server_error_rx) = watch::channel(None);
+        let (request_body, eof_tx) = stalled_request_body();
+        let options = ArrowStreamConfigurationOptions::default();
+
+        let process_acks = ZerobusArrowStream::process_acks(
+            Box::pin(response_stream),
+            Arc::new(AtomicBool::new(false)),
+            last_ack_tx,
+            Arc::new(Mutex::new(Vec::new())),
+            Duration::from_secs(60),
+            server_error_tx,
+            Arc::new(AtomicU64::new(0)),
+            Arc::new(AtomicU64::new(0)),
+            Arc::new(AtomicBool::new(false)),
+            Arc::new(Mutex::new(())),
+            Arc::new(Mutex::new(None)),
+            request_body,
+            watch::channel(None).0,
+            watch::channel(None).1,
+            &options,
+            true,
+            #[cfg(feature = "test-hooks")]
+            Arc::new(Mutex::new(None)),
+            #[cfg(feature = "test-hooks")]
+            Arc::new(Mutex::new(None)),
+        );
+        tokio::pin!(process_acks);
+
+        tokio::time::timeout(Duration::from_millis(100), async {
+            tokio::select! {
+                result = &mut process_acks => {
+                    panic!("request cleanup completed before stalled EOF was released: {result:?}")
+                }
+                changed = server_error_rx.changed() => {
+                    changed.expect("error receiver should remain open");
+                }
+            }
+        })
+        .await
+        .expect("permanent peer error must be published before request cleanup finishes");
+        let published_error = server_error_rx
+            .borrow()
+            .clone()
+            .expect("permanent peer error should be published");
+        assert!(!published_error.is_retryable());
+        assert!(published_error
+            .to_string()
+            .contains("permanent peer failure"));
+        assert!(
+            futures::poll!(process_acks.as_mut()).is_pending(),
+            "ACK processing should still be waiting for request EOF"
+        );
+
+        eof_tx.send_replace(true);
+        let error = tokio::time::timeout(Duration::from_millis(100), &mut process_acks)
+            .await
+            .expect("ACK processing should finish after request EOF")
+            .expect_err("permanent peer status must terminate ACK processing");
+        assert!(!error.is_retryable());
+        assert!(error.to_string().contains("permanent peer failure"));
+    }
+
+    #[tokio::test]
+    async fn waiter_returns_published_terminal_error_before_stream_closure() {
+        let terminal_error = ZerobusError::InvalidStateError("invalid ACK".to_string());
+        let (_last_ack_tx, last_ack_rx) = watch::channel(None);
+        let (_server_error_tx, server_error_rx) = watch::channel(Some(terminal_error));
+        let is_closed = AtomicBool::new(false);
+        let close_teardown_started = AtomicBool::new(false);
+
+        let error = ZerobusArrowStream::wait_for_offset_state(
+            0,
+            "test waiter",
+            Duration::from_millis(100),
+            &is_closed,
+            &close_teardown_started,
+            last_ack_rx,
+            server_error_rx,
+        )
+        .await
+        .expect_err("published terminal error must beat the waiter timeout");
+
+        assert!(matches!(error, ZerobusError::InvalidStateError(_)));
+        assert!(!error.is_retryable());
+        assert!(!is_closed.load(Ordering::Relaxed));
+    }
+
+    #[tokio::test]
+    async fn waiter_prefers_target_ack_over_published_terminal_error() {
+        let (_last_ack_tx, last_ack_rx) = watch::channel(Some(0));
+        let terminal_error = ZerobusError::InvalidStateError("invalid ACK".to_string());
+        let (_server_error_tx, server_error_rx) = watch::channel(Some(terminal_error));
+
+        ZerobusArrowStream::wait_for_offset_state(
+            0,
+            "test waiter",
+            Duration::from_millis(100),
+            &AtomicBool::new(false),
+            &AtomicBool::new(false),
+            last_ack_rx,
+            server_error_rx,
+        )
+        .await
+        .expect("the target ACK must win over a concurrently published terminal error");
+    }
+
+    #[tokio::test]
+    async fn closing_reconnect_rejects_positive_ack_before_replay_install() {
+        let schema = one_col_schema();
+        let sem = Arc::new(Semaphore::new(1));
+        let pending_batches = Arc::new(Mutex::new(vec![pending_batch(
+            &sem,
+            batch_with_rows(&schema, 10),
+            7,
+            0,
+            10,
+        )]));
+        let response_stream = futures::stream::iter([Ok(PutResult {
+            app_metadata: serde_json::to_vec(&FlightAckMetadata::new(7, 10))
+                .unwrap()
+                .into(),
+        })]);
+        let (last_ack_tx, last_ack_rx) = watch::channel(None);
+        let (server_error_tx, _server_error_rx) = watch::channel(None);
+        let last_acked_records = Arc::new(AtomicU64::new(0));
+
+        let error = ZerobusArrowStream::process_acks(
+            Box::pin(response_stream),
+            Arc::new(AtomicBool::new(false)),
+            last_ack_tx,
+            Arc::clone(&pending_batches),
+            Duration::from_secs(60),
+            server_error_tx,
+            Arc::new(AtomicU64::new(10)),
+            Arc::clone(&last_acked_records),
+            Arc::new(AtomicBool::new(true)),
+            Arc::new(Mutex::new(())),
+            Arc::new(Mutex::new(None)),
+            completed_request_body(),
+            watch::channel(None).0,
+            watch::channel(None).1,
+            &ArrowStreamConfigurationOptions::default(),
+            false,
+            #[cfg(feature = "test-hooks")]
+            Arc::new(Mutex::new(None)),
+            #[cfg(feature = "test-hooks")]
+            Arc::new(Mutex::new(None)),
+        )
+        .await
+        .expect_err("a replacement ACK before replay installation must be rejected");
+
+        assert!(matches!(error, ZerobusError::InvalidStateError(_)));
+        assert_eq!(last_acked_records.load(Ordering::Acquire), 0);
+        assert_eq!(*last_ack_rx.borrow(), None);
+        assert_eq!(pending_batches.lock().await.len(), 1);
     }
 
     /// Assigned ranges buffered while paused are not valid acknowledgement targets until replay
@@ -2389,7 +4386,15 @@ mod tests {
             Arc::clone(&submitted_records),
             Arc::clone(&last_acked_records),
             Arc::new(AtomicBool::new(true)),
+            Arc::new(Mutex::new(())),
+            Arc::new(Mutex::new(None)),
+            completed_request_body(),
+            watch::channel(None).0,
+            watch::channel(None).1,
             &ArrowStreamConfigurationOptions::default(),
+            true,
+            #[cfg(feature = "test-hooks")]
+            Arc::new(Mutex::new(None)),
             #[cfg(feature = "test-hooks")]
             Arc::new(Mutex::new(None)),
         )
@@ -2453,7 +4458,15 @@ mod tests {
             Arc::new(AtomicU64::new(10)),
             Arc::clone(&last_acked_records),
             Arc::new(AtomicBool::new(false)),
+            Arc::new(Mutex::new(())),
+            Arc::new(Mutex::new(None)),
+            completed_request_body(),
+            watch::channel(None).0,
+            watch::channel(None).1,
             &ArrowStreamConfigurationOptions::default(),
+            true,
+            #[cfg(feature = "test-hooks")]
+            Arc::new(Mutex::new(None)),
             #[cfg(feature = "test-hooks")]
             Arc::new(Mutex::new(None)),
         )
@@ -2464,6 +4477,7 @@ mod tests {
         let cumulative_records_assigned = Arc::new(AtomicU64::new(10));
         let submitted_records = Arc::new(AtomicU64::new(10));
         let (tx, mut rx) = mpsc::channel::<Result<RecordBatch, FlightError>>(1);
+        let replay_state_installed = AtomicBool::new(false);
         ZerobusArrowStream::replay_pending_batches(
             &tx,
             &pending_batches,
@@ -2471,6 +4485,7 @@ mod tests {
             &submitted_records,
             &last_acked_records,
             acked_before_disconnect,
+            &replay_state_installed,
         )
         .await
         .expect("replay should succeed");
@@ -2512,6 +4527,7 @@ mod tests {
         let (tx, rx) = mpsc::channel::<Result<RecordBatch, FlightError>>(4);
         drop(rx);
 
+        let replay_state_installed = AtomicBool::new(false);
         let res = ZerobusArrowStream::replay_pending_batches(
             &tx,
             &pending,
@@ -2519,6 +4535,7 @@ mod tests {
             &submitted,
             &last_acked,
             0,
+            &replay_state_installed,
         )
         .await;
         assert!(res.is_err(), "replay must surface the send failure");
@@ -2571,6 +4588,7 @@ mod tests {
 
         let (tx, mut rx) = mpsc::channel::<Result<RecordBatch, FlightError>>(4);
 
+        let replay_state_installed = AtomicBool::new(false);
         let res = ZerobusArrowStream::replay_pending_batches(
             &tx,
             &pending,
@@ -2578,6 +4596,7 @@ mod tests {
             &submitted,
             &last_acked,
             0,
+            &replay_state_installed,
         )
         .await;
         assert!(res.is_ok());
@@ -2611,6 +4630,7 @@ mod tests {
         let last_acked = Arc::new(AtomicU64::new(4));
         let (tx, mut rx) = mpsc::channel::<Result<RecordBatch, FlightError>>(4);
 
+        let replay_state_installed = AtomicBool::new(false);
         let res = ZerobusArrowStream::replay_pending_batches(
             &tx,
             &pending,
@@ -2618,6 +4638,7 @@ mod tests {
             &submitted,
             &last_acked,
             4,
+            &replay_state_installed,
         )
         .await;
         assert!(res.is_ok());
@@ -2736,6 +4757,608 @@ mod tests {
             "batch appended before mutex release must be drained into failed"
         );
         assert!(pending.lock().await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn duplicate_close_signals_only_shorten_deadlines() {
+        let original_ack_deadline = Instant::now() + Duration::from_secs(1);
+        let original_close_deadline = Instant::now() + Duration::from_secs(2);
+        let mut phase = GracefulClosePhase::AwaitingAcks {
+            target_records: 7,
+            ack_deadline: original_ack_deadline,
+            close_deadline: original_close_deadline,
+        };
+        let ingest_mutex = Arc::new(Mutex::new(()));
+        let is_paused = Arc::new(AtomicBool::new(true));
+        let submitted_records = Arc::new(AtomicU64::new(7));
+
+        let target = ZerobusArrowStream::register_graceful_close(
+            &mut phase,
+            10_000,
+            None,
+            &ingest_mutex,
+            &is_paused,
+            &submitted_records,
+        )
+        .await;
+        assert_eq!(target, 7);
+        match &phase {
+            GracefulClosePhase::AwaitingAcks {
+                ack_deadline,
+                close_deadline,
+                ..
+            } => {
+                assert_eq!(*ack_deadline, original_ack_deadline);
+                assert_eq!(*close_deadline, original_close_deadline);
+            }
+            _ => panic!("expected ACK-wait phase"),
+        }
+
+        ZerobusArrowStream::register_graceful_close(
+            &mut phase,
+            100,
+            None,
+            &ingest_mutex,
+            &is_paused,
+            &submitted_records,
+        )
+        .await;
+        match phase {
+            GracefulClosePhase::AwaitingAcks {
+                ack_deadline,
+                close_deadline,
+                ..
+            } => {
+                assert!(ack_deadline < original_ack_deadline);
+                assert!(close_deadline < original_close_deadline);
+            }
+            _ => panic!("expected ACK-wait phase"),
+        }
+
+        let original_drain_deadline = Instant::now() + Duration::from_secs(2);
+        let mut phase = GracefulClosePhase::DrainingResponse {
+            deadline: original_drain_deadline,
+            recovery_reason: ZerobusError::StreamClosedError(tonic::Status::unavailable(
+                "test rotation",
+            )),
+            request_reached_eof: false,
+            response_reached_eof: false,
+        };
+        ZerobusArrowStream::register_graceful_close(
+            &mut phase,
+            100,
+            None,
+            &ingest_mutex,
+            &is_paused,
+            &submitted_records,
+        )
+        .await;
+        match phase {
+            GracefulClosePhase::DrainingResponse { deadline, .. } => {
+                assert!(deadline < original_drain_deadline);
+            }
+            _ => panic!("expected response-drain phase"),
+        }
+    }
+
+    #[test]
+    fn graceful_close_deadlines_reserve_cleanup_inside_server_grace() {
+        let (ack_deadline, close_deadline) =
+            ZerobusArrowStream::graceful_close_deadlines(5_000, None);
+        assert_eq!(
+            close_deadline.duration_since(ack_deadline),
+            Duration::from_millis(CLOSE_SIGNAL_DRAIN_TIMEOUT_MS)
+        );
+
+        let (ack_deadline, close_deadline) =
+            ZerobusArrowStream::graceful_close_deadlines(5_000, Some(500));
+        assert_eq!(
+            close_deadline.duration_since(ack_deadline),
+            Duration::from_millis(4_500)
+        );
+
+        let (ack_deadline, close_deadline) =
+            ZerobusArrowStream::graceful_close_deadlines(5_000, Some(0));
+        assert_eq!(
+            close_deadline.duration_since(ack_deadline),
+            Duration::from_millis(5_000)
+        );
+
+        let (ack_deadline, close_deadline) = ZerobusArrowStream::graceful_close_deadlines(0, None);
+        assert_eq!(
+            close_deadline.duration_since(ack_deadline),
+            Duration::from_millis(CLOSE_SIGNAL_DRAIN_TIMEOUT_MS),
+            "zero server grace must still get a local best-effort EOF settle window"
+        );
+    }
+
+    #[test]
+    fn graceful_close_deadlines_cap_extreme_durations_without_overflow() {
+        let (ack_deadline, close_deadline) =
+            ZerobusArrowStream::graceful_close_deadlines(5_000, Some(u64::MAX));
+        assert!(ack_deadline <= close_deadline);
+        assert_eq!(
+            close_deadline.duration_since(ack_deadline),
+            Duration::from_millis(CLOSE_SIGNAL_DRAIN_TIMEOUT_MS),
+            "an oversized client override must be capped by the server allowance"
+        );
+
+        let (ack_deadline, close_deadline) =
+            ZerobusArrowStream::graceful_close_deadlines(u64::MAX, None);
+        assert!(ack_deadline <= close_deadline);
+        assert_eq!(
+            close_deadline.duration_since(ack_deadline),
+            Duration::from_millis(CLOSE_SIGNAL_DRAIN_TIMEOUT_MS),
+            "an oversized peer duration must retain the cleanup reservation"
+        );
+    }
+
+    #[tokio::test]
+    async fn timed_out_reconnect_cleanup_applies_queued_acknowledgments() {
+        let schema = one_col_schema();
+        let sem = Arc::new(Semaphore::new(1));
+        let pending_batches = Arc::new(Mutex::new(vec![pending_batch(
+            &sem,
+            batch_with_rows(&schema, 10),
+            7,
+            0,
+            10,
+        )]));
+        let submitted_records = Arc::new(AtomicU64::new(10));
+        let last_acked_records = Arc::new(AtomicU64::new(0));
+        let (last_ack_tx, last_ack_rx) = watch::channel(None);
+        #[cfg(feature = "test-hooks")]
+        let ack_applied_gate = Arc::new(Mutex::new(None));
+        let progress = AckProgress {
+            submitted_records: &submitted_records,
+            last_acked_records: &last_acked_records,
+            pending_batches: &pending_batches,
+            last_ack_tx: &last_ack_tx,
+            #[cfg(feature = "test-hooks")]
+            ack_applied_gate: &ack_applied_gate,
+        };
+        let response_stream = futures::stream::iter([Ok(PutResult {
+            app_metadata: serde_json::to_vec(&FlightAckMetadata::new(7, 10))
+                .unwrap()
+                .into(),
+        })]);
+        let (batch_tx, _batch_rx) = mpsc::channel(1);
+        let connection = FlightConnection {
+            response_stream: Box::pin(response_stream),
+            batch_tx,
+            request_body: completed_request_body(),
+            replay_state_installed: true,
+        };
+
+        let result = ZerobusArrowStream::finish_timed_out_reconnect(
+            connection,
+            Instant::now() + Duration::from_secs(1),
+            ZerobusArrowStream::reconnect_timeout_error(100),
+            &progress,
+        )
+        .await;
+
+        assert!(matches!(result, Err(ZerobusError::ConnectionTimeout(_))));
+        assert!(pending_batches.lock().await.is_empty());
+        assert_eq!(last_acked_records.load(Ordering::Acquire), 10);
+        assert_eq!(*last_ack_rx.borrow(), Some(7));
+    }
+
+    #[tokio::test]
+    async fn pre_replay_reconnect_cleanup_rejects_positive_acknowledgments() {
+        let schema = one_col_schema();
+        let sem = Arc::new(Semaphore::new(1));
+        let pending_batches = Arc::new(Mutex::new(vec![pending_batch(
+            &sem,
+            batch_with_rows(&schema, 10),
+            7,
+            0,
+            10,
+        )]));
+        // These values still belong to the failed connection. Applying the replacement
+        // connection's ACK against them would falsely complete offset 7.
+        let submitted_records = Arc::new(AtomicU64::new(10));
+        let last_acked_records = Arc::new(AtomicU64::new(0));
+        let (last_ack_tx, last_ack_rx) = watch::channel(None);
+        #[cfg(feature = "test-hooks")]
+        let ack_applied_gate = Arc::new(Mutex::new(None));
+        let progress = AckProgress {
+            submitted_records: &submitted_records,
+            last_acked_records: &last_acked_records,
+            pending_batches: &pending_batches,
+            last_ack_tx: &last_ack_tx,
+            #[cfg(feature = "test-hooks")]
+            ack_applied_gate: &ack_applied_gate,
+        };
+        let response_stream = futures::stream::iter([Ok(PutResult {
+            app_metadata: serde_json::to_vec(&FlightAckMetadata::new(7, 10))
+                .unwrap()
+                .into(),
+        })]);
+        let (batch_tx, _batch_rx) = mpsc::channel(1);
+        let connection = FlightConnection {
+            response_stream: Box::pin(response_stream),
+            batch_tx,
+            request_body: completed_request_body(),
+            replay_state_installed: false,
+        };
+
+        let result = ZerobusArrowStream::finish_timed_out_reconnect(
+            connection,
+            Instant::now() + Duration::from_secs(1),
+            ZerobusArrowStream::reconnect_timeout_error(100),
+            &progress,
+        )
+        .await;
+        let error = match result {
+            Err(error) => error,
+            Ok(_) => panic!("a positive ACK before replay state installation must be rejected"),
+        };
+
+        assert!(matches!(error, ZerobusError::InvalidStateError(_)));
+        let pending = pending_batches.lock().await;
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0].offset_id, 7);
+        assert_eq!(pending[0].start_record, 0);
+        assert_eq!(pending[0].end_record, 10);
+        assert_eq!(last_acked_records.load(Ordering::Acquire), 0);
+        assert_eq!(*last_ack_rx.borrow(), None);
+    }
+
+    #[tokio::test]
+    async fn expired_reconnect_cleanup_deadline_preempts_ready_responses() {
+        let response_polls = Arc::new(AtomicUsize::new(0));
+        let observed_polls = Arc::clone(&response_polls);
+        let ready_metadata: Bytes = serde_json::to_vec(&FlightAckMetadata::stream_ready())
+            .unwrap()
+            .into();
+        let response_stream = futures::stream::poll_fn(move |_| {
+            observed_polls.fetch_add(1, Ordering::SeqCst);
+            Poll::Ready(Some(Ok(PutResult {
+                app_metadata: ready_metadata.clone(),
+            })))
+        });
+        let (batch_tx, _batch_rx) = mpsc::channel(1);
+        let connection = FlightConnection {
+            response_stream: Box::pin(response_stream),
+            batch_tx,
+            request_body: completed_request_body(),
+            replay_state_installed: false,
+        };
+        let pending_batches = Arc::new(Mutex::new(Vec::new()));
+        let submitted_records = Arc::new(AtomicU64::new(0));
+        let last_acked_records = Arc::new(AtomicU64::new(0));
+        let (last_ack_tx, _last_ack_rx) = watch::channel(None);
+        #[cfg(feature = "test-hooks")]
+        let ack_applied_gate = Arc::new(Mutex::new(None));
+        let progress = AckProgress {
+            submitted_records: &submitted_records,
+            last_acked_records: &last_acked_records,
+            pending_batches: &pending_batches,
+            last_ack_tx: &last_ack_tx,
+            #[cfg(feature = "test-hooks")]
+            ack_applied_gate: &ack_applied_gate,
+        };
+
+        let result = ZerobusArrowStream::finish_timed_out_reconnect(
+            connection,
+            Instant::now(),
+            ZerobusArrowStream::reconnect_timeout_error(100),
+            &progress,
+        )
+        .await;
+
+        assert!(matches!(result, Err(ZerobusError::ConnectionTimeout(_))));
+        assert_eq!(
+            response_polls.load(Ordering::SeqCst),
+            0,
+            "an expired deadline must win before another ready response is polled"
+        );
+    }
+
+    #[tokio::test]
+    async fn explicit_close_deadline_reports_incomplete_transport_stage() {
+        #[cfg(feature = "test-hooks")]
+        let response_drain_gate = Arc::new(Mutex::new(None));
+
+        let request_timeout = ZerobusArrowStream::finish_response_drain_deadline(
+            &GracefulClosePhase::DrainingExplicitClose {
+                deadline: Instant::now(),
+                request_reached_eof: false,
+                response_reached_eof: false,
+            },
+            #[cfg(feature = "test-hooks")]
+            &response_drain_gate,
+        )
+        .await
+        .expect_err("missing request EOF must be reported");
+        assert!(request_timeout
+            .to_string()
+            .contains(EXPLICIT_CLOSE_REQUEST_EOF_TIMEOUT));
+
+        let response_timeout = ZerobusArrowStream::finish_response_drain_deadline(
+            &GracefulClosePhase::DrainingExplicitClose {
+                deadline: Instant::now(),
+                request_reached_eof: true,
+                response_reached_eof: false,
+            },
+            #[cfg(feature = "test-hooks")]
+            &response_drain_gate,
+        )
+        .await
+        .expect_err("missing response EOF must be reported");
+        assert!(response_timeout
+            .to_string()
+            .contains(EXPLICIT_CLOSE_RESPONSE_DRAIN_TIMEOUT));
+    }
+
+    #[tokio::test]
+    async fn explicit_close_does_not_reinvalidate_a_carried_auth_rejection() {
+        let invalidations = Arc::new(AtomicUsize::new(0));
+        let headers_provider: Arc<dyn HeadersProvider> =
+            Arc::new(CountingInvalidationHeadersProvider {
+                invalidations: Arc::clone(&invalidations),
+            });
+        let error = ZerobusError::CreateStreamError(tonic::Status::unauthenticated(
+            "credential already invalidated",
+        ));
+        let (server_error_tx, server_error_rx) = watch::channel(None);
+
+        let result = ZerobusArrowStream::finish_explicit_close_result(
+            Err(error.clone()),
+            true,
+            Instant::now() + Duration::from_secs(1),
+            &headers_provider,
+            &server_error_tx,
+        )
+        .await;
+
+        assert_eq!(invalidations.load(Ordering::SeqCst), 0);
+        assert_eq!(result.unwrap_err().to_string(), error.to_string());
+        assert_eq!(
+            server_error_rx.borrow().as_ref().map(ToString::to_string),
+            Some(error.to_string())
+        );
+    }
+
+    #[test]
+    fn latest_permanent_close_error_supersedes_retained_auth_rejection() {
+        let retained = ZerobusError::CreateStreamError(tonic::Status::unauthenticated(
+            "old credential rejection",
+        ));
+        let latest_invalid_argument = ZerobusError::CreateStreamError(
+            tonic::Status::invalid_argument("latest permanent rejection"),
+        );
+        let latest_auth = ZerobusError::CreateStreamError(tonic::Status::unauthenticated(
+            "latest credential rejection",
+        ));
+        let retryable_cleanup = ZerobusError::StreamClosedError(tonic::Status::unavailable(
+            "replacement transport failed",
+        ));
+
+        let selected = ZerobusArrowStream::preferred_close_error(
+            Some(retained.clone()),
+            Some(latest_invalid_argument.clone()),
+        )
+        .expect("a permanent close error should be selected");
+        assert_eq!(selected.to_string(), latest_invalid_argument.to_string());
+
+        let selected = ZerobusArrowStream::preferred_close_error(
+            Some(retained.clone()),
+            Some(latest_auth.clone()),
+        )
+        .expect("the latest auth rejection should be selected");
+        assert_eq!(selected.to_string(), latest_auth.to_string());
+
+        let selected = ZerobusArrowStream::preferred_close_error(
+            Some(retained.clone()),
+            Some(retryable_cleanup),
+        )
+        .expect("the retained permanent error should be selected");
+        assert_eq!(selected.to_string(), retained.to_string());
+    }
+
+    #[tokio::test]
+    async fn explicit_close_preempts_a_ready_response_backlog() {
+        let response_stream = futures::stream::poll_fn(|_| {
+            Poll::Ready(Some(Ok(PutResult {
+                app_metadata: Bytes::new(),
+            })))
+        });
+        let mut response_stream: FlightResponseStream = Box::pin(response_stream);
+        let deadline = Instant::now() + Duration::from_secs(1);
+        let (_explicit_close_tx, mut explicit_close_rx) = watch::channel(Some(deadline));
+        let request_body = completed_request_body();
+
+        let event = ZerobusArrowStream::wait_for_ack_event(
+            &mut response_stream,
+            &request_body,
+            &GracefulClosePhase::Open,
+            Duration::from_secs(60),
+            &mut explicit_close_rx,
+        )
+        .await;
+
+        assert!(matches!(
+            event,
+            AckEvent::ExplicitClose {
+                deadline: observed
+            } if observed == deadline
+        ));
+    }
+
+    #[tokio::test]
+    async fn expired_graceful_close_deadline_preempts_a_ready_response_backlog() {
+        let response_stream = futures::stream::poll_fn(|_| {
+            Poll::Ready(Some(Ok(PutResult {
+                app_metadata: Bytes::new(),
+            })))
+        });
+        let mut response_stream: FlightResponseStream = Box::pin(response_stream);
+        let phase = GracefulClosePhase::AwaitingAcks {
+            target_records: 1,
+            ack_deadline: Instant::now(),
+            close_deadline: Instant::now() + Duration::from_secs(1),
+        };
+        let (_explicit_close_tx, mut explicit_close_rx) = watch::channel(None);
+        let request_body = completed_request_body();
+
+        let event = ZerobusArrowStream::wait_for_ack_event(
+            &mut response_stream,
+            &request_body,
+            &phase,
+            Duration::from_secs(60),
+            &mut explicit_close_rx,
+        )
+        .await;
+
+        assert!(matches!(event, AckEvent::GracefulCloseDeadline));
+    }
+
+    #[tokio::test]
+    async fn response_backlog_advances_acks_while_request_eof_settles() {
+        let (eof_tx, eof_rx) = watch::channel(false);
+        let request_body = RequestBodyControl {
+            shutdown: CancellationToken::new(),
+            eof_rx,
+        };
+        let polls = Arc::new(AtomicUsize::new(0));
+        let observed_polls = Arc::clone(&polls);
+        let response_stream = futures::stream::poll_fn(move |_| {
+            let poll = observed_polls.fetch_add(1, Ordering::SeqCst);
+            match poll {
+                0 => Poll::Ready(Some(Ok(PutResult {
+                    app_metadata: serde_json::to_vec(&FlightAckMetadata::new(0, 4))
+                        .unwrap()
+                        .into(),
+                }))),
+                1 => {
+                    eof_tx.send_replace(true);
+                    Poll::Ready(Some(Ok(PutResult {
+                        app_metadata: serde_json::to_vec(&FlightAckMetadata::new(0, 10))
+                            .unwrap()
+                            .into(),
+                    })))
+                }
+                _ => Poll::Ready(None),
+            }
+        });
+        let mut response_stream: FlightResponseStream = Box::pin(response_stream);
+        let mut phase = GracefulClosePhase::DrainingResponse {
+            deadline: Instant::now() + Duration::from_secs(1),
+            recovery_reason: ZerobusError::StreamClosedError(tonic::Status::unavailable(
+                "test rotation",
+            )),
+            request_reached_eof: false,
+            response_reached_eof: false,
+        };
+        let (_explicit_close_tx, mut explicit_close_rx) = watch::channel(None);
+
+        let schema = one_col_schema();
+        let sem = Arc::new(Semaphore::new(1));
+        let pending_batches = Arc::new(Mutex::new(vec![pending_batch(
+            &sem,
+            batch_with_rows(&schema, 10),
+            0,
+            0,
+            10,
+        )]));
+        let submitted_records = Arc::new(AtomicU64::new(10));
+        let last_acked_records = Arc::new(AtomicU64::new(0));
+        let (last_ack_tx, last_ack_rx) = watch::channel(None);
+        #[cfg(feature = "test-hooks")]
+        let ack_applied_gate = Arc::new(Mutex::new(None));
+        let progress = AckProgress {
+            submitted_records: &submitted_records,
+            last_acked_records: &last_acked_records,
+            pending_batches: &pending_batches,
+            last_ack_tx: &last_ack_tx,
+            #[cfg(feature = "test-hooks")]
+            ack_applied_gate: &ack_applied_gate,
+        };
+
+        for expected_records in [4, 10] {
+            let event = ZerobusArrowStream::wait_for_ack_event(
+                &mut response_stream,
+                &request_body,
+                &phase,
+                Duration::from_secs(60),
+                &mut explicit_close_rx,
+            )
+            .await;
+            let AckEvent::Response(Some(Ok(result))) = event else {
+                panic!("expected a queued response while request EOF was pending");
+            };
+            let ack = FlightAckMetadata::from_bytes(&result.app_metadata).unwrap();
+            assert_eq!(ack.ack_up_to_records, expected_records);
+            ZerobusArrowStream::apply_acknowledgment(&ack, &progress)
+                .await
+                .unwrap();
+        }
+
+        let event = ZerobusArrowStream::wait_for_ack_event(
+            &mut response_stream,
+            &request_body,
+            &phase,
+            Duration::from_secs(60),
+            &mut explicit_close_rx,
+        )
+        .await;
+        assert!(matches!(event, AckEvent::RequestEof));
+        phase.mark_request_eof();
+
+        let event = ZerobusArrowStream::wait_for_ack_event(
+            &mut response_stream,
+            &request_body,
+            &phase,
+            Duration::from_secs(60),
+            &mut explicit_close_rx,
+        )
+        .await;
+        assert!(matches!(event, AckEvent::Response(None)));
+        phase.mark_response_eof();
+
+        assert_eq!(phase.drain_progress(), Some((true, true)));
+        assert_eq!(last_acked_records.load(Ordering::Acquire), 10);
+        assert_eq!(*last_ack_rx.borrow(), Some(0));
+        assert!(pending_batches.lock().await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn request_shutdown_discards_queued_encoder_output_and_reports_eof() {
+        let schema = one_col_schema();
+        let table_properties = ArrowTableProperties {
+            table_name: "catalog.schema.table".to_string(),
+            schema: Arc::clone(&schema),
+        };
+        let options = ArrowStreamConfigurationOptions::default();
+        let (tx, rx) = mpsc::channel(options.max_inflight_batches);
+        let (mut request_stream, request_body) =
+            ZerobusArrowStream::make_request_stream(rx, &table_properties, &options)
+                .expect("request stream should build");
+
+        tx.send(Ok(batch_with_rows(&schema, 10)))
+            .await
+            .expect("batch should queue");
+        assert!(
+            request_stream.next().await.is_some(),
+            "encoder should first yield the schema"
+        );
+
+        request_body.shutdown();
+        let next = tokio::time::timeout(Duration::from_secs(1), request_stream.next())
+            .await
+            .expect("cancellation should wake the request stream");
+        assert!(
+            next.is_none(),
+            "queued batch data must be skipped after shutdown"
+        );
+        assert!(
+            request_body
+                .wait_for_eof_until(Instant::now() + Duration::from_secs(1))
+                .await,
+            "request-body control should observe EOF"
+        );
     }
 
     #[tokio::test]

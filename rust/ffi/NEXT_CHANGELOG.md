@@ -36,6 +36,8 @@
 
 ### Behavior Changes
 
+- Arrow Flight rotation now half-closes the request and drains the response before reconnecting. `stream_paused_max_wait_time_ms = 0` skips the ACK wait but still permits up to 500ms of bounded transport cleanup; very short server grace periods receive a best-effort local EOF attempt. Recovery and reconnect-ready timeouts use the same bounded cleanup for a replacement request that is already live and apply acknowledgments received during that cleanup. Explicit close reports a timeout when request EOF or response draining does not complete. Streams with recovery disabled now honor server close signals and terminate after transport cleanup without reconnecting; batches accepted during the grace window remain available through the unacked-batch API.
+
 ### Breaking Changes
 
 - `zerobus_sdk_create_stream_with_headers_provider`,

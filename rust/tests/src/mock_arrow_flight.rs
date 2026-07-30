@@ -2,15 +2,18 @@
 
 use std::collections::HashMap;
 use std::pin::Pin;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
+use arrow_array::Int64Array;
+use arrow_flight::decode::{DecodedFlightData, DecodedPayload, FlightRecordBatchStream};
 use arrow_flight::flight_service_server::{FlightService, FlightServiceServer};
 use arrow_flight::{
     Action, ActionType, Criteria, Empty, FlightData, FlightDescriptor, FlightInfo,
     HandshakeRequest, HandshakeResponse, PutResult, SchemaResult, Ticket,
 };
-use futures::Stream;
+use futures::{Stream, StreamExt, TryStreamExt};
 use rcgen::{generate_simple_self_signed, CertifiedKey};
 use serde::{Deserialize, Serialize};
 use tokio::sync::{mpsc, Mutex};
@@ -58,6 +61,40 @@ pub enum MockFlightResponse {
         /// Cumulative records acknowledged.
         ack_up_to_records: u64,
     },
+    /// Emits an ordinary ACK followed immediately by a distinct graceful-close signal
+    /// for the same received batch. This models both responses already being queued while
+    /// the client is between response polls.
+    BatchAckThenGracefulClose {
+        ack_up_to_offset: i64,
+        ack_up_to_records: u64,
+        duration_ms: u64,
+        hold_response_open: bool,
+    },
+    /// Acknowledge exactly the records decoded from the current physical chunk and
+    /// request graceful close. This is used to verify suffix-only recovery when a
+    /// logical RecordBatch is cancelled between Flight chunks.
+    GracefulCloseAfterChunk {
+        duration_ms: u64,
+        hold_response_open: bool,
+    },
+    /// Successful batch acknowledgment sent only after the client cleanly half-closes
+    /// its request stream.
+    ///
+    /// This explicitly models a genuine acknowledgment that was still in flight when
+    /// request `END_STREAM` arrived. Its watermark should advance beyond the preceding
+    /// acknowledgment or close signal.
+    BatchAckAfterRequestEof {
+        ack_up_to_offset: i64,
+        /// Cumulative records acknowledged.
+        ack_up_to_records: u64,
+    },
+    /// Acknowledge a batch normally, then keep the response open after request EOF.
+    BatchAckAndHoldAfterRequestEof {
+        ack_up_to_offset: i64,
+        ack_up_to_records: u64,
+    },
+    /// Terminal peer status sent only after the client cleanly half-closes its request stream.
+    ErrorAfterRequestEof { status: Status },
     /// Error response - sent immediately when a batch arrives.
     Error { status: Status, delay_ms: u64 },
     /// Reject a connection's setup: send this error instead of the ready signal on the
@@ -66,6 +103,8 @@ pub enum MockFlightResponse {
     FailSetup { status: Status },
     /// Reject a connection's setup after a delay.
     FailSetupAfter { status: Status, delay_ms: u64 },
+    /// Delay a connection's ready signal after response headers are already available.
+    DelaySetup { delay_ms: u64 },
     /// Close stream (drop the connection) - useful for testing recovery.
     CloseStream { delay_ms: u64 },
     /// Graceful close signal - sends a close signal with grace period duration.
@@ -80,6 +119,22 @@ pub enum MockFlightResponse {
         /// allowing the client to mark batches as acked during the grace period.
         ack_up_to_offset: Option<i64>,
         ack_up_to_records: Option<u64>,
+        /// Test-only behavior for exercising the client's bounded drain fallback.
+        /// When true, keep the response open after a clean request half-close.
+        hold_response_open: bool,
+    },
+    /// Graceful close whose post-request-EOF response is a terminal peer status.
+    GracefulCloseWithFinalError {
+        duration_ms: u64,
+        delay_ms: u64,
+        status: Status,
+    },
+    /// Graceful close followed by a peer error before request EOF. The handler keeps
+    /// polling the request so tests can distinguish a clean client half-close from a reset.
+    GracefulCloseWithDelayedError {
+        duration_ms: u64,
+        error_delay_ms: u64,
+        status: Status,
     },
 }
 
@@ -93,11 +148,33 @@ pub struct MockFlightServer {
     batch_count: Arc<Mutex<u64>>,
     /// Track total rows received
     row_count: Arc<Mutex<u64>>,
+    /// Decoded first-column IDs received across all connections.
+    received_ids: Arc<Mutex<Vec<i64>>>,
+    /// Decoded first-column IDs grouped by DoPut connection, in connection order.
+    received_ids_by_connection: Arc<Mutex<Vec<Vec<i64>>>>,
+    /// Assigns a stable index to each DoPut connection.
+    connection_count: Arc<AtomicU64>,
     /// Track response index across connection attempts
     response_indices: Arc<Mutex<HashMap<String, usize>>>,
     /// Observation of every `ack_up_to_records` value emitted on the auto-ack path,
     /// in emission order. Used by tests to assert acks are connection-relative.
     auto_ack_records: Arc<Mutex<Vec<u64>>>,
+    /// Number of DoPut request streams that ended with a clean HTTP/2 half-close.
+    request_half_closes: Arc<AtomicU64>,
+    /// Number of DoPut request streams that ended with a transport error/reset.
+    request_resets: Arc<AtomicU64>,
+    /// Number of explicitly scripted acknowledgments delivered after observing a clean
+    /// request half-close.
+    final_response_deliveries: Arc<AtomicU64>,
+    /// Test-only barrier that delays the next `DoPut` response headers after the request
+    /// handler has started consuming its body.
+    do_put_response_gate: Arc<Mutex<Option<DoPutResponseBarrier>>>,
+}
+
+#[derive(Clone)]
+struct DoPutResponseBarrier {
+    reached: Arc<tokio::sync::Notify>,
+    proceed: Arc<tokio::sync::Notify>,
 }
 
 impl MockFlightServer {
@@ -107,8 +184,15 @@ impl MockFlightServer {
             max_offset_received: Arc::new(Mutex::new(-1)),
             batch_count: Arc::new(Mutex::new(0)),
             row_count: Arc::new(Mutex::new(0)),
+            received_ids: Arc::new(Mutex::new(Vec::new())),
+            received_ids_by_connection: Arc::new(Mutex::new(Vec::new())),
+            connection_count: Arc::new(AtomicU64::new(0)),
             response_indices: Arc::new(Mutex::new(HashMap::new())),
             auto_ack_records: Arc::new(Mutex::new(Vec::new())),
+            request_half_closes: Arc::new(AtomicU64::new(0)),
+            request_resets: Arc::new(AtomicU64::new(0)),
+            final_response_deliveries: Arc::new(AtomicU64::new(0)),
+            do_put_response_gate: Arc::new(Mutex::new(None)),
         }
     }
 
@@ -136,10 +220,49 @@ impl MockFlightServer {
         *self.row_count.lock().await
     }
 
+    /// Get decoded first-column IDs received across all connections.
+    pub async fn get_received_ids(&self) -> Vec<i64> {
+        self.received_ids.lock().await.clone()
+    }
+
+    /// Get decoded first-column IDs grouped by DoPut connection.
+    pub async fn get_received_ids_by_connection(&self) -> Vec<Vec<i64>> {
+        self.received_ids_by_connection.lock().await.clone()
+    }
+
     /// Get every `ack_up_to_records` value emitted on the auto-ack path, in order.
     #[allow(dead_code)]
     pub async fn get_auto_ack_records(&self) -> Vec<u64> {
         self.auto_ack_records.lock().await.clone()
+    }
+
+    /// Get the number of client request streams that reached a clean END_STREAM.
+    pub fn get_request_half_close_count(&self) -> u64 {
+        self.request_half_closes.load(Ordering::Relaxed)
+    }
+
+    /// Get the number of client request streams that ended with a reset/transport error.
+    pub fn get_request_reset_count(&self) -> u64 {
+        self.request_resets.load(Ordering::Relaxed)
+    }
+
+    /// Get the number of explicitly scripted acknowledgments delivered after request
+    /// `END_STREAM`.
+    pub fn get_final_response_delivery_count(&self) -> u64 {
+        self.final_response_deliveries.load(Ordering::Relaxed)
+    }
+
+    /// Delays response headers for the next `DoPut` until `proceed` is notified.
+    pub async fn arm_do_put_response_barrier(
+        &self,
+    ) -> (Arc<tokio::sync::Notify>, Arc<tokio::sync::Notify>) {
+        let reached = Arc::new(tokio::sync::Notify::new());
+        let proceed = Arc::new(tokio::sync::Notify::new());
+        *self.do_put_response_gate.lock().await = Some(DoPutResponseBarrier {
+            reached: Arc::clone(&reached),
+            proceed: Arc::clone(&proceed),
+        });
+        (reached, proceed)
     }
 
     /// Reset the server state
@@ -152,7 +275,14 @@ impl MockFlightServer {
         *self.max_offset_received.lock().await = -1;
         *self.batch_count.lock().await = 0;
         *self.row_count.lock().await = 0;
+        self.received_ids.lock().await.clear();
+        self.received_ids_by_connection.lock().await.clear();
+        self.connection_count.store(0, Ordering::Relaxed);
         self.auto_ack_records.lock().await.clear();
+        self.request_half_closes.store(0, Ordering::Relaxed);
+        self.request_resets.store(0, Ordering::Relaxed);
+        self.final_response_deliveries.store(0, Ordering::Relaxed);
+        *self.do_put_response_gate.lock().await = None;
     }
 }
 
@@ -224,15 +354,30 @@ impl FlightService for MockFlightServer {
 
         info!("Received DoPut request for table: {}", table_name);
 
-        let mut stream = request.into_inner();
+        let stream = request.into_inner();
+        let mut stream = FlightRecordBatchStream::new_from_flight_data(
+            stream.map_err(arrow_flight::error::FlightError::from),
+        )
+        .into_inner();
         let (tx, rx) = mpsc::channel(100);
+        let response_barrier = self.do_put_response_gate.lock().await.take();
+        let connection_index = self.connection_count.fetch_add(1, Ordering::Relaxed) as usize;
+        {
+            let mut ids_by_connection = self.received_ids_by_connection.lock().await;
+            ids_by_connection.resize_with(connection_index + 1, Vec::new);
+        }
 
         let responses = Arc::clone(&self.responses);
         let max_offset_received = Arc::clone(&self.max_offset_received);
         let batch_count = Arc::clone(&self.batch_count);
         let row_count = Arc::clone(&self.row_count);
+        let received_ids = Arc::clone(&self.received_ids);
+        let received_ids_by_connection = Arc::clone(&self.received_ids_by_connection);
         let response_indices = Arc::clone(&self.response_indices);
         let auto_ack_records = Arc::clone(&self.auto_ack_records);
+        let request_half_closes = Arc::clone(&self.request_half_closes);
+        let request_resets = Arc::clone(&self.request_resets);
+        let final_response_deliveries = Arc::clone(&self.final_response_deliveries);
 
         tokio::spawn(async move {
             let mut stream_responses: Vec<MockFlightResponse> = Vec::new();
@@ -244,6 +389,8 @@ impl FlightService for MockFlightServer {
             // auto-acks (the server derives ack_up_to_records per connection).
             let mut expected_offset: i64 = 0;
             let mut connection_record_count: u64 = 0;
+            let mut hold_response_open_after_half_close = false;
+            let mut final_response_error: Option<Status> = None;
 
             // Load configured responses
             {
@@ -260,21 +407,91 @@ impl FlightService for MockFlightServer {
                 *indices.get(&table_name).unwrap_or(&0)
             };
 
-            while let Ok(Some(flight_data)) = stream.message().await {
+            loop {
+                let DecodedFlightData {
+                    inner: flight_data,
+                    payload,
+                } = match stream.next().await {
+                    Some(Ok(decoded)) => decoded,
+                    None => {
+                        request_half_closes.fetch_add(1, Ordering::Relaxed);
+                        if let Some(status) = final_response_error.take() {
+                            let _ = tx.send(Err(status)).await;
+                            break;
+                        }
+
+                        if let Some(MockFlightResponse::BatchAckAfterRequestEof {
+                            ack_up_to_offset,
+                            ack_up_to_records,
+                        }) = stream_responses.get(response_index)
+                        {
+                            let metadata = FlightAckMetadata {
+                                ack_up_to_offset: *ack_up_to_offset,
+                                ack_up_to_records: *ack_up_to_records,
+                            };
+                            let result = PutResult {
+                                app_metadata: serde_json::to_vec(&metadata).unwrap().into(),
+                            };
+                            let delivered = tx.send(Ok(result)).await.is_ok();
+                            response_index += 1;
+                            response_indices
+                                .lock()
+                                .await
+                                .insert(table_name.clone(), response_index);
+                            if delivered {
+                                final_response_deliveries.fetch_add(1, Ordering::Relaxed);
+                            }
+                        } else if let Some(MockFlightResponse::ErrorAfterRequestEof { status }) =
+                            stream_responses.get(response_index)
+                        {
+                            let _ = tx.send(Err(status.clone())).await;
+                            response_index += 1;
+                            response_indices
+                                .lock()
+                                .await
+                                .insert(table_name.clone(), response_index);
+                        }
+                        break;
+                    }
+                    Some(Err(error)) => {
+                        request_resets.fetch_add(1, Ordering::Relaxed);
+                        warn!("Client request stream reset or decode failed: {error}");
+                        break;
+                    }
+                };
                 // Handle schema message (first message has no app_metadata or empty app_metadata)
                 if is_first_message {
                     is_first_message = false;
                     if flight_data.app_metadata.is_empty() {
+                        let delayed_setup =
+                            if let Some(MockFlightResponse::DelaySetup { delay_ms }) =
+                                stream_responses.get(response_index)
+                            {
+                                let delay_ms = *delay_ms;
+                                response_index += 1;
+                                response_indices
+                                    .lock()
+                                    .await
+                                    .insert(table_name.clone(), response_index);
+                                sleep(Duration::from_millis(delay_ms)).await;
+                                true
+                            } else {
+                                false
+                            };
                         // A scripted FailSetup rejects this connection's setup: send the
                         // error instead of the ready signal (simulates a reconnect failure).
-                        let setup_failure = match stream_responses.get(response_index) {
-                            Some(MockFlightResponse::FailSetup { status }) => {
-                                Some((status.clone(), 0))
+                        let setup_failure = if delayed_setup {
+                            None
+                        } else {
+                            match stream_responses.get(response_index) {
+                                Some(MockFlightResponse::FailSetup { status }) => {
+                                    Some((status.clone(), 0))
+                                }
+                                Some(MockFlightResponse::FailSetupAfter { status, delay_ms }) => {
+                                    Some((status.clone(), *delay_ms))
+                                }
+                                _ => None,
                             }
-                            Some(MockFlightResponse::FailSetupAfter { status, delay_ms }) => {
-                                Some((status.clone(), *delay_ms))
-                            }
-                            _ => None,
                         };
                         if let Some((status, delay_ms)) = setup_failure {
                             response_index += 1;
@@ -349,12 +566,22 @@ impl FlightService for MockFlightServer {
                         *count += 1;
                     }
 
-                    // Decode the IPC data_header flatbuffer to get the actual row count.
-                    let rows = arrow_ipc::root_as_message(&flight_data.data_header)
-                        .ok()
-                        .and_then(|msg| msg.header_as_record_batch())
-                        .map(|rb| rb.length() as u64)
-                        .unwrap_or(0);
+                    // Decode the full Arrow payload so tests can verify row identity,
+                    // not only the flatbuffer's declared row count.
+                    let rows = match &payload {
+                        DecodedPayload::RecordBatch(batch) => {
+                            if let Some(id_array) =
+                                batch.column(0).as_any().downcast_ref::<Int64Array>()
+                            {
+                                let ids = id_array.values().to_vec();
+                                received_ids.lock().await.extend_from_slice(&ids);
+                                received_ids_by_connection.lock().await[connection_index]
+                                    .extend_from_slice(&ids);
+                            }
+                            batch.num_rows() as u64
+                        }
+                        DecodedPayload::Schema(_) | DecodedPayload::None => 0,
+                    };
                     if rows > 0 {
                         // Connection-local counter drives acks (mirrors the server's
                         // per-connection cumulative tracker); the global row_count is
@@ -410,6 +637,126 @@ impl FlightService for MockFlightServer {
                                 }
                             }
                         }
+                        MockFlightResponse::BatchAckThenGracefulClose {
+                            ack_up_to_offset,
+                            ack_up_to_records,
+                            duration_ms,
+                            hold_response_open,
+                        } => {
+                            if metadata
+                                .as_ref()
+                                .map(|m| m.offset_id >= *ack_up_to_offset)
+                                .unwrap_or(false)
+                            {
+                                let ack = FlightAckMetadata {
+                                    ack_up_to_offset: *ack_up_to_offset,
+                                    ack_up_to_records: *ack_up_to_records,
+                                };
+                                if tx
+                                    .send(Ok(PutResult {
+                                        app_metadata: serde_json::to_vec(&ack).unwrap().into(),
+                                    }))
+                                    .await
+                                    .is_err()
+                                {
+                                    return;
+                                }
+
+                                let close_metadata = serde_json::json!({
+                                    "ack_up_to_offset": -1,
+                                    "ack_up_to_records": 0,
+                                    "close_stream_duration_ms": duration_ms,
+                                });
+                                if tx
+                                    .send(Ok(PutResult {
+                                        app_metadata: serde_json::to_vec(&close_metadata)
+                                            .unwrap()
+                                            .into(),
+                                    }))
+                                    .await
+                                    .is_err()
+                                {
+                                    return;
+                                }
+
+                                response_index += 1;
+                                hold_response_open_after_half_close = *hold_response_open;
+                                response_indices
+                                    .lock()
+                                    .await
+                                    .insert(table_name.clone(), response_index);
+                            }
+                        }
+                        MockFlightResponse::GracefulCloseAfterChunk {
+                            duration_ms,
+                            hold_response_open,
+                        } => {
+                            if let Some(metadata) = &metadata {
+                                let close_metadata = serde_json::json!({
+                                    "ack_up_to_offset": metadata.offset_id,
+                                    "ack_up_to_records": connection_record_count,
+                                    "close_stream_duration_ms": duration_ms,
+                                });
+                                if tx
+                                    .send(Ok(PutResult {
+                                        app_metadata: serde_json::to_vec(&close_metadata)
+                                            .unwrap()
+                                            .into(),
+                                    }))
+                                    .await
+                                    .is_err()
+                                {
+                                    return;
+                                }
+                                response_index += 1;
+                                hold_response_open_after_half_close = *hold_response_open;
+                                response_indices
+                                    .lock()
+                                    .await
+                                    .insert(table_name.clone(), response_index);
+
+                                // Let the client observe the close response before the mock
+                                // polls another request item. This makes cancellation at a
+                                // physical chunk boundary deterministic under local HTTP/2.
+                                sleep(Duration::from_millis(100)).await;
+                            }
+                        }
+                        MockFlightResponse::BatchAckAfterRequestEof { .. } => {
+                            debug!("Waiting for request EOF before sending scripted ack");
+                        }
+                        MockFlightResponse::BatchAckAndHoldAfterRequestEof {
+                            ack_up_to_offset,
+                            ack_up_to_records,
+                        } => {
+                            if metadata
+                                .as_ref()
+                                .map(|m| m.offset_id >= *ack_up_to_offset)
+                                .unwrap_or(false)
+                            {
+                                let ack = FlightAckMetadata {
+                                    ack_up_to_offset: *ack_up_to_offset,
+                                    ack_up_to_records: *ack_up_to_records,
+                                };
+                                if tx
+                                    .send(Ok(PutResult {
+                                        app_metadata: serde_json::to_vec(&ack).unwrap().into(),
+                                    }))
+                                    .await
+                                    .is_err()
+                                {
+                                    return;
+                                }
+                                response_index += 1;
+                                hold_response_open_after_half_close = true;
+                                response_indices
+                                    .lock()
+                                    .await
+                                    .insert(table_name.clone(), response_index);
+                            }
+                        }
+                        MockFlightResponse::ErrorAfterRequestEof { .. } => {
+                            debug!("Waiting for request EOF before sending scripted error");
+                        }
                         MockFlightResponse::Error { status, delay_ms } => {
                             // Error responses trigger immediately on first batch
                             if *delay_ms > 0 {
@@ -450,6 +797,14 @@ impl FlightService for MockFlightServer {
                             let _ = tx.send(Err(status)).await;
                             return;
                         }
+                        MockFlightResponse::DelaySetup { .. } => {
+                            warn!("DelaySetup response reached the batch-processing phase");
+                            response_index += 1;
+                            response_indices
+                                .lock()
+                                .await
+                                .insert(table_name.clone(), response_index);
+                        }
                         MockFlightResponse::CloseStream { delay_ms } => {
                             // CloseStream triggers immediately - simulates server closing without ack
                             if *delay_ms > 0 {
@@ -469,6 +824,7 @@ impl FlightService for MockFlightServer {
                             delay_ms,
                             ack_up_to_offset,
                             ack_up_to_records,
+                            hold_response_open,
                         } => {
                             if *delay_ms > 0 {
                                 sleep(Duration::from_millis(*delay_ms)).await;
@@ -495,6 +851,7 @@ impl FlightService for MockFlightServer {
                                 return;
                             }
                             response_index += 1;
+                            hold_response_open_after_half_close = *hold_response_open;
                             {
                                 let mut indices = response_indices.lock().await;
                                 indices.insert(table_name.clone(), response_index);
@@ -502,6 +859,60 @@ impl FlightService for MockFlightServer {
                             // Continue processing - the main loop waits for more batches.
                             // During grace period the client won't send new batches,
                             // so this effectively waits until the client disconnects.
+                        }
+                        MockFlightResponse::GracefulCloseWithFinalError {
+                            duration_ms,
+                            delay_ms,
+                            status,
+                        } => {
+                            if *delay_ms > 0 {
+                                sleep(Duration::from_millis(*delay_ms)).await;
+                            }
+                            let close_metadata = serde_json::json!({
+                                "ack_up_to_offset": -1,
+                                "ack_up_to_records": 0,
+                                "close_stream_duration_ms": duration_ms,
+                            });
+                            let put_result = PutResult {
+                                app_metadata: serde_json::to_vec(&close_metadata).unwrap().into(),
+                            };
+                            if tx.send(Ok(put_result)).await.is_err() {
+                                return;
+                            }
+                            final_response_error = Some(status.clone());
+                            response_index += 1;
+                            let mut indices = response_indices.lock().await;
+                            indices.insert(table_name.clone(), response_index);
+                        }
+                        MockFlightResponse::GracefulCloseWithDelayedError {
+                            duration_ms,
+                            error_delay_ms,
+                            status,
+                        } => {
+                            let close_metadata = serde_json::json!({
+                                "ack_up_to_offset": -1,
+                                "ack_up_to_records": 0,
+                                "close_stream_duration_ms": duration_ms,
+                            });
+                            let put_result = PutResult {
+                                app_metadata: serde_json::to_vec(&close_metadata).unwrap().into(),
+                            };
+                            if tx.send(Ok(put_result)).await.is_err() {
+                                return;
+                            }
+                            response_index += 1;
+                            {
+                                let mut indices = response_indices.lock().await;
+                                indices.insert(table_name.clone(), response_index);
+                            }
+                            if *error_delay_ms > 0 {
+                                sleep(Duration::from_millis(*error_delay_ms)).await;
+                            }
+                            if tx.send(Err(status.clone())).await.is_err() {
+                                return;
+                            }
+                            // Continue polling the request. The response has failed, so the
+                            // client must still explicitly drive its controlled body to EOF.
                         }
                     }
                 } else {
@@ -532,8 +943,16 @@ impl FlightService for MockFlightServer {
                 }
             }
 
-            debug!("Client stream ended");
+            debug!("Client request stream ended");
+            if hold_response_open_after_half_close {
+                std::future::pending::<()>().await;
+            }
         });
+
+        if let Some(barrier) = response_barrier {
+            barrier.reached.notify_one();
+            barrier.proceed.notified().await;
+        }
 
         let output_stream = tokio_stream::wrappers::ReceiverStream::new(rx);
         Ok(Response::new(Box::pin(output_stream)))
@@ -593,8 +1012,15 @@ async fn start_mock_flight_server_inner(
         max_offset_received: Arc::clone(&mock_server.max_offset_received),
         batch_count: Arc::clone(&mock_server.batch_count),
         row_count: Arc::clone(&mock_server.row_count),
+        received_ids: Arc::clone(&mock_server.received_ids),
+        received_ids_by_connection: Arc::clone(&mock_server.received_ids_by_connection),
+        connection_count: Arc::clone(&mock_server.connection_count),
         response_indices: Arc::clone(&mock_server.response_indices),
         auto_ack_records: Arc::clone(&mock_server.auto_ack_records),
+        request_half_closes: Arc::clone(&mock_server.request_half_closes),
+        request_resets: Arc::clone(&mock_server.request_resets),
+        final_response_deliveries: Arc::clone(&mock_server.final_response_deliveries),
+        do_put_response_gate: Arc::clone(&mock_server.do_put_response_gate),
     };
 
     let addr: std::net::SocketAddr = "127.0.0.1:0".parse()?;

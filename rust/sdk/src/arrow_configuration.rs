@@ -104,14 +104,27 @@ pub struct ArrowStreamConfigurationOptions {
     /// - Continues accepting and buffering new `ingest_batch()` calls
     /// - Stops sending buffered batches to the server
     /// - Continues processing acknowledgments for in-flight batches
-    /// - Waits for either all in-flight batches to be acknowledged or the timeout to expire
+    /// - Waits for batches already sent at the time of the signal to be acknowledged,
+    ///   or for the configured grace period to expire
+    /// - Half-closes the request, then shares up to 500ms between observing request EOF
+    ///   and draining the response so the peer can send `END_STREAM` before recovery
     ///
     /// Configuration values:
-    /// - `None`: Wait for the full server-specified duration (most graceful)
-    /// - `Some(0)`: Immediate recovery, close stream right away
-    /// - `Some(x)`: Wait up to min(x, server_duration) milliseconds
+    /// - `None`: Use the available server grace period for acknowledgments
+    /// - `Some(0)`: Do not wait for acknowledgments
+    /// - `Some(x)`: Wait up to `x` milliseconds for acknowledgments, further capped by
+    ///   the server grace period after reserving transport-cleanup time
     ///
-    /// Default: `None` (wait for full server duration)
+    /// The SDK reserves time inside the server grace period for bounded request/response
+    /// transport cleanup. This cleanup still runs when the configured ACK wait is zero.
+    /// If the server advertises less than 500ms (including zero), the SDK skips the ACK
+    /// wait and makes a best-effort local cleanup attempt for up to 500ms; the server may
+    /// already have hard-closed, so clean peer shutdown cannot be guaranteed in that case.
+    /// Close signals are honored even when recovery is disabled: the SDK performs transport
+    /// cleanup and terminates without reconnecting. Batches accepted while paused remain
+    /// available through `get_unacked_batches()`.
+    ///
+    /// Default: `None` (use the available server grace period)
     pub stream_paused_max_wait_time_ms: Option<u64>,
 }
 

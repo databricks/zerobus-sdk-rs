@@ -704,7 +704,7 @@ mod arrow_flight_tests {
                 .recovery(true)
                 .recovery_retries(3)
                 .recovery_backoff_ms(0)
-                .flush_timeout_ms(1_000)
+                .flush_timeout_ms(200)
                 .build_arrow()
                 .await?;
 
@@ -1136,6 +1136,58 @@ mod arrow_flight_tests {
             Ok(())
         }
 
+        #[tokio::test]
+        async fn test_close_reports_response_drain_timeout(
+        ) -> Result<(), Box<dyn std::error::Error>> {
+            setup_tracing();
+
+            let (mock_server, server_url) = start_mock_flight_server().await?;
+            let schema = create_test_arrow_schema();
+            mock_server
+                .inject_responses(
+                    TABLE_NAME,
+                    vec![MockFlightResponse::BatchAckAndHoldAfterRequestEof {
+                        ack_up_to_offset: 0,
+                        ack_up_to_records: 1,
+                    }],
+                )
+                .await;
+
+            let sdk = ZerobusSdk::builder()
+                .endpoint(server_url)
+                .unity_catalog_url("https://mock-uc.com")
+                .tls_config(Arc::new(NoTlsConfig))
+                .build()?;
+            let mut stream = sdk
+                .stream_builder()
+                .table(TABLE_NAME)
+                .headers_provider(Arc::new(TestHeadersProvider::default()))
+                .arrow(schema.clone())
+                .build_arrow()
+                .await?;
+
+            stream
+                .ingest_batch(create_test_record_batch(
+                    schema,
+                    vec![1],
+                    vec![Some("held response")],
+                ))
+                .await?;
+
+            let error = stream
+                .close()
+                .await
+                .expect_err("close must report a response that never reaches EOF");
+            assert!(error
+                .to_string()
+                .contains("Explicit close timed out while draining the Flight response"));
+            assert_eq!(mock_server.get_request_half_close_count(), 1);
+            assert_eq!(mock_server.get_request_reset_count(), 0);
+            assert!(stream.is_closed());
+
+            Ok(())
+        }
+
         /// Cancelling close after supervisor/sender teardown must leave the stream in a
         /// resumable Closing state: new ingests are rejected, retrieval remains disabled,
         /// and resumed/repeated close calls return the original flush error without waiting
@@ -1233,9 +1285,63 @@ mod arrow_flight_tests {
     }
 
     mod error_handling_tests {
+        use std::collections::HashMap;
+
+        use async_trait::async_trait;
+        use databricks_zerobus_ingest_sdk::{HeadersProvider, ZerobusResult};
+        use tokio::sync::Notify;
         use tonic::Status;
 
         use super::*;
+
+        /// Headers provider that lets a test park the credential retry before its `DoPut`
+        /// request is created.
+        struct BlockingAuthRetryHeadersProvider {
+            get_headers_calls: std::sync::atomic::AtomicUsize,
+            invalidations: std::sync::atomic::AtomicUsize,
+            retry_headers_started: Notify,
+            release_retry_headers: Notify,
+        }
+
+        impl BlockingAuthRetryHeadersProvider {
+            fn new() -> Self {
+                Self {
+                    get_headers_calls: std::sync::atomic::AtomicUsize::new(0),
+                    invalidations: std::sync::atomic::AtomicUsize::new(0),
+                    retry_headers_started: Notify::new(),
+                    release_retry_headers: Notify::new(),
+                }
+            }
+
+            fn invalidation_count(&self) -> usize {
+                self.invalidations.load(std::sync::atomic::Ordering::SeqCst)
+            }
+        }
+
+        #[async_trait]
+        impl HeadersProvider for BlockingAuthRetryHeadersProvider {
+            async fn get_headers(&self) -> ZerobusResult<HashMap<&'static str, String>> {
+                let call = self
+                    .get_headers_calls
+                    .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+                    + 1;
+                // Park every credential fetch after the initial stream + first reconnect
+                // rejection so recovery-timeout retries cannot sneak past the barrier.
+                if call >= 3 {
+                    self.retry_headers_started.notify_one();
+                    self.release_retry_headers.notified().await;
+                }
+
+                let mut headers = HashMap::new();
+                headers.insert("authorization", "Bearer test_token".to_string());
+                Ok(headers)
+            }
+
+            async fn invalidate(&self) {
+                self.invalidations
+                    .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            }
+        }
 
         #[tokio::test]
         async fn test_server_error_propagates() -> Result<(), Box<dyn std::error::Error>> {
@@ -1280,9 +1386,8 @@ mod arrow_flight_tests {
         }
 
         /// A terminal server error must reach a blocked wait_for_offset()/flush() as the
-        /// real error, not a generic close/timeout. process_acks publishes the error while
-        /// is_closed is still false (the waiter keeps waiting), so the supervisor
-        /// re-publishes it after finalization to wake the waiter with the real error.
+        /// real error, not a generic close/timeout. `process_acks` publishes it before
+        /// bounded request cleanup, and the waiter consumes it before final closure.
         #[tokio::test]
         async fn test_wait_for_offset_returns_real_error_on_terminal_failure(
         ) -> Result<(), Box<dyn std::error::Error>> {
@@ -1314,9 +1419,7 @@ mod arrow_flight_tests {
                 .headers_provider(Arc::new(TestHeadersProvider::default()))
                 .arrow(schema.clone())
                 .recovery(false)
-                // Long enough that a regressed waiter would surface the flush deadline
-                // instead of the real error, so this assertion catches the regression.
-                .flush_timeout_ms(3000)
+                .flush_timeout_ms(200)
                 .build_arrow()
                 .await?;
 
@@ -1696,6 +1799,427 @@ mod arrow_flight_tests {
             Ok(())
         }
 
+        /// Explicit close must not hide a reconnect auth rejection or skip the shared
+        /// provider's invalidation when that callback is still in progress.
+        #[tokio::test]
+        async fn test_close_during_reconnect_auth_invalidation_preserves_error(
+        ) -> Result<(), Box<dyn std::error::Error>> {
+            setup_tracing();
+
+            let (mock_server, server_url) = start_mock_flight_server().await?;
+            let schema = create_test_arrow_schema();
+            mock_server
+                .inject_responses(
+                    TABLE_NAME,
+                    vec![
+                        MockFlightResponse::BatchAckThenGracefulClose {
+                            ack_up_to_offset: 0,
+                            ack_up_to_records: 1,
+                            duration_ms: 5_000,
+                            hold_response_open: false,
+                        },
+                        MockFlightResponse::FailSetup {
+                            status: Status::unauthenticated("reconnect credential rejected"),
+                        },
+                    ],
+                )
+                .await;
+
+            let invalidations = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+            let cancellations = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+            let provider = Arc::new(HangingInvalidationHeadersProvider {
+                invalidations: Arc::clone(&invalidations),
+                cancellations: Arc::clone(&cancellations),
+            });
+            let sdk = ZerobusSdk::builder()
+                .endpoint(server_url)
+                .unity_catalog_url("https://mock-uc.com")
+                .tls_config(Arc::new(NoTlsConfig))
+                .build()?;
+            let mut stream = sdk
+                .stream_builder()
+                .table(TABLE_NAME)
+                .headers_provider(provider)
+                .arrow(schema.clone())
+                .recovery(true)
+                .recovery_backoff_ms(0)
+                .recovery_timeout_ms(5_000)
+                .recovery_retries(3)
+                .build_arrow()
+                .await?;
+
+            let offset = stream
+                .ingest_batch(create_test_record_batch(
+                    schema,
+                    vec![1],
+                    vec![Some("acked")],
+                ))
+                .await?;
+            stream.wait_for_offset(offset).await?;
+            tokio::time::timeout(std::time::Duration::from_secs(2), async {
+                while invalidations.load(std::sync::atomic::Ordering::SeqCst) == 0 {
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .expect("reconnect auth invalidation should start");
+
+            let error = stream
+                .close()
+                .await
+                .expect_err("close must preserve the reconnect auth rejection");
+            assert!(error.to_string().contains("reconnect credential rejected"));
+            assert!(!error.is_retryable());
+            assert_eq!(
+                invalidations.load(std::sync::atomic::Ordering::SeqCst),
+                1,
+                "close must not skip or repeat shared credential invalidation"
+            );
+            assert_eq!(
+                cancellations.load(std::sync::atomic::Ordering::SeqCst),
+                1,
+                "the hanging invalidation must be cancelled at the close deadline"
+            );
+
+            Ok(())
+        }
+
+        /// Once reconnect authentication has been invalidated, closing before the retry
+        /// creates its `DoPut` must preserve that rejection without invalidating it again.
+        #[tokio::test]
+        async fn test_close_before_auth_retry_doput_preserves_invalidated_error(
+        ) -> Result<(), Box<dyn std::error::Error>> {
+            setup_tracing();
+
+            let (mock_server, server_url) = start_mock_flight_server().await?;
+            let schema = create_test_arrow_schema();
+            mock_server
+                .inject_responses(
+                    TABLE_NAME,
+                    vec![
+                        MockFlightResponse::BatchAckThenGracefulClose {
+                            ack_up_to_offset: 0,
+                            ack_up_to_records: 1,
+                            duration_ms: 5_000,
+                            hold_response_open: false,
+                        },
+                        MockFlightResponse::FailSetup {
+                            status: Status::unauthenticated("reconnect credential rejected"),
+                        },
+                    ],
+                )
+                .await;
+
+            let provider = Arc::new(BlockingAuthRetryHeadersProvider::new());
+            let sdk = ZerobusSdk::builder()
+                .endpoint(server_url)
+                .unity_catalog_url("https://mock-uc.com")
+                .tls_config(Arc::new(NoTlsConfig))
+                .build()?;
+            let mut stream = sdk
+                .stream_builder()
+                .table(TABLE_NAME)
+                .headers_provider(provider.clone())
+                .arrow(schema.clone())
+                .recovery(true)
+                .recovery_backoff_ms(0)
+                .recovery_timeout_ms(5_000)
+                .recovery_retries(3)
+                .build_arrow()
+                .await?;
+
+            let offset = stream
+                .ingest_batch(create_test_record_batch(
+                    schema,
+                    vec![1],
+                    vec![Some("acked")],
+                ))
+                .await?;
+            stream.wait_for_offset(offset).await?;
+            tokio::time::timeout(
+                std::time::Duration::from_secs(2),
+                provider.retry_headers_started.notified(),
+            )
+            .await
+            .expect("credential retry should pause before creating its DoPut");
+            assert_eq!(provider.invalidation_count(), 1);
+
+            let error = stream
+                .close()
+                .await
+                .expect_err("close must preserve the already-invalidated auth rejection");
+            assert!(error.to_string().contains("reconnect credential rejected"));
+            assert!(!error.is_retryable());
+            assert_eq!(
+                provider.invalidation_count(),
+                1,
+                "the same auth rejection must not invalidate shared credentials twice"
+            );
+
+            Ok(())
+        }
+
+        /// A retryable recovery-deadline failure after auth invalidation must not clear the
+        /// retained permanent rejection; close() still surfaces the credential error.
+        #[tokio::test]
+        async fn test_close_after_auth_retry_recovery_timeout_preserves_auth(
+        ) -> Result<(), Box<dyn std::error::Error>> {
+            setup_tracing();
+
+            let (mock_server, server_url) = start_mock_flight_server().await?;
+            let schema = create_test_arrow_schema();
+            mock_server
+                .inject_responses(
+                    TABLE_NAME,
+                    vec![
+                        MockFlightResponse::BatchAckThenGracefulClose {
+                            ack_up_to_offset: 0,
+                            ack_up_to_records: 1,
+                            duration_ms: 5_000,
+                            hold_response_open: false,
+                        },
+                        MockFlightResponse::FailSetup {
+                            status: Status::unauthenticated("reconnect credential rejected"),
+                        },
+                    ],
+                )
+                .await;
+
+            let provider = Arc::new(BlockingAuthRetryHeadersProvider::new());
+            let sdk = ZerobusSdk::builder()
+                .endpoint(server_url)
+                .unity_catalog_url("https://mock-uc.com")
+                .tls_config(Arc::new(NoTlsConfig))
+                .build()?;
+            let mut stream = sdk
+                .stream_builder()
+                .table(TABLE_NAME)
+                .headers_provider(provider.clone())
+                .arrow(schema.clone())
+                .recovery(true)
+                .recovery_backoff_ms(0)
+                .recovery_timeout_ms(200)
+                .recovery_retries(3)
+                .build_arrow()
+                .await?;
+
+            let offset = stream
+                .ingest_batch(create_test_record_batch(
+                    schema,
+                    vec![1],
+                    vec![Some("acked")],
+                ))
+                .await?;
+            stream.wait_for_offset(offset).await?;
+            tokio::time::timeout(
+                std::time::Duration::from_secs(2),
+                provider.retry_headers_started.notified(),
+            )
+            .await
+            .expect("credential retry should pause before creating its DoPut");
+            assert_eq!(provider.invalidation_count(), 1);
+
+            // Keep the credential retry blocked until the recovery deadline cancels
+            // reconnect with a retryable timeout, then close.
+            tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+
+            let error = stream
+                .close()
+                .await
+                .expect_err("retryable reconnect timeout must not hide the auth rejection");
+            assert!(
+                error.to_string().contains("reconnect credential rejected"),
+                "close must preserve the permanent auth rejection, got: {error}"
+            );
+            assert!(!error.is_retryable());
+            assert_eq!(
+                provider.invalidation_count(),
+                1,
+                "the same auth rejection must not invalidate shared credentials twice"
+            );
+
+            Ok(())
+        }
+
+        /// A close timeout waiting for response headers from the credential retry is a
+        /// cleanup detail; the earlier permanent auth rejection remains the primary error.
+        #[tokio::test]
+        async fn test_close_timeout_after_auth_retry_preserves_auth_rejection(
+        ) -> Result<(), Box<dyn std::error::Error>> {
+            setup_tracing();
+
+            let (mock_server, server_url) = start_mock_flight_server().await?;
+            let schema = create_test_arrow_schema();
+            mock_server
+                .inject_responses(
+                    TABLE_NAME,
+                    vec![
+                        MockFlightResponse::BatchAckThenGracefulClose {
+                            ack_up_to_offset: 0,
+                            ack_up_to_records: 1,
+                            duration_ms: 5_000,
+                            hold_response_open: false,
+                        },
+                        MockFlightResponse::FailSetup {
+                            status: Status::unauthenticated("reconnect credential rejected"),
+                        },
+                    ],
+                )
+                .await;
+
+            let provider = Arc::new(BlockingAuthRetryHeadersProvider::new());
+            let sdk = ZerobusSdk::builder()
+                .endpoint(server_url)
+                .unity_catalog_url("https://mock-uc.com")
+                .tls_config(Arc::new(NoTlsConfig))
+                .build()?;
+            let mut stream = sdk
+                .stream_builder()
+                .table(TABLE_NAME)
+                .headers_provider(provider.clone())
+                .arrow(schema.clone())
+                .recovery(true)
+                .recovery_backoff_ms(0)
+                .recovery_timeout_ms(5_000)
+                .recovery_retries(3)
+                .build_arrow()
+                .await?;
+
+            let offset = stream
+                .ingest_batch(create_test_record_batch(
+                    schema,
+                    vec![1],
+                    vec![Some("acked")],
+                ))
+                .await?;
+            stream.wait_for_offset(offset).await?;
+            tokio::time::timeout(
+                std::time::Duration::from_secs(2),
+                provider.retry_headers_started.notified(),
+            )
+            .await
+            .expect("credential retry should pause before creating its DoPut");
+
+            let (response_blocked, release_response) =
+                mock_server.arm_do_put_response_barrier().await;
+            provider.release_retry_headers.notify_one();
+            tokio::time::timeout(
+                std::time::Duration::from_secs(2),
+                response_blocked.notified(),
+            )
+            .await
+            .expect("credential retry should start its DoPut");
+
+            let error = stream
+                .close()
+                .await
+                .expect_err("permanent auth rejection must outrank close cleanup timeout");
+            release_response.notify_one();
+            assert!(error.to_string().contains("reconnect credential rejected"));
+            assert!(!error.is_retryable());
+            assert_eq!(
+                provider.invalidation_count(),
+                1,
+                "the same auth rejection must not invalidate shared credentials twice"
+            );
+
+            Ok(())
+        }
+
+        /// A permanent error from the current reconnect attempt is newer and more specific
+        /// than a retained auth rejection from the preceding attempt, even when close races it.
+        #[tokio::test]
+        async fn test_close_prefers_latest_permanent_reconnect_error(
+        ) -> Result<(), Box<dyn std::error::Error>> {
+            setup_tracing();
+
+            let (mock_server, server_url) = start_mock_flight_server().await?;
+            let schema = create_test_arrow_schema();
+            mock_server
+                .inject_responses(
+                    TABLE_NAME,
+                    vec![
+                        MockFlightResponse::BatchAckThenGracefulClose {
+                            ack_up_to_offset: 0,
+                            ack_up_to_records: 1,
+                            duration_ms: 5_000,
+                            hold_response_open: false,
+                        },
+                        MockFlightResponse::FailSetup {
+                            status: Status::unauthenticated("older credential rejection"),
+                        },
+                        MockFlightResponse::FailSetup {
+                            status: Status::invalid_argument("latest permanent rejection"),
+                        },
+                    ],
+                )
+                .await;
+
+            let provider = Arc::new(BlockingAuthRetryHeadersProvider::new());
+            let sdk = ZerobusSdk::builder()
+                .endpoint(server_url)
+                .unity_catalog_url("https://mock-uc.com")
+                .tls_config(Arc::new(NoTlsConfig))
+                .build()?;
+            let mut stream = sdk
+                .stream_builder()
+                .table(TABLE_NAME)
+                .headers_provider(provider.clone())
+                .arrow(schema.clone())
+                .recovery(true)
+                .recovery_backoff_ms(0)
+                .recovery_timeout_ms(5_000)
+                .recovery_retries(3)
+                .build_arrow()
+                .await?;
+
+            let offset = stream
+                .ingest_batch(create_test_record_batch(
+                    schema,
+                    vec![1],
+                    vec![Some("acked")],
+                ))
+                .await?;
+            stream.wait_for_offset(offset).await?;
+            tokio::time::timeout(
+                std::time::Duration::from_secs(2),
+                provider.retry_headers_started.notified(),
+            )
+            .await
+            .expect("credential retry should pause before its DoPut");
+
+            let (response_blocked, release_response) =
+                mock_server.arm_do_put_response_barrier().await;
+            provider.release_retry_headers.notify_one();
+            tokio::time::timeout(
+                std::time::Duration::from_secs(2),
+                response_blocked.notified(),
+            )
+            .await
+            .expect("the latest reconnect response should be ready behind the barrier");
+
+            let close_task = tokio::spawn(async move {
+                let result = stream.close().await;
+                (stream, result)
+            });
+            tokio::task::yield_now().await;
+            release_response.notify_one();
+            let (_stream, close_result) =
+                tokio::time::timeout(std::time::Duration::from_secs(2), close_task)
+                    .await
+                    .expect("close should consume the latest reconnect error")?;
+            let error = close_result.expect_err("the latest permanent error must fail close");
+            assert!(error.to_string().contains("latest permanent rejection"));
+            assert!(!error.to_string().contains("older credential rejection"));
+            assert_eq!(
+                provider.invalidation_count(),
+                1,
+                "only the superseded auth rejection should invalidate credentials"
+            );
+
+            Ok(())
+        }
+
         /// Terminal auth cleanup runs after the stream closes, but it must still be
         /// bounded so a custom provider cannot leave the supervisor task alive forever.
         #[tokio::test]
@@ -2046,7 +2570,7 @@ mod arrow_flight_tests {
             let (mock_server, server_url) = start_mock_flight_server().await?;
             let schema = create_test_arrow_schema();
 
-            // Mirror what Shinkansen attaches on a schema mismatch.
+            // Mirror what Zerobus attaches on a schema mismatch.
             let mut metadata = HashMap::new();
             metadata.insert("error_code".to_string(), "8001".to_string());
             metadata.insert(
@@ -2316,6 +2840,58 @@ mod arrow_flight_tests {
             assert!(stream.is_closed());
             let unacked = stream.get_unacked_batches().await?;
             assert_eq!(unacked.len(), 1, "Should have 1 unacked batch");
+
+            Ok(())
+        }
+
+        #[tokio::test]
+        async fn test_repeated_close_preserves_flush_error_over_later_peer_error(
+        ) -> Result<(), Box<dyn std::error::Error>> {
+            setup_tracing();
+
+            let (mock_server, server_url) = start_mock_flight_server().await?;
+            let schema = create_test_arrow_schema();
+            mock_server
+                .inject_responses(
+                    TABLE_NAME,
+                    vec![MockFlightResponse::ErrorAfterRequestEof {
+                        status: tonic::Status::invalid_argument("later shutdown rejection"),
+                    }],
+                )
+                .await;
+
+            let sdk = ZerobusSdk::builder()
+                .endpoint(server_url)
+                .unity_catalog_url("https://mock-uc.com")
+                .tls_config(Arc::new(NoTlsConfig))
+                .build()?;
+            let mut stream = sdk
+                .stream_builder()
+                .table(TABLE_NAME)
+                .headers_provider(Arc::new(TestHeadersProvider::default()))
+                .arrow(schema.clone())
+                .flush_timeout_ms(100)
+                .build_arrow()
+                .await?;
+
+            stream
+                .ingest_batch(create_test_record_batch(
+                    schema,
+                    vec![1],
+                    vec![Some("unacked")],
+                ))
+                .await?;
+
+            let first = stream
+                .close()
+                .await
+                .expect_err("the first close must return its flush timeout");
+            let second = stream
+                .close()
+                .await
+                .expect_err("repeated close must return the same flush timeout");
+            assert!(first.to_string().contains("Flush timed out"));
+            assert_eq!(second.to_string(), first.to_string());
 
             Ok(())
         }
@@ -3131,14 +3707,13 @@ mod arrow_flight_tests {
             Ok(())
         }
 
-        /// close() while a reconnect is parked at the rebuild barrier must tear the stream
-        /// down and move pending batches to the failed set, without panicking or hanging
-        /// beyond the flush timeout.
+        /// close() while a replacement connection is parked at the rebuild barrier must
+        /// half-close that connection before moving pending batches to the failed set.
         #[tokio::test]
-        async fn test_close_during_reconnect_window_moves_pending_to_failed(
+        async fn test_close_during_reconnect_half_closes_replacement(
         ) -> Result<(), Box<dyn std::error::Error>> {
             setup_tracing();
-            info!("Starting test_close_during_reconnect_window_moves_pending_to_failed");
+            info!("Starting test_close_during_reconnect_half_closes_replacement");
 
             let (mock_server, server_url) = start_mock_flight_server().await?;
             let schema = create_test_arrow_schema();
@@ -3172,7 +3747,8 @@ mod arrow_flight_tests {
                 .build_arrow()
                 .await?;
 
-            // Park the reconnect; do not release it — close() reaps it instead.
+            // Park the reconnect; do not release it — close() must transfer connection B
+            // to the normal request-half-close and response-drain path instead.
             let (reached, _proceed) = stream.arm_reconnect_rebuild_barrier().await;
 
             let batch = create_test_record_batch(schema.clone(), vec![1], vec![Some("a")]);
@@ -3182,8 +3758,11 @@ mod arrow_flight_tests {
                 .await
                 .expect("reconnect should reach the rebuild barrier");
 
-            // close() must return (its flush times out at 200ms) without hanging or
-            // panicking, reaping the parked supervisor along the way.
+            let half_closes_before_close = mock_server.get_request_half_close_count();
+            let resets_before_close = mock_server.get_request_reset_count();
+
+            // close() must return (its flush times out at 200ms) without dropping the
+            // parked replacement DoPut.
             let close_result =
                 tokio::time::timeout(std::time::Duration::from_secs(5), stream.close())
                     .await
@@ -3191,6 +3770,16 @@ mod arrow_flight_tests {
             assert!(
                 close_result.is_err(),
                 "close() should surface the flush timeout"
+            );
+            assert_eq!(
+                mock_server.get_request_half_close_count(),
+                half_closes_before_close + 1,
+                "explicit close must half-close replacement connection B"
+            );
+            assert_eq!(
+                mock_server.get_request_reset_count(),
+                resets_before_close,
+                "explicit close must not reset replacement connection B"
             );
 
             // The un-acked batch was moved to the failed set and is retrievable.
@@ -3200,6 +3789,337 @@ mod arrow_flight_tests {
                 1,
                 "pending batch must be moved to the failed set"
             );
+
+            Ok(())
+        }
+
+        /// Closing while replacement `DoPut` is waiting for response headers must keep
+        /// driving that same request, send request EOF, and hand the eventual response to
+        /// normal draining rather than cancelling the in-flight reconnect.
+        #[tokio::test]
+        async fn test_close_while_reconnect_waits_for_response_headers(
+        ) -> Result<(), Box<dyn std::error::Error>> {
+            setup_tracing();
+
+            let (mock_server, server_url) = start_mock_flight_server().await?;
+            let schema = create_test_arrow_schema();
+            mock_server
+                .inject_responses(
+                    TABLE_NAME,
+                    vec![MockFlightResponse::BatchAckThenGracefulClose {
+                        ack_up_to_offset: 0,
+                        ack_up_to_records: 1,
+                        duration_ms: 5_000,
+                        hold_response_open: false,
+                    }],
+                )
+                .await;
+
+            let sdk = ZerobusSdk::builder()
+                .endpoint(server_url)
+                .unity_catalog_url("https://mock-uc.com")
+                .tls_config(Arc::new(NoTlsConfig))
+                .build()?;
+            let mut stream = sdk
+                .stream_builder()
+                .table(TABLE_NAME)
+                .headers_provider(Arc::new(TestHeadersProvider::default()))
+                .arrow(schema.clone())
+                .recovery(true)
+                .recovery_backoff_ms(0)
+                .recovery_retries(3)
+                .build_arrow()
+                .await?;
+
+            // The initial request is already established, so this gates replacement B.
+            let (response_blocked, release_response) =
+                mock_server.arm_do_put_response_barrier().await;
+            let offset = stream
+                .ingest_batch(create_test_record_batch(
+                    schema,
+                    vec![1],
+                    vec![Some("acked")],
+                ))
+                .await?;
+            stream.wait_for_offset(offset).await?;
+            tokio::time::timeout(
+                std::time::Duration::from_secs(2),
+                response_blocked.notified(),
+            )
+            .await
+            .expect("replacement DoPut should wait for response headers");
+
+            let half_closes_before = mock_server.get_request_half_close_count();
+            let resets_before = mock_server.get_request_reset_count();
+            let close_task = tokio::spawn(async move {
+                let result = stream.close().await;
+                (stream, result)
+            });
+
+            tokio::time::timeout(std::time::Duration::from_secs(2), async {
+                while mock_server.get_request_half_close_count() == half_closes_before {
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .expect("explicit close should send EOF before response headers arrive");
+            release_response.notify_one();
+
+            let (stream, close_result) =
+                tokio::time::timeout(std::time::Duration::from_secs(2), close_task)
+                    .await
+                    .expect("close should finish after replacement response headers arrive")?;
+            close_result?;
+            assert_eq!(
+                mock_server.get_request_half_close_count(),
+                half_closes_before + 1
+            );
+            assert_eq!(mock_server.get_request_reset_count(), resets_before);
+            assert!(stream.is_closed());
+
+            Ok(())
+        }
+
+        /// If replacement response headers do not arrive within the bounded close window,
+        /// close must report that cleanup failure instead of translating it to success.
+        #[tokio::test]
+        async fn test_close_reports_reconnect_response_header_timeout(
+        ) -> Result<(), Box<dyn std::error::Error>> {
+            setup_tracing();
+
+            let (mock_server, server_url) = start_mock_flight_server().await?;
+            let schema = create_test_arrow_schema();
+            mock_server
+                .inject_responses(
+                    TABLE_NAME,
+                    vec![MockFlightResponse::BatchAckThenGracefulClose {
+                        ack_up_to_offset: 0,
+                        ack_up_to_records: 1,
+                        duration_ms: 5_000,
+                        hold_response_open: false,
+                    }],
+                )
+                .await;
+
+            let sdk = ZerobusSdk::builder()
+                .endpoint(server_url)
+                .unity_catalog_url("https://mock-uc.com")
+                .tls_config(Arc::new(NoTlsConfig))
+                .build()?;
+            let mut stream = sdk
+                .stream_builder()
+                .table(TABLE_NAME)
+                .headers_provider(Arc::new(TestHeadersProvider::default()))
+                .arrow(schema.clone())
+                .recovery(true)
+                .recovery_backoff_ms(0)
+                .recovery_retries(3)
+                .build_arrow()
+                .await?;
+
+            let (response_blocked, release_response) =
+                mock_server.arm_do_put_response_barrier().await;
+            let offset = stream
+                .ingest_batch(create_test_record_batch(
+                    schema,
+                    vec![1],
+                    vec![Some("acked")],
+                ))
+                .await?;
+            stream.wait_for_offset(offset).await?;
+            tokio::time::timeout(
+                std::time::Duration::from_secs(2),
+                response_blocked.notified(),
+            )
+            .await
+            .expect("replacement DoPut should wait for response headers");
+
+            let half_closes_before = mock_server.get_request_half_close_count();
+            let resets_before = mock_server.get_request_reset_count();
+            let error = stream
+                .close()
+                .await
+                .expect_err("close must report the replacement response-header timeout");
+            assert!(error
+                .to_string()
+                .contains("Explicit close timed out while waiting for the replacement"));
+            assert_eq!(
+                mock_server.get_request_half_close_count(),
+                half_closes_before + 1,
+                "the bounded timeout must still send request EOF"
+            );
+            assert_eq!(
+                mock_server.get_request_reset_count(),
+                resets_before,
+                "waiting for response headers must not reset the request side"
+            );
+            release_response.notify_one();
+            assert!(stream.is_closed());
+
+            Ok(())
+        }
+
+        /// Recovery timeout must be enforced by reconnect itself so a replacement DoPut
+        /// that is already live receives request EOF instead of being dropped by its caller.
+        #[tokio::test]
+        async fn test_recovery_timeout_half_closes_live_reconnect_doput(
+        ) -> Result<(), Box<dyn std::error::Error>> {
+            setup_tracing();
+
+            let (mock_server, server_url) = start_mock_flight_server().await?;
+            let schema = create_test_arrow_schema();
+            mock_server
+                .inject_responses(
+                    TABLE_NAME,
+                    vec![MockFlightResponse::BatchAckThenGracefulClose {
+                        ack_up_to_offset: 0,
+                        ack_up_to_records: 1,
+                        duration_ms: 5_000,
+                        hold_response_open: false,
+                    }],
+                )
+                .await;
+
+            let sdk = ZerobusSdk::builder()
+                .endpoint(server_url)
+                .unity_catalog_url("https://mock-uc.com")
+                .tls_config(Arc::new(NoTlsConfig))
+                .build()?;
+            let mut stream = sdk
+                .stream_builder()
+                .table(TABLE_NAME)
+                .headers_provider(Arc::new(TestHeadersProvider::default()))
+                .arrow(schema.clone())
+                .recovery(true)
+                .recovery_backoff_ms(0)
+                .recovery_timeout_ms(100)
+                .recovery_retries(1)
+                .build_arrow()
+                .await?;
+
+            let (response_blocked, release_response) =
+                mock_server.arm_do_put_response_barrier().await;
+            let offset = stream
+                .ingest_batch(create_test_record_batch(
+                    schema,
+                    vec![1],
+                    vec![Some("acked")],
+                ))
+                .await?;
+            stream.wait_for_offset(offset).await?;
+            tokio::time::timeout(
+                std::time::Duration::from_secs(2),
+                response_blocked.notified(),
+            )
+            .await
+            .expect("replacement DoPut should wait for response headers");
+
+            let half_closes_before = mock_server.get_request_half_close_count();
+            let resets_before = mock_server.get_request_reset_count();
+            tokio::time::timeout(std::time::Duration::from_secs(2), async {
+                while !stream.is_closed() {
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .expect("recovery timeout should terminate the stream");
+
+            assert_eq!(
+                mock_server.get_request_half_close_count(),
+                half_closes_before + 1,
+                "recovery timeout must half-close the live replacement request"
+            );
+            assert_eq!(
+                mock_server.get_request_reset_count(),
+                resets_before,
+                "recovery timeout must not reset the live replacement request"
+            );
+            let error = stream
+                .close()
+                .await
+                .expect_err("the terminal recovery timeout must remain visible");
+            assert!(error
+                .to_string()
+                .contains("Reconnection timed out after 100ms"));
+            release_response.notify_one();
+
+            Ok(())
+        }
+
+        /// A replacement `DoPut` has a live response stream before the asynchronous ready
+        /// signal arrives. The shorter ready timeout must therefore retain and cleanly
+        /// half-close that request instead of dropping it and sending RESET(CANCEL).
+        #[tokio::test]
+        async fn test_reconnect_ready_timeout_half_closes_live_doput(
+        ) -> Result<(), Box<dyn std::error::Error>> {
+            setup_tracing();
+
+            let (mock_server, server_url) = start_mock_flight_server().await?;
+            let schema = create_test_arrow_schema();
+            mock_server
+                .inject_responses(
+                    TABLE_NAME,
+                    vec![
+                        MockFlightResponse::Error {
+                            status: tonic::Status::unavailable("trigger reconnect"),
+                            delay_ms: 0,
+                        },
+                        MockFlightResponse::DelaySetup { delay_ms: 200 },
+                    ],
+                )
+                .await;
+
+            let sdk = ZerobusSdk::builder()
+                .endpoint(server_url)
+                .unity_catalog_url("https://mock-uc.com")
+                .tls_config(Arc::new(NoTlsConfig))
+                .build()?;
+            let mut stream = sdk
+                .stream_builder()
+                .table(TABLE_NAME)
+                .headers_provider(Arc::new(TestHeadersProvider::default()))
+                .arrow(schema.clone())
+                .recovery(true)
+                .recovery_backoff_ms(0)
+                .recovery_retries(1)
+                .recovery_timeout_ms(2_000)
+                .connection_timeout_ms(50)
+                .build_arrow()
+                .await?;
+
+            stream
+                .ingest_batch(create_test_record_batch(
+                    schema,
+                    vec![1],
+                    vec![Some("reconnect")],
+                ))
+                .await?;
+
+            tokio::time::timeout(std::time::Duration::from_secs(2), async {
+                while !stream.is_closed() {
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .expect("ready timeout should terminate recovery after one attempt");
+
+            assert_eq!(
+                mock_server.get_request_half_close_count(),
+                1,
+                "ready timeout must half-close the live replacement request"
+            );
+            assert_eq!(
+                mock_server.get_request_reset_count(),
+                0,
+                "ready timeout must not reset the live replacement request"
+            );
+            let error = stream
+                .close()
+                .await
+                .expect_err("the reconnect ready timeout must remain visible");
+            assert!(error
+                .to_string()
+                .contains("Timed out waiting for server reconnect confirmation (50ms)"));
 
             Ok(())
         }
@@ -3924,6 +4844,16 @@ mod arrow_flight_tests {
                  (possible silent data loss from pause-gate race)",
             );
 
+            let received_ids: std::collections::BTreeSet<_> =
+                mock_server.get_received_ids().await.into_iter().collect();
+            let expected_ids: std::collections::BTreeSet<_> = (0..CONCURRENT_TASKS)
+                .flat_map(|i| (0..ROWS_PER_BATCH).map(move |r| i as i64 * 100 + r as i64))
+                .collect();
+            assert_eq!(
+                received_ids, expected_ids,
+                "every unique row must reach the server even when replay creates duplicates"
+            );
+
             Ok(())
         }
 
@@ -3959,6 +4889,7 @@ mod arrow_flight_tests {
                             delay_ms: 0,
                             ack_up_to_offset: None,
                             ack_up_to_records: None,
+                            hold_response_open: false,
                         },
                         MockFlightResponse::BatchAck {
                             ack_up_to_offset: CONCURRENT_TASKS as i64 - 1,
@@ -4023,6 +4954,16 @@ mod arrow_flight_tests {
                 total_rows >= TOTAL_UNIQUE_ROWS,
                 "Server received {total_rows} rows; expected at least {TOTAL_UNIQUE_ROWS} \
                  (possible silent data loss from pause-gate race)",
+            );
+
+            let received_ids: std::collections::BTreeSet<_> =
+                mock_server.get_received_ids().await.into_iter().collect();
+            let expected_ids: std::collections::BTreeSet<_> = (0..CONCURRENT_TASKS)
+                .flat_map(|i| (0..ROWS_PER_BATCH).map(move |r| i as i64 * 100 + r as i64))
+                .collect();
+            assert_eq!(
+                received_ids, expected_ids,
+                "every unique row must survive the graceful-close pause and replay"
             );
 
             Ok(())
@@ -4731,6 +5672,93 @@ mod arrow_flight_tests {
 
             Ok(())
         }
+
+        /// A graceful close after one physical chunk must retain the durable prefix and
+        /// replay only the unacknowledged suffix of the logical RecordBatch.
+        #[tokio::test]
+        async fn test_graceful_close_replays_only_unacked_chunk_suffix(
+        ) -> Result<(), Box<dyn std::error::Error>> {
+            setup_tracing();
+            // Use enough physical chunks that HTTP/2 backpressure leaves an encoded
+            // suffix for request-body cancellation; the two-chunk fixture can be fully
+            // handed to tonic before the close response reaches the ACK processor.
+            const PARTIAL_BATCH_ROWS: usize = 50_000;
+
+            let (mock_server, server_url) = start_mock_flight_server().await?;
+            let schema = create_test_arrow_schema();
+            mock_server
+                .inject_responses(
+                    TABLE_NAME,
+                    vec![MockFlightResponse::GracefulCloseAfterChunk {
+                        duration_ms: 10_000,
+                        hold_response_open: false,
+                    }],
+                )
+                .await;
+
+            let sdk = ZerobusSdk::builder()
+                .endpoint(server_url)
+                .unity_catalog_url("https://mock-uc.com")
+                .tls_config(Arc::new(NoTlsConfig))
+                .build()?;
+            let mut stream = sdk
+                .stream_builder()
+                .table(TABLE_NAME)
+                .headers_provider(Arc::new(TestHeadersProvider::default()))
+                .arrow(schema.clone())
+                .recovery(true)
+                .recovery_backoff_ms(0)
+                .recovery_retries(3)
+                .stream_paused_max_wait_time_ms(Some(0))
+                .flush_timeout_ms(15_000)
+                .build_arrow()
+                .await?;
+
+            let batch =
+                create_large_test_record_batch(schema, PARTIAL_BATCH_ROWS, PAYLOAD_BYTES_PER_ROW);
+            let offset = stream.ingest_batch(batch).await?;
+            tokio::time::timeout(
+                std::time::Duration::from_secs(10),
+                stream.wait_for_offset(offset),
+            )
+            .await
+            .expect("the unacknowledged suffix should replay promptly")?;
+
+            let nonempty_connections: Vec<_> = mock_server
+                .get_received_ids_by_connection()
+                .await
+                .into_iter()
+                .filter(|ids| !ids.is_empty())
+                .collect();
+            assert_eq!(
+                nonempty_connections.len(),
+                2,
+                "the closing connection should receive a prefix and recovery should receive its suffix"
+            );
+            let prefix_len = nonempty_connections[0].len();
+            assert!(
+                prefix_len > 0 && prefix_len < PARTIAL_BATCH_ROWS,
+                "the close signal must split the logical batch at a physical chunk boundary"
+            );
+            assert_eq!(
+                nonempty_connections[0],
+                (0..prefix_len as i64).collect::<Vec<_>>()
+            );
+            assert_eq!(
+                nonempty_connections[1],
+                (prefix_len as i64..PARTIAL_BATCH_ROWS as i64).collect::<Vec<_>>(),
+                "wire offsets restart on recovery, but row replay must begin at the first unacked ID"
+            );
+            assert_eq!(
+                mock_server.get_received_ids().await,
+                (0..PARTIAL_BATCH_ROWS as i64).collect::<Vec<_>>(),
+                "the durable prefix must not replay and the cancelled suffix must not be lost"
+            );
+            assert_eq!(mock_server.get_request_reset_count(), 0);
+
+            stream.close().await?;
+            Ok(())
+        }
     }
 
     mod dictionary_tests {
@@ -4836,15 +5864,29 @@ mod arrow_flight_tests {
 
     mod graceful_close_tests {
         use super::*;
-        use std::time::Instant;
+        use crate::mock_arrow_flight::MockFlightServer;
+        use std::time::Duration;
+
+        async fn wait_for_request_transport_end(mock_server: &MockFlightServer) {
+            tokio::time::timeout(Duration::from_secs(2), async {
+                while mock_server.get_request_half_close_count()
+                    + mock_server.get_request_reset_count()
+                    == 0
+                {
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .expect("server should observe request EOF or reset");
+        }
 
         #[tokio::test]
-        async fn test_default_graceful_close_waits_for_full_server_duration(
+        async fn test_graceful_close_half_closes_request_and_drains_response(
         ) -> Result<(), Box<dyn std::error::Error>> {
             setup_tracing();
-            info!("Starting test_default_graceful_close_waits_for_full_server_duration (arrow)");
+            info!("Starting test_graceful_close_half_closes_request_and_drains_response (arrow)");
 
-            const SERVER_DURATION_MS: u64 = 1000;
+            const SERVER_DURATION_MS: u64 = 10_000;
 
             let (mock_server, server_url) = start_mock_flight_server().await?;
             let schema = create_test_arrow_schema();
@@ -4868,14 +5910,9 @@ mod arrow_flight_tests {
                         MockFlightResponse::GracefulClose {
                             duration_ms: SERVER_DURATION_MS,
                             delay_ms: 0,
-                            ack_up_to_offset: None,
-                            ack_up_to_records: None,
-                        },
-                        // After recovery, the client replays batch 2. Ack it.
-                        MockFlightResponse::BatchAck {
-                            ack_up_to_offset: 0,
-                            delay_ms: 0,
-                            ack_up_to_records: 3,
+                            ack_up_to_offset: Some(2),
+                            ack_up_to_records: Some(9),
+                            hold_response_open: false,
                         },
                     ],
                 )
@@ -4898,54 +5935,241 @@ mod arrow_flight_tests {
                 .build_arrow()
                 .await?;
 
-            // Ingest batch 0 and 1 - these will be acked.
+            // Queue two batches and flush them together before exercising rotation.
             let batch0 = create_test_record_batch(
                 schema.clone(),
                 vec![1, 2, 3],
                 vec![Some("a"), Some("b"), Some("c")],
             );
-            let offset0 = stream.ingest_batch(batch0).await?;
-            stream.wait_for_offset(offset0).await?;
+            stream.ingest_batch(batch0).await?;
 
             let batch1 = create_test_record_batch(
                 schema.clone(),
                 vec![4, 5, 6],
                 vec![Some("d"), Some("e"), Some("f")],
             );
-            let offset1 = stream.ingest_batch(batch1).await?;
-            stream.wait_for_offset(offset1).await?;
+            stream.ingest_batch(batch1).await?;
+            stream.flush().await?;
 
-            // Ingest batch 2 - triggers graceful close signal. The client should wait
-            // for the full server duration before triggering recovery.
+            // Park after the close signal's cumulative ack has been fully applied. At
+            // that point the pending batch is durable, but request END_STREAM must not
+            // have been sent until the ack-processing phase completes.
+            let (ack_applied, release_ack_processor) = stream.arm_ack_applied_barrier().await;
+            let (_, drain_completed) = stream.arm_response_drain_hook().await;
+
+            // Ingest batch 2 to trigger the close signal. Its cumulative ACK satisfies
+            // the pre-signal target, so the client should half-close promptly.
             let batch2 = create_test_record_batch(
                 schema.clone(),
                 vec![7, 8, 9],
                 vec![Some("g"), Some("h"), Some("i")],
             );
-            let start = Instant::now();
             let offset2 = stream.ingest_batch(batch2).await?;
 
-            // Wait for batch 2 to be acked (after recovery replays it).
-            stream.wait_for_offset(offset2).await?;
-            let elapsed = start.elapsed();
-
-            // Should have waited roughly the server duration before recovery.
-            assert!(
-                elapsed.as_millis() >= (SERVER_DURATION_MS as u128 - 200),
-                "Expected to wait at least ~{}ms for graceful close, but only waited {}ms",
-                SERVER_DURATION_MS,
-                elapsed.as_millis()
+            tokio::time::timeout(Duration::from_secs(2), ack_applied.notified())
+                .await
+                .expect("close signal ack should be applied");
+            assert_eq!(
+                mock_server.get_request_half_close_count(),
+                0,
+                "request must remain open until the already-sent batch ack is applied"
             );
 
-            stream.close().await?;
+            // The close signal's ack has already satisfied flush(), but close() must
+            // wait for the active HTTP/2 shutdown instead of aborting the supervisor.
+            let close_task = tokio::spawn(async move {
+                let result = stream.close().await;
+                (stream, result)
+            });
+            tokio::task::yield_now().await;
+            assert!(
+                !close_task.is_finished(),
+                "close must wait while ACK processing is parked"
+            );
+            release_ack_processor.notify_one();
+
+            tokio::time::timeout(Duration::from_secs(2), drain_completed.notified())
+                .await
+                .expect("client should finish the response drain on server EOF");
+            let (stream, close_result) = close_task.await?;
+            close_result?;
+
+            // Batch 2 was acknowledged before request EOF and close completed only
+            // after the SDK consumed response EOF.
+            assert_eq!(offset2, 2);
+            assert_eq!(mock_server.get_request_half_close_count(), 1);
+            assert_eq!(
+                mock_server.get_request_reset_count(),
+                0,
+                "zero ACK wait must still avoid resetting the request stream"
+            );
+            assert_eq!(
+                mock_server.get_final_response_delivery_count(),
+                0,
+                "the mock must not synthesize a final response after request END_STREAM"
+            );
+            assert_eq!(
+                mock_server.get_request_reset_count(),
+                0,
+                "graceful rotation must not reset the request stream"
+            );
+
+            assert!(stream.is_closed());
             Ok(())
         }
 
         #[tokio::test]
-        async fn test_immediate_recovery_on_close_signal() -> Result<(), Box<dyn std::error::Error>>
-        {
+        async fn test_close_waits_for_separately_queued_graceful_close(
+        ) -> Result<(), Box<dyn std::error::Error>> {
             setup_tracing();
-            info!("Starting test_immediate_recovery_on_close_signal (arrow)");
+            info!("Starting test_close_waits_for_separately_queued_graceful_close (arrow)");
+
+            let (mock_server, server_url) = start_mock_flight_server().await?;
+            let schema = create_test_arrow_schema();
+            mock_server
+                .inject_responses(
+                    TABLE_NAME,
+                    vec![MockFlightResponse::BatchAckThenGracefulClose {
+                        ack_up_to_offset: 0,
+                        ack_up_to_records: 3,
+                        duration_ms: 10_000,
+                        hold_response_open: false,
+                    }],
+                )
+                .await;
+
+            let sdk = ZerobusSdk::builder()
+                .endpoint(server_url)
+                .unity_catalog_url("https://mock-uc.com")
+                .tls_config(Arc::new(NoTlsConfig))
+                .build()?;
+            let mut stream = sdk
+                .stream_builder()
+                .table(TABLE_NAME)
+                .headers_provider(Arc::new(TestHeadersProvider::default()))
+                .arrow(schema.clone())
+                .recovery(true)
+                .recovery_backoff_ms(10_000)
+                .recovery_retries(3)
+                .build_arrow()
+                .await?;
+
+            let (ack_applied, release_ack_processor) = stream.arm_ack_applied_barrier().await;
+            stream
+                .ingest_batch(create_test_record_batch(
+                    schema,
+                    vec![1, 2, 3],
+                    vec![Some("a"), Some("b"), Some("c")],
+                ))
+                .await?;
+            tokio::time::timeout(Duration::from_secs(2), ack_applied.notified())
+                .await
+                .expect("ordinary ACK should be applied before the queued close signal");
+            assert_eq!(mock_server.get_request_half_close_count(), 0);
+            assert_eq!(mock_server.get_request_reset_count(), 0);
+
+            let mut close_task = tokio::spawn(async move {
+                let result = stream.close().await;
+                (stream, result)
+            });
+            assert!(
+                tokio::time::timeout(Duration::from_millis(100), &mut close_task)
+                    .await
+                    .is_err(),
+                "close must wait for the ACK processor instead of aborting the live request"
+            );
+
+            release_ack_processor.notify_one();
+            let (stream, close_result) = tokio::time::timeout(Duration::from_secs(2), close_task)
+                .await
+                .expect("close should finish after ACK processing resumes")?;
+            close_result?;
+            wait_for_request_transport_end(&mock_server).await;
+
+            assert_eq!(mock_server.get_request_half_close_count(), 1);
+            assert_eq!(
+                mock_server.get_request_reset_count(),
+                0,
+                "a separately queued close signal must not race explicit close into a reset"
+            );
+            assert!(stream.is_closed());
+            assert!(stream.get_unacked_batches().await?.is_empty());
+            Ok(())
+        }
+
+        /// A permanent peer status produced only after explicit close sends request EOF must
+        /// be returned by close(), even when its preceding flush completed successfully.
+        #[tokio::test]
+        async fn test_explicit_close_returns_error_after_request_eof(
+        ) -> Result<(), Box<dyn std::error::Error>> {
+            setup_tracing();
+            info!("Starting test_explicit_close_returns_error_after_request_eof (arrow)");
+
+            let (mock_server, server_url) = start_mock_flight_server().await?;
+            let schema = create_test_arrow_schema();
+            mock_server
+                .inject_responses(
+                    TABLE_NAME,
+                    vec![
+                        MockFlightResponse::BatchAck {
+                            ack_up_to_offset: 0,
+                            delay_ms: 0,
+                            ack_up_to_records: 3,
+                        },
+                        MockFlightResponse::ErrorAfterRequestEof {
+                            status: tonic::Status::invalid_argument("post-EOF rejection"),
+                        },
+                    ],
+                )
+                .await;
+
+            let sdk = ZerobusSdk::builder()
+                .endpoint(server_url)
+                .unity_catalog_url("https://mock-uc.com")
+                .tls_config(Arc::new(NoTlsConfig))
+                .build()?;
+            let mut stream = sdk
+                .stream_builder()
+                .table(TABLE_NAME)
+                .headers_provider(Arc::new(TestHeadersProvider::default()))
+                .arrow(schema.clone())
+                .recovery(true)
+                .recovery_retries(3)
+                .build_arrow()
+                .await?;
+
+            stream
+                .ingest_batch(create_test_record_batch(
+                    schema,
+                    vec![1, 2, 3],
+                    vec![Some("a"), Some("b"), Some("c")],
+                ))
+                .await?;
+            stream.flush().await?;
+
+            let error = stream
+                .close()
+                .await
+                .expect_err("close must preserve the peer's permanent post-EOF status");
+            match error {
+                ZerobusError::StreamClosedError(status) => {
+                    assert_eq!(status.code(), tonic::Code::InvalidArgument);
+                    assert_eq!(status.message(), "post-EOF rejection");
+                }
+                other => panic!("expected peer stream status, got {other:?}"),
+            }
+
+            wait_for_request_transport_end(&mock_server).await;
+            assert_eq!(mock_server.get_request_half_close_count(), 1);
+            assert_eq!(mock_server.get_request_reset_count(), 0);
+            Ok(())
+        }
+
+        #[tokio::test]
+        async fn test_zero_ack_wait_still_cleans_up_transport(
+        ) -> Result<(), Box<dyn std::error::Error>> {
+            setup_tracing();
+            info!("Starting test_zero_ack_wait_still_cleans_up_transport (arrow)");
 
             let (mock_server, server_url) = start_mock_flight_server().await?;
             let schema = create_test_arrow_schema();
@@ -4963,14 +6187,15 @@ mod arrow_flight_tests {
                         MockFlightResponse::GracefulClose {
                             duration_ms: 10_000,
                             delay_ms: 0,
-                            ack_up_to_offset: None,
-                            ack_up_to_records: None,
+                            ack_up_to_offset: Some(0),
+                            ack_up_to_records: Some(3),
+                            hold_response_open: true,
                         },
-                        // After immediate recovery, ack batch 1.
-                        MockFlightResponse::BatchAck {
-                            ack_up_to_offset: 0,
-                            delay_ms: 0,
-                            ack_up_to_records: 3,
+                        // Model a genuine advancing ACK that was still in flight when
+                        // request END_STREAM arrived.
+                        MockFlightResponse::BatchAckAfterRequestEof {
+                            ack_up_to_offset: 1,
+                            ack_up_to_records: 6,
                         },
                     ],
                 )
@@ -4993,6 +6218,7 @@ mod arrow_flight_tests {
                 .stream_paused_max_wait_time_ms(Some(0))
                 .build_arrow()
                 .await?;
+            let (response_consumed, drain_completed) = stream.arm_response_drain_hook().await;
 
             let batch0 = create_test_record_batch(
                 schema.clone(),
@@ -5003,23 +6229,26 @@ mod arrow_flight_tests {
             stream.wait_for_offset(offset0).await?;
 
             // Batch 1 triggers graceful close. With stream_paused_max_wait_time_ms=0,
-            // recovery should be triggered immediately.
+            // recovery waits only for the bounded transport drain.
             let batch1 = create_test_record_batch(
                 schema.clone(),
                 vec![4, 5, 6],
                 vec![Some("d"), Some("e"), Some("f")],
             );
-            let start = Instant::now();
             let offset1 = stream.ingest_batch(batch1).await?;
 
+            tokio::time::timeout(Duration::from_secs(2), response_consumed.notified())
+                .await
+                .expect("client should consume the advancing ACK after request EOF");
+            tokio::time::timeout(Duration::from_secs(2), drain_completed.notified())
+                .await
+                .expect("bounded transport drain should complete");
             stream.wait_for_offset(offset1).await?;
-            let elapsed = start.elapsed();
-
-            // Should recover quickly, not wait 10 seconds.
-            assert!(
-                elapsed.as_millis() < 5000,
-                "Expected immediate recovery, but waited {}ms",
-                elapsed.as_millis()
+            assert_eq!(mock_server.get_request_half_close_count(), 1);
+            assert_eq!(
+                mock_server.get_final_response_delivery_count(),
+                1,
+                "client must drain the explicitly scripted ACK after request END_STREAM"
             );
 
             stream.close().await?;
@@ -5047,6 +6276,7 @@ mod arrow_flight_tests {
                             delay_ms: 0,
                             ack_up_to_offset: None,
                             ack_up_to_records: None,
+                            hold_response_open: true,
                         },
                         // After recovery, ack batch 0.
                         MockFlightResponse::BatchAck {
@@ -5075,31 +6305,26 @@ mod arrow_flight_tests {
                 .stream_paused_max_wait_time_ms(Some(CLIENT_MAX_WAIT_MS))
                 .build_arrow()
                 .await?;
+            let (_, drain_completed) = stream.arm_response_drain_hook().await;
 
             let batch0 = create_test_record_batch(
                 schema.clone(),
                 vec![1, 2, 3],
                 vec![Some("a"), Some("b"), Some("c")],
             );
-            let start = Instant::now();
             let offset0 = stream.ingest_batch(batch0).await?;
 
+            tokio::time::timeout(Duration::from_secs(3), drain_completed.notified())
+                .await
+                .expect("bounded response drain should complete");
             stream.wait_for_offset(offset0).await?;
-            let elapsed = start.elapsed();
-
-            // Should wait roughly CLIENT_MAX_WAIT_MS (not SERVER_DURATION_MS).
-            assert!(
-                elapsed.as_millis() >= (CLIENT_MAX_WAIT_MS as u128 - 200),
-                "Expected to wait at least ~{}ms, but only waited {}ms",
-                CLIENT_MAX_WAIT_MS,
-                elapsed.as_millis()
+            assert_eq!(mock_server.get_request_half_close_count(), 1);
+            assert_eq!(
+                mock_server.get_request_reset_count(),
+                0,
+                "a client ACK-wait cap must still preserve clean request EOF"
             );
-            assert!(
-                elapsed.as_millis() < (SERVER_DURATION_MS as u128 - 500),
-                "Expected to wait less than server duration {}ms, but waited {}ms",
-                SERVER_DURATION_MS,
-                elapsed.as_millis()
-            );
+            assert_eq!(mock_server.get_final_response_delivery_count(), 0);
 
             stream.close().await?;
             Ok(())
@@ -5132,6 +6357,7 @@ mod arrow_flight_tests {
                             delay_ms: 0,
                             ack_up_to_offset: Some(1),
                             ack_up_to_records: Some(6),
+                            hold_response_open: false,
                         },
                         // After early recovery, no batches need replay since all were acked.
                     ],
@@ -5155,6 +6381,7 @@ mod arrow_flight_tests {
                 .stream_paused_max_wait_time_ms(None)
                 .build_arrow()
                 .await?;
+            let (_, drain_completed) = stream.arm_response_drain_hook().await;
 
             let batch0 = create_test_record_batch(
                 schema.clone(),
@@ -5169,21 +6396,292 @@ mod arrow_flight_tests {
                 vec![4, 5, 6],
                 vec![Some("d"), Some("e"), Some("f")],
             );
-            let start = Instant::now();
             let offset1 = stream.ingest_batch(batch1).await?;
 
-            // Batch 1 should be acked during the grace period (after 100ms delay).
-            // The graceful close should exit early since all batches are acked.
+            tokio::time::timeout(Duration::from_secs(2), drain_completed.notified())
+                .await
+                .expect("all-acked close should finish its response drain on server EOF");
             stream.wait_for_offset(offset1).await?;
-            let elapsed = start.elapsed();
+            assert_eq!(mock_server.get_final_response_delivery_count(), 0);
 
-            // Should exit well before the 10s grace period.
-            assert!(
-                elapsed.as_millis() < 3000,
-                "Expected early exit from graceful close, but waited {}ms",
-                elapsed.as_millis()
+            stream.close().await?;
+            Ok(())
+        }
+
+        #[tokio::test]
+        async fn test_graceful_close_cleans_up_when_recovery_is_disabled(
+        ) -> Result<(), Box<dyn std::error::Error>> {
+            let (mock_server, server_url) = start_mock_flight_server().await?;
+            let schema = create_test_arrow_schema();
+            mock_server
+                .inject_responses(
+                    TABLE_NAME,
+                    vec![MockFlightResponse::GracefulClose {
+                        duration_ms: 5_000,
+                        delay_ms: 0,
+                        ack_up_to_offset: Some(0),
+                        ack_up_to_records: Some(3),
+                        hold_response_open: false,
+                    }],
+                )
+                .await;
+
+            let sdk = ZerobusSdk::builder()
+                .endpoint(server_url)
+                .unity_catalog_url("https://mock-uc.com")
+                .tls_config(Arc::new(NoTlsConfig))
+                .build()?;
+            let mut stream = sdk
+                .stream_builder()
+                .table(TABLE_NAME)
+                .headers_provider(Arc::new(TestHeadersProvider::default()))
+                .arrow(schema.clone())
+                .recovery(false)
+                .build_arrow()
+                .await?;
+
+            let batch = create_test_record_batch(
+                schema,
+                vec![1, 2, 3],
+                vec![Some("a"), Some("b"), Some("c")],
             );
+            let offset = stream.ingest_batch(batch).await?;
+            stream.wait_for_offset(offset).await?;
+            tokio::time::timeout(Duration::from_secs(2), async {
+                while !stream.is_closed() {
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .expect("recovery-disabled stream should finalize after transport cleanup");
 
+            assert_eq!(mock_server.get_request_half_close_count(), 1);
+            assert_eq!(mock_server.get_request_reset_count(), 0);
+            assert!(stream.close().await.is_err());
+            Ok(())
+        }
+
+        #[tokio::test]
+        async fn test_permanent_peer_error_during_drain_is_preserved(
+        ) -> Result<(), Box<dyn std::error::Error>> {
+            let (mock_server, server_url) = start_mock_flight_server().await?;
+            let schema = create_test_arrow_schema();
+            mock_server
+                .inject_responses(
+                    TABLE_NAME,
+                    vec![MockFlightResponse::GracefulCloseWithFinalError {
+                        duration_ms: 5_000,
+                        delay_ms: 0,
+                        status: tonic::Status::invalid_argument("permanent drain failure"),
+                    }],
+                )
+                .await;
+
+            let sdk = ZerobusSdk::builder()
+                .endpoint(server_url)
+                .unity_catalog_url("https://mock-uc.com")
+                .tls_config(Arc::new(NoTlsConfig))
+                .build()?;
+            let stream = sdk
+                .stream_builder()
+                .table(TABLE_NAME)
+                .headers_provider(Arc::new(TestHeadersProvider::default()))
+                .arrow(schema.clone())
+                .recovery(true)
+                .recovery_retries(3)
+                .stream_paused_max_wait_time_ms(Some(0))
+                .build_arrow()
+                .await?;
+
+            let batch = create_test_record_batch(
+                schema,
+                vec![1, 2, 3],
+                vec![Some("a"), Some("b"), Some("c")],
+            );
+            let offset = stream.ingest_batch(batch).await?;
+            let error = stream
+                .wait_for_offset(offset)
+                .await
+                .expect_err("permanent peer error must terminate the stream");
+            match error {
+                ZerobusError::StreamClosedError(status) => {
+                    assert_eq!(status.code(), tonic::Code::InvalidArgument);
+                    assert_eq!(status.message(), "permanent drain failure");
+                }
+                other => panic!("expected peer stream status, got {other:?}"),
+            }
+            wait_for_request_transport_end(&mock_server).await;
+            assert_eq!(mock_server.get_request_half_close_count(), 1);
+            assert_eq!(mock_server.get_request_reset_count(), 0);
+            Ok(())
+        }
+
+        #[tokio::test]
+        async fn test_peer_error_while_awaiting_acks_still_half_closes_request(
+        ) -> Result<(), Box<dyn std::error::Error>> {
+            let (mock_server, server_url) = start_mock_flight_server().await?;
+            let schema = create_test_arrow_schema();
+            mock_server
+                .inject_responses(
+                    TABLE_NAME,
+                    vec![MockFlightResponse::GracefulCloseWithDelayedError {
+                        duration_ms: 5_000,
+                        error_delay_ms: 50,
+                        status: tonic::Status::invalid_argument("pre-EOF peer failure"),
+                    }],
+                )
+                .await;
+
+            let sdk = ZerobusSdk::builder()
+                .endpoint(server_url)
+                .unity_catalog_url("https://mock-uc.com")
+                .tls_config(Arc::new(NoTlsConfig))
+                .build()?;
+            let stream = sdk
+                .stream_builder()
+                .table(TABLE_NAME)
+                .headers_provider(Arc::new(TestHeadersProvider::default()))
+                .arrow(schema.clone())
+                .recovery(true)
+                .recovery_retries(3)
+                .build_arrow()
+                .await?;
+
+            let batch = create_test_record_batch(
+                schema,
+                vec![1, 2, 3],
+                vec![Some("a"), Some("b"), Some("c")],
+            );
+            let offset = stream.ingest_batch(batch).await?;
+            let error = stream
+                .wait_for_offset(offset)
+                .await
+                .expect_err("permanent peer error must terminate the stream");
+            match error {
+                ZerobusError::StreamClosedError(status) => {
+                    assert_eq!(status.code(), tonic::Code::InvalidArgument);
+                    assert_eq!(status.message(), "pre-EOF peer failure");
+                }
+                other => panic!("expected peer stream status, got {other:?}"),
+            }
+            wait_for_request_transport_end(&mock_server).await;
+            assert_eq!(mock_server.get_request_half_close_count(), 1);
+            assert_eq!(mock_server.get_request_reset_count(), 0);
+            Ok(())
+        }
+
+        #[tokio::test]
+        async fn test_invalid_close_signal_ack_still_half_closes_request(
+        ) -> Result<(), Box<dyn std::error::Error>> {
+            let (mock_server, server_url) = start_mock_flight_server().await?;
+            let schema = create_test_arrow_schema();
+            mock_server
+                .inject_responses(
+                    TABLE_NAME,
+                    vec![MockFlightResponse::GracefulClose {
+                        duration_ms: 5_000,
+                        delay_ms: 0,
+                        ack_up_to_offset: Some(0),
+                        ack_up_to_records: Some(4),
+                        hold_response_open: false,
+                    }],
+                )
+                .await;
+
+            let sdk = ZerobusSdk::builder()
+                .endpoint(server_url)
+                .unity_catalog_url("https://mock-uc.com")
+                .tls_config(Arc::new(NoTlsConfig))
+                .build()?;
+            let stream = sdk
+                .stream_builder()
+                .table(TABLE_NAME)
+                .headers_provider(Arc::new(TestHeadersProvider::default()))
+                .arrow(schema.clone())
+                .recovery(true)
+                .recovery_retries(3)
+                .build_arrow()
+                .await?;
+
+            let batch = create_test_record_batch(
+                schema,
+                vec![1, 2, 3],
+                vec![Some("a"), Some("b"), Some("c")],
+            );
+            let offset = stream.ingest_batch(batch).await?;
+            let error = stream
+                .wait_for_offset(offset)
+                .await
+                .expect_err("forward ACK in a close signal must be rejected");
+            match error {
+                ZerobusError::InvalidStateError(message) => {
+                    assert!(message.contains("4 records"));
+                    assert!(message.contains("3 records were submitted"));
+                }
+                other => panic!("expected invalid-state error, got {other:?}"),
+            }
+            wait_for_request_transport_end(&mock_server).await;
+            assert_eq!(mock_server.get_request_half_close_count(), 1);
+            assert_eq!(mock_server.get_request_reset_count(), 0);
+            Ok(())
+        }
+
+        #[tokio::test]
+        async fn test_zero_server_grace_recovers_without_waiting(
+        ) -> Result<(), Box<dyn std::error::Error>> {
+            let (mock_server, server_url) = start_mock_flight_server().await?;
+            let schema = create_test_arrow_schema();
+            mock_server
+                .inject_responses(
+                    TABLE_NAME,
+                    vec![
+                        MockFlightResponse::GracefulClose {
+                            duration_ms: 0,
+                            delay_ms: 0,
+                            ack_up_to_offset: None,
+                            ack_up_to_records: None,
+                            hold_response_open: false,
+                        },
+                        MockFlightResponse::BatchAck {
+                            ack_up_to_offset: 0,
+                            delay_ms: 0,
+                            ack_up_to_records: 3,
+                        },
+                    ],
+                )
+                .await;
+
+            let sdk = ZerobusSdk::builder()
+                .endpoint(server_url)
+                .unity_catalog_url("https://mock-uc.com")
+                .tls_config(Arc::new(NoTlsConfig))
+                .build()?;
+            let mut stream = sdk
+                .stream_builder()
+                .table(TABLE_NAME)
+                .headers_provider(Arc::new(TestHeadersProvider::default()))
+                .arrow(schema.clone())
+                .recovery(true)
+                .recovery_backoff_ms(0)
+                .recovery_retries(3)
+                .build_arrow()
+                .await?;
+
+            let batch = create_test_record_batch(
+                schema,
+                vec![1, 2, 3],
+                vec![Some("a"), Some("b"), Some("c")],
+            );
+            let offset = stream.ingest_batch(batch).await?;
+            tokio::time::timeout(Duration::from_secs(2), stream.wait_for_offset(offset))
+                .await
+                .expect("zero-duration signal must not stall recovery")?;
+            assert_eq!(
+                mock_server.get_request_half_close_count(),
+                1,
+                "zero grace still gets a local best-effort request EOF settle window"
+            );
+            assert_eq!(mock_server.get_request_reset_count(), 0);
             stream.close().await?;
             Ok(())
         }
@@ -5205,14 +6703,16 @@ mod arrow_flight_tests {
                         MockFlightResponse::GracefulClose {
                             duration_ms: 5_000,
                             delay_ms: 0,
-                            ack_up_to_offset: None,
-                            ack_up_to_records: None,
+                            ack_up_to_offset: Some(0),
+                            ack_up_to_records: Some(3),
+                            hold_response_open: false,
                         },
-                        // After recovery, ack both batches (batch 0 + batch 1 = 6 records).
+                        // Batch A is already durable; only buffered batch B replays on the
+                        // replacement connection, whose wire offsets and record count restart.
                         MockFlightResponse::BatchAck {
-                            ack_up_to_offset: 1,
+                            ack_up_to_offset: 0,
                             delay_ms: 0,
-                            ack_up_to_records: 6,
+                            ack_up_to_records: 3,
                         },
                     ],
                 )
@@ -5243,8 +6743,12 @@ mod arrow_flight_tests {
             );
             let _offset0 = stream.ingest_batch(batch0).await?;
 
-            // Wait a bit for the graceful close signal to be processed.
-            tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+            tokio::time::timeout(
+                Duration::from_secs(2),
+                stream.wait_for_graceful_close_start(),
+            )
+            .await
+            .expect("client should enter the graceful-close pause");
 
             // Ingestion during the grace period should be accepted and buffered.
             // The batch will be replayed after recovery.
@@ -5256,8 +6760,23 @@ mod arrow_flight_tests {
             let offset1 = stream.ingest_batch(batch1).await?;
             assert_eq!(offset1, 1, "Expected offset 1 for second batch");
 
-            // After recovery, both batches should be acked.
-            stream.wait_for_offset(offset1).await?;
+            // The ACK carried by the close signal satisfies the pre-signal target, so
+            // request EOF and recovery must happen promptly instead of waiting 5 seconds
+            // for post-pause batch B.
+            wait_for_request_transport_end(&mock_server).await;
+            assert_eq!(mock_server.get_request_half_close_count(), 1);
+            assert_eq!(mock_server.get_request_reset_count(), 0);
+            tokio::time::timeout(Duration::from_secs(2), stream.wait_for_offset(offset1))
+                .await
+                .expect("post-pause ingestion must not extend the graceful-close ACK wait")?;
+
+            let nonempty_connections: Vec<_> = mock_server
+                .get_received_ids_by_connection()
+                .await
+                .into_iter()
+                .filter(|ids| !ids.is_empty())
+                .collect();
+            assert_eq!(nonempty_connections, vec![vec![1, 2, 3], vec![4, 5, 6]]);
 
             stream.close().await?;
             Ok(())
