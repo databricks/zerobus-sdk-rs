@@ -1,8 +1,10 @@
 mod mock_grpc;
 mod utils;
 
+use std::future::Future;
 use std::sync::Arc;
 use std::task::Poll;
+use std::time::Duration;
 
 use databricks_zerobus_ingest_sdk::{
     MessageId, MultiplexedStream, NoTlsConfig, ZerobusError, ZerobusSdk, ZerobusStream,
@@ -231,9 +233,20 @@ mod single_stream_tests {
 mod multi_stream_tests {
     use super::*;
 
+    const COMPLETION_TIMEOUT: Duration = Duration::from_secs(5);
+
     /// Use separate table names per stream so each gRPC connection gets its own response sequence.
     const TABLE_A: &str = "multi.schema.table_a";
     const TABLE_B: &str = "multi.schema.table_b";
+
+    async fn expect_completion<F>(future: F, message: &str) -> F::Output
+    where
+        F: Future,
+    {
+        tokio::time::timeout(COMPLETION_TIMEOUT, future)
+            .await
+            .expect(message)
+    }
 
     #[tokio::test]
     async fn test_round_robin_across_two_streams() -> Result<(), Box<dyn std::error::Error>> {
@@ -378,14 +391,31 @@ mod multi_stream_tests {
             matches!(poll!(&mut third_future), Poll::Pending),
             "Expected ingest to wait on the chosen stream even when another sibling is free"
         );
+        tokio::task::yield_now().await;
+        assert!(
+            matches!(poll!(&mut third_future), Poll::Pending),
+            "Expected ingest to remain blocked after yielding"
+        );
 
         slow_ack.release();
-        let third = third_future.await?;
+        let third = expect_completion(
+            third_future,
+            "ingest should complete once the chosen lane drains",
+        )
+        .await?;
 
         assert_eq!(third.stream_index(), 0);
         assert_eq!(third.sub_offset(), 1);
-        mux.wait_for_message_id(first).await?;
-        mux.wait_for_message_id(third).await?;
+        expect_completion(
+            mux.wait_for_message_id(first),
+            "first record should be acknowledged after releasing its gate",
+        )
+        .await?;
+        expect_completion(
+            mux.wait_for_message_id(third),
+            "third record should be acknowledged after the chosen lane drains",
+        )
+        .await?;
         assert_eq!(mock_server.get_write_count().await, 3);
 
         Ok(())
@@ -456,16 +486,32 @@ mod multi_stream_tests {
             matches!(poll!(&mut batch_future), Poll::Pending),
             "Expected batch ingest to wait on the chosen stream even when another sibling is free"
         );
+        tokio::task::yield_now().await;
+        assert!(
+            matches!(poll!(&mut batch_future), Poll::Pending),
+            "Expected batch ingest to remain blocked after yielding"
+        );
 
         slow_ack.release();
-        let batch_id = batch_future
-            .await?
-            .expect("non-empty batch should return a message id");
+        let batch_id = expect_completion(
+            batch_future,
+            "batch ingest should complete once the chosen lane drains",
+        )
+        .await?
+        .expect("non-empty batch should return a message id");
 
         assert_eq!(batch_id.stream_index(), 0);
         assert_eq!(batch_id.sub_offset(), 1);
-        mux.wait_for_message_id(first).await?;
-        mux.wait_for_message_id(batch_id).await?;
+        expect_completion(
+            mux.wait_for_message_id(first),
+            "first record should be acknowledged after releasing its gate",
+        )
+        .await?;
+        expect_completion(
+            mux.wait_for_message_id(batch_id),
+            "batch should be acknowledged after the chosen lane drains",
+        )
+        .await?;
         assert_eq!(mock_server.get_write_count().await, 5);
 
         Ok(())
@@ -532,9 +578,18 @@ mod multi_stream_tests {
             matches!(poll!(&mut third_future), Poll::Pending),
             "Expected ingest to block while all sub-streams are full"
         );
+        tokio::task::yield_now().await;
+        assert!(
+            matches!(poll!(&mut third_future), Poll::Pending),
+            "Expected ingest to remain blocked after yielding"
+        );
 
         lane_a_ack.release();
-        let third = third_future.await?;
+        let third = expect_completion(
+            third_future,
+            "ingest should complete once the original lane drains",
+        )
+        .await?;
 
         assert_eq!(
             third.stream_index(),
@@ -544,9 +599,21 @@ mod multi_stream_tests {
         assert_eq!(third.sub_offset(), 1);
 
         lane_b_ack.release();
-        mux.wait_for_message_id(first).await?;
-        mux.wait_for_message_id(second).await?;
-        mux.wait_for_message_id(third).await?;
+        expect_completion(
+            mux.wait_for_message_id(first),
+            "first record should be acknowledged after releasing lane A",
+        )
+        .await?;
+        expect_completion(
+            mux.wait_for_message_id(second),
+            "second record should be acknowledged after releasing lane B",
+        )
+        .await?;
+        expect_completion(
+            mux.wait_for_message_id(third),
+            "third record should be acknowledged after the original lane drains",
+        )
+        .await?;
         assert_eq!(mock_server.get_write_count().await, 3);
 
         Ok(())

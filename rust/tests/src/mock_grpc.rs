@@ -28,12 +28,14 @@ pub struct MockResponseGate {
 }
 
 impl MockResponseGate {
+    #[allow(dead_code)]
     pub fn new() -> Self {
         Self {
             semaphore: Semaphore::new(0),
         }
     }
 
+    #[allow(dead_code)]
     pub fn release(&self) {
         self.semaphore.add_permits(1);
     }
@@ -58,6 +60,7 @@ pub enum MockResponse {
         delay_ms: u64,
     },
     /// Successful record acknowledgment released explicitly by a test
+    #[allow(dead_code)]
     GatedRecordAck {
         ack_up_to_offset: i64,
         gate: Arc<MockResponseGate>,
