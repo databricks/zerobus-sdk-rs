@@ -218,7 +218,7 @@ func (s *SDK) Close() error {
 // WithProto with the required descriptor, or WithJSON for JSON records.
 //
 // The stream opens asynchronously: CreateStream validates its arguments and
-// returns a ready stream immediately, while the first connection (token mint
+// returns a stream immediately, while the first connection (token mint
 // plus handshake) proceeds in the background and recovers on failure. A
 // connection error that cannot be recovered — bad credentials, an unknown
 // table — therefore surfaces on the first Flush, WaitForOffset, or ack
