@@ -15,6 +15,9 @@ import (
 // wait for a server round-trip. The caller must Close the stream when done.
 type Stream struct {
 	core *stream.CoreStream[*zerobuspb.EphemeralStreamRequest, *zerobuspb.EphemeralStreamResponse]
+	// sdk is the SDK that created this stream. Close deregisters from it so a
+	// long-lived SDK does not retain streams the caller has already closed.
+	sdk *SDK
 }
 
 // IngestRecordOffset queues one record and returns the logical offset assigned
@@ -111,7 +114,19 @@ func (s *Stream) GetUnackedBatches() ([][][]byte, error) {
 // teardown and any remaining records are abandoned — retrievable via
 // GetUnackedRecords or reported through the ack callback's OnError.
 func (s *Stream) Close() error {
-	return wrapErr("Close", s.core.Close())
+	err := s.core.Close()
+	if s.sdk != nil {
+		s.sdk.forget(s)
+	}
+	return wrapErr("Close", err)
+}
+
+// terminate tears the stream down without the final flush Close performs. It is
+// the SDK.Close path: the shared connection is going away, so waiting for
+// acknowledgements would only stall shutdown. Close and terminate share one
+// once-guard, so whichever runs first decides the result both report.
+func (s *Stream) terminate() error {
+	return wrapErr("Close", s.core.Terminate())
 }
 
 // IsClosed reports whether the stream has been closed or has failed terminally.

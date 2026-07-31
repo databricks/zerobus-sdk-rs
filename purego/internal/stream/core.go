@@ -517,7 +517,13 @@ func (cs *CoreStream[Req, Resp]) Flush(ctx context.Context) error {
 
 func (cs *CoreStream[Req, Resp]) flushThrough(ctx context.Context, target int64) error {
 	if target < 0 {
-		return nil // nothing successfully ingested yet
+		// Nothing was successfully ingested, so there is no watermark to wait
+		// for. A stream that already failed terminally — an unknown table or a
+		// rejected credential on the background open — must still report that
+		// failure here rather than a bare success, since Flush is where such a
+		// failure is documented to surface. A clean Close sets no terminal
+		// error, so it still reports nil.
+		return cs.terminalErr()
 	}
 	return cs.WaitForOffset(ctx, target)
 }
@@ -607,6 +613,29 @@ func (cs *CoreStream[Req, Resp]) Close() error {
 		cs.cancelSupervisor()
 		cs.buf.close()
 		<-cs.done // wait for the supervisor to exit
+	})
+	return cs.closeErr
+}
+
+// Terminate stops admission and tears the stream down immediately, without the
+// final flush Close performs: records queued but not yet acknowledged are
+// abandoned rather than waited on (still retrievable via GetUnacked, and
+// reported through the AckCallback's OnError). Use it when the underlying
+// connection is going away and waiting for acknowledgements cannot succeed.
+//
+// It is idempotent, blocks until lifecycle teardown completes, and shares its
+// once-guard with Close, so whichever call runs first decides the result both
+// report. It returns any terminal stream failure, nil otherwise.
+func (cs *CoreStream[Req, Resp]) Terminate() error {
+	cs.closeOnce.Do(func() {
+		cs.offsetMu.Lock()
+		cs.closing = true
+		cs.offsetMu.Unlock()
+
+		cs.cancelSupervisor()
+		cs.buf.close()
+		<-cs.done // wait for the supervisor to exit
+		cs.closeErr = cs.terminalErr()
 	})
 	return cs.closeErr
 }

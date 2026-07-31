@@ -52,15 +52,18 @@ package zerobus
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/url"
 	"strings"
+	"sync"
 
 	"google.golang.org/grpc"
 
 	"github.com/databricks/zerobus-sdk/purego/internal/auth"
 	"github.com/databricks/zerobus-sdk/purego/internal/stream"
 	"github.com/databricks/zerobus-sdk/purego/internal/transport"
+	"github.com/databricks/zerobus-sdk/purego/internal/zerobuspb"
 )
 
 // version identifies this SDK in the gRPC user-agent header.
@@ -95,6 +98,30 @@ type SDK struct {
 	zerobusEndpoint string
 	ucEndpoint      string
 	conn            *transport.Conn
+	// tokenCache backs every OAuth provider this SDK creates so a token minted
+	// for a table is reused by later streams on the same table instead of
+	// re-minting per stream.
+	tokenCache *auth.SharedTokenCache
+
+	// mu guards the open-stream set and the closed flag.
+	mu     sync.Mutex
+	closed bool
+	// streams holds the streams this SDK created and has not yet torn down, so
+	// Close can terminate them. Entries are removed by Stream.Close.
+	streams map[*Stream]struct{}
+}
+
+// newSDK builds an SDK around an already-dialed connection. It is the single
+// construction point shared by New and the test-only NewWithConn so both get
+// the shared token cache and stream registry.
+func newSDK(conn *transport.Conn, zerobusEndpoint, ucEndpoint string) *SDK {
+	return &SDK{
+		zerobusEndpoint: strings.TrimSpace(zerobusEndpoint),
+		ucEndpoint:      strings.TrimSpace(ucEndpoint),
+		conn:            conn,
+		tokenCache:      auth.NewSharedTokenCache(),
+		streams:         make(map[*Stream]struct{}),
+	}
 }
 
 // New connects to the Zerobus service and returns an SDK.
@@ -136,17 +163,47 @@ func New(zerobusEndpoint, ucEndpoint string, opts ...Option) (*SDK, error) {
 	if err != nil {
 		return nil, &Error{Op: "New", cause: err, retryable: false}
 	}
-	return &SDK{
-		zerobusEndpoint: strings.TrimSpace(zerobusEndpoint),
-		ucEndpoint:      strings.TrimSpace(ucEndpoint),
-		conn:            conn,
-	}, nil
+	return newSDK(conn, zerobusEndpoint, ucEndpoint), nil
 }
 
-// Close releases the SDK's connection. Streams created from it are terminated;
-// close individual streams first for orderly shutdown and durability results.
+// Close terminates every stream still open from this SDK, then releases the
+// shared connection. It is idempotent, and further CreateStream calls fail.
+//
+// Termination is abrupt: records queued but not yet acknowledged are abandoned
+// rather than flushed, and are reported through each stream's ack callback (or
+// retrievable with GetUnackedRecords). Close individual streams first for an
+// orderly shutdown with durability results.
 func (s *SDK) Close() error {
-	return wrapErr("Close", s.conn.Close())
+	s.mu.Lock()
+	if s.closed {
+		s.mu.Unlock()
+		return nil
+	}
+	s.closed = true
+	open := make([]*Stream, 0, len(s.streams))
+	for st := range s.streams {
+		open = append(open, st)
+	}
+	s.streams = nil
+	s.mu.Unlock()
+
+	// Each teardown waits on its own supervisor goroutine, so terminate
+	// concurrently rather than summing every stream's teardown on the shutdown
+	// path.
+	errs := make([]error, len(open)+1)
+	var wg sync.WaitGroup
+	for i, st := range open {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			errs[i] = st.terminate()
+		}()
+	}
+	wg.Wait()
+	// Close the connection only after the streams are down, so a supervisor
+	// cannot reconnect onto a connection that is going away.
+	errs[len(open)] = s.conn.Close()
+	return wrapErr("Close", errors.Join(errs...))
 }
 
 // CreateStream opens an ingestion stream for tableName authenticated with the
@@ -167,6 +224,7 @@ func (s *SDK) CreateStream(
 ) (*Stream, error) {
 	provider, err := auth.NewOAuthHeadersProvider(
 		clientID, clientSecret, s.zerobusEndpoint, s.ucEndpoint,
+		auth.WithSharedTokenCache(s.tokenCache),
 	)
 	if err != nil {
 		return nil, &Error{Op: "CreateStream", cause: err, retryable: false}
@@ -206,6 +264,9 @@ func (s *SDK) createStream(
 			opt(&sc)
 		}
 	}
+	if err := validateStreamArgs(tableName, sc); err != nil {
+		return nil, &Error{Op: op, cause: err, retryable: false}
+	}
 
 	params := stream.StreamParams{
 		TableName:       tableName,
@@ -222,7 +283,40 @@ func (s *SDK) createStream(
 	if err != nil {
 		return nil, wrapErr(op, err)
 	}
-	return &Stream{core: core}, nil
+	st := &Stream{core: core, sdk: s}
+	s.mu.Lock()
+	if s.closed {
+		s.mu.Unlock()
+		// Terminate rather than leak the supervisor goroutine NewProtoJSONStream
+		// already started.
+		_ = core.Terminate()
+		return nil, &Error{Op: op, cause: fmt.Errorf("SDK is closed"), retryable: false}
+	}
+	s.streams[st] = struct{}{}
+	s.mu.Unlock()
+	return st, nil
+}
+
+// validateStreamArgs rejects stream arguments that transport open would reject
+// asynchronously, so a caller mistake fails at CreateStream instead of surfacing
+// much later on the first Flush. It deliberately mirrors the transport's checks
+// rather than adding stricter rules of its own.
+func validateStreamArgs(tableName string, sc streamConfig) error {
+	if strings.TrimSpace(tableName) == "" {
+		return fmt.Errorf("table name is required")
+	}
+	if sc.recordType == zerobuspb.RecordType_PROTO && len(sc.descriptor) == 0 {
+		return fmt.Errorf("WithProto requires a non-empty descriptor proto")
+	}
+	return nil
+}
+
+// forget drops st from the open-stream set once it has torn itself down, so a
+// long-lived SDK does not retain closed streams.
+func (s *SDK) forget(st *Stream) {
+	s.mu.Lock()
+	delete(s.streams, st)
+	s.mu.Unlock()
 }
 
 // grpcTarget converts a user-facing endpoint (an https URL, a bare host, or a

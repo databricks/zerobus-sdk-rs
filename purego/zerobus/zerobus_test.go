@@ -5,6 +5,9 @@ import (
 	"errors"
 	"io"
 	"net"
+	"net/http"
+	"net/http/httptest"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -278,5 +281,177 @@ func TestStreamBatchIngest(t *testing.T) {
 	}
 	if err := stream.Flush(); err != nil {
 		t.Fatalf("Flush: %v", err)
+	}
+}
+
+// ucTokenServer is a stand-in for the Unity Catalog OIDC token endpoint that
+// counts how many client-credentials mints it served.
+type ucTokenServer struct {
+	mints atomic.Int64
+}
+
+func (s *ucTokenServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	if r.URL.Path != "/oidc/v1/token" {
+		http.NotFound(w, r)
+		return
+	}
+	s.mints.Add(1)
+	w.Header().Set("Content-Type", "application/json")
+	_, _ = io.WriteString(w, `{"access_token":"minted-token","expires_in":3600}`)
+}
+
+func TestCreateStreamSharesTokenCacheAcrossStreams(t *testing.T) {
+	uc := &ucTokenServer{}
+	ucSrv := httptest.NewServer(uc)
+	defer ucSrv.Close()
+
+	conn := dialEcho(t, &echoServer{streamID: "stream-oauth"})
+	sdk := zerobus.NewWithConn(conn, "https://ws.zerobus.databricks.com", ucSrv.URL)
+	defer sdk.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	// Two streams on the same table with the same credentials must reuse one
+	// minted token rather than each provider caching its own.
+	for i := 0; i < 2; i++ {
+		st, err := sdk.CreateStream(ctx, "main.sales.orders", "client-id", "client-secret")
+		if err != nil {
+			t.Fatalf("CreateStream[%d]: %v", i, err)
+		}
+		if _, err := st.IngestRecordOffset([]byte(`{"id":1}`)); err != nil {
+			t.Fatalf("IngestRecordOffset[%d]: %v", i, err)
+		}
+		// Flushing forces the background open — and therefore the token mint —
+		// to have completed before the next stream is created.
+		if err := st.Flush(); err != nil {
+			t.Fatalf("Flush[%d]: %v", i, err)
+		}
+		if err := st.Close(); err != nil {
+			t.Fatalf("Close[%d]: %v", i, err)
+		}
+	}
+	if got := uc.mints.Load(); got != 1 {
+		t.Errorf("token mints = %d, want 1 (cache shared across streams)", got)
+	}
+}
+
+func TestCreateStreamRejectsInvalidArguments(t *testing.T) {
+	conn := dialEcho(t, &echoServer{streamID: "stream-invalid"})
+	sdk := zerobus.NewWithConn(conn, "https://ws.zerobus.databricks.com", "https://ws.databricks.com")
+	defer sdk.Close()
+	provider := zerobus.NewStaticHeadersProvider(map[string]string{"authorization": "Bearer t"})
+
+	tests := []struct {
+		name  string
+		table string
+		opts  []zerobus.StreamOption
+	}{
+		{name: "empty table name", table: ""},
+		{name: "blank table name", table: "   "},
+		{
+			name:  "proto without descriptor",
+			table: "main.sales.orders",
+			opts:  []zerobus.StreamOption{zerobus.WithProto(nil)},
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			st, err := sdk.CreateStreamWithProvider(context.Background(), tc.table, provider, tc.opts...)
+			if err == nil {
+				_ = st.Close()
+				t.Fatal("CreateStreamWithProvider succeeded, want a validation error")
+			}
+			if zerobus.Retryable(err) {
+				t.Errorf("error %v is retryable, want permanent", err)
+			}
+		})
+	}
+	if n := sdk.OpenStreamCount(); n != 0 {
+		t.Errorf("SDK tracks %d streams, want 0 after rejected creates", n)
+	}
+}
+
+func TestFlushReportsTerminalFailureWithNoRecords(t *testing.T) {
+	conn := dialEcho(t, &echoServer{streamID: "stream-terminal"})
+	sdk := zerobus.NewWithConn(conn, "https://ws.zerobus.databricks.com", "https://ws.databricks.com")
+	defer sdk.Close()
+
+	// An empty static provider fails every open, and disabling recovery makes the
+	// stream terminal after the first attempt instead of retrying.
+	st, err := sdk.CreateStreamWithProvider(context.Background(), "main.sales.orders",
+		zerobus.NewStaticHeadersProvider(nil), zerobus.WithRecovery(zerobus.RecoveryDisabled))
+	if err != nil {
+		t.Fatalf("CreateStreamWithProvider: %v", err)
+	}
+	defer st.Close()
+
+	waitFor(t, st.IsClosed, "stream to fail terminally")
+
+	// Nothing was ingested, so there is no watermark to wait for — but Flush is
+	// where a failed background open is documented to surface, so it must not
+	// report success.
+	if err := st.Flush(); err == nil {
+		t.Error("Flush on a terminally failed stream = nil, want the open failure")
+	}
+}
+
+func TestSDKCloseTerminatesOpenStreams(t *testing.T) {
+	conn := dialEcho(t, &echoServer{streamID: "stream-sdk-close"})
+	sdk := zerobus.NewWithConn(conn, "https://ws.zerobus.databricks.com", "https://ws.databricks.com")
+	provider := zerobus.NewStaticHeadersProvider(map[string]string{"authorization": "Bearer t"})
+
+	st, err := sdk.CreateStreamWithProvider(context.Background(), "main.sales.orders", provider)
+	if err != nil {
+		t.Fatalf("CreateStreamWithProvider: %v", err)
+	}
+	if _, err := st.IngestRecordOffset([]byte(`{"id":1}`)); err != nil {
+		t.Fatalf("IngestRecordOffset: %v", err)
+	}
+
+	if err := sdk.Close(); err != nil {
+		t.Fatalf("SDK.Close: %v", err)
+	}
+	if !st.IsClosed() {
+		t.Error("stream still open after SDK.Close")
+	}
+	if err := sdk.Close(); err != nil {
+		t.Errorf("second SDK.Close: %v, want nil (idempotent)", err)
+	}
+	if _, err := sdk.CreateStreamWithProvider(context.Background(), "main.sales.orders", provider); err == nil {
+		t.Error("CreateStreamWithProvider succeeded on a closed SDK")
+	}
+}
+
+func TestStreamCloseDeregistersFromSDK(t *testing.T) {
+	conn := dialEcho(t, &echoServer{streamID: "stream-deregister"})
+	sdk := zerobus.NewWithConn(conn, "https://ws.zerobus.databricks.com", "https://ws.databricks.com")
+	defer sdk.Close()
+	provider := zerobus.NewStaticHeadersProvider(map[string]string{"authorization": "Bearer t"})
+
+	st, err := sdk.CreateStreamWithProvider(context.Background(), "main.sales.orders", provider)
+	if err != nil {
+		t.Fatalf("CreateStreamWithProvider: %v", err)
+	}
+	if n := sdk.OpenStreamCount(); n != 1 {
+		t.Fatalf("SDK tracks %d streams, want 1 after CreateStream", n)
+	}
+	if err := st.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	if n := sdk.OpenStreamCount(); n != 0 {
+		t.Errorf("SDK tracks %d streams, want 0 after Stream.Close", n)
+	}
+}
+
+// waitFor polls cond until it holds, failing the test if it never does.
+func waitFor(t *testing.T, cond func() bool, what string) {
+	t.Helper()
+	deadline := time.Now().Add(10 * time.Second)
+	for !cond() {
+		if time.Now().After(deadline) {
+			t.Fatalf("timed out waiting for %s", what)
+		}
+		time.Sleep(5 * time.Millisecond)
 	}
 }

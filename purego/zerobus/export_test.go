@@ -10,11 +10,15 @@ func GRPCTarget(endpoint string) (string, error) { return grpcTarget(endpoint) }
 // NewWithConn builds an SDK around an already-dialed transport connection,
 // bypassing New's dialing so tests can point the SDK at an in-memory server.
 func NewWithConn(conn *transport.Conn, zerobusEndpoint, ucEndpoint string) *SDK {
-	return &SDK{
-		zerobusEndpoint: zerobusEndpoint,
-		ucEndpoint:      ucEndpoint,
-		conn:            conn,
-	}
+	return newSDK(conn, zerobusEndpoint, ucEndpoint)
+}
+
+// OpenStreamCount reports how many streams the SDK still tracks for Close, so
+// tests can assert that Stream.Close deregisters itself.
+func (s *SDK) OpenStreamCount() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return len(s.streams)
 }
 
 // ResolveStreamConfig applies the given options and returns the resolved record
