@@ -25,11 +25,13 @@ class HeadersProviderNativeTest {
               case 0:
                 throw new BrokenToStringException();
               case 1:
-                return Collections.singletonMap("authorization", "Bearer token");
+                return Collections.singletonMap("Authorization", "Bearer token");
               case 2:
                 throw new NonRetriableException("permanent failure");
-              default:
+              case 3:
                 return nonStringMap();
+              default:
+                return Collections.singletonMap("invalid header", "value");
             }
           }
 

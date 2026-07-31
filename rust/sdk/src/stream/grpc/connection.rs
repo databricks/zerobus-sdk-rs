@@ -8,7 +8,7 @@ use std::sync::Arc;
 
 use prost::Message;
 use tokio_stream::wrappers::ReceiverStream;
-use tonic::metadata::{MetadataKey, MetadataMap, MetadataValue};
+use tonic::metadata::MetadataValue;
 use tonic::transport::Channel;
 use tracing::{debug, error, info, instrument};
 
@@ -74,7 +74,28 @@ impl ZerobusStream {
         let headers = headers_provider.get_headers().await?;
 
         for (key, value) in headers {
-            insert_header(stream_metadata, key, &value, &table_properties.table_name)?;
+            match key {
+                "x-databricks-zerobus-table-name" => {
+                    let table_name = MetadataValue::try_from(value.as_str())
+                        .map_err(|e| ZerobusError::InvalidTableName(e.to_string()))?;
+                    stream_metadata.insert("x-databricks-zerobus-table-name", table_name);
+                }
+                "authorization" => {
+                    let mut auth_value = MetadataValue::try_from(value.as_str()).map_err(|_| {
+                        error!(table_name = %table_properties.table_name, "authorization token is not a valid HTTP header value");
+                        ZerobusError::InvalidUCTokenError(
+                            "authorization token is not a valid HTTP header value".to_string(),
+                        )
+                    })?;
+                    auth_value.set_sensitive(true);
+                    stream_metadata.insert("authorization", auth_value);
+                }
+                other_key => {
+                    let header_value = MetadataValue::try_from(value.as_str())
+                        .map_err(|_| ZerobusError::InvalidArgument(other_key.to_string()))?;
+                    stream_metadata.insert(other_key, header_value);
+                }
+            }
         }
 
         let mut response_grpc_stream = channel
@@ -150,74 +171,5 @@ impl ZerobusStream {
                 Err(ZerobusError::CreateStreamError(status))
             }
         }
-    }
-}
-
-fn insert_header(
-    metadata: &mut MetadataMap,
-    key: &'static str,
-    value: &str,
-    table_name: &str,
-) -> ZerobusResult<()> {
-    let metadata_key = MetadataKey::from_bytes(key.as_bytes())
-        .map_err(|_| ZerobusError::InvalidArgument(format!("invalid header name: {key}")))?;
-    match metadata_key.as_str() {
-        "x-databricks-zerobus-table-name" => {
-            let table_name = MetadataValue::try_from(value)
-                .map_err(|error| ZerobusError::InvalidTableName(error.to_string()))?;
-            metadata.insert(metadata_key, table_name);
-        }
-        "authorization" => {
-            let mut auth_value = MetadataValue::try_from(value).map_err(|_| {
-                error!(
-                    table_name,
-                    "authorization token is not a valid HTTP header value"
-                );
-                ZerobusError::InvalidUCTokenError(
-                    "authorization token is not a valid HTTP header value".to_string(),
-                )
-            })?;
-            auth_value.set_sensitive(true);
-            metadata.insert(metadata_key, auth_value);
-        }
-        _ => {
-            let header_value = MetadataValue::try_from(value).map_err(|_| {
-                ZerobusError::InvalidArgument(format!("invalid value for metadata header: {key}"))
-            })?;
-            metadata.insert(metadata_key, header_value);
-        }
-    }
-    Ok(())
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn invalid_custom_header_name_returns_error() {
-        let error = insert_header(
-            &mut MetadataMap::new(),
-            "invalid header",
-            "value",
-            "catalog.schema.table",
-        )
-        .expect_err("invalid metadata key must be rejected");
-
-        assert!(matches!(error, ZerobusError::InvalidArgument(_)));
-    }
-
-    #[test]
-    fn mixed_case_authorization_header_is_sensitive() {
-        let mut metadata = MetadataMap::new();
-        insert_header(
-            &mut metadata,
-            "Authorization",
-            "Bearer token",
-            "catalog.schema.table",
-        )
-        .unwrap();
-
-        assert!(metadata.get("authorization").unwrap().is_sensitive());
     }
 }

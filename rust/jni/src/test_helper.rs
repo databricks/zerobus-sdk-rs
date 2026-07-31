@@ -198,11 +198,18 @@ pub extern "system" fn Java_com_databricks_zerobus_NativeTestHelper_nativeTestHe
                 return "NonRetriableException was retryable".to_string();
             }
 
-            let fourth = get_headers_blocking(provider_ref);
+            let fourth = get_headers_blocking(provider_ref.clone());
             if !fourth.is_err_and(|error| {
                 matches!(error, ZerobusError::InvalidArgument(message) if message.contains("java.lang.String"))
             }) {
                 return "non-String map entry was not rejected clearly".to_string();
+            }
+
+            let fifth = get_headers_blocking(provider_ref);
+            if !fifth.is_err_and(|error| {
+                matches!(error, ZerobusError::InvalidArgument(message) if message.contains("invalid gRPC metadata header name"))
+            }) {
+                return "invalid header name was not rejected clearly".to_string();
             }
 
             "OK".to_string()

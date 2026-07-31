@@ -10,10 +10,6 @@
 
 ### Bug Fixes
 
-- `HeadersProvider` exceptions are now retryable during automatic recovery unless the provider
-  throws `NonRetriableException`, including for Arrow streams. Malformed provider output and
-  excessive distinct header names remain non-retryable.
-
 ### Documentation
 
 ### Internal Changes

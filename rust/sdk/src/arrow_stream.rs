@@ -741,6 +741,7 @@ impl ZerobusArrowStream {
                                     options.recovery_retries,
                                 ) {
                                     is_closed.store(true, Ordering::Relaxed);
+                                    let _ = server_error_tx.send(Some(e.clone()));
                                     Self::move_pending_to_failed(&pending_batches, &failed_batches)
                                         .await;
                                     return Err(e);

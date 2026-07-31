@@ -169,6 +169,7 @@ fn extract_headers(
 }
 
 fn intern_header_name(name: String) -> ZerobusResult<&'static str> {
+    let name = normalize_header_name(name)?;
     let names = HEADER_NAMES.get_or_init(|| Mutex::new(HashSet::new()));
     let mut names = names
         .lock()
@@ -185,6 +186,21 @@ fn intern_header_name(name: String) -> ZerobusResult<&'static str> {
     let leaked = Box::leak(name.into_boxed_str());
     names.insert(leaked);
     Ok(leaked)
+}
+
+fn normalize_header_name(mut name: String) -> ZerobusResult<String> {
+    name.make_ascii_lowercase();
+    if name.is_empty()
+        || name.ends_with("-bin")
+        || !name.bytes().all(|byte| {
+            byte.is_ascii_lowercase() || byte.is_ascii_digit() || b"-_.".contains(&byte)
+        })
+    {
+        return Err(provider_invalid_argument(format!(
+            "invalid gRPC metadata header name: {name}"
+        )));
+    }
+    Ok(name)
 }
 
 fn java_call_error(env: &mut JNIEnv<'_>, method: &str, error: JniError) -> ZerobusError {
