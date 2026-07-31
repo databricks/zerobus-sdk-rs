@@ -1,0 +1,50 @@
+# .NET
+bin/
+obj/
+[Bb]in/
+[Oo]bj/
+
+# Visual Studio
+.vs/
+*.user
+*.suo
+*.userosscache
+*.sln.docstates
+
+# Rider
+.idea/
+
+# Build results
+*.dll
+*.pdb
+*.exe
+*.app
+*.cache
+*.log
+
+# NuGet
+*.nupkg
+*.snupkg
+packages/
+**/packages/
+
+# .NET Core
+project.lock.json
+project.fragment.lock.json
+
+# Coverage
+coverage*/
+*.coverage
+*.coveragexml
+
+# Rust
+/target/
+**/target/
+
+# Rust tools
+**/*.rs.bk
+
+# OS
+.DS_Store
+
+runtimes/

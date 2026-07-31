@@ -20,6 +20,7 @@ A high-performance Rust client for streaming data ingestion into Databricks Delt
   - [7. Close the Stream](#7-close-the-stream)
 - [Client-side warnings](#client-side-warnings)
 - [Configuration Options](#configuration-options)
+- [Proxy Configuration](#proxy-configuration)
 - [Error Handling](#error-handling)
 - [Examples](#examples)
 - [Best Practices](#best-practices)
@@ -106,12 +107,29 @@ See [`examples/README.md`](https://github.com/databricks/zerobus-sdk/blob/main/r
 zerobus_rust_sdk/
 ├── sdk/                                # Core SDK library
 │   ├── src/
-│   │   ├── lib.rs                      # Main SDK and stream implementation
+│   │   ├── lib.rs                      # Crate root and public re-exports
+│   │   ├── sdk.rs                      # Main SDK client implementation
 │   │   ├── builder/                    # Builder pattern for SDK initialization
+│   │   ├── stream/                     # Core gRPC ingestion stream
+│   │   │   ├── mod.rs                  # Stream module entry point
+│   │   │   └── grpc/                   # gRPC stream internals
+│   │   │       ├── mod.rs
+│   │   │       ├── connection.rs       # Connection setup and management
+│   │   │       ├── ingest.rs           # Record ingestion path
+│   │   │       ├── sender.rs           # Outbound request sender
+│   │   │       ├── receiver.rs         # Inbound response receiver
+│   │   │       ├── acks.rs             # Acknowledgement tracking
+│   │   │       ├── callback_handler.rs # Ack/error callback dispatch
+│   │   │       ├── supervisor.rs       # Stream supervision and reconnect
+│   │   │       ├── close.rs            # Graceful close handling
+│   │   │       └── types.rs            # Shared gRPC stream types
+│   │   ├── multiplexed_stream.rs       # Multiplexed stream implementation
 │   │   ├── default_token_factory.rs    # OAuth 2.0 token handling
+│   │   ├── token_cache.rs              # OAuth token caching
 │   │   ├── errors.rs                   # Error types and retryable logic
 │   │   ├── headers_provider.rs         # Trait for custom authentication headers
 │   │   ├── callbacks.rs                # Ack/error callback traits
+│   │   ├── client_warnings.rs          # Client-side warning diagnostics
 │   │   ├── record_types.rs             # Record encoding types (JSON, proto, raw)
 │   │   ├── schema.rs                   # Unity Catalog → proto/Arrow schema generation
 │   │   ├── stream_configuration.rs     # Stream options
@@ -130,7 +148,13 @@ zerobus_rust_sdk/
 │
 ├── ffi/                                # C FFI bindings for other languages
 │   ├── src/
-│   │   ├── lib.rs                      # FFI implementation
+│   │   ├── lib.rs                      # FFI entry point and exports
+│   │   ├── sdk.rs                      # SDK lifecycle FFI
+│   │   ├── stream.rs                   # Stream FFI
+│   │   ├── builder.rs                  # Builder FFI
+│   │   ├── proto_schema.rs             # Proto schema FFI
+│   │   ├── arrow.rs                    # Arrow Flight FFI (feature: arrow-flight)
+│   │   ├── common.rs                   # Shared FFI helpers
 │   │   └── tests.rs                    # FFI unit tests
 │   ├── zerobus.h                       # Generated C header
 │   ├── cbindgen.toml                   # Header generation config
@@ -139,14 +163,25 @@ zerobus_rust_sdk/
 │
 ├── jni/                                # JNI bindings for Java SDK
 │   ├── src/
-│   │   └── lib.rs                      # JNI implementation
+│   │   ├── lib.rs                      # JNI entry point
+│   │   ├── sdk.rs                      # SDK lifecycle JNI
+│   │   ├── stream.rs                   # Stream JNI
+│   │   ├── arrow_stream.rs             # Arrow Flight stream JNI (feature: arrow-flight)
+│   │   ├── async_bridge.rs             # Async runtime bridge
+│   │   ├── callbacks.rs                # Ack/error callback bridge
+│   │   ├── class_cache.rs              # Cached JNI class/method handles
+│   │   ├── errors.rs                   # Error mapping to Java exceptions
+│   │   ├── options.rs                  # Stream/SDK option parsing
+│   │   ├── runtime.rs                  # Tokio runtime management
+│   │   └── test_helper.rs              # JNI test helpers
 │   └── Cargo.toml
 │
 ├── tools/
 │   └── generate_files/                 # Schema generation CLI tool (package `tools`)
 │       ├── src/
 │       │   ├── main.rs                 # CLI entry point
-│       │   └── generate.rs             # Unity Catalog -> Proto conversion
+│       │   ├── generate.rs             # Unity Catalog -> Proto conversion
+│       │   └── token_factory.rs        # OAuth token factory for the CLI
 │       ├── README.md                   # Tool documentation
 │       └── Cargo.toml
 │
@@ -175,9 +210,17 @@ zerobus_rust_sdk/
 │   │   ├── rust_tests.rs               # Core SDK test suite
 │   │   ├── proxy_tests.rs              # HTTP proxy tests
 │   │   ├── arrow_tests.rs              # Arrow Flight test suite
+│   │   ├── multiplexed_stream_tests.rs # Multiplexed stream test suite
 │   │   └── utils.rs                    # Shared test utilities
 │   ├── build.rs
 │   └── Cargo.toml
+│
+├── third_party/
+│   └── arrow-flight/                   # Vendored arrow-flight fork (slice-aware batch-split patch)
+│       ├── src/                        # Fork sources (encode/decode/client/sql/…)
+│       ├── Cargo.toml
+│       ├── regen.sh                    # Re-sync script for the vendored fork
+│       └── README.md
 │
 ├── Cargo.toml                          # Workspace configuration
 └── README.md                           # This file
@@ -218,7 +261,7 @@ zerobus_rust_sdk/
 |                  |                   |
 |      +-----------+-----------+       |
 |      v                       v       |
-| +----------+          +----------+   | 
+| +----------+          +----------+   |
 | |  Sender  |          | Receiver |   | Parallel tasks
 | |  Task    |          |  Task    |   |
 | +----------+          +----------+   |
@@ -328,7 +371,7 @@ For JSON-based ingestion, you can skip the schema generation step and directly p
 ### 1. Generate Protocol Buffer Schema (Protocol Buffers approach only)
 
 > **Important Note**: The schema generation tool and examples are **only available in the GitHub repository**. The crate published on [crates.io](https://crates.io/crates/databricks-zerobus-ingest-sdk) contains only the core Zerobus ingestion SDK logic. To generate protobuf schemas or see working examples, clone the repository:
-> 
+>
 > ```bash
 > git clone https://github.com/databricks/zerobus-sdk.git
 > cd zerobus-sdk/rust
@@ -490,6 +533,41 @@ let mut stream = sdk
     .await?;
 ```
 
+#### Dynamic Protobuf Stream
+
+When the table's schema is known only at runtime — for example a descriptor fetched from Unity Catalog or built in code with `schema::descriptor_from_uc_columns` — there is no compiled `prost::Message` type. Resolve the descriptor with `message_descriptor`, pass it to `.dynamic_proto(descriptor)`, and fill records field-by-field with `DynamicRecord`:
+
+```rust
+use databricks_zerobus_ingest_sdk::{message_descriptor, DynamicRecord, ProtoBytes};
+use databricks_zerobus_ingest_sdk::schema::{descriptor_from_uc_columns, UcColumn};
+
+// Build the descriptor at runtime (a column's proto field number is `position + 1`).
+let descriptor_proto = descriptor_from_uc_columns(&columns, "table_Orders")?;
+let descriptor = message_descriptor(&descriptor_proto)?;
+
+let mut stream = sdk
+    .stream_builder().table("catalog.schema.orders")
+    .oauth(client_id, client_secret)
+    .dynamic_proto(descriptor)
+    .build()
+    .await?;
+
+// Fill records field-by-field; `set()` validates the field name and type (the
+// value must match the field's proto type, e.g. a BIGINT column takes an i64).
+// `encode()` then checks proto2 required fields before producing the bytes.
+use databricks_zerobus_ingest_sdk::ProtoBytes;
+for i in 0..100_000i64 {
+    let mut record = stream.new_record()?; // bound to the stream's schema
+    record.set("id", i)?.set("customer_name", "Alice Smith")?;
+    let _offset = stream.ingest_record_offset(ProtoBytes(record.encode()?)).await?; // queue only — do NOT wait here
+}
+stream.flush().await?; // wait once for all pending acknowledgments
+```
+
+`.dynamic_proto()` takes a resolved `MessageDescriptor`. Get one from `message_descriptor(&proto)` or build it against your own `prost_reflect::DescriptorPool`.
+
+On the wire this is identical to `.compiled_proto(...)`; the difference is that records are built dynamically rather than from a generated struct. See the [`dynamic_proto`](https://docs.rs/databricks-zerobus-ingest-sdk/latest/databricks_zerobus_ingest_sdk/dynamic_proto/) module and the `proto_dynamic_single` example for details.
+
 Setters can be called in any order. The builder validates at `build()` time that both authentication and format have been configured.
 
 ### 5. Ingest Data
@@ -501,6 +579,7 @@ The SDK provides flexible ways to ingest data with different levels of abstracti
 | `ProtoMessage<T>` | Proto | Auto-encoding: pass structs, SDK handles encoding |
 | `ProtoBytes` | Proto | Pre-encoded: pass bytes with explicit wrapper |
 | `Vec<u8>` | Proto | Backward-compatible: raw bytes without wrapper |
+| `ProtoBytes(record.encode()?)` | Proto | Dynamic: build fields at runtime against a descriptor, then encode ([`dynamic_proto`](#dynamic-protobuf-stream)) |
 | `JsonValue<T>` | JSON | Auto-serializing: pass structs, SDK handles JSON conversion |
 | `JsonString` | JSON | Pre-serialized: pass JSON strings with explicit wrapper |
 | `String` | JSON | Backward-compatible: raw strings without wrapper |
@@ -679,12 +758,12 @@ match stream.close().await {
         let unacked = stream.get_unacked_records().await?;
         let total_records = unacked.count();
         println!("Failed to ack {} records", total_records);
-        
+
         // Option 2: Get records grouped by batch (preserves batch structure)
         let unacked_batches = stream.get_unacked_batches().await?;
         let total_records: usize = unacked_batches.iter().map(|batch| batch.get_record_count()).sum();
         println!("Failed to ack {} records in {} batches", total_records, unacked_batches.len());
-        
+
         // Retry with a new stream
     }
     Ok(_) => println!("Stream closed successfully"),
@@ -739,6 +818,28 @@ let stream = sdk
     .await?;
 ```
 
+## Proxy Configuration
+
+Standard and Arrow Flight streams use the same proxy policy for initial connections,
+automatic recovery, and stream recreation. By default, the SDK uses the first non-empty
+proxy variable in this order:
+
+1. `grpc_proxy`, then `GRPC_PROXY`
+2. `https_proxy`, then `HTTPS_PROXY`
+3. `http_proxy`, then `HTTP_PROXY`
+
+Set `no_grpc_proxy`/`NO_GRPC_PROXY`, falling back to `no_proxy`/`NO_PROXY`, to a
+comma-separated list of host suffixes that should connect directly. `*` bypasses the
+proxy for every host. Both `http://` and `https://` CONNECT proxies are supported;
+HTTPS proxy certificates are validated with the system trust store.
+
+For application-specific routing, install a `ConnectorFactory` with
+`ZerobusSdkBuilder::connector_factory`. A caller-supplied factory completely replaces
+environment discovery and must implement any desired no-proxy rules itself. Returning
+`None` connects directly; returning a `ProxyConnector` created with
+`ProxyConnector::new` uses that proxy. The selected factory is retained for every Arrow
+replacement channel.
+
 ## Error Handling
 
 The SDK categorizes errors as **retryable** or **non-retryable**:
@@ -755,9 +856,73 @@ Require manual intervention:
 - `InvalidUCTokenError` - Invalid OAuth credentials
 - `InvalidTableName` - Table doesn't exist or invalid format
 - `InvalidArgument` - Invalid parameters, schema mismatch, or payload too large (see [Payload Size Limit](#payload-size-limit))
+- `InvalidSchema` *(Arrow Flight, Beta)* - The client's Arrow schema does not match the target Delta table (see [Schema Mismatch](#schema-mismatch-arrow-flight))
 - `Code::Unauthenticated` - Authentication failure
 - `Code::PermissionDenied` - Insufficient table permissions
 - `ChannelCreationError` - Failed to establish TLS connection
+
+`Code::Unauthenticated` and `Code::PermissionDenied` remain globally non-retryable and
+require manual intervention. During initial stream setup only, if recovery is enabled
+and at least one configured retry remains, the SDK may invalidate the rejected
+credentials and spend at most one recovery retry on another setup attempt. A second
+authentication rejection is terminal. This one-shot setup exception does not change
+reconnect behavior.
+
+### Schema Mismatch (Arrow Flight)
+
+*(Beta; requires `features = ["arrow-flight"]`.)*
+
+When the server rejects an Arrow Flight stream because the client's schema no longer matches the target Delta table — for example, a column was added to or dropped from the table — the SDK surfaces a structured `ZerobusError::InvalidSchema` rather than an opaque `CreateStreamError`. This applies both to initial stream setup (`build_arrow()`) and to mid-stream reconnects: a schema change detected during recovery is surfaced immediately (via `wait_for_offset` / `flush`) instead of being retried until the recovery budget drains.
+
+`InvalidSchema` carries the raw, machine-readable facts the server reported so you can branch programmatically instead of parsing the message string. The SDK deliberately does not decide whether a mismatch is recoverable — that policy is yours (for example, re-resolving the table schema from Unity Catalog and rebuilding the stream):
+
+```rust
+use databricks_zerobus_ingest_sdk::{SchemaValidationCause, ZerobusError};
+
+match stream.wait_for_offset(offset).await {
+    Ok(()) => { /* durable */ }
+    // `InvalidSchema` is #[non_exhaustive], so match with `..`.
+    Err(ZerobusError::InvalidSchema { causes, error_code, message, .. }) => {
+        // `causes` are typed tokens (e.g. FieldNotInTable, MissingRequiredColumn);
+        // `error_code` is the server's numeric code (e.g. "8001") for telemetry;
+        // `message` carries per-field detail for diagnostics.
+        let drift_only = !causes.is_empty()
+            && causes.iter().all(|c| matches!(
+                c,
+                SchemaValidationCause::FieldNotInTable
+                    | SchemaValidationCause::MissingRequiredColumn
+            ));
+        if drift_only {
+            // Re-resolve the table schema and rebuild the stream, then replay.
+        } else {
+            // e.g. TypeIncompatible — a re-resolve won't help; surface to the operator.
+        }
+        let _ = (error_code, message);
+    }
+    Err(e) => { /* handle other errors */ }
+}
+```
+
+`SchemaValidationCause` is `#[non_exhaustive]` and includes an `Unknown(String)` variant, so a newer server cause the SDK doesn't recognize is still surfaced rather than dropped.
+
+### Variant Extension Annotation (Arrow Flight)
+
+*(Beta; requires `features = ["arrow-flight"]`.)*
+
+`arrow_schema_from_uc_columns` / `arrow_schema_from_uc_schema` build an Arrow schema from Unity Catalog columns. By default `VARIANT` columns become a plain `Struct<metadata, value>` with no marker. Pass `ArrowSchemaOptions { annotate_variant_extension: true }` to also tag every variant field (top-level and nested) with the canonical `arrow.parquet.variant` Arrow extension, so downstream consumers can tell which fields are variants:
+
+```rust
+use databricks_zerobus_ingest_sdk::schema::{
+    arrow_schema_from_uc_columns_with_options, ArrowSchemaOptions, UcColumn,
+};
+
+let mut options = ArrowSchemaOptions::default();
+options.annotate_variant_extension = true;
+let schema = arrow_schema_from_uc_columns_with_options(&uc_columns, &options)?;
+# Ok::<(), databricks_zerobus_ingest_sdk::schema::SchemaError>(())
+```
+
+The physical `Struct<metadata, value>` shape is unchanged. Leave it off (the default) unless a consumer needs the marker: the Arrow Flight server's target schema is unmarked, so a marked schema forces a per-batch server-side cast. If you enable it, build your `RecordBatch` from the same marked schema — `ingest_batch` compares schemas including field metadata and rejects a marked-stream/unmarked-batch mismatch locally.
 
 ### Payload Size Limit
 
@@ -812,8 +977,10 @@ The `examples/` directory contains four working examples covering different seri
 |---------|--------------|-----------|----------|
 | `json/single.rs` | JSON | Single-record | `cargo run -p rust-examples-json --example json_single` |
 | `json/batch.rs` | JSON | Batch | `cargo run -p rust-examples-json --example json_batch` |
-| `proto/single.rs` | Protocol Buffers | Single-record | `cargo run -p rust-examples-proto --example proto_single` |
-| `proto/batch.rs` | Protocol Buffers | Batch | `cargo run -p rust-examples-proto --example proto_batch` |
+| `proto/compiled/single.rs` | Protocol Buffers | Single-record | `cargo run -p rust-examples-proto --example proto_compiled_single` |
+| `proto/compiled/batch.rs` | Protocol Buffers | Batch | `cargo run -p rust-examples-proto --example proto_compiled_batch` |
+| `proto/dynamic/single.rs` | Protocol Buffers (runtime schema) | Single-record | `cargo run -p rust-examples-proto --example proto_dynamic_single` |
+| `proto/dynamic/batch.rs` | Protocol Buffers (runtime schema) | Batch | `cargo run -p rust-examples-proto --example proto_dynamic_batch` |
 
 
 Check [`examples/README.md`](https://github.com/databricks/zerobus-sdk/blob/main/rust/examples/README.md) for setup instructions and detailed comparisons.
@@ -1078,11 +1245,15 @@ cargo run -p rust-examples-json --example json_single
 # Build and run JSON batch example
 cargo run -p rust-examples-json --example json_batch
 
-# Build and run Protocol Buffers single-record example
-cargo run -p rust-examples-proto --example proto_single
+# Build and run Protocol Buffers single-record example (compiled schema)
+cargo run -p rust-examples-proto --example proto_compiled_single
 
-# Build and run Protocol Buffers batch example
-cargo run -p rust-examples-proto --example proto_batch
+# Build and run Protocol Buffers batch example (compiled schema)
+cargo run -p rust-examples-proto --example proto_compiled_batch
+
+# Build and run Protocol Buffers dynamic-schema examples
+cargo run -p rust-examples-proto --example proto_dynamic_single
+cargo run -p rust-examples-proto --example proto_dynamic_batch
 ```
 
 ## Community and Contributing

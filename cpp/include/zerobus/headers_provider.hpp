@@ -19,11 +19,19 @@ namespace zerobus {
 /// Implementations should therefore be thread-safe with respect to their own
 /// state.
 ///
-/// Lifetime: the provider must outlive the `Stream`, which holds a `shared_ptr`
-/// to it. This is necessary but not always sufficient: a `get_headers()` call
-/// still running when `close()` times out (~1s) can be invoked on a freed
-/// provider. Keep `get_headers()` well under that budget, or keep the provider
-/// alive past the `Stream`.
+/// Lifetime: you pass the provider as a `shared_ptr` and its ownership is
+/// handed to the SDK, which keeps it alive until the Rust core is done with it
+/// — after any in-flight `get_headers()` call (including one running during
+/// connection recovery) has returned. You therefore do not need to keep your
+/// own reference alive past `create_stream`, and a slow `get_headers()` racing
+/// stream teardown can no longer be invoked on a freed provider.
+///
+/// Because the SDK owns the provider, its **destructor may run on an internal
+/// SDK worker thread** (whichever thread drops the last reference), not the
+/// thread that called `create_stream` / destroyed the `Stream`. Keep
+/// `~YourProvider()` non-blocking and free of thread-affine work, and do not
+/// let it throw (it runs across the C FFI boundary, where an escaping exception
+/// terminates the process).
 class HeadersProvider {
  public:
   virtual ~HeadersProvider() = default;

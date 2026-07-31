@@ -19,6 +19,10 @@ const (
 )
 
 // HeadersProvider provides gRPC metadata headers for stream authentication.
+//
+// Structurally identical to auth.HeadersProvider; defined here so transport (the
+// lowest layer) does not import auth, which would invert the dependency. An
+// *auth.StaticHeadersProvider satisfies this interface directly.
 type HeadersProvider interface {
 	// GetHeaders returns the metadata headers to attach to the stream. Called
 	// during Open before the RPC handshake starts. Keys are case-folded to
@@ -26,17 +30,16 @@ type HeadersProvider interface {
 	// returned for it is ignored in favor of the stream-open TableName.
 	//
 	// ctx bounds GetHeaders: it is the caller's Open context, or, when that
-	// context has no deadline, one bounded by defaultHandshakeTimeout. A
+	// context has no deadline, one bounded by defaultHeadersTimeout. A
 	// GetHeaders that blocks on network I/O (e.g. a token mint) is therefore
 	// cancelled once the open budget is exhausted rather than hanging forever.
 	GetHeaders(ctx context.Context, tableName string) (map[string]string, error)
 
 	// Invalidate drops any cached credentials so the next GetHeaders re-derives
-	// them. Open calls this when the server rejects the supplied credentials
-	// with Unauthenticated or PermissionDenied during stream creation.
+	// them. The stream lifecycle calls this when an Open or live stream rejects
+	// credentials with Unauthenticated or PermissionDenied.
 	//
-	// It must not block: Open calls it synchronously on the failure path, and
-	// the ctx it receives may already be cancelled.
+	// It must not block: recovery calls it synchronously on the failure path.
 	Invalidate(ctx context.Context, tableName string)
 }
 
@@ -62,20 +65,20 @@ func (p StreamParams) resolveHeaders(ctx context.Context) (map[string]string, er
 	}
 	seenNormalizedKeys := make(map[string]struct{}, len(snapshot))
 	for k, v := range snapshot {
-		normalized := normalizeHeaderKey(k)
-		if normalized != "" {
-			if _, exists := seenNormalizedKeys[normalized]; exists {
-				return nil, fmt.Errorf("transport: open %q: duplicate header key %q after normalization", p.TableName, normalized)
-			}
-			seenNormalizedKeys[normalized] = struct{}{}
-		}
-		// Reject at the wire boundary; gRPC would otherwise fail opaquely.
+		// Reject at the wire boundary before deduping; gRPC would otherwise fail
+		// opaquely, and validating first means a doubled invalid key reports as
+		// invalid rather than misleadingly as a duplicate.
 		if !isUsableAsHeaderKey(k) {
 			return nil, fmt.Errorf("transport: open %q: header key %q is not a valid gRPC metadata key", p.TableName, strings.TrimSpace(k))
 		}
 		if !isUsableAsHeaderValue(v) {
 			return nil, fmt.Errorf("transport: open %q: header %q contains invalid value characters", p.TableName, strings.TrimSpace(k))
 		}
+		normalized := normalizeHeaderKey(k)
+		if _, exists := seenNormalizedKeys[normalized]; exists {
+			return nil, fmt.Errorf("transport: open %q: duplicate header key %q after normalization", p.TableName, normalized)
+		}
+		seenNormalizedKeys[normalized] = struct{}{}
 	}
 	return snapshot, nil
 }
@@ -152,9 +155,32 @@ func isUsableAsHeaderValue(value string) bool {
 	return true
 }
 
-// isAuthRejection reports whether err is a gRPC auth rejection
-// (Unauthenticated or PermissionDenied), unwrapping wrapped errors.
-func isAuthRejection(err error) bool {
+// IsAuthRejection reports whether err rejects authentication.
+func IsAuthRejection(err error) bool {
 	code := status.Code(err)
 	return code == codes.Unauthenticated || code == codes.PermissionDenied
+}
+
+// IsTerminalStatus reports whether err carries a gRPC status code that a retry
+// cannot fix. Reconnecting on these only burns the recovery budget and resends
+// pending data; the caller must fail fast instead. Errors that carry no gRPC
+// status (code Unknown) are treated as transient and are not classified here.
+//
+// FailedPrecondition is terminal here but retryable in the Rust core (and so in
+// every SDK that inherits its classification over FFI). The service returns it
+// for state a reconnect cannot change, such as a table whose schema no longer
+// matches the stream, so retrying only delays the same failure. Revisit this if
+// the service ever uses it for a transient condition.
+//
+// Canceled is deliberately absent: a server-sent Canceled status is transient,
+// unlike a caller's context.Canceled, which the stream classifies separately.
+func IsTerminalStatus(err error) bool {
+	switch status.Code(err) {
+	case codes.InvalidArgument, codes.Unauthenticated, codes.PermissionDenied,
+		codes.OutOfRange, codes.Unimplemented, codes.NotFound,
+		codes.FailedPrecondition:
+		return true
+	default:
+		return false
+	}
 }

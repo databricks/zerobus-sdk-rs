@@ -22,6 +22,10 @@ jobs:
       - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
         with:
           components: rustfmt
+      - name: Verify generated FFI header is up to date
+        run: |
+          cargo build -p zerobus-ffi
+          git diff --exit-code ffi/zerobus.h
       - name: Format all files
         run: make fmt
       - name: Fail on differences

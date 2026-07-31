@@ -19,8 +19,13 @@ func main() {
 		log.Fatal("Missing required environment variables")
 	}
 
-	// Create SDK instance.
-	sdk, err := zerobus.NewZerobusSdk(zerobusEndpoint, unityCatalogURL)
+	// WithApplicationName is optional. It appends an application identifier to
+	// the Go SDK user-agent sent to Zerobus.
+	sdk, err := zerobus.NewZerobusSdkWithOptions(
+		zerobusEndpoint,
+		unityCatalogURL,
+		zerobus.WithApplicationName("my-app/1.0"),
+	)
 	if err != nil {
 		log.Fatalf("Failed to create SDK: %v", err)
 	}

@@ -1,5 +1,4 @@
 use std::error::Error;
-use std::fs;
 
 use prost::Message;
 use prost_reflect::prost_types;
@@ -28,8 +27,13 @@ const SERVER_ENDPOINT: &str = "https://<your-shard-id>.zerobus.<region>.cloud.da
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error>> {
-    let descriptor_proto =
-        load_descriptor_proto("output/orders.descriptor", "orders.proto", "table_Orders");
+    // Embed the descriptor at compile time (like the generated `orders.rs`
+    // above), so it needs no runtime file read.
+    let descriptor_proto = load_descriptor_proto(
+        include_bytes!("output/orders.descriptor"),
+        "orders.proto",
+        "table_Orders",
+    );
     let sdk_handle = ZerobusSdk::builder()
         .endpoint(SERVER_ENDPOINT)
         .unity_catalog_url(DATABRICKS_WORKSPACE_URL)
@@ -213,13 +217,11 @@ async fn ingest_with_offset_api(stream: &mut ZerobusStream) -> Result<(), Box<dy
 }
 
 fn load_descriptor_proto(
-    path: &str,
+    descriptor_bytes: &[u8],
     file_name: &str,
     message_name: &str,
 ) -> prost_types::DescriptorProto {
-    let descriptor_bytes = fs::read(path).expect("Failed to read proto descriptor file");
-    let file_descriptor_set =
-        prost_types::FileDescriptorSet::decode(descriptor_bytes.as_ref()).unwrap();
+    let file_descriptor_set = prost_types::FileDescriptorSet::decode(descriptor_bytes).unwrap();
 
     let file_descriptor_proto = file_descriptor_set
         .file

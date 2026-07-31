@@ -16,9 +16,11 @@ use databricks::zerobus::{
     IngestRecordResponse,
 };
 use prost_types::Duration as ProtobufDuration;
+use rcgen::{generate_simple_self_signed, CertifiedKey};
 use tokio::sync::{mpsc, Mutex};
 use tokio::time::sleep;
 use tokio_stream::Stream;
+use tonic::transport::{Identity, ServerTlsConfig};
 use tonic::{Request, Response, Status, Streaming};
 use tracing::{debug, error, info, warn};
 
@@ -159,8 +161,11 @@ impl Zerobus for MockZerobusServer {
                             }
 
                             // Search for the next CreateStream response starting from response_index.
+                            // Bind the start separately so mutating `response_index` in the loop
+                            // body (to persist resume state) doesn't trip `clippy::mut_range_bound`.
                             let mut create_stream_found = false;
-                            for idx in response_index..stream_responses.len() {
+                            let search_start = response_index;
+                            for idx in search_start..stream_responses.len() {
                                 if let Some(mock_response) = stream_responses.get(idx) {
                                     match mock_response {
                                         MockResponse::CreateStream {
@@ -371,6 +376,27 @@ impl Zerobus for MockZerobusServer {
 /// Helper function to create a mock server and return its address
 pub async fn start_mock_server() -> Result<(MockZerobusServer, String), Box<dyn std::error::Error>>
 {
+    start_mock_server_inner(None, "http", "127.0.0.1").await
+}
+
+/// Starts the mock server with a runtime-generated TLS identity.
+#[allow(dead_code)]
+pub async fn start_mock_tls_server(
+) -> Result<(MockZerobusServer, String, Vec<u8>), Box<dyn std::error::Error>> {
+    let CertifiedKey { cert, key_pair } =
+        generate_simple_self_signed(vec!["localhost".to_string()])?;
+    let cert_pem = cert.pem();
+    let identity = Identity::from_pem(cert_pem.as_bytes(), key_pair.serialize_pem().as_bytes());
+    let tls = ServerTlsConfig::new().identity(identity);
+    let (server, server_url) = start_mock_server_inner(Some(tls), "https", "localhost").await?;
+    Ok((server, server_url, cert_pem.into_bytes()))
+}
+
+async fn start_mock_server_inner(
+    tls: Option<ServerTlsConfig>,
+    scheme: &str,
+    endpoint_host: &str,
+) -> Result<(MockZerobusServer, String), Box<dyn std::error::Error>> {
     info!("Starting mock Zerobus server");
     let mock_server = MockZerobusServer::new();
     let server_clone = MockZerobusServer {
@@ -384,12 +410,16 @@ pub async fn start_mock_server() -> Result<(MockZerobusServer, String), Box<dyn 
     let addr: std::net::SocketAddr = "127.0.0.1:0".parse()?;
     let listener = tokio::net::TcpListener::bind(addr).await?;
     let local_addr = listener.local_addr()?;
-    let server_url = format!("http://{}", local_addr);
+    let server_url = format!("{}://{}:{}", scheme, endpoint_host, local_addr.port());
     info!("Mock server will listen on: {}", server_url);
 
+    let mut server = tonic::transport::Server::builder();
+    if let Some(tls) = tls {
+        server = server.tls_config(tls)?;
+    }
+    let router = server.add_service(ZerobusServer::new(server_clone));
     tokio::spawn(async move {
-        if let Err(e) = tonic::transport::Server::builder()
-            .add_service(ZerobusServer::new(server_clone))
+        if let Err(e) = router
             .serve_with_incoming(tokio_stream::wrappers::TcpListenerStream::new(listener))
             .await
         {

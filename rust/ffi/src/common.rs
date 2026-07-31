@@ -142,16 +142,13 @@ pub struct CStreamConfigurationOptions {
     pub has_callback_max_wait_time_ms: bool,
     /// Optional ack callback. When either pointer is non-null, acks/errors are
     /// delivered asynchronously instead of only via wait_for_offset / flush.
-    /// Fired on a background task, serialized (never concurrent), so keep them
-    /// lightweight; ack_user_data and shared state need their own sync.
+    /// Fired serialized on a background task, so keep them lightweight;
+    /// ack_user_data and shared state need their own sync.
     /// ack_on_ack: once per record, in order; monotonic (offset N => all <= N).
-    /// ack_on_error: relays core error text as-is (no retryability); the same
-    /// failure may also surface from ingest / flush.
-    /// close() drains the handler task up to callback_max_wait_time_ms, then
-    /// abort()s it — but abort only cancels at an await, so a synchronously
-    /// running callback can outlive close(). Keep both pointers and
-    /// ack_user_data alive until the callback object is destroyed, not merely
-    /// until close() returns.
+    /// ack_on_error: relays core error text as-is; may also surface from ingest / flush.
+    /// A synchronously running callback can outlive close() (abort only cancels
+    /// at an await), so keep both pointers and ack_user_data alive until the
+    /// callback object is destroyed, not merely until close() returns.
     /// error_message is valid only during the call (copy to keep). Callbacks must
     /// not unwind across the C boundary (panics are contained and logged).
     // Signatures are written inline rather than via the AckOn*Callback aliases
@@ -166,6 +163,10 @@ pub struct CStreamConfigurationOptions {
     >,
     pub ack_user_data: *mut std::ffi::c_void,
 }
+
+// Safety: this POD struct only carries scalars, function pointers, and an
+// opaque user_data pointer whose synchronization remains the caller's contract.
+unsafe impl Send for CStreamConfigurationOptions {}
 
 // Helper to convert C string to Rust String
 pub(crate) unsafe fn c_str_to_string(c_str: *const c_char) -> Result<String, &'static str> {
@@ -206,19 +207,92 @@ pub struct CHeaders {
 /// The caller is responsible for freeing the returned CHeaders using zerobus_free_headers
 pub type HeadersProviderCallback = extern "C" fn(user_data: *mut std::ffi::c_void) -> CHeaders;
 
-/// Rust struct that wraps a Go callback and implements HeadersProvider
+/// Function pointer type for releasing the headers provider's `user_data`.
+///
+/// The FFI owns `user_data`: this is invoked exactly once, when the last `Arc`
+/// referencing the provider drops. Because the supervisor task holds its own
+/// `Arc` clone across an in-flight `get_headers` call, that drop is guaranteed
+/// to happen only after any synchronous callback has returned — closing the
+/// use-after-free window that a wrapper freeing `user_data` right after
+/// `close()` would otherwise leave open.
+///
+/// May run on an internal SDK thread (a tokio worker, not necessarily the
+/// thread that created the stream), so it must be safe to call from any thread.
+pub type HeadersProviderFreeCallback = extern "C" fn(user_data: *mut std::ffi::c_void);
+
+/// Function pointer type for async stream creation completion.
+///
+/// `stream` is non-null on success and null on failure. `result` points to a
+/// `CResult` valid only for the duration of the call; copy any error text during
+/// the callback if you need to retain it.
+///
+/// Invoked from a background task, so it must be thread-safe and must not
+/// unwind across the FFI boundary.
+pub type CreateStreamAsyncCallback = extern "C" fn(
+    stream: *mut CZerobusStream,
+    result: *const CResult,
+    user_data: *mut std::ffi::c_void,
+);
+
+/// Function pointer type for async offset-returning operations.
+///
+/// `result` points to a `CResult` valid only for the duration of the call; copy
+/// any error text during the callback if you need to retain it.
+pub type OffsetAsyncCallback =
+    extern "C" fn(offset: i64, result: *const CResult, user_data: *mut std::ffi::c_void);
+
+/// Function pointer type for async bool-returning operations.
+///
+/// `result` points to a `CResult` valid only for the duration of the call; copy
+/// any error text during the callback if you need to retain it.
+pub type BoolAsyncCallback =
+    extern "C" fn(value: bool, result: *const CResult, user_data: *mut std::ffi::c_void);
+
+/// Function pointer type for async `CRecordArray`-returning operations.
+///
+/// On success, ownership of `records` transfers to the callback recipient, who
+/// must free it with `zerobus_free_record_array`. `result` points to a `CResult`
+/// valid only for the duration of the call; copy any error text during the
+/// callback if you need to retain it.
+pub type RecordArrayAsyncCallback =
+    extern "C" fn(records: CRecordArray, result: *const CResult, user_data: *mut std::ffi::c_void);
+
+/// Rust struct that wraps a Go/C callback and implements HeadersProvider.
+///
+/// Owns `user_data` when `free_user_data` is set: the destroy callback fires
+/// from `Drop`, i.e. once every task that could call `get_headers` is gone.
 pub(crate) struct CallbackHeadersProvider {
     callback: HeadersProviderCallback,
     user_data: *mut std::ffi::c_void,
+    free_user_data: Option<HeadersProviderFreeCallback>,
     in_use: AtomicBool, // Track concurrent access to detect thread-safety issues
 }
 
 impl CallbackHeadersProvider {
-    pub(crate) fn new(callback: HeadersProviderCallback, user_data: *mut std::ffi::c_void) -> Self {
+    pub(crate) fn new(
+        callback: HeadersProviderCallback,
+        user_data: *mut std::ffi::c_void,
+        free_user_data: Option<HeadersProviderFreeCallback>,
+    ) -> Self {
         Self {
             callback,
             user_data,
+            free_user_data,
             in_use: AtomicBool::new(false),
+        }
+    }
+}
+
+impl Drop for CallbackHeadersProvider {
+    fn drop(&mut self) {
+        if let Some(free) = self.free_user_data {
+            let user_data = self.user_data;
+            // Contain panics: unwinding across the FFI boundary is UB.
+            if catch_unwind(AssertUnwindSafe(|| free(user_data))).is_err() {
+                tracing::error!(
+                    "headers provider free callback panicked; contained at FFI boundary"
+                );
+            }
         }
     }
 }
@@ -285,18 +359,12 @@ impl HeadersProvider for CallbackHeadersProvider {
 /// Allocate a zeroed `CHeader` array of `count` elements for a headers callback
 /// to populate and return in a `CHeaders`.
 ///
-/// The array is allocated by the same allocator `zerobus_free_headers` releases
-/// it with (`libc::calloc` / `libc::free`), so a non-Rust callback can build a
-/// `CHeaders` without its own allocator having to match Rust's. This matters on
-/// Windows, where the C/C++ caller and this statically linked library can
-/// resolve to different CRT heaps; allocating here keeps the alloc/free pair on
-/// one heap and avoids the cross-heap free that would otherwise corrupt memory.
-///
-/// Zero-initialised so a partially populated array is safe to pass to
-/// `zerobus_free_headers` (unset key/value pointers are null and skipped).
-/// Returns null if `count` is 0 or the allocation fails.
-// Not wrapped in `ffi_guard`: a pure `calloc` that returns null on failure,
-// with no panic-capable operation.
+/// Uses the same allocator `zerobus_free_headers` frees with (`libc::calloc` /
+/// `libc::free`), keeping the alloc/free pair on one heap — needed on Windows,
+/// where the caller and this static library can resolve to different CRT heaps.
+/// Zero-initialised so a partially populated array is safe to free (unset
+/// pointers are null and skipped). Returns null if `count` is 0 or alloc fails.
+// Not wrapped in `ffi_guard`: pure `calloc`, returns null on failure, cannot panic.
 #[no_mangle]
 pub extern "C" fn zerobus_alloc_header_array(count: usize) -> *mut CHeader {
     if count == 0 {
@@ -306,18 +374,14 @@ pub extern "C" fn zerobus_alloc_header_array(count: usize) -> *mut CHeader {
 }
 
 /// Duplicate `len` bytes from `data` into a NUL-terminated C string for a
-/// headers callback to store in a `CHeader` key/value or a `CHeaders`
+/// headers callback to store in a `CHeader` key/value or `CHeaders`
 /// error_message.
 ///
 /// Allocated as a Rust `CString`, matching the `CString::from_raw` that
-/// `zerobus_free_headers` frees it with - the string is allocated and freed by
-/// the same allocator inside this library (see `zerobus_alloc_header_array` for
-/// why that matters). `len` of 0 yields an empty string (a valid non-null
-/// pointer). Returns null on allocation failure or if the input contains an
-/// interior NUL byte (which a C string cannot represent).
-// Not wrapped in `ffi_guard`: null-checks its input and returns null on any
-// failure (`CString::new` reports interior NULs as `Err`), with no
-// panic-capable operation.
+/// `zerobus_free_headers` frees it with (see `zerobus_alloc_header_array` for
+/// why same-allocator matters). `len` of 0 yields an empty string. Returns null
+/// on alloc failure or if the input has an interior NUL byte.
+// Not wrapped in `ffi_guard`: null-checks input, returns null on failure, cannot panic.
 #[no_mangle]
 pub extern "C" fn zerobus_alloc_cstring(data: *const u8, len: usize) -> *mut c_char {
     let bytes: &[u8] = if len == 0 {
@@ -428,6 +492,30 @@ impl AckCallback for CallbackAckCallback {
                     "ack on_error callback panicked; contained at FFI boundary"
                 );
             }
+        }
+    }
+}
+
+// Test-only drop observation for `CallbackAckCallback` (created internally, so
+// tests can't hold a `Weak`). `#[cfg(test)]` keeps the shipped library
+// unchanged. Counts only drops keyed to `ACK_DROP_SENTINEL_CREATE_FAIL_TESTS`,
+// so other tests' callbacks (null `user_data`) don't perturb the count.
+#[cfg(test)]
+pub(crate) static ACK_CALLBACK_DROP_COUNT: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(0);
+
+/// Sentinel `ack_user_data` reserved for the create-failure ack-drop tests.
+#[cfg(test)]
+pub(crate) static ACK_DROP_SENTINEL_CREATE_FAIL_TESTS: u8 = 0;
+
+#[cfg(test)]
+impl Drop for CallbackAckCallback {
+    fn drop(&mut self) {
+        if std::ptr::eq(
+            self.user_data as *const u8,
+            &ACK_DROP_SENTINEL_CREATE_FAIL_TESTS,
+        ) {
+            ACK_CALLBACK_DROP_COUNT.fetch_add(1, Ordering::SeqCst);
         }
     }
 }

@@ -2,6 +2,7 @@ package transport
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 
@@ -9,6 +10,13 @@ import (
 
 	"github.com/databricks/zerobus-sdk/purego/internal/zerobuspb"
 )
+
+// ErrInvalidParams marks an Open failure caused by invalid stream parameters
+// (empty table name, unsupported record type, missing descriptor). These are
+// deterministic: reopening with the same params reproduces the failure, so
+// higher layers can use errors.Is to treat them as non-retryable rather than
+// reconnecting in a loop.
+var ErrInvalidParams = errors.New("transport: invalid stream parameters")
 
 // StreamParams describes the stream to open: which table to ingest into, how
 // records are encoded, and which headers provider supplies its credentials.
@@ -42,8 +50,9 @@ type Stream struct {
 // the live stream once the server acknowledges it with a stream ID.
 //
 // ctx bounds opening the stream — GetHeaders (when a HeadersProvider is set),
-// the RPC start, and the handshake — and is defaulted to defaultHandshakeTimeout
-// when it carries no deadline.
+// the RPC start, and the handshake. When ctx has no deadline, Open applies
+// default bounds independently to GetHeaders and the handshake so a slow token
+// mint can't consume the entire open budget.
 // Cancelling ctx aborts an in-progress Open promptly, but once Open succeeds
 // the live stream is detached and cancelled only by Close, so a later ctx
 // timeout won't tear it down mid-ingest. ctx's values (including caller
@@ -53,30 +62,38 @@ func (c *Conn) Open(ctx context.Context, p StreamParams) (*Stream, error) {
 	// the validation below also governs the value actually sent.
 	p.TableName = strings.TrimSpace(p.TableName)
 	if p.TableName == "" {
-		return nil, fmt.Errorf("transport: open: table name is required")
+		return nil, fmt.Errorf("transport: open: table name is required: %w", ErrInvalidParams)
 	}
 	switch p.RecordType {
 	case zerobuspb.RecordType_PROTO, zerobuspb.RecordType_JSON:
 		// Supported.
 	default:
-		return nil, fmt.Errorf("transport: open %q: unsupported record type %v", p.TableName, p.RecordType)
+		return nil, fmt.Errorf("transport: open %q: unsupported record type %v: %w", p.TableName, p.RecordType, ErrInvalidParams)
 	}
 	if p.RecordType == zerobuspb.RecordType_PROTO && len(p.DescriptorProto) == 0 {
-		return nil, fmt.Errorf("transport: open %q: descriptor proto required for PROTO records", p.TableName)
+		return nil, fmt.Errorf("transport: open %q: descriptor proto required for PROTO records: %w", p.TableName, ErrInvalidParams)
 	}
-	// openCtx bounds the whole open attempt — GetHeaders (which may block on a
-	// token mint), the RPC start, and the handshake — using the caller's ctx,
-	// defaulted to defaultHandshakeTimeout when it has no deadline.
-	openCtx := ctx
+	headersCtx := ctx
+	useDefaultBudgets := false
 	if _, ok := ctx.Deadline(); !ok {
-		var cancelOpen context.CancelFunc
-		openCtx, cancelOpen = context.WithTimeout(ctx, defaultHandshakeTimeout)
-		defer cancelOpen()
+		useDefaultBudgets = true
+		var cancelHeaders context.CancelFunc
+		// Tag the budget so a HeadersProvider can tell this internal timeout
+		// apart from a caller cancel via context.Cause.
+		headersCtx, cancelHeaders = context.WithTimeoutCause(ctx, defaultHeadersTimeout, errHeadersBudgetExceeded)
+		defer cancelHeaders()
 	}
 
-	headers, err := p.resolveHeaders(openCtx)
+	headers, err := p.resolveHeaders(headersCtx)
 	if err != nil {
 		return nil, err
+	}
+
+	handshakeCtx := ctx
+	if useDefaultBudgets {
+		var cancelHandshake context.CancelFunc
+		handshakeCtx, cancelHandshake = context.WithTimeout(ctx, defaultHandshakeTimeout)
+		defer cancelHandshake()
 	}
 
 	// Detach the live stream from ctx's cancel/deadline (WithoutCancel keeps its
@@ -84,16 +101,17 @@ func (c *Conn) Open(ctx context.Context, p StreamParams) (*Stream, error) {
 	streamCtx := withStreamMetadataHeaders(context.WithoutCancel(ctx), p.TableName, headers)
 	streamCtx, cancelStream := context.WithCancel(streamCtx)
 
-	// Until the handshake succeeds, bridge openCtx to cancelStream so a caller
+	// Until the handshake succeeds, bridge handshakeCtx to cancelStream so a caller
 	// cancel/timeout unblocks the in-progress RPC start, first Send, and readiness
 	// wait. stopBridge removes it on success so the live stream is fully detached.
-	stopBridge := context.AfterFunc(openCtx, cancelStream)
+	stopBridge := context.AfterFunc(handshakeCtx, cancelStream)
 
-	stream, err := c.open(openCtx, streamCtx, cancelStream, p)
+	stream, err := c.open(handshakeCtx, streamCtx, cancelStream, p)
 	if err != nil {
-		if p.HeadersProvider != nil && isAuthRejection(err) {
-			p.HeadersProvider.Invalidate(ctx, p.TableName)
-		}
+		// Deregister the bridge before returning so its AfterFunc doesn't linger
+		// until handshakeCtx ends (which, on the default-budget path, is bounded,
+		// but on a caller-supplied long-lived ctx would otherwise stay pinned).
+		stopBridge()
 		cancelStream()
 		return nil, err
 	}
@@ -101,7 +119,7 @@ func (c *Conn) Open(ctx context.Context, p StreamParams) (*Stream, error) {
 	// return one racing cancellation.
 	if !stopBridge() {
 		cancelStream()
-		return nil, fmt.Errorf("transport: open %q: %w", p.TableName, openCtx.Err())
+		return nil, fmt.Errorf("transport: open %q: %w", p.TableName, handshakeCtx.Err())
 	}
 	stream.cancel = cancelStream
 	return stream, nil
@@ -127,6 +145,12 @@ func (c *Conn) open(hctx, streamCtx context.Context, teardown context.CancelFunc
 		},
 		confirmCreateStream,
 	); err != nil {
+		// Direct auth rejections are preserved for the lifecycle layer, which owns
+		// normal invalidation. Only the timeout race path (expired hctx) invalidates
+		// here so a preserved rejection cannot be lost to deadline masking.
+		if p.HeadersProvider != nil && IsAuthRejection(err) && hctx.Err() != nil {
+			p.HeadersProvider.Invalidate(hctx, p.TableName)
+		}
 		return nil, fmt.Errorf("transport: open %q: %w", p.TableName, err)
 	}
 	return s, nil
@@ -165,8 +189,41 @@ func confirmCreateStream(resp *zerobuspb.EphemeralStreamResponse) (string, error
 	return id, nil
 }
 
+// FakeStreamRPC is the wire interface a test fake must satisfy to be wrapped by
+// [NewFakeStreamForTesting]. It exists only for tests in other internal
+// packages that must supply a fake RPC; production callers do not use it.
+type FakeStreamRPC interface {
+	Send(*zerobuspb.EphemeralStreamRequest) error
+	Recv() (*zerobuspb.EphemeralStreamResponse, error)
+	CloseSend() error
+}
+
+// NewFakeStreamForTesting wraps a test fake as a Stream, skipping the handshake.
+// It is exported because Go tests in other internal packages cannot reach
+// Stream's unexported fields; production code must not use it.
+//
+// Close cancels the stream (abrupt abort). If the RPC implements Abort() the
+// fake can model gRPC's context-cancel (distinct from CloseSend's half-close)
+// and unblock a Recv parked on a channel. Otherwise Close falls back to
+// CloseSend, which suffices for fakes whose Recv returns io.EOF on half-close.
+func NewFakeStreamForTesting(rpc FakeStreamRPC) *Stream {
+	s := &Stream{}
+	s.rpc = rpc
+	if a, ok := rpc.(interface{ Abort() }); ok {
+		s.cancel = a.Abort
+	} else {
+		s.cancel = func() { _ = rpc.CloseSend() }
+	}
+	s.setID("fake-stream")
+	return s
+}
+
+// ServerID returns the server-assigned stream identifier from the handshake.
+func (s *Stream) ServerID() string { return s.name() }
+
 // ID returns the server-assigned stream identifier from the handshake.
-func (s *Stream) ID() string { return s.name() }
+// Deprecated: use ServerID.
+func (s *Stream) ID() string { return s.ServerID() }
 
 // Send writes one request to the server. It is not safe for concurrent use.
 func (s *Stream) Send(req *zerobuspb.EphemeralStreamRequest) error { return s.send(req) }
