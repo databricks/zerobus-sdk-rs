@@ -18,7 +18,7 @@ use tokio_util::sync::CancellationToken;
 use tonic::transport::Channel;
 use tracing::{debug, error, info, instrument, warn};
 
-use super::types::{CallbackMessage, OneshotMap, RecordLandingZone};
+use super::types::{CallbackMessage, OneshotMap, RecordLandingZone, SentOffsetWatermark};
 use super::{ZerobusStream, STREAM_TEARDOWN_DRAIN_TIMEOUT_MS};
 use crate::databricks::zerobus::zerobus_client::ZerobusClient;
 use crate::errors::should_retry_initial_connection;
@@ -203,6 +203,7 @@ impl ZerobusStream {
 
             // 3. Spawn receiver and sender task.
             let is_paused = Arc::new(AtomicBool::new(false));
+            let highest_sent_offset: SentOffsetWatermark = Arc::new(std::sync::Mutex::new(-1));
 
             // Per-stream child token
             let per_stream_token = cancellation_token.child_token();
@@ -219,6 +220,7 @@ impl ZerobusStream {
                 server_error_tx.clone(),
                 recv_drain_token.clone(),
                 callback_tx.clone(),
+                Arc::clone(&highest_sent_offset),
             );
             let mut send_task = Self::spawn_sender_task(
                 tx,
@@ -226,6 +228,7 @@ impl ZerobusStream {
                 Arc::clone(&is_paused),
                 server_error_tx.clone(),
                 per_stream_token.clone(),
+                highest_sent_offset,
             );
 
             // 4. Wait for any of the two tasks to end.

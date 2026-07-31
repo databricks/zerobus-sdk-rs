@@ -21,6 +21,11 @@
 
 ### Bug Fixes
 
+- **Rust gRPC — reject server over-acks**: cumulative durability
+  acknowledgements that exceed the highest request sent on the active
+  connection now fail the stream before any record is reported durable or the
+  acknowledgement watermark advances.
+
 - **Arrow Flight — invalid acknowledgment watermarks are rejected** (Beta): ack progress is now monotonic, so delayed or duplicate responses cannot move the durable watermark backward. A response claiming more records than were actually submitted on the active connection is rejected without making buffered, unsent records appear durable.
 
 ### Documentation

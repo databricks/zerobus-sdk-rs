@@ -34,6 +34,16 @@ pub enum MockResponse {
         ack_up_to_offset: i64,
         delay_ms: u64,
     },
+    /// Record acknowledgment sent when a different request offset is observed.
+    ///
+    /// This allows tests to model a server that acknowledges beyond what the
+    /// client has sent.
+    #[allow(dead_code)]
+    RecordAckOnOffset {
+        trigger_offset: i64,
+        ack_up_to_offset: i64,
+        delay_ms: u64,
+    },
     /// Close stream signal
     #[allow(dead_code)]
     CloseStreamSignal {
@@ -448,6 +458,34 @@ async fn handle_mock_response(
             delay_ms,
         } => {
             if offset == Some(*ack_up_to_offset) {
+                if *delay_ms > 0 {
+                    sleep(Duration::from_millis(*delay_ms)).await;
+                }
+                info!(
+                    "Sending RecordAck response for {} with ack_up_to_offset: {}",
+                    request_type, ack_up_to_offset
+                );
+                let response = EphemeralStreamResponse {
+                    payload: Some(ResponsePayload::IngestRecordResponse(
+                        IngestRecordResponse {
+                            durability_ack_up_to_offset: Some(*ack_up_to_offset),
+                        },
+                    )),
+                };
+                if tx.send(Ok(response)).await.is_err() {
+                    return (false, current_index);
+                }
+                (true, current_index + 1)
+            } else {
+                (true, current_index)
+            }
+        }
+        MockResponse::RecordAckOnOffset {
+            trigger_offset,
+            ack_up_to_offset,
+            delay_ms,
+        } => {
+            if offset == Some(*trigger_offset) {
                 if *delay_ms > 0 {
                     sleep(Duration::from_millis(*delay_ms)).await;
                 }
