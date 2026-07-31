@@ -37,7 +37,7 @@ public interface HeadersProvider {
    *
    * <p>Header names must be valid gRPC metadata keys and should come from a small, fixed set.
    * Dynamically generated header names are not supported because names are retained for the
-   * lifetime of the process.
+   * lifetime of the process and the SDK limits the number of distinct names.
    *
    * <p>Exceptions are treated as retryable during automatic stream recovery. Throw {@link
    * NonRetriableException} for permanent failures that should stop recovery immediately.

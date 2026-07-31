@@ -13,8 +13,10 @@
 
 ### Bug Fixes
 
-- Invalid custom gRPC metadata header names now return `InvalidArgument` instead of panicking
-  during stream connection setup.
+- Custom gRPC metadata headers now reject invalid names without panicking, recognize reserved
+  headers case-insensitively, and keep authorization values marked sensitive.
+- Arrow recovery now preserves non-retryable custom headers-provider errors instead of replacing
+  them with a retryable `Unavailable` status.
 
 ### Documentation
 

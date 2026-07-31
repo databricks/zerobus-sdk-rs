@@ -735,6 +735,16 @@ impl ZerobusArrowStream {
                                     headers_provider.invalidate().await;
                                 }
                                 warn!("Supervisor: Reconnection failed: {}", e);
+                                if should_stop_reconnecting(
+                                    &e,
+                                    attempts.saturating_add(1),
+                                    options.recovery_retries,
+                                ) {
+                                    is_closed.store(true, Ordering::Relaxed);
+                                    Self::move_pending_to_failed(&pending_batches, &failed_batches)
+                                        .await;
+                                    return Err(e);
+                                }
                                 // Loop continues, will retry if retries remain.
                                 // Create a dummy stream that immediately errors.
                                 response_stream = Box::pin(futures::stream::once(async move {
@@ -1699,6 +1709,10 @@ impl Drop for ZerobusArrowStream {
     }
 }
 
+fn should_stop_reconnecting(error: &ZerobusError, attempt: u32, max_attempts: u32) -> bool {
+    !error.is_retryable() || attempt >= max_attempts
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1718,5 +1732,15 @@ mod tests {
 
         assert_eq!(props.table_name, "catalog.schema.table");
         assert_eq!(props.schema.fields().len(), 2);
+    }
+
+    #[test]
+    fn non_retryable_provider_error_stops_recovery() {
+        let permanent = ZerobusError::InvalidArgument("permanent provider failure".to_string());
+        let transient = ZerobusError::TokenFetchError("temporary provider failure".to_string());
+
+        assert!(should_stop_reconnecting(&permanent, 1, 4));
+        assert!(!should_stop_reconnecting(&transient, 1, 4));
+        assert!(should_stop_reconnecting(&transient, 4, 4));
     }
 }

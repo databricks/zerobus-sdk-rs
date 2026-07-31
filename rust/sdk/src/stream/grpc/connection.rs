@@ -74,26 +74,7 @@ impl ZerobusStream {
         let headers = headers_provider.get_headers().await?;
 
         for (key, value) in headers {
-            match key {
-                "x-databricks-zerobus-table-name" => {
-                    let table_name = MetadataValue::try_from(value.as_str())
-                        .map_err(|e| ZerobusError::InvalidTableName(e.to_string()))?;
-                    stream_metadata.insert("x-databricks-zerobus-table-name", table_name);
-                }
-                "authorization" => {
-                    let mut auth_value = MetadataValue::try_from(value.as_str()).map_err(|_| {
-                        error!(table_name = %table_properties.table_name, "authorization token is not a valid HTTP header value");
-                        ZerobusError::InvalidUCTokenError(
-                            "authorization token is not a valid HTTP header value".to_string(),
-                        )
-                    })?;
-                    auth_value.set_sensitive(true);
-                    stream_metadata.insert("authorization", auth_value);
-                }
-                other_key => {
-                    insert_custom_header(stream_metadata, other_key, &value)?;
-                }
-            }
+            insert_header(stream_metadata, key, &value, &table_properties.table_name)?;
         }
 
         let mut response_grpc_stream = channel
@@ -172,16 +153,40 @@ impl ZerobusStream {
     }
 }
 
-fn insert_custom_header(
+fn insert_header(
     metadata: &mut MetadataMap,
     key: &'static str,
     value: &str,
+    table_name: &str,
 ) -> ZerobusResult<()> {
-    let key = MetadataKey::from_bytes(key.as_bytes())
-        .map_err(|_| ZerobusError::InvalidArgument(key.to_string()))?;
-    let value = MetadataValue::try_from(value)
-        .map_err(|_| ZerobusError::InvalidArgument(key.to_string()))?;
-    metadata.insert(key, value);
+    let metadata_key = MetadataKey::from_bytes(key.as_bytes())
+        .map_err(|_| ZerobusError::InvalidArgument(format!("invalid header name: {key}")))?;
+    match metadata_key.as_str() {
+        "x-databricks-zerobus-table-name" => {
+            let table_name = MetadataValue::try_from(value)
+                .map_err(|error| ZerobusError::InvalidTableName(error.to_string()))?;
+            metadata.insert(metadata_key, table_name);
+        }
+        "authorization" => {
+            let mut auth_value = MetadataValue::try_from(value).map_err(|_| {
+                error!(
+                    table_name,
+                    "authorization token is not a valid HTTP header value"
+                );
+                ZerobusError::InvalidUCTokenError(
+                    "authorization token is not a valid HTTP header value".to_string(),
+                )
+            })?;
+            auth_value.set_sensitive(true);
+            metadata.insert(metadata_key, auth_value);
+        }
+        _ => {
+            let header_value = MetadataValue::try_from(value).map_err(|_| {
+                ZerobusError::InvalidArgument(format!("invalid value for metadata header: {key}"))
+            })?;
+            metadata.insert(metadata_key, header_value);
+        }
+    }
     Ok(())
 }
 
@@ -191,9 +196,28 @@ mod tests {
 
     #[test]
     fn invalid_custom_header_name_returns_error() {
-        let error = insert_custom_header(&mut MetadataMap::new(), "invalid header", "value")
-            .expect_err("invalid metadata key must be rejected");
+        let error = insert_header(
+            &mut MetadataMap::new(),
+            "invalid header",
+            "value",
+            "catalog.schema.table",
+        )
+        .expect_err("invalid metadata key must be rejected");
 
         assert!(matches!(error, ZerobusError::InvalidArgument(_)));
+    }
+
+    #[test]
+    fn mixed_case_authorization_header_is_sensitive() {
+        let mut metadata = MetadataMap::new();
+        insert_header(
+            &mut metadata,
+            "Authorization",
+            "Bearer token",
+            "catalog.schema.table",
+        )
+        .unwrap();
+
+        assert!(metadata.get("authorization").unwrap().is_sensitive());
     }
 }

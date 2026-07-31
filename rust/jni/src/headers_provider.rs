@@ -11,6 +11,7 @@ use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex, OnceLock};
 
 static HEADER_NAMES: OnceLock<Mutex<HashSet<&'static str>>> = OnceLock::new();
+const MAX_INTERNED_HEADER_NAMES: usize = 1024;
 
 struct LocalFrameError(ZerobusError);
 
@@ -156,24 +157,34 @@ fn extract_headers(
             .map_err(|error| java_call_error(env, "read header value", error))?
             .into();
 
-        headers.insert(intern_header_name(key), value);
+        env.delete_local_ref(key_string)
+            .map_err(|error| java_call_error(env, "release header name", error))?;
+        env.delete_local_ref(value_string)
+            .map_err(|error| java_call_error(env, "release header value", error))?;
+
+        headers.insert(intern_header_name(key)?, value);
     }
 
     Ok(headers)
 }
 
-fn intern_header_name(name: String) -> &'static str {
+fn intern_header_name(name: String) -> ZerobusResult<&'static str> {
     let names = HEADER_NAMES.get_or_init(|| Mutex::new(HashSet::new()));
     let mut names = names
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
     if let Some(existing) = names.get(name.as_str()) {
-        return existing;
+        return Ok(existing);
+    }
+    if names.len() >= MAX_INTERNED_HEADER_NAMES {
+        return Err(provider_invalid_argument(format!(
+            "too many distinct header names; use at most {MAX_INTERNED_HEADER_NAMES} fixed names"
+        )));
     }
 
     let leaked = Box::leak(name.into_boxed_str());
     names.insert(leaked);
-    leaked
+    Ok(leaked)
 }
 
 fn java_call_error(env: &mut JNIEnv<'_>, method: &str, error: JniError) -> ZerobusError {
