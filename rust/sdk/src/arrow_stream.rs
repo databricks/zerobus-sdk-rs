@@ -1723,41 +1723,27 @@ impl ZerobusArrowStream {
                         }
                     };
 
-                    if ack.is_close_signal() {
+                    if ack.is_close_signal() && matches!(&rotation, RotationState::Open) {
                         let server_duration_ms = ack.close_stream_duration_ms.unwrap_or(0);
-                        let (new_ack_deadline, new_drain_deadline) = Self::rotation_deadlines(
+                        let (ack_deadline, drain_deadline) = Self::rotation_deadlines(
                             server_duration_ms,
                             options.stream_paused_max_wait_time_ms,
                         );
-
-                        match &mut rotation {
-                            RotationState::Open => {
-                                let target_records = Self::pause_and_snapshot_submitted(
-                                    &ingest_mutex,
-                                    &is_paused,
-                                    &submitted_records,
-                                )
-                                .await;
-                                rotation = RotationState::WaitingForAcks {
-                                    target_records,
-                                    ack_deadline: new_ack_deadline,
-                                    drain_deadline: new_drain_deadline,
-                                };
-                                info!(
-                                    server_duration_ms,
-                                    target_records, "Server requested graceful stream rotation"
-                                );
-                            }
-                            RotationState::WaitingForAcks {
-                                ack_deadline,
-                                drain_deadline,
-                                ..
-                            } => {
-                                *ack_deadline = (*ack_deadline).min(new_ack_deadline);
-                                *drain_deadline = (*drain_deadline).min(new_drain_deadline);
-                            }
-                            RotationState::Draining(_) => unreachable!(),
-                        }
+                        let target_records = Self::pause_and_snapshot_submitted(
+                            &ingest_mutex,
+                            &is_paused,
+                            &submitted_records,
+                        )
+                        .await;
+                        rotation = RotationState::WaitingForAcks {
+                            target_records,
+                            ack_deadline,
+                            drain_deadline,
+                        };
+                        info!(
+                            server_duration_ms,
+                            target_records, "Server requested graceful stream rotation"
+                        );
                     }
 
                     if ack.ack_up_to_records > 0 {
