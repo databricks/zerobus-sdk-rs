@@ -54,9 +54,11 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net"
 	"net/url"
 	"strings"
 	"sync"
+	"unicode/utf8"
 
 	"google.golang.org/grpc"
 
@@ -147,8 +149,12 @@ func New(zerobusEndpoint, ucEndpoint string, opts ...Option) (*SDK, error) {
 		return nil, &Error{Op: "New", cause: err, retryable: false}
 	}
 
+	name := strings.TrimSpace(cfg.applicationName)
+	if err := validateApplicationName(name); err != nil {
+		return nil, &Error{Op: "New", cause: err, retryable: false}
+	}
 	ua := userAgentPrefix
-	if name := strings.TrimSpace(cfg.applicationName); name != "" {
+	if name != "" {
 		ua = ua + " " + name
 	}
 
@@ -208,8 +214,8 @@ func (s *SDK) Close() error {
 
 // CreateStream opens an ingestion stream for tableName authenticated with the
 // Unity Catalog OAuth 2.0 client-credentials flow using clientID and
-// clientSecret. The record encoding defaults to JSON; pass WithProto to ingest
-// Protocol Buffer records, along with any tuning options.
+// clientSecret. The record encoding defaults to Protocol Buffers; pass
+// WithProto with the required descriptor, or WithJSON for JSON records.
 //
 // The stream opens asynchronously: CreateStream validates its arguments and
 // returns a ready stream immediately, while the first connection (token mint
@@ -311,6 +317,22 @@ func validateStreamArgs(tableName string, sc streamConfig) error {
 	return nil
 }
 
+// validateApplicationName applies gRPC metadata's ASCII-value constraints
+// before constructing the lazy connection, so malformed user-agent data fails
+// at New rather than later during the first stream open.
+func validateApplicationName(name string) error {
+	if !utf8.ValidString(name) {
+		return fmt.Errorf("application name must be valid UTF-8")
+	}
+	for i := 0; i < len(name); i++ {
+		b := name[i]
+		if b != '\t' && (b < 0x20 || b == 0x7f || b > 0x7e) {
+			return fmt.Errorf("application name contains invalid user-agent characters")
+		}
+	}
+	return nil
+}
+
 // forget drops st from the open-stream set once it has torn itself down, so a
 // long-lived SDK does not retain closed streams.
 func (s *SDK) forget(st *Stream) {
@@ -319,9 +341,9 @@ func (s *SDK) forget(st *Stream) {
 	s.mu.Unlock()
 }
 
-// grpcTarget converts a user-facing endpoint (an https URL, a bare host, or a
-// gRPC resolver target) into a target grpc.NewClient accepts. An https/http URL
-// is reduced to host[:port], defaulting to :443. Explicit resolver targets
+// grpcTarget converts a user-facing endpoint (an HTTPS URL, a bare host, or a
+// gRPC resolver target) into a target grpc.NewClient accepts. An HTTPS URL is
+// reduced to host[:port], defaulting to :443. Explicit resolver targets
 // (containing "://", e.g. "dns:///", "passthrough:///") pass through unchanged
 // so tests and advanced callers can inject their own.
 func grpcTarget(endpoint string) (string, error) {
@@ -330,16 +352,22 @@ func grpcTarget(endpoint string) (string, error) {
 		return "", fmt.Errorf("zerobusEndpoint is required")
 	}
 	lower := strings.ToLower(endpoint)
-	if !strings.HasPrefix(lower, "https://") && !strings.HasPrefix(lower, "http://") {
-		// A gRPC resolver target (scheme://... other than http/https) is passed
+	if strings.HasPrefix(lower, "http://") {
+		return "", fmt.Errorf("zerobusEndpoint must use HTTPS")
+	}
+	if !strings.HasPrefix(lower, "https://") {
+		// A gRPC resolver target (scheme://... other than HTTPS) is passed
 		// through; a bare host gets the default TLS port.
 		if strings.Contains(endpoint, "://") {
 			return endpoint, nil
 		}
-		if _, port, err := splitHostPort(endpoint); err == nil && port != "" {
-			return endpoint, nil
+		if ip := net.ParseIP(strings.Trim(endpoint, "[]")); ip != nil {
+			return net.JoinHostPort(ip.String(), "443"), nil
 		}
-		return endpoint + ":443", nil
+		if host, port, err := net.SplitHostPort(endpoint); err == nil {
+			return net.JoinHostPort(host, port), nil
+		}
+		return net.JoinHostPort(endpoint, "443"), nil
 	}
 	u, err := url.Parse(endpoint)
 	if err != nil {
@@ -353,20 +381,5 @@ func grpcTarget(endpoint string) (string, error) {
 	if port == "" {
 		port = "443"
 	}
-	return host + ":" + port, nil
-}
-
-// splitHostPort reports the host and port of a "host:port" string, returning an
-// empty port when none is present. It tolerates a bare host without erroring so
-// grpcTarget can decide whether to append the default port.
-func splitHostPort(s string) (host, port string, err error) {
-	i := strings.LastIndexByte(s, ':')
-	if i < 0 {
-		return s, "", nil
-	}
-	// A ':' inside brackets is part of an IPv6 literal, not a port separator.
-	if strings.HasSuffix(s[:i], "]") || !strings.Contains(s, "]") {
-		return s[:i], s[i+1:], nil
-	}
-	return s, "", nil
+	return net.JoinHostPort(host, port), nil
 }

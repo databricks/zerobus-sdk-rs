@@ -18,8 +18,9 @@ type sdkConfig struct {
 
 // WithApplicationName appends a caller-supplied identifier such as "my-app/1.0"
 // to the gRPC user-agent header. Leading and trailing whitespace is trimmed and
-// blank names are ignored. The final value is "zerobus-sdk-go-purego/<version>
-// <name>".
+// blank names are ignored. Names must be valid ASCII user-agent values; invalid
+// UTF-8, control characters, and DEL cause New to fail. The final value is
+// "zerobus-sdk-go-purego/<version> <name>".
 func WithApplicationName(name string) Option {
 	return func(c *sdkConfig) { c.applicationName = name }
 }
@@ -45,7 +46,8 @@ const (
 // AckCallback receives asynchronous per-offset acknowledgement and error
 // notifications. Register one with WithAckCallback as an alternative to blocking
 // on Flush or WaitForOffset. Callbacks run on a dedicated worker, so
-// implementations must return promptly and must not call back into the stream.
+// implementations should return promptly to avoid delaying later notifications.
+// Stream methods, including Close, may be called from a callback.
 type AckCallback = stream.AckCallback
 
 // StreamOption configures a stream created with CreateStream or
@@ -63,15 +65,12 @@ type streamConfig struct {
 
 func defaultStreamConfig() streamConfig {
 	return streamConfig{
-		// JSON is the default so a record type is always valid without a
-		// descriptor; WithProto switches to proto and supplies the descriptor.
-		recordType: zerobuspb.RecordType_JSON,
+		recordType: zerobuspb.RecordType_PROTO,
 		cfg:        stream.DefaultConfig(),
 	}
 }
 
-// WithJSON selects JSON record encoding. It is the default when no encoding
-// option is given.
+// WithJSON selects JSON record encoding.
 func WithJSON() StreamOption {
 	return func(c *streamConfig) {
 		c.recordType = zerobuspb.RecordType_JSON
@@ -124,6 +123,25 @@ func WithRecoveryRetries(n int) StreamOption {
 	return func(c *streamConfig) { c.cfg.RecoveryRetries = n }
 }
 
+// WithRecoveryTimeout bounds each stream-open attempt during recovery. A
+// non-positive value keeps the default (15 seconds).
+func WithRecoveryTimeout(d time.Duration) StreamOption {
+	return func(c *streamConfig) { c.cfg.RecoveryTimeout = d }
+}
+
+// WithRecoveryBackoff sets the delay between consecutive recovery attempts. A
+// non-positive value keeps the default (2 seconds).
+func WithRecoveryBackoff(d time.Duration) StreamOption {
+	return func(c *streamConfig) { c.cfg.RecoveryBackoff = d }
+}
+
+// WithLackOfAckTimeout bounds how long records may remain in flight without an
+// acknowledgement before recovery starts. A non-positive value keeps the
+// default (60 seconds).
+func WithLackOfAckTimeout(d time.Duration) StreamOption {
+	return func(c *streamConfig) { c.cfg.LackOfAckTimeout = d }
+}
+
 // WithFlushTimeout sets the upper bound on how long Flush and WaitForOffset wait
 // for acknowledgement. A caller context may shorten this budget but cannot
 // extend it. A non-positive value keeps the default (5 minutes).
@@ -135,4 +153,20 @@ func WithFlushTimeout(d time.Duration) StreamOption {
 // non-positive value keeps the default (just under the 10 MiB service limit).
 func WithMaxPayloadBytes(n int) StreamOption {
 	return func(c *streamConfig) { c.cfg.MaxPayloadBytes = n }
+}
+
+// WithMaxBatchRecords caps the number of records accepted by one
+// IngestRecordsOffset call. A non-positive value keeps the default (100,000).
+func WithMaxBatchRecords(n int) StreamOption {
+	return func(c *streamConfig) { c.cfg.MaxBatchRecords = n }
+}
+
+// WithStreamPausedMaxWait caps how long the client honors a server-requested
+// pause before reconnecting. If omitted, the full server-requested duration is
+// honored. Passing zero reconnects immediately; a positive duration waits for
+// the shorter of that duration and the server request.
+func WithStreamPausedMaxWait(d time.Duration) StreamOption {
+	return func(c *streamConfig) {
+		c.cfg.StreamPausedMaxWait = &d
+	}
 }

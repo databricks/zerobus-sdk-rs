@@ -30,9 +30,13 @@ func TestGRPCTarget(t *testing.T) {
 	}{
 		{name: "https URL", endpoint: "https://ws.zerobus.databricks.com", want: "ws.zerobus.databricks.com:443"},
 		{name: "https URL with port", endpoint: "https://ws.zerobus.databricks.com:8443", want: "ws.zerobus.databricks.com:8443"},
-		{name: "http URL", endpoint: "http://localhost:8080", want: "localhost:8080"},
+		{name: "http URL rejected", endpoint: "http://localhost:8080", wantErr: true},
 		{name: "bare host", endpoint: "ws.zerobus.databricks.com", want: "ws.zerobus.databricks.com:443"},
 		{name: "host:port", endpoint: "ws.zerobus.databricks.com:9000", want: "ws.zerobus.databricks.com:9000"},
+		{name: "IPv6 URL", endpoint: "https://[::1]", want: "[::1]:443"},
+		{name: "IPv6 URL with port", endpoint: "https://[::1]:8443", want: "[::1]:8443"},
+		{name: "bare IPv6", endpoint: "::1", want: "[::1]:443"},
+		{name: "bracketed IPv6 with port", endpoint: "[::1]:8443", want: "[::1]:8443"},
 		{name: "resolver target passthrough", endpoint: "passthrough:///bufnet", want: "passthrough:///bufnet"},
 		{name: "dns target", endpoint: "dns:///ws.zerobus.databricks.com:443", want: "dns:///ws.zerobus.databricks.com:443"},
 		{name: "trims whitespace", endpoint: "  https://ws.databricks.com  ", want: "ws.databricks.com:443"},
@@ -60,8 +64,8 @@ func TestGRPCTarget(t *testing.T) {
 
 func TestResolveStreamConfigDefaults(t *testing.T) {
 	rt, desc, maxInflight, recovery := zerobus.ResolveStreamConfig()
-	if rt != int32(zerobuspb.RecordType_JSON) {
-		t.Errorf("default record type = %d, want JSON(%d)", rt, zerobuspb.RecordType_JSON)
+	if rt != int32(zerobuspb.RecordType_PROTO) {
+		t.Errorf("default record type = %d, want PROTO(%d)", rt, zerobuspb.RecordType_PROTO)
 	}
 	if desc != nil {
 		t.Errorf("default descriptor = %v, want nil", desc)
@@ -110,6 +114,67 @@ func TestWithJSONClearsDescriptor(t *testing.T) {
 	}
 }
 
+func TestResolveStreamTuningOptions(t *testing.T) {
+	pauseWait := 3 * time.Second
+	recoveryTimeout, recoveryBackoff, lackOfAckTimeout, maxBatchRecords, gotPauseWait :=
+		zerobus.ResolveStreamTuning(
+			zerobus.WithRecoveryTimeout(11*time.Second),
+			zerobus.WithRecoveryBackoff(12*time.Second),
+			zerobus.WithLackOfAckTimeout(13*time.Second),
+			zerobus.WithMaxBatchRecords(14),
+			zerobus.WithStreamPausedMaxWait(pauseWait),
+		)
+	if recoveryTimeout != 11*time.Second {
+		t.Errorf("RecoveryTimeout = %v, want 11s", recoveryTimeout)
+	}
+	if recoveryBackoff != 12*time.Second {
+		t.Errorf("RecoveryBackoff = %v, want 12s", recoveryBackoff)
+	}
+	if lackOfAckTimeout != 13*time.Second {
+		t.Errorf("LackOfAckTimeout = %v, want 13s", lackOfAckTimeout)
+	}
+	if maxBatchRecords != 14 {
+		t.Errorf("MaxBatchRecords = %d, want 14", maxBatchRecords)
+	}
+	if gotPauseWait == nil || *gotPauseWait != pauseWait {
+		t.Errorf("StreamPausedMaxWait = %v, want %v", gotPauseWait, pauseWait)
+	}
+
+	_, _, _, _, zeroPauseWait := zerobus.ResolveStreamTuning(zerobus.WithStreamPausedMaxWait(0))
+	if zeroPauseWait == nil || *zeroPauseWait != 0 {
+		t.Errorf("explicit zero StreamPausedMaxWait = %v, want pointer to zero", zeroPauseWait)
+	}
+}
+
+func TestNewRejectsInvalidApplicationName(t *testing.T) {
+	tests := []struct {
+		name string
+		app  string
+	}{
+		{name: "invalid UTF-8", app: string([]byte{0xff})},
+		{name: "NUL", app: "my-app\x00suffix"},
+		{name: "newline", app: "my-app\nsuffix"},
+		{name: "DEL", app: "my-app\x7f"},
+		{name: "non-ASCII", app: "my-app-é"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			sdk, err := zerobus.New(
+				"https://ws.zerobus.databricks.com",
+				"https://ws.databricks.com",
+				zerobus.WithApplicationName(tc.app),
+			)
+			if err == nil {
+				_ = sdk.Close()
+				t.Fatal("New succeeded, want invalid application-name error")
+			}
+			if zerobus.Retryable(err) {
+				t.Errorf("error %v is retryable, want permanent", err)
+			}
+		})
+	}
+}
+
 func TestErrorRetryable(t *testing.T) {
 	// A non-retryable underlying error stays non-retryable through the helper.
 	if zerobus.Retryable(context.Canceled) {
@@ -127,6 +192,7 @@ func TestErrorRetryable(t *testing.T) {
 type echoServer struct {
 	zerobuspb.UnimplementedZerobusServer
 	streamID string
+	noAcks   bool
 }
 
 func (s *echoServer) EphemeralStream(stream zerobuspb.Zerobus_EphemeralStreamServer) error {
@@ -153,6 +219,9 @@ func (s *echoServer) EphemeralStream(stream zerobuspb.Zerobus_EphemeralStreamSer
 		}
 		if err != nil {
 			return err
+		}
+		if s.noAcks {
+			continue
 		}
 		// Ack single records and batches alike by echoing the wire offset the
 		// sender stamped on the request.
@@ -261,7 +330,7 @@ func TestStreamBatchIngest(t *testing.T) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	stream, err := sdk.CreateStreamWithProvider(ctx, "main.sales.orders", provider)
+	stream, err := sdk.CreateStreamWithProvider(ctx, "main.sales.orders", provider, zerobus.WithJSON())
 	if err != nil {
 		t.Fatalf("CreateStreamWithProvider: %v", err)
 	}
@@ -315,7 +384,7 @@ func TestCreateStreamSharesTokenCacheAcrossStreams(t *testing.T) {
 	// Two streams on the same table with the same credentials must reuse one
 	// minted token rather than each provider caching its own.
 	for i := 0; i < 2; i++ {
-		st, err := sdk.CreateStream(ctx, "main.sales.orders", "client-id", "client-secret")
+		st, err := sdk.CreateStream(ctx, "main.sales.orders", "client-id", "client-secret", zerobus.WithJSON())
 		if err != nil {
 			t.Fatalf("CreateStream[%d]: %v", i, err)
 		}
@@ -349,6 +418,7 @@ func TestCreateStreamRejectsInvalidArguments(t *testing.T) {
 	}{
 		{name: "empty table name", table: ""},
 		{name: "blank table name", table: "   "},
+		{name: "default proto without descriptor", table: "main.sales.orders"},
 		{
 			name:  "proto without descriptor",
 			table: "main.sales.orders",
@@ -380,7 +450,8 @@ func TestFlushReportsTerminalFailureWithNoRecords(t *testing.T) {
 	// An empty static provider fails every open, and disabling recovery makes the
 	// stream terminal after the first attempt instead of retrying.
 	st, err := sdk.CreateStreamWithProvider(context.Background(), "main.sales.orders",
-		zerobus.NewStaticHeadersProvider(nil), zerobus.WithRecovery(zerobus.RecoveryDisabled))
+		zerobus.NewStaticHeadersProvider(nil), zerobus.WithJSON(),
+		zerobus.WithRecovery(zerobus.RecoveryDisabled))
 	if err != nil {
 		t.Fatalf("CreateStreamWithProvider: %v", err)
 	}
@@ -401,7 +472,8 @@ func TestSDKCloseTerminatesOpenStreams(t *testing.T) {
 	sdk := zerobus.NewWithConn(conn, "https://ws.zerobus.databricks.com", "https://ws.databricks.com")
 	provider := zerobus.NewStaticHeadersProvider(map[string]string{"authorization": "Bearer t"})
 
-	st, err := sdk.CreateStreamWithProvider(context.Background(), "main.sales.orders", provider)
+	st, err := sdk.CreateStreamWithProvider(
+		context.Background(), "main.sales.orders", provider, zerobus.WithJSON())
 	if err != nil {
 		t.Fatalf("CreateStreamWithProvider: %v", err)
 	}
@@ -418,7 +490,8 @@ func TestSDKCloseTerminatesOpenStreams(t *testing.T) {
 	if err := sdk.Close(); err != nil {
 		t.Errorf("second SDK.Close: %v, want nil (idempotent)", err)
 	}
-	if _, err := sdk.CreateStreamWithProvider(context.Background(), "main.sales.orders", provider); err == nil {
+	if _, err := sdk.CreateStreamWithProvider(
+		context.Background(), "main.sales.orders", provider, zerobus.WithJSON()); err == nil {
 		t.Error("CreateStreamWithProvider succeeded on a closed SDK")
 	}
 }
@@ -429,7 +502,8 @@ func TestStreamCloseDeregistersFromSDK(t *testing.T) {
 	defer sdk.Close()
 	provider := zerobus.NewStaticHeadersProvider(map[string]string{"authorization": "Bearer t"})
 
-	st, err := sdk.CreateStreamWithProvider(context.Background(), "main.sales.orders", provider)
+	st, err := sdk.CreateStreamWithProvider(
+		context.Background(), "main.sales.orders", provider, zerobus.WithJSON())
 	if err != nil {
 		t.Fatalf("CreateStreamWithProvider: %v", err)
 	}
@@ -441,6 +515,56 @@ func TestStreamCloseDeregistersFromSDK(t *testing.T) {
 	}
 	if n := sdk.OpenStreamCount(); n != 0 {
 		t.Errorf("SDK tracks %d streams, want 0 after Stream.Close", n)
+	}
+}
+
+func TestIngestContextCancelsBackpressure(t *testing.T) {
+	tests := []struct {
+		name   string
+		ingest func(*zerobus.Stream, context.Context) error
+	}{
+		{
+			name: "record",
+			ingest: func(st *zerobus.Stream, ctx context.Context) error {
+				_, err := st.IngestRecordOffsetContext(ctx, []byte(`{"id":2}`))
+				return err
+			},
+		},
+		{
+			name: "batch",
+			ingest: func(st *zerobus.Stream, ctx context.Context) error {
+				_, err := st.IngestRecordsOffsetContext(ctx, [][]byte{[]byte(`{"id":2}`)})
+				return err
+			},
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			conn := dialEcho(t, &echoServer{streamID: "stream-backpressure", noAcks: true})
+			sdk := zerobus.NewWithConn(
+				conn, "https://ws.zerobus.databricks.com", "https://ws.databricks.com")
+			t.Cleanup(func() { _ = sdk.Close() })
+			provider := zerobus.NewStaticHeadersProvider(
+				map[string]string{"authorization": "Bearer t"})
+
+			st, err := sdk.CreateStreamWithProvider(
+				context.Background(), "main.sales.orders", provider,
+				zerobus.WithJSON(), zerobus.WithMaxInflight(1),
+			)
+			if err != nil {
+				t.Fatalf("CreateStreamWithProvider: %v", err)
+			}
+			if _, err := st.IngestRecordOffset([]byte(`{"id":1}`)); err != nil {
+				t.Fatalf("first IngestRecordOffset: %v", err)
+			}
+
+			ctx, cancel := context.WithTimeout(context.Background(), 25*time.Millisecond)
+			defer cancel()
+			err = tc.ingest(st, ctx)
+			if !errors.Is(err, context.DeadlineExceeded) {
+				t.Fatalf("context ingest error = %v, want DeadlineExceeded", err)
+			}
+		})
 	}
 }
 

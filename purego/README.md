@@ -60,6 +60,10 @@ record must be confirmed durable before continuing. Because acks are ordered and
 the watermark is monotonic, waiting on the last offset of a group confirms all
 prior offsets too.
 
+When buffer backpressure may block longer than the caller can wait, use
+`IngestRecordOffsetContext` or `IngestRecordsOffsetContext`. Cancellation only
+interrupts admission; once queued, a record remains owned by the stream.
+
 ## Authentication
 
 `CreateStream` uses the Unity Catalog OAuth 2.0 client-credentials flow. For
@@ -76,9 +80,10 @@ externally managed credentials.
 
 ## Record types
 
-- **JSON** (default) — `WithJSON()`; records are UTF-8 JSON bytes.
-- **Protocol Buffers** — `WithProto(descriptorProto)`; records are marshaled
-  protobuf bytes and the serialized message descriptor is supplied once.
+- **Protocol Buffers** (default record type) —
+  `WithProto(descriptorProto)`; records are marshaled protobuf bytes and the
+  required serialized message descriptor is supplied once.
+- **JSON** — `WithJSON()`; records are UTF-8 JSON bytes.
 
 ## Error handling
 
@@ -101,6 +106,11 @@ Streams reconnect automatically on recoverable failures (default 4 retries).
 Disable with `WithRecovery(zerobus.RecoveryDisabled)`. After a stream closes or
 fails, `GetUnackedRecords` / `GetUnackedBatches` return the records that were
 never acknowledged, for replay or persistence.
+
+Recovery and buffering can be tuned with `WithRecoveryRetries`,
+`WithRecoveryTimeout`, `WithRecoveryBackoff`, `WithLackOfAckTimeout`,
+`WithMaxInflight`, `WithMaxBufferedPayloadBytes`, `WithMaxBatchRecords`, and
+`WithStreamPausedMaxWait`.
 
 ## Package layout
 

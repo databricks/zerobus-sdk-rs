@@ -1,6 +1,10 @@
 package zerobus
 
-import "github.com/databricks/zerobus-sdk/purego/internal/transport"
+import (
+	"time"
+
+	"github.com/databricks/zerobus-sdk/purego/internal/transport"
+)
 
 // Test-only accessors for unexported helpers and injection points.
 
@@ -31,4 +35,21 @@ func ResolveStreamConfig(opts ...StreamOption) (recordType int32, descriptor []b
 		}
 	}
 	return int32(sc.recordType), sc.descriptor, sc.cfg.MaxInflight, sc.cfg.Recovery
+}
+
+// ResolveStreamTuning applies options and returns the public tuning values that
+// need wiring assertions.
+func ResolveStreamTuning(opts ...StreamOption) (
+	recoveryTimeout, recoveryBackoff, lackOfAckTimeout time.Duration,
+	maxBatchRecords int,
+	streamPausedMaxWait *time.Duration,
+) {
+	sc := defaultStreamConfig()
+	for _, opt := range opts {
+		if opt != nil {
+			opt(&sc)
+		}
+	}
+	return sc.cfg.RecoveryTimeout, sc.cfg.RecoveryBackoff, sc.cfg.LackOfAckTimeout,
+		sc.cfg.MaxBatchRecords, sc.cfg.StreamPausedMaxWait
 }

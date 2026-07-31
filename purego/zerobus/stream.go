@@ -33,7 +33,14 @@ type Stream struct {
 // once; waiting after every record collapses throughput to one record per
 // round-trip.
 func (s *Stream) IngestRecordOffset(record []byte) (int64, error) {
-	off, err := s.core.Ingest(context.Background(), record)
+	return s.IngestRecordOffsetContext(context.Background(), record)
+}
+
+// IngestRecordOffsetContext is IngestRecordOffset with a caller-supplied
+// context. Cancellation only interrupts waiting for buffer capacity; once the
+// record is queued, its lifecycle is owned by the stream.
+func (s *Stream) IngestRecordOffsetContext(ctx context.Context, record []byte) (int64, error) {
+	off, err := s.core.Ingest(ctx, record)
 	return off, wrapErr("IngestRecordOffset", err)
 }
 
@@ -45,7 +52,14 @@ func (s *Stream) IngestRecordOffset(record []byte) (int64, error) {
 // entry and one ack, amortizing per-call overhead. Each element is a raw record
 // payload (proto bytes or JSON bytes) as for IngestRecordOffset.
 func (s *Stream) IngestRecordsOffset(records [][]byte) (int64, error) {
-	off, err := s.core.IngestBatch(context.Background(), records)
+	return s.IngestRecordsOffsetContext(context.Background(), records)
+}
+
+// IngestRecordsOffsetContext is IngestRecordsOffset with a caller-supplied
+// context. Cancellation only interrupts waiting for buffer capacity; once the
+// batch is queued, its lifecycle is owned by the stream.
+func (s *Stream) IngestRecordsOffsetContext(ctx context.Context, records [][]byte) (int64, error) {
+	off, err := s.core.IngestBatch(ctx, records)
 	return off, wrapErr("IngestRecordsOffset", err)
 }
 
