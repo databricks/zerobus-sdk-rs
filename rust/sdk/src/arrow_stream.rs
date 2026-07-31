@@ -86,6 +86,17 @@ struct FlightConnection {
     request_body: RequestBodyControl,
 }
 
+/// State captured when rotation stops waiting for acknowledgments and begins transport
+/// cleanup. The response may already have ended, but the request must still reach EOF.
+struct DrainState {
+    /// Hard cutoff shared by request EOF observation and response draining.
+    deadline: Instant,
+    /// Whether the response ended before the request entered the drain helper.
+    response_finished: bool,
+    /// Peer or protocol error to preserve while the remaining transport settles.
+    terminal_error: Option<ZerobusError>,
+}
+
 /// Server-initiated rotation has only three phases: normal traffic, waiting for the
 /// pre-signal acknowledgment snapshot, and transport drain.
 enum RotationState {
@@ -95,11 +106,7 @@ enum RotationState {
         ack_deadline: Instant,
         drain_deadline: Instant,
     },
-    Draining {
-        deadline: Instant,
-        response_finished: bool,
-        terminal_error: Option<ZerobusError>,
-    },
+    Draining(DrainState),
 }
 
 /// Test-only barrier used to pause `reconnect` at a precise point — the new connection
@@ -161,6 +168,103 @@ struct PendingBatch {
     end_record: u64,
     /// Backpressure permit; dropping it frees one `max_inflight_batches` slot.
     _permit: OwnedSemaphorePermit,
+}
+
+/// Borrowed view of the active connection's acknowledgment bookkeeping.
+///
+/// Keeping these values together makes every ACK path use the same connection-local
+/// submitted watermark, monotonic durable watermark, and pending-batch collection.
+struct AckProgress<'a> {
+    submitted_records: &'a AtomicU64,
+    last_acked_records: &'a AtomicU64,
+    pending_batches: &'a Mutex<Vec<PendingBatch>>,
+    last_ack_tx: &'a watch::Sender<Option<OffsetId>>,
+    #[cfg(feature = "test-hooks")]
+    ack_applied_gate: &'a AckAppliedGate,
+}
+
+impl AckProgress<'_> {
+    /// Validates an ACK against the active connection, advances the monotonic durable
+    /// watermark, removes fully acknowledged batches, and wakes completed offset waiters.
+    async fn apply(&self, ack: &FlightAckMetadata) -> ZerobusResult<()> {
+        let acked_records = ack.ack_up_to_records;
+        // `ack_up_to_records` is the durability boundary. Derive completed SDK offsets
+        // from local pending ranges so an inconsistent `ack_up_to_offset` cannot advance
+        // a waiter; keep the server-provided offset only for diagnostics.
+        let (effective_acked_records, max_acked_offset) = {
+            // Ingest publishes submitted_records and commits to the active sender while
+            // holding this same lock. Validation therefore cannot observe a submitted
+            // watermark before its handoff, or a handoff before its watermark.
+            let mut pending = self.pending_batches.lock().await;
+            let submitted_records = self.submitted_records.load(Ordering::Acquire);
+            if acked_records > submitted_records {
+                return Err(ZerobusError::InvalidStateError(format!(
+                    "Acknowledgement claims {acked_records} records, but only {submitted_records} records were submitted"
+                )));
+            }
+
+            let previous_acked_records = self
+                .last_acked_records
+                .fetch_max(acked_records, Ordering::AcqRel);
+            let effective_acked_records = previous_acked_records.max(acked_records);
+            let mut max_acked_offset: Option<OffsetId> = None;
+            pending.retain(|pb| {
+                if effective_acked_records >= pb.end_record {
+                    max_acked_offset =
+                        Some(max_acked_offset.map_or(pb.offset_id, |o| o.max(pb.offset_id)));
+                    false
+                } else {
+                    true
+                }
+            });
+            (effective_acked_records, max_acked_offset)
+        };
+
+        debug!(
+            ack_up_to_offset = ack.ack_up_to_offset,
+            ack_up_to_records = acked_records,
+            effective_acked_records,
+            "Received acknowledgment"
+        );
+
+        #[cfg(feature = "test-hooks")]
+        if acked_records > 0 {
+            if let Some(notify) = self.ack_applied_gate.lock().await.as_ref() {
+                notify.notify_one();
+            }
+        }
+
+        if let Some(offset) = max_acked_offset {
+            let _ = self.last_ack_tx.send(Some(offset));
+        }
+
+        Ok(())
+    }
+}
+
+/// Borrowed handles needed to stop sending and half-close the active Flight request.
+///
+/// The pause gate and sender are changed under `ingest_mutex`, ensuring a concurrent ingest
+/// either reaches the old connection first or remains buffered for replay.
+struct RequestControl<'a> {
+    request_body: &'a RequestBodyControl,
+    ingest_mutex: &'a Mutex<()>,
+    is_paused: &'a AtomicBool,
+    batch_tx: &'a BatchSender,
+}
+
+impl RequestControl<'_> {
+    /// Atomically stops new sends, detaches queued work, then asks tonic to poll the request
+    /// body to EOF. [`RequestBodyControl::wait_for_eof`] observes completion separately.
+    async fn half_close(&self) {
+        ZerobusArrowStream::pause_and_detach_sender(
+            self.ingest_mutex,
+            self.is_paused,
+            self.batch_tx,
+        )
+        .await;
+        self.request_body.shutdown();
+    }
 }
 
 /// Returns the batch portion not durably acknowledged, avoiding duplicate retry of an
@@ -1327,8 +1431,8 @@ impl ZerobusArrowStream {
     /// either finishes first, or observes `is_paused == true` and buffers — it never
     /// reads a detached (`None`) sender while `is_paused` is still false.
     async fn pause_and_detach_sender(
-        ingest_mutex: &Arc<Mutex<()>>,
-        is_paused: &Arc<AtomicBool>,
+        ingest_mutex: &Mutex<()>,
+        is_paused: &AtomicBool,
         batch_tx: &BatchSender,
     ) {
         let _guard = ingest_mutex.lock().await;
@@ -1390,68 +1494,6 @@ impl ZerobusArrowStream {
         Self::move_pending_to_failed(pending_batches, failed_batches, last_acked_records).await;
     }
 
-    /// Advances the monotonic record watermark and removes fully acknowledged batches.
-    async fn apply_acknowledgment(
-        ack: &FlightAckMetadata,
-        submitted_records: &AtomicU64,
-        last_acked_records: &AtomicU64,
-        pending_batches: &Mutex<Vec<PendingBatch>>,
-        last_ack_tx: &watch::Sender<Option<OffsetId>>,
-        #[cfg(feature = "test-hooks")] ack_applied_gate: &AckAppliedGate,
-    ) -> ZerobusResult<()> {
-        let acked_records = ack.ack_up_to_records;
-        // `ack_up_to_records` is the durability boundary. Derive completed SDK offsets
-        // from local pending ranges so an inconsistent `ack_up_to_offset` cannot advance
-        // a waiter; keep the server-provided offset only for diagnostics.
-        let (effective_acked_records, max_acked_offset) = {
-            // Ingest publishes submitted_records and commits to the active sender while
-            // holding this same lock. Validation therefore cannot observe a submitted
-            // watermark before its handoff, or a handoff before its watermark.
-            let mut pending = pending_batches.lock().await;
-            let submitted_records = submitted_records.load(Ordering::Acquire);
-            if acked_records > submitted_records {
-                return Err(ZerobusError::InvalidStateError(format!(
-                    "Acknowledgement claims {acked_records} records, but only {submitted_records} records were submitted"
-                )));
-            }
-
-            let previous_acked_records =
-                last_acked_records.fetch_max(acked_records, Ordering::AcqRel);
-            let effective_acked_records = previous_acked_records.max(acked_records);
-            let mut max_acked_offset: Option<OffsetId> = None;
-            pending.retain(|pb| {
-                if effective_acked_records >= pb.end_record {
-                    max_acked_offset =
-                        Some(max_acked_offset.map_or(pb.offset_id, |o| o.max(pb.offset_id)));
-                    false
-                } else {
-                    true
-                }
-            });
-            (effective_acked_records, max_acked_offset)
-        };
-
-        debug!(
-            ack_up_to_offset = ack.ack_up_to_offset,
-            ack_up_to_records = acked_records,
-            effective_acked_records,
-            "Received acknowledgment"
-        );
-
-        #[cfg(feature = "test-hooks")]
-        if acked_records > 0 {
-            if let Some(notify) = ack_applied_gate.lock().await.as_ref() {
-                notify.notify_one();
-            }
-        }
-
-        if let Some(offset) = max_acked_offset {
-            let _ = last_ack_tx.send(Some(offset));
-        }
-
-        Ok(())
-    }
-
     fn rotation_error() -> ZerobusError {
         ZerobusError::StreamClosedError(tonic::Status::unavailable(
             "Server requested graceful stream rotation",
@@ -1504,26 +1546,20 @@ impl ZerobusArrowStream {
     /// deadline. Late acknowledgments are applied while tonic settles request EOF.
     /// A real peer status or invalid acknowledgment outranks the synthetic retryable
     /// rotation result.
-    #[allow(clippy::too_many_arguments)]
     async fn close_request_and_drain_response(
         response_stream: &mut FlightResponseStream,
-        request_body: &RequestBodyControl,
-        deadline: Instant,
-        mut response_finished: bool,
-        mut terminal_error: Option<ZerobusError>,
-        ingest_mutex: &Arc<Mutex<()>>,
-        is_paused: &Arc<AtomicBool>,
-        batch_tx: &BatchSender,
-        submitted_records: &Arc<AtomicU64>,
-        last_acked_records: &Arc<AtomicU64>,
-        pending_batches: &Arc<Mutex<Vec<PendingBatch>>>,
-        last_ack_tx: &watch::Sender<Option<OffsetId>>,
-        #[cfg(feature = "test-hooks")] ack_applied_gate: &AckAppliedGate,
+        request: RequestControl<'_>,
+        acknowledgments: AckProgress<'_>,
+        state: DrainState,
     ) -> ZerobusResult<()> {
-        Self::pause_and_detach_sender(ingest_mutex, is_paused, batch_tx).await;
-        request_body.shutdown();
+        let DrainState {
+            deadline,
+            mut response_finished,
+            mut terminal_error,
+        } = state;
+        request.half_close().await;
 
-        let mut request_eof = Box::pin(request_body.wait_for_eof());
+        let mut request_eof = Box::pin(request.request_body.wait_for_eof());
         let mut request_finished = false;
 
         loop {
@@ -1547,17 +1583,7 @@ impl ZerobusArrowStream {
                         Some(Ok(put_result)) => {
                             match FlightAckMetadata::from_bytes(&put_result.app_metadata) {
                                 Ok(ack) if ack.ack_up_to_records > 0 => {
-                                    if let Err(error) = Self::apply_acknowledgment(
-                                        &ack,
-                                        submitted_records,
-                                        last_acked_records,
-                                        pending_batches,
-                                        last_ack_tx,
-                                        #[cfg(feature = "test-hooks")]
-                                        ack_applied_gate,
-                                    )
-                                    .await
-                                    {
+                                    if let Err(error) = acknowledgments.apply(&ack).await {
                                         Self::update_rotation_error(&mut terminal_error, error);
                                     }
                                 }
@@ -1605,6 +1631,20 @@ impl ZerobusArrowStream {
         #[cfg(feature = "test-hooks")] ack_applied_gate: AckAppliedGate,
     ) -> ZerobusResult<()> {
         let mut rotation = RotationState::Open;
+        let request = RequestControl {
+            request_body: &request_body,
+            ingest_mutex: ingest_mutex.as_ref(),
+            is_paused: is_paused.as_ref(),
+            batch_tx: &batch_tx,
+        };
+        let acknowledgments = AckProgress {
+            submitted_records: submitted_records.as_ref(),
+            last_acked_records: last_acked_records.as_ref(),
+            pending_batches: pending_batches.as_ref(),
+            last_ack_tx: &last_ack_tx,
+            #[cfg(feature = "test-hooks")]
+            ack_applied_gate: &ack_applied_gate,
+        };
 
         loop {
             if is_closed.load(Ordering::Relaxed) {
@@ -1621,39 +1661,26 @@ impl ZerobusArrowStream {
                 if last_acked_records.load(Ordering::Acquire) >= *target_records
                     || Instant::now() >= *ack_deadline
                 {
-                    rotation = RotationState::Draining {
+                    rotation = RotationState::Draining(DrainState {
                         deadline: Self::bounded_rotation_drain_deadline(*drain_deadline),
                         response_finished: false,
                         terminal_error: None,
-                    };
+                    });
                     continue;
                 }
             }
 
-            if matches!(rotation, RotationState::Draining { .. }) {
-                let RotationState::Draining {
-                    deadline,
-                    response_finished,
-                    terminal_error,
-                } = std::mem::replace(&mut rotation, RotationState::Open)
+            if matches!(rotation, RotationState::Draining(_)) {
+                let RotationState::Draining(state) =
+                    std::mem::replace(&mut rotation, RotationState::Open)
                 else {
                     unreachable!()
                 };
                 return Self::close_request_and_drain_response(
                     &mut response_stream,
-                    &request_body,
-                    deadline,
-                    response_finished,
-                    terminal_error,
-                    &ingest_mutex,
-                    &is_paused,
-                    &batch_tx,
-                    &submitted_records,
-                    &last_acked_records,
-                    &pending_batches,
-                    &last_ack_tx,
-                    #[cfg(feature = "test-hooks")]
-                    &ack_applied_gate,
+                    request,
+                    acknowledgments,
+                    state,
                 )
                 .await;
             }
@@ -1683,7 +1710,7 @@ impl ZerobusArrowStream {
                         response = response_stream.next() => response,
                     }
                 }
-                RotationState::Draining { .. } => unreachable!(),
+                RotationState::Draining(_) => unreachable!(),
             };
 
             match response {
@@ -1729,28 +1756,19 @@ impl ZerobusArrowStream {
                                 *ack_deadline = (*ack_deadline).min(new_ack_deadline);
                                 *drain_deadline = (*drain_deadline).min(new_drain_deadline);
                             }
-                            RotationState::Draining { .. } => unreachable!(),
+                            RotationState::Draining(_) => unreachable!(),
                         }
                     }
 
                     if ack.ack_up_to_records > 0 {
-                        let ack_result = Self::apply_acknowledgment(
-                            &ack,
-                            &submitted_records,
-                            &last_acked_records,
-                            &pending_batches,
-                            &last_ack_tx,
-                            #[cfg(feature = "test-hooks")]
-                            &ack_applied_gate,
-                        )
-                        .await;
+                        let ack_result = acknowledgments.apply(&ack).await;
                         if let Err(error) = ack_result {
                             if let RotationState::WaitingForAcks { drain_deadline, .. } = rotation {
-                                rotation = RotationState::Draining {
+                                rotation = RotationState::Draining(DrainState {
                                     deadline: Self::bounded_rotation_drain_deadline(drain_deadline),
                                     response_finished: false,
                                     terminal_error: Some(error),
-                                };
+                                });
                                 continue;
                             }
                             return Err(error);
@@ -1761,11 +1779,11 @@ impl ZerobusArrowStream {
                     let status: tonic::Status = error.into();
                     let error = ZerobusError::StreamClosedError(status);
                     if let RotationState::WaitingForAcks { drain_deadline, .. } = rotation {
-                        rotation = RotationState::Draining {
+                        rotation = RotationState::Draining(DrainState {
                             deadline: Self::bounded_rotation_drain_deadline(drain_deadline),
                             response_finished: true,
                             terminal_error: Some(error),
-                        };
+                        });
                         continue;
                     }
                     let _ = server_error_tx.send(Some(error.clone()));
@@ -1773,11 +1791,11 @@ impl ZerobusArrowStream {
                 }
                 None => {
                     if let RotationState::WaitingForAcks { drain_deadline, .. } = rotation {
-                        rotation = RotationState::Draining {
+                        rotation = RotationState::Draining(DrainState {
                             deadline: Self::bounded_rotation_drain_deadline(drain_deadline),
                             response_finished: true,
                             terminal_error: None,
-                        };
+                        });
                         continue;
                     }
                     return Err(ZerobusError::StreamClosedError(tonic::Status::unknown(
