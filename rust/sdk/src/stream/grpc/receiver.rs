@@ -12,13 +12,34 @@ use tokio::time::Duration;
 use tokio_util::sync::CancellationToken;
 use tracing::{error, info, instrument, span, Level};
 
-use super::types::{CallbackMessage, OneshotMap, RecordLandingZone};
+use super::types::{CallbackMessage, OneshotMap, RecordLandingZone, SentOffsetWatermark};
 use super::{ZerobusStream, STREAM_TEARDOWN_DRAIN_TIMEOUT_MS};
 use crate::databricks::zerobus::ephemeral_stream_response::Payload as ResponsePayload;
 use crate::databricks::zerobus::{
     CloseStreamSignal, EphemeralStreamResponse, IngestRecordResponse,
 };
 use crate::{OffsetId, StreamConfigurationOptions, ZerobusError, ZerobusResult};
+
+fn validate_ack_offset(
+    ack_offset: OffsetId,
+    last_acked_offset: OffsetId,
+    highest_sent_offset: OffsetId,
+) -> ZerobusResult<bool> {
+    if ack_offset < 0 {
+        return Err(ZerobusError::InvalidStateError(format!(
+            "Server ack offset {ack_offset} is negative"
+        )));
+    }
+    if ack_offset <= last_acked_offset {
+        return Ok(false);
+    }
+    if ack_offset > highest_sent_offset {
+        return Err(ZerobusError::InvalidStateError(format!(
+            "Server ack offset {ack_offset} exceeds highest sent offset {highest_sent_offset}"
+        )));
+    }
+    Ok(true)
+}
 
 impl ZerobusStream {
     /// Spawns a task that continuously reads from `response_grpc_stream`
@@ -36,11 +57,12 @@ impl ZerobusStream {
         server_error_tx: tokio::sync::watch::Sender<Option<ZerobusError>>,
         recv_drain_token: CancellationToken,
         callback_tx: Option<tokio::sync::mpsc::UnboundedSender<CallbackMessage>>,
+        highest_sent_offset: SentOffsetWatermark,
     ) -> tokio::task::JoinHandle<ZerobusResult<()>> {
         tokio::spawn(async move {
             let span = span!(Level::DEBUG, "inbound_stream_processor");
             let _guard = span.enter();
-            let mut last_acked_offset = -1;
+            let mut last_acked_offset: OffsetId = -1;
             let mut pause_deadline: Option<tokio::time::Instant> = None;
             // Set when we exit because the supervisor signalled close (`recv_drain_token`).
             // On that path we drain the response stream inline so the server sees END_STREAM
@@ -108,22 +130,48 @@ impl ZerobusStream {
                                     return Err(error);
                                 }
                             };
+                            let sent_offset = *highest_sent_offset
+                                .lock()
+                                .expect("Sent offset watermark lock poisoned");
+                            match validate_ack_offset(
+                                durability_ack_up_to_offset,
+                                last_acked_offset,
+                                sent_offset,
+                            ) {
+                                Ok(true) => {}
+                                Ok(false) => continue,
+                                Err(error) => {
+                                    error!("{error}");
+                                    let _ = server_error_tx.send(Some(error.clone()));
+                                    return Err(error);
+                                }
+                            }
                             let mut last_logical_acked_offset = -2;
                             let mut map = oneshot_map.lock().await;
-                            for _offset_to_ack in
+                            for offset_to_ack in
                                 (last_acked_offset + 1)..=durability_ack_up_to_offset
                             {
-                                if let Ok(record) = landing_zone.remove_observed() {
-                                    let logical_offset = record.offset_id;
-                                    last_logical_acked_offset = logical_offset;
-
-                                    if let Some(sender) = map.remove(&logical_offset) {
-                                        let _ = sender.send(Ok(logical_offset));
+                                let record = match landing_zone.remove_observed() {
+                                    Ok(record) => record,
+                                    Err(_) => {
+                                        let message = format!(
+                                            "Server ack offset {durability_ack_up_to_offset} could not be applied at physical offset {offset_to_ack}"
+                                        );
+                                        error!("{message}");
+                                        let error = ZerobusError::InvalidStateError(message);
+                                        let _ = server_error_tx.send(Some(error.clone()));
+                                        return Err(error);
                                     }
+                                };
+                                let logical_offset = record.offset_id;
+                                last_logical_acked_offset = logical_offset;
 
-                                    if let Some(ref tx) = callback_tx {
-                                        let _ = tx.send(CallbackMessage::Ack(logical_offset));
-                                    }
+                                if let Some(sender) = map.remove(&logical_offset) {
+                                    let _ = sender.send(Ok(logical_offset));
+                                }
+
+                                if let Some(ref tx) = callback_tx {
+                                    let _ = tx.send(CallbackMessage::Ack(logical_offset));
                                 }
                             }
                             drop(map);
@@ -245,5 +293,56 @@ impl ZerobusStream {
             }
             Ok(())
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::validate_ack_offset;
+    use crate::ZerobusError;
+
+    #[test]
+    fn negative_ack_is_rejected() {
+        let error = validate_ack_offset(-1, -1, 0).expect_err("negative ack must fail");
+        assert!(matches!(
+            error,
+            ZerobusError::InvalidStateError(message)
+                if message == "Server ack offset -1 is negative"
+        ));
+    }
+
+    #[test]
+    fn duplicate_or_regressive_ack_is_ignored() {
+        assert!(!validate_ack_offset(3, 3, 5).expect("duplicate ack is valid"));
+        assert!(!validate_ack_offset(2, 3, 5).expect("regressive ack is valid"));
+    }
+
+    #[test]
+    fn regressive_ack_does_not_lower_watermark() {
+        let mut last_acked_offset = -1;
+        for ack_offset in [1, 0, 2] {
+            if validate_ack_offset(ack_offset, last_acked_offset, 2)
+                .expect("ack sequence must be valid")
+            {
+                last_acked_offset = ack_offset;
+            }
+        }
+        assert_eq!(last_acked_offset, 2);
+    }
+
+    #[test]
+    fn ack_beyond_highest_sent_offset_is_rejected() {
+        let error = validate_ack_offset(4, 2, 3).expect_err("over-ack must fail");
+        assert!(matches!(
+            error,
+            ZerobusError::InvalidStateError(message)
+                if message
+                    == "Server ack offset 4 exceeds highest sent offset 3"
+        ));
+    }
+
+    #[test]
+    fn advancing_ack_within_sent_range_is_applied() {
+        assert!(validate_ack_offset(4, 2, 4).expect("valid ack must advance"));
     }
 }

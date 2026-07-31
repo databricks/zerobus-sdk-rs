@@ -2874,6 +2874,151 @@ mod failure_scenarios_tests {
         }
 
         #[tokio::test]
+        async fn test_server_over_ack_fails_stream() -> Result<(), Box<dyn std::error::Error>> {
+            setup_tracing();
+            info!("Starting test_server_over_ack_fails_stream");
+
+            let (mock_server, server_url) = start_mock_server().await?;
+
+            mock_server
+                .inject_responses(
+                    TABLE_NAME,
+                    vec![
+                        MockResponse::CreateStream {
+                            stream_id: "test_stream_over_ack".to_string(),
+                            delay_ms: 0,
+                        },
+                        MockResponse::RecordAckOnOffset {
+                            trigger_offset: 0,
+                            ack_up_to_offset: 1,
+                            delay_ms: 0,
+                        },
+                    ],
+                )
+                .await;
+
+            let sdk = ZerobusSdk::builder()
+                .endpoint(server_url.clone())
+                .unity_catalog_url("https://mock-uc.com")
+                .tls_config(Arc::new(NoTlsConfig))
+                .build()?;
+            let stream = sdk
+                .stream_builder()
+                .table(TABLE_NAME)
+                .headers_provider(Arc::new(TestHeadersProvider::default()))
+                .compiled_proto(create_test_descriptor_proto().unwrap_or_default())
+                .recovery(false)
+                .build()
+                .await?;
+
+            let offset = stream
+                .ingest_record_offset(b"pending data".to_vec())
+                .await?;
+            let error = stream
+                .wait_for_offset(offset)
+                .await
+                .expect_err("an acknowledgement beyond the sent offset must fail the stream");
+            assert!(
+                !error.is_retryable(),
+                "a protocol violation must be terminal"
+            );
+            assert!(
+                error
+                    .to_string()
+                    .contains("Server ack offset 1 exceeds highest sent offset 0"),
+                "unexpected error: {error}"
+            );
+            assert_eq!(mock_server.get_write_count().await, 1);
+
+            let unacked = stream.get_unacked_records().await?.collect::<Vec<_>>();
+            assert_eq!(unacked.len(), 1);
+            assert!(matches!(
+                &unacked[0],
+                databricks_zerobus_ingest_sdk::EncodedRecord::Proto(payload)
+                    if payload == b"pending data"
+            ));
+
+            let later_ingest = stream.ingest_record_offset(b"more data".to_vec()).await;
+            assert!(matches!(
+                later_ingest,
+                Err(ZerobusError::StreamClosedError(_))
+            ));
+
+            Ok(())
+        }
+
+        #[tokio::test]
+        async fn test_batch_over_ack_uses_physical_offset() -> Result<(), Box<dyn std::error::Error>>
+        {
+            setup_tracing();
+            info!("Starting test_batch_over_ack_uses_physical_offset");
+
+            let (mock_server, server_url) = start_mock_server().await?;
+
+            mock_server
+                .inject_responses(
+                    TABLE_NAME,
+                    vec![
+                        MockResponse::CreateStream {
+                            stream_id: "test_stream_batch_over_ack".to_string(),
+                            delay_ms: 0,
+                        },
+                        MockResponse::RecordAckOnOffset {
+                            trigger_offset: 0,
+                            ack_up_to_offset: 1,
+                            delay_ms: 0,
+                        },
+                    ],
+                )
+                .await;
+
+            let sdk = ZerobusSdk::builder()
+                .endpoint(server_url.clone())
+                .unity_catalog_url("https://mock-uc.com")
+                .tls_config(Arc::new(NoTlsConfig))
+                .build()?;
+            let stream = sdk
+                .stream_builder()
+                .table(TABLE_NAME)
+                .headers_provider(Arc::new(TestHeadersProvider::default()))
+                .compiled_proto(create_test_descriptor_proto().unwrap_or_default())
+                .recovery(false)
+                .build()
+                .await?;
+
+            let batch: Vec<Vec<u8>> = (0..5)
+                .map(|index| format!("batch-{index}").into_bytes())
+                .collect();
+            let offset = stream
+                .ingest_records_offset(batch.clone())
+                .await?
+                .expect("a non-empty batch has an offset");
+            let error = stream
+                .wait_for_offset(offset)
+                .await
+                .expect_err("a batch is one physical request, so ack 1 must fail");
+            assert!(
+                error
+                    .to_string()
+                    .contains("Server ack offset 1 exceeds highest sent offset 0"),
+                "unexpected error: {error}"
+            );
+            assert_eq!(mock_server.get_write_count().await, 5);
+
+            let unacked = stream.get_unacked_records().await?.collect::<Vec<_>>();
+            assert_eq!(unacked.len(), batch.len());
+            for (record, expected) in unacked.iter().zip(batch) {
+                assert!(matches!(
+                    record,
+                    databricks_zerobus_ingest_sdk::EncodedRecord::Proto(payload)
+                        if payload == &expected
+                ));
+            }
+
+            Ok(())
+        }
+
+        #[tokio::test]
         async fn test_server_unresponsiveness_fails_stream(
         ) -> Result<(), Box<dyn std::error::Error>> {
             setup_tracing();

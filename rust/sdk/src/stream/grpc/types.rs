@@ -30,6 +30,13 @@ pub(super) type OneshotMap =
 /// Landing zone for ingest records.
 pub(super) type RecordLandingZone = Arc<LandingZone<Box<IngestRequest>>>;
 
+/// Highest physical offset handed to the active gRPC connection.
+///
+/// The sender updates this watermark while holding the same lock that the
+/// receiver uses for validation. This prevents a fast acknowledgement from
+/// racing the sender between channel handoff and watermark publication.
+pub(super) type SentOffsetWatermark = Arc<std::sync::Mutex<OffsetId>>;
+
 /// Messages sent to the callback handler task.
 #[derive(Debug, Clone)]
 pub(super) enum CallbackMessage {
