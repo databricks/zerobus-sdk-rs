@@ -22,6 +22,7 @@
 ### Bug Fixes
 
 - **Arrow Flight — invalid acknowledgment watermarks are rejected** (Beta): ack progress is now monotonic, so delayed or duplicate responses cannot move the durable watermark backward. A response claiming more records than were actually submitted on the active connection is rejected without making buffered, unsent records appear durable.
+- Fixed server-initiated Arrow Flight rotation to wait only for records submitted on the active connection, half-close its request, and drain late acknowledgments or peer status before reconnecting. `stream_paused_max_wait_time_ms = Some(0)` skips the ACK wait but still performs bounded transport cleanup. Explicit close and teardown of incomplete replacement connections retain their existing best-effort behavior.
 
 ### Documentation
 

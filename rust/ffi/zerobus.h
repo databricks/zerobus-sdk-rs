@@ -65,8 +65,10 @@ typedef struct CArrowStreamConfigurationOptions {
    */
   int32_t ipc_compression;
   /**
-   * Maximum time in milliseconds to wait during graceful stream close.
-   * -1 = None (wait full server duration), 0 = immediate recovery, >0 = wait up to min(this, server_duration).
+   * Maximum acknowledgment wait in milliseconds during graceful stream close.
+   * -1 = use the available server grace period, 0 = no ACK wait, >0 = capped ACK wait.
+   * Bounded transport cleanup still runs with 0; very short server grace periods get a
+   * best-effort local cleanup window even if the server may already have hard-closed.
    */
   int64_t stream_paused_max_wait_time_ms;
 } CArrowStreamConfigurationOptions;

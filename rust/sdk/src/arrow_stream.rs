@@ -9,22 +9,25 @@
 //! (Go, Python, Java, TypeScript) can use `ingest_ipc_batch` with pre-serialised
 //! Arrow IPC bytes.
 
+use std::future::Future;
 use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::Arc;
+use std::task::Poll;
 
 use arrow_flight::encode::FlightDataEncoderBuilder;
 use arrow_flight::error::FlightError;
-use arrow_flight::{FlightClient, PutResult};
+use arrow_flight::{FlightClient, FlightData, PutResult};
 use arrow_ipc::writer::IpcWriteOptions;
 use bytes::Bytes;
 use futures::{Stream, StreamExt};
 #[cfg(feature = "test-hooks")]
 use tokio::sync::Notify;
 use tokio::sync::{mpsc, watch, Mutex, OwnedSemaphorePermit, Semaphore};
-use tokio::time::{sleep, Duration};
+use tokio::time::{sleep, Duration, Instant};
 use tokio_retry::strategy::FixedInterval;
 use tokio_retry::RetryIf;
+use tokio_util::sync::CancellationToken;
 use tonic::metadata::MetadataValue;
 use tonic::transport::Channel;
 use tracing::{debug, error, info, instrument, warn};
@@ -44,6 +47,67 @@ use crate::ZerobusResult;
 
 /// Type alias for the batch sender channel, wrapped for thread-safe sharing.
 type BatchSender = Arc<Mutex<Option<mpsc::Sender<Result<RecordBatch, FlightError>>>>>;
+
+/// Reserve this much of a normal server grace period for request EOF and response drain.
+const ROTATION_DRAIN_TIMEOUT_MS: u64 = 500;
+
+type FlightResponseStream = Pin<Box<dyn Stream<Item = Result<PutResult, FlightError>> + Send>>;
+type FlightRequestStream = Pin<Box<dyn Stream<Item = Result<FlightData, FlightError>> + Send>>;
+
+/// Stops one Flight request body without dropping the HTTP/2 stream and reports when
+/// tonic has polled that body to EOF.
+struct RequestBodyControl {
+    shutdown: CancellationToken,
+    eof_rx: watch::Receiver<bool>,
+}
+
+impl RequestBodyControl {
+    fn shutdown(&self) {
+        self.shutdown.cancel();
+    }
+
+    async fn wait_for_eof(&self) {
+        let mut eof_rx = self.eof_rx.clone();
+        loop {
+            if *eof_rx.borrow_and_update() {
+                return;
+            }
+            if eof_rx.changed().await.is_err() {
+                std::future::pending::<()>().await;
+            }
+        }
+    }
+}
+
+/// State owned by a single active DoPut connection.
+struct FlightConnection {
+    response_stream: FlightResponseStream,
+    batch_tx: mpsc::Sender<Result<RecordBatch, FlightError>>,
+    request_body: RequestBodyControl,
+}
+
+/// State captured when rotation stops waiting for acknowledgments and begins transport
+/// cleanup. The response may already have ended, but the request must still reach EOF.
+struct DrainState {
+    /// Hard cutoff shared by request EOF observation and response draining.
+    deadline: Instant,
+    /// Whether the response ended before the request entered the drain helper.
+    response_finished: bool,
+    /// Peer or protocol error to preserve while the remaining transport settles.
+    terminal_error: Option<ZerobusError>,
+}
+
+/// Server-initiated rotation has only three phases: normal traffic, waiting for the
+/// pre-signal acknowledgment snapshot, and transport drain.
+enum RotationState {
+    Open,
+    WaitingForAcks {
+        target_records: u64,
+        ack_deadline: Instant,
+        drain_deadline: Instant,
+    },
+    Draining(DrainState),
+}
 
 /// Test-only barrier used to pause `reconnect` at a precise point — the new connection
 /// is established but pending ranges are not yet rebuilt — so a test can schedule a
@@ -104,6 +168,103 @@ struct PendingBatch {
     end_record: u64,
     /// Backpressure permit; dropping it frees one `max_inflight_batches` slot.
     _permit: OwnedSemaphorePermit,
+}
+
+/// Borrowed view of the active connection's acknowledgment bookkeeping.
+///
+/// Keeping these values together makes every ACK path use the same connection-local
+/// submitted watermark, monotonic durable watermark, and pending-batch collection.
+struct AckProgress<'a> {
+    submitted_records: &'a AtomicU64,
+    last_acked_records: &'a AtomicU64,
+    pending_batches: &'a Mutex<Vec<PendingBatch>>,
+    last_ack_tx: &'a watch::Sender<Option<OffsetId>>,
+    #[cfg(feature = "test-hooks")]
+    ack_applied_gate: &'a AckAppliedGate,
+}
+
+impl AckProgress<'_> {
+    /// Validates an ACK against the active connection, advances the monotonic durable
+    /// watermark, removes fully acknowledged batches, and wakes completed offset waiters.
+    async fn apply(&self, ack: &FlightAckMetadata) -> ZerobusResult<()> {
+        let acked_records = ack.ack_up_to_records;
+        // `ack_up_to_records` is the durability boundary. Derive completed SDK offsets
+        // from local pending ranges so an inconsistent `ack_up_to_offset` cannot advance
+        // a waiter; keep the server-provided offset only for diagnostics.
+        let (effective_acked_records, max_acked_offset) = {
+            // Ingest publishes submitted_records and commits to the active sender while
+            // holding this same lock. Validation therefore cannot observe a submitted
+            // watermark before its handoff, or a handoff before its watermark.
+            let mut pending = self.pending_batches.lock().await;
+            let submitted_records = self.submitted_records.load(Ordering::Acquire);
+            if acked_records > submitted_records {
+                return Err(ZerobusError::InvalidStateError(format!(
+                    "Acknowledgement claims {acked_records} records, but only {submitted_records} records were submitted"
+                )));
+            }
+
+            let previous_acked_records = self
+                .last_acked_records
+                .fetch_max(acked_records, Ordering::AcqRel);
+            let effective_acked_records = previous_acked_records.max(acked_records);
+            let mut max_acked_offset: Option<OffsetId> = None;
+            pending.retain(|pb| {
+                if effective_acked_records >= pb.end_record {
+                    max_acked_offset =
+                        Some(max_acked_offset.map_or(pb.offset_id, |o| o.max(pb.offset_id)));
+                    false
+                } else {
+                    true
+                }
+            });
+            (effective_acked_records, max_acked_offset)
+        };
+
+        debug!(
+            ack_up_to_offset = ack.ack_up_to_offset,
+            ack_up_to_records = acked_records,
+            effective_acked_records,
+            "Received acknowledgment"
+        );
+
+        #[cfg(feature = "test-hooks")]
+        if acked_records > 0 {
+            if let Some(notify) = self.ack_applied_gate.lock().await.as_ref() {
+                notify.notify_one();
+            }
+        }
+
+        if let Some(offset) = max_acked_offset {
+            let _ = self.last_ack_tx.send(Some(offset));
+        }
+
+        Ok(())
+    }
+}
+
+/// Borrowed handles needed to stop sending and half-close the active Flight request.
+///
+/// The pause gate and sender are changed under `ingest_mutex`, ensuring a concurrent ingest
+/// either reaches the old connection first or remains buffered for replay.
+struct RequestControl<'a> {
+    request_body: &'a RequestBodyControl,
+    ingest_mutex: &'a Mutex<()>,
+    is_paused: &'a AtomicBool,
+    batch_tx: &'a BatchSender,
+}
+
+impl RequestControl<'_> {
+    /// Atomically stops new sends, detaches queued work, then asks tonic to poll the request
+    /// body to EOF. [`RequestBodyControl::wait_for_eof`] observes completion separately.
+    async fn half_close(&self) {
+        ZerobusArrowStream::pause_and_detach_sender(
+            self.ingest_mutex,
+            self.is_paused,
+            self.batch_tx,
+        )
+        .await;
+        self.request_body.shutdown();
+    }
 }
 
 /// Returns the batch portion not durably acknowledged, avoiding duplicate retry of an
@@ -427,7 +588,7 @@ impl ZerobusArrowStream {
         };
         let creation = RetryIf::spawn(strategy, create_attempt, should_retry).await;
 
-        let (response_stream, tx) = match creation {
+        let connection = match creation {
             Ok(result) => result,
             Err(e) => {
                 error!("Arrow Flight stream creation failed after retries: {}", e);
@@ -438,7 +599,7 @@ impl ZerobusArrowStream {
         // Store the sender.
         {
             let mut batch_tx = stream.batch_tx.lock().await;
-            *batch_tx = Some(tx);
+            *batch_tx = Some(connection.batch_tx.clone());
         }
 
         // Spawn the supervisor task.
@@ -461,7 +622,8 @@ impl ZerobusArrowStream {
             Arc::clone(&stream.last_acked_records),
             Arc::clone(&stream.is_paused),
             Arc::clone(&stream.ingest_mutex),
-            response_stream,
+            connection.response_stream,
+            connection.request_body,
             Arc::clone(&stream.sdk_identifier),
             #[cfg(feature = "test-hooks")]
             Arc::clone(&stream.reconnect_rebuild_gate),
@@ -483,7 +645,7 @@ impl ZerobusArrowStream {
     }
 
     /// Attempts to establish a Flight connection.
-    /// Returns the response stream and batch sender on success.
+    /// Returns the complete connection on success.
     async fn try_connect(
         endpoint: &str,
         tls_config: &Arc<dyn TlsConfig>,
@@ -492,10 +654,7 @@ impl ZerobusArrowStream {
         options: &ArrowStreamConfigurationOptions,
         headers_provider: &Arc<dyn HeadersProvider>,
         sdk_identifier: &str,
-    ) -> ZerobusResult<(
-        Pin<Box<dyn Stream<Item = Result<PutResult, FlightError>> + Send>>,
-        mpsc::Sender<Result<RecordBatch, FlightError>>,
-    )> {
+    ) -> ZerobusResult<FlightConnection> {
         // Share one deadline across connection setup and auth-rejection invalidation.
         // This preserves the original auth error if a custom provider stalls instead of
         // reclassifying the attempt as a retryable setup timeout.
@@ -615,8 +774,64 @@ impl ZerobusArrowStream {
         Ok(client)
     }
 
+    /// Builds a request body that can be stopped at a FlightData boundary and observed
+    /// reaching EOF without dropping the surrounding HTTP/2 stream.
+    fn make_request_stream(
+        batch_rx: mpsc::Receiver<Result<RecordBatch, FlightError>>,
+        table_properties: &ArrowTableProperties,
+        options: &ArrowStreamConfigurationOptions,
+    ) -> ZerobusResult<(FlightRequestStream, RequestBodyControl)> {
+        let ipc_write_options = make_ipc_write_options(options.ipc_compression)?;
+        let schema = Arc::clone(&table_properties.schema);
+        let batch_stream = tokio_stream::wrappers::ReceiverStream::new(batch_rx);
+        let offset_counter = Arc::new(std::sync::atomic::AtomicI64::new(0));
+        let offset_counter_clone = Arc::clone(&offset_counter);
+        let mut encoded: FlightRequestStream = Box::pin(
+            FlightDataEncoderBuilder::new()
+                .with_schema(schema)
+                .with_options(ipc_write_options)
+                .build(batch_stream)
+                .enumerate()
+                .map(move |(idx, result)| {
+                    result.map(|mut flight_data| {
+                        if idx > 0 {
+                            let offset = offset_counter_clone
+                                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                            let metadata = FlightBatchMetadata::new(offset);
+                            if let Ok(bytes) = metadata.to_bytes() {
+                                flight_data.app_metadata = bytes.into();
+                            }
+                        }
+                        flight_data
+                    })
+                }),
+        );
+
+        let shutdown = CancellationToken::new();
+        let mut cancelled = Box::pin(shutdown.clone().cancelled_owned());
+        let (eof_tx, eof_rx) = watch::channel(false);
+        let controlled = futures::stream::poll_fn(move |cx| {
+            if cancelled.as_mut().poll(cx).is_ready() {
+                eof_tx.send_replace(true);
+                return Poll::Ready(None);
+            }
+            match encoded.as_mut().poll_next(cx) {
+                Poll::Ready(None) => {
+                    eof_tx.send_replace(true);
+                    Poll::Ready(None)
+                }
+                result => result,
+            }
+        });
+
+        Ok((
+            Box::pin(controlled),
+            RequestBodyControl { shutdown, eof_rx },
+        ))
+    }
+
     /// Starts the Flight stream with the given client.
-    /// Returns the response stream and batch sender for use by the supervisor.
+    /// Returns the complete active connection for use by the supervisor.
     ///
     /// This method waits for the server's "ready" signal (ack_up_to_offset = -1)
     /// to confirm that stream setup succeeded (auth, schema validation, table access).
@@ -626,43 +841,13 @@ impl ZerobusArrowStream {
         mut client: FlightClient,
         table_properties: &ArrowTableProperties,
         options: &ArrowStreamConfigurationOptions,
-    ) -> ZerobusResult<(
-        Pin<Box<dyn Stream<Item = Result<PutResult, FlightError>> + Send>>,
-        mpsc::Sender<Result<RecordBatch, FlightError>>,
-    )> {
+    ) -> ZerobusResult<FlightConnection> {
         // Create channel for sending RecordBatches.
         let (batch_tx, batch_rx) =
             mpsc::channel::<Result<RecordBatch, FlightError>>(options.max_inflight_batches);
 
-        let ipc_write_options = make_ipc_write_options(options.ipc_compression)?;
-        let schema = Arc::clone(&table_properties.schema);
-        let batch_stream = tokio_stream::wrappers::ReceiverStream::new(batch_rx);
-
-        // Build the Flight data stream. FlightDataEncoderBuilder handles schema
-        // framing, dictionary encoding, and automatic batch chunking at 2 MiB.
-        // Each non-schema FlightData message gets a sequential wire offset in
-        // its app_metadata (index 0 is the schema message; data messages start at 1).
-        let offset_counter = Arc::new(std::sync::atomic::AtomicI64::new(0));
-        let offset_counter_clone = Arc::clone(&offset_counter);
-        let flight_data_stream = FlightDataEncoderBuilder::new()
-            .with_schema(schema)
-            .with_options(ipc_write_options)
-            .build(batch_stream)
-            .enumerate()
-            .map(move |(idx, result)| {
-                result.map(|mut flight_data| {
-                    // Skip schema message (idx 0); add metadata to data messages.
-                    if idx > 0 {
-                        let offset =
-                            offset_counter_clone.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                        let metadata = FlightBatchMetadata::new(offset);
-                        if let Ok(bytes) = metadata.to_bytes() {
-                            flight_data.app_metadata = bytes.into();
-                        }
-                    }
-                    flight_data
-                })
-            });
+        let (flight_data_stream, request_body) =
+            Self::make_request_stream(batch_rx, table_properties, options)?;
 
         // Start the DoPut stream.
         let mut response_stream = client
@@ -731,7 +916,11 @@ impl ZerobusArrowStream {
             }
         }
 
-        Ok((response_stream, batch_tx))
+        Ok(FlightConnection {
+            response_stream: Box::pin(response_stream),
+            batch_tx,
+            request_body,
+        })
     }
 
     /// Spawns the supervisor task that manages the stream lifecycle and recovery.
@@ -760,7 +949,8 @@ impl ZerobusArrowStream {
         last_acked_records: Arc<AtomicU64>,
         is_paused: Arc<AtomicBool>,
         ingest_mutex: Arc<Mutex<()>>,
-        initial_response_stream: Pin<Box<dyn Stream<Item = Result<PutResult, FlightError>> + Send>>,
+        initial_response_stream: FlightResponseStream,
+        initial_request_body: RequestBodyControl,
         sdk_identifier: Arc<str>,
         #[cfg(feature = "test-hooks")] reconnect_rebuild_gate: ReconnectRebuildGate,
         #[cfg(feature = "test-hooks")] ack_applied_gate: AckAppliedGate,
@@ -768,6 +958,7 @@ impl ZerobusArrowStream {
         tokio::spawn(async move {
             let ack_timeout = Duration::from_millis(options.server_lack_of_ack_timeout_ms);
             let mut response_stream = Some(initial_response_stream);
+            let mut request_body = Some(initial_request_body);
             // Carries a failed reconnect's real error into the next iteration's handling
             // instead of round-tripping a synthetic error through a dummy stream.
             let mut pending_error: Option<ZerobusError> = None;
@@ -793,6 +984,9 @@ impl ZerobusArrowStream {
                         response_stream
                             .take()
                             .expect("response_stream present when no pending reconnect error"),
+                        request_body
+                            .take()
+                            .expect("request_body present when no pending reconnect error"),
                         Arc::clone(&is_closed),
                         last_ack_tx.clone(),
                         Arc::clone(&pending_batches),
@@ -801,6 +995,8 @@ impl ZerobusArrowStream {
                         Arc::clone(&submitted_records),
                         Arc::clone(&last_acked_records),
                         Arc::clone(&is_paused),
+                        Arc::clone(&ingest_mutex),
+                        Arc::clone(&batch_tx),
                         &options,
                         #[cfg(feature = "test-hooks")]
                         Arc::clone(&ack_applied_gate),
@@ -900,11 +1096,12 @@ impl ZerobusArrowStream {
                         .await;
 
                         match reconnect_result {
-                            Ok(Ok(new_response_stream)) => {
+                            Ok(Ok(connection)) => {
                                 info!("Supervisor: Recovery successful, resuming");
                                 recovery_attempts.store(0, Ordering::Relaxed);
                                 // is_paused was already cleared inside reconnect().
-                                response_stream = Some(new_response_stream);
+                                response_stream = Some(connection.response_stream);
+                                request_body = Some(connection.request_body);
                             }
                             Ok(Err(e)) => {
                                 warn!("Supervisor: Reconnection failed: {}", e);
@@ -1019,7 +1216,7 @@ impl ZerobusArrowStream {
         ingest_mutex: &Arc<Mutex<()>>,
         is_paused: &Arc<AtomicBool>,
         #[cfg(feature = "test-hooks")] reconnect_rebuild_gate: &ReconnectRebuildGate,
-    ) -> ZerobusResult<Pin<Box<dyn Stream<Item = Result<PutResult, FlightError>> + Send>>> {
+    ) -> ZerobusResult<FlightConnection> {
         // Create new client.
         let client = Self::create_flight_client(
             endpoint,
@@ -1036,30 +1233,8 @@ impl ZerobusArrowStream {
         let (tx, batch_rx) =
             mpsc::channel::<Result<RecordBatch, FlightError>>(options.max_inflight_batches);
 
-        let ipc_write_options = make_ipc_write_options(options.ipc_compression)?;
-        let schema = Arc::clone(&table_properties.schema);
-        let batch_stream = tokio_stream::wrappers::ReceiverStream::new(batch_rx);
-
-        let offset_counter = Arc::new(std::sync::atomic::AtomicI64::new(0));
-        let offset_counter_clone = Arc::clone(&offset_counter);
-        let flight_data_stream = FlightDataEncoderBuilder::new()
-            .with_schema(schema)
-            .with_options(ipc_write_options)
-            .build(batch_stream)
-            .enumerate()
-            .map(move |(idx, result)| {
-                result.map(|mut flight_data| {
-                    if idx > 0 {
-                        let offset =
-                            offset_counter_clone.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                        let metadata = FlightBatchMetadata::new(offset);
-                        if let Ok(bytes) = metadata.to_bytes() {
-                            flight_data.app_metadata = bytes.into();
-                        }
-                    }
-                    flight_data
-                })
-            });
+        let (flight_data_stream, request_body) =
+            Self::make_request_stream(batch_rx, table_properties, options)?;
 
         // Start the DoPut stream.
         let mut flight_client = client;
@@ -1162,7 +1337,11 @@ impl ZerobusArrowStream {
         // Clear the pause gate while still holding ingest_mutex.
         is_paused.store(false, Ordering::Relaxed);
 
-        Ok(response_stream)
+        Ok(FlightConnection {
+            response_stream: Box::pin(response_stream),
+            batch_tx: tx,
+            request_body,
+        })
     }
 
     /// Rebuilds `pending_batches` for replay after a reconnect and replays them over
@@ -1252,14 +1431,27 @@ impl ZerobusArrowStream {
     /// either finishes first, or observes `is_paused == true` and buffers — it never
     /// reads a detached (`None`) sender while `is_paused` is still false.
     async fn pause_and_detach_sender(
-        ingest_mutex: &Arc<Mutex<()>>,
-        is_paused: &Arc<AtomicBool>,
+        ingest_mutex: &Mutex<()>,
+        is_paused: &AtomicBool,
         batch_tx: &BatchSender,
     ) {
         let _guard = ingest_mutex.lock().await;
         is_paused.store(true, Ordering::Relaxed);
         let mut tx = batch_tx.lock().await;
         *tx = None;
+    }
+
+    /// Pauses new sends and snapshots exactly the records submitted to this connection.
+    /// Ingests admitted after this critical section remain pending for replay and cannot
+    /// extend the active connection's acknowledgment target.
+    async fn pause_and_snapshot_submitted(
+        ingest_mutex: &Arc<Mutex<()>>,
+        is_paused: &Arc<AtomicBool>,
+        submitted_records: &AtomicU64,
+    ) -> u64 {
+        let _guard = ingest_mutex.lock().await;
+        is_paused.store(true, Ordering::Relaxed);
+        submitted_records.load(Ordering::Acquire)
     }
 
     /// Moves each pending batch's unacknowledged suffix to the failed list, dropping
@@ -1302,90 +1494,157 @@ impl ZerobusArrowStream {
         Self::move_pending_to_failed(pending_batches, failed_batches, last_acked_records).await;
     }
 
-    /// Advances the monotonic record watermark and removes fully acknowledged batches.
-    async fn apply_acknowledgment(
-        ack: &FlightAckMetadata,
-        submitted_records: &AtomicU64,
-        last_acked_records: &AtomicU64,
-        pending_batches: &Mutex<Vec<PendingBatch>>,
-        last_ack_tx: &watch::Sender<Option<OffsetId>>,
-        #[cfg(feature = "test-hooks")] ack_applied_gate: &AckAppliedGate,
-    ) -> ZerobusResult<()> {
-        let acked_records = ack.ack_up_to_records;
-        // `ack_up_to_records` is the durability boundary. Derive completed SDK offsets
-        // from local pending ranges so an inconsistent `ack_up_to_offset` cannot advance
-        // a waiter; keep the server-provided offset only for diagnostics.
-        let (effective_acked_records, max_acked_offset) = {
-            // Ingest publishes submitted_records and commits to the active sender while
-            // holding this same lock. Validation therefore cannot observe a submitted
-            // watermark before its handoff, or a handoff before its watermark.
-            let mut pending = pending_batches.lock().await;
-            let submitted_records = submitted_records.load(Ordering::Acquire);
-            if acked_records > submitted_records {
-                return Err(ZerobusError::InvalidStateError(format!(
-                    "Acknowledgement claims {acked_records} records, but only {submitted_records} records were submitted"
-                )));
-            }
-
-            let previous_acked_records =
-                last_acked_records.fetch_max(acked_records, Ordering::AcqRel);
-            let effective_acked_records = previous_acked_records.max(acked_records);
-            let mut max_acked_offset: Option<OffsetId> = None;
-            pending.retain(|pb| {
-                if effective_acked_records >= pb.end_record {
-                    max_acked_offset =
-                        Some(max_acked_offset.map_or(pb.offset_id, |o| o.max(pb.offset_id)));
-                    false
-                } else {
-                    true
-                }
-            });
-            (effective_acked_records, max_acked_offset)
-        };
-
-        debug!(
-            ack_up_to_offset = ack.ack_up_to_offset,
-            ack_up_to_records = acked_records,
-            effective_acked_records,
-            "Received acknowledgment"
-        );
-
-        #[cfg(feature = "test-hooks")]
-        if acked_records > 0 {
-            if let Some(notify) = ack_applied_gate.lock().await.as_ref() {
-                notify.notify_one();
-            }
-        }
-
-        if let Some(offset) = max_acked_offset {
-            let _ = last_ack_tx.send(Some(offset));
-        }
-
-        Ok(())
+    fn rotation_error() -> ZerobusError {
+        ZerobusError::StreamClosedError(tonic::Status::unavailable(
+            "Server requested graceful stream rotation",
+        ))
     }
 
-    /// Processes acknowledgments from the server response stream.
+    /// Records the latest rotation error without allowing a retryable transport status
+    /// to hide an earlier permanent peer or protocol failure.
+    fn update_rotation_error(current: &mut Option<ZerobusError>, candidate: ZerobusError) {
+        let preserves_permanent = current
+            .as_ref()
+            .map(|error| !error.is_retryable() && candidate.is_retryable())
+            .unwrap_or(false);
+        if !preserves_permanent {
+            *current = Some(candidate);
+        }
+    }
+
+    /// Splits the advertised grace into an ACK-wait portion and a bounded transport
+    /// drain. Very short grace periods skip ACK waiting and receive a best-effort local
+    /// drain window; the peer may already have closed in that case.
+    fn rotation_deadlines(
+        server_duration_ms: u64,
+        configured_ack_wait_ms: Option<u64>,
+    ) -> (Instant, Instant) {
+        let now = Instant::now();
+        let drain_budget = Duration::from_millis(ROTATION_DRAIN_TIMEOUT_MS);
+        let server_grace = Duration::from_millis(server_duration_ms);
+        let bounded_fallback = now + Duration::from_secs(365 * 24 * 60 * 60);
+        let server_deadline = now.checked_add(server_grace).unwrap_or(bounded_fallback);
+        let available_ack_wait = server_grace.saturating_sub(drain_budget);
+        let configured_ack_wait = configured_ack_wait_ms
+            .map(Duration::from_millis)
+            .unwrap_or(available_ack_wait);
+        let ack_wait = available_ack_wait.min(configured_ack_wait);
+        let ack_deadline = now.checked_add(ack_wait).unwrap_or(server_deadline);
+        let drain_deadline = if server_grace < drain_budget {
+            now + drain_budget
+        } else {
+            server_deadline
+        };
+        (ack_deadline, drain_deadline)
+    }
+
+    fn bounded_rotation_drain_deadline(close_deadline: Instant) -> Instant {
+        close_deadline.min(Instant::now() + Duration::from_millis(ROTATION_DRAIN_TIMEOUT_MS))
+    }
+
+    /// Half-closes the active request and drains the response under the rotation
+    /// deadline. Late acknowledgments are applied while tonic settles request EOF.
+    /// A real peer status or invalid acknowledgment outranks the synthetic retryable
+    /// rotation result.
+    async fn close_request_and_drain_response(
+        response_stream: &mut FlightResponseStream,
+        request: RequestControl<'_>,
+        acknowledgments: AckProgress<'_>,
+        state: DrainState,
+    ) -> ZerobusResult<()> {
+        let DrainState {
+            deadline,
+            mut response_finished,
+            mut terminal_error,
+        } = state;
+        request.half_close().await;
+
+        let mut request_eof = Box::pin(request.request_body.wait_for_eof());
+        let mut request_finished = false;
+
+        loop {
+            if request_finished && response_finished {
+                return Err(terminal_error.unwrap_or_else(Self::rotation_error));
+            }
+            if Instant::now() >= deadline {
+                return Err(terminal_error.unwrap_or_else(Self::rotation_error));
+            }
+
+            tokio::select! {
+                biased;
+                _ = tokio::time::sleep_until(deadline) => {
+                    return Err(terminal_error.unwrap_or_else(Self::rotation_error));
+                }
+                _ = &mut request_eof, if !request_finished => {
+                    request_finished = true;
+                }
+                response = response_stream.next(), if !response_finished => {
+                    match response {
+                        Some(Ok(put_result)) => {
+                            match FlightAckMetadata::from_bytes(&put_result.app_metadata) {
+                                Ok(ack) if ack.ack_up_to_records > 0 => {
+                                    if let Err(error) = acknowledgments.apply(&ack).await {
+                                        Self::update_rotation_error(&mut terminal_error, error);
+                                    }
+                                }
+                                Ok(_) => {}
+                                Err(error) => {
+                                    warn!("Failed to parse ack metadata while draining: {error}");
+                                }
+                            }
+                        }
+                        Some(Err(error)) => {
+                            let status: tonic::Status = error.into();
+                            Self::update_rotation_error(
+                                &mut terminal_error,
+                                ZerobusError::StreamClosedError(status),
+                            );
+                            response_finished = true;
+                        }
+                        None => response_finished = true,
+                    }
+                }
+            }
+        }
+    }
+
+    /// Processes acknowledgments and the single server-initiated rotation path.
     ///
-    /// Uses record-based tracking: the server sends `ack_up_to_records` indicating
-    /// the cumulative number of records durably stored. We match this against
-    /// pending batches' record ranges to determine which batches are fully acked.
-    /// This correctly handles batches that were split into multiple Flight chunks
-    /// by `FlightDataEncoderBuilder`.
+    /// Rotation pauses sends and snapshots submitted records, waits only for that
+    /// connection-local target, then half-closes the request and drains late responses
+    /// before returning a retryable result to the supervisor.
     #[allow(clippy::too_many_arguments)]
     async fn process_acks(
-        mut response_stream: Pin<Box<dyn Stream<Item = Result<PutResult, FlightError>> + Send>>,
+        mut response_stream: FlightResponseStream,
+        request_body: RequestBodyControl,
         is_closed: Arc<AtomicBool>,
-        last_ack_tx: tokio::sync::watch::Sender<Option<OffsetId>>,
+        last_ack_tx: watch::Sender<Option<OffsetId>>,
         pending_batches: Arc<Mutex<Vec<PendingBatch>>>,
         ack_timeout: Duration,
         server_error_tx: watch::Sender<Option<ZerobusError>>,
         submitted_records: Arc<AtomicU64>,
         last_acked_records: Arc<AtomicU64>,
         is_paused: Arc<AtomicBool>,
+        ingest_mutex: Arc<Mutex<()>>,
+        batch_tx: BatchSender,
         options: &ArrowStreamConfigurationOptions,
         #[cfg(feature = "test-hooks")] ack_applied_gate: AckAppliedGate,
     ) -> ZerobusResult<()> {
-        let mut pause_deadline: Option<tokio::time::Instant> = None;
+        let mut rotation = RotationState::Open;
+        let request = RequestControl {
+            request_body: &request_body,
+            ingest_mutex: ingest_mutex.as_ref(),
+            is_paused: is_paused.as_ref(),
+            batch_tx: &batch_tx,
+        };
+        let acknowledgments = AckProgress {
+            submitted_records: submitted_records.as_ref(),
+            last_acked_records: last_acked_records.as_ref(),
+            pending_batches: pending_batches.as_ref(),
+            last_ack_tx: &last_ack_tx,
+            #[cfg(feature = "test-hooks")]
+            ack_applied_gate: &ack_applied_gate,
+        };
 
         loop {
             if is_closed.load(Ordering::Relaxed) {
@@ -1393,169 +1652,141 @@ impl ZerobusArrowStream {
                 return Ok(());
             }
 
-            // Check pause state: exit when deadline reached or all batches acked.
-            // Returns a retriable error to trigger recovery in the supervisor.
-            if let Some(deadline) = pause_deadline {
-                let now = tokio::time::Instant::now();
-                let all_acked = pending_batches.lock().await.is_empty();
-
-                if now >= deadline {
-                    info!("Graceful close timeout reached. Triggering recovery.");
-                    return Err(ZerobusError::StreamClosedError(tonic::Status::unavailable(
-                        "Graceful close timeout reached",
-                    )));
-                } else if all_acked {
-                    info!("All in-flight batches acknowledged during graceful close. Triggering recovery.");
-                    return Err(ZerobusError::StreamClosedError(tonic::Status::unavailable(
-                        "All in-flight batches acked during graceful close",
-                    )));
+            if let RotationState::WaitingForAcks {
+                target_records,
+                ack_deadline,
+                drain_deadline,
+            } = &rotation
+            {
+                if last_acked_records.load(Ordering::Acquire) >= *target_records
+                    || Instant::now() >= *ack_deadline
+                {
+                    rotation = RotationState::Draining(DrainState {
+                        deadline: Self::bounded_rotation_drain_deadline(*drain_deadline),
+                        response_finished: false,
+                        terminal_error: None,
+                    });
+                    continue;
                 }
             }
 
-            // TODO: Anchor this timeout to the oldest pending batch. The current
-            // per-response timeout can spend most of its window while idle and restarts
-            // whenever any response arrives, even if it makes no ack progress.
-            let result = if let Some(deadline) = pause_deadline {
-                // TODO: Race graceful close against the active ack deadline and
-                // preserve the earliest close deadline when repeated signals arrive.
-                tokio::select! {
-                    biased;
-                    _ = tokio::time::sleep_until(deadline) => {
-                        continue;
+            if matches!(rotation, RotationState::Draining(_)) {
+                let RotationState::Draining(state) =
+                    std::mem::replace(&mut rotation, RotationState::Open)
+                else {
+                    unreachable!()
+                };
+                return Self::close_request_and_drain_response(
+                    &mut response_stream,
+                    request,
+                    acknowledgments,
+                    state,
+                )
+                .await;
+            }
+
+            let response = match &rotation {
+                RotationState::Open => {
+                    match tokio::time::timeout(ack_timeout, response_stream.next()).await {
+                        Ok(response) => response,
+                        Err(_) => {
+                            let pending = pending_batches.lock().await;
+                            if !pending.is_empty() {
+                                error!(
+                                    pending_count = pending.len(),
+                                    "Server ack timeout with pending batches"
+                                );
+                                return Err(ZerobusError::StreamClosedError(
+                                    tonic::Status::deadline_exceeded("Server ack timeout"),
+                                ));
+                            }
+                            continue;
+                        }
                     }
-                    res = tokio::time::timeout(ack_timeout, response_stream.next()) => res,
                 }
-            } else {
-                tokio::time::timeout(ack_timeout, response_stream.next()).await
+                RotationState::WaitingForAcks { ack_deadline, .. } => {
+                    tokio::select! {
+                        _ = tokio::time::sleep_until(*ack_deadline) => continue,
+                        response = response_stream.next() => response,
+                    }
+                }
+                RotationState::Draining(_) => unreachable!(),
             };
 
-            match result {
-                Ok(Some(Ok(put_result))) => {
-                    match FlightAckMetadata::from_bytes(&put_result.app_metadata) {
-                        Ok(ack) => {
-                            // Handle close stream signal.
-                            if ack.is_close_signal() {
-                                if options.recovery {
-                                    let server_duration_ms =
-                                        ack.close_stream_duration_ms.unwrap_or(0);
-
-                                    let wait_duration_ms = match options
-                                        .stream_paused_max_wait_time_ms
-                                    {
-                                        None => server_duration_ms,
-                                        Some(0) => {
-                                            info!(
-                                                    "Server will close the stream in {}ms. Triggering stream recovery.",
-                                                    server_duration_ms
-                                                );
-                                            return Err(ZerobusError::StreamClosedError(
-                                                tonic::Status::unavailable(
-                                                    "Immediate recovery on close signal",
-                                                ),
-                                            ));
-                                        }
-                                        Some(max_wait) => {
-                                            std::cmp::min(max_wait, server_duration_ms)
-                                        }
-                                    };
-
-                                    if wait_duration_ms == 0 {
-                                        info!("Server will close the stream. Triggering immediate recovery.");
-                                        return Err(ZerobusError::StreamClosedError(
-                                            tonic::Status::unavailable(
-                                                "Immediate recovery on close signal",
-                                            ),
-                                        ));
-                                    }
-
-                                    is_paused.store(true, Ordering::Relaxed);
-                                    pause_deadline = Some(
-                                        tokio::time::Instant::now()
-                                            + Duration::from_millis(wait_duration_ms),
-                                    );
-                                    info!(
-                                        "Server will close the stream in {}ms. Entering graceful close period (waiting up to {}ms for in-flight acks).",
-                                        server_duration_ms, wait_duration_ms
-                                    );
-                                }
-                                // Process any ack data that came with the close signal.
-                                // Fall through to ack processing below only if there's
-                                // meaningful ack data (non-zero records count).
-                                if ack.ack_up_to_records == 0 {
-                                    continue;
-                                }
-                            }
-
-                            Self::apply_acknowledgment(
-                                &ack,
-                                &submitted_records,
-                                &last_acked_records,
-                                &pending_batches,
-                                &last_ack_tx,
-                                #[cfg(feature = "test-hooks")]
-                                &ack_applied_gate,
-                            )
-                            .await?;
+            match response {
+                Some(Ok(put_result)) => {
+                    let ack = match FlightAckMetadata::from_bytes(&put_result.app_metadata) {
+                        Ok(ack) => ack,
+                        Err(error) => {
+                            warn!("Failed to parse ack metadata: {error}");
+                            continue;
                         }
-                        Err(e) => {
-                            warn!("Failed to parse ack metadata: {}", e);
+                    };
+
+                    if ack.is_close_signal() && matches!(&rotation, RotationState::Open) {
+                        let server_duration_ms = ack.close_stream_duration_ms.unwrap_or(0);
+                        let (ack_deadline, drain_deadline) = Self::rotation_deadlines(
+                            server_duration_ms,
+                            options.stream_paused_max_wait_time_ms,
+                        );
+                        let target_records = Self::pause_and_snapshot_submitted(
+                            &ingest_mutex,
+                            &is_paused,
+                            &submitted_records,
+                        )
+                        .await;
+                        rotation = RotationState::WaitingForAcks {
+                            target_records,
+                            ack_deadline,
+                            drain_deadline,
+                        };
+                        info!(
+                            server_duration_ms,
+                            target_records, "Server requested graceful stream rotation"
+                        );
+                    }
+
+                    if ack.ack_up_to_records > 0 {
+                        let ack_result = acknowledgments.apply(&ack).await;
+                        if let Err(error) = ack_result {
+                            if let RotationState::WaitingForAcks { drain_deadline, .. } = rotation {
+                                rotation = RotationState::Draining(DrainState {
+                                    deadline: Self::bounded_rotation_drain_deadline(drain_deadline),
+                                    response_finished: false,
+                                    terminal_error: Some(error),
+                                });
+                                continue;
+                            }
+                            return Err(error);
                         }
                     }
                 }
-                Ok(Some(Err(e))) => {
-                    // A stream error while paused ends the graceful-close wait and
-                    // triggers recovery.
-                    if pause_deadline.is_some() {
-                        info!(
-                            "Stream error during graceful close period, triggering recovery: {}",
-                            e
-                        );
-                        return Err(ZerobusError::StreamClosedError(tonic::Status::unavailable(
-                            "Stream error during graceful close",
-                        )));
-                    }
-                    error!("Flight stream error: {}", e);
-                    let status: tonic::Status = e.into();
+                Some(Err(error)) => {
+                    let status: tonic::Status = error.into();
                     let error = ZerobusError::StreamClosedError(status);
+                    if let RotationState::WaitingForAcks { drain_deadline, .. } = rotation {
+                        rotation = RotationState::Draining(DrainState {
+                            deadline: Self::bounded_rotation_drain_deadline(drain_deadline),
+                            response_finished: true,
+                            terminal_error: Some(error),
+                        });
+                        continue;
+                    }
                     let _ = server_error_tx.send(Some(error.clone()));
                     return Err(error);
                 }
-                Ok(None) => {
-                    // During graceful close, stream end is expected.
-                    // Return retriable error to trigger recovery.
-                    if pause_deadline.is_some() {
-                        info!("Server closed stream during graceful close period, triggering recovery.");
-                        return Err(ZerobusError::StreamClosedError(tonic::Status::unavailable(
-                            "Server closed stream during graceful close",
-                        )));
-                    }
-                    debug!("Server closed the stream");
-                    let error = ZerobusError::StreamClosedError(tonic::Status::unknown(
-                        "Server closed the stream",
-                    ));
-                    // Returned to the supervisor, which publishes it (before + after
-                    // finalization) in its terminal branch.
-                    return Err(error);
-                }
-                Err(_timeout) => {
-                    // During graceful close, ack timeout is not an error.
-                    if pause_deadline.is_some() {
+                None => {
+                    if let RotationState::WaitingForAcks { drain_deadline, .. } = rotation {
+                        rotation = RotationState::Draining(DrainState {
+                            deadline: Self::bounded_rotation_drain_deadline(drain_deadline),
+                            response_finished: true,
+                            terminal_error: None,
+                        });
                         continue;
                     }
-                    // Check if there are pending acks that should have been received.
-                    let pending = pending_batches.lock().await;
-                    if !pending.is_empty() {
-                        error!(
-                            pending_count = pending.len(),
-                            "Server ack timeout with pending batches"
-                        );
-                        let error = ZerobusError::StreamClosedError(
-                            tonic::Status::deadline_exceeded("Server ack timeout"),
-                        );
-                        // Returned to the supervisor, which publishes it (before + after
-                        // finalization) in its terminal branch.
-                        return Err(error);
-                    }
+                    return Err(ZerobusError::StreamClosedError(tonic::Status::unknown(
+                        "Server closed the stream",
+                    )));
                 }
             }
         }
@@ -2292,6 +2523,18 @@ mod tests {
         }
     }
 
+    fn inactive_rotation_controls() -> (RequestBodyControl, Arc<Mutex<()>>, BatchSender) {
+        let (_eof_tx, eof_rx) = watch::channel(true);
+        (
+            RequestBodyControl {
+                shutdown: CancellationToken::new(),
+                eof_rx,
+            },
+            Arc::new(Mutex::new(())),
+            Arc::new(Mutex::new(None)),
+        )
+    }
+
     /// An acknowledgement beyond the connection-local submitted-record count is a protocol
     /// violation and must not make unsent records appear durable.
     #[tokio::test]
@@ -2318,9 +2561,11 @@ mod tests {
         let (server_error_tx, _server_error_rx) = watch::channel(None);
         let submitted_records = Arc::new(AtomicU64::new(10));
         let last_acked_records = Arc::new(AtomicU64::new(0));
+        let (request_body, ingest_mutex, batch_tx) = inactive_rotation_controls();
 
         let error = ZerobusArrowStream::process_acks(
             Box::pin(response_stream),
+            request_body,
             Arc::new(AtomicBool::new(false)),
             last_ack_tx,
             Arc::clone(&pending_batches),
@@ -2329,6 +2574,8 @@ mod tests {
             Arc::clone(&submitted_records),
             Arc::clone(&last_acked_records),
             Arc::new(AtomicBool::new(false)),
+            ingest_mutex,
+            batch_tx,
             &ArrowStreamConfigurationOptions::default(),
             #[cfg(feature = "test-hooks")]
             Arc::new(Mutex::new(None)),
@@ -2378,9 +2625,11 @@ mod tests {
         let (server_error_tx, _server_error_rx) = watch::channel(None);
         let submitted_records = Arc::new(AtomicU64::new(10));
         let last_acked_records = Arc::new(AtomicU64::new(0));
+        let (request_body, ingest_mutex, batch_tx) = inactive_rotation_controls();
 
         let error = ZerobusArrowStream::process_acks(
             Box::pin(response_stream),
+            request_body,
             Arc::new(AtomicBool::new(false)),
             last_ack_tx,
             Arc::clone(&pending_batches),
@@ -2389,6 +2638,8 @@ mod tests {
             Arc::clone(&submitted_records),
             Arc::clone(&last_acked_records),
             Arc::new(AtomicBool::new(true)),
+            ingest_mutex,
+            batch_tx,
             &ArrowStreamConfigurationOptions::default(),
             #[cfg(feature = "test-hooks")]
             Arc::new(Mutex::new(None)),
@@ -2442,9 +2693,11 @@ mod tests {
         let (last_ack_tx, _last_ack_rx) = watch::channel(None);
         let (server_error_tx, _server_error_rx) = watch::channel(None);
         let last_acked_records = Arc::new(AtomicU64::new(0));
+        let (request_body, ingest_mutex, batch_tx) = inactive_rotation_controls();
 
         let _stream_closed = ZerobusArrowStream::process_acks(
             Box::pin(response_stream),
+            request_body,
             Arc::new(AtomicBool::new(false)),
             last_ack_tx,
             Arc::clone(&pending_batches),
@@ -2453,6 +2706,8 @@ mod tests {
             Arc::new(AtomicU64::new(10)),
             Arc::clone(&last_acked_records),
             Arc::new(AtomicBool::new(false)),
+            ingest_mutex,
+            batch_tx,
             &ArrowStreamConfigurationOptions::default(),
             #[cfg(feature = "test-hooks")]
             Arc::new(Mutex::new(None)),
