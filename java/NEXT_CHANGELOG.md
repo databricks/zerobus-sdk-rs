@@ -10,6 +10,9 @@
 
 ### Bug Fixes
 
+- `HeadersProvider` exceptions are now retryable during automatic recovery unless the provider
+  throws `NonRetriableException`. Malformed provider output remains non-retryable.
+
 ### Documentation
 
 ### Internal Changes

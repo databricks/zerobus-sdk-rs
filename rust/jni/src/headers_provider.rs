@@ -1,6 +1,7 @@
 //! JNI bridge for the Java HeadersProvider interface.
 
 use crate::runtime::get_jvm;
+use crate::{as_jclass, get_class_cache};
 use async_trait::async_trait;
 use databricks_zerobus_ingest_sdk::{HeadersProvider, ZerobusError, ZerobusResult};
 use jni::errors::Error as JniError;
@@ -15,7 +16,9 @@ struct LocalFrameError(ZerobusError);
 
 impl From<JniError> for LocalFrameError {
     fn from(error: JniError) -> Self {
-        Self(provider_error(format!("JNI local frame failed: {error}")))
+        Self(provider_retryable_error(format!(
+            "JNI local frame failed: {error}"
+        )))
     }
 }
 
@@ -45,7 +48,7 @@ impl HeadersProvider for JavaHeadersProvider {
         let provider_ref = self.provider_ref.clone();
         tokio::task::spawn_blocking(move || get_headers_blocking(provider_ref))
             .await
-            .map_err(|error| provider_error(format!("callback task failed: {error}")))?
+            .map_err(|error| provider_retryable_error(format!("callback task failed: {error}")))?
     }
 
     async fn invalidate(&self) {
@@ -58,11 +61,13 @@ impl HeadersProvider for JavaHeadersProvider {
     }
 }
 
-fn get_headers_blocking(provider_ref: GlobalRef) -> ZerobusResult<HashMap<&'static str, String>> {
+pub(crate) fn get_headers_blocking(
+    provider_ref: GlobalRef,
+) -> ZerobusResult<HashMap<&'static str, String>> {
     let jvm = get_jvm();
     let mut env = jvm
         .attach_current_thread_as_daemon()
-        .map_err(|error| provider_error(format!("failed to attach to JVM: {error}")))?;
+        .map_err(|error| provider_retryable_error(format!("failed to attach to JVM: {error}")))?;
 
     env.with_local_frame(32, |env| -> Result<_, LocalFrameError> {
         let map_object = env
@@ -76,7 +81,7 @@ fn get_headers_blocking(provider_ref: GlobalRef) -> ZerobusResult<HashMap<&'stat
             .map_err(|error| java_call_error(env, "getHeaders", error))?;
 
         if map_object.is_null() {
-            return Err(provider_error("getHeaders returned null").into());
+            return Err(provider_invalid_argument("getHeaders returned null").into());
         }
 
         Ok(extract_headers(env, &map_object)?)
@@ -84,7 +89,7 @@ fn get_headers_blocking(provider_ref: GlobalRef) -> ZerobusResult<HashMap<&'stat
     .map_err(|error| error.0)
 }
 
-fn invalidate_blocking(provider_ref: GlobalRef) {
+pub(crate) fn invalidate_blocking(provider_ref: GlobalRef) {
     let jvm = get_jvm();
     let mut env = match jvm.attach_current_thread_as_daemon() {
         Ok(env) => env,
@@ -124,7 +129,20 @@ fn extract_headers(
         };
 
         if key.is_null() || value.is_null() {
-            return Err(provider_error("header names and values must not be null"));
+            return Err(provider_invalid_argument(
+                "header names and values must not be null",
+            ));
+        }
+        let key_is_string = env
+            .is_instance_of(&key, "java/lang/String")
+            .map_err(|error| java_call_error(env, "validate header name", error))?;
+        let value_is_string = env
+            .is_instance_of(&value, "java/lang/String")
+            .map_err(|error| java_call_error(env, "validate header value", error))?;
+        if !key_is_string || !value_is_string {
+            return Err(provider_invalid_argument(
+                "header names and values must be java.lang.String",
+            ));
         }
 
         let key_string = JString::from(key);
@@ -159,19 +177,57 @@ fn intern_header_name(name: String) -> &'static str {
 }
 
 fn java_call_error(env: &mut JNIEnv<'_>, method: &str, error: JniError) -> ZerobusError {
-    let detail = if matches!(error, JniError::JavaException) {
-        take_java_exception_message(env).unwrap_or_else(|| error.to_string())
+    if matches!(error, JniError::JavaException) {
+        let exception = take_java_exception(env);
+        let detail = exception
+            .as_ref()
+            .and_then(|exception| exception.message.as_deref())
+            .unwrap_or("Java exception was thrown");
+        let message = format!("{method} failed: {detail}");
+        if exception.is_some_and(|exception| exception.non_retryable) {
+            provider_invalid_argument(message)
+        } else {
+            provider_retryable_error(message)
+        }
     } else {
-        error.to_string()
-    };
-    provider_error(format!("{method} failed: {detail}"))
+        provider_retryable_error(format!("{method} failed: {error}"))
+    }
 }
 
-fn take_java_exception_message(env: &mut JNIEnv<'_>) -> Option<String> {
-    let throwable = env.exception_occurred().ok()?;
-    env.exception_clear().ok()?;
+struct JavaException {
+    message: Option<String>,
+    non_retryable: bool,
+}
+
+fn take_java_exception(env: &mut JNIEnv<'_>) -> Option<JavaException> {
+    let throwable = match env.exception_occurred() {
+        Ok(throwable) => throwable,
+        Err(_) => {
+            let _ = env.exception_clear();
+            return None;
+        }
+    };
+    let _ = env.exception_clear();
+
+    let non_retryable = env
+        .is_instance_of(
+            &throwable,
+            as_jclass(&get_class_cache().non_retriable_exception_class),
+        )
+        .unwrap_or(false);
+    let _ = env.exception_clear();
+    let message = extract_throwable_string(env, &throwable);
+    let _ = env.exception_clear();
+
+    Some(JavaException {
+        message,
+        non_retryable,
+    })
+}
+
+fn extract_throwable_string(env: &mut JNIEnv<'_>, throwable: &JObject<'_>) -> Option<String> {
     let message = env
-        .call_method(&throwable, "toString", "()Ljava/lang/String;", &[])
+        .call_method(throwable, "toString", "()Ljava/lang/String;", &[])
         .ok()?
         .l()
         .ok()?;
@@ -179,9 +235,10 @@ fn take_java_exception_message(env: &mut JNIEnv<'_>) -> Option<String> {
     env.get_string(&message).ok().map(Into::into)
 }
 
-fn provider_error(message: impl Into<String>) -> ZerobusError {
+fn provider_invalid_argument(message: impl Into<String>) -> ZerobusError {
     ZerobusError::InvalidArgument(format!("Java HeadersProvider error: {}", message.into()))
 }
 
-unsafe impl Send for JavaHeadersProvider {}
-unsafe impl Sync for JavaHeadersProvider {}
+fn provider_retryable_error(message: impl Into<String>) -> ZerobusError {
+    ZerobusError::TokenFetchError(format!("Java HeadersProvider error: {}", message.into()))
+}

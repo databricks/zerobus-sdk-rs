@@ -13,6 +13,9 @@
 
 ### Bug Fixes
 
+- Invalid custom gRPC metadata header names now return `InvalidArgument` instead of panicking
+  during stream connection setup.
+
 ### Documentation
 
 ### Internal Changes

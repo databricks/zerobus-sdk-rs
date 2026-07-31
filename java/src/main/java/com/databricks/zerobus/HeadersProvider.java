@@ -39,6 +39,9 @@ public interface HeadersProvider {
    * Dynamically generated header names are not supported because names are retained for the
    * lifetime of the process.
    *
+   * <p>Exceptions are treated as retryable during automatic stream recovery. Throw {@link
+   * NonRetriableException} for permanent failures that should stop recovery immediately.
+   *
    * @return a non-null map of header names to values
    * @throws Exception if the headers cannot be produced
    */

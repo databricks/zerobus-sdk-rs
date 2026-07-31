@@ -261,9 +261,11 @@ public class StreamBuilderTest {
   void jsonBuildRoutesToCreateJsonStreamInternal() {
     assumeNativeLibrary();
     ZerobusSdk sdk = mock(ZerobusSdk.class);
+    HeadersProvider provider = () -> Collections.singletonMap("authorization", "Bearer token");
 
     new StreamBuilder(sdk)
         .table("cat.sch.json")
+        .headersProvider(provider)
         .oauth("json-id", "json-secret")
         .maxInflightRecords(4242)
         .json()
@@ -285,7 +287,13 @@ public class StreamBuilderTest {
     ZerobusSdk sdk = mock(ZerobusSdk.class);
     HeadersProvider provider = () -> Collections.singletonMap("authorization", "Bearer token");
 
-    new StreamBuilder(sdk).table("cat.sch.json").headersProvider(provider).json().build();
+    StreamBuilder builder =
+        new StreamBuilder(sdk)
+            .table("cat.sch.json")
+            .oauth("unused-id", "unused-secret")
+            .headersProvider(provider);
+    assertDoesNotThrow(builder::validateRequired);
+    builder.json().build();
 
     verify(sdk)
         .createJsonStreamInternal(eq("cat.sch.json"), eq(null), eq(null), eq(provider), any());
