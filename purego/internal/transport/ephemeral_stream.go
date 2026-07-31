@@ -145,6 +145,12 @@ func (c *Conn) open(hctx, streamCtx context.Context, teardown context.CancelFunc
 		},
 		confirmCreateStream,
 	); err != nil {
+		// Direct auth rejections are preserved for the lifecycle layer, which owns
+		// normal invalidation. Only the timeout race path (expired hctx) invalidates
+		// here so a preserved rejection cannot be lost to deadline masking.
+		if p.HeadersProvider != nil && IsAuthRejection(err) && hctx.Err() != nil {
+			p.HeadersProvider.Invalidate(hctx, p.TableName)
+		}
 		return nil, fmt.Errorf("transport: open %q: %w", p.TableName, err)
 	}
 	return s, nil

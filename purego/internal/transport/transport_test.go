@@ -180,9 +180,34 @@ func firstMD(md metadata.MD, key string) string {
 	return ""
 }
 
+// heldRecvErrorStream delays surfacing RecvMsg's real result until release is
+// closed, letting a test force "server status captured first, deadline observed
+// second" ordering in Conn.Open's handshake path.
+type heldRecvErrorStream struct {
+	grpc.ClientStream
+	release  <-chan struct{}
+	captured chan<- struct{}
+}
+
+func (s *heldRecvErrorStream) RecvMsg(m any) error {
+	err := s.ClientStream.RecvMsg(m)
+	select {
+	case s.captured <- struct{}{}:
+	default:
+	}
+	<-s.release
+	return err
+}
+
 // dialFake starts srv on an in-memory listener and returns a Conn wired to it.
 // The server and connection are torn down via t.Cleanup.
 func dialFake(t *testing.T, srv *fakeServer) *transport.Conn {
+	return dialFakeWithExtraDialOptions(t, srv)
+}
+
+// dialFakeWithExtraDialOptions is dialFake plus optional grpc-go dial options
+// (for example a client stream interceptor).
+func dialFakeWithExtraDialOptions(t *testing.T, srv *fakeServer, extraOpts ...grpc.DialOption) *transport.Conn {
 	t.Helper()
 
 	lis := bufconn.Listen(1 << 20)
@@ -203,9 +228,10 @@ func dialFake(t *testing.T, srv *fakeServer) *transport.Conn {
 	dialer := grpc.WithContextDialer(func(ctx context.Context, _ string) (net.Conn, error) {
 		return lis.DialContext(ctx)
 	})
+	opts := append([]grpc.DialOption{dialer}, extraOpts...)
 	conn, err := transport.Dial("passthrough:///bufnet",
 		transport.WithInsecure(),
-		transport.WithGRPCDialOptions(dialer),
+		transport.WithGRPCDialOptions(opts...),
 	)
 	if err != nil {
 		t.Fatalf("Dial: %v", err)
@@ -561,6 +587,66 @@ func TestOpenAuthRejectionPreservesStatusForLifecycle(t *testing.T) {
 				t.Fatalf("transport invalidated credentials %d time(s)", p.invalidateCalls.Load())
 			}
 		})
+	}
+}
+
+// TestOpenAuthRejectionStillInvalidatesWhenOpenDeadlineExpires verifies the
+// user-visible race: if Recv already captured an auth rejection but Open's ctx
+// expires before Recv returns it, Open still reports the rejection and
+// invalidates cached credentials.
+func TestOpenAuthRejectionStillInvalidatesWhenOpenDeadlineExpires(t *testing.T) {
+	srv := &fakeServer{streamID: "s", seen: make(chan observed, 1), authRejectCode: codes.Unauthenticated}
+	releaseRecv := make(chan struct{})
+	capturedRecv := make(chan struct{}, 1)
+	holdRecv := grpc.WithStreamInterceptor(func(
+		ctx context.Context,
+		desc *grpc.StreamDesc,
+		cc *grpc.ClientConn,
+		method string,
+		streamer grpc.Streamer,
+		opts ...grpc.CallOption,
+	) (grpc.ClientStream, error) {
+		cs, err := streamer(ctx, desc, cc, method, opts...)
+		if err != nil {
+			return nil, err
+		}
+		return &heldRecvErrorStream{
+			ClientStream: cs,
+			release:      releaseRecv,
+			captured:     capturedRecv,
+		}, nil
+	})
+	conn := dialFakeWithExtraDialOptions(t, srv, holdRecv)
+
+	p := &stubHeadersProvider{headers: map[string]string{"authorization": "tok"}}
+	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+	defer cancel()
+	go func() {
+		<-ctx.Done()
+		close(releaseRecv)
+	}()
+
+	_, err := conn.Open(ctx, transport.StreamParams{
+		TableName:       "c.s.t",
+		RecordType:      zerobuspb.RecordType_JSON,
+		HeadersProvider: p,
+	})
+	if err == nil {
+		t.Fatal("Open with held auth rejection: got nil error")
+	}
+	select {
+	case <-capturedRecv:
+	default:
+		t.Fatal("test setup failure: interceptor did not capture a Recv result before release")
+	}
+	if got := status.Code(err); got != codes.Unauthenticated {
+		t.Fatalf("Open error code = %v, want %v", got, codes.Unauthenticated)
+	}
+	if errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("Open error = %v, want auth rejection to replace DeadlineExceeded", err)
+	}
+	if p.invalidateCalls.Load() != 1 {
+		t.Fatalf("Invalidate calls = %d, want 1", p.invalidateCalls.Load())
 	}
 }
 
