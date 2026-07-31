@@ -2,8 +2,7 @@
 // to read their connection settings from the environment.
 //
 // Every connection setting is read from the environment, so no value is ever
-// baked into source — the same five variable names the C++, TypeScript, Java,
-// and Python SDK examples use:
+// baked into source. The five variables are:
 //
 //	ZEROBUS_SERVER_ENDPOINT   Zerobus gRPC endpoint
 //	DATABRICKS_WORKSPACE_URL  Unity Catalog / workspace URL (OAuth token exchange)

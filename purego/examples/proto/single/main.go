@@ -7,10 +7,8 @@
 // throughput. For high volume, prefer the batch API in proto/batch.
 //
 // A proto stream needs a message descriptor so the server can interpret the raw
-// protobuf bytes. Unlike the C++ SDK (which builds the descriptor at runtime
-// from Unity Catalog metadata), the pure-Go SDK uses a static schema: the
-// descriptor is marshaled from the generated bindings in proto/pb (see
-// proto/orders.proto).
+// protobuf bytes. The pure-Go SDK uses a static schema: the descriptor is
+// marshaled from the generated bindings in proto/pb (see proto/orders.proto).
 //
 // Configuration — every connection setting is read from the environment. Export
 // these before running (see the examples README):
