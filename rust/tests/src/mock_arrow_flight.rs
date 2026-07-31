@@ -2,6 +2,7 @@
 
 use std::collections::HashMap;
 use std::pin::Pin;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -58,6 +59,15 @@ pub enum MockFlightResponse {
         /// Cumulative records acknowledged.
         ack_up_to_records: u64,
     },
+    /// Acknowledgment emitted only after the client cleanly half-closes its request.
+    BatchAckAfterRequestEof {
+        ack_up_to_offset: i64,
+        ack_up_to_records: u64,
+    },
+    /// Permanent status emitted only after the client cleanly half-closes its request.
+    ErrorAfterRequestEof { status: Status },
+    /// Keep the response open after request EOF to exercise the bounded drain fallback.
+    HoldResponseAfterRequestEof,
     /// Error response - sent immediately when a batch arrives.
     Error { status: Status, delay_ms: u64 },
     /// Reject a connection's setup: send this error instead of the ready signal on the
@@ -98,6 +108,10 @@ pub struct MockFlightServer {
     /// Observation of every `ack_up_to_records` value emitted on the auto-ack path,
     /// in emission order. Used by tests to assert acks are connection-relative.
     auto_ack_records: Arc<Mutex<Vec<u64>>>,
+    /// Number of request bodies that ended with a clean client half-close.
+    request_half_closes: Arc<AtomicU64>,
+    /// Number of request bodies that ended with a transport error/reset.
+    request_resets: Arc<AtomicU64>,
 }
 
 impl MockFlightServer {
@@ -109,6 +123,8 @@ impl MockFlightServer {
             row_count: Arc::new(Mutex::new(0)),
             response_indices: Arc::new(Mutex::new(HashMap::new())),
             auto_ack_records: Arc::new(Mutex::new(Vec::new())),
+            request_half_closes: Arc::new(AtomicU64::new(0)),
+            request_resets: Arc::new(AtomicU64::new(0)),
         }
     }
 
@@ -142,6 +158,14 @@ impl MockFlightServer {
         self.auto_ack_records.lock().await.clone()
     }
 
+    pub fn get_request_half_close_count(&self) -> u64 {
+        self.request_half_closes.load(Ordering::Relaxed)
+    }
+
+    pub fn get_request_reset_count(&self) -> u64 {
+        self.request_resets.load(Ordering::Relaxed)
+    }
+
     /// Reset the server state
     #[allow(dead_code)]
     pub async fn reset(&self) {
@@ -153,6 +177,8 @@ impl MockFlightServer {
         *self.batch_count.lock().await = 0;
         *self.row_count.lock().await = 0;
         self.auto_ack_records.lock().await.clear();
+        self.request_half_closes.store(0, Ordering::Relaxed);
+        self.request_resets.store(0, Ordering::Relaxed);
     }
 }
 
@@ -233,6 +259,8 @@ impl FlightService for MockFlightServer {
         let row_count = Arc::clone(&self.row_count);
         let response_indices = Arc::clone(&self.response_indices);
         let auto_ack_records = Arc::clone(&self.auto_ack_records);
+        let request_half_closes = Arc::clone(&self.request_half_closes);
+        let request_resets = Arc::clone(&self.request_resets);
 
         tokio::spawn(async move {
             let mut stream_responses: Vec<MockFlightResponse> = Vec::new();
@@ -260,7 +288,19 @@ impl FlightService for MockFlightServer {
                 *indices.get(&table_name).unwrap_or(&0)
             };
 
-            while let Ok(Some(flight_data)) = stream.message().await {
+            let clean_request_eof = loop {
+                let flight_data = match stream.message().await {
+                    Ok(Some(flight_data)) => flight_data,
+                    Ok(None) => {
+                        request_half_closes.fetch_add(1, Ordering::Relaxed);
+                        break true;
+                    }
+                    Err(error) => {
+                        request_resets.fetch_add(1, Ordering::Relaxed);
+                        warn!("Client request stream reset: {error}");
+                        break false;
+                    }
+                };
                 // Handle schema message (first message has no app_metadata or empty app_metadata)
                 if is_first_message {
                     is_first_message = false;
@@ -410,6 +450,11 @@ impl FlightService for MockFlightServer {
                                 }
                             }
                         }
+                        MockFlightResponse::BatchAckAfterRequestEof { .. }
+                        | MockFlightResponse::ErrorAfterRequestEof { .. }
+                        | MockFlightResponse::HoldResponseAfterRequestEof => {
+                            debug!("Waiting for request EOF before sending scripted response");
+                        }
                         MockFlightResponse::Error { status, delay_ms } => {
                             // Error responses trigger immediately on first batch
                             if *delay_ms > 0 {
@@ -530,6 +575,47 @@ impl FlightService for MockFlightServer {
                         }
                     }
                 }
+            };
+
+            if clean_request_eof {
+                match stream_responses.get(response_index) {
+                    Some(MockFlightResponse::BatchAckAfterRequestEof {
+                        ack_up_to_offset,
+                        ack_up_to_records,
+                    }) => {
+                        let metadata = FlightAckMetadata {
+                            ack_up_to_offset: *ack_up_to_offset,
+                            ack_up_to_records: *ack_up_to_records,
+                        };
+                        let _ = tx
+                            .send(Ok(PutResult {
+                                app_metadata: serde_json::to_vec(&metadata).unwrap().into(),
+                            }))
+                            .await;
+                        response_index += 1;
+                        response_indices
+                            .lock()
+                            .await
+                            .insert(table_name.clone(), response_index);
+                    }
+                    Some(MockFlightResponse::ErrorAfterRequestEof { status }) => {
+                        let _ = tx.send(Err(status.clone())).await;
+                        response_index += 1;
+                        response_indices
+                            .lock()
+                            .await
+                            .insert(table_name.clone(), response_index);
+                    }
+                    Some(MockFlightResponse::HoldResponseAfterRequestEof) => {
+                        response_index += 1;
+                        response_indices
+                            .lock()
+                            .await
+                            .insert(table_name.clone(), response_index);
+                        std::future::pending::<()>().await;
+                    }
+                    _ => {}
+                }
             }
 
             debug!("Client stream ended");
@@ -595,6 +681,8 @@ async fn start_mock_flight_server_inner(
         row_count: Arc::clone(&mock_server.row_count),
         response_indices: Arc::clone(&mock_server.response_indices),
         auto_ack_records: Arc::clone(&mock_server.auto_ack_records),
+        request_half_closes: Arc::clone(&mock_server.request_half_closes),
+        request_resets: Arc::clone(&mock_server.request_resets),
     };
 
     let addr: std::net::SocketAddr = "127.0.0.1:0".parse()?;

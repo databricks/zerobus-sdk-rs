@@ -3646,6 +3646,11 @@ mod arrow_flight_tests {
                             delay_ms: 0,
                             ack_up_to_records: 3,
                         },
+                        MockFlightResponse::BatchAck {
+                            ack_up_to_offset: 1,
+                            delay_ms: 0,
+                            ack_up_to_records: 4,
+                        },
                     ],
                 )
                 .await;
@@ -3694,11 +3699,23 @@ mod arrow_flight_tests {
             );
             let offset2 = stream.ingest_batch(batch2).await?;
 
+            // A third batch advances the mock script to the disconnect after the
+            // partial ACK for batch2. Recovery must replay only batch2's final three
+            // rows, followed by this batch.
+            let batch3 = create_test_record_batch(schema, vec![16], vec![Some("p")]);
+            let offset3 = stream.ingest_batch(batch3).await?;
+
             let result = stream.wait_for_offset(offset2).await;
             assert!(
                 result.is_ok(),
                 "Expected partial batch recovery to succeed: {:?}",
                 result
+            );
+            stream.wait_for_offset(offset3).await?;
+            assert_eq!(
+                mock_server.get_total_records_received().await,
+                20,
+                "recovery must replay only the three-record unacknowledged suffix"
             );
 
             stream.close().await?;
@@ -4836,13 +4853,44 @@ mod arrow_flight_tests {
 
     mod graceful_close_tests {
         use super::*;
-        use std::time::Instant;
+        use arrow_array::RecordBatch;
+        use arrow_schema::Schema as ArrowSchema;
+        use databricks_zerobus_ingest_sdk::ZerobusArrowStream;
+        use std::time::{Duration, Instant};
+
+        async fn build_rotation_stream(
+            server_url: String,
+            schema: Arc<ArrowSchema>,
+            ack_wait_ms: Option<u64>,
+        ) -> Result<ZerobusArrowStream, Box<dyn std::error::Error>> {
+            let sdk = ZerobusSdk::builder()
+                .endpoint(server_url)
+                .unity_catalog_url("https://mock-uc.com")
+                .tls_config(Arc::new(NoTlsConfig))
+                .build()?;
+            Ok(sdk
+                .stream_builder()
+                .table(TABLE_NAME)
+                .headers_provider(Arc::new(TestHeadersProvider::default()))
+                .arrow(schema)
+                .recovery(true)
+                .recovery_backoff_ms(10)
+                .recovery_retries(3)
+                .flush_timeout_ms(3_000)
+                .stream_paused_max_wait_time_ms(ack_wait_ms)
+                .build_arrow()
+                .await?)
+        }
+
+        fn one_batch(schema: Arc<ArrowSchema>) -> RecordBatch {
+            create_test_record_batch(schema, vec![1, 2, 3], vec![Some("a"), Some("b"), Some("c")])
+        }
 
         #[tokio::test]
-        async fn test_default_graceful_close_waits_for_full_server_duration(
+        async fn test_server_rotation_half_closes_before_reconnect(
         ) -> Result<(), Box<dyn std::error::Error>> {
             setup_tracing();
-            info!("Starting test_default_graceful_close_waits_for_full_server_duration (arrow)");
+            info!("Starting test_server_rotation_half_closes_before_reconnect (arrow)");
 
             const SERVER_DURATION_MS: u64 = 1000;
 
@@ -4915,37 +4963,95 @@ mod arrow_flight_tests {
             let offset1 = stream.ingest_batch(batch1).await?;
             stream.wait_for_offset(offset1).await?;
 
-            // Ingest batch 2 - triggers graceful close signal. The client should wait
-            // for the full server duration before triggering recovery.
+            // Batch 2 triggers rotation. It is replayed only after the active request
+            // reaches EOF and the server response is drained.
             let batch2 = create_test_record_batch(
                 schema.clone(),
                 vec![7, 8, 9],
                 vec![Some("g"), Some("h"), Some("i")],
             );
-            let start = Instant::now();
             let offset2 = stream.ingest_batch(batch2).await?;
 
-            // Wait for batch 2 to be acked (after recovery replays it).
             stream.wait_for_offset(offset2).await?;
-            let elapsed = start.elapsed();
-
-            // Should have waited roughly the server duration before recovery.
-            assert!(
-                elapsed.as_millis() >= (SERVER_DURATION_MS as u128 - 200),
-                "Expected to wait at least ~{}ms for graceful close, but only waited {}ms",
-                SERVER_DURATION_MS,
-                elapsed.as_millis()
-            );
+            assert_eq!(mock_server.get_request_half_close_count(), 1);
+            assert_eq!(mock_server.get_request_reset_count(), 0);
 
             stream.close().await?;
             Ok(())
         }
 
         #[tokio::test]
-        async fn test_immediate_recovery_on_close_signal() -> Result<(), Box<dyn std::error::Error>>
-        {
+        async fn test_server_rotation_without_recovery_still_half_closes(
+        ) -> Result<(), Box<dyn std::error::Error>> {
             setup_tracing();
-            info!("Starting test_immediate_recovery_on_close_signal (arrow)");
+            info!("Starting test_server_rotation_without_recovery_still_half_closes (arrow)");
+
+            let (mock_server, server_url) = start_mock_flight_server().await?;
+            let schema = create_test_arrow_schema();
+            mock_server
+                .inject_responses(
+                    TABLE_NAME,
+                    vec![MockFlightResponse::GracefulClose {
+                        duration_ms: 1_000,
+                        delay_ms: 0,
+                        ack_up_to_offset: None,
+                        ack_up_to_records: None,
+                    }],
+                )
+                .await;
+
+            let sdk = ZerobusSdk::builder()
+                .endpoint(server_url)
+                .unity_catalog_url("https://mock-uc.com")
+                .tls_config(Arc::new(NoTlsConfig))
+                .build()?;
+            let stream = sdk
+                .stream_builder()
+                .table(TABLE_NAME)
+                .headers_provider(Arc::new(TestHeadersProvider::default()))
+                .arrow(schema.clone())
+                .recovery(false)
+                .stream_paused_max_wait_time_ms(Some(0))
+                .build_arrow()
+                .await?;
+
+            let offset = stream.ingest_batch(one_batch(schema)).await?;
+            let error = stream
+                .wait_for_offset(offset)
+                .await
+                .expect_err("rotation must terminate when recovery is disabled");
+            match error {
+                ZerobusError::StreamClosedError(status) => {
+                    assert_eq!(status.code(), tonic::Code::Unavailable);
+                    assert_eq!(
+                        status.message(),
+                        "Server requested graceful stream rotation"
+                    );
+                }
+                other => panic!("expected rotation error, got {other:?}"),
+            }
+
+            tokio::time::timeout(Duration::from_secs(2), async {
+                while !stream.is_closed() {
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .expect("rotation must finalize the stream without reconnecting");
+
+            assert_eq!(mock_server.get_batch_count().await, 1, "must not reconnect");
+            assert_eq!(mock_server.get_request_half_close_count(), 1);
+            assert_eq!(mock_server.get_request_reset_count(), 0);
+            let unacked = stream.get_unacked_batches().await?;
+            assert_eq!(unacked.len(), 1);
+            assert_eq!(unacked[0].num_rows(), 3);
+            Ok(())
+        }
+
+        #[tokio::test]
+        async fn test_zero_ack_wait_still_half_closes() -> Result<(), Box<dyn std::error::Error>> {
+            setup_tracing();
+            info!("Starting test_zero_ack_wait_still_half_closes (arrow)");
 
             let (mock_server, server_url) = start_mock_flight_server().await?;
             let schema = create_test_arrow_schema();
@@ -4966,7 +5072,7 @@ mod arrow_flight_tests {
                             ack_up_to_offset: None,
                             ack_up_to_records: None,
                         },
-                        // After immediate recovery, ack batch 1.
+                        // After bounded transport cleanup and recovery, ack batch 1.
                         MockFlightResponse::BatchAck {
                             ack_up_to_offset: 0,
                             delay_ms: 0,
@@ -5002,8 +5108,8 @@ mod arrow_flight_tests {
             let offset0 = stream.ingest_batch(batch0).await?;
             stream.wait_for_offset(offset0).await?;
 
-            // Batch 1 triggers graceful close. With stream_paused_max_wait_time_ms=0,
-            // recovery should be triggered immediately.
+            // A zero configured wait skips only the ACK wait. The request must still
+            // half-close and the response receives a bounded drain opportunity.
             let batch1 = create_test_record_batch(
                 schema.clone(),
                 vec![4, 5, 6],
@@ -5015,12 +5121,14 @@ mod arrow_flight_tests {
             stream.wait_for_offset(offset1).await?;
             let elapsed = start.elapsed();
 
-            // Should recover quickly, not wait 10 seconds.
+            // Cleanup should be bounded well below the advertised 10-second grace.
             assert!(
-                elapsed.as_millis() < 5000,
-                "Expected immediate recovery, but waited {}ms",
+                elapsed.as_millis() < 2000,
+                "Expected bounded transport cleanup, but waited {}ms",
                 elapsed.as_millis()
             );
+            assert_eq!(mock_server.get_request_half_close_count(), 1);
+            assert_eq!(mock_server.get_request_reset_count(), 0);
 
             stream.close().await?;
             Ok(())
@@ -5100,6 +5208,8 @@ mod arrow_flight_tests {
                 SERVER_DURATION_MS,
                 elapsed.as_millis()
             );
+            assert_eq!(mock_server.get_request_half_close_count(), 1);
+            assert_eq!(mock_server.get_request_reset_count(), 0);
 
             stream.close().await?;
             Ok(())
@@ -5183,6 +5293,15 @@ mod arrow_flight_tests {
                 "Expected early exit from graceful close, but waited {}ms",
                 elapsed.as_millis()
             );
+            tokio::time::timeout(Duration::from_secs(2), async {
+                while mock_server.get_request_half_close_count() == 0 {
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .expect("the active request should reach EOF after the close-signal ACK");
+            assert_eq!(mock_server.get_request_half_close_count(), 1);
+            assert_eq!(mock_server.get_request_reset_count(), 0);
 
             stream.close().await?;
             Ok(())
@@ -5201,18 +5320,21 @@ mod arrow_flight_tests {
                 .inject_responses(
                     TABLE_NAME,
                     vec![
-                        // Send graceful close after batch 0.
+                        // Acknowledge batch 0 with the close signal. Waiting for offset 0
+                        // then proves the pause and submitted-record snapshot are active.
                         MockFlightResponse::GracefulClose {
                             duration_ms: 5_000,
                             delay_ms: 0,
-                            ack_up_to_offset: None,
-                            ack_up_to_records: None,
+                            ack_up_to_offset: Some(0),
+                            ack_up_to_records: Some(3),
                         },
-                        // After recovery, ack both batches (batch 0 + batch 1 = 6 records).
+                        // Keep the active response open long enough to ingest while paused.
+                        MockFlightResponse::HoldResponseAfterRequestEof,
+                        // Only batch 1 is pending on the replacement connection.
                         MockFlightResponse::BatchAck {
-                            ack_up_to_offset: 1,
+                            ack_up_to_offset: 0,
                             delay_ms: 0,
-                            ack_up_to_records: 6,
+                            ack_up_to_records: 3,
                         },
                     ],
                 )
@@ -5241,10 +5363,8 @@ mod arrow_flight_tests {
                 vec![1, 2, 3],
                 vec![Some("a"), Some("b"), Some("c")],
             );
-            let _offset0 = stream.ingest_batch(batch0).await?;
-
-            // Wait a bit for the graceful close signal to be processed.
-            tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+            let offset0 = stream.ingest_batch(batch0).await?;
+            stream.wait_for_offset(offset0).await?;
 
             // Ingestion during the grace period should be accepted and buffered.
             // The batch will be replayed after recovery.
@@ -5258,7 +5378,201 @@ mod arrow_flight_tests {
 
             // After recovery, both batches should be acked.
             stream.wait_for_offset(offset1).await?;
+            assert_eq!(
+                mock_server.get_batch_count().await,
+                2,
+                "the post-signal batch must be sent only on the replacement connection"
+            );
+            assert_eq!(mock_server.get_request_half_close_count(), 1);
+            assert_eq!(mock_server.get_request_reset_count(), 0);
 
+            stream.close().await?;
+            Ok(())
+        }
+
+        #[tokio::test]
+        async fn test_post_eof_ack_is_applied_before_replay(
+        ) -> Result<(), Box<dyn std::error::Error>> {
+            let (mock_server, server_url) = start_mock_flight_server().await?;
+            let schema = create_test_arrow_schema();
+            mock_server
+                .inject_responses(
+                    TABLE_NAME,
+                    vec![
+                        MockFlightResponse::GracefulClose {
+                            duration_ms: 1_000,
+                            delay_ms: 0,
+                            ack_up_to_offset: None,
+                            ack_up_to_records: None,
+                        },
+                        MockFlightResponse::BatchAckAfterRequestEof {
+                            ack_up_to_offset: 0,
+                            ack_up_to_records: 3,
+                        },
+                    ],
+                )
+                .await;
+
+            let mut stream = build_rotation_stream(server_url, schema.clone(), Some(0)).await?;
+            let offset = stream.ingest_batch(one_batch(schema)).await?;
+            stream.wait_for_offset(offset).await?;
+
+            assert_eq!(
+                mock_server.get_batch_count().await,
+                1,
+                "late ACK avoids replay"
+            );
+            assert_eq!(mock_server.get_request_half_close_count(), 1);
+            assert_eq!(mock_server.get_request_reset_count(), 0);
+            stream.close().await?;
+            Ok(())
+        }
+
+        #[tokio::test]
+        async fn test_post_eof_permanent_error_is_preserved(
+        ) -> Result<(), Box<dyn std::error::Error>> {
+            let (mock_server, server_url) = start_mock_flight_server().await?;
+            let schema = create_test_arrow_schema();
+            mock_server
+                .inject_responses(
+                    TABLE_NAME,
+                    vec![
+                        MockFlightResponse::GracefulClose {
+                            duration_ms: 1_000,
+                            delay_ms: 0,
+                            ack_up_to_offset: None,
+                            ack_up_to_records: None,
+                        },
+                        MockFlightResponse::ErrorAfterRequestEof {
+                            status: tonic::Status::invalid_argument("post-EOF rejection"),
+                        },
+                    ],
+                )
+                .await;
+
+            let stream = build_rotation_stream(server_url, schema.clone(), Some(0)).await?;
+            let offset = stream.ingest_batch(one_batch(schema)).await?;
+            let error = stream
+                .wait_for_offset(offset)
+                .await
+                .expect_err("peer error must win");
+            match error {
+                ZerobusError::StreamClosedError(status) => {
+                    assert_eq!(status.code(), tonic::Code::InvalidArgument);
+                    assert_eq!(status.message(), "post-EOF rejection");
+                }
+                other => panic!("expected permanent peer status, got {other:?}"),
+            }
+            assert_eq!(mock_server.get_request_half_close_count(), 1);
+            assert_eq!(mock_server.get_request_reset_count(), 0);
+            Ok(())
+        }
+
+        #[tokio::test]
+        async fn test_rotation_drain_timeout_falls_back_to_reconnect(
+        ) -> Result<(), Box<dyn std::error::Error>> {
+            let (mock_server, server_url) = start_mock_flight_server().await?;
+            let schema = create_test_arrow_schema();
+            mock_server
+                .inject_responses(
+                    TABLE_NAME,
+                    vec![
+                        MockFlightResponse::GracefulClose {
+                            duration_ms: 1_000,
+                            delay_ms: 0,
+                            ack_up_to_offset: None,
+                            ack_up_to_records: None,
+                        },
+                        MockFlightResponse::HoldResponseAfterRequestEof,
+                        MockFlightResponse::BatchAck {
+                            ack_up_to_offset: 0,
+                            delay_ms: 0,
+                            ack_up_to_records: 3,
+                        },
+                    ],
+                )
+                .await;
+
+            let mut stream = build_rotation_stream(server_url, schema.clone(), Some(0)).await?;
+            let started = Instant::now();
+            let offset = stream.ingest_batch(one_batch(schema)).await?;
+            stream.wait_for_offset(offset).await?;
+
+            assert!(started.elapsed() >= Duration::from_millis(450));
+            assert_eq!(mock_server.get_request_half_close_count(), 1);
+            assert_eq!(mock_server.get_request_reset_count(), 0);
+            stream.close().await?;
+            Ok(())
+        }
+
+        #[tokio::test]
+        async fn test_invalid_close_ack_still_half_closes_request(
+        ) -> Result<(), Box<dyn std::error::Error>> {
+            let (mock_server, server_url) = start_mock_flight_server().await?;
+            let schema = create_test_arrow_schema();
+            mock_server
+                .inject_responses(
+                    TABLE_NAME,
+                    vec![
+                        MockFlightResponse::GracefulClose {
+                            duration_ms: 1_000,
+                            delay_ms: 0,
+                            ack_up_to_offset: Some(0),
+                            ack_up_to_records: Some(4),
+                        },
+                        MockFlightResponse::ErrorAfterRequestEof {
+                            status: tonic::Status::unavailable("rotation grace expired"),
+                        },
+                    ],
+                )
+                .await;
+
+            let stream = build_rotation_stream(server_url, schema.clone(), Some(0)).await?;
+            let offset = stream.ingest_batch(one_batch(schema)).await?;
+            let error = stream
+                .wait_for_offset(offset)
+                .await
+                .expect_err("invalid ACK must fail");
+            assert!(matches!(error, ZerobusError::InvalidStateError(_)));
+            assert_eq!(
+                mock_server.get_batch_count().await,
+                1,
+                "a retryable post-EOF status must not trigger replay after a permanent error"
+            );
+            assert_eq!(mock_server.get_request_half_close_count(), 1);
+            assert_eq!(mock_server.get_request_reset_count(), 0);
+            Ok(())
+        }
+
+        #[tokio::test]
+        async fn test_zero_server_grace_uses_bounded_local_drain(
+        ) -> Result<(), Box<dyn std::error::Error>> {
+            let (mock_server, server_url) = start_mock_flight_server().await?;
+            let schema = create_test_arrow_schema();
+            mock_server
+                .inject_responses(
+                    TABLE_NAME,
+                    vec![
+                        MockFlightResponse::GracefulClose {
+                            duration_ms: 0,
+                            delay_ms: 0,
+                            ack_up_to_offset: None,
+                            ack_up_to_records: None,
+                        },
+                        MockFlightResponse::BatchAck {
+                            ack_up_to_offset: 0,
+                            delay_ms: 0,
+                            ack_up_to_records: 3,
+                        },
+                    ],
+                )
+                .await;
+
+            let mut stream = build_rotation_stream(server_url, schema.clone(), None).await?;
+            let offset = stream.ingest_batch(one_batch(schema)).await?;
+            stream.wait_for_offset(offset).await?;
+            assert_eq!(mock_server.get_request_half_close_count(), 1);
+            assert_eq!(mock_server.get_request_reset_count(), 0);
             stream.close().await?;
             Ok(())
         }

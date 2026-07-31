@@ -36,6 +36,8 @@
 
 ### Behavior Changes
 
+- Server-initiated Arrow Flight rotation now waits only for records submitted on the active connection, half-closes its request, and drains late responses before reconnecting. `stream_paused_max_wait_time_ms = 0` skips the ACK wait but still permits bounded transport cleanup.
+
 ### Breaking Changes
 
 - `zerobus_sdk_create_stream_with_headers_provider`,
