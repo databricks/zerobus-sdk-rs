@@ -85,7 +85,7 @@
     }
   },
   "devDependencies": {
-    "@napi-rs/cli": "^2.18.0",
+    "@napi-rs/cli": "^3.8.2",
     "@types/node": "^20.0.0",
     "apache-arrow": "^18.1.0",
     "dotenv": "^17.2.3",
