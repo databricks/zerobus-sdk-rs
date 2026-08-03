@@ -63,7 +63,8 @@ inline CStreamConfigurationOptions to_c(const StreamOptions& opts) {
 /// Build the C Arrow stream-config struct from `ArrowStreamOptions`.
 inline CArrowStreamConfigurationOptions to_c(const ArrowStreamOptions& opts) {
   // The core builds a bounded Tokio channel with this capacity
-  // (`mpsc::channel(max_inflight_batches)` in `arrow_stream.rs`), which panics
+  // (`mpsc::channel(max_inflight_batches)` in
+  // `rust/sdk/src/stream/arrow/connection.rs`), which panics
   // on a capacity of 0. Reject it here with an actionable message rather than
   // letting the FFI panic guard surface the opaque panic text.
   if (opts.max_inflight_batches == 0) {
