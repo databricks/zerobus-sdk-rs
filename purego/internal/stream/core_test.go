@@ -1013,15 +1013,18 @@ func TestCoreStreamMalformedAckTearsDownAndRecovers(t *testing.T) {
 }
 
 // TestCoreStreamIngestOnClosedStreamErrors verifies that Ingest on a cleanly
-// closed stream returns an error, not (0, nil).
+// closed stream returns (-1, err), matching the original Go SDK.
 func TestCoreStreamIngestOnClosedStreamErrors(t *testing.T) {
 	rpc := newFakeRPC()
 	cs := newTestStream(t, newFakeOpener(rpc))
 	cs.Close()
 
-	_, err := cs.Ingest(context.Background(), []byte(`{}`))
+	off, err := cs.Ingest(context.Background(), []byte(`{}`))
 	if err == nil {
 		t.Fatal("want error from Ingest on closed stream, got nil")
+	}
+	if off != -1 {
+		t.Fatalf("closed Ingest offset = %d, want -1", off)
 	}
 }
 
@@ -2578,20 +2581,26 @@ func TestCoreStreamRejectsOversizedPayloadWithoutConsumingOffset(t *testing.T) {
 	cs := newCoreForTest(testParams(), cfg, newFakeOpener(rpc), nil)
 	t.Cleanup(func() { cs.Close() })
 
-	if _, err := cs.Ingest(context.Background(), bytes.Repeat([]byte("x"), 65)); !errors.Is(err, ErrPayloadTooLarge) {
+	if off, err := cs.Ingest(context.Background(), bytes.Repeat([]byte("x"), 65)); !errors.Is(err, ErrPayloadTooLarge) {
 		t.Fatalf("want ErrPayloadTooLarge for record, got %v", err)
+	} else if off != -1 {
+		t.Fatalf("oversized Ingest offset = %d, want -1", off)
 	}
-	if _, err := cs.IngestBatch(context.Background(), [][]byte{
+	if off, err := cs.IngestBatch(context.Background(), [][]byte{
 		bytes.Repeat([]byte("x"), 40),
 		bytes.Repeat([]byte("y"), 30),
 	}); !errors.Is(err, ErrPayloadTooLarge) {
 		t.Fatalf("want ErrPayloadTooLarge for batch, got %v", err)
+	} else if off != -1 {
+		t.Fatalf("oversized IngestBatch offset = %d, want -1", off)
 	}
 	cs.cfg.MaxBatchRecords = 1
-	if _, err := cs.IngestBatch(context.Background(), [][]byte{
+	if off, err := cs.IngestBatch(context.Background(), [][]byte{
 		[]byte(`{}`), []byte(`{}`),
 	}); !errors.Is(err, ErrPayloadTooLarge) {
 		t.Fatalf("want ErrPayloadTooLarge for batch record count, got %v", err)
+	} else if off != -1 {
+		t.Fatalf("oversized batch count offset = %d, want -1", off)
 	}
 	cs.cfg.MaxBatchRecords = DefaultMaxBatchRecords
 	offset, err := cs.Ingest(context.Background(), []byte(`{}`))
