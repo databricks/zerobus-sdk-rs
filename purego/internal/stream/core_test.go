@@ -156,6 +156,37 @@ func TestCoreStreamWaitReadyRetriesOpenBeforeSuccess(t *testing.T) {
 	}
 }
 
+func TestCoreStreamWaitReadyPrefersPublishedResultOverCanceledContext(t *testing.T) {
+	cases := []struct {
+		name     string
+		readyErr error
+	}{
+		{name: "success", readyErr: nil},
+		{name: "terminal failure", readyErr: errors.New("open failed")},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			cs := &CoreStream[encodedMsg, ephemeralResp]{readyCh: make(chan struct{})}
+			cs.signalReady(tc.readyErr)
+
+			ctx, cancel := context.WithCancel(context.Background())
+			cancel()
+
+			err := cs.WaitReady(ctx)
+			if tc.readyErr == nil {
+				if err != nil {
+					t.Fatalf("WaitReady error = %v, want nil published ready result", err)
+				}
+				return
+			}
+			if !errors.Is(err, tc.readyErr) {
+				t.Fatalf("WaitReady error = %v, want published ready error %v", err, tc.readyErr)
+			}
+		})
+	}
+}
+
 func TestCoreStreamFirstOpenContextCancelsRecoveryBackoff(t *testing.T) {
 	openingCtx, cancelOpening := context.WithCancel(context.Background())
 	cfg := testConfig()

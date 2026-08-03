@@ -371,13 +371,24 @@ func NewCoreStream[Req, Resp any](
 // opened at least once, or an error if first-open fails terminally or the
 // stream is closed before first-open succeeds.
 func (cs *CoreStream[Req, Resp]) WaitReady(ctx context.Context) error {
-	select {
-	case <-ctx.Done():
-		return ctx.Err()
-	case <-cs.readyCh:
+	readyResult := func() error {
 		cs.readyMu.Lock()
 		defer cs.readyMu.Unlock()
 		return cs.readyErr
+	}
+
+	select {
+	case <-cs.readyCh:
+		return readyResult()
+	case <-ctx.Done():
+		// If both become ready together, prefer the published first-open result
+		// over the caller's context so a completed open outcome is never masked.
+		select {
+		case <-cs.readyCh:
+			return readyResult()
+		default:
+			return ctx.Err()
+		}
 	}
 }
 
