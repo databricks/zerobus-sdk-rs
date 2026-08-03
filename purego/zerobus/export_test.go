@@ -14,7 +14,7 @@ func GRPCTarget(endpoint string) (string, error) { return grpcTarget(endpoint) }
 // NewWithConn builds an SDK around an already-dialed transport connection,
 // bypassing New's dialing so tests can point the SDK at an in-memory server.
 func NewWithConn(conn *transport.Conn, zerobusEndpoint, ucEndpoint string) *SDK {
-	return newSDK(conn, zerobusEndpoint, ucEndpoint)
+	return newSDK(conn, zerobusEndpoint, ucEndpoint, sdkConfig{})
 }
 
 // OpenStreamCount reports how many streams the SDK still tracks for Close, so

@@ -11,6 +11,12 @@
 - Added opt-in wait-ready stream creation whose context bounds the complete
   first-open process; asynchronous creation now preserves context values while
   detaching caller cancellation.
+- Added `CreateDynamicProtoStream`, which fetches Unity Catalog table schemas
+  with the same client credentials, builds runtime protobuf descriptors, and
+  exposes JSON ingest methods that convert to protobuf bytes automatically.
+- Added internal UC schema conversion and runtime dynamic-protobuf conversion
+  modules plus focused tests for schema fetch, descriptor parity, and JSON
+  conversion failures.
 
 ### Deprecations
 

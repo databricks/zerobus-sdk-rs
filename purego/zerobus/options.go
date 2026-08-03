@@ -2,6 +2,7 @@ package zerobus
 
 import (
 	"crypto/tls"
+	"net/http"
 	"time"
 
 	"github.com/databricks/zerobus-sdk/purego/internal/stream"
@@ -12,8 +13,11 @@ import (
 type Option func(*sdkConfig)
 
 type sdkConfig struct {
-	applicationName string
-	tlsConfig       *tls.Config
+	applicationName           string
+	tlsConfig                 *tls.Config
+	dynamicSchemaHTTPClient   *http.Client
+	dynamicSchemaFetchTimeout time.Duration
+	dynamicSchemaCacheTTL     time.Duration
 }
 
 // WithApplicationName appends a caller-supplied identifier such as "my-app/1.0"
@@ -30,6 +34,33 @@ func WithApplicationName(name string) Option {
 // CA or for tests; production callers rarely need it.
 func WithTLSConfig(tc *tls.Config) Option {
 	return func(c *sdkConfig) { c.tlsConfig = tc }
+}
+
+// WithDynamicSchemaFetchTimeout sets the timeout used by
+// CreateDynamicProtoStream for Unity Catalog schema requests.
+// A non-positive value keeps the default.
+func WithDynamicSchemaFetchTimeout(d time.Duration) Option {
+	return func(c *sdkConfig) { c.dynamicSchemaFetchTimeout = d }
+}
+
+// WithDynamicSchemaCacheTTL sets how long descriptor bytes fetched from Unity
+// Catalog are cached per table in SDK memory.
+//
+// A positive value enables caching for that duration. Zero keeps the default.
+// A negative value disables the cache (always refetch schema).
+func WithDynamicSchemaCacheTTL(d time.Duration) Option {
+	return func(c *sdkConfig) { c.dynamicSchemaCacheTTL = d }
+}
+
+// WithDynamicSchemaHTTPClient overrides the HTTP client used for Unity Catalog
+// schema/token requests in CreateDynamicProtoStream.
+// A nil client is ignored.
+func WithDynamicSchemaHTTPClient(client *http.Client) Option {
+	return func(c *sdkConfig) {
+		if client != nil {
+			c.dynamicSchemaHTTPClient = client
+		}
+	}
 }
 
 // RecoverySetting controls whether a stream reconnects after a recoverable

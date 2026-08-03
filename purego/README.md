@@ -78,6 +78,36 @@ first successful open, so it does not terminate the live stream.
 - **Protocol Buffers** (default): `WithProto(descriptorProto)`.
 - **JSON**: `WithJSON()`.
 
+## Dynamic proto with UC schema fetch
+
+`CreateDynamicProtoStream` fetches table schema from Unity Catalog, converts it
+to a runtime protobuf descriptor, and accepts raw JSON records that are
+converted to protobuf before ingest.
+
+```go
+stream, err := sdk.CreateDynamicProtoStream(
+    ctx,
+    "catalog.schema.table",
+    clientID,
+    clientSecret,
+)
+if err != nil {
+    log.Fatal(err)
+}
+defer stream.Close()
+
+for _, rec := range records {
+    if _, err := stream.IngestJSONStringOffset(rec); err != nil { // queue only
+        log.Fatal(err)
+    }
+}
+if err := stream.Flush(); err != nil { // wait once at the end
+    log.Fatal(err)
+}
+```
+
+See `examples/dynamic/uc_json/main.go` for a complete example.
+
 ## Error handling
 
 Operations return `*Error`. Use `Retryable(err)` to check retryability:
@@ -112,6 +142,9 @@ purego/
     ├── stream/           generic ingestion core (buffer, watermark, supervisor)
     ├── transport/        gRPC connection, TLS, EphemeralStream handshake
     ├── auth/             HeadersProvider, token cache, UC OAuth
+    ├── schema/           UC schema -> protobuf descriptor conversion
+    ├── ucschema/         UC REST schema fetch client
+    ├── dynamicproto/     JSON -> protobuf runtime conversion
     └── zerobuspb/        generated protobuf bindings
 ```
 
