@@ -21,9 +21,10 @@ use tonic::transport::Channel;
 use tracing::{error, info, warn};
 
 use super::batch::make_ipc_write_options;
-use super::{ArrowTableProperties, RecordBatch, ZerobusArrowStream};
-use crate::arrow_configuration::ArrowStreamConfigurationOptions;
-use crate::arrow_metadata::{FlightAckMetadata, FlightBatchMetadata};
+use super::metadata::{FlightAckMetadata, FlightBatchMetadata};
+use super::{
+    ArrowStreamConfigurationOptions, ArrowTableProperties, RecordBatch, ZerobusArrowStream,
+};
 use crate::errors::ZerobusError;
 use crate::headers_provider::HeadersProvider;
 use crate::proxy::{self, ConnectorFactory};

@@ -31,8 +31,8 @@ pub use arrow_array::RecordBatch;
 pub use arrow_schema::{DataType, Field, Schema as ArrowSchema, TimeUnit};
 
 use self::batch::{materialize_ipc, PendingBatch};
+pub use self::options::ArrowStreamConfigurationOptions;
 use self::supervisor::Supervisor;
-use crate::arrow_configuration::ArrowStreamConfigurationOptions;
 use crate::errors::{should_retry_initial_connection, ZerobusError};
 use crate::headers_provider::HeadersProvider;
 use crate::offset_generator::{OffsetId, OffsetIdGenerator};
@@ -43,6 +43,8 @@ use crate::ZerobusResult;
 mod acks;
 mod batch;
 mod connection;
+mod metadata;
+mod options;
 mod supervisor;
 
 const LOG_TARGET: &str = module_path!();

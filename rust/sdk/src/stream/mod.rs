@@ -13,7 +13,10 @@ mod grpc;
 #[cfg(feature = "arrow-flight")]
 pub(crate) use arrow::ArrowTableProperties;
 #[cfg(feature = "arrow-flight")]
-pub use arrow::{ArrowSchema, DataType, Field, RecordBatch, TimeUnit, ZerobusArrowStream};
+pub use arrow::{
+    ArrowSchema, ArrowStreamConfigurationOptions, DataType, Field, RecordBatch, TimeUnit,
+    ZerobusArrowStream,
+};
 
 pub use grpc::ZerobusStream;
 

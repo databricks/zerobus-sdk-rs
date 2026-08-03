@@ -14,11 +14,10 @@ use tracing::{debug, error, info, warn};
 
 use super::batch::PendingBatch;
 use super::connection::{FlightResponseStream, RequestBodyControl};
+use super::metadata::FlightAckMetadata;
 #[cfg(feature = "test-hooks")]
 use super::AckAppliedGate;
-use super::{BatchSender, ZerobusArrowStream};
-use crate::arrow_configuration::ArrowStreamConfigurationOptions;
-use crate::arrow_metadata::FlightAckMetadata;
+use super::{ArrowStreamConfigurationOptions, BatchSender, ZerobusArrowStream};
 use crate::errors::ZerobusError;
 use crate::offset_generator::OffsetId;
 use crate::ZerobusResult;

@@ -128,7 +128,9 @@ zerobus_rust_sdk/
 │   │   │       ├── connection.rs       # Flight transport and request encoding
 │   │   │       ├── acks.rs             # ACK processing and server rotation
 │   │   │       ├── supervisor.rs       # Recovery, replay, and finalization
-│   │   │       └── batch.rs            # Pending batches and IPC helpers
+│   │   │       ├── batch.rs            # Pending batches and IPC helpers
+│   │   │       ├── metadata.rs         # Flight request/ack metadata
+│   │   │       └── options.rs          # Arrow Flight stream options
 │   │   ├── multiplexed_stream.rs       # Multiplexed stream implementation
 │   │   ├── default_token_factory.rs    # OAuth 2.0 token handling
 │   │   ├── token_cache.rs              # OAuth token caching
@@ -144,8 +146,6 @@ zerobus_rust_sdk/
 │   │   ├── landing_zone.rs             # Inflight record buffer
 │   │   ├── offset_generator.rs         # Logical offset tracking
 │   │   ├── proxy.rs                    # HTTP proxy support
-│   │   ├── arrow_configuration.rs      # Arrow Flight options (feature: arrow-flight)
-│   │   ├── arrow_metadata.rs           # Arrow Flight metadata (feature: arrow-flight)
 │   │   └── zeroparser/                 # Descriptor-driven protobuf parser (feature: zeroparser)
 │   ├── zerobus_service.proto           # gRPC protocol definition
 │   ├── build.rs                        # Build script for protobuf compilation

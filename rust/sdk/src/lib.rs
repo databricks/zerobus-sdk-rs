@@ -37,10 +37,6 @@ pub mod databricks {
     }
 }
 
-#[cfg(feature = "arrow-flight")]
-mod arrow_configuration;
-#[cfg(feature = "arrow-flight")]
-mod arrow_metadata;
 mod builder;
 mod callbacks;
 mod client_warnings;
@@ -62,8 +58,6 @@ pub mod stream_options;
 mod tls_config;
 mod token_cache;
 
-#[cfg(feature = "arrow-flight")]
-pub use arrow_configuration::ArrowStreamConfigurationOptions;
 pub use builder::{StreamBuilder, ZerobusSdkBuilder};
 pub use callbacks::AckCallback;
 pub use default_token_factory::DefaultTokenFactory;
@@ -88,7 +82,10 @@ pub use sdk::{ZerobusSdk, DEFAULT_SDK_IDENTIFIER};
 pub use stream::CallbackHandlerHarness;
 pub use stream::ZerobusStream;
 #[cfg(feature = "arrow-flight")]
-pub use stream::{ArrowSchema, DataType, Field, RecordBatch, TimeUnit, ZerobusArrowStream};
+pub use stream::{
+    ArrowSchema, ArrowStreamConfigurationOptions, DataType, Field, RecordBatch, TimeUnit,
+    ZerobusArrowStream,
+};
 pub use stream_configuration::StreamConfigurationOptions;
 #[cfg(feature = "testing")]
 pub use tls_config::NoTlsConfig;

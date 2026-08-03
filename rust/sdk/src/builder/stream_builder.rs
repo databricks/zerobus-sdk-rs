@@ -32,9 +32,9 @@ use crate::{
 };
 
 #[cfg(feature = "arrow-flight")]
-use crate::arrow_configuration::ArrowStreamConfigurationOptions;
-#[cfg(feature = "arrow-flight")]
-use crate::stream::{ArrowSchema, ArrowTableProperties, ZerobusArrowStream};
+use crate::stream::{
+    ArrowSchema, ArrowStreamConfigurationOptions, ArrowTableProperties, ZerobusArrowStream,
+};
 
 /// Internal representation of the authentication configuration.
 enum AuthConfig {

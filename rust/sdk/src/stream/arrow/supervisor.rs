@@ -15,8 +15,10 @@ use tracing::{debug, error, info, warn};
 use super::acks::{pause_and_detach_sender, AckProcessor};
 use super::batch::{rebuild_pending_for_replay, PendingBatch};
 use super::connection::{FlightConnection, FlightResponseStream, RequestBodyControl};
-use super::{ArrowTableProperties, BatchSender, RecordBatch, ZerobusArrowStream};
-use crate::arrow_configuration::ArrowStreamConfigurationOptions;
+use super::{
+    ArrowStreamConfigurationOptions, ArrowTableProperties, BatchSender, RecordBatch,
+    ZerobusArrowStream,
+};
 use crate::errors::ZerobusError;
 use crate::headers_provider::HeadersProvider;
 use crate::proxy::ConnectorFactory;
@@ -471,11 +473,11 @@ mod tests {
     use tokio::sync::{mpsc, Mutex, Semaphore};
     use tokio::time::{timeout, Duration};
 
+    use super::super::metadata::FlightAckMetadata;
     use super::{
         pause_and_detach_sender, AckProcessor, BatchSender, PendingBatch, RecordBatch, Supervisor,
         ZerobusError,
     };
-    use crate::arrow_metadata::FlightAckMetadata;
     use crate::offset_generator::OffsetId;
 
     fn one_col_schema() -> Arc<ArrowSchema> {
