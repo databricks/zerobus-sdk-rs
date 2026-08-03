@@ -16,12 +16,8 @@ crate-type = ["cdylib"]
 napi = { version = "2", features = ["async", "tokio_rt", "serde-json", "napi6"] }
 napi-derive = "2"
 
-# Rust SDK 2.6.0 brings token caching, payload size limits, and Arrow Flight
-# fixes used by the TypeScript binding. CI overlays `[patch.crates-io]` to swap
-# in the in-tree Rust SDK when `use_local_sdk` is set (see ci-typescript.yml).
 databricks-zerobus-ingest-sdk = "2.6.0"
 
-# Match the Rust SDK 2.6 workspace versions.
 tokio = { version = "1.52", features = ["macros", "rt-multi-thread"] }
 
 prost = "0.14"
@@ -36,8 +32,6 @@ async-trait = "0.1"
 # `Bytes` is the input type for the Rust SDK's `ingest_ipc_batch` entry.
 bytes = "1"
 
-# Arrow dependencies (only used when arrow-flight feature is enabled).
-# 59.1 matches the Rust SDK 2.6 workspace.
 arrow-array = { version = "59.1", optional = true }
 arrow-schema = { version = "59.1", optional = true }
 arrow-ipc = { version = "59.1", features = ["lz4", "zstd"], optional = true }
