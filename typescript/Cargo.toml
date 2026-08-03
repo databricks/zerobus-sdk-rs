@@ -41,7 +41,7 @@ bytes = "1"
 # 58.2 matches the Rust SDK 2.0 workspace.
 arrow-array = { version = "58.2", optional = true }
 arrow-schema = { version = "58.2", optional = true }
-arrow-ipc = { version = "58.2", features = ["lz4", "zstd"], optional = true }
+arrow-ipc = { version = "59.1", features = ["lz4", "zstd"], optional = true }
 
 [build-dependencies]
 napi-build = "2"
