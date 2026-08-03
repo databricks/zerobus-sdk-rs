@@ -26,9 +26,11 @@
 
 ### Internal Changes
 
+- Updated TypeScript SDK development dependencies and the NAPI Cargo lockfile to
+  resolve Dependabot security alerts without changing the public SDK API.
+
 ### Breaking Changes
 
 ### Deprecations
 
 ### API Changes
-
