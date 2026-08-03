@@ -64,4 +64,3 @@ func main() {
 	}
 	log.Println("All records acknowledged.")
 }
-
