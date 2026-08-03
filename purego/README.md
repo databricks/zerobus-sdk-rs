@@ -106,7 +106,7 @@ if err := stream.Flush(); err != nil { // wait once at the end
 }
 ```
 
-See `examples/dynamic/uc_json/main.go` for a complete example.
+See `examples/dynamic/single/main.go` for a complete example.
 
 ## Error handling
 

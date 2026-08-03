@@ -10,6 +10,8 @@ Runnable examples for `github.com/databricks/zerobus-sdk/purego`.
 | JSON batch   | JSON             | One atomic batch                 | `json/batch`   |
 | Proto single | Protocol Buffers | Single-record loop, then `Flush` | `proto/single` |
 | Proto batch  | Protocol Buffers | One atomic batch                 | `proto/batch`  |
+| Dynamic single | Dynamic Proto (UC schema fetch) | Single-record loop, then `Flush` | `dynamic/single` |
+| Dynamic batch  | Dynamic Proto (UC schema fetch) | One atomic batch | `dynamic/batch` |
 
 Every example uses **loop-then-`Flush()`**: queue records, then flush once.
 
@@ -55,6 +57,8 @@ go run ./json/single
 go run ./json/batch
 go run ./proto/single
 go run ./proto/batch
+go run ./dynamic/single
+go run ./dynamic/batch
 ```
 
 ## Regenerating the proto bindings
