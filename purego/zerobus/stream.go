@@ -23,7 +23,8 @@ type Stream struct {
 // IngestRecordOffset queues one record and returns the logical offset assigned
 // to it. It returns as soon as the record is buffered; sending and
 // acknowledgement happen in the background. If the buffer is full it blocks for
-// backpressure until space frees up or the stream fails.
+// backpressure until space frees up or the stream fails. On error it returns
+// offset -1, matching the original Go SDK.
 //
 // record is the raw record payload: serialized protobuf bytes for a proto
 // stream, or UTF-8 JSON bytes for a JSON stream.
@@ -46,7 +47,8 @@ func (s *Stream) IngestRecordOffsetContext(ctx context.Context, record []byte) (
 
 // IngestRecordsOffset queues records as one atomic batch and returns the single
 // logical offset covering the whole batch. The server acknowledges the batch
-// atomically. An empty batch is a no-op that returns -1 with no error.
+// atomically. An empty batch is a no-op that returns -1 with no error. On error
+// it returns offset -1, matching the original Go SDK.
 //
 // Prefer this over IngestRecordOffset in hot paths: one batch is one buffer
 // entry and one ack, amortizing per-call overhead. Each element is a raw record

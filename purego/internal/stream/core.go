@@ -389,11 +389,12 @@ func waitUntil(ctx context.Context, deadline time.Time) bool {
 
 // Ingest encodes record and enqueues it in the buffer, blocking if the buffer
 // is at capacity (backpressure). Returns the logical offset assigned to this
-// record. For throughput, queue records in a loop and call Flush once; waiting
-// for every offset serializes ingestion on server round trips.
+// record, or -1 with an error when the record is not queued. For throughput,
+// queue records in a loop and call Flush once; waiting for every offset
+// serializes ingestion on server round trips.
 func (cs *CoreStream[Req, Resp]) Ingest(ctx context.Context, record []byte) (int64, error) {
 	if err := cs.checkRawSize(len(record)); err != nil {
-		return 0, err
+		return -1, err
 	}
 	weight := cs.enc.retainedSize(len(record), 1)
 	return cs.enqueueEncoded(ctx, weight, func() (Req, error) {
@@ -403,9 +404,9 @@ func (cs *CoreStream[Req, Resp]) Ingest(ctx context.Context, record []byte) (int
 
 // IngestBatch encodes records as a single atomic batch and enqueues it, blocking
 // if the buffer is at capacity. The whole batch occupies one logical offset and
-// the server acks it atomically. Returns that offset, or -1 for an empty batch,
-// which is a no-op. Prefer this over Ingest in hot paths: it amortizes
-// per-message overhead across the batch.
+// the server acks it atomically. Returns that offset, -1 for an empty batch
+// (a no-op), or -1 with an error when the batch is not queued. Prefer this over
+// Ingest in hot paths: it amortizes per-message overhead across the batch.
 func (cs *CoreStream[Req, Resp]) IngestBatch(ctx context.Context, records [][]byte) (int64, error) {
 	if len(records) == 0 {
 		// Rust returns Ok(None) for empty batches; in Go we model that as a
@@ -413,19 +414,19 @@ func (cs *CoreStream[Req, Resp]) IngestBatch(ctx context.Context, records [][]by
 		return -1, nil
 	}
 	if len(records) > cs.cfg.MaxBatchRecords {
-		return 0, fmt.Errorf("%w: %d records exceeds MaxBatchRecords=%d",
+		return -1, fmt.Errorf("%w: %d records exceeds MaxBatchRecords=%d",
 			ErrPayloadTooLarge, len(records), cs.cfg.MaxBatchRecords)
 	}
 	total := 0
 	for _, record := range records {
 		if len(record) > cs.cfg.MaxPayloadBytes || total > cs.cfg.MaxPayloadBytes-len(record) {
-			return 0, fmt.Errorf("%w: raw batch exceeds MaxPayloadBytes=%d",
+			return -1, fmt.Errorf("%w: raw batch exceeds MaxPayloadBytes=%d",
 				ErrPayloadTooLarge, cs.cfg.MaxPayloadBytes)
 		}
 		total += len(record)
 	}
 	if err := cs.checkRawSize(total); err != nil {
-		return 0, err
+		return -1, err
 	}
 	weight := cs.enc.retainedSize(total, len(records))
 	return cs.enqueueEncoded(ctx, weight, func() (Req, error) {
@@ -442,6 +443,7 @@ func (cs *CoreStream[Req, Resp]) checkRawSize(size int) error {
 }
 
 // enqueueEncoded reserves capacity and encodes before assigning an offset.
+// Failed ingest returns -1 to match the original Go SDK (offsets start at 0).
 func (cs *CoreStream[Req, Resp]) enqueueEncoded(
 	ctx context.Context,
 	weight int64,
@@ -449,31 +451,31 @@ func (cs *CoreStream[Req, Resp]) enqueueEncoded(
 ) (int64, error) {
 	if cs.isClosed() {
 		if err := cs.terminalErr(); err != nil {
-			return 0, err
+			return -1, err
 		}
-		return 0, errClosed
+		return -1, errClosed
 	}
 	cs.offsetMu.Lock()
 	closing := cs.closing
 	cs.offsetMu.Unlock()
 	if closing {
-		return 0, errClosed
+		return -1, errClosed
 	}
 	if cs.offsetExhausted.Load() {
-		return 0, ErrOffsetExhausted
+		return -1, ErrOffsetExhausted
 	}
 	if err := cs.buf.reserve(ctx, weight); err != nil {
-		return 0, err
+		return -1, err
 	}
 
 	msg, err := encodeFn()
 	if err != nil {
 		cs.buf.release(weight)
-		return 0, err
+		return -1, err
 	}
 	if size := cs.enc.maxWireSize(msg); size > cs.cfg.MaxPayloadBytes {
 		cs.buf.release(weight)
-		return 0, fmt.Errorf("%w: encoded size %d exceeds MaxPayloadBytes=%d",
+		return -1, fmt.Errorf("%w: encoded size %d exceeds MaxPayloadBytes=%d",
 			ErrPayloadTooLarge, size, cs.cfg.MaxPayloadBytes)
 	}
 
@@ -481,18 +483,18 @@ func (cs *CoreStream[Req, Resp]) enqueueEncoded(
 	if cs.closing {
 		cs.offsetMu.Unlock()
 		cs.buf.release(weight)
-		return 0, errClosed
+		return -1, errClosed
 	}
 	if cs.offsetExhausted.Load() {
 		cs.offsetMu.Unlock()
 		cs.buf.release(weight)
-		return 0, ErrOffsetExhausted
+		return -1, ErrOffsetExhausted
 	}
 	offset := cs.nextOffset
 	cs.enc.stampOffset(msg, offset)
 	if err := cs.buf.append(offset, msg, weight); err != nil {
 		cs.offsetMu.Unlock()
-		return 0, err
+		return -1, err
 	}
 	if offset == math.MaxInt64 {
 		cs.offsetExhausted.Store(true)

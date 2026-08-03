@@ -99,8 +99,6 @@ jobs:
       - name: Run tests (race detector)
         run: go test -race ./...
 
-      # The primary SDK claim is CGO-free usage. Keep an explicit non-race test
-      # run with CGO disabled so CI catches accidental CGO regressions.
       - name: Run tests (CGO disabled)
         env:
           CGO_ENABLED: "0"

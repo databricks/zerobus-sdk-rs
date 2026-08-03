@@ -16,6 +16,8 @@
 - Correctly normalize IPv6 Zerobus endpoints and reject plaintext HTTP
   endpoints because the SDK always uses TLS.
 - Validate application names before adding them to the gRPC user-agent.
+- Return offset `-1` (not `0`) from failed ingest calls, matching the
+  original Go SDK so callers can distinguish errors from the first real offset.
 
 ### Documentation
 
