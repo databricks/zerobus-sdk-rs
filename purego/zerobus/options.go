@@ -44,7 +44,7 @@ func WithDynamicSchemaFetchTimeout(d time.Duration) Option {
 }
 
 // WithDynamicSchemaCacheTTL sets how long descriptor bytes fetched from Unity
-// Catalog are cached per table in SDK memory.
+// Catalog are cached per table and credential identity in SDK memory.
 //
 // A positive value enables caching for that duration. Zero keeps the default.
 // A negative value disables the cache (always refetch schema).

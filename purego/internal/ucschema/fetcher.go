@@ -2,6 +2,7 @@
 package ucschema
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -12,6 +13,7 @@ import (
 	"net/url"
 	"strings"
 	"time"
+	"unicode"
 
 	"github.com/databricks/zerobus-sdk/purego/internal/schema"
 )
@@ -23,6 +25,8 @@ const (
 	maxSchemaResponseBytes = 2 * 1024 * 1024
 )
 
+var errRequestTimeout = errors.New("uc schema request timeout")
+
 // FetchError reports token/schema fetch failures with retryability.
 type FetchError struct {
 	op        string
@@ -32,10 +36,14 @@ type FetchError struct {
 }
 
 func (e *FetchError) Error() string {
-	if e.msg == "" {
-		return "uc schema fetch failed"
+	prefix := "uc schema fetch"
+	if e.op != "" {
+		prefix += " " + e.op
 	}
-	return e.msg
+	if e.msg == "" {
+		return prefix + " failed"
+	}
+	return prefix + ": " + e.msg
 }
 
 func (e *FetchError) Unwrap() error     { return e.cause }
@@ -97,7 +105,7 @@ func (f *Fetcher) FetchTableSchema(ctx context.Context, tableFullName string) (*
 	if err := validateTableName(tableFullName); err != nil {
 		return nil, &FetchError{op: "FetchTableSchema", msg: err.Error(), retryable: false, cause: err}
 	}
-	callCtx, cancel := context.WithTimeout(ctx, f.requestTimeout)
+	callCtx, cancel := context.WithTimeoutCause(ctx, f.requestTimeout, errRequestTimeout)
 	defer cancel()
 
 	token, err := f.fetchToken(callCtx)
@@ -136,8 +144,7 @@ func (f *Fetcher) FetchTableSchema(ctx context.Context, tableFullName string) (*
 		SchemaName  string            `json:"schema_name"`
 		Columns     []schema.UcColumn `json:"columns"`
 	}
-	dec := json.NewDecoder(io.LimitReader(resp.Body, maxSchemaResponseBytes))
-	if err := dec.Decode(&body); err != nil {
+	if err := decodeBoundedJSON(resp.Body, maxSchemaResponseBytes, &body); err != nil {
 		return nil, &FetchError{
 			op:        "FetchTableSchema",
 			msg:       fmt.Sprintf("parse schema response: %v", err),
@@ -208,8 +215,7 @@ func (f *Fetcher) fetchToken(ctx context.Context) (string, error) {
 	var body struct {
 		AccessToken string `json:"access_token"`
 	}
-	dec := json.NewDecoder(io.LimitReader(resp.Body, maxTokenResponseBytes))
-	if err := dec.Decode(&body); err != nil {
+	if err := decodeBoundedJSON(resp.Body, maxTokenResponseBytes, &body); err != nil {
 		return "", &FetchError{
 			op:        "FetchToken",
 			msg:       fmt.Sprintf("parse token response: %v", err),
@@ -219,6 +225,13 @@ func (f *Fetcher) fetchToken(ctx context.Context) (string, error) {
 	}
 	if strings.TrimSpace(body.AccessToken) == "" {
 		return "", &FetchError{op: "FetchToken", msg: "token response missing access_token", retryable: false}
+	}
+	if !isUsableAsHeader(body.AccessToken) {
+		return "", &FetchError{
+			op:        "FetchToken",
+			msg:       "token response contains invalid access_token",
+			retryable: false,
+		}
 	}
 	return body.AccessToken, nil
 }
@@ -245,14 +258,34 @@ func classifyHTTPError(op string, resp *http.Response) error {
 	}
 }
 
+func decodeBoundedJSON(r io.Reader, limit int64, destination any) error {
+	data, err := io.ReadAll(io.LimitReader(r, limit+1))
+	if err != nil {
+		return err
+	}
+	if int64(len(data)) > limit {
+		return fmt.Errorf("response exceeds %d bytes", limit)
+	}
+	decoder := json.NewDecoder(bytes.NewReader(data))
+	if err := decoder.Decode(destination); err != nil {
+		return err
+	}
+	var trailing any
+	if err := decoder.Decode(&trailing); !errors.Is(err, io.EOF) {
+		if err == nil {
+			return fmt.Errorf("response contains multiple JSON values")
+		}
+		return fmt.Errorf("response contains trailing data: %w", err)
+	}
+	return nil
+}
+
 func isRetryableTransportError(ctx context.Context, err error) bool {
 	if err == nil {
 		return false
 	}
 	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
-		// Caller cancellation is not retryable, but request timeout/deadline from
-		// our own short-living context should be considered transient.
-		return context.Cause(ctx) == nil
+		return errors.Is(context.Cause(ctx), errRequestTimeout)
 	}
 	var nerr net.Error
 	if errors.As(err, &nerr) {
@@ -273,7 +306,28 @@ func validateEndpoint(endpoint string) error {
 	if u.Hostname() == "" {
 		return fmt.Errorf("uc endpoint host is empty")
 	}
+	if u.User != nil {
+		return fmt.Errorf("uc endpoint must not contain userinfo")
+	}
+	if u.RawQuery != "" || u.ForceQuery {
+		return fmt.Errorf("uc endpoint must not contain a query string")
+	}
+	if u.Fragment != "" {
+		return fmt.Errorf("uc endpoint must not contain a fragment")
+	}
 	return nil
+}
+
+func isUsableAsHeader(value string) bool {
+	if value == "" {
+		return false
+	}
+	for _, r := range value {
+		if r > unicode.MaxASCII || unicode.IsControl(r) {
+			return false
+		}
+	}
+	return true
 }
 
 func validateTableName(tableName string) error {

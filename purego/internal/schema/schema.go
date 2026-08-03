@@ -20,6 +20,34 @@ type UcColumn struct {
 	Position int32  `json:"position"`
 }
 
+// UnmarshalJSON defaults omitted nullability to true, matching UC semantics.
+func (c *UcColumn) UnmarshalJSON(data []byte) error {
+	var raw struct {
+		Name     string `json:"name"`
+		TypeName string `json:"type_name"`
+		TypeText string `json:"type_text"`
+		TypeJSON string `json:"type_json"`
+		Nullable *bool  `json:"nullable"`
+		Position int32  `json:"position"`
+	}
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return err
+	}
+	nullable := true
+	if raw.Nullable != nil {
+		nullable = *raw.Nullable
+	}
+	*c = UcColumn{
+		Name:     raw.Name,
+		TypeName: raw.TypeName,
+		TypeText: raw.TypeText,
+		TypeJSON: raw.TypeJSON,
+		Nullable: nullable,
+		Position: raw.Position,
+	}
+	return nil
+}
+
 // UcTableSchema mirrors the UC REST API table schema shape.
 type UcTableSchema struct {
 	Name        string     `json:"name"`
@@ -34,6 +62,9 @@ type SchemaError struct {
 }
 
 func (e *SchemaError) Error() string { return e.msg }
+func (e *SchemaError) IsRetryable() bool {
+	return false
+}
 
 func schemaErrf(format string, args ...any) error {
 	return &SchemaError{msg: fmt.Sprintf(format, args...)}
@@ -128,7 +159,7 @@ func columnToProto(c UcColumn, collector *messageCollector) (descriptorpb.FieldD
 			return 0, nil, false, schemaErrf("invalid type_json for column %q: %v", c.Name, err)
 		}
 		repeated := complexType.kind == complexKindArray || complexType.kind == complexKindMap
-		typ, typeName, err := mapComplexTypeToProtobuf(complexType, c.Name, collector)
+		typ, typeName, err := mapComplexTypeToProtobuf(complexType, c.Name, c.Name, collector)
 		return typ, typeName, repeated, err
 	default:
 		prim, err := parsePrimitiveTopLevel(c.TypeName)
@@ -415,7 +446,12 @@ func (c *messageCollector) uniqueName(base string) string {
 	}
 }
 
-func mapComplexTypeToProtobuf(ct *complexType, path string, collector *messageCollector) (descriptorpb.FieldDescriptorProto_Type, *string, error) {
+func mapComplexTypeToProtobuf(
+	ct *complexType,
+	path string,
+	fieldName string,
+	collector *messageCollector,
+) (descriptorpb.FieldDescriptorProto_Type, *string, error) {
 	switch ct.kind {
 	case complexKindPrimitive:
 		return primitiveProtoType(ct.prim), nil, nil
@@ -432,7 +468,12 @@ func mapComplexTypeToProtobuf(ct *complexType, path string, collector *messageCo
 		case complexKindPrimitive:
 			return primitiveProtoType(ct.elem.prim), nil, nil
 		case complexKindStruct:
-			return mapComplexTypeToProtobuf(ct.elem, sanitizeMessageName(path)+"_element", collector)
+			return mapComplexTypeToProtobuf(
+				ct.elem,
+				sanitizeMessageName(path)+"_element",
+				fieldName,
+				collector,
+			)
 		case complexKindArray:
 			return 0, nil, schemaErrf("nested arrays not supported for field %q", path)
 		case complexKindMap:
@@ -460,7 +501,11 @@ func mapComplexTypeToProtobuf(ct *complexType, path string, collector *messageCo
 		default:
 			return 0, nil, schemaErrf("maps with complex value types not supported for field %q", path)
 		}
-		entryName := collector.uniqueName(base + "Entry")
+		entryName := sanitizeMessageName(fieldName) + "Entry"
+		if _, exists := collector.used[entryName]; exists {
+			return 0, nil, schemaErrf("map entry name collision for field %q", path)
+		}
+		collector.used[entryName] = struct{}{}
 		entry := generateMapEntry(entryName, primitiveProtoType(ct.key.prim), valueType, valueTypeName)
 		collector.nested = append(collector.nested, entry)
 		return descriptorpb.FieldDescriptorProto_TYPE_MESSAGE, &entryName, nil
@@ -476,7 +521,7 @@ func generateStructMessage(messageName string, fields []structField) (*descripto
 			return nil, err
 		}
 		path := messageName + "_" + f.name
-		typ, typeName, err := mapComplexTypeToProtobuf(f.typ, path, local)
+		typ, typeName, err := mapComplexTypeToProtobuf(f.typ, path, f.name, local)
 		if err != nil {
 			return nil, err
 		}

@@ -29,7 +29,7 @@ func NewFromDescriptorProtoBytes(descBytes []byte) (*Converter, error) {
 	if err := proto.Unmarshal(descBytes, &file); err != nil || len(file.GetMessageType()) == 0 {
 		var msg descriptorpb.DescriptorProto
 		if err2 := proto.Unmarshal(descBytes, &msg); err2 != nil {
-			return nil, fmt.Errorf("dynamicproto: parse descriptor bytes: %w", err)
+			return nil, fmt.Errorf("dynamicproto: parse descriptor bytes: %w", err2)
 		}
 		file = descriptorpb.FileDescriptorProto{
 			Name:    proto.String("zerobus_dynamic.proto"),
@@ -64,21 +64,13 @@ func (c *Converter) EncodeJSONBytes(record []byte) ([]byte, error) {
 		return nil, fmt.Errorf("dynamicproto: record is empty")
 	}
 	msg := dynamicpb.NewMessage(c.message)
-	unmarshal := protojson.UnmarshalOptions{DiscardUnknown: false}
+	unmarshal := protojson.UnmarshalOptions{DiscardUnknown: true}
 	if err := unmarshal.Unmarshal(record, msg); err != nil {
 		return nil, fmt.Errorf("dynamicproto: parse JSON payload: %w", err)
-	}
-	if err := proto.CheckInitialized(msg); err != nil {
-		return nil, fmt.Errorf("dynamicproto: missing required fields: %w", err)
 	}
 	out, err := proto.Marshal(msg)
 	if err != nil {
 		return nil, fmt.Errorf("dynamicproto: encode protobuf payload: %w", err)
 	}
 	return out, nil
-}
-
-// EncodeJSONString converts one JSON string payload to protobuf bytes.
-func (c *Converter) EncodeJSONString(record string) ([]byte, error) {
-	return c.EncodeJSONBytes([]byte(record))
 }

@@ -6,6 +6,7 @@ import (
 
 	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/types/descriptorpb"
+	"google.golang.org/protobuf/types/dynamicpb"
 )
 
 func testDescriptorBytes(t *testing.T) []byte {
@@ -48,6 +49,14 @@ func TestConverter_EncodeJSONBytes(t *testing.T) {
 	if len(out) == 0 {
 		t.Fatalf("expected encoded bytes")
 	}
+	msg := dynamicpb.NewMessage(c.message)
+	if err := proto.Unmarshal(out, msg); err != nil {
+		t.Fatalf("decode encoded bytes: %v", err)
+	}
+	id := c.message.Fields().ByName("id")
+	if got := msg.Get(id).Int(); got != 123 {
+		t.Fatalf("id = %d, want 123", got)
+	}
 }
 
 func TestConverter_MissingRequiredField(t *testing.T) {
@@ -64,13 +73,22 @@ func TestConverter_MissingRequiredField(t *testing.T) {
 	}
 }
 
-func TestConverter_UnknownField(t *testing.T) {
+func TestConverter_UnknownFieldIgnored(t *testing.T) {
 	c, err := NewFromDescriptorProtoBytes(testDescriptorBytes(t))
 	if err != nil {
 		t.Fatalf("NewFromDescriptorProtoBytes() error = %v", err)
 	}
-	_, err = c.EncodeJSONBytes([]byte(`{"id":1, "unknown": true}`))
+	if _, err := c.EncodeJSONBytes([]byte(`{"id":1, "unknown": true}`)); err != nil {
+		t.Fatalf("EncodeJSONBytes() error = %v", err)
+	}
+}
+
+func TestConverter_MalformedDescriptorReportsFallbackError(t *testing.T) {
+	_, err := NewFromDescriptorProtoBytes([]byte{0x0a, 0x01})
 	if err == nil {
-		t.Fatalf("expected unknown field error")
+		t.Fatal("expected malformed descriptor error")
+	}
+	if strings.Contains(err.Error(), "%!w(<nil>)") {
+		t.Fatalf("error wrapped nil instead of fallback parse error: %v", err)
 	}
 }

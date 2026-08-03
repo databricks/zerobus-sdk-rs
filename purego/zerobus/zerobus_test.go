@@ -2,11 +2,13 @@ package zerobus_test
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"io"
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -16,6 +18,10 @@ import (
 	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/grpc/test/bufconn"
 	"google.golang.org/protobuf/proto"
+	"google.golang.org/protobuf/reflect/protodesc"
+	"google.golang.org/protobuf/reflect/protoreflect"
+	"google.golang.org/protobuf/types/descriptorpb"
+	"google.golang.org/protobuf/types/dynamicpb"
 
 	"github.com/databricks/zerobus-sdk/purego/internal/transport"
 	"github.com/databricks/zerobus-sdk/purego/internal/zerobuspb"
@@ -202,6 +208,8 @@ type echoServer struct {
 	streamID string
 	noAcks   bool
 	noReady  bool
+	creates  chan *zerobuspb.CreateIngestStreamRequest
+	ingests  chan *zerobuspb.EphemeralStreamRequest
 }
 
 func (s *echoServer) EphemeralStream(stream zerobuspb.Zerobus_EphemeralStreamServer) error {
@@ -211,6 +219,9 @@ func (s *echoServer) EphemeralStream(stream zerobuspb.Zerobus_EphemeralStreamSer
 	}
 	if req.GetCreateStream() == nil {
 		return io.ErrUnexpectedEOF
+	}
+	if s.creates != nil {
+		s.creates <- proto.Clone(req.GetCreateStream()).(*zerobuspb.CreateIngestStreamRequest)
 	}
 	if s.noReady {
 		<-stream.Context().Done()
@@ -245,6 +256,9 @@ func (s *echoServer) EphemeralStream(stream zerobuspb.Zerobus_EphemeralStreamSer
 			offset = batch.OffsetId
 		} else {
 			continue
+		}
+		if s.ingests != nil {
+			s.ingests <- proto.Clone(req).(*zerobuspb.EphemeralStreamRequest)
 		}
 		if err := stream.Send(&zerobuspb.EphemeralStreamResponse{
 			Payload: &zerobuspb.EphemeralStreamResponse_IngestRecordResponse{
@@ -784,5 +798,161 @@ func waitFor(t *testing.T, cond func() bool, what string) {
 			t.Fatalf("timed out waiting for %s", what)
 		}
 		time.Sleep(5 * time.Millisecond)
+	}
+}
+
+func TestDynamicProtoPublicFlow(t *testing.T) {
+	uc := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.URL.Path == "/oidc/v1/token":
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"access_token": "abc",
+				"expires_in":   300,
+			})
+		case strings.HasPrefix(r.URL.Path, "/api/2.1/unity-catalog/tables/"):
+			if got := r.Header.Get("Authorization"); got != "Bearer abc" {
+				http.Error(w, "missing schema authorization", http.StatusUnauthorized)
+				return
+			}
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"name":         "orders",
+				"catalog_name": "main",
+				"schema_name":  "sales",
+				"columns": []map[string]any{
+					{
+						"name":      "id",
+						"type_name": "LONG",
+						"nullable":  false,
+						"position":  0,
+					},
+					{
+						"name":      "note",
+						"type_name": "STRING",
+						"nullable":  true,
+						"position":  1,
+					},
+					{
+						"name":      "payload",
+						"type_name": "STRUCT",
+						"type_json": `{"type":"struct","fields":[` +
+							`{"name":"name","type":"string","nullable":false},` +
+							`{"name":"tags","type":{"type":"array","elementType":"long"},"nullable":true},` +
+							`{"name":"attributes","type":{"type":"map","keyType":"string","valueType":"integer"},"nullable":true}` +
+							`]}`,
+						"nullable": true,
+						"position": 2,
+					},
+				},
+			})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer uc.Close()
+
+	creates := make(chan *zerobuspb.CreateIngestStreamRequest, 1)
+	ingests := make(chan *zerobuspb.EphemeralStreamRequest, 2)
+	conn := dialEcho(t, &echoServer{
+		streamID: "dynamic-stream",
+		creates:  creates,
+		ingests:  ingests,
+	})
+	sdk := zerobus.NewWithConn(
+		conn,
+		"https://ws.zerobus.databricks.com",
+		uc.URL,
+		zerobus.WithDynamicSchemaHTTPClient(uc.Client()),
+	)
+	t.Cleanup(func() { _ = sdk.Close() })
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	dynamic, err := sdk.CreateDynamicProtoStream(
+		ctx,
+		"main.sales.orders",
+		"id",
+		"secret",
+		zerobus.WithWaitForReady(),
+	)
+	if err != nil {
+		t.Fatalf("CreateDynamicProtoStream() error = %v", err)
+	}
+	defer dynamic.Close()
+
+	if _, err := dynamic.IngestJSONStringOffset(
+		`{"payload":{"name":"missing id"}}`,
+	); err == nil {
+		t.Fatal("missing required id was accepted")
+	}
+	if got := len(ingests); got != 0 {
+		t.Fatalf("failed dynamic record queued %d requests, want 0", got)
+	}
+	if _, err := dynamic.IngestJSONStringOffset(
+		`{"id":"1","payload":{"name":"first","tags":["10","20"],"attributes":{"a":7}},"extra":"ignored"}`,
+	); err != nil {
+		t.Fatalf("IngestJSONStringOffset() error = %v", err)
+	}
+	if _, err := dynamic.IngestJSONStringsOffset([]string{
+		`{"id":"2","payload":{"name":"second","tags":[],"attributes":{}}}`,
+		`{"id":"3","payload":{"name":"third","tags":["30"],"attributes":{"b":9}}}`,
+	}); err != nil {
+		t.Fatalf("IngestJSONStringsOffset() error = %v", err)
+	}
+	if err := dynamic.Flush(); err != nil {
+		t.Fatalf("Flush() error = %v", err)
+	}
+
+	create := <-creates
+	if create.GetRecordType() != zerobuspb.RecordType_PROTO {
+		t.Fatalf("record type = %v, want PROTO", create.GetRecordType())
+	}
+	if len(create.GetDescriptorProto()) == 0 {
+		t.Fatal("dynamic create request has empty descriptor")
+	}
+	var descriptor descriptorpb.DescriptorProto
+	if err := proto.Unmarshal(create.GetDescriptorProto(), &descriptor); err != nil {
+		t.Fatalf("unmarshal dynamic descriptor: %v", err)
+	}
+	file, err := protodesc.NewFile(&descriptorpb.FileDescriptorProto{
+		Name:        proto.String("dynamic_test.proto"),
+		Syntax:      proto.String("proto2"),
+		MessageType: []*descriptorpb.DescriptorProto{&descriptor},
+	}, nil)
+	if err != nil {
+		t.Fatalf("resolve dynamic descriptor: %v", err)
+	}
+	messageDescriptor := file.Messages().Get(0)
+	single := <-ingests
+	singleBytes := single.GetIngestRecord().GetProtoEncodedRecord()
+	if len(singleBytes) == 0 {
+		t.Fatal("single dynamic record was not encoded as protobuf")
+	}
+	decoded := dynamicpb.NewMessage(messageDescriptor)
+	if err := proto.Unmarshal(singleBytes, decoded); err != nil {
+		t.Fatalf("decode dynamic record: %v", err)
+	}
+	if got := decoded.Get(messageDescriptor.Fields().ByName("id")).Int(); got != 1 {
+		t.Fatalf("decoded id = %d, want 1", got)
+	}
+	if decoded.Has(messageDescriptor.Fields().ByName("note")) {
+		t.Fatal("omitted nullable note is present")
+	}
+	payloadField := messageDescriptor.Fields().ByName("payload")
+	payload := decoded.Get(payloadField).Message()
+	payloadDescriptor := payloadField.Message()
+	if got := payload.Get(payloadDescriptor.Fields().ByName("name")).String(); got != "first" {
+		t.Fatalf("decoded payload.name = %q, want first", got)
+	}
+	tags := payload.Get(payloadDescriptor.Fields().ByName("tags")).List()
+	if tags.Len() != 2 || tags.Get(0).Int() != 10 || tags.Get(1).Int() != 20 {
+		t.Fatalf("decoded tags = %v, want [10 20]", tags)
+	}
+	attributes := payload.Get(payloadDescriptor.Fields().ByName("attributes")).Map()
+	if got := attributes.Get(protoreflect.ValueOfString("a").MapKey()).Int(); got != 7 {
+		t.Fatalf("decoded attributes[a] = %d, want 7", got)
+	}
+	batch := <-ingests
+	if got := len(batch.GetIngestRecordBatch().GetProtoEncodedBatch().GetRecords()); got != 2 {
+		t.Fatalf("dynamic batch records = %d, want 2", got)
 	}
 }

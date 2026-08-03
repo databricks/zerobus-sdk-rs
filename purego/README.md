@@ -108,6 +108,20 @@ if err := stream.Flush(); err != nil { // wait once at the end
 
 See `examples/dynamic/single/main.go` for a complete example.
 
+Dynamic JSON follows protobuf JSON value rules:
+
+- `DATE` is days since 1970-01-01.
+- `TIMESTAMP` is UTC microseconds since the Unix epoch.
+- `TIMESTAMP_NTZ` is local-wall-clock microseconds since 1970-01-01, with no
+  timezone.
+- `BINARY` is a base64-encoded string.
+- `DECIMAL` is a string, such as `"123.45"`.
+- `VARIANT` is a string containing JSON text.
+- `BIGINT` values above 2^53 should be strings to avoid JSON-number precision
+  loss.
+- `STRUCT`, `ARRAY`, and `MAP` use JSON objects, arrays, and objects.
+- Unknown JSON fields are ignored.
+
 ## Error handling
 
 Operations return `*Error`. Use `Retryable(err)` to check retryability:
@@ -127,6 +141,9 @@ if _, err := stream.IngestRecordOffset(rec); err != nil {
 Streams reconnect automatically on recoverable failures (default 4 retries).
 Disable with `WithRecovery(zerobus.RecoveryDisabled)`.
 After close/failure, use `GetUnackedRecords` / `GetUnackedBatches` to replay.
+For `DynamicProtoStream`, these methods return the converted protobuf bytes.
+Replay them through the embedded `Stream.IngestRecordOffset` /
+`Stream.IngestRecordsOffset`, not through the `IngestJSON*` methods.
 
 Recovery and buffering can be tuned with `WithRecoveryRetries`,
 `WithRecoveryTimeout`, `WithRecoveryBackoff`, `WithLackOfAckTimeout`,

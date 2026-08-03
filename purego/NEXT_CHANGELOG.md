@@ -15,7 +15,7 @@
   with the same client credentials, builds runtime protobuf descriptors, and
   exposes JSON ingest methods that convert to protobuf bytes automatically.
 - Added internal UC schema conversion and runtime dynamic-protobuf conversion
-  modules plus focused tests for schema fetch, descriptor parity, and JSON
+  modules plus focused tests for schema fetch, descriptor generation, and JSON
   conversion failures.
 
 ### Deprecations

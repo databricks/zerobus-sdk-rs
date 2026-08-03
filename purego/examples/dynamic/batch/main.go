@@ -54,13 +54,6 @@ func main() {
 	}
 	log.Printf("Batch of %d records queued; batch offset ID: %d", len(records), batchOffset)
 
-	if batchOffset >= 0 {
-		if err := stream.WaitForOffset(batchOffset); err != nil {
-			log.Fatalf("wait for offset %d: %v", batchOffset, err)
-		}
-		log.Printf("Batch acknowledged at offset ID: %d", batchOffset)
-	}
-
 	if err := stream.Flush(); err != nil {
 		log.Fatalf("flush: %v", err)
 	}
