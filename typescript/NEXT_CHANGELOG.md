@@ -28,6 +28,8 @@
 
 - Updated TypeScript SDK development dependencies and the NAPI Cargo lockfile to
   resolve Dependabot security alerts without changing the public SDK API.
+- Updated the wrapped Rust SDK dependency from v2.0.1 to v2.6.0 and aligned
+  Arrow dependencies with the Rust SDK 2.6 workspace.
 
 ### Breaking Changes
 
