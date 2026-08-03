@@ -1,8 +1,6 @@
-// Package config holds the shared helpers the pure-Go Zerobus SDK examples use
-// to read their connection settings from the environment.
+// Package config contains shared example configuration helpers.
 //
-// Every connection setting is read from the environment, so no value is ever
-// baked into source. The five variables are:
+// Required environment variables:
 //
 //	ZEROBUS_SERVER_ENDPOINT   Zerobus gRPC endpoint
 //	DATABRICKS_WORKSPACE_URL  Unity Catalog / workspace URL (OAuth token exchange)
@@ -10,8 +8,7 @@
 //	DATABRICKS_CLIENT_ID      OAuth 2.0 client id
 //	DATABRICKS_CLIENT_SECRET  OAuth 2.0 client secret
 //
-// The examples target an `orders` table; see the examples README for the
-// CREATE TABLE statement.
+// Examples target an `orders` table; see the examples README.
 package config
 
 import (
@@ -28,9 +25,7 @@ type Settings struct {
 	ClientSecret   string
 }
 
-// RequireEnv reads a required environment variable, exiting with a clear
-// message (status 2) if it is unset or empty. Exiting — rather than returning an
-// error — keeps a misconfigured environment distinct from a genuine SDK error.
+// RequireEnv returns a required environment variable or exits with status 2.
 func RequireEnv(name string) string {
 	v := os.Getenv(name)
 	if v == "" {
@@ -42,8 +37,7 @@ func RequireEnv(name string) string {
 	return v
 }
 
-// Load reads the five standard connection variables from the environment,
-// exiting via RequireEnv if any is missing.
+// Load reads the standard connection variables from the environment.
 func Load() Settings {
 	return Settings{
 		ServerEndpoint: RequireEnv("ZEROBUS_SERVER_ENDPOINT"),

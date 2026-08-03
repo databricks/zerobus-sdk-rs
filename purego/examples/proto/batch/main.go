@@ -1,22 +1,15 @@
-// Batch protobuf ingestion with the Zerobus pure-Go SDK.
+// Batch protobuf ingestion example.
 //
-// Opens a proto stream and ingests records with the BATCH API,
-// IngestRecordsOffset, which queues a whole slice of records in one call and
-// returns the single offset assigned to the batch. Prefer the batch API in hot
-// paths: a batch is one buffer entry and one atomic ack.
+// Uses IngestRecordsOffset with a descriptor from generated bindings.
 //
-// As in the single-record proto example, a static message descriptor (marshaled
-// from the generated bindings in proto/pb) is supplied at stream creation.
-//
-// Configuration — every connection setting is read from the environment. Export
-// these before running (see the examples README):
+// Set these environment variables before running:
 //
 //	ZEROBUS_SERVER_ENDPOINT, DATABRICKS_WORKSPACE_URL, ZEROBUS_TABLE_NAME,
 //	DATABRICKS_CLIENT_ID, DATABRICKS_CLIENT_SECRET
 //
 //	go run ./proto/batch
 //
-// Target table (see the examples README and proto/orders.proto):
+// Target table:
 //
 //	orders(id INT, customer_name STRING, product_name STRING, quantity INT,
 //	       price DOUBLE, status STRING, created_at TIMESTAMP, updated_at TIMESTAMP)
@@ -70,8 +63,7 @@ func main() {
 
 	now := config.NowMicros()
 
-	// Marshal each record, collect them into a batch, then hand the whole batch
-	// over in a single call.
+	// Marshal records and queue one batch.
 	orders := []*pb.Order{
 		makeOrder(1, "Alice Smith", "Wireless Mouse", 2, 25.99, "pending", now),
 		makeOrder(2, "Bob Johnson", "Mechanical Keyboard", 1, 89.99, "shipped", now),
@@ -92,7 +84,7 @@ func main() {
 	}
 	log.Printf("Batch of %d records queued; batch offset ID: %d", len(batch), batchOffset)
 
-	// Waiting on the batch's single offset confirms every record in it.
+	// Waiting on the batch offset confirms the batch.
 	if batchOffset >= 0 {
 		if err := stream.WaitForOffset(batchOffset); err != nil {
 			log.Fatalf("wait for offset %d: %v", batchOffset, err)

@@ -1,8 +1,6 @@
 # Zerobus pure-Go SDK examples
 
-Runnable examples for the pure-Go Zerobus SDK (`github.com/databricks/zerobus-sdk/purego`).
-All examples live in a single module that `replace`s the SDK with the local
-checkout, so they build against your working tree with no extra setup.
+Runnable examples for `github.com/databricks/zerobus-sdk/purego`.
 
 ## Available examples
 
@@ -13,10 +11,7 @@ checkout, so they build against your working tree with no extra setup.
 | Proto single | Protocol Buffers | Single-record loop, then `Flush` | `proto/single` |
 | Proto batch  | Protocol Buffers | One atomic batch                 | `proto/batch`  |
 
-Every example uses the idiomatic **loop-then-`Flush()`** pattern: queue records
-without waiting, then confirm durability once at the end (or periodically for a
-continuous stream). Never wait for an acknowledgement after every record — that
-collapses throughput to one record per server round-trip.
+Every example uses **loop-then-`Flush()`**: queue records, then flush once.
 
 ## Prerequisites
 
@@ -37,13 +32,11 @@ CREATE TABLE catalog.schema.orders (
 
 ### 2. Set up a service principal
 
-Create a service principal with `SELECT` and `MODIFY` on the table, and an OAuth
-client id / secret for it.
+Create a service principal with `SELECT` and `MODIFY` on the table and an OAuth client id/secret.
 
 ### 3. Configure connection info
 
-Every connection setting is read from the environment — nothing is baked into
-source. Export these before running:
+Export these before running:
 
 ```bash
 export ZEROBUS_SERVER_ENDPOINT="https://<workspace-id>.zerobus.<region>.cloud.databricks.com"
@@ -66,15 +59,11 @@ go run ./proto/batch
 
 ## Regenerating the proto bindings
 
-The proto examples use bindings generated from `proto/orders.proto` into
-`proto/pb/`. To regenerate after editing the schema (requires `protoc` and
-`protoc-gen-go` on `PATH`):
+Proto examples use bindings generated from `proto/orders.proto` into `proto/pb/`.
+Regenerate after schema edits (`protoc` and `protoc-gen-go` required):
 
 ```bash
 cd proto && ./generate_proto.sh
 ```
 
-`orders.proto` is a hand-maintained copy of the table's schema — keep it in sync
-with the table, or records land in the wrong columns. The pure-Go SDK uses this
-static descriptor (marshaled from the generated bindings) rather than building
-one at runtime from Unity Catalog metadata.
+`orders.proto` mirrors the table schema. Keep them in sync.

@@ -1,24 +1,16 @@
-// Single-record protobuf ingestion with the Zerobus pure-Go SDK.
+// Single-record protobuf ingestion example.
 //
-// Opens a proto stream and ingests records ONE AT A TIME with
-// IngestRecordOffset, then flushes ONCE at the end. IngestRecordOffset returns
-// as soon as the record is queued; sending and acknowledgement happen in the
-// background. Calling WaitForOffset/Flush after every record would collapse
-// throughput. For high volume, prefer the batch API in proto/batch.
+// Queues records with IngestRecordOffset and calls Flush once.
+// Uses a descriptor marshaled from generated bindings.
 //
-// A proto stream needs a message descriptor so the server can interpret the raw
-// protobuf bytes. The pure-Go SDK uses a static schema: the descriptor is
-// marshaled from the generated bindings in proto/pb (see proto/orders.proto).
-//
-// Configuration — every connection setting is read from the environment. Export
-// these before running (see the examples README):
+// Set these environment variables before running:
 //
 //	ZEROBUS_SERVER_ENDPOINT, DATABRICKS_WORKSPACE_URL, ZEROBUS_TABLE_NAME,
 //	DATABRICKS_CLIENT_ID, DATABRICKS_CLIENT_SECRET
 //
 //	go run ./proto/single
 //
-// Target table (see the examples README and proto/orders.proto):
+// Target table:
 //
 //	orders(id INT, customer_name STRING, product_name STRING, quantity INT,
 //	       price DOUBLE, status STRING, created_at TIMESTAMP, updated_at TIMESTAMP)
@@ -52,7 +44,7 @@ func makeOrder(id int, customer, product string, quantity int, price float64, st
 func main() {
 	cfg := config.Load()
 
-	// The serialized message descriptor the proto stream is opened with.
+	// Descriptor for the proto stream.
 	descriptor, err := config.MessageDescriptorBytes((&pb.Order{}).ProtoReflect().Descriptor())
 	if err != nil {
 		log.Fatalf("marshal descriptor: %v", err)
@@ -74,8 +66,7 @@ func main() {
 
 	now := config.NowMicros()
 
-	// Ingest records one at a time: marshal each Order to protobuf bytes and
-	// queue them — with NO per-record wait. The single wait point is the Flush.
+	// Queue records one at a time without per-record waits.
 	orders := []*pb.Order{
 		makeOrder(1, "Alice Smith", "Wireless Mouse", 2, 25.99, "pending", now),
 		makeOrder(2, "Bob Johnson", "Mechanical Keyboard", 1, 89.99, "shipped", now),
@@ -93,7 +84,7 @@ func main() {
 		log.Printf("Record %d queued with offset ID: %d", i+1, offset)
 	}
 
-	// Flush once at the end: block until every queued record is durably acked.
+	// Flush once at the end.
 	if err := stream.Flush(); err != nil {
 		log.Fatalf("flush: %v", err)
 	}
