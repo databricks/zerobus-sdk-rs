@@ -87,7 +87,7 @@
   "devDependencies": {
     "@napi-rs/cli": "^2.18.0",
     "@types/node": "^20.0.0",
-    "apache-arrow": "^18.1.0",
+    "apache-arrow": "^21.2.0",
     "dotenv": "^17.2.3",
     "protobufjs": "^8.7.1",
     "protobufjs-cli": "^2.6.1",
