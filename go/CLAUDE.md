@@ -2,6 +2,24 @@
 
 Go wrapper around the Rust core via cgo and the C FFI library.
 
+## Client code patterns (performance)
+
+When writing or reviewing client/example code, follow the idiomatic async flow.
+`IngestRecordOffset()` and `IngestRecordsOffset()` (on `ZerobusStream`), as well as
+`IngestBatch()` (on `ZerobusArrowStream`), return as soon as the record is queued;
+the SDK sends it and tracks its acknowledgment in the background.
+
+- Ingest in a loop, then call `Flush()` to confirm durability — once for a
+  bounded batch, or periodically for a long-running stream.
+- Acks are ordered, so if you only need to confirm a group of records, call
+  `WaitForOffset()` on the LAST offset — it confirms all prior offsets too.
+- Use `WaitForOffset()` when a specific record must be confirmed before
+  continuing; prefer `Flush()` for bulk durability. Avoid calling
+  `WaitForOffset()` after every record in a tight loop, since that limits
+  throughput to one record per round-trip.
+- There is no ack-callback API in the Go SDK; use `Flush()` / `WaitForOffset()`
+  (or the fire-and-forget `IngestRecordNowait`/`IngestRecordsNowait`).
+
 ## Structure
 
 ```
@@ -55,18 +73,25 @@ Go's GC can relocate heap objects. When passing Go memory to C:
 - **Never remove `runtime.Pinner` calls** — doing so causes "cgo argument has Go pointer to unpinned Go pointer" panics.
 - Requires Go 1.21+ (the `runtime.Pinner` API).
 
-### Handle registry for callbacks
+### Handle ownership for callbacks
 
 When using custom `HeadersProvider` (instead of default OAuth):
 - A `cgo.Handle` wraps the Go interface value and prevents GC collection.
-- Handles are stored in `streamHandleRegistry` (mutex-protected map, keyed by stream pointer).
-- **Cleanup sequence**: lock registry → delete handle → remove from map → unlock → free C stream.
+- The handle is passed to the FFI as `user_data`, and its **ownership is handed to
+  the FFI** along with a `free_user_data` destroy callback (`goFreeHeadersProvider`).
+  The FFI invokes it exactly once on every path — on success after any in-flight
+  `get_headers` returns, and on a failed create before returning — and that is where
+  `handle.Delete()` runs. The Go side must therefore **never** call `handle.Delete()`
+  itself, not even when create fails; doing so would double-delete the `cgo.Handle`
+  (panic).
+- This replaces the older per-stream handle registry: freeing the handle on `close()`
+  could race a recovery `get_headers` still running on a worker thread (use-after-free).
 - Leaking a handle leaks the Go `HeadersProvider` object and any resources it holds.
 
 ### Arrow batch cleanup
 
 - `zerobus_arrow_free_batch_array()` must be called after reading unacknowledged batches.
-- Same handle registry pattern applies for Arrow streams with custom headers.
+- Arrow streams with custom headers use the same FFI-owned handle destroy path.
 
 ## Breaking change rules
 
@@ -85,7 +110,7 @@ Public API is everything exported (capitalized) in the `go/` package:
 
 ## Thread safety
 
-Go SDK is safe for concurrent use from multiple goroutines. Internal synchronization handles concurrent `Ingest` calls. The handle registry uses a mutex.
+Go SDK is safe for concurrent use from multiple goroutines. Internal synchronization handles concurrent `Ingest` calls.
 
 ## Changelog and documentation
 

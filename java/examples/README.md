@@ -51,12 +51,12 @@ Each example demonstrates: single ingestion + wait, batch ingestion + wait for l
 ### ZerobusProtoStream (Recommended for Protocol Buffers)
 
 ```java
-ZerobusProtoStream stream = sdk.createProtoStream(
-    tableName,
-    MyProto.getDescriptor().toProto(),
-    clientId,
-    clientSecret
-).join();
+ZerobusProtoStream stream = sdk.streamBuilder()
+    .table(tableName)
+    .oauth(clientId, clientSecret)
+    .compiledProto(MyProto.getDescriptor().toProto())
+    .build()
+    .join();
 
 // Method-level generics - flexible typing
 stream.ingestRecordOffset(myProtoMessage);        // Message
@@ -68,11 +68,12 @@ stream.ingestRecordsOffset(listOfByteArrays);     // batch
 ### ZerobusJsonStream (Recommended for JSON)
 
 ```java
-ZerobusJsonStream stream = sdk.createJsonStream(
-    tableName,
-    clientId,
-    clientSecret
-).join();
+ZerobusJsonStream stream = sdk.streamBuilder()
+    .table(tableName)
+    .oauth(clientId, clientSecret)
+    .json()
+    .build()
+    .join();
 
 // Method-level generics - flexible typing
 stream.ingestRecordOffset(object, gson::toJson);  // Object + serializer
@@ -89,13 +90,18 @@ Schema schema = new Schema(Arrays.asList(
     Field.nullable("temp", new ArrowType.Int(32, true))
 ));
 
-ZerobusArrowStream stream = sdk.createArrowStream(
-    tableName, schema, clientId, clientSecret
-).join();
+ZerobusArrowStream stream = sdk.streamBuilder()
+    .table(tableName)
+    .oauth(clientId, clientSecret)
+    .arrow(schema)
+    .build()
+    .join();
 
 // Columnar batch ingestion
 Optional<Long> offset = stream.ingestBatch(vectorSchemaRoot);
-offset.ifPresent(stream::waitForOffset);
+if (offset.isPresent()) {
+    stream.waitForOffset(offset.get());
+}
 ```
 
 ### ZerobusStream (Deprecated)
@@ -140,7 +146,7 @@ export DATABRICKS_CLIENT_SECRET="your-client-secret"
 
 ```bash
 cd ..  # Go to SDK root
-mvn package -DskipTests
+mvn package -DskipTests -Dzerobus.skipNativeLibCheck=true
 ```
 
 ## Running Examples

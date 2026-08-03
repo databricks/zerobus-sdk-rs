@@ -11,6 +11,14 @@ members = [
 ]
 resolver = "2"
 
+# The FFI crate catches panics at the `extern "C"` boundary via `catch_unwind`,
+# which only works under the unwinding panic strategy; `panic = "abort"` would
+# turn those guards into process aborts. Pin unwind so a release build can't
+# silently disable them. Cargo only honors profiles at the workspace root, so
+# this must live here rather than in ffi/Cargo.toml.
+[profile.release]
+panic = "unwind"
+
 [workspace.dependencies]
 # Protobuf / gRPC
 prost = "0.14"
@@ -19,6 +27,7 @@ prost-reflect = "0.16"
 tonic = "0.14"
 tonic-prost = "0.14"
 tonic-prost-build = "0.14"
+tonic-types = "0.14"
 protoc-bin-vendored = "3.0.0"
 
 # Async runtime
@@ -34,8 +43,10 @@ serde_json = "1.0"
 
 # HTTP / networking
 reqwest = { version = "0.12", features = ["json", "rustls-tls-native-roots", "rustls-tls-webpki-roots"], default-features = false }
-hyper-http-proxy = { version = "1.1", default-features = false, features = ["rustls-tls-native-roots"] }
+hyper-http-proxy = { version = "1.1", default-features = false }
+hyper-rustls = { version = "0.27", default-features = false, features = ["http1", "native-tokio", "ring", "tls12"] }
 hyper-util = { version = "0.1", features = ["client-legacy", "tokio"] }
+tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12"] }
 
 # Error handling
 thiserror = "1.0"
@@ -46,10 +57,10 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
 # Arrow
 # arrow-flight is vendored locally with a slice-aware batch-split fix (arrow-rs#9388 / #5352).
-arrow-flight = { path = "third_party/arrow-flight", version = "58.3", default-features = false }
-arrow-array = { version = "58.3", default-features = false }
-arrow-schema = { version = "58.3", default-features = false }
-arrow-ipc = { version = "58.3", default-features = false }
+arrow-flight = { path = "third_party/arrow-flight", version = "59.1", default-features = false }
+arrow-array = { version = "59.1", default-features = false }
+arrow-schema = { version = "59.1", default-features = false }
+arrow-ipc = { version = "59.1", default-features = false }
 
 # Misc
 futures = "0.3"

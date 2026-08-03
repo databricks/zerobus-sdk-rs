@@ -55,8 +55,9 @@ impl From<JsonEncodedRecord> for EncodedRecord {
 /// # use databricks_zerobus_ingest_sdk::{ZerobusStream, ProtoBytes};
 /// # async fn example(stream: &ZerobusStream) -> Result<(), Box<dyn std::error::Error>> {
 /// let proto_bytes = vec![1, 2, 3, 4];
-/// let offset = stream.ingest_record_offset(ProtoBytes(proto_bytes)).await?;
-/// stream.wait_for_offset(offset).await?;
+/// let _offset = stream.ingest_record_offset(ProtoBytes(proto_bytes)).await?;
+/// // Ingest queues the record; flush() once when done waits for all pending acks.
+/// stream.flush().await?;
 /// # Ok(())
 /// # }
 /// ```
@@ -79,8 +80,9 @@ impl From<ProtoBytes> for EncodedRecord {
 /// # use databricks_zerobus_ingest_sdk::{ZerobusStream, JsonString};
 /// # async fn example(stream: &ZerobusStream) -> Result<(), Box<dyn std::error::Error>> {
 /// let json_str = r#"{"name":"test","value":42}"#.to_string();
-/// let offset = stream.ingest_record_offset(JsonString(json_str)).await?;
-/// stream.wait_for_offset(offset).await?;
+/// let _offset = stream.ingest_record_offset(JsonString(json_str)).await?;
+/// // Ingest queues the record; flush() once when done waits for all pending acks.
+/// stream.flush().await?;
 /// # Ok(())
 /// # }
 /// ```
@@ -104,8 +106,9 @@ impl From<JsonString> for EncodedRecord {
 /// # use databricks_zerobus_ingest_sdk::{ZerobusStream, ProtoMessage};
 /// # async fn example(stream: &ZerobusStream, my_proto_msg: impl prost::Message) -> Result<(), Box<dyn std::error::Error>> {
 /// // Ingest a protobuf message - it will be automatically serialized
-/// let offset = stream.ingest_record_offset(ProtoMessage(my_proto_msg)).await?;
-/// stream.wait_for_offset(offset).await?;
+/// let _offset = stream.ingest_record_offset(ProtoMessage(my_proto_msg)).await?;
+/// // Ingest queues the record; flush() once when done waits for all pending acks.
+/// stream.flush().await?;
 /// # Ok(())
 /// # }
 /// ```
@@ -137,8 +140,9 @@ impl<T: Message> From<ProtoMessage<T>> for EncodedRecord {
 ///
 /// let my_data = MyData { name: "test".into(), value: 42 };
 /// // Ingest a JSON object - it will be automatically serialized
-/// let offset = stream.ingest_record_offset(JsonValue(my_data)).await?;
-/// stream.wait_for_offset(offset).await?;
+/// let _offset = stream.ingest_record_offset(JsonValue(my_data)).await?;
+/// // Ingest queues the record; flush() once when done waits for all pending acks.
+/// stream.flush().await?;
 /// # Ok(())
 /// # }
 /// ```
@@ -263,6 +267,14 @@ impl EncodedBatch {
 
     pub fn is_empty(&self) -> bool {
         self.get_record_count() == 0
+    }
+
+    /// Returns the total encoded byte size of all records in this batch.
+    pub fn total_byte_size(&self) -> usize {
+        match self {
+            EncodedBatch::Proto(records) => records.iter().map(|r| r.len()).sum(),
+            EncodedBatch::Json(records) => records.iter().map(|s| s.len()).sum(),
+        }
     }
 }
 
@@ -658,6 +670,24 @@ mod tests {
 
             let empty_batch = EncodedBatch::Proto(smallvec![]);
             assert_eq!(empty_batch.get_record_count(), 0);
+        }
+
+        #[test]
+        fn test_total_byte_size_proto() {
+            let batch = EncodedBatch::Proto(smallvec![vec![1, 2, 3], vec![4, 5]]);
+            assert_eq!(batch.total_byte_size(), 5);
+        }
+
+        #[test]
+        fn test_total_byte_size_json() {
+            let batch = EncodedBatch::Json(smallvec!["hello".to_string(), "world!".to_string()]);
+            assert_eq!(batch.total_byte_size(), 11);
+        }
+
+        #[test]
+        fn test_total_byte_size_empty() {
+            let batch = EncodedBatch::Proto(smallvec![]);
+            assert_eq!(batch.total_byte_size(), 0);
         }
 
         #[test]

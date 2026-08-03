@@ -36,30 +36,36 @@ import org.slf4j.LoggerFactory;
  *
  * <h3>Example Usage</h3>
  *
+ * <p>Use {@link #streamBuilder()} to create streams:
+ *
  * <pre>{@code
  * try (ZerobusSdk sdk = new ZerobusSdk(
  *         "https://server-endpoint.databricks.com",
  *         "https://workspace.databricks.com")) {
  *
- *     // For JSON ingestion (recommended):
- *     try (ZerobusJsonStream jsonStream = sdk.createJsonStream(
- *             "catalog.schema.table",
- *             clientId,
- *             clientSecret).join()) {
- *         jsonStream.ingestRecordOffset(myObject, gson::toJson);
+ *     // For Protocol Buffer ingestion:
+ *     try (ZerobusProtoStream protoStream = sdk.streamBuilder()
+ *             .table("catalog.schema.table")
+ *             .oauth(clientId, clientSecret)
+ *             .compiledProto(descriptorProto)
+ *             .build()
+ *             .join()) {
+ *         protoStream.ingestRecordOffset(myProtoMessage);
  *     }
  *
- *     // For Protocol Buffer ingestion:
- *     try (ZerobusProtoStream protoStream = sdk.createProtoStream(
- *             "catalog.schema.table",
- *             descriptorProto,
- *             clientId,
- *             clientSecret).join()) {
- *         protoStream.ingestRecordOffset(myProtoMessage);
+ *     // For JSON ingestion:
+ *     try (ZerobusJsonStream jsonStream = sdk.streamBuilder()
+ *             .table("catalog.schema.table")
+ *             .oauth(clientId, clientSecret)
+ *             .json()
+ *             .build()
+ *             .join()) {
+ *         jsonStream.ingestRecordOffset(myObject, gson::toJson);
  *     }
  * }
  * }</pre>
  *
+ * @see StreamBuilder
  * @see ZerobusJsonStream
  * @see ZerobusProtoStream
  * @see StreamConfigurationOptions
@@ -92,13 +98,43 @@ public class ZerobusSdk implements AutoCloseable {
    * @throws ZerobusException if the SDK cannot be initialized
    */
   public ZerobusSdk(String serverEndpoint, String unityCatalogEndpoint) {
+    this(serverEndpoint, unityCatalogEndpoint, null);
+  }
+
+  /**
+   * Creates a new ZerobusSdk instance with an optional application identifier.
+   *
+   * @param serverEndpoint The gRPC endpoint URL for the Zerobus service.
+   * @param unityCatalogEndpoint The Unity Catalog endpoint URL.
+   * @param applicationName Optional application identifier appended to the HTTP {@code user-agent}
+   *     header, conventionally {@code "<product>/<version>"} (e.g. {@code "my-app/1.0"}). When set,
+   *     the header becomes {@code "zerobus-sdk-java/<version> <applicationName>"}. Pass {@code
+   *     null} to omit.
+   * @throws ZerobusException if the SDK cannot be initialized
+   */
+  public ZerobusSdk(String serverEndpoint, String unityCatalogEndpoint, String applicationName) {
     this.serverEndpoint = serverEndpoint;
     this.unityCatalogEndpoint = unityCatalogEndpoint;
-    this.nativeHandle = nativeCreate(serverEndpoint, unityCatalogEndpoint);
+    this.nativeHandle = nativeCreate(serverEndpoint, unityCatalogEndpoint, applicationName);
     if (this.nativeHandle == 0) {
       throw new RuntimeException("Failed to create native SDK instance");
     }
     logger.debug("ZerobusSdk created for endpoint: {}", serverEndpoint);
+  }
+
+  // ==================== Stream Builder ====================
+
+  /**
+   * Returns a fluent {@link StreamBuilder} for creating a stream on this SDK.
+   *
+   * <p>This is the recommended way to create streams. It supports JSON, Protocol Buffer, and Arrow
+   * Flight streams via a single chainable API.
+   *
+   * @return a new stream builder bound to this SDK
+   * @see StreamBuilder
+   */
+  public StreamBuilder streamBuilder() {
+    return new StreamBuilder(this);
   }
 
   // ==================== Proto Stream Creation ====================
@@ -106,18 +142,15 @@ public class ZerobusSdk implements AutoCloseable {
   /**
    * Creates a new Protocol Buffer stream for ingesting proto records into a table.
    *
-   * <p>This is the recommended method for Protocol Buffer ingestion. It provides a flexible API
-   * with method-level generics and batch ingestion support.
-   *
    * <p>Example usage:
    *
    * <pre>{@code
-   * ZerobusProtoStream stream = sdk.createProtoStream(
-   *     "catalog.schema.table",
-   *     MyProto.getDescriptor().toProto(),
-   *     clientId,
-   *     clientSecret
-   * ).join();
+   * ZerobusProtoStream stream = sdk.streamBuilder()
+   *     .table("catalog.schema.table")
+   *     .oauth(clientId, clientSecret)
+   *     .compiledProto(MyProto.getDescriptor().toProto())
+   *     .build()
+   *     .join();
    *
    * long offset = stream.ingestRecordOffset(myProtoMessage);
    * stream.waitForOffset(offset);
@@ -130,13 +163,19 @@ public class ZerobusSdk implements AutoCloseable {
    * @param clientSecret The OAuth client secret for authentication.
    * @return A CompletableFuture that completes with the ZerobusProtoStream when the stream is
    *     ready.
+   * @deprecated Use {@link #streamBuilder()} instead, for example {@code
+   *     sdk.streamBuilder().table(tableName).oauth(clientId,
+   *     clientSecret).compiledProto(descriptorProto).build()}. This method will be removed in the
+   *     next major release.
    */
+  @Deprecated
   public CompletableFuture<ZerobusProtoStream> createProtoStream(
       String tableName,
       com.google.protobuf.DescriptorProtos.DescriptorProto descriptorProto,
       String clientId,
       String clientSecret) {
-    return createProtoStream(tableName, descriptorProto, clientId, clientSecret, DEFAULT_OPTIONS);
+    return createProtoStreamInternal(
+        tableName, descriptorProto, clientId, clientSecret, DEFAULT_OPTIONS);
   }
 
   /**
@@ -150,8 +189,26 @@ public class ZerobusSdk implements AutoCloseable {
    * @param options Configuration options for the stream.
    * @return A CompletableFuture that completes with the ZerobusProtoStream when the stream is
    *     ready.
+   * @deprecated Use {@link #streamBuilder()} instead, for example {@code
+   *     sdk.streamBuilder().table(tableName).oauth(clientId,
+   *     clientSecret).compiledProto(descriptorProto).build()}. This method will be removed in the
+   *     next major release.
    */
+  @Deprecated
   public CompletableFuture<ZerobusProtoStream> createProtoStream(
+      String tableName,
+      com.google.protobuf.DescriptorProtos.DescriptorProto descriptorProto,
+      String clientId,
+      String clientSecret,
+      StreamConfigurationOptions options) {
+    return createProtoStreamInternal(tableName, descriptorProto, clientId, clientSecret, options);
+  }
+
+  /**
+   * Shared implementation for creating a Protocol Buffer stream. Used by {@link #streamBuilder()}
+   * and the deprecated {@code createProtoStream} overloads.
+   */
+  CompletableFuture<ZerobusProtoStream> createProtoStreamInternal(
       String tableName,
       com.google.protobuf.DescriptorProtos.DescriptorProto descriptorProto,
       String clientId,
@@ -191,17 +248,15 @@ public class ZerobusSdk implements AutoCloseable {
   /**
    * Creates a new JSON stream for ingesting JSON records into a table.
    *
-   * <p>This is the recommended method for JSON ingestion as it provides a clean API without
-   * requiring Protocol Buffer types.
-   *
    * <p>Example usage:
    *
    * <pre>{@code
-   * ZerobusJsonStream stream = sdk.createJsonStream(
-   *     "catalog.schema.table",
-   *     clientId,
-   *     clientSecret
-   * ).join();
+   * ZerobusJsonStream stream = sdk.streamBuilder()
+   *     .table("catalog.schema.table")
+   *     .oauth(clientId, clientSecret)
+   *     .json()
+   *     .build()
+   *     .join();
    *
    * // Main: Ingest objects with a serializer
    * Gson gson = new Gson();
@@ -218,10 +273,14 @@ public class ZerobusSdk implements AutoCloseable {
    * @param clientId The OAuth client ID for authentication.
    * @param clientSecret The OAuth client secret for authentication.
    * @return A CompletableFuture that completes with the ZerobusJsonStream when the stream is ready.
+   * @deprecated Use {@link #streamBuilder()} instead, for example {@code
+   *     sdk.streamBuilder().table(tableName).oauth(clientId, clientSecret).json().build()}. This
+   *     method will be removed in the next major release.
    */
+  @Deprecated
   public CompletableFuture<ZerobusJsonStream> createJsonStream(
       String tableName, String clientId, String clientSecret) {
-    return createJsonStream(tableName, clientId, clientSecret, DEFAULT_OPTIONS);
+    return createJsonStreamInternal(tableName, clientId, clientSecret, DEFAULT_OPTIONS);
   }
 
   /**
@@ -232,8 +291,21 @@ public class ZerobusSdk implements AutoCloseable {
    * @param clientSecret The OAuth client secret for authentication.
    * @param options Configuration options for the stream.
    * @return A CompletableFuture that completes with the ZerobusJsonStream when the stream is ready.
+   * @deprecated Use {@link #streamBuilder()} instead, for example {@code
+   *     sdk.streamBuilder().table(tableName).oauth(clientId, clientSecret).json().build()}. This
+   *     method will be removed in the next major release.
    */
+  @Deprecated
   public CompletableFuture<ZerobusJsonStream> createJsonStream(
+      String tableName, String clientId, String clientSecret, StreamConfigurationOptions options) {
+    return createJsonStreamInternal(tableName, clientId, clientSecret, options);
+  }
+
+  /**
+   * Shared implementation for creating a JSON stream. Used by {@link #streamBuilder()} and the
+   * deprecated {@code createJsonStream} overloads.
+   */
+  CompletableFuture<ZerobusJsonStream> createJsonStreamInternal(
       String tableName, String clientId, String clientSecret, StreamConfigurationOptions options) {
 
     ensureOpen();
@@ -267,9 +339,7 @@ public class ZerobusSdk implements AutoCloseable {
    * @param options Configuration options for the stream.
    * @param <RecordType> The type of records to be ingested (must extend Message).
    * @return A CompletableFuture that completes with the ZerobusStream when the stream is ready.
-   * @deprecated Use {@link #createProtoStream(String,
-   *     com.google.protobuf.DescriptorProtos.DescriptorProto, String, String,
-   *     StreamConfigurationOptions)} instead.
+   * @deprecated Use {@link #streamBuilder()} instead.
    */
   @Deprecated
   public <RecordType extends Message> CompletableFuture<ZerobusStream<RecordType>> createStream(
@@ -314,8 +384,7 @@ public class ZerobusSdk implements AutoCloseable {
    * @param clientSecret The OAuth client secret for authentication.
    * @param <RecordType> The type of records to be ingested (must extend Message).
    * @return A CompletableFuture that completes with the ZerobusStream when the stream is ready.
-   * @deprecated Use {@link #createProtoStream(String,
-   *     com.google.protobuf.DescriptorProtos.DescriptorProto, String, String)} instead.
+   * @deprecated Use {@link #streamBuilder()} instead.
    */
   @Deprecated
   public <RecordType extends Message> CompletableFuture<ZerobusStream<RecordType>> createStream(
@@ -337,10 +406,15 @@ public class ZerobusSdk implements AutoCloseable {
    * @param clientSecret The OAuth client secret for authentication.
    * @return A CompletableFuture that completes with the ZerobusArrowStream when the stream is
    *     ready.
+   * @deprecated Use {@link #streamBuilder()} instead, for example {@code
+   *     sdk.streamBuilder().table(tableName).oauth(clientId, clientSecret).arrow(schema).build()}.
+   *     This method will be removed in the next major release.
    */
+  @Deprecated
   public CompletableFuture<ZerobusArrowStream> createArrowStream(
       String tableName, Schema schema, String clientId, String clientSecret) {
-    return createArrowStream(tableName, schema, clientId, clientSecret, DEFAULT_ARROW_OPTIONS);
+    return createArrowStreamInternal(
+        tableName, schema, clientId, clientSecret, DEFAULT_ARROW_OPTIONS);
   }
 
   /**
@@ -354,8 +428,25 @@ public class ZerobusSdk implements AutoCloseable {
    * @param options Configuration options for the Arrow stream.
    * @return A CompletableFuture that completes with the ZerobusArrowStream when the stream is
    *     ready.
+   * @deprecated Use {@link #streamBuilder()} instead, for example {@code
+   *     sdk.streamBuilder().table(tableName).oauth(clientId, clientSecret).arrow(schema).build()}.
+   *     This method will be removed in the next major release.
    */
+  @Deprecated
   public CompletableFuture<ZerobusArrowStream> createArrowStream(
+      String tableName,
+      Schema schema,
+      String clientId,
+      String clientSecret,
+      ArrowStreamConfigurationOptions options) {
+    return createArrowStreamInternal(tableName, schema, clientId, clientSecret, options);
+  }
+
+  /**
+   * Shared implementation for creating an Arrow Flight stream. Used by {@link #streamBuilder()} and
+   * the deprecated {@code createArrowStream} overloads.
+   */
+  CompletableFuture<ZerobusArrowStream> createArrowStreamInternal(
       String tableName,
       Schema schema,
       String clientId,
@@ -683,7 +774,8 @@ public class ZerobusSdk implements AutoCloseable {
 
   // Native methods implemented in Rust
 
-  private static native long nativeCreate(String serverEndpoint, String unityCatalogEndpoint);
+  private static native long nativeCreate(
+      String serverEndpoint, String unityCatalogEndpoint, String applicationName);
 
   private static native void nativeDestroy(long handle);
 

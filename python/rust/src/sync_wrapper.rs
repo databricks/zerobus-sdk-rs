@@ -283,7 +283,12 @@ pub struct ZerobusSdk {
 #[pymethods]
 impl ZerobusSdk {
     #[new]
-    fn new(host: String, unity_catalog_url: String) -> PyResult<Self> {
+    #[pyo3(signature = (host, unity_catalog_url, application_name = None))]
+    fn new(
+        host: String,
+        unity_catalog_url: String,
+        application_name: Option<String>,
+    ) -> PyResult<Self> {
         let runtime = Arc::new(
             tokio::runtime::Builder::new_multi_thread()
                 .enable_all()
@@ -299,12 +304,15 @@ impl ZerobusSdk {
         let py_version = env!("CARGO_PKG_VERSION");
         let sdk_identifier = format!("{}/{}", SDK_IDENTIFIER_PREFIX, py_version);
 
-        let inner = RustSdk::builder()
+        let builder = RustSdk::builder()
             .endpoint(host)
             .unity_catalog_url(unity_catalog_url)
-            .sdk_identifier(sdk_identifier)
-            .build()
-            .map_err(map_error)?;
+            .sdk_identifier(sdk_identifier);
+        let builder = match application_name {
+            Some(application_name) => builder.application_name(application_name),
+            None => builder,
+        };
+        let inner = builder.build().map_err(map_error)?;
 
         Ok(Self {
             inner: Arc::new(RwLock::new(inner)),

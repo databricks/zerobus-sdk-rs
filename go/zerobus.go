@@ -17,9 +17,10 @@
 //
 // Create an SDK instance and stream:
 //
-//	sdk, err := zerobus.NewZerobusSdk(
+//	sdk, err := zerobus.NewZerobusSdkWithOptions(
 //	    "https://your-shard.zerobus.databricks.com",
 //	    "https://your-workspace.databricks.com",
+//	    zerobus.WithApplicationName("my-app/1.0"),
 //	)
 //	if err != nil {
 //	    log.Fatal(err)
@@ -42,14 +43,20 @@
 //
 // # Ingesting Data
 //
-// Recommended API (direct offset return):
+// Queue records in a loop, then wait once for all acknowledgments:
 //
-//	offset, err := stream.IngestRecordOffset(`{"id": 1, "message": "Hello"}`)
-//	if err != nil {
+//	for _, record := range records {
+//	    if _, err := stream.IngestRecordOffset(record); err != nil {
+//	        log.Fatal(err)
+//	    }
+//	}
+//	if err := stream.Flush(); err != nil {
 //	    log.Fatal(err)
 //	}
 //
-// Legacy API (still supported but deprecated):
+// The legacy API is still supported but deprecated. Awaiting each record is
+// appropriate only for low-volume cases that require confirmation before
+// continuing:
 //
 //	ack, err := stream.IngestRecord(`{"id": 1, "message": "Hello"}`)
 //	if err != nil {
@@ -103,20 +110,18 @@
 //
 // # Performance
 //
-// For high throughput, use goroutines for concurrent ingestion:
+// Ingestion is asynchronous and pipelined. Queue records without waiting in
+// the loop, then call Flush once. Prefer IngestRecordsOffset for hot paths to
+// amortize cgo overhead:
 //
-//	var wg sync.WaitGroup
-//	for i := 0; i < 10000; i++ {
-//	    wg.Add(1)
-//	    go func(data []byte) {
-//	        defer wg.Done()
-//	        offset, err := stream.IngestRecordOffset(data)
-//	        if err != nil {
-//	            log.Printf("Failed to ingest: %v", err)
-//	        }
-//	    }(dataToIngest)
+//	for _, data := range records {
+//	    if _, err := stream.IngestRecordOffset(data); err != nil {
+//	        log.Fatal(err)
+//	    }
 //	}
-//	wg.Wait()
+//	if err := stream.Flush(); err != nil {
+//	    log.Fatal(err)
+//	}
 //
 // # Static Linking
 //
@@ -128,6 +133,8 @@ package zerobus
 
 import (
 	"runtime"
+	"strings"
+	"unicode/utf8"
 	"unsafe"
 )
 
@@ -143,6 +150,28 @@ type ZerobusStream struct {
 	ptr unsafe.Pointer
 }
 
+type sdkOptions struct {
+	applicationName string
+}
+
+// SdkOption configures a ZerobusSdk created with NewZerobusSdkWithOptions.
+type SdkOption func(*sdkOptions)
+
+// WithApplicationName appends a caller-supplied identifier, such as
+// "my-app/1.0", to the HTTP user-agent header. Leading and trailing whitespace
+// is trimmed, and empty or whitespace-only names are ignored. The final value
+// is "zerobus-sdk-go/<version> <name>".
+//
+// An invalid UTF-8 name, a name containing a NUL byte, or a name that is not a
+// valid HTTP header value causes NewZerobusSdkWithOptions to return a
+// non-retryable construction error.
+func WithApplicationName(name string) SdkOption {
+	name = strings.TrimSpace(name)
+	return func(options *sdkOptions) {
+		options.applicationName = name
+	}
+}
+
 // NewZerobusSdk creates a new SDK instance.
 //
 // Parameters:
@@ -153,7 +182,60 @@ type ZerobusStream struct {
 //   - Invalid endpoint URLs
 //   - Unable to extract workspace ID from Unity Catalog URL
 func NewZerobusSdk(zerobusEndpoint, unityCatalogURL string) (*ZerobusSdk, error) {
-	ptr, err := sdkNew(zerobusEndpoint, unityCatalogURL)
+	return newZerobusSdk(zerobusEndpoint, unityCatalogURL, sdkOptions{})
+}
+
+// NewZerobusSdkWithOptions creates an SDK instance with optional settings.
+// Use WithApplicationName to add an application identifier to the user-agent
+// header sent on every Zerobus request.
+//
+// Application names are trimmed before use, and blank values are ignored.
+// Invalid UTF-8, NUL bytes, and values that are invalid in an HTTP header cause
+// this function to return a non-retryable construction error.
+//
+// Existing callers that do not need options should continue to use
+// NewZerobusSdk.
+//
+// Example:
+//
+//	sdk, err := zerobus.NewZerobusSdkWithOptions(
+//	    "https://workspace.zerobus.databricks.com",
+//	    "https://workspace.cloud.databricks.com",
+//	    zerobus.WithApplicationName("my-app/1.0"),
+//	)
+func NewZerobusSdkWithOptions(
+	zerobusEndpoint string,
+	unityCatalogURL string,
+	opts ...SdkOption,
+) (*ZerobusSdk, error) {
+	var resolved sdkOptions
+	for _, opt := range opts {
+		if opt != nil {
+			opt(&resolved)
+		}
+	}
+	return newZerobusSdk(zerobusEndpoint, unityCatalogURL, resolved)
+}
+
+func newZerobusSdk(
+	zerobusEndpoint string,
+	unityCatalogURL string,
+	opts sdkOptions,
+) (*ZerobusSdk, error) {
+	if strings.IndexByte(opts.applicationName, 0) >= 0 {
+		return nil, &ZerobusError{
+			Message:     "application name must not contain a NUL byte",
+			IsRetryable: false,
+		}
+	}
+	if !utf8.ValidString(opts.applicationName) {
+		return nil, &ZerobusError{
+			Message:     "application name must be valid UTF-8",
+			IsRetryable: false,
+		}
+	}
+
+	ptr, err := sdkNew(zerobusEndpoint, unityCatalogURL, opts)
 	if err != nil {
 		return nil, err
 	}
@@ -249,6 +331,13 @@ func (s *ZerobusSdk) CreateStream(
 //	        "x-databricks-zerobus-table-name": "catalog.schema.table",
 //	    }, nil
 //	}
+//
+// The SDK owns the provider for the stream's lifetime and releases it only
+// after any in-flight GetHeaders call (including one during connection
+// recovery) has returned — so a slow GetHeaders racing stream teardown is
+// never invoked on a released provider. GetHeaders may be called from an
+// internal SDK worker thread, so implementations must be safe to use from a
+// goroutine other than the one that created the stream.
 type HeadersProvider interface {
 	// GetHeaders returns the headers to be used for authentication.
 	// This method will be called by the SDK when authentication is needed.
@@ -366,7 +455,15 @@ func (st *ZerobusStream) IngestRecord(payload interface{}) (*RecordAck, error) {
 
 // IngestRecordOffset ingests a record into the stream and returns the offset directly.
 // This is the preferred API for ingesting records.
-// This method blocks until the record is queued and returns the offset.
+// This method returns as soon as the record is queued; the SDK sends it and
+// tracks its acknowledgment in the background.
+//
+// The idiomatic flow is to ingest in a loop and call Flush() to confirm
+// durability. Use WaitForOffset() with the returned offset when you need to
+// confirm a specific record before continuing (acks are ordered, so the last
+// offset confirms the whole group); prefer Flush() for bulk durability. Avoid
+// calling WaitForOffset() after every record in a tight loop, since that limits
+// throughput to one record per round-trip.
 //
 // The payload parameter accepts either:
 //   - []byte for Protocol Buffer encoded records
@@ -380,17 +477,15 @@ func (st *ZerobusStream) IngestRecord(payload interface{}) (*RecordAck, error) {
 //
 // Examples:
 //
-//	// Ingest records and get offsets directly
-//	offset1, err := stream.IngestRecordOffset(`{"field": "value1"}`)
-//	if err != nil {
+//	// High throughput: ingest in a loop without waiting, then flush once.
+//	for _, r := range records {
+//	    if _, err := stream.IngestRecordOffset(r); err != nil {
+//	        log.Fatal(err)
+//	    }
+//	}
+//	if err := stream.Flush(); err != nil {
 //	    log.Fatal(err)
 //	}
-//
-//	// For concurrent ingestion, use goroutines
-//	go func() {
-//	    offset, err := stream.IngestRecordOffset(data)
-//	    // handle result
-//	}()
 func (st *ZerobusStream) IngestRecordOffset(payload interface{}) (int64, error) {
 	if st.ptr == nil {
 		return -1, &ZerobusError{Message: "Stream has been closed", IsRetryable: false}
@@ -508,7 +603,16 @@ func (st *ZerobusStream) IngestRecordsNowait(records []interface{}) error {
 
 // IngestRecordsOffset ingests a batch of records into the stream and returns one offset for the entire batch.
 // This is an optimized API for ingesting multiple records at once.
-// This method blocks until all records are queued and returns the batch offset.
+// This method returns as soon as the batch is queued; the server round-trip
+// happens in the background.
+//
+// Prefer this batch API over single-record calls in hot paths. The idiomatic
+// flow is to ingest your batches in a loop and call Flush() to confirm
+// durability. Use WaitForOffset() with a returned offset when you need to
+// confirm a specific batch before continuing (acks are ordered, so the last
+// offset confirms the whole group); prefer Flush() for bulk durability. Avoid
+// calling WaitForOffset() after every batch in a tight loop, since that limits
+// throughput to one batch per round-trip.
 //
 // The records parameter accepts a slice where each element is either:
 //   - []byte for Protocol Buffer encoded records
@@ -587,15 +691,25 @@ func (st *ZerobusStream) IngestRecordsOffset(records []interface{}) (int64, erro
 // WaitForOffset blocks until the server acknowledges the record at the specified offset.
 // This allows explicit control over when to wait for acknowledgments.
 //
-// Use this with offsets returned from IngestRecordOffset() to wait for specific records
-// to be durably written without waiting for all pending records (unlike Flush).
+// Use this with offsets returned from IngestRecordOffset() to confirm a specific
+// record before continuing, without waiting for all pending records (unlike Flush).
+// Acks are ordered, so waiting on the last offset of a group confirms all prior
+// offsets too.
+//
+// Use this when you need to confirm a specific record; prefer Flush() for bulk
+// durability (ingest in a loop, then Flush() once). Avoid calling WaitForOffset()
+// after every record in a tight loop, since that limits throughput to one record
+// per round-trip.
 //
 // Example:
 //
-//	offset, _ := stream.IngestRecordOffset(data)
-//	// Do other work...
-//	if err := stream.WaitForOffset(offset); err != nil {
-//	    log.Printf("Record at offset %d failed: %v", offset, err)
+//	// Confirm a group of records with a single wait on the last offset.
+//	var last int64
+//	for _, r := range records {
+//	    last, _ = stream.IngestRecordOffset(r)
+//	}
+//	if err := stream.WaitForOffset(last); err != nil { // confirms all prior offsets too
+//	    log.Printf("Record at offset %d failed: %v", last, err)
 //	}
 func (st *ZerobusStream) WaitForOffset(offset int64) error {
 	if st.ptr == nil {
@@ -643,12 +757,20 @@ func (st *ZerobusStream) GetUnackedRecords() ([]interface{}, error) {
 // Flush blocks until all pending records have been acknowledged by the server.
 // This ensures durability guarantees before proceeding.
 //
+// This is the idiomatic way to confirm durability for high-throughput ingestion:
+// ingest many records via IngestRecordOffset()/IngestRecordsOffset() in a loop,
+// then call Flush() once. Use WaitForOffset() instead when you only need to
+// confirm a specific record rather than everything queued so far.
+//
 // Returns an error if:
 //   - Flush timeout is exceeded
 //   - Any record fails with a non-retryable error
 //
 // Example:
 //
+//	for _, r := range records {
+//	    stream.IngestRecordOffset(r)
+//	}
 //	if err := stream.Flush(); err != nil {
 //	    log.Printf("Flush failed: %v", err)
 //	}

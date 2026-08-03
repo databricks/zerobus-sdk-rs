@@ -14,6 +14,7 @@ A high-performance Python client for streaming data ingestion into Databricks De
 - [Quick Start](#quick-start)
   - [JSON (Simplest)](#option-1-json-simplest)
   - [Protocol Buffers](#option-2-protocol-buffers)
+  - [Acknowledgments and throughput](#acknowledgments-and-throughput)
 - [Configuration](#configuration)
 - [Error Handling](#error-handling)
 - [Handling Stream Failures](#handling-stream-failures)
@@ -93,8 +94,8 @@ All core ingestion functionality (gRPC, OAuth, stream management) is handled by 
 
 ### Choose Your Serialization Format
 
-1. **JSON** - Simple, no schema compilation needed. Good for getting started.
-2. **Protocol Buffers** - Strongly-typed schemas, more efficient over the wire.
+1. **Protocol Buffers** (Recommended) - Strongly-typed schemas with compact binary encoding. More efficient over the wire and the best choice for production and high-throughput workloads.
+2. **JSON** - Simple, no schema compilation needed. Good for getting started or quick prototyping, but each record carries higher per-record overhead (text serialization plus UTF-8 validation), so it is slower than Protocol Buffers for high-volume ingestion.
 
 ### Option 1: JSON (Simplest)
 
@@ -153,6 +154,21 @@ async def main():
 
 asyncio.run(main())
 ```
+
+### Acknowledgments and throughput
+
+Ingestion is asynchronous. `ingest_record_offset()` returns as soon as the record is
+queued; the SDK sends it and tracks its acknowledgment in the background. To confirm
+records are durably committed, call `flush()` — it returns once everything queued so far
+is acknowledged. The idiomatic flow is **ingest in a loop, then `flush()`** (once for a
+bounded batch, or periodically for a long-running stream); or register an
+[`AckCallback`](#ackcallback) to be notified as records commit.
+
+Each ingest also returns the record's offset, and `wait_for_offset(offset)` blocks until
+that offset is acknowledged — handy when a specific record must be confirmed before
+continuing (acks are ordered, so waiting on the last offset confirms the whole run). Just
+avoid calling `wait_for_offset()` after every record in a tight loop, since that limits
+throughput to one record per round-trip.
 
 ### Option 2: Protocol Buffers
 
@@ -289,7 +305,7 @@ stream = sdk.create_stream(client_id, client_secret, table_properties, options)
 | `recovery` | `bool` | `True` | Enable automatic stream recovery |
 | `recovery_timeout_ms` | `int` | `15000` | Timeout for recovery operations (ms) |
 | `recovery_backoff_ms` | `int` | `2000` | Delay between recovery attempts (ms) |
-| `recovery_retries` | `int` | `3` | Maximum number of recovery attempts |
+| `recovery_retries` | `int` | `4` | Maximum number of recovery attempts |
 | `flush_timeout_ms` | `int` | `300000` | Timeout for flush operations (ms) |
 | `server_lack_of_ack_timeout_ms` | `int` | `60000` | Server acknowledgment timeout (ms) |
 | `stream_paused_max_wait_time_ms` | `Optional[int]` | `None` | Max wait during graceful stream close. `None` = full server duration, `0` = immediate, `x` = min(x, server_duration) |
@@ -352,11 +368,35 @@ for batch in unacked_batches:
 
 ## Performance Tips
 
+The idiomatic flow is to ingest in a loop and `flush()` once — ingest calls queue
+immediately and the SDK acknowledges records in the background, so a single `flush()`
+confirms everything queued so far. The ack watermark is monotonic, so if you want a
+durability checkpoint mid-stream, waiting on the last offset returned confirms every
+prior record. In async code, an [`AckCallback`](#ackcallback) tracks durability without
+blocking. Calling `wait_for_offset()` after every record in a tight loop limits
+throughput to one record per round-trip, so save it for confirming a specific record.
+
 | Method | Throughput | Use case |
 |--------|------------|----------|
 | `ingest_record_nowait()` | **Highest** | Fire-and-forget: no offset returned; maximum throughput when you do not need per-record ack tracking in the hot path |
-| `ingest_record_offset()` | Medium | Recommended for most apps: returns an offset after queueing; call `wait_for_offset()` when you need durability confirmation |
+| `ingest_record_offset()` | Medium | Recommended for most apps: returns an offset after queueing. Ingest in a loop, then `flush()` once |
 | `ingest_record()` | Low | **Deprecated** — prefer offset-based APIs |
+
+**Idiomatic flow:**
+
+```python
+for record in records:
+    await stream.ingest_record_offset(record)   # queues immediately, no round-trip
+await stream.flush()                            # one wait for everything
+```
+
+**Confirming a specific record** (waiting on the last offset confirms all prior records):
+
+```python
+for record in records:
+    offset = await stream.ingest_record_offset(record)
+await stream.wait_for_offset(offset)            # confirm the run before continuing
+```
 
 ## API Reference
 
@@ -365,8 +405,10 @@ for batch in unacked_batches:
 Main entry point. Sync: `from zerobus.sdk.sync import ZerobusSdk` / Async: `from zerobus.sdk.aio import ZerobusSdk`
 
 ```python
-sdk = ZerobusSdk(server_endpoint: str, unity_catalog_endpoint: str)
+sdk = ZerobusSdk(server_endpoint: str, unity_catalog_endpoint: str, application_name: Optional[str] = None)
 ```
+
+`application_name` is optional; when set it is appended to the `user-agent` header on gRPC requests to the Zerobus server (not on the OAuth token requests to the login service). It follows the `"<product>/<version>"` convention (e.g. `my-app/1.0`).
 
 ```python
 # Sync
@@ -396,7 +438,8 @@ stream = await sdk.create_stream(client_id, client_secret, table_properties, opt
 - **JSON mode**: `dict` (SDK serializes) or `str` (pre-serialized JSON)
 - **Protobuf mode**: `Message` object (SDK serializes) or `bytes` (pre-serialized)
 
-**Offset tracking:**
+**Offset tracking** (use to confirm a specific record before continuing; for bulk
+durability, ingest in a loop and `flush()` once):
 
 ```python
 # Sync
@@ -409,6 +452,8 @@ offset = await stream.ingest_record_offset(record)
 # ... do other work ...
 await stream.wait_for_offset(offset)  # Block until durably written
 ```
+
+Acks are ordered, so waiting on the last offset returned confirms all prior records too.
 
 **Stream management:**
 

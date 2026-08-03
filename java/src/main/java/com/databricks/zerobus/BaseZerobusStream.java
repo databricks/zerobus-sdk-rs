@@ -21,7 +21,12 @@ import org.slf4j.LoggerFactory;
  * try-with-resources for automatic cleanup:
  *
  * <pre>{@code
- * try (ZerobusJsonStream stream = sdk.createJsonStream(...).join()) {
+ * try (ZerobusJsonStream stream = sdk.streamBuilder()
+ *         .table("catalog.schema.table")
+ *         .oauth(clientId, clientSecret)
+ *         .json()
+ *         .build()
+ *         .join()) {
  *     stream.ingestRecordOffset(record);
  * }
  * }</pre>
@@ -71,7 +76,13 @@ abstract class BaseZerobusStream implements AutoCloseable {
   /**
    * Waits for a specific offset to be acknowledged by the server.
    *
-   * @param offset the offset to wait for
+   * <p>Use this when you need to confirm a specific record before continuing. Because the
+   * acknowledgment watermark is monotonic, passing the <b>last</b> offset from an ingest loop
+   * confirms every prior record too. For confirming a whole batch, prefer {@link #flush()}; for
+   * non-blocking progress tracking, register an {@link AckCallback}. (Calling this after every
+   * record in a tight loop limits throughput to one record per round-trip.)
+   *
+   * @param offset the offset to wait for (typically the last offset returned by an ingest loop)
    * @throws ZerobusException if an error occurs or the wait times out
    */
   public void waitForOffset(long offset) throws ZerobusException {
@@ -81,6 +92,10 @@ abstract class BaseZerobusStream implements AutoCloseable {
 
   /**
    * Flushes the stream, waiting for all queued records to be acknowledged.
+   *
+   * <p>This is the idiomatic way to confirm durability: ingest in a loop, then call {@code flush()}
+   * once (after a bounded batch, or periodically for a long-running stream). It returns once
+   * everything queued so far is acknowledged.
    *
    * @throws ZerobusException if an error occurs or the flush times out
    */

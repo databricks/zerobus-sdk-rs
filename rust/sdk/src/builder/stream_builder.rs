@@ -27,7 +27,9 @@ use crate::databricks::zerobus::RecordType;
 use crate::headers_provider::NoAuthHeadersProvider;
 use crate::headers_provider::{HeadersProvider, OAuthHeadersProvider};
 use crate::stream_configuration::StreamConfigurationOptions;
-use crate::{TableProperties, ZerobusError, ZerobusResult, ZerobusSdk, ZerobusStream};
+use crate::{
+    MessageDescriptor, TableProperties, ZerobusError, ZerobusResult, ZerobusSdk, ZerobusStream,
+};
 
 #[cfg(feature = "arrow-flight")]
 use crate::arrow_configuration::ArrowStreamConfigurationOptions;
@@ -49,6 +51,7 @@ enum AuthConfig {
 enum FormatConfig {
     Json,
     CompiledProto(Box<prost_types::DescriptorProto>),
+    DynamicProto(MessageDescriptor),
     #[cfg(feature = "arrow-flight")]
     Arrow(Arc<ArrowSchema>),
 }
@@ -114,6 +117,7 @@ impl fmt::Debug for StreamBuilder<'_> {
         let format_kind = match &self.format {
             Some(FormatConfig::Json) => "Json",
             Some(FormatConfig::CompiledProto(_)) => "CompiledProto",
+            Some(FormatConfig::DynamicProto(_)) => "DynamicProto",
             #[cfg(feature = "arrow-flight")]
             Some(FormatConfig::Arrow(_)) => "Arrow",
             None => "None",
@@ -194,6 +198,21 @@ impl<'a> StreamBuilder<'a> {
         self
     }
 
+    /// Select dynamic protobuf record format, for a schema known only at runtime.
+    ///
+    /// Takes a resolved [`MessageDescriptor`](crate::MessageDescriptor). Get one
+    /// from [`message_descriptor`](crate::message_descriptor), which resolves a
+    /// [`prost_types::DescriptorProto`] (built with
+    /// [`crate::schema::descriptor_from_uc_columns`] or fetched from Unity
+    /// Catalog), or from your own [`prost_reflect::DescriptorPool`].
+    ///
+    /// Fill records with [`DynamicRecord`](crate::DynamicRecord). Wire-identical to
+    /// [`compiled_proto`](Self::compiled_proto).
+    pub fn dynamic_proto(mut self, descriptor: MessageDescriptor) -> Self {
+        self.format = Some(FormatConfig::DynamicProto(descriptor));
+        self
+    }
+
     /// Select Arrow Flight record format.
     #[cfg(feature = "arrow-flight")]
     pub fn arrow(mut self, schema: Arc<ArrowSchema>) -> Self {
@@ -264,6 +283,23 @@ impl<'a> StreamBuilder<'a> {
     /// Set the maximum number of in-flight requests (gRPC streams only).
     pub fn max_inflight_requests(mut self, n: usize) -> Self {
         self.grpc_config.max_inflight_requests = n;
+        self
+    }
+
+    /// Set the maximum total encoded record byte size allowed per ingest call
+    /// (gRPC JSON/proto streams only).
+    ///
+    /// This is the sum of all record bytes passed to a single ingest call.
+    /// Calls exceeding this limit fail fast with
+    /// [`ZerobusError::InvalidArgument`] before any network I/O.
+    ///
+    /// Defaults to slightly below the 10 MiB server limit.
+    ///
+    /// Note: this setting only applies to streams built with [`build()`](Self::build).
+    /// Arrow Flight streams (built with `build_arrow()`) do not read this value
+    /// and have no client-side payload-size enforcement.
+    pub fn max_ingest_payload_bytes(mut self, bytes: usize) -> Self {
+        self.grpc_config.max_ingest_payload_bytes = bytes;
         self
     }
 
@@ -341,7 +377,7 @@ impl<'a> StreamBuilder<'a> {
         }
         if self.format.is_none() {
             return Err(ZerobusError::InvalidArgument(
-                "record format is required: call .json(), .compiled_proto(), or .arrow()".into(),
+                "record format is required: call .json(), .compiled_proto(), .dynamic_proto(), or .arrow()".into(),
             ));
         }
         Ok(())
@@ -376,9 +412,15 @@ impl<'a> StreamBuilder<'a> {
         self.validate()?;
         let headers_provider = self.resolve_headers_provider()?;
 
-        let (record_type, descriptor_proto) = match self.format {
-            Some(FormatConfig::Json) => (RecordType::Json, None),
-            Some(FormatConfig::CompiledProto(desc)) => (RecordType::Proto, Some(*desc)),
+        let (record_type, descriptor_proto, message_descriptor) = match self.format {
+            Some(FormatConfig::Json) => (RecordType::Json, None, None),
+            Some(FormatConfig::CompiledProto(desc)) => (RecordType::Proto, Some(*desc), None),
+            Some(FormatConfig::DynamicProto(md)) => {
+                // The wire descriptor is recovered from the already-resolved
+                // MessageDescriptor the caller supplied.
+                let desc = md.descriptor_proto().clone();
+                (RecordType::Proto, Some(desc), Some(md))
+            }
             #[cfg(feature = "arrow-flight")]
             Some(FormatConfig::Arrow(_)) => {
                 return Err(ZerobusError::InvalidArgument(
@@ -387,7 +429,7 @@ impl<'a> StreamBuilder<'a> {
             }
             None => {
                 return Err(ZerobusError::InvalidArgument(
-                    "record format is required: call .json() or .compiled_proto() before .build()"
+                    "record format is required: call .json(), .compiled_proto(), or .dynamic_proto() before .build()"
                         .into(),
                 ));
             }
@@ -397,6 +439,7 @@ impl<'a> StreamBuilder<'a> {
         let table_properties = TableProperties {
             table_name: self.table_name,
             descriptor_proto,
+            message_descriptor,
         };
 
         let channel = self.sdk.get_or_create_channel_zerobus_client().await?;
@@ -418,6 +461,23 @@ impl<'a> StreamBuilder<'a> {
     #[cfg(feature = "arrow-flight")]
     pub async fn build_arrow(self) -> ZerobusResult<ZerobusArrowStream> {
         self.validate()?;
+
+        // Arrow-only: a zero bound deadlocks ingest / panics the channel. Not in the
+        // shared validate() since it's irrelevant to JSON/proto build().
+        if self.arrow_config.max_inflight_batches == 0 {
+            return Err(ZerobusError::InvalidArgument(
+                "max_inflight_batches must be greater than 0".into(),
+            ));
+        }
+
+        // `max_ingest_payload_bytes` only applies to gRPC streams; warn if the
+        // user changed it from the default before building an Arrow stream.
+        if self.grpc_config.max_ingest_payload_bytes
+            != StreamConfigurationOptions::default().max_ingest_payload_bytes
+        {
+            crate::client_warnings::warn_payload_limit_ignored_for_arrow();
+        }
+
         let headers_provider = self.resolve_headers_provider()?;
 
         let schema = match self.format {
@@ -443,6 +503,7 @@ impl<'a> StreamBuilder<'a> {
         let stream = ZerobusArrowStream::new(
             &self.sdk.zerobus_endpoint,
             Arc::clone(&self.sdk.tls_config),
+            self.sdk.connector_factory.clone(),
             table_properties,
             headers_provider,
             self.arrow_config,
@@ -503,6 +564,23 @@ mod tests {
     }
 
     #[test]
+    fn dynamic_proto_sets_format_and_validates() {
+        let sdk = test_sdk();
+        let md = crate::message_descriptor(&prost_types::DescriptorProto {
+            name: Some("T".to_string()),
+            ..Default::default()
+        })
+        .unwrap();
+        let builder = sdk
+            .stream_builder()
+            .table("t")
+            .oauth("a", "b")
+            .dynamic_proto(md);
+        assert!(format!("{builder:?}").contains("DynamicProto"));
+        builder.validate().expect("validation should succeed");
+    }
+
+    #[test]
     fn any_order_format_before_auth() {
         let sdk = test_sdk();
         let _builder = sdk
@@ -550,6 +628,26 @@ mod tests {
         let builder = sdk.stream_builder().table("t").oauth("a", "b").json();
         assert_eq!(builder.grpc_config.max_inflight_requests, 1_000_000);
         assert!(builder.grpc_config.recovery);
+        assert_eq!(
+            builder.grpc_config.max_ingest_payload_bytes,
+            crate::stream_options::defaults::MAX_INGEST_PAYLOAD_BYTES
+        );
+        assert!(builder.grpc_config.max_ingest_payload_bytes < 10 * 1024 * 1024);
+    }
+
+    #[test]
+    fn max_ingest_payload_bytes_override() {
+        let sdk = test_sdk();
+        let builder = sdk
+            .stream_builder()
+            .table("t")
+            .oauth("a", "b")
+            .json()
+            .max_ingest_payload_bytes(5 * 1024 * 1024);
+        assert_eq!(
+            builder.grpc_config.max_ingest_payload_bytes,
+            5 * 1024 * 1024
+        );
     }
 
     #[tokio::test]

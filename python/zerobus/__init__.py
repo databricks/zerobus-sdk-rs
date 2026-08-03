@@ -14,7 +14,8 @@ Example (Sync):
     >>>
     >>> sdk = ZerobusSdk(
     ...     host="https://your-shard-id.zerobus.region.cloud.databricks.com",
-    ...     unity_catalog_url="https://your-workspace.cloud.databricks.com"
+    ...     unity_catalog_url="https://your-workspace.cloud.databricks.com",
+    ...     application_name="my-app/1.0",  # optional
     ... )
     >>>
     >>> props = TableProperties("catalog.schema.table")
@@ -34,7 +35,7 @@ Example (Async):
     >>> from zerobus.sdk.aio import ZerobusSdk, TableProperties
     >>>
     >>> async def main():
-    ...     sdk = ZerobusSdk(host, unity_catalog_url)
+    ...     sdk = ZerobusSdk(host, unity_catalog_url, application_name="my-app/1.0")
     ...     stream = await sdk.create_stream(props, client_id, client_secret)
     ...     offset = await stream.ingest_record_offset(b"data")
     ...     await stream.flush()
@@ -48,7 +49,7 @@ import zerobus._zerobus_core as _core
 from zerobus.sdk.shared.arrow import ArrowStreamConfigurationOptions, IPCCompression
 from zerobus.sdk.sync import ZerobusArrowStream, ZerobusSdk, ZerobusStream
 
-__version__ = "1.3.0"
+__version__ = "1.4.0"
 
 # Re-export common types
 TableProperties = _core.TableProperties

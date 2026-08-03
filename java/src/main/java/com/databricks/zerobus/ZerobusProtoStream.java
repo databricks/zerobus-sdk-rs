@@ -13,15 +13,15 @@ import java.util.Optional;
  * <p>This class provides a flexible API for Protocol Buffer ingestion with method-level generics,
  * allowing different message types to be ingested through the same stream.
  *
- * <p>Create instances using {@link ZerobusSdk#createProtoStream}:
+ * <p>Create instances using {@link ZerobusSdk#streamBuilder()}:
  *
  * <pre>{@code
- * ZerobusProtoStream stream = sdk.createProtoStream(
- *     "catalog.schema.table",
- *     MyProto.getDescriptor().toProto(),
- *     clientId,
- *     clientSecret
- * ).join();
+ * ZerobusProtoStream stream = sdk.streamBuilder()
+ *     .table("catalog.schema.table")
+ *     .oauth(clientId, clientSecret)
+ *     .compiledProto(MyProto.getDescriptor().toProto())
+ *     .build()
+ *     .join();
  *
  * // Ingest proto messages
  * long offset = stream.ingestRecordOffset(myProtoMessage);
@@ -37,8 +37,7 @@ import java.util.Optional;
  * stream.close();
  * }</pre>
  *
- * @see ZerobusSdk#createProtoStream(String, com.google.protobuf.DescriptorProtos.DescriptorProto,
- *     String, String)
+ * @see ZerobusSdk#streamBuilder()
  */
 public class ZerobusProtoStream extends BaseZerobusStream {
 
@@ -47,7 +46,7 @@ public class ZerobusProtoStream extends BaseZerobusStream {
   private final String clientId;
   private final String clientSecret;
 
-  /** Package-private constructor. Use {@link ZerobusSdk#createProtoStream} to create instances. */
+  /** Package-private constructor. Use {@link ZerobusSdk#streamBuilder()} to create instances. */
   ZerobusProtoStream(
       long nativeHandle,
       String tableName,
@@ -84,6 +83,10 @@ public class ZerobusProtoStream extends BaseZerobusStream {
    * <p>This is the main method for ingesting proto records. The message is automatically serialized
    * to bytes.
    *
+   * <p>Returns as soon as the record is queued; the SDK sends it and tracks its acknowledgment in
+   * the background. The idiomatic flow is to call this in a loop, then confirm durability once via
+   * {@link #flush()} (or {@link #waitForOffset(long)} on the last returned offset).
+   *
    * @param record the Protocol Buffer message to ingest
    * @param <T> the message type
    * @return the offset ID assigned to this record
@@ -115,6 +118,10 @@ public class ZerobusProtoStream extends BaseZerobusStream {
    * Ingests multiple Protocol Buffer messages and returns the batch offset.
    *
    * <p>This is the main method for batch ingestion. All messages are automatically serialized.
+   *
+   * <p>Returns as soon as the batch is queued. The idiomatic flow is to ingest your batches in a
+   * loop, then confirm durability once via {@link #flush()} (or {@link #waitForOffset(long)} on the
+   * last offset).
    *
    * @param records the Protocol Buffer messages to ingest
    * @param <T> the message type

@@ -2,6 +2,7 @@
 
 use std::collections::HashMap;
 use std::pin::Pin;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -10,11 +11,12 @@ use arrow_flight::{
     Action, ActionType, Criteria, Empty, FlightData, FlightDescriptor, FlightInfo,
     HandshakeRequest, HandshakeResponse, PutResult, SchemaResult, Ticket,
 };
-use arrow_ipc;
 use futures::Stream;
+use rcgen::{generate_simple_self_signed, CertifiedKey};
 use serde::{Deserialize, Serialize};
 use tokio::sync::{mpsc, Mutex};
 use tokio::time::sleep;
+use tonic::transport::{Identity, ServerTlsConfig};
 use tonic::{Request, Response, Status, Streaming};
 use tracing::{debug, error, info, warn};
 
@@ -57,8 +59,23 @@ pub enum MockFlightResponse {
         /// Cumulative records acknowledged.
         ack_up_to_records: u64,
     },
+    /// Acknowledgment emitted only after the client cleanly half-closes its request.
+    BatchAckAfterRequestEof {
+        ack_up_to_offset: i64,
+        ack_up_to_records: u64,
+    },
+    /// Permanent status emitted only after the client cleanly half-closes its request.
+    ErrorAfterRequestEof { status: Status },
+    /// Keep the response open after request EOF to exercise the bounded drain fallback.
+    HoldResponseAfterRequestEof,
     /// Error response - sent immediately when a batch arrives.
     Error { status: Status, delay_ms: u64 },
+    /// Reject a connection's setup: send this error instead of the ready signal on the
+    /// first (schema) message, simulating a failed reconnect. Consumes its scripted slot,
+    /// so schedule it as the response the target (reconnect) connection reaches.
+    FailSetup { status: Status },
+    /// Reject a connection's setup after a delay.
+    FailSetupAfter { status: Status, delay_ms: u64 },
     /// Close stream (drop the connection) - useful for testing recovery.
     CloseStream { delay_ms: u64 },
     /// Graceful close signal - sends a close signal with grace period duration.
@@ -88,8 +105,13 @@ pub struct MockFlightServer {
     row_count: Arc<Mutex<u64>>,
     /// Track response index across connection attempts
     response_indices: Arc<Mutex<HashMap<String, usize>>>,
-    /// Track expected offset per table (must be strictly sequential starting from 0)
-    expected_offsets: Arc<Mutex<HashMap<String, i64>>>,
+    /// Observation of every `ack_up_to_records` value emitted on the auto-ack path,
+    /// in emission order. Used by tests to assert acks are connection-relative.
+    auto_ack_records: Arc<Mutex<Vec<u64>>>,
+    /// Number of request bodies that ended with a clean client half-close.
+    request_half_closes: Arc<AtomicU64>,
+    /// Number of request bodies that ended with a transport error/reset.
+    request_resets: Arc<AtomicU64>,
 }
 
 impl MockFlightServer {
@@ -100,7 +122,9 @@ impl MockFlightServer {
             batch_count: Arc::new(Mutex::new(0)),
             row_count: Arc::new(Mutex::new(0)),
             response_indices: Arc::new(Mutex::new(HashMap::new())),
-            expected_offsets: Arc::new(Mutex::new(HashMap::new())),
+            auto_ack_records: Arc::new(Mutex::new(Vec::new())),
+            request_half_closes: Arc::new(AtomicU64::new(0)),
+            request_resets: Arc::new(AtomicU64::new(0)),
         }
     }
 
@@ -128,6 +152,20 @@ impl MockFlightServer {
         *self.row_count.lock().await
     }
 
+    /// Get every `ack_up_to_records` value emitted on the auto-ack path, in order.
+    #[allow(dead_code)]
+    pub async fn get_auto_ack_records(&self) -> Vec<u64> {
+        self.auto_ack_records.lock().await.clone()
+    }
+
+    pub fn get_request_half_close_count(&self) -> u64 {
+        self.request_half_closes.load(Ordering::Relaxed)
+    }
+
+    pub fn get_request_reset_count(&self) -> u64 {
+        self.request_resets.load(Ordering::Relaxed)
+    }
+
     /// Reset the server state
     #[allow(dead_code)]
     pub async fn reset(&self) {
@@ -138,8 +176,9 @@ impl MockFlightServer {
         *self.max_offset_received.lock().await = -1;
         *self.batch_count.lock().await = 0;
         *self.row_count.lock().await = 0;
-        let mut expected_offsets = self.expected_offsets.lock().await;
-        expected_offsets.clear();
+        self.auto_ack_records.lock().await.clear();
+        self.request_half_closes.store(0, Ordering::Relaxed);
+        self.request_resets.store(0, Ordering::Relaxed);
     }
 }
 
@@ -219,11 +258,20 @@ impl FlightService for MockFlightServer {
         let batch_count = Arc::clone(&self.batch_count);
         let row_count = Arc::clone(&self.row_count);
         let response_indices = Arc::clone(&self.response_indices);
-        let expected_offsets = Arc::clone(&self.expected_offsets);
+        let auto_ack_records = Arc::clone(&self.auto_ack_records);
+        let request_half_closes = Arc::clone(&self.request_half_closes);
+        let request_resets = Arc::clone(&self.request_resets);
 
         tokio::spawn(async move {
             let mut stream_responses: Vec<MockFlightResponse> = Vec::new();
             let mut is_first_message = true;
+            // Per-connection state, owned as locals like the real server (fresh per
+            // DoPut connection). These must not leak across reconnects or concurrent
+            // same-table streams: `expected_offset` validates wire ordering, and
+            // `connection_record_count` is the cumulative-record tracker that drives
+            // auto-acks (the server derives ack_up_to_records per connection).
+            let mut expected_offset: i64 = 0;
+            let mut connection_record_count: u64 = 0;
 
             // Load configured responses
             {
@@ -240,17 +288,48 @@ impl FlightService for MockFlightServer {
                 *indices.get(&table_name).unwrap_or(&0)
             };
 
-            // Reset expected offset to 0 for each new connection
-            {
-                let mut offsets = expected_offsets.lock().await;
-                offsets.insert(table_name.clone(), 0);
-            }
-
-            while let Ok(Some(flight_data)) = stream.message().await {
+            let clean_request_eof = loop {
+                let flight_data = match stream.message().await {
+                    Ok(Some(flight_data)) => flight_data,
+                    Ok(None) => {
+                        request_half_closes.fetch_add(1, Ordering::Relaxed);
+                        break true;
+                    }
+                    Err(error) => {
+                        request_resets.fetch_add(1, Ordering::Relaxed);
+                        warn!("Client request stream reset: {error}");
+                        break false;
+                    }
+                };
                 // Handle schema message (first message has no app_metadata or empty app_metadata)
                 if is_first_message {
                     is_first_message = false;
                     if flight_data.app_metadata.is_empty() {
+                        // A scripted FailSetup rejects this connection's setup: send the
+                        // error instead of the ready signal (simulates a reconnect failure).
+                        let setup_failure = match stream_responses.get(response_index) {
+                            Some(MockFlightResponse::FailSetup { status }) => {
+                                Some((status.clone(), 0))
+                            }
+                            Some(MockFlightResponse::FailSetupAfter { status, delay_ms }) => {
+                                Some((status.clone(), *delay_ms))
+                            }
+                            _ => None,
+                        };
+                        if let Some((status, delay_ms)) = setup_failure {
+                            response_index += 1;
+                            {
+                                let mut indices = response_indices.lock().await;
+                                indices.insert(table_name.clone(), response_index);
+                            }
+                            if delay_ms > 0 {
+                                sleep(Duration::from_millis(delay_ms)).await;
+                            }
+                            info!("Rejecting connection setup: {:?}", status);
+                            let _ = tx.send(Err(status)).await;
+                            return;
+                        }
+
                         debug!("Received schema message, sending ready signal");
                         // Send ready signal to confirm setup succeeded.
                         // This mirrors real server behavior where the server sends this after
@@ -278,30 +357,23 @@ impl FlightService for MockFlightServer {
                 if let Some(metadata) = &metadata {
                     debug!("Received batch with offset_id: {}", metadata.offset_id);
 
-                    // Validate offset is strictly sequential
-                    let expected = {
-                        let offsets = expected_offsets.lock().await;
-                        *offsets.get(&table_name).unwrap_or(&0)
-                    };
-                    if metadata.offset_id != expected {
+                    // Validate offset is strictly sequential (connection-local).
+                    if metadata.offset_id != expected_offset {
                         error!(
                             "Non-incremental offset: expected {}, got {}",
-                            expected, metadata.offset_id
+                            expected_offset, metadata.offset_id
                         );
                         let _ = tx
                             .send(Err(Status::invalid_argument(format!(
                                 "Non-incremental offset: expected {}, actual {}",
-                                expected, metadata.offset_id
+                                expected_offset, metadata.offset_id
                             ))))
                             .await;
                         return;
                     }
 
-                    // Update expected offset for next batch
-                    {
-                        let mut offsets = expected_offsets.lock().await;
-                        offsets.insert(table_name.clone(), metadata.offset_id + 1);
-                    }
+                    // Update expected offset for next batch.
+                    expected_offset = metadata.offset_id + 1;
 
                     // Update max offset
                     {
@@ -324,6 +396,10 @@ impl FlightService for MockFlightServer {
                         .map(|rb| rb.length() as u64)
                         .unwrap_or(0);
                     if rows > 0 {
+                        // Connection-local counter drives acks (mirrors the server's
+                        // per-connection cumulative tracker); the global row_count is
+                        // kept only as a cross-connection observation metric.
+                        connection_record_count += rows;
                         let mut count = row_count.lock().await;
                         *count += rows;
                     }
@@ -374,6 +450,11 @@ impl FlightService for MockFlightServer {
                                 }
                             }
                         }
+                        MockFlightResponse::BatchAckAfterRequestEof { .. }
+                        | MockFlightResponse::ErrorAfterRequestEof { .. }
+                        | MockFlightResponse::HoldResponseAfterRequestEof => {
+                            debug!("Waiting for request EOF before sending scripted response");
+                        }
                         MockFlightResponse::Error { status, delay_ms } => {
                             // Error responses trigger immediately on first batch
                             if *delay_ms > 0 {
@@ -387,6 +468,31 @@ impl FlightService for MockFlightServer {
                                 indices.insert(table_name.clone(), response_index);
                             }
                             let _ = tx.send(Err(status.clone())).await;
+                            return;
+                        }
+                        MockFlightResponse::FailSetup { status } => {
+                            // Only meaningful at connection setup; if reached here, the
+                            // scripting is off — fail the connection with the error.
+                            let status = status.clone();
+                            response_index += 1;
+                            {
+                                let mut indices = response_indices.lock().await;
+                                indices.insert(table_name.clone(), response_index);
+                            }
+                            let _ = tx.send(Err(status)).await;
+                            return;
+                        }
+                        MockFlightResponse::FailSetupAfter { status, delay_ms } => {
+                            if *delay_ms > 0 {
+                                sleep(Duration::from_millis(*delay_ms)).await;
+                            }
+                            let status = status.clone();
+                            response_index += 1;
+                            {
+                                let mut indices = response_indices.lock().await;
+                                indices.insert(table_name.clone(), response_index);
+                            }
+                            let _ = tx.send(Err(status)).await;
                             return;
                         }
                         MockFlightResponse::CloseStream { delay_ms } => {
@@ -446,10 +552,10 @@ impl FlightService for MockFlightServer {
                 } else {
                     // Auto-ack if no more configured responses
                     if let Some(metadata) = metadata {
-                        let records = {
-                            let count = row_count.lock().await;
-                            *count
-                        };
+                        // Use the connection-local record count so acks are
+                        // connection-relative, matching the real server.
+                        let records = connection_record_count;
+                        auto_ack_records.lock().await.push(records);
                         let ack_metadata = FlightAckMetadata {
                             ack_up_to_offset: metadata.offset_id,
                             ack_up_to_records: records,
@@ -468,6 +574,47 @@ impl FlightService for MockFlightServer {
                             return;
                         }
                     }
+                }
+            };
+
+            if clean_request_eof {
+                match stream_responses.get(response_index) {
+                    Some(MockFlightResponse::BatchAckAfterRequestEof {
+                        ack_up_to_offset,
+                        ack_up_to_records,
+                    }) => {
+                        let metadata = FlightAckMetadata {
+                            ack_up_to_offset: *ack_up_to_offset,
+                            ack_up_to_records: *ack_up_to_records,
+                        };
+                        let _ = tx
+                            .send(Ok(PutResult {
+                                app_metadata: serde_json::to_vec(&metadata).unwrap().into(),
+                            }))
+                            .await;
+                        response_index += 1;
+                        response_indices
+                            .lock()
+                            .await
+                            .insert(table_name.clone(), response_index);
+                    }
+                    Some(MockFlightResponse::ErrorAfterRequestEof { status }) => {
+                        let _ = tx.send(Err(status.clone())).await;
+                        response_index += 1;
+                        response_indices
+                            .lock()
+                            .await
+                            .insert(table_name.clone(), response_index);
+                    }
+                    Some(MockFlightResponse::HoldResponseAfterRequestEof) => {
+                        response_index += 1;
+                        response_indices
+                            .lock()
+                            .await
+                            .insert(table_name.clone(), response_index);
+                        std::future::pending::<()>().await;
+                    }
+                    _ => {}
                 }
             }
 
@@ -503,6 +650,28 @@ impl FlightService for MockFlightServer {
 /// Helper function to create a mock Flight server and return its address
 pub async fn start_mock_flight_server(
 ) -> Result<(MockFlightServer, String), Box<dyn std::error::Error>> {
+    start_mock_flight_server_inner(None, "http", "127.0.0.1").await
+}
+
+/// Starts the mock Flight server with a runtime-generated TLS identity.
+#[allow(dead_code)]
+pub async fn start_mock_tls_flight_server(
+) -> Result<(MockFlightServer, String, Vec<u8>), Box<dyn std::error::Error>> {
+    let CertifiedKey { cert, key_pair } =
+        generate_simple_self_signed(vec!["localhost".to_string()])?;
+    let cert_pem = cert.pem();
+    let identity = Identity::from_pem(cert_pem.as_bytes(), key_pair.serialize_pem().as_bytes());
+    let tls = ServerTlsConfig::new().identity(identity);
+    let (server, server_url) =
+        start_mock_flight_server_inner(Some(tls), "https", "localhost").await?;
+    Ok((server, server_url, cert_pem.into_bytes()))
+}
+
+async fn start_mock_flight_server_inner(
+    tls: Option<ServerTlsConfig>,
+    scheme: &str,
+    endpoint_host: &str,
+) -> Result<(MockFlightServer, String), Box<dyn std::error::Error>> {
     info!("Starting mock Arrow Flight server");
     let mock_server = MockFlightServer::new();
     let server_clone = MockFlightServer {
@@ -511,18 +680,24 @@ pub async fn start_mock_flight_server(
         batch_count: Arc::clone(&mock_server.batch_count),
         row_count: Arc::clone(&mock_server.row_count),
         response_indices: Arc::clone(&mock_server.response_indices),
-        expected_offsets: Arc::clone(&mock_server.expected_offsets),
+        auto_ack_records: Arc::clone(&mock_server.auto_ack_records),
+        request_half_closes: Arc::clone(&mock_server.request_half_closes),
+        request_resets: Arc::clone(&mock_server.request_resets),
     };
 
     let addr: std::net::SocketAddr = "127.0.0.1:0".parse()?;
     let listener = tokio::net::TcpListener::bind(addr).await?;
     let local_addr = listener.local_addr()?;
-    let server_url = format!("http://{}", local_addr);
+    let server_url = format!("{}://{}:{}", scheme, endpoint_host, local_addr.port());
     info!("Mock Flight server will listen on: {}", server_url);
 
+    let mut server = tonic::transport::Server::builder();
+    if let Some(tls) = tls {
+        server = server.tls_config(tls)?;
+    }
+    let router = server.add_service(FlightServiceServer::new(server_clone));
     tokio::spawn(async move {
-        if let Err(e) = tonic::transport::Server::builder()
-            .add_service(FlightServiceServer::new(server_clone))
+        if let Err(e) = router
             .serve_with_incoming(tokio_stream::wrappers::TcpListenerStream::new(listener))
             .await
         {

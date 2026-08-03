@@ -400,6 +400,13 @@ impl ZerobusStream {
     /// This is the recommended API for high-throughput scenarios where you want to
     /// decouple record ingestion from acknowledgment tracking.
     ///
+    /// **Acknowledgments:** the idiomatic flow is to ingest in a loop and then `flush()`
+    /// once to confirm everything queued so far. The returned offset, together with
+    /// `waitForOffset()`, lets you confirm a specific record when you need it (acks are
+    /// ordered, so the last offset confirms the whole run) — prefer `flush()` for bulk.
+    /// Avoid calling `waitForOffset()` after every record in a tight loop, since that
+    /// limits throughput to one record per round-trip.
+    ///
     /// # Arguments
     ///
     /// * `payload` - The record data (Buffer, string, protobuf message, or plain object)
@@ -412,11 +419,14 @@ impl ZerobusStream {
     /// # Example
     ///
     /// ```typescript
-    /// // Promise resolves immediately with offset (before server ack)
-    /// const offset1 = await stream.ingestRecordOffset(record1);
-    /// const offset2 = await stream.ingestRecordOffset(record2);
-    /// // Wait for both to be acknowledged
-    /// await stream.waitForOffset(offset2);
+    /// // High-throughput pattern: ingest in a loop, wait once at the end.
+    /// let lastOffset: bigint | null = null;
+    /// for (const record of records) {
+    ///   lastOffset = await stream.ingestRecordOffset(record); // resolves on queue, no round-trip
+    /// }
+    /// // The ack watermark is monotonic: waiting on the last offset confirms all prior records.
+    /// if (lastOffset !== null) await stream.waitForOffset(lastOffset);
+    /// // Or simply: await stream.flush();
     /// ```
     #[napi(ts_return_type = "Promise<bigint>")]
     pub fn ingest_record_offset(&self, env: Env, payload: Unknown) -> Result<JsObject> {
@@ -454,6 +464,12 @@ impl ZerobusStream {
     /// the batch is queued, without waiting for server acknowledgment. Use
     /// `waitForOffset()` to wait for acknowledgment when needed.
     ///
+    /// **Acknowledgments:** the idiomatic flow is to ingest your batches in a loop and
+    /// then `flush()` once to confirm. The returned offset, together with `waitForOffset()`,
+    /// confirms a specific batch when you need it (acks are ordered, so the last offset
+    /// confirms the whole run) — prefer `flush()` for bulk. Avoid calling `waitForOffset()`
+    /// after every batch in a tight loop, since that limits throughput to one round-trip per batch.
+    ///
     /// # Arguments
     ///
     /// * `records` - Array of record data
@@ -466,11 +482,14 @@ impl ZerobusStream {
     /// # Example
     ///
     /// ```typescript
-    /// // Promise resolves immediately with offset (before server ack)
-    /// const offset = await stream.ingestRecordsOffset(batch);
-    /// if (offset !== null) {
-    ///   await stream.waitForOffset(offset);
+    /// // Ingest many batches without waiting, then flush once.
+    /// let lastOffset = null;
+    /// for (const batch of batches) {
+    ///   const offset = await stream.ingestRecordsOffset(batch); // resolves on queue
+    ///   if (offset !== null) lastOffset = offset;
     /// }
+    /// if (lastOffset !== null) await stream.waitForOffset(lastOffset);
+    /// // Or simply: await stream.flush();
     /// ```
     #[napi(ts_return_type = "Promise<bigint | null>")]
     pub fn ingest_records_offset(&self, env: Env, records: Vec<Unknown>) -> Result<JsObject> {
@@ -511,9 +530,12 @@ impl ZerobusStream {
 
     /// Waits for a specific offset to be acknowledged by the server.
     ///
-    /// Use this method with `ingestRecordOffset()` and `ingestRecordsOffset()` to
-    /// selectively wait for acknowledgments. This allows you to ingest many records
-    /// quickly and then wait only for specific offsets when needed.
+    /// Use this method with `ingestRecordOffset()` and `ingestRecordsOffset()` to confirm
+    /// a specific record before continuing. Acks are ordered, so waiting on the LAST offset
+    /// confirms every prior record too — you never need to wait on intermediate offsets.
+    /// For confirming a bulk run, `flush()` is usually simpler; reach for `waitForOffset()`
+    /// when one particular record must be confirmed. Avoid calling it after every record in
+    /// a tight loop, since that limits throughput to one record per round-trip.
     ///
     /// # Arguments
     ///
@@ -527,12 +549,12 @@ impl ZerobusStream {
     /// # Example
     ///
     /// ```typescript
-    /// const offsets = [];
+    /// let lastOffset: bigint | null = null;
     /// for (const record of records) {
-    ///   offsets.push(await stream.ingestRecordOffset(record));
+    ///   lastOffset = await stream.ingestRecordOffset(record); // no per-record wait
     /// }
-    /// // Wait for the last offset (implies all previous are also acknowledged)
-    /// await stream.waitForOffset(offsets[offsets.length - 1]);
+    /// // Wait for the last offset only (implies all previous are also acknowledged).
+    /// if (lastOffset !== null) await stream.waitForOffset(lastOffset);
     /// ```
     #[napi(ts_return_type = "Promise<void>")]
     pub fn wait_for_offset(&self, env: Env, offset_id: BigInt) -> Result<JsObject> {
@@ -559,6 +581,11 @@ impl ZerobusStream {
     ///
     /// This method ensures all previously ingested records have been sent to the server
     /// and acknowledged. It's useful for checkpointing or ensuring data durability.
+    ///
+    /// This is the idiomatic way to confirm records ingested via `ingestRecordOffset()` /
+    /// `ingestRecordsOffset()`: ingest in a loop, then `flush()` once (for a bounded batch,
+    /// or periodically for a long-running stream). It resolves once everything queued so
+    /// far is acknowledged.
     ///
     /// # Errors
     ///
@@ -721,11 +748,6 @@ impl StaticHeadersProvider {
             ));
         }
 
-        // Add TS user agent if not provided
-        if !map.contains_key("user-agent") {
-            map.insert("user-agent", TS_SDK_USER_AGENT.to_string());
-        }
-
         Ok(Self { headers: map })
     }
 }
@@ -810,9 +832,15 @@ impl RustHeadersProvider for TsOAuthHeadersProvider {
         let mut headers = HashMap::new();
         headers.insert("authorization", format!("Bearer {}", token));
         headers.insert("x-databricks-zerobus-table-name", self.table_name.clone());
-        headers.insert("user-agent", TS_SDK_USER_AGENT.to_string());
         Ok(headers)
     }
+}
+
+#[napi(object)]
+#[derive(Default)]
+pub struct ZerobusSdkOptions {
+    /// Identifier appended to the `user-agent` header
+    pub application_name: Option<String>,
 }
 
 /// The main SDK for interacting with the Databricks Zerobus service.
@@ -824,7 +852,8 @@ impl RustHeadersProvider for TsOAuthHeadersProvider {
 /// ```typescript
 /// const sdk = new ZerobusSdk(
 ///   "https://workspace-id.zerobus.region.cloud.databricks.com",
-///   "https://workspace.cloud.databricks.com"
+///   "https://workspace.cloud.databricks.com",
+///   { applicationName: "my-app/1.0" }
 /// );
 ///
 /// const stream = await sdk.createStream(
@@ -852,13 +881,19 @@ impl ZerobusSdk {
     ///   (e.g., "https://workspace-id.zerobus.region.cloud.databricks.com")
     /// * `unity_catalog_url` - The Unity Catalog endpoint URL
     ///   (e.g., "https://workspace.cloud.databricks.com")
+    /// * `options` - Optional SDK configuration (see `ZerobusSdkOptions`),
+    ///   including `applicationName` for server-side attribution.
     ///
     /// # Errors
     ///
     /// - Invalid endpoint URLs
     /// - Failed to extract workspace ID from the endpoint
     #[napi(constructor)]
-    pub fn new(zerobus_endpoint: String, unity_catalog_url: String) -> Result<Self> {
+    pub fn new(
+        zerobus_endpoint: String,
+        unity_catalog_url: String,
+        options: Option<ZerobusSdkOptions>,
+    ) -> Result<Self> {
         let workspace_id = zerobus_endpoint
             .strip_prefix("https://")
             .or_else(|| zerobus_endpoint.strip_prefix("http://"))
@@ -870,9 +905,17 @@ impl ZerobusSdk {
                 )
             })?;
 
-        let inner = RustZerobusSdk::builder()
+        let options = options.unwrap_or_default();
+
+        let builder = RustZerobusSdk::builder()
             .endpoint(&zerobus_endpoint)
             .unity_catalog_url(&unity_catalog_url)
+            .sdk_identifier(TS_SDK_USER_AGENT);
+        let builder = match options.application_name {
+            Some(name) => builder.application_name(name),
+            None => builder,
+        };
+        let inner = builder
             .build()
             .map_err(|e| Error::from_reason(format!("Failed to create SDK: {}", e)))?;
 
@@ -947,19 +990,19 @@ impl ZerobusSdk {
         // Decode the optional protobuf descriptor up-front so we can hand it
         // to the builder's `.compiled_proto()` setter; the builder constructs
         // the (now-private) `TableProperties` itself.
-        let descriptor_proto: Option<prost_types::DescriptorProto> =
-            if let Some(ref desc_str) = table_properties.descriptor_proto {
-                let bytes = base64_decode(desc_str).map_err(|e| {
-                    Error::from_reason(format!("Failed to decode descriptor: {}", e))
+        let descriptor_proto: Option<prost_types::DescriptorProto> = if let Some(ref desc_str) =
+            table_properties.descriptor_proto
+        {
+            let bytes = base64_decode(desc_str)
+                .map_err(|e| Error::from_reason(format!("Failed to decode descriptor: {}", e)))?;
+            let dp: prost_types::DescriptorProto =
+                prost::Message::decode(&bytes[..]).map_err(|e| {
+                    Error::from_reason(format!("Failed to parse descriptor proto: {}", e))
                 })?;
-                let dp: prost_types::DescriptorProto = prost::Message::decode(&bytes[..])
-                    .map_err(|e| {
-                        Error::from_reason(format!("Failed to parse descriptor proto: {}", e))
-                    })?;
-                Some(dp)
-            } else {
-                None
-            };
+            Some(dp)
+        } else {
+            None
+        };
 
         let opts = options.unwrap_or(StreamConfigurationOptions {
             max_inflight_requests: None,
@@ -1438,9 +1481,7 @@ impl ZerobusArrowStream {
                 stream_ref
                     .ingest_ipc_batch(Bytes::from(buffer_vec))
                     .await
-                    .map_err(|e| {
-                        napi::Error::from_reason(format!("Failed to ingest batch: {}", e))
-                    })
+                    .map_err(|e| napi::Error::from_reason(format!("Failed to ingest batch: {}", e)))
             },
             |env, offset_id| {
                 let global: JsGlobal = env.get_global()?;

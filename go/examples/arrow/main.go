@@ -44,7 +44,13 @@ func main() {
 	}
 
 	// ── 2. Create the SDK instance ────────────────────────────────────────────
-	sdk, err := zerobus.NewZerobusSdk(endpoint, ucURL)
+	// WithApplicationName is optional. It appends an application identifier to
+	// the Go SDK user-agent sent to Zerobus.
+	sdk, err := zerobus.NewZerobusSdkWithOptions(
+		endpoint,
+		ucURL,
+		zerobus.WithApplicationName("my-app/1.0"),
+	)
 	if err != nil {
 		log.Fatalf("Failed to create SDK: %v", err)
 	}
@@ -88,7 +94,10 @@ func main() {
 		{{device: "sensor-002", temp: 22.8, humid: 59.5}},
 	}
 
-	var offsets []int64
+	// Ingest batches in a loop. IngestBatch returns as soon as the batch is
+	// queued; the SDK sends it and tracks its acknowledgment in the background.
+	// We confirm everything below with a single Flush() — keeping the ingest loop
+	// free of per-batch waits is what sustains throughput.
 	for i, readings := range batches {
 		ipcBytes := serializeBatch(schema, alloc, readings)
 
@@ -104,26 +113,20 @@ func main() {
 		}
 
 		log.Printf("Batch %d (%d rows) queued at offset %d", i, len(readings), offset)
-		offsets = append(offsets, offset)
 	}
 
 	// ── 7. Wait for server acknowledgments ───────────────────────────────────
 	//
-	// WaitForOffset blocks until the server confirms that the batch at the
-	// given offset is durably stored. Call Flush() to wait for all pending
-	// batches at once.
+	// Flush() blocks until ALL pending batches are durably stored — a single
+	// round-trip for the whole stream, and the idiomatic way to confirm
+	// durability. (If you only need to confirm up to a specific point, call
+	// WaitForOffset() on the last offset instead; the ack watermark is monotonic.)
 	log.Println("Waiting for acknowledgments...")
-	for _, offset := range offsets {
-		if err := stream.WaitForOffset(offset); err != nil {
-			log.Fatalf("WaitForOffset(%d) failed: %v", offset, err)
-		}
-		log.Printf("Offset %d acknowledged", offset)
-	}
-
-	// ── 8. Flush and close ────────────────────────────────────────────────────
 	if err := stream.Flush(); err != nil {
 		log.Fatalf("Flush failed: %v", err)
 	}
+
+	// ── 8. Close ──────────────────────────────────────────────────────────────
 	if err := stream.Close(); err != nil {
 		log.Fatalf("Close failed: %v", err)
 	}

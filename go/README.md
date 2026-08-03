@@ -13,8 +13,8 @@ We are keen to hear feedback from you on this SDK. Please [file issues](https://
 - [Overview](#overview)
 - [Features](#features)
 - [Getting Started](#getting-started)
-  - [For SDK Users (Install from pkg.go.dev)](#for-sdk-users-install-from-pkggodev)
-  - [For Contributors (Build from Source)](#for-contributors-build-from-source)
+  - [Installation](#installation)
+  - [Development Setup](#development-setup)
 - [Quick Start](#quick-start)
 - [Repository Structure](#repository-structure)
 - [How It Works](#how-it-works)
@@ -188,19 +188,22 @@ func main() {
     }
     defer stream.Close()
 
-    // 4. Send record to server and get offset
-    // The offset is a logical sequence number assigned to this record
-    offset, err := stream.IngestRecordOffset(`{"id": 1, "message": "Hello"}`)
-    if err != nil {
-        log.Fatal(err)
+    // 4. Queue records without waiting for each acknowledgment.
+    records := []string{
+        `{"id": 1, "message": "Hello"}`,
+        `{"id": 2, "message": "World"}`,
     }
-    log.Printf("Record queued for ingestion with offset %d", offset)
+    for _, record := range records {
+        if _, err := stream.IngestRecordOffset(record); err != nil {
+            log.Fatal(err)
+        }
+    }
 
-    // 5. Wait for server to acknowledge the record is durably written
-    if err := stream.WaitForOffset(offset); err != nil {
+    // 5. Wait once for every queued record to be acknowledged.
+    if err := stream.Flush(); err != nil {
         log.Fatal(err)
     }
-    log.Println("Record confirmed by server")
+    log.Println("Records confirmed by server")
 }
 ```
 
@@ -247,7 +250,9 @@ if err != nil {
 }
 log.Printf("Record queued with offset %d", offset)
 
-// 4. Optionally wait for server acknowledgment
+// 4. Optionally wait for server acknowledgment of this specific record.
+// For bulk ingestion, ingest in a loop and call stream.Flush() once instead —
+// see the "Idiomatic high-throughput flow" under Usage Guide → Ingest Data.
 if err := stream.WaitForOffset(offset); err != nil {
     log.Fatal(err)
 }
@@ -439,6 +444,25 @@ if err != nil {
 defer sdk.Free()
 ```
 
+#### Identifying your application in the user-agent header
+
+The SDK sends `zerobus-sdk-go/<version>` as the HTTP `user-agent` header on
+every Zerobus request. To append an application identifier for server-side
+attribution, use `NewZerobusSdkWithOptions` and `WithApplicationName`:
+
+```go
+sdk, err := zerobus.NewZerobusSdkWithOptions(
+    "https://your-shard-id.zerobus.region.cloud.databricks.com",
+    "https://your-workspace.cloud.databricks.com",
+    zerobus.WithApplicationName("my-app/1.0"),
+)
+```
+
+The wire value becomes `zerobus-sdk-go/<version> my-app/1.0`. By convention,
+application names use `<product>/<version>`. The existing
+`NewZerobusSdk(endpoint, unityCatalogURL)` constructor remains available when
+no options are needed.
+
 ### 2. Configure Authentication
 
 The SDK handles authentication automatically. You just need to provide your OAuth credentials:
@@ -477,21 +501,40 @@ defer stream.Close()
 
 ### 4. Ingest Data
 
-**Single record:**
+> **Acknowledgments and throughput.** Ingestion is asynchronous.
+> `IngestRecordOffset()` returns as soon as the record is queued; the SDK sends it
+> and tracks its acknowledgment in the background. To confirm records are durably
+> committed, call `Flush()` — it returns once everything queued so far is
+> acknowledged. The idiomatic flow is **ingest in a loop, then `Flush()`** (once
+> for a bounded batch, or periodically for a long-running stream). Each ingest
+> also returns the record's offset, and `WaitForOffset(offset)` blocks until that
+> offset is acknowledged — handy when a specific record must be confirmed before
+> continuing (acks are ordered, so waiting on the last offset confirms the whole
+> run). Just avoid calling `WaitForOffset()` after every record in a tight loop,
+> since that limits throughput to one record per round-trip.
+
+**Idiomatic high-throughput flow: ingest in a loop, then `Flush()` once.**
 
 ```go
-// JSON (string) - queues record and returns offset
-offset, err := stream.IngestRecordOffset(`{"id": 1, "value": "hello"}`)
-if err != nil {
+// Ingest many records without waiting between them.
+for i := 0; i < 100000; i++ {
+    jsonData := fmt.Sprintf(`{"id": %d, "timestamp": %d}`, i, time.Now().Unix())
+    if _, err := stream.IngestRecordOffset(jsonData); err != nil {
+        log.Printf("Record %d failed: %v", i, err)
+        continue
+    }
+}
+
+// Wait for ALL pending records to be acknowledged in a single call.
+if err := stream.Flush(); err != nil {
     log.Fatal(err)
 }
-log.Printf("Record queued at offset: %d", offset)
 ```
 
-**Batch ingestion for high throughput:**
+**Batch ingestion for even higher throughput:**
 
 ```go
-// Ingest multiple records at once
+// Ingest multiple records in one call (one offset for the whole batch).
 records := []interface{}{
     `{"id": 1, "value": "first"}`,
     `{"id": 2, "value": "second"}`,
@@ -502,28 +545,28 @@ if err != nil {
     log.Fatal(err)
 }
 log.Printf("Batch queued with offset: %d", batchOffset)
+// ... ingest more batches ...
+if err := stream.Flush(); err != nil { // wait for everything at the end
+    log.Fatal(err)
+}
 ```
 
-**High throughput pattern:**
+**Single record with explicit confirmation:**
 
 ```go
-// Ingest many records without waiting
-for i := 0; i < 100000; i++ {
-    jsonData := fmt.Sprintf(`{"id": %d, "timestamp": %d}`, i, time.Now().Unix())
-    offset, err := stream.IngestRecordOffset(jsonData)
-    if err != nil {
-        log.Printf("Record %d failed: %v", i, err)
-        continue
-    }
-
-    // Optional: log progress
-    if i%10000 == 0 {
-        log.Printf("Ingested %d records, latest offset: %d", i, offset)
-    }
+// JSON (string) - queues record and returns offset.
+offset, err := stream.IngestRecordOffset(`{"id": 1, "value": "hello"}`)
+if err != nil {
+    log.Fatal(err)
 }
+log.Printf("Record queued at offset: %d", offset)
 
-// Wait for all records to be acknowledged
-stream.Flush()
+// WaitForOffset confirms this specific record before continuing. For bulk
+// ingestion, prefer ingesting in a loop and calling Flush() once (see the
+// high-throughput flow above).
+if err := stream.WaitForOffset(offset); err != nil {
+    log.Fatal(err)
+}
 ```
 
 **Concurrent ingestion with goroutines:**
@@ -620,13 +663,18 @@ if err := stream.WaitForOffset(batchOffset); err != nil {
 }
 log.Println("Batch confirmed")
 
-// High-throughput:
+// Idiomatic high-throughput flow: ingest in a loop, then Flush() once to
+// confirm everything queued so far.
 for i := 0; i < 1000; i++ {
-    _, _ := stream.IngestRecordOffset(record)
+    if _, err := stream.IngestRecordOffset(record); err != nil {
+        log.Printf("Record %d failed: %v", i, err)
+    }
 }
 
-// Use Flush() to wait for all pending acknowledgments at once
-stream.Flush()
+// Use Flush() to wait for all pending acknowledgments at once.
+if err := stream.Flush(); err != nil {
+    log.Fatal(err)
+}
 ```
 
 ### 6. Error Handling
@@ -898,19 +946,20 @@ The test suite includes:
 
 1. **Reuse SDK Instances** - Create one `ZerobusSdk` per application and reuse for multiple streams
 2. **Always Close Streams** - Use `defer stream.Close()` to ensure all data is flushed
-3. **Choose the Right Ingestion Method**:
+3. **Ingest, then `Flush()`** - `IngestRecordOffset()`/`IngestRecordsOffset()` return as soon as the record is queued and track acknowledgment in the background. The idiomatic flow is to ingest in a loop and call `Flush()` to confirm durability. Use `WaitForOffset()` when a specific record must be confirmed before continuing (acks are ordered, so the last offset confirms the whole group). Just avoid calling `WaitForOffset()` after every record in a tight loop, since that limits throughput to one record per round-trip.
+4. **Choose the Right Ingestion Method**:
    - Use `IngestRecordsOffset()` for high throughput batch ingestion
    - Use `IngestRecordOffset()` when processing records individually
    - Both return offsets directly; use `WaitForOffset()` to explicitly wait for acknowledgments
    - The older `IngestRecord()` method is deprecated
-4. **Tune Inflight Limits** - Adjust `MaxInflightRequests` based on memory and throughput needs
-5. **Enable Recovery** - Always set `Recovery: true` in production environments
-6. **Use Batch Ingestion** - For high throughput, ingest many records before calling `Flush()`
-7. **Monitor Errors** - Log and alert on non-retryable errors
-8. **Use Protocol Buffers for Production** - More efficient than JSON for high-volume scenarios
-9. **Secure Credentials** - Never hardcode secrets; use environment variables or secret managers
-10. **Test Recovery** - Simulate failures to verify your error handling logic
-11. **One Stream Per Goroutine** - Don't share streams across goroutines; create separate streams for concurrent ingestion
+5. **Tune Inflight Limits** - Adjust `MaxInflightRequests` based on memory and throughput needs
+6. **Enable Recovery** - Always set `Recovery: true` in production environments
+7. **Use Batch Ingestion** - For high throughput, ingest many records before calling `Flush()`
+8. **Monitor Errors** - Log and alert on non-retryable errors
+9. **Use Protocol Buffers for Production** - More efficient than JSON for high-volume scenarios
+10. **Secure Credentials** - Never hardcode secrets; use environment variables or secret managers
+11. **Test Recovery** - Simulate failures to verify your error handling logic
+12. **One Stream Per Goroutine** - Don't share streams across goroutines; create separate streams for concurrent ingestion
 
 ## Migration Guide
 
@@ -985,12 +1034,39 @@ Main entry point for the SDK.
 **Constructor:**
 ```go
 func NewZerobusSdk(zerobusEndpoint, unityCatalogURL string) (*ZerobusSdk, error)
+
+func NewZerobusSdkWithOptions(
+    zerobusEndpoint, unityCatalogURL string,
+    opts ...SdkOption,
+) (*ZerobusSdk, error)
+
+func WithApplicationName(name string) SdkOption
 ```
 
 Creates a new SDK instance.
 
 - `zerobusEndpoint` - Zerobus gRPC service endpoint
 - `unityCatalogURL` - Unity Catalog URL for OAuth token acquisition
+- `SdkOption` - An optional SDK-construction setting passed to
+  `NewZerobusSdkWithOptions`
+- `WithApplicationName` - Appends a trimmed application identifier to the
+  default wire user-agent, `zerobus-sdk-go/<version>`; blank names are ignored
+
+The original `NewZerobusSdk` constructor remains available. Use
+`NewZerobusSdkWithOptions` when the application should identify itself in
+requests:
+
+```go
+sdk, err := zerobus.NewZerobusSdkWithOptions(
+    zerobusEndpoint,
+    unityCatalogURL,
+    zerobus.WithApplicationName("my-app/1.0"),
+)
+```
+
+This example sends `zerobus-sdk-go/<version> my-app/1.0` as the wire user-agent.
+Invalid UTF-8, NUL bytes, and values that are invalid in an HTTP header return
+a non-retryable construction error.
 
 **Methods:**
 
@@ -1119,6 +1195,12 @@ Waits for the server to acknowledge that a specific record has been durably writ
 - When you need explicit confirmation before marking work as complete
 
 Unlike `Flush()` which waits for all pending records, this waits only for a specific offset, allowing more granular control.
+
+> Use `WaitForOffset()` when a specific record must be confirmed before
+> continuing; acks are ordered, so waiting on the last offset of a group confirms
+> all prior offsets too. For bulk durability, prefer ingesting in a loop and
+> calling `Flush()` once. Avoid calling `WaitForOffset()` after every record in a
+> tight loop, since that limits throughput to one record per round-trip.
 
 **Example:**
 ```go

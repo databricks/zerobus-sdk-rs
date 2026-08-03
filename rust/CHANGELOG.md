@@ -1,5 +1,194 @@
 # Version changelog
 
+## Release v2.5.0
+
+### Major Changes
+
+### New Features and Improvements
+
+- Arrow Flight: schema-validation rejections now surface as the new
+  `ZerobusError::InvalidSchema` variant (carrying the server-reported `causes` as
+  typed `SchemaValidationCause` values) instead of a generic `CreateStreamError`.
+  This lets callers detect a table/stream schema mismatch — e.g. a column added
+  to or dropped from the target table — and re-resolve their schema rather than
+  treating it as an opaque invalid-argument failure. The variant is not
+  SDK-retryable. This applies both to initial stream setup and to mid-stream
+  reconnects: on a reconnect, the typed error flows through the terminal
+  recovery path (a non-retriable failure ends recovery and is reported as-is),
+  so a schema change detected during recovery is surfaced to a blocked
+  `wait_for_offset` / `flush` as `InvalidSchema` — letting callers rebuild the
+  stream without downtime — rather than being retried until the recovery budget
+  drains and reported as a generic failure.
+- Added dynamic protobuf support: build and ingest records against a descriptor known only at runtime (for example one fetched from Unity Catalog or built with `schema::descriptor_from_uc_columns`), with no compiled `prost::Message` type. Resolve the descriptor with `message_descriptor()`, pass it to `StreamBuilder::dynamic_proto()` (also available from `ZerobusStream::message_descriptor()`), fill records field-by-field with `DynamicRecord`, and `encode()` them (which enforces proto2 `required` fields) for ingestion. See the new `proto_dynamic_single` example.
+
+### Bug Fixes
+
+- **Proxy target TLS is now applied exactly once**: Standard and Arrow Flight streams now keep the CONNECT tunnel raw after establishing an HTTP or HTTPS proxy connection, allowing tonic to apply endpoint TLS once instead of attempting a second TLS handshake for HTTPS targets.
+- **Arrow Flight — proxy configuration now applies to all connections** (Beta): Arrow streams now honor the same `grpc_proxy`/`https_proxy`/`http_proxy`, `no_grpc_proxy`/`no_proxy`, and caller-supplied `connector_factory` policy as standard streams, including replacement channels created during recovery.
+- **Initial setup refreshes one stale credential**: an `Unauthenticated` or `PermissionDenied` response during initial stream setup previously failed after invalidating the rejected credential. When recovery is enabled and a recovery retry remains, initial setup now spends at most one such retry so the headers provider can refresh the credential; a repeated auth rejection remains terminal, and auth errors remain globally non-retryable. Provider invalidation shares the setup deadline and preserves the auth rejection if it stalls instead of consuming the remaining budget as generic timeout retries. This applies to both standard (gRPC) and Arrow Flight streams; reconnect behavior is unchanged on both.
+- **Arrow Flight — `close()` now propagates flush errors and survives cancellation** (Beta): `ZerobusArrowStream::close()` previously swallowed a failed final `flush()` and always returned `Ok(())`, contradicting its documentation and diverging from the proto stream's `close()`. It now returns the flush error after still tearing down the stream and moving pending batches to the failed set (retrievable via `get_unacked_batches()`). If the close future is cancelled after teardown starts, the stream enters a non-ingestable `Closing` state and a later `close()` resumes teardown without waiting for another flush.
+- **Arrow Flight — `max_inflight_batches` now bounds batches awaiting acknowledgment** (Beta): it previously limited only the pre-encode channel, so pending batches could grow unbounded under a slow-acking server. `ingest_batch` now holds a permit until the batch is acked, applying backpressure (it blocks) at the configured limit. `max_inflight_batches = 0` is now rejected with `InvalidArgument` instead of panicking.
+- **Arrow Flight — recovery replay is now failure-safe** (Beta): if a batch send failed while replaying after a reconnect, the pending set was drained and lost (unrecoverable via automatic replay or `get_unacked_batches()`). Pending batches (and their in-flight accounting) are now retained so the next recovery attempt replays them.
+- **Arrow Flight — no spurious ingest error during recovery handoff** (Beta): a race between starting recovery and an in-flight `ingest_batch` could make ingest return a "stream sender is closed" error for a batch that was actually retained and replayed. The pause and sender-detach is now atomic with respect to ingest, so ingest either sends or buffers (returns `Ok`).
+- **Arrow Flight — records ingested during recovery are always replayed** (Beta): `reconnect` reset the recovery counters before rebuilding the pending record ranges, so a record ingested in that window could be assigned a stale range and skipped by replay as already acknowledged. The counter reset and range rebuild are now applied atomically, so a record ingested during a recovery handoff is always replayed.
+- **Arrow Flight — unacknowledged batches no longer duplicate durably-acked records** (Beta): after a terminal failure, a partially-acknowledged auto-chunked batch was retained whole, so retrying it via `get_unacked_batches()` re-sent the already-persisted prefix. Retained batches are now sliced to their un-acknowledged suffix, and `get_unacked_batches()` returns a consistent, idempotent snapshot: closure and the terminal drain are serialized with `ingest_batch`, so a batch accepted concurrently with recovery/close is included rather than omitted from the first snapshot and revealed by a later call.
+- **Arrow Flight — `flush()`/`wait_for_offset()`/`close()` return the real terminal error** (Beta): on a terminal failure a blocked `flush()`/`wait_for_offset()` could return a generic "timed out" or "stream is closed" error instead of the actual cause. All terminal paths — mid-stream server error, server stream end, and ack timeout — now publish the error and wake waiters with it. `close()` likewise returns the terminal error when the stream was already closed by a background failure (rather than `Ok(())`), so the common ingest-then-`close()` pattern no longer hides failed batches. Additionally, an acknowledgment that lands just before the stream closes now resolves as `Ok(())` instead of a spurious closed error (which could otherwise trigger a duplicate retry of an already-durable batch).
+- **Arrow Flight — empty (zero-row) batches are rejected** (Beta): `ingest_batch()`/`ingest_ipc_batch()` now return `InvalidArgument` for a zero-row `RecordBatch`. Previously it entered the pending set but the Flight encoder emits no data message for zero rows, so it was never sent or acknowledged and `flush()`/`wait_for_offset()` would hang until they timed out.
+- **Arrow Flight — recovery surfaces the original reconnect failure** (Beta): after reconnect attempts were exhausted, the stream terminated with a synthetic "Reconnection failed" error, losing the underlying cause and its retry classification. The real reconnect error is now carried through: its message is surfaced, an auth rejection still invalidates cached credentials and retries (so a fresh token can be minted), and if retries are exhausted the original error is reported rather than a synthetic one. A single `recovery_timeout_ms` deadline bounds reconnect plus credential invalidation, and terminal cleanup is bounded separately; a stalled custom provider therefore cannot hang recovery or leave the supervisor alive indefinitely.
+- **Arrow Flight — authorization metadata is now sensitive** (Beta): Bearer credentials are marked sensitive in tonic metadata, matching the standard gRPC stream and preventing token values from appearing in metadata debug output. Invalid authorization header values now return `InvalidUCTokenError` instead of `InvalidArgument`, also matching the standard gRPC stream.
+
+### Documentation
+
+### Internal Changes
+
+- Added a test-only `test-hooks` Cargo feature that exposes deterministic synchronization seams in the Arrow stream for recovery-race tests. It has zero footprint in default and FFI builds.
+
+### Breaking Changes
+
+### Deprecations
+
+### API Changes
+
+- Added `StreamBuilder::dynamic_proto()`, `ZerobusStream::message_descriptor()`, and `ZerobusStream::new_record()`.
+- Added dynamic-proto types at the crate root: `DynamicRecord` (with `set()` and a `required`-field-checking `encode()`), the `IntoDynamicValue` conversion trait, the `message_descriptor()` resolver, the `missing_required_fields()` helper, and re-exports of `prost_reflect::{DynamicMessage, MessageDescriptor, Value}`.
+
+
+## Release v2.4.0
+
+### Major Changes
+
+### New Features and Improvements
+
+### Bug Fixes
+
+### Documentation
+
+### Internal Changes
+
+### Breaking Changes
+
+- Bumped the Arrow dependencies (`arrow-array`, `arrow-schema`, `arrow-ipc`, and
+  the vendored `arrow-flight` fork) from `58.3` to `59.1`. The vendored
+  `arrow-flight` crate was re-synced to upstream `59.1.0` with the slice-aware
+  batch-split fix (arrow-rs#9388 / #5352) re-applied. Because the SDK re-exports
+  Arrow types through its public API, consumers using the Beta `arrow-flight`
+  feature that exchange the re-exported Arrow types with the SDK **must upgrade
+  their own Arrow dependency to `59.x`** — Arrow `58` and `59` types cannot be
+  mixed in the same build. Consumers on the default build (without the
+  `arrow-flight` feature) are unaffected.
+
+### Deprecations
+
+### API Changes
+
+
+## Release v2.3.2
+
+### Major Changes
+
+### New Features and Improvements
+
+- Added the callback bridge used by multiplexed streams to report `MessageId`
+  values while preserving the existing `AckCallback` API. Each sub-stream
+  callback converts its stream-local `OffsetId` into a message ID containing
+  both the sub-stream index and offset.
+
+### Bug Fixes
+
+- Fixed `VARIANT` columns in Arrow Flight schemas generated from Unity Catalog
+  metadata. `arrow_schema_from_uc_columns` / `arrow_schema_from_uc_schema` now
+  project `VARIANT` as `Struct<metadata: LargeBinary not null, value:
+  LargeBinary not null>` instead of `LargeUtf8`, matching the server's expected
+  binary variant representation. Protobuf descriptor generation continues to
+  expose `VARIANT` as `string`.
+
+### Documentation
+
+### Internal Changes
+
+- Add a `testing`-feature-gated `CallbackHandlerHarness` that drives the real callback-handler task and reproduces `close()`'s teardown, and split the callback drain-then-abort / wait-indefinitely logic out of `shutdown_all_tasks_gracefully` into `ZerobusStream::shutdown_callback_task` so it can be exercised in isolation. Test-only; no change to shipped behavior or the default (non-`testing`) build.
+
+### Breaking Changes
+
+### Deprecations
+
+### API Changes
+
+- Generalized `AckCallback` over its identifier type while preserving
+  `OffsetId` as the default for existing single-stream callbacks. Multiplexed
+  callbacks use the same trait with `MessageId` as the identifier type.
+
+
+## Release v2.3.1
+
+### Major Changes
+
+### New Features and Improvements
+
+### Bug Fixes
+
+- Fixed `VARIANT` columns nested inside a `STRUCT`, `ARRAY`, or `MAP` failing with `unknown primitive type 'variant'` when building a descriptor from a Unity Catalog schema. Nested `VARIANT` now maps to `string` (unshredded JSON-encoded text) at any depth, matching the top-level behavior. Applies to both the protobuf and Arrow Flight schema paths (`descriptor_from_uc_columns` / `arrow_schema_from_uc_columns`).
+
+### Documentation
+
+- Reworked ingestion docs to lead with the high-throughput pattern (ingest in a loop, then `flush()` once) and explicitly warn against calling `wait_for_offset()` after every record. Updated the README, crate- and method-level doc comments (`ingest_record_offset`, `ingest_records_offset`, `wait_for_offset`, `flush`), and the `json`/`proto` single-record examples accordingly.
+
+### Internal Changes
+
+- Established `rust/sdk/zerobus_service.proto` as the single canonical gRPC schema, now referenced directly by the cgo Go SDK tests and the Java SDK build instead of their own duplicated (and drifted) copies. No schema or behavior change for the Rust core — the file stays where it was.
+
+### Breaking Changes
+
+### Deprecations
+
+### API Changes
+
+## Release v2.3.0
+
+### Major Changes
+
+### New Features and Improvements
+
+- Token caching for the default OAuth path. Tokens obtained via `.oauth(...)` are now cached per table on the `ZerobusSdk` instance and reused across stream creations and recoveries until they near expiry, instead of minting a fresh token on every stream. This reduces load on the Unity Catalog token endpoint for clients that create many short-lived streams. Caching is on by default and can be tuned via `ZerobusSdkBuilder::token_cache_enabled` and `ZerobusSdkBuilder::token_refresh_buffer`.
+- On a server-side authentication rejection during stream creation, the cached token is invalidated so the next attempt re-mints (re-checking grants at Unity Catalog), rather than reusing a rejected token until the refresh window.
+- `OAuthHeadersProvider::new` now caches tokens for the lifetime of the returned provider (previously it minted a fresh token on every call). Behavior is unchanged for the common path of constructing streams through `ZerobusSdk`, which already shares a cache.
+- Add `StreamBuilder::no_auth()` and `NoAuthHeadersProvider` for local testing
+  against Zerobus endpoints that do not enforce authentication. Both are gated
+  behind the `testing` feature flag.
+- Add `ZerobusSdkBuilder::no_tls()` convenience method as a shortcut for
+  `.tls_config(Arc::new(NoTlsConfig))` when connecting to plaintext `http://`
+  endpoints. Gated behind the `testing` feature flag.
+- Added a configurable payload size limit per `ingest_record_offset` / `ingest_records_offset` call. Attempts to ingest more than the limit of encoded record data in a single call now return `ZerobusError::InvalidArgument` immediately, before any network I/O. The default is set slightly below the 10 MiB server limit to leave headroom for the request envelope (protobuf framing/stream metadata), so payloads accepted client-side are not later rejected by the server's transport layer. The limit is tunable per stream via `StreamBuilder::max_ingest_payload_bytes` (gRPC JSON/proto streams only; Arrow Flight streams do not enforce it and log a warning if it is set before `build_arrow()`).
+- Added stream lifecycle logging to make recovery observable. The SDK now logs (at `info`) when recovery starts and how many records are pending, and when a recovered stream re-sends unacknowledged records and how many. Each failed stream-creation attempt is logged (at `warn`) with its attempt number and retryability, and a non-retryable failure logs (at `error`) how many records were left unacknowledged (these are retained for retrieval via `get_unacked_records`/`get_unacked_batches`). These counts now distinguish in-flight batches from the true record count they carry (a single `ingest_records` can be one batch but many records), and a terminal recovery failure now always emits a single `error` even when no records remain pending.
+- `ZerobusSdkBuilder::application_name` is now normalized and validated in `build()`: the value is trimmed of surrounding whitespace, a blank value is ignored (the default `zerobus-sdk-rs/<version>` identifier is used), and a value that is not a valid `user-agent` header value (for example one containing a newline or other control byte) is rejected with `ZerobusError::InvalidArgument`. The validity rule mirrors `http::HeaderValue` exactly, so this rejects only values tonic would reject anyway — it surfaces the error early at `build()` as `InvalidArgument` instead of later as a channel-creation error on first connect. Centralizing this in the core means all wrapper SDKs inherit the same handling.
+
+### Bug Fixes
+- Redacted the OAuth authorization token from an error log and error message on the gRPC stream-setup path; a malformed token value is no longer written to logs.
+- A UC token that cannot be encoded as an HTTP `authorization` header value is now rejected at mint time rather than cached, so it cannot poison the cache and fail every stream creation until its refresh window.
+- Arrow Flight stream errors now preserve the server's gRPC status code instead of flattening it to `Unknown`. Previously a `FlightError` was wrapped via `tonic::Status::from_error`, which dropped the inner code, so non-retryable rejections (for example `PermissionDenied`) were misclassified as retryable and auth-rejection detection did not fire on the Arrow path.
+- Fixed Arrow Flight streams over-splitting batches that were deserialized from Arrow IPC bytes. The zero-copy IPC reader makes every column buffer report its whole allocation size, so the Flight encoder's `split_batch_for_grpc_response` over-estimated batch size and split it into many small `FlightData` messages — inflating message counts and rendering IPC compression ineffective. The encoder now sizes batches with a slice-aware calculation (`ArrayData::get_slice_memory_size`) so already-sliced/IPC-decoded batches are measured accurately, with no extra data copy. Shipped via a vendored `arrow-flight` (`58.3.0`) referenced as a workspace `path` dependency (see `rust/third_party/arrow-flight`); fixes [arrow-rs#9388](https://github.com/apache/arrow-rs/issues/9388) / [#5352](https://github.com/apache/arrow-rs/issues/5352).
+
+### Documentation
+
+### Internal Changes
+
+- Added `ZerobusStream::signal_shutdown` (crate-private), a `&self`-callable
+  helper that flips `is_closed` and cancels the cancellation token. Lets
+  `MultiplexedStream` tear down sub-stream background tasks from its poison
+  path and `Drop` without needing `&mut`. JoinHandle reaping still happens in
+  `close` or the existing `Drop` impl.
+- Split `sdk/src/lib.rs` into per-concern modules (`sdk.rs`, `stream/grpc/`). No public API change — all `pub use` re-exports preserved. The new layout separates transport-agnostic logic (ingestion, ack tracking, teardown, callback dispatch) from gRPC-specific code (connection setup, sender/receiver tasks, supervisor) and places the gRPC transport under `stream/grpc/`, leaving room for `stream/arrow/` and a shared `stream/` core in follow-ups.
+
+### Breaking Changes
+
+### Deprecations
+
+### API Changes
+
+- Added `ZerobusSdkBuilder::token_cache_enabled(bool)` to enable or disable OAuth token caching (default enabled).
+- Added `ZerobusSdkBuilder::token_refresh_buffer(Duration)` to configure how long before a cached token's expiry it is refreshed (default 5 minutes).
+- Added `HeadersProvider::invalidate` with a default no-op implementation; the SDK calls it when the server rejects the supplied credentials so a provider can drop cached auth state. Existing trait implementations are unaffected.
+
 ## Release v2.2.2
 
 ### Major Changes

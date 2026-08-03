@@ -13,15 +13,19 @@ jobs:
           - os: linux-ubuntu-latest
             runner: { group: databricks-protected-runner-group, labels: linux-ubuntu-latest }
             target: x86_64-unknown-linux-gnu
+            build_target: x86_64-unknown-linux-gnu.2.26
             artifact: libzerobus_jni.so
             native_dir: linux-x86_64
             cross: false
+            zigbuild: true
           - os: linux-ubuntu-latest
             runner: { group: databricks-protected-runner-group, labels: linux-ubuntu-latest }
             target: aarch64-unknown-linux-gnu
+            build_target: aarch64-unknown-linux-gnu.2.26
             artifact: libzerobus_jni.so
             native_dir: linux-aarch64
-            cross: true
+            cross: false
+            zigbuild: true
           - os: linux-ubuntu-latest
             runner: { group: databricks-protected-runner-group, labels: linux-ubuntu-latest }
             target: x86_64-unknown-linux-musl
@@ -83,13 +87,13 @@ jobs:
         with:
           targets: ${{ matrix.target }}
 
-      - name: Install Zig (musl cross-builds)
+      - name: Install Zig (zigbuild targets)
         if: matrix.zigbuild
         uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2.2.1
         with:
           version: 0.13.0
 
-      - name: Install cargo-zigbuild (musl cross-builds)
+      - name: Install cargo-zigbuild (zigbuild targets)
         if: matrix.zigbuild
         run: cargo install cargo-zigbuild --locked --version 0.19.8
 
@@ -101,7 +105,7 @@ jobs:
         if: matrix.zigbuild
         env:
           RUSTFLAGS: -C target-feature=-crt-static
-        run: cargo zigbuild --release -p zerobus-jni --target ${{ matrix.target }}
+        run: cargo zigbuild --release -p zerobus-jni --target ${{ matrix.build_target || matrix.target }}
 
       - name: Upload artifact
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4

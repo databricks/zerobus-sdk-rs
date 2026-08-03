@@ -13,6 +13,7 @@ body:
         - Java
         - Python
         - Go
+        - C++
         - All
     validations:
       required: true

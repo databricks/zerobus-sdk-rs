@@ -14,25 +14,27 @@ Zerobus is a high-throughput streaming service for direct data ingestion into Da
 
 ## SDKs
 
-| Language | Directory | Package |
-|----------|-----------|---------|
-| Rust | [`rust/`](rust/) | [`databricks-zerobus-ingest-sdk`](https://crates.io/crates/databricks-zerobus-ingest-sdk) |
-| Python | [`python/`](python/) | [`databricks-zerobus-ingest-sdk`](https://pypi.org/project/databricks-zerobus-ingest-sdk/) |
-| Go | [`go/`](go/) | [`github.com/databricks/zerobus-sdk/go`](https://pkg.go.dev/github.com/databricks/zerobus-sdk/go) |
-| TypeScript | [`typescript/`](typescript/) | [`@databricks/zerobus-ingest-sdk`](https://www.npmjs.com/package/@databricks/zerobus-ingest-sdk) |
-| Java | [`java/`](java/) | [`com.databricks:zerobus-ingest-sdk`](https://central.sonatype.com/artifact/com.databricks/zerobus-ingest-sdk) |
+| Language   | Directory                    | Package                                                                                                        |
+| ---------- | ---------------------------- | -------------------------------------------------------------------------------------------------------------- |
+| Rust       | [`rust/`](rust/)             | [`databricks-zerobus-ingest-sdk`](https://crates.io/crates/databricks-zerobus-ingest-sdk)                      |
+| Python     | [`python/`](python/)         | [`databricks-zerobus-ingest-sdk`](https://pypi.org/project/databricks-zerobus-ingest-sdk/)                     |
+| Go         | [`go/`](go/)                 | [`github.com/databricks/zerobus-sdk/go`](https://pkg.go.dev/github.com/databricks/zerobus-sdk/go)              |
+| TypeScript | [`typescript/`](typescript/) | [`@databricks/zerobus-ingest-sdk`](https://www.npmjs.com/package/@databricks/zerobus-ingest-sdk)               |
+| Java       | [`java/`](java/)             | [`com.databricks:zerobus-ingest-sdk`](https://central.sonatype.com/artifact/com.databricks/zerobus-ingest-sdk) |
+| C++        | [`cpp/`](cpp/)               | Source / CMake (`zerobus::zerobus`)                                                                            |
+| C#         | [`dotnet/`](dotnet/)         | [`Databricks.Zerobus`](https://www.nuget.org/packages/Databricks.Zerobus)                                      |
 
 ## Platform Support
 
 We try to provide prebuilt native binaries for the following platforms:
 
-| Platform | Architecture |
-|----------|-------------|
-| Linux | x86_64 |
-| Linux | aarch64 |
-| Windows | x86_64 |
-| macOS | x86_64 |
-| macOS | aarch64 (Apple Silicon) |
+| Platform | Architecture            |
+| -------- | ----------------------- |
+| Linux    | x86_64                  |
+| Linux    | aarch64                 |
+| Windows  | x86_64                  |
+| macOS    | x86_64                  |
+| macOS    | aarch64 (Apple Silicon) |
 
 > **Note:** We do not currently have macOS CI runners, so macOS binaries are built locally and may not be available for every SDK or release. If your platform is not supported or you encounter compatibility issues, you can [build from source](CONTRIBUTING.md) or [file an issue](https://github.com/databricks/zerobus-sdk/issues).
 
@@ -110,21 +112,21 @@ Use `proto2` syntax with `optional` fields to correctly represent nullable Delta
 
 ##### Delta → Protobuf Type Mappings
 
-| Delta Type | Proto2 Type |
-|-----------|-------------|
-| TINYINT, BYTE, INT, SMALLINT, SHORT | int32 |
-| BIGINT, LONG | int64 |
-| FLOAT | float |
-| DOUBLE | double |
-| STRING, VARCHAR | string |
-| BOOLEAN | bool |
-| BINARY | bytes |
-| DATE | int32 |
-| TIMESTAMP, TIMESTAMP_NTZ | int64 |
-| ARRAY\<type\> | repeated type |
-| MAP\<key, value\> | map\<key, value\> |
-| STRUCT\<fields\> | nested message |
-| VARIANT | string (JSON string) |
+| Delta Type                          | Proto2 Type          |
+| ----------------------------------- | -------------------- |
+| TINYINT, BYTE, INT, SMALLINT, SHORT | int32                |
+| BIGINT, LONG                        | int64                |
+| FLOAT                               | float                |
+| DOUBLE                              | double               |
+| STRING, VARCHAR                     | string               |
+| BOOLEAN                             | bool                 |
+| BINARY                              | bytes                |
+| DATE                                | int32                |
+| TIMESTAMP, TIMESTAMP_NTZ            | int64                |
+| ARRAY\<type\>                       | repeated type        |
+| MAP\<key, value\>                   | map\<key, value\>    |
+| STRUCT\<fields\>                    | nested message       |
+| VARIANT                             | string (JSON string) |
 
 #### Schema Generation
 
@@ -132,22 +134,32 @@ Instead of writing `.proto` files by hand, each SDK ships a tool to generate pro
 
 ### Arrow Flight ingestion (Beta)
 
-Supported by all SDKs starting from version 2.0.0. Currently in Beta — the API is stabilising but may still change before reaching GA. A third record format option alongside JSON and Protocol Buffers: send Apache Arrow `RecordBatch` data directly to Zerobus over the Arrow Flight protocol, on the same gRPC connection. Best fit when:
+Available in the Rust, Python, Go, TypeScript, and Java SDKs starting from their 2.0.0 releases, and in the C++ SDK from its initial `0.1.0` release. Currently in Beta — the API is stabilising but may still change before reaching GA. A third record format option alongside JSON and Protocol Buffers: send Apache Arrow `RecordBatch` data directly to Zerobus over the Arrow Flight protocol, on the same gRPC connection. Best fit when:
 
 - Your workload is naturally columnar or batched — analytics pipelines, gateways aggregating short windows of rows, wide/numeric schemas where row-by-row serialization adds noticeable CPU overhead.
 - Your application already produces Arrow data — pyarrow, the [arrow-rs](https://github.com/apache/arrow-rs) crates, DataFusion, Polars, or other libraries built on Arrow.
 
-For sparse, one-row-at-a-time traffic, JSON or Protocol Buffers over the standard SDK gRPC path are usually simpler. See each SDK's `examples/arrow/` directory for usage.
+For sparse, one-row-at-a-time traffic, JSON or Protocol Buffers over the standard SDK gRPC path are usually simpler. Most SDKs ship a runnable `examples/arrow/` directory; the C++ SDK covers Arrow Flight in its [README](cpp/README.md#arrow-flight-ingestion-beta) until its examples land.
+
+### Acknowledgments and throughput
+
+Ingestion is asynchronous in every SDK. An `ingest` call returns as soon as the record is queued — the SDK sends it and tracks its acknowledgment on a background task. To confirm that records were durably committed, call `flush()`; it returns once everything queued so far has been acknowledged.
+
+The idiomatic flow is therefore **ingest in a loop, then `flush()`** — once at the end of a bounded batch, or periodically for a long-running stream. Where the SDK supports it, you can instead register an ack callback and be notified as records commit, without blocking at all.
+
+Each `ingest` also returns the record's offset, and `wait_for_offset(offset)` blocks until that offset is acknowledged. That's useful when a particular record must be confirmed before you continue; because acknowledgments are ordered, waiting on the last offset of a run confirms the whole run. The one thing to avoid is waiting on every record inside a tight loop — that turns the asynchronous pipeline into a synchronous request/response and limits throughput to a single record per network round-trip.
+
+See each SDK's README for exact method names and a runnable example.
 
 ## HTTP Proxy Support
 
 All SDKs support HTTP CONNECT proxies via environment variables, following gRPC core conventions. The first variable found (in order) is used:
 
-| Proxy | No-proxy |
-|-------|----------|
-| `grpc_proxy` / `GRPC_PROXY` | `no_grpc_proxy` / `NO_GRPC_PROXY` |
-| `https_proxy` / `HTTPS_PROXY` | `no_proxy` / `NO_PROXY` |
-| `http_proxy` / `HTTP_PROXY` | |
+| Proxy                         | No-proxy                          |
+| ----------------------------- | --------------------------------- |
+| `grpc_proxy` / `GRPC_PROXY`   | `no_grpc_proxy` / `NO_GRPC_PROXY` |
+| `https_proxy` / `HTTPS_PROXY` | `no_proxy` / `NO_PROXY`           |
+| `http_proxy` / `HTTP_PROXY`   |                                   |
 
 The `no_proxy` value is a comma-separated list of hostnames (suffix-matched) or `*` to bypass the proxy entirely.
 

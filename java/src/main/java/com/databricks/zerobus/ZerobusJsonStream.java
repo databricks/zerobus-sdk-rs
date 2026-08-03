@@ -10,14 +10,15 @@ import java.util.Optional;
  *
  * <p>This class provides a clean API for JSON ingestion that doesn't require Protocol Buffer types.
  *
- * <p>Create instances using {@link ZerobusSdk#createJsonStream}:
+ * <p>Create instances using {@link ZerobusSdk#streamBuilder()}:
  *
  * <pre>{@code
- * ZerobusJsonStream stream = sdk.createJsonStream(
- *     "catalog.schema.table",
- *     clientId,
- *     clientSecret
- * ).join();
+ * ZerobusJsonStream stream = sdk.streamBuilder()
+ *     .table("catalog.schema.table")
+ *     .oauth(clientId, clientSecret)
+ *     .json()
+ *     .build()
+ *     .join();
  *
  * // Main: Ingest objects with a serializer
  * Gson gson = new Gson();
@@ -34,7 +35,7 @@ import java.util.Optional;
  * stream.close();
  * }</pre>
  *
- * @see ZerobusSdk#createJsonStream(String, String, String)
+ * @see ZerobusSdk#streamBuilder()
  */
 public class ZerobusJsonStream extends BaseZerobusStream {
 
@@ -107,7 +108,7 @@ public class ZerobusJsonStream extends BaseZerobusStream {
   private final String clientId;
   private final String clientSecret;
 
-  /** Package-private constructor. Use {@link ZerobusSdk#createJsonStream} to create instances. */
+  /** Package-private constructor. Use {@link ZerobusSdk#streamBuilder()} to create instances. */
   ZerobusJsonStream(
       long nativeHandle,
       String tableName,
@@ -136,6 +137,10 @@ public class ZerobusJsonStream extends BaseZerobusStream {
    *
    * <p>This is the main method for JSON ingestion. The object is serialized using the provided
    * serializer function.
+   *
+   * <p>Returns as soon as the record is queued; the SDK sends it and tracks its acknowledgment in
+   * the background. The idiomatic flow is to call this in a loop, then confirm durability once via
+   * {@link #flush()} (or {@link #waitForOffset(long)} on the last returned offset).
    *
    * <p>Example with Gson:
    *
@@ -178,6 +183,10 @@ public class ZerobusJsonStream extends BaseZerobusStream {
    *
    * <p>This is the main method for batch JSON ingestion. Each object is serialized using the
    * provided serializer function.
+   *
+   * <p>Returns as soon as the batch is queued. The idiomatic flow is to ingest your batches in a
+   * loop, then confirm durability once via {@link #flush()} (or {@link #waitForOffset(long)} on the
+   * last offset).
    *
    * @param objects the objects to serialize and ingest
    * @param serializer a function that converts each object to a JSON string

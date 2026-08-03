@@ -96,7 +96,7 @@ class StreamConfigurationOptions:
     """Backoff time in milliseconds between recovery attempts (default: 2000)"""
 
     recovery_retries: int
-    """Number of retries for stream recovery (default: 3)"""
+    """Number of retries for stream recovery (default: 4)"""
 
     server_lack_of_ack_timeout_ms: int
     """Number of ms in which, if we do not receive an acknowledgement, the server is considered unresponsive (default: 60000)"""
@@ -122,7 +122,7 @@ class StreamConfigurationOptions:
         recovery: bool = True,
         recovery_timeout_ms: int = 15000,
         recovery_backoff_ms: int = 2000,
-        recovery_retries: int = 3,
+        recovery_retries: int = 4,
         server_lack_of_ack_timeout_ms: int = 60000,
         flush_timeout_ms: int = 300000,
         record_type: RecordType = ...,
@@ -138,7 +138,7 @@ class StreamConfigurationOptions:
             recovery: Enable automatic stream recovery (default: True)
             recovery_timeout_ms: Recovery operation timeout in ms (default: 15000)
             recovery_backoff_ms: Delay between recovery attempts in ms (default: 2000)
-            recovery_retries: Maximum number of recovery attempts (default: 3)
+            recovery_retries: Maximum number of recovery attempts (default: 4)
             server_lack_of_ack_timeout_ms: Server acknowledgment timeout in ms (default: 60000)
             flush_timeout_ms: Flush operation timeout in ms (default: 300000)
             record_type: Serialization format (default: RecordType.PROTO)
@@ -304,7 +304,19 @@ class sync:
     class ZerobusSdk:
         """Main entry point for synchronous Zerobus ingestion."""
 
-        def __init__(self, host: str, unity_catalog_url: str) -> None: ...
+        def __init__(self, host: str, unity_catalog_url: str, application_name: Optional[str] = None) -> None:
+            """
+            Create a synchronous Zerobus SDK instance.
+
+            Args:
+                host: Zerobus server endpoint
+                unity_catalog_url: Unity Catalog / workspace URL
+                application_name: Optional caller identifier (conventionally
+                    "<product>/<version>") appended to the HTTP user-agent header on
+                    gRPC requests toward the Zerobus server.
+            """
+            ...
+
         def set_use_tls(self, use_tls: bool) -> None:
             """
             Set whether to use TLS for connections (default: True).
@@ -445,7 +457,19 @@ class aio:
     class ZerobusSdk:
         """Main entry point for asynchronous Zerobus ingestion."""
 
-        def __init__(self, host: str, unity_catalog_url: str) -> None: ...
+        def __init__(self, host: str, unity_catalog_url: str, application_name: Optional[str] = None) -> None:
+            """
+            Create an asynchronous Zerobus SDK instance.
+
+            Args:
+                host: Zerobus server endpoint
+                unity_catalog_url: Unity Catalog / workspace URL
+                application_name: Optional caller identifier (conventionally
+                    "<product>/<version>") appended to the HTTP user-agent header on
+                    gRPC requests toward the Zerobus server.
+            """
+            ...
+
         async def set_use_tls(self, use_tls: bool) -> None:
             """
             Set whether to use TLS for connections (default: True).

@@ -38,8 +38,10 @@ The SDK supports two serialization formats and two ingestion methods:
 |---------|--------|--------|----------|
 | [JSON Single](json/README.md#single-record-example) | JSON | Single-record | `cargo run -p rust-examples-json --example json_single` |
 | [JSON Batch](json/README.md#batch-example) | JSON | Batch | `cargo run -p rust-examples-json --example json_batch` |
-| [Proto Single](proto/README.md#single-record-example) | Protocol Buffers | Single-record | `cargo run -p rust-examples-proto --example proto_single` |
-| [Proto Batch](proto/README.md#batch-example) | Protocol Buffers | Batch | `cargo run -p rust-examples-proto --example proto_batch` |
+| [Proto Compiled Single](proto/README.md#compiled-single-record-example) | Protocol Buffers | Single-record | `cargo run -p rust-examples-proto --example proto_compiled_single` |
+| [Proto Compiled Batch](proto/README.md#compiled-batch-example) | Protocol Buffers | Batch | `cargo run -p rust-examples-proto --example proto_compiled_batch` |
+| [Proto Dynamic](proto/README.md#dynamic-schema-example) | Protocol Buffers | Single-record (runtime schema) | `cargo run -p rust-examples-proto --example proto_dynamic_single` |
+| [Proto Dynamic Batch](proto/README.md#dynamic-batch) | Protocol Buffers | Batch (runtime schema) | `cargo run -p rust-examples-proto --example proto_dynamic_batch` |
 | [Arrow](arrow/README.md) | Arrow Flight (Beta) | `RecordBatch` | `cargo run -p example_arrow` |
 
 ## Prerequisites
@@ -160,8 +162,11 @@ let mut stream = sdk
 ### 3. Ingest and Acknowledge
 
 ```rust
-let offset = stream.ingest_record_offset(data).await?;
-stream.wait_for_offset(offset).await?;
+for record in records {
+    // Returns once queued — do NOT wait on this offset inside the loop.
+    let _offset = stream.ingest_record_offset(record).await?;
+}
+stream.flush().await?; // Confirm all pending records at once.
 ```
 
 ### 4. Close Stream
@@ -172,13 +177,20 @@ stream.close().await?;
 
 ## Ingestion API
 
+> ⚡ **Do not call `wait_for_offset()` after every record.** `ingest_record_offset` queues the
+> record and returns immediately; the round-trip happens in the background. Waiting per record
+> serializes the pipeline into one round-trip per record and collapses throughput. Ingest in a
+> loop, then call `flush()` once (or wait on only the last offset).
+
 ```rust
-let offset = stream.ingest_record_offset(data).await?;
-// Do other work, then wait when needed.
-stream.wait_for_offset(offset).await?;
+for record in records {
+    let _offset = stream.ingest_record_offset(record).await?;
+}
+// Confirm everything at once.
+stream.flush().await?;
 ```
 
-`ingest_record_offset` returns the assigned `OffsetId` immediately after the record is queued. Call `wait_for_offset(offset)` to block until the record is durably acknowledged by the server.
+`ingest_record_offset` returns the assigned `OffsetId` immediately after the record is queued. To confirm durability, call `flush()` after a run of records, or `wait_for_offset(offset)` on a single offset only when you must confirm that specific record before continuing (low volume).
 
 ## Single-Record vs Batch Ingestion
 

@@ -19,8 +19,13 @@ func main() {
 		log.Fatal("Missing required environment variables")
 	}
 
-	// Create SDK instance.
-	sdk, err := zerobus.NewZerobusSdk(zerobusEndpoint, unityCatalogURL)
+	// WithApplicationName is optional. It appends an application identifier to
+	// the Go SDK user-agent sent to Zerobus.
+	sdk, err := zerobus.NewZerobusSdkWithOptions(
+		zerobusEndpoint,
+		unityCatalogURL,
+		zerobus.WithApplicationName("my-app/1.0"),
+	)
 	if err != nil {
 		log.Fatalf("Failed to create SDK: %v", err)
 	}
@@ -46,8 +51,10 @@ func main() {
 	}
 	defer stream.Close()
 
+	// Ingest records in a loop. IngestRecordOffset returns as soon as the record
+	// is queued; the SDK sends it and tracks its acknowledgment in the background.
+	// Keeping the ingest loop free of per-record waits sustains throughput.
 	log.Println("Ingesting records...")
-	var offsets []int64
 	for i := 0; i < 5; i++ {
 		// Change this string to match the schema of your table.
 		jsonRecord := `{
@@ -67,16 +74,12 @@ func main() {
 		}
 
 		log.Printf("Ingested record %d at offset %d", i, offset)
-		offsets = append(offsets, offset)
 	}
 
-	// Wait for specific offsets to be acknowledged.
+	// Wait once for every successfully queued record to be acknowledged.
 	log.Println("Waiting for acknowledgments...")
-	for _, offset := range offsets {
-		if err := stream.WaitForOffset(offset); err != nil {
-			log.Fatalf("Failed to wait for offset %d: %v", offset, err)
-		}
-		log.Printf("Record at offset %d acknowledged", offset)
+	if err := stream.Flush(); err != nil {
+		log.Fatalf("Failed to flush stream: %v", err)
 	}
 
 	log.Println("All records successfully ingested and acknowledged!")

@@ -26,7 +26,9 @@ use crate::offset_generator::OffsetId;
 /// Callback trait for receiving acknowledgment notifications.
 ///
 /// Implement this trait to receive callbacks when records/batches are acknowledged
-/// by the server or when errors occur.
+/// by the server or when errors occur. Single streams use the default [`OffsetId`]
+/// identifier. Other stream types can select an identifier that matches their
+/// ingestion API.
 ///
 /// # Thread Safety and Performance
 ///
@@ -58,7 +60,7 @@ use crate::offset_generator::OffsetId;
 ///     }
 /// }
 /// ```
-pub trait AckCallback: Send + Sync {
+pub trait AckCallback<Id = OffsetId>: Send + Sync {
     /// Called when a record/batch is successfully acknowledged by the server.
     ///
     /// **Note**: This runs synchronously in a dedicated callback handler task.
@@ -66,8 +68,8 @@ pub trait AckCallback: Send + Sync {
     ///
     /// # Parameters
     ///
-    /// * `offset_id` - The logical offset ID that was acknowledged
-    fn on_ack(&self, offset_id: OffsetId);
+    /// * `id` - The identifier that was acknowledged
+    fn on_ack(&self, id: Id);
 
     /// Called when an error occurs for a specific record/batch.
     ///
@@ -76,11 +78,12 @@ pub trait AckCallback: Send + Sync {
     ///
     /// # Parameters
     ///
-    /// * `offset_id` - The logical offset ID that encountered an error
+    /// * `id` - The identifier that encountered an error
     /// * `error_message` - Human-readable error description
-    fn on_error(&self, offset_id: OffsetId, error_message: &str);
+    fn on_error(&self, id: Id, error_message: &str);
 }
 
+#[allow(dead_code)]
 #[cfg(test)]
 mod tests {
     use super::*;

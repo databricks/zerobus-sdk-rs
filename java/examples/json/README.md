@@ -41,11 +41,12 @@ java -cp ".:../target/classes:$(cd .. && mvn dependency:build-classpath -q -Dinc
 ### Creating a JSON Stream
 
 ```java
-ZerobusJsonStream stream = sdk.createJsonStream(
-    tableName,
-    clientId,
-    clientSecret
-).join();
+ZerobusJsonStream stream = sdk.streamBuilder()
+    .table(tableName)
+    .oauth(clientId, clientSecret)
+    .json()
+    .build()
+    .join();
 ```
 
 ### Single Record Ingestion
@@ -77,7 +78,9 @@ Optional<Long> offset = stream.ingestRecordsOffset(jsonBatch);
 List<Map<String, Object>> objectBatch = ...;
 offset = stream.ingestRecordsOffset(objectBatch, gson::toJson);
 
-offset.ifPresent(stream::waitForOffset);
+if (offset.isPresent()) {
+    stream.waitForOffset(offset.get());
+}
 ```
 
 ### Getting Unacknowledged Records

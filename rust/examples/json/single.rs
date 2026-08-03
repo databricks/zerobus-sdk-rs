@@ -1,3 +1,11 @@
+//! Single-record JSON ingestion, demonstrating each record wrapper type.
+//!
+//! Note on throughput: `ingest_record_offset()` returns as soon as the record is queued.
+//! This example ingests several records and then calls `flush()` ONCE to confirm them.
+//! Do not call `wait_for_offset()` after every record in a real workload — that forces a
+//! server round-trip per record and collapses throughput. For high volume, prefer the
+//! batch API in `batch.rs`.
+
 use std::error::Error;
 
 use databricks_zerobus_ingest_sdk::{JsonString, JsonValue, ZerobusSdk, ZerobusStream};
@@ -74,14 +82,10 @@ async fn ingest_with_offset_api(stream: &mut ZerobusStream) -> Result<(), Box<dy
         updated_at: now,
     };
 
+    // Queue the record; the call returns immediately without waiting for the ack.
     let offset_id = stream.ingest_record_offset(JsonValue(order)).await?;
     println!(
-        "[Auto-serializing] Record sent with offset ID: {}",
-        offset_id
-    );
-    stream.wait_for_offset(offset_id).await?;
-    println!(
-        "[Auto-serializing] Record acknowledged with offset ID: {}",
+        "[Auto-serializing] Record queued with offset ID: {}",
         offset_id
     );
 
@@ -101,10 +105,8 @@ async fn ingest_with_offset_api(stream: &mut ZerobusStream) -> Result<(), Box<dy
     );
 
     let offset_id = stream.ingest_record_offset(JsonString(json_string)).await?;
-    println!("[Pre-serialized] Record sent with offset ID: {}", offset_id);
-    stream.wait_for_offset(offset_id).await?;
     println!(
-        "[Pre-serialized] Record acknowledged with offset ID: {}",
+        "[Pre-serialized] Record queued with offset ID: {}",
         offset_id
     );
 
@@ -125,14 +127,14 @@ async fn ingest_with_offset_api(stream: &mut ZerobusStream) -> Result<(), Box<dy
 
     let offset_id = stream.ingest_record_offset(raw_json).await?;
     println!(
-        "[Backward-compatible] Record sent with offset ID: {}",
+        "[Backward-compatible] Record queued with offset ID: {}",
         offset_id
     );
-    stream.wait_for_offset(offset_id).await?;
-    println!(
-        "[Backward-compatible] Record acknowledged with offset ID: {}",
-        offset_id
-    );
+
+    // Confirm all queued records at once. flush() waits for every pending acknowledgment;
+    // this is the right place to wait, not after each individual ingest above.
+    stream.flush().await?;
+    println!("All records acknowledged");
 
     Ok(())
 }

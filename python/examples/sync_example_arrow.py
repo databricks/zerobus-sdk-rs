@@ -89,7 +89,7 @@ def main():
 
     try:
         # Step 1: Initialize the SDK
-        sdk = ZerobusSdk(SERVER_ENDPOINT, UNITY_CATALOG_ENDPOINT)
+        sdk = ZerobusSdk(SERVER_ENDPOINT, UNITY_CATALOG_ENDPOINT, application_name="my-app/1.0")
         logger.info("SDK initialized")
 
         # Step 2: Configure arrow stream options (all optional, shown with defaults)
@@ -98,7 +98,7 @@ def main():
             recovery=True,
             recovery_timeout_ms=15000,
             recovery_backoff_ms=2000,
-            recovery_retries=3,
+            recovery_retries=4,
         )
         logger.info("Arrow stream configuration created")
 
@@ -143,7 +143,10 @@ def main():
             logger.info(f"  Table ingested: {table.num_rows} rows, offset: {offset}")
 
             # ========================================================================
-            # Wait for a specific offset to be acknowledged
+            # Wait for a specific offset to be acknowledged.
+            # Acks are ordered, so waiting once on the LAST offset here (or just calling
+            # flush()) confirms every prior batch too — no need to wait per batch in the
+            # loop above.
             # ========================================================================
             logger.info(f"\nWaiting for offset {offset} to be acknowledged...")
             stream.wait_for_offset(offset)

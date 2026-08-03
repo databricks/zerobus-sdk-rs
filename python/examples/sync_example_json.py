@@ -114,7 +114,7 @@ def main():
 
     try:
         # Step 1: Initialize the SDK
-        sdk = ZerobusSdk(SERVER_ENDPOINT, UNITY_CATALOG_ENDPOINT)
+        sdk = ZerobusSdk(SERVER_ENDPOINT, UNITY_CATALOG_ENDPOINT, application_name="my-app/1.0")
         logger.info("✓ SDK initialized")
 
         # Step 2: Define table properties
@@ -129,7 +129,7 @@ def main():
             recovery=True,
             recovery_timeout_ms=15000,
             recovery_backoff_ms=2000,
-            recovery_retries=3,
+            recovery_retries=4,
         )
         logger.info("✓ Stream configuration created")
 
@@ -156,7 +156,9 @@ def main():
         try:
             # ========================================================================
             # Method 1: ingest_record_offset() - RECOMMENDED for single records
-            # Returns offset directly without intermediate acknowledgment object
+            # Returns offset directly without intermediate acknowledgment object.
+            # Idiomatic flow: ingest in a loop, then flush() once at the end (see below)
+            # to confirm everything is durably committed.
             # ========================================================================
             logger.info("\n1. Using ingest_record_offset() - optimized API")
             for i in range(min(10, NUM_RECORDS)):

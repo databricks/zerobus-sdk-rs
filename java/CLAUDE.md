@@ -2,6 +2,26 @@
 
 Java wrapper around the Rust core via JNI.
 
+## Client code patterns (read before writing or reviewing examples/docs)
+
+Ingestion is asynchronous. `ingestRecordOffset()` (and `ingestRecordsOffset()`) return as
+soon as the record/batch is queued — the SDK sends it and tracks its acknowledgment in the
+background.
+
+- **Idiomatic flow:** ingest in a loop, then call `flush()` once (after a bounded batch, or
+  periodically for a long-running stream) to confirm durability. Equivalently, call
+  `waitForOffset()` on the **last** returned offset — acks are ordered, so confirming the
+  last offset confirms every prior record.
+- **Async monitoring:** register an `AckCallback` (`onAck`/`onError`) to track progress
+  without blocking the ingest loop.
+- **Per-record `waitForOffset()`:** use when a specific record must be confirmed before
+  continuing. Avoid calling it after every record in a tight loop, since that limits
+  throughput to one record per round-trip.
+- New code should use `ZerobusProtoStream` / `ZerobusJsonStream` (offset-based) rather than
+  the deprecated `ZerobusStream`. With the deprecated API, keep the last future and `.join()`
+  once after the loop rather than joining per record (the latter is discouraged for the same
+  throughput reason).
+
 ## Structure
 
 ```
@@ -28,7 +48,7 @@ Run from `java/`:
 - `mvn compile` — Compile
 - `mvn test` — Run tests
 - `mvn test -Dtest=ClassName#method` — Run specific test
-- `mvn clean package` — Build JAR (includes fat JAR)
+- `mvn clean package -Dzerobus.skipNativeLibCheck=true` — Build local Java JARs without staged release JNI libraries
 - `mvn spotless:check` — Check formatting (Google Java Format)
 - `mvn spotless:apply` — Auto-format
 

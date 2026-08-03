@@ -10,7 +10,8 @@ Example:
     >>>
     >>> sdk = ZerobusSdk(
     ...     host="https://your-shard-id.zerobus.region.cloud.databricks.com",
-    ...     unity_catalog_url="https://your-workspace.cloud.databricks.com"
+    ...     unity_catalog_url="https://your-workspace.cloud.databricks.com",
+    ...     application_name="my-app/1.0",  # optional
     ... )
     >>>
     >>> props = TableProperties("catalog.schema.table")
@@ -38,7 +39,7 @@ Example:
     >>> offset = ack.wait_for_ack(timeout_sec=30)
 """
 
-from typing import Iterator
+from typing import Iterator, Optional
 
 # Import Rust-backed implementations
 import zerobus._zerobus_core as _core
@@ -65,11 +66,21 @@ class ZerobusStream:
         return self._inner.ingest_record(payload)
 
     def ingest_record_offset(self, payload):
-        """Submit record and return offset immediately (no waiting)."""
+        """Submit record and return offset immediately (no waiting).
+
+        Returns as soon as the record is queued; the SDK sends it and tracks its
+        acknowledgment in the background. The idiomatic flow is to ingest in a loop
+        and call ``flush()`` once to confirm durability (or use an ``AckCallback``).
+        """
         return self._inner.ingest_record_offset(payload)
 
     def ingest_record_nowait(self, payload):
-        """Submit record without waiting (fire-and-forget)."""
+        """Submit record without waiting (fire-and-forget).
+
+        Highest-throughput single-record API: returns no offset. Use when you do not
+        need per-record offsets; track durability with an ``AckCallback`` and call
+        ``flush()`` before close.
+        """
         return self._inner.ingest_record_nowait(payload)
 
     def ingest_records_offset(self, payloads):
@@ -81,11 +92,20 @@ class ZerobusStream:
         return self._inner.ingest_records_nowait(payloads)
 
     def wait_for_offset(self, offset: int):
-        """Wait for a specific offset to be acknowledged."""
+        """Block until a specific offset is acknowledged.
+
+        Use when you need to confirm a specific record before continuing; acks are
+        ordered, so waiting on the last offset returned confirms all prior records too.
+        For bulk durability, prefer ingesting in a loop and calling ``flush()`` once.
+        """
         return self._inner.wait_for_offset(offset)
 
     def flush(self):
-        """Flush all pending records."""
+        """Flush all pending records, blocking until they are acknowledged.
+
+        The idiomatic way to confirm durability: ingest in a loop, then call ``flush()``
+        once to confirm everything queued so far is committed.
+        """
         return self._inner.flush()
 
     def close(self):
@@ -158,11 +178,20 @@ class ZerobusArrowStream:
         return self._inner.ingest_batch(ipc_bytes)
 
     def wait_for_offset(self, offset: int):
-        """Wait for a specific offset to be acknowledged."""
+        """Block until a specific offset is acknowledged.
+
+        Use when you need to confirm a specific batch before continuing; acks are
+        ordered, so waiting on the last offset returned confirms all prior batches too.
+        For bulk durability, prefer ingesting batches in a loop and calling ``flush()``.
+        """
         return self._inner.wait_for_offset(offset)
 
     def flush(self):
-        """Flush all pending batches, waiting for acknowledgment."""
+        """Flush all pending batches, blocking until they are acknowledged.
+
+        The idiomatic way to confirm durability: ingest batches in a loop, then call
+        ``flush()`` once to confirm everything queued so far is committed.
+        """
         return self._inner.flush()
 
     def close(self):
@@ -197,8 +226,19 @@ class ZerobusArrowStream:
 class ZerobusSdk:
     """Python wrapper around Rust ZerobusSdk that provides unified create_stream API."""
 
-    def __init__(self, host: str, unity_catalog_url: str):
-        self._inner = _RustZerobusSdk(host, unity_catalog_url)
+    def __init__(self, host: str, unity_catalog_url: str, application_name: Optional[str] = None):
+        """
+        Create a Zerobus SDK instance.
+
+        Args:
+            host: Zerobus endpoint URL
+                (e.g. "https://<workspace>.zerobus.<region>.cloud.databricks.com").
+            unity_catalog_url: Unity Catalog URL used for OAuth.
+            application_name: Optional caller identifier (conventionally
+                "<product>/<version>") appended to the HTTP user-agent header on
+                gRPC requests toward the Zerobus server.
+        """
+        self._inner = _RustZerobusSdk(host, unity_catalog_url, application_name)
 
     def create_arrow_stream(
         self, table_name: str, schema, client_id: str, client_secret: str, options=None

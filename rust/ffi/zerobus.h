@@ -19,6 +19,23 @@ namespace zerobus {
 #endif  // __cplusplus
 
 /**
+ * A single header key-value pair for C FFI
+ */
+typedef struct CHeader {
+  char *key;
+  char *value;
+} CHeader;
+
+/**
+ * A collection of headers returned from Go callback
+ */
+typedef struct CHeaders {
+  struct CHeader *headers;
+  uintptr_t count;
+  char *error_message;
+} CHeaders;
+
+/**
  * Opaque handle for an Arrow Flight stream.
  */
 typedef struct CArrowStream {
@@ -48,8 +65,10 @@ typedef struct CArrowStreamConfigurationOptions {
    */
   int32_t ipc_compression;
   /**
-   * Maximum time in milliseconds to wait during graceful stream close.
-   * -1 = None (wait full server duration), 0 = immediate recovery, >0 = wait up to min(this, server_duration).
+   * Maximum acknowledgment wait in milliseconds during graceful stream close.
+   * -1 = use the available server grace period, 0 = no ACK wait, >0 = capped ACK wait.
+   * Bounded transport cleanup still runs with 0; very short server grace periods get a
+   * best-effort local cleanup window even if the server may already have hard-closed.
    */
   int64_t stream_paused_max_wait_time_ms;
 } CArrowStreamConfigurationOptions;
@@ -59,23 +78,6 @@ typedef struct CResult {
   char *error_message;
   bool is_retryable;
 } CResult;
-
-/**
- * A single header key-value pair for C FFI
- */
-typedef struct CHeader {
-  char *key;
-  char *value;
-} CHeader;
-
-/**
- * A collection of headers returned from Go callback
- */
-typedef struct CHeaders {
-  struct CHeader *headers;
-  uintptr_t count;
-  char *error_message;
-} CHeaders;
 
 /**
  * Function pointer type for the headers provider callback
@@ -128,7 +130,53 @@ typedef struct CStreamConfigurationOptions {
   bool has_stream_paused_max_wait_time_ms;
   uint64_t callback_max_wait_time_ms;
   bool has_callback_max_wait_time_ms;
+  /**
+   * Optional ack callback. When either pointer is non-null, acks/errors are
+   * delivered asynchronously instead of only via wait_for_offset / flush.
+   * Fired serialized on a background task, so keep them lightweight;
+   * ack_user_data and shared state need their own sync.
+   * ack_on_ack: once per record, in order; monotonic (offset N => all <= N).
+   * ack_on_error: relays core error text as-is; may also surface from ingest / flush.
+   * A synchronously running callback can outlive close() (abort only cancels
+   * at an await), so keep both pointers and ack_user_data alive until the
+   * callback object is destroyed, not merely until close() returns.
+   * error_message is valid only during the call (copy to keep). Callbacks must
+   * not unwind across the C boundary (panics are contained and logged).
+   */
+  void (*ack_on_ack)(int64_t offset_id, void *user_data);
+  void (*ack_on_error)(int64_t offset_id, const char *error_message, void *user_data);
+  void *ack_user_data;
 } CStreamConfigurationOptions;
+
+/**
+ * Function pointer type for async stream creation completion.
+ *
+ * `stream` is non-null on success and null on failure. `result` points to a
+ * `CResult` valid only for the duration of the call; copy any error text during
+ * the callback if you need to retain it.
+ *
+ * Invoked from a background task, so it must be thread-safe and must not
+ * unwind across the FFI boundary.
+ */
+typedef void (*CreateStreamAsyncCallback)(struct CZerobusStream *stream,
+                                          const struct CResult *result,
+                                          void *user_data);
+
+/**
+ * Function pointer type for async offset-returning operations.
+ *
+ * `result` points to a `CResult` valid only for the duration of the call; copy
+ * any error text during the callback if you need to retain it.
+ */
+typedef void (*OffsetAsyncCallback)(int64_t offset, const struct CResult *result, void *user_data);
+
+/**
+ * Function pointer type for async bool-returning operations.
+ *
+ * `result` points to a `CResult` valid only for the duration of the call; copy
+ * any error text during the callback if you need to retain it.
+ */
+typedef void (*BoolAsyncCallback)(bool value, const struct CResult *result, void *user_data);
 
 /**
  * Represents a single record (either Proto or JSON)
@@ -148,6 +196,18 @@ typedef struct CRecordArray {
 } CRecordArray;
 
 /**
+ * Function pointer type for async `CRecordArray`-returning operations.
+ *
+ * On success, ownership of `records` transfers to the callback recipient, who
+ * must free it with `zerobus_free_record_array`. `result` points to a `CResult`
+ * valid only for the duration of the call; copy any error text during the
+ * callback if you need to retain it.
+ */
+typedef void (*RecordArrayAsyncCallback)(struct CRecordArray records,
+                                         const struct CResult *result,
+                                         void *user_data);
+
+/**
  * Opaque handle to a table's protobuf schema: its serialized descriptor plus a
  * prepared encoder. C code only ever holds a pointer to it; the backing
  * allocation is owned by the SDK and released by zerobus_proto_schema_free.
@@ -159,6 +219,35 @@ typedef struct CZerobusProtoSchema {
 #ifdef __cplusplus
 extern "C" {
 #endif // __cplusplus
+
+/**
+ * Allocate a zeroed `CHeader` array of `count` elements for a headers callback
+ * to populate and return in a `CHeaders`.
+ *
+ * Uses the same allocator `zerobus_free_headers` frees with (`libc::calloc` /
+ * `libc::free`), keeping the alloc/free pair on one heap — needed on Windows,
+ * where the caller and this static library can resolve to different CRT heaps.
+ * Zero-initialised so a partially populated array is safe to free (unset
+ * pointers are null and skipped). Returns null if `count` is 0 or alloc fails.
+ */
+struct CHeader *zerobus_alloc_header_array(uintptr_t count);
+
+/**
+ * Duplicate `len` bytes from `data` into a NUL-terminated C string for a
+ * headers callback to store in a `CHeader` key/value or `CHeaders`
+ * error_message.
+ *
+ * Allocated as a Rust `CString`, matching the `CString::from_raw` that
+ * `zerobus_free_headers` frees it with (see `zerobus_alloc_header_array` for
+ * why same-allocator matters). `len` of 0 yields an empty string. Returns null
+ * on alloc failure or if the input has an interior NUL byte.
+ */
+char *zerobus_alloc_cstring(const uint8_t *data, uintptr_t len);
+
+/**
+ * Free headers returned from callback
+ */
+void zerobus_free_headers(struct CHeaders headers);
 
 /**
  * Creates an Arrow Flight stream authenticated with OAuth client credentials.
@@ -179,6 +268,12 @@ struct CArrowStream *zerobus_sdk_create_arrow_stream(struct CZerobusSdk *sdk,
  * Creates an Arrow Flight stream with a custom headers provider callback.
  *
  * `schema_ipc_bytes` must point to Arrow IPC stream bytes encoding only the schema.
+ *
+ * Ownership of `user_data` / `free_user_data` follows
+ * `zerobus_sdk_create_stream_with_headers_provider` — once called the FFI owns
+ * `user_data` and invokes `free_user_data` exactly once on every path (on
+ * success after any in-flight `get_headers` returns; on failure before
+ * returning null). The caller must never free `user_data` itself.
  */
 struct CArrowStream *zerobus_sdk_create_arrow_stream_with_headers_provider(struct CZerobusSdk *sdk,
                                                                            const char *table_name,
@@ -186,6 +281,7 @@ struct CArrowStream *zerobus_sdk_create_arrow_stream_with_headers_provider(struc
                                                                            uintptr_t schema_ipc_len,
                                                                            HeadersProviderCallback headers_callback,
                                                                            void *user_data,
+                                                                           void (*free_user_data)(void *user_data),
                                                                            const struct CArrowStreamConfigurationOptions *options,
                                                                            struct CResult *result);
 
@@ -259,11 +355,6 @@ bool zerobus_arrow_stream_is_closed(struct CArrowStream *stream);
  * Returns the default Arrow stream configuration options.
  */
 struct CArrowStreamConfigurationOptions zerobus_arrow_get_default_config(void);
-
-/**
- * Free headers returned from callback
- */
-void zerobus_free_headers(struct CHeaders headers);
 
 /**
  * Allocates a new SDK builder. Must be terminated by exactly one of
@@ -354,8 +445,42 @@ struct CZerobusStream *zerobus_sdk_create_stream(struct CZerobusSdk *sdk,
                                                  struct CResult *result);
 
 /**
+ * Create a stream with OAuth authentication on a background task.
+ *
+ * Returns `true` once the request has been validated and scheduled. The
+ * callback is invoked exactly once with either a non-null stream pointer and a
+ * success result, or a null stream pointer and a failure result. The SDK
+ * handle must remain valid until the callback runs.
+ */
+bool zerobus_sdk_create_stream_async(struct CZerobusSdk *sdk,
+                                     const char *table_name,
+                                     const uint8_t *descriptor_proto_bytes,
+                                     uintptr_t descriptor_proto_len,
+                                     const char *client_id,
+                                     const char *client_secret,
+                                     const struct CStreamConfigurationOptions *options,
+                                     CreateStreamAsyncCallback callback,
+                                     void *user_data,
+                                     struct CResult *result);
+
+/**
  * Create a stream with a custom headers provider callback
- * This allows you to provide custom authentication headers via a Go callback function
+ * This allows you to provide custom authentication headers via a Go/C callback function.
+ *
+ * Ownership: once this function is called, the FFI owns `user_data`. When
+ * `free_user_data` is set it is invoked exactly once, on every path:
+ * - on success, when the last internal reference to the provider drops — after
+ *   any in-flight `get_headers` callback has returned (this is what closes the
+ *   recovery-vs-teardown use-after-free);
+ * - on failure (this call returns null), before returning.
+ *
+ * The caller must therefore hand ownership across and never free `user_data`
+ * itself, not even when create fails. Pass a null `free_user_data` to opt out
+ * (the caller then owns `user_data` and must keep it alive for the stream's
+ * whole lifetime, including in-flight recovery callbacks).
+ *
+ * `free_user_data` may run on an internal SDK thread, so it must be safe to
+ * call from any thread.
  */
 struct CZerobusStream *zerobus_sdk_create_stream_with_headers_provider(struct CZerobusSdk *sdk,
                                                                        const char *table_name,
@@ -363,8 +488,64 @@ struct CZerobusStream *zerobus_sdk_create_stream_with_headers_provider(struct CZ
                                                                        uintptr_t descriptor_proto_len,
                                                                        HeadersProviderCallback headers_callback,
                                                                        void *user_data,
+                                                                       void (*free_user_data)(void *user_data),
                                                                        const struct CStreamConfigurationOptions *options,
                                                                        struct CResult *result);
+
+/**
+ * Create a stream with a custom headers provider callback on a background task.
+ *
+ * Returns `true` once the request has been validated and scheduled. The
+ * callback is invoked exactly once with either a non-null stream pointer and a
+ * success result, or a null stream pointer and a failure result. The SDK
+ * handle must remain valid until the callback runs.
+ *
+ * Ownership follows the synchronous `zerobus_sdk_create_stream_with_headers_provider`:
+ * once this function is called, the FFI owns `user_data`. When `free_user_data`
+ * is set it is invoked exactly once, on every path:
+ * - on a synchronous scheduling failure (this call returns false), before returning;
+ * - on an asynchronous creation failure, when the provider drops in the spawned
+ *   task before the completion callback fires with the error;
+ * - on success, when the last internal reference to the provider drops — after
+ *   any in-flight `get_headers` callback has returned (closing the
+ *   recovery-vs-teardown use-after-free).
+ *
+ * The caller must therefore hand ownership across and never free `user_data`
+ * itself, not even when creation fails. Pass a null `free_user_data` to opt out
+ * (the caller then owns `user_data` and must keep it alive for the stream's
+ * whole lifetime, including in-flight recovery callbacks).
+ *
+ * `free_user_data` may run on an internal SDK thread, so it must be safe to
+ * call from any thread.
+ */
+bool zerobus_sdk_create_stream_with_headers_provider_async(struct CZerobusSdk *sdk,
+                                                           const char *table_name,
+                                                           const uint8_t *descriptor_proto_bytes,
+                                                           uintptr_t descriptor_proto_len,
+                                                           HeadersProviderCallback headers_callback,
+                                                           void *user_data,
+                                                           void (*free_user_data)(void *user_data),
+                                                           const struct CStreamConfigurationOptions *options,
+                                                           CreateStreamAsyncCallback callback,
+                                                           void *callback_user_data,
+                                                           struct CResult *result);
+
+/**
+ * Recreate a stream from an existing stream
+ * This is used for recovery scenarios where the stream needs to be re-established
+ */
+struct CZerobusStream *zerobus_sdk_recreate_stream(struct CZerobusSdk *sdk,
+                                                   struct CZerobusStream *stream,
+                                                   struct CResult *result);
+
+/**
+ * Recreate a stream from an existing stream on a background task.
+ */
+bool zerobus_sdk_recreate_stream_async(struct CZerobusSdk *sdk,
+                                       struct CZerobusStream *stream,
+                                       CreateStreamAsyncCallback callback,
+                                       void *user_data,
+                                       struct CResult *result);
 
 /**
  * Free a stream instance
@@ -382,6 +563,16 @@ int64_t zerobus_stream_ingest_proto_record(struct CZerobusStream *stream,
                                            struct CResult *result);
 
 /**
+ * Ingest a protobuf record on a background task and report the assigned offset via callback.
+ */
+bool zerobus_stream_ingest_proto_record_async(struct CZerobusStream *stream,
+                                              const uint8_t *data,
+                                              uintptr_t data_len,
+                                              OffsetAsyncCallback callback,
+                                              void *user_data,
+                                              struct CResult *result);
+
+/**
  * Ingest a JSON record
  * Returns the offset directly
  * Returns -1 on error
@@ -389,6 +580,15 @@ int64_t zerobus_stream_ingest_proto_record(struct CZerobusStream *stream,
 int64_t zerobus_stream_ingest_json_record(struct CZerobusStream *stream,
                                           const char *json_data,
                                           struct CResult *result);
+
+/**
+ * Ingest a JSON record on a background task and report the assigned offset via callback.
+ */
+bool zerobus_stream_ingest_json_record_async(struct CZerobusStream *stream,
+                                             const char *json_data,
+                                             OffsetAsyncCallback callback,
+                                             void *user_data,
+                                             struct CResult *result);
 
 /**
  * Ingest a batch of protobuf records
@@ -402,6 +602,17 @@ int64_t zerobus_stream_ingest_proto_records(struct CZerobusStream *stream,
                                             struct CResult *result);
 
 /**
+ * Ingest a batch of protobuf records on a background task and report the last offset via callback.
+ */
+bool zerobus_stream_ingest_proto_records_async(struct CZerobusStream *stream,
+                                               const uint8_t *const *records,
+                                               const uintptr_t *record_lens,
+                                               uintptr_t num_records,
+                                               OffsetAsyncCallback callback,
+                                               void *user_data,
+                                               struct CResult *result);
+
+/**
  * Ingest a batch of JSON records
  * Returns the offset of the last record in the batch, or -1 on error
  * Returns -2 if batch is empty
@@ -410,6 +621,16 @@ int64_t zerobus_stream_ingest_json_records(struct CZerobusStream *stream,
                                            const char *const *json_records,
                                            uintptr_t num_records,
                                            struct CResult *result);
+
+/**
+ * Ingest a batch of JSON records on a background task and report the last offset via callback.
+ */
+bool zerobus_stream_ingest_json_records_async(struct CZerobusStream *stream,
+                                              const char *const *json_records,
+                                              uintptr_t num_records,
+                                              OffsetAsyncCallback callback,
+                                              void *user_data,
+                                              struct CResult *result);
 
 /**
  * Ingest a protobuf record without waiting for the record to be queued (fire-and-forget).
@@ -475,9 +696,26 @@ bool zerobus_stream_wait_for_offset(struct CZerobusStream *stream,
                                     struct CResult *result);
 
 /**
+ * Wait for an offset on a background task and report completion via callback.
+ */
+bool zerobus_stream_wait_for_offset_async(struct CZerobusStream *stream,
+                                          int64_t offset,
+                                          BoolAsyncCallback callback,
+                                          void *user_data,
+                                          struct CResult *result);
+
+/**
  * Flush all pending records
  */
 bool zerobus_stream_flush(struct CZerobusStream *stream, struct CResult *result);
+
+/**
+ * Flush all pending records on a background task and report completion via callback.
+ */
+bool zerobus_stream_flush_async(struct CZerobusStream *stream,
+                                BoolAsyncCallback callback,
+                                void *user_data,
+                                struct CResult *result);
 
 /**
  * Get unacknowledged records from a closed stream
@@ -485,6 +723,14 @@ bool zerobus_stream_flush(struct CZerobusStream *stream, struct CResult *result)
  */
 struct CRecordArray zerobus_stream_get_unacked_records(struct CZerobusStream *stream,
                                                        struct CResult *result);
+
+/**
+ * Get unacknowledged records from a closed stream on a background task.
+ */
+bool zerobus_stream_get_unacked_records_async(struct CZerobusStream *stream,
+                                              RecordArrayAsyncCallback callback,
+                                              void *user_data,
+                                              struct CResult *result);
 
 /**
  * Free a CRecordArray returned by zerobus_stream_get_unacked_records
@@ -495,6 +741,19 @@ void zerobus_free_record_array(struct CRecordArray array);
  * Close the stream gracefully
  */
 bool zerobus_stream_close(struct CZerobusStream *stream, struct CResult *result);
+
+/**
+ * Close the stream gracefully on a background task.
+ */
+bool zerobus_stream_close_async(struct CZerobusStream *stream,
+                                BoolAsyncCallback callback,
+                                void *user_data,
+                                struct CResult *result);
+
+/**
+ * Returns whether the stream has been closed.
+ */
+bool zerobus_stream_is_closed(struct CZerobusStream *stream);
 
 /**
  * Free error message string
@@ -536,11 +795,11 @@ const uint8_t *zerobus_proto_schema_descriptor_bytes(const struct CZerobusProtoS
  * - LONG/BIGINT above 2^53: pass as a JSON string, else the value loses
  *   precision as a JSON number.
  *
- * Presence is enforced only for top-level non-nullable scalar and struct
- * columns (proto2 `required`); a record omitting one fails. Non-nullable
+ * Non-nullable scalar and struct fields (proto2 `required`) are presence-checked
+ * at any depth — nested STRUCTs, ARRAY<STRUCT> elements, and MAP values — so a
+ * record omitting one fails locally rather than at the server. Non-nullable
  * ARRAY/MAP columns map to `repeated`, which has no presence, so an omitted one
- * encodes as empty rather than failing; required fields nested inside a STRUCT
- * are likewise not presence-checked.
+ * encodes as empty rather than failing.
  * Returns true on success; caller must free buffer with `zerobus_free_proto_bytes`.
  * On failure `*out_data` is set to NULL and `*out_len` to 0.
  */
