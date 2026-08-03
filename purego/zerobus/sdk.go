@@ -1,7 +1,4 @@
-// Package zerobus is a native, pure-Go client for streaming ingestion into
-// Databricks Delta tables through the Zerobus service. It talks gRPC to the
-// service directly — no cgo, no FFI, no C toolchain — so it builds and
-// cross-compiles as an ordinary Go module.
+// Package zerobus is a pure-Go client for Zerobus ingestion.
 //
 // # Quick start
 //
@@ -23,11 +20,7 @@
 //
 // # Ingesting data
 //
-// Ingestion is asynchronous and pipelined: IngestRecordOffset returns as soon as
-// the record is queued and the offset is assigned; sending and acknowledgement
-// happen in the background. Queue records in a loop and confirm durability with
-// a single Flush — never wait for an acknowledgement after every record, which
-// collapses throughput to one record per round-trip.
+// Ingestion is asynchronous. Queue records in a loop and call Flush once.
 //
 //	for _, rec := range records {
 //	    if _, err := stream.IngestRecordOffset(rec); err != nil {
@@ -75,18 +68,15 @@ import (
 // version identifies this SDK in the gRPC user-agent header.
 const version = "0.1.0"
 
-// userAgentPrefix is the leading user-agent token sent on every request. An
-// application name supplied via WithApplicationName is appended after a space.
+// userAgentPrefix is sent on every request.
 const userAgentPrefix = "zerobus-sdk-go-purego/" + version
 
 // HeadersProvider supplies the gRPC authentication metadata for a stream.
 // Implement it to plug in custom authentication with CreateStreamWithProvider;
 // the built-in OAuth path (CreateStream) provides one for you.
 //
-// GetHeaders returns the metadata headers for tableName; it may block on a token
-// mint, bounded by ctx. Invalidate is called on a server auth rejection so
-// cached credentials can be dropped before the next attempt — it must not block
-// on network I/O.
+// GetHeaders may block on token minting (bounded by ctx).
+// Invalidate should drop cached credentials and return quickly.
 type HeadersProvider = transport.HeadersProvider
 
 // NewStaticHeadersProvider returns a HeadersProvider that returns the same fixed
@@ -96,10 +86,7 @@ func NewStaticHeadersProvider(headers map[string]string) HeadersProvider {
 	return auth.NewStaticHeadersProvider(headers)
 }
 
-// SDK is the entry point for creating ingestion streams. It owns the shared gRPC
-// connection to the Zerobus service and, for the OAuth path, a per-table token
-// cache reused across every stream it creates. A single SDK is safe for
-// concurrent use; callers must Close it when done.
+// SDK creates streams and owns shared connection state.
 type SDK struct {
 	zerobusEndpoint string
 	ucEndpoint      string
@@ -117,9 +104,7 @@ type SDK struct {
 	streams map[*Stream]struct{}
 }
 
-// newSDK builds an SDK around an already-dialed connection. It is the single
-// construction point shared by New and the test-only NewWithConn so both get
-// the shared token cache and stream registry.
+// newSDK builds an SDK around an existing connection.
 func newSDK(conn *transport.Conn, zerobusEndpoint, ucEndpoint string) *SDK {
 	return &SDK{
 		zerobusEndpoint: strings.TrimSpace(zerobusEndpoint),
@@ -137,9 +122,8 @@ func newSDK(conn *transport.Conn, zerobusEndpoint, ucEndpoint string) *SDK {
 // Catalog workspace URL used to mint OAuth tokens (e.g.
 // "https://ws.cloud.databricks.com").
 //
-// The connection is secured with TLS using the host's root CAs unless
-// WithTLSConfig overrides it. Dialing is lazy: the TCP/TLS handshake happens
-// when the first stream opens, so New does not fail on an unreachable service.
+// TLS uses host root CAs unless overridden by WithTLSConfig.
+// Dialing is lazy and happens on first stream open.
 func New(zerobusEndpoint, ucEndpoint string, opts ...Option) (*SDK, error) {
 	var cfg sdkConfig
 	for _, opt := range opts {
@@ -176,13 +160,8 @@ func New(zerobusEndpoint, ucEndpoint string, opts ...Option) (*SDK, error) {
 	return newSDK(conn, zerobusEndpoint, ucEndpoint), nil
 }
 
-// Close terminates every stream still open from this SDK, then releases the
-// shared connection. It is idempotent, and further CreateStream calls fail.
-//
-// Termination is abrupt: records queued but not yet acknowledged are abandoned
-// rather than flushed, and are reported through each stream's ack callback (or
-// retrievable with GetUnackedRecords). Close individual streams first for an
-// orderly shutdown with durability results.
+// Close terminates open streams and releases the shared connection.
+// It is idempotent; CreateStream fails after Close.
 func (s *SDK) Close() error {
 	s.mu.Lock()
 	if s.closed {
@@ -216,22 +195,9 @@ func (s *SDK) Close() error {
 	return wrapErr("Close", errors.Join(errs...))
 }
 
-// CreateStream opens an ingestion stream for tableName authenticated with the
-// Unity Catalog OAuth 2.0 client-credentials flow using clientID and
-// clientSecret. The record encoding defaults to Protocol Buffers; pass
-// WithProto with the required descriptor, or WithJSON for JSON records.
-//
-// By default, the stream opens asynchronously: CreateStream validates its
-// arguments and returns a stream immediately. Values from ctx propagate to the
-// first connection and later reconnects, but its cancellation and deadline are
-// detached because the open process outlives this call. A connection error that
-// cannot be recovered — bad credentials, an unknown table — therefore surfaces
-// on the first Flush, WaitForOffset, or ack callback, not from CreateStream.
-//
-// Pass WithWaitForReady to bind the complete first-open process to ctx instead:
-// token resolution, handshake, retry backoff, and repeated attempts stop when
-// ctx is cancelled. After the first successful open, cancellation is detached
-// and the stream owns its lifecycle. The caller must Close the returned stream.
+// CreateStream opens an OAuth-authenticated ingestion stream for tableName.
+// By default it returns quickly and first-open runs in the background.
+// Use WithWaitForReady to block until first-open succeeds or fails.
 func (s *SDK) CreateStream(
 	ctx context.Context,
 	tableName, clientID, clientSecret string,
@@ -247,10 +213,7 @@ func (s *SDK) CreateStream(
 	return s.createStream(ctx, "CreateStream", tableName, provider, opts...)
 }
 
-// CreateStreamWithProvider opens an ingestion stream for tableName using a custom
-// HeadersProvider for authentication. Use it when the OAuth client-credentials
-// flow of CreateStream does not fit — for externally managed credentials, a
-// custom token source, or tests. Options behave as in CreateStream.
+// CreateStreamWithProvider opens a stream with a custom HeadersProvider.
 func (s *SDK) CreateStreamWithProvider(
 	ctx context.Context,
 	tableName string,
@@ -289,11 +252,7 @@ func (s *SDK) createStream(
 		DescriptorProto: sc.descriptor,
 		HeadersProvider: provider,
 	}
-	// NewProtoJSONStream validates the record type / descriptor and starts the
-	// supervisor, which opens the first transport stream in the background. Only
-	// construction-time validation errors surface here; connection failures
-	// surface on the first Flush/WaitForOffset (see CreateStream) unless
-	// WithWaitForReady is set.
+	// NewProtoJSONStream validates config and starts first-open.
 	openingCtx := context.WithoutCancel(ctx)
 	if sc.waitReady {
 		openingCtx = ctx
@@ -324,10 +283,7 @@ func (s *SDK) createStream(
 	return st, nil
 }
 
-// validateStreamArgs rejects stream arguments that transport open would reject
-// asynchronously, so a caller mistake fails at CreateStream instead of surfacing
-// much later on the first Flush. It deliberately mirrors the transport's checks
-// rather than adding stricter rules of its own.
+// validateStreamArgs fails fast on invalid stream arguments.
 func validateStreamArgs(tableName string, sc streamConfig) error {
 	if strings.TrimSpace(tableName) == "" {
 		return fmt.Errorf("table name is required")
@@ -338,9 +294,7 @@ func validateStreamArgs(tableName string, sc streamConfig) error {
 	return nil
 }
 
-// validateApplicationName applies gRPC metadata's ASCII-value constraints
-// before constructing the lazy connection, so malformed user-agent data fails
-// at New rather than later during the first stream open.
+// validateApplicationName enforces gRPC metadata character constraints.
 func validateApplicationName(name string) error {
 	if !utf8.ValidString(name) {
 		return fmt.Errorf("application name must be valid UTF-8")
@@ -354,19 +308,14 @@ func validateApplicationName(name string) error {
 	return nil
 }
 
-// forget drops st from the open-stream set once it has torn itself down, so a
-// long-lived SDK does not retain closed streams.
+// forget removes a closed stream from the SDK registry.
 func (s *SDK) forget(st *Stream) {
 	s.mu.Lock()
 	delete(s.streams, st)
 	s.mu.Unlock()
 }
 
-// grpcTarget converts a user-facing endpoint (an HTTPS URL, a bare host, or a
-// gRPC resolver target) into a target grpc.NewClient accepts. An HTTPS URL is
-// reduced to host[:port], defaulting to :443. Explicit resolver targets
-// (containing "://", e.g. "dns:///", "passthrough:///") pass through unchanged
-// so tests and advanced callers can inject their own.
+// grpcTarget converts endpoint input to a grpc.NewClient target.
 func grpcTarget(endpoint string) (string, error) {
 	endpoint = strings.TrimSpace(endpoint)
 	if endpoint == "" {
