@@ -43,6 +43,10 @@
 // genuinely low-volume cases where each record must be confirmed before
 // continuing.
 //
+// Stream creation is asynchronous by default: CreateStream returns after local
+// validation while first-open runs in the background. Pass WithWaitForReady to
+// make CreateStream block until first-open succeeds or fails terminally.
+//
 // # Authentication
 //
 // CreateStream uses the Unity Catalog OAuth 2.0 client-credentials flow. For
@@ -217,12 +221,17 @@ func (s *SDK) Close() error {
 // clientSecret. The record encoding defaults to Protocol Buffers; pass
 // WithProto with the required descriptor, or WithJSON for JSON records.
 //
-// The stream opens asynchronously: CreateStream validates its arguments and
-// returns a stream immediately, while the first connection (token mint
-// plus handshake) proceeds in the background and recovers on failure. A
-// connection error that cannot be recovered — bad credentials, an unknown
-// table — therefore surfaces on the first Flush, WaitForOffset, or ack
-// callback, not from CreateStream. The caller must Close the returned stream.
+// By default, the stream opens asynchronously: CreateStream validates its
+// arguments and returns a stream immediately. Values from ctx propagate to the
+// first connection and later reconnects, but its cancellation and deadline are
+// detached because the open process outlives this call. A connection error that
+// cannot be recovered — bad credentials, an unknown table — therefore surfaces
+// on the first Flush, WaitForOffset, or ack callback, not from CreateStream.
+//
+// Pass WithWaitForReady to bind the complete first-open process to ctx instead:
+// token resolution, handshake, retry backoff, and repeated attempts stop when
+// ctx is cancelled. After the first successful open, cancellation is detached
+// and the stream owns its lifecycle. The caller must Close the returned stream.
 func (s *SDK) CreateStream(
 	ctx context.Context,
 	tableName, clientID, clientSecret string,
@@ -259,7 +268,7 @@ func (s *SDK) CreateStreamWithProvider(
 }
 
 func (s *SDK) createStream(
-	_ context.Context,
+	ctx context.Context,
 	op, tableName string,
 	provider HeadersProvider,
 	opts ...StreamOption,
@@ -283,9 +292,13 @@ func (s *SDK) createStream(
 	// NewProtoJSONStream validates the record type / descriptor and starts the
 	// supervisor, which opens the first transport stream in the background. Only
 	// construction-time validation errors surface here; connection failures
-	// surface on the first Flush/WaitForOffset (see CreateStream). The context is
-	// accepted for a uniform, forward-compatible signature.
-	core, err := stream.NewProtoJSONStream(s.conn, params, sc.cfg, sc.callback)
+	// surface on the first Flush/WaitForOffset (see CreateStream) unless
+	// WithWaitForReady is set.
+	openingCtx := context.WithoutCancel(ctx)
+	if sc.waitReady {
+		openingCtx = ctx
+	}
+	core, err := stream.NewProtoJSONStream(openingCtx, s.conn, params, sc.cfg, sc.callback)
 	if err != nil {
 		return nil, wrapErr(op, err)
 	}
@@ -300,6 +313,14 @@ func (s *SDK) createStream(
 	}
 	s.streams[st] = struct{}{}
 	s.mu.Unlock()
+
+	if sc.waitReady {
+		if err := st.core.WaitReady(ctx); err != nil {
+			_ = st.terminate()
+			s.forget(st)
+			return nil, wrapErr(op, err)
+		}
+	}
 	return st, nil
 }
 

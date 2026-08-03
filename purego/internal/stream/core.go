@@ -294,6 +294,13 @@ type CoreStream[Req, Resp any] struct {
 
 	// done is closed when the supervisor exits (terminal state).
 	done chan struct{}
+	// readyCh closes once the first-open result is known. A nil readyErr means
+	// at least one open succeeded; a non-nil readyErr means the first-open
+	// process failed terminally or was cancelled before succeeding.
+	readyCh  chan struct{}
+	readyMu  sync.Mutex
+	readyErr error
+	readySet bool
 	// termErr holds the first terminal error after done is closed.
 	termErr         error
 	retainedUnacked []item[Req]
@@ -316,9 +323,13 @@ func newClientStreamID() string {
 
 // NewCoreStream constructs a CoreStream and starts the supervisor goroutine.
 // The stream is immediately ready for Ingest calls; the supervisor opens the
-// first transport stream in the background. Prefer the per-protocol
-// constructors (NewProtoJSONStream) over calling this directly.
+// first transport stream in the background. openingCtx supplies values for the
+// stream lifetime and bounds the complete first-open process. After the first
+// successful open, caller cancellation is detached and Close owns lifecycle
+// cancellation. Prefer the per-protocol constructors (NewProtoJSONStream) over
+// calling this directly.
 func NewCoreStream[Req, Resp any](
+	openingCtx context.Context,
 	params StreamParams,
 	cfg Config,
 	opener opener[Req, Resp],
@@ -335,7 +346,7 @@ func NewCoreStream[Req, Resp any](
 	if len(params.DescriptorProto) > 0 {
 		params.DescriptorProto = bytes.Clone(params.DescriptorProto)
 	}
-	ctx, cancel := context.WithCancel(context.Background())
+	lifecycleCtx, cancel := context.WithCancel(context.WithoutCancel(openingCtx))
 	cs := &CoreStream[Req, Resp]{
 		params:           params,
 		cfg:              cfg,
@@ -348,11 +359,38 @@ func NewCoreStream[Req, Resp any](
 		clientID:         newClientStreamID(),
 		pauseWait:        waitUntil,
 		done:             make(chan struct{}),
+		readyCh:          make(chan struct{}),
 		cancelSupervisor: cancel,
 	}
 	cs.lastEnqueued.Store(-1)
-	go cs.supervise(ctx)
+	go cs.supervise(lifecycleCtx, openingCtx)
 	return cs
+}
+
+// WaitReady waits for the first-open result. It returns nil once the stream has
+// opened at least once, or an error if first-open fails terminally or the
+// stream is closed before first-open succeeds.
+func (cs *CoreStream[Req, Resp]) WaitReady(ctx context.Context) error {
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-cs.readyCh:
+		cs.readyMu.Lock()
+		defer cs.readyMu.Unlock()
+		return cs.readyErr
+	}
+}
+
+func (cs *CoreStream[Req, Resp]) signalReady(err error) {
+	cs.readyMu.Lock()
+	if cs.readySet {
+		cs.readyMu.Unlock()
+		return
+	}
+	cs.readySet = true
+	cs.readyErr = err
+	close(cs.readyCh)
+	cs.readyMu.Unlock()
 }
 
 // ID returns the stable client-generated logical stream ID.
@@ -699,12 +737,20 @@ type sendEvent struct {
 	err            error
 }
 
-// runOnce operates one transport stream until a worker exits.
+// runOnce operates one transport stream until a worker exits. lifecycleCtx owns
+// the live connection after open; openingCtx bounds only this open attempt.
 // resetRecoveryBudget reports durable progress or a stable connection.
-func (cs *CoreStream[Req, Resp]) runOnce(ctx context.Context) (cause error, resetRecoveryBudget bool) {
-	openCtx, cancelOpen := context.WithTimeout(ctx, cs.cfg.RecoveryTimeout)
+func (cs *CoreStream[Req, Resp]) runOnce(
+	lifecycleCtx, openingCtx context.Context,
+) (cause error, resetRecoveryBudget bool) {
+	openCtx, cancelOpen := context.WithTimeout(openingCtx, cs.cfg.RecoveryTimeout)
+	// SDK/Stream Close owns lifecycleCtx. Link it into the bounded open attempt
+	// without making caller cancellation own the post-handshake connection.
+	stopLifecycleCancel := context.AfterFunc(lifecycleCtx, cancelOpen)
 	stream, err := cs.opener.Open(openCtx, cs.params)
 	openTimedOut := errors.Is(openCtx.Err(), context.DeadlineExceeded)
+	openingCtxDone := openingCtx.Err() != nil
+	stopLifecycleCancel()
 	cancelOpen()
 	if err != nil {
 		openErr := &openFailure{cause: fmt.Errorf("stream: open: %w", err)}
@@ -715,13 +761,14 @@ func (cs *CoreStream[Req, Resp]) runOnce(ctx context.Context) (cause error, rese
 		// A deadline that happens to expire alongside a permanent rejection must
 		// not promote it to retryable: the status, or the error's own
 		// classification, still decides.
-		if openTimedOut && ctx.Err() == nil &&
+		if openTimedOut && lifecycleCtx.Err() == nil && !openingCtxDone &&
 			!transport.IsTerminalStatus(err) && !deniesRetry(err) {
 			return &openBudgetExceeded{cause: openErr}, false
 		}
 		return openErr, false
 	}
 	cs.setServerID(stream.ServerID())
+	cs.signalReady(nil)
 	openedAt := time.Now()
 	startAck := cs.wm.current()
 
@@ -729,7 +776,7 @@ func (cs *CoreStream[Req, Resp]) runOnce(ctx context.Context) (cause error, rese
 	cs.buf.requeue()
 
 	// senderCtx controls only this connection's sender.
-	senderCtx, cancelSender := context.WithCancel(ctx)
+	senderCtx, cancelSender := context.WithCancel(lifecycleCtx)
 	defer cancelSender()
 
 	senderExitCh := make(chan error, 1)
@@ -801,7 +848,7 @@ waitLoop:
 			break waitLoop
 		case <-pauseCh:
 			recordPause()
-		case <-ctx.Done():
+		case <-lifecycleCtx.Done():
 			break waitLoop
 		}
 	}
@@ -809,7 +856,7 @@ waitLoop:
 	cancelSender()
 	var ps pauseSignal
 	switch {
-	case ctx.Err() != nil:
+	case lifecycleCtx.Err() != nil:
 		cs.gracefulTeardown(
 			stream, senderExited, senderExitCh, receiverDone,
 		)

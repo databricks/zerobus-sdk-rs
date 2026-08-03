@@ -913,7 +913,9 @@ type testOpener = opener[encodedMsg, ephemeralResp]
 // newCoreForTest builds a proto/JSON CoreStream with the JSON encoder and offset
 // ack model — the common wiring every test needs.
 func newCoreForTest(params StreamParams, cfg Config, o testOpener, cb AckCallback) *testStream {
-	return NewCoreStream[encodedMsg, ephemeralResp](params, cfg, o, jsonEncoder{}, offsetAckModel{}, cb)
+	return NewCoreStream[encodedMsg, ephemeralResp](
+		context.Background(), params, cfg, o, jsonEncoder{}, offsetAckModel{}, cb,
+	)
 }
 
 func newTestStream(t *testing.T, o testOpener) *testStream {

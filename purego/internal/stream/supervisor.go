@@ -9,12 +9,15 @@ import (
 	"github.com/databricks/zerobus-sdk/purego/internal/transport"
 )
 
-// supervise runs the connect, stream, and recovery lifecycle.
+// supervise runs the connect, stream, and recovery lifecycle. firstOpenCtx
+// bounds every attempt and backoff before the first successful open;
+// lifecycleCtx owns the live stream and every later reconnect.
 // Durable progress or a connection that survives RecoveryResetAfter resets the
 // retry budget.
-func (cs *CoreStream[Req, Resp]) supervise(ctx context.Context) {
+func (cs *CoreStream[Req, Resp]) supervise(lifecycleCtx, firstOpenCtx context.Context) {
 	defer func() {
-		if ctx.Err() != nil {
+		if lifecycleCtx.Err() != nil {
+			cs.signalReady(errClosedBeforeReady)
 			// Wake waiters whose targets are now unreachable.
 			cs.wm.closeForClean()
 			if cs.dispatcher != nil {
@@ -36,10 +39,15 @@ func (cs *CoreStream[Req, Resp]) supervise(ctx context.Context) {
 	failedAttempts := 0
 	openedOnce := false
 	initialAuthRefreshUsed := false
+superviseLoop:
 	for {
-		if ctx.Err() != nil {
+		if lifecycleCtx.Err() != nil {
 			// Cancelled by Close — clean exit, no error.
 			return
+		}
+		if !openedOnce && firstOpenCtx.Err() != nil {
+			err = firstOpenCtx.Err()
+			break
 		}
 
 		if failedAttempts > 0 {
@@ -48,25 +56,43 @@ func (cs *CoreStream[Req, Resp]) supervise(ctx context.Context) {
 					failedAttempts, err)
 				break
 			}
+			backoffCtx := lifecycleCtx
+			if !openedOnce {
+				backoffCtx = firstOpenCtx
+			}
+			timer := time.NewTimer(cs.cfg.RecoveryBackoff)
 			select {
-			case <-time.After(cs.cfg.RecoveryBackoff):
-			case <-ctx.Done():
+			case <-timer.C:
+			case <-lifecycleCtx.Done():
+				timer.Stop()
 				return
+			case <-backoffCtx.Done():
+				timer.Stop()
+				if lifecycleCtx.Err() != nil {
+					return
+				}
+				err = backoffCtx.Err()
+				break superviseLoop
 			}
 			// runOnce requeues after Open succeeds.
 		}
 
-		runErr, resetRecoveryBudget := cs.runOnce(ctx)
+		openingCtx := lifecycleCtx
+		if !openedOnce {
+			openingCtx = firstOpenCtx
+		}
+		runErr, resetRecoveryBudget := cs.runOnce(lifecycleCtx, openingCtx)
 
-		// ctx cancelled = clean exit via Close. Don't treat server-side EOF as clean.
-		if ctx.Err() != nil {
+		// Lifecycle cancellation is a clean exit via Close. Don't treat
+		// server-side EOF as clean.
+		if lifecycleCtx.Err() != nil {
 			// A definitive rejection still invalidates the credential that
 			// caused it, even when Close raced the completed Open/Recv. The
 			// provider contract requires Invalidate to be non-blocking.
 			if transport.IsAuthRejection(runErr) &&
 				cs.params.HeadersProvider != nil {
 				cs.params.HeadersProvider.Invalidate(
-					context.WithoutCancel(ctx), cs.params.TableName,
+					context.WithoutCancel(lifecycleCtx), cs.params.TableName,
 				)
 			}
 			return
@@ -91,7 +117,7 @@ func (cs *CoreStream[Req, Resp]) supervise(ctx context.Context) {
 				)
 				break
 			}
-			if !cs.pauseWait(ctx, ps.resumeAt) {
+			if !cs.pauseWait(lifecycleCtx, ps.resumeAt) {
 				return
 			}
 			continue
@@ -120,7 +146,7 @@ func (cs *CoreStream[Req, Resp]) supervise(ctx context.Context) {
 		}
 		if transport.IsAuthRejection(runErr) &&
 			cs.params.HeadersProvider != nil {
-			cs.params.HeadersProvider.Invalidate(ctx, cs.params.TableName)
+			cs.params.HeadersProvider.Invalidate(lifecycleCtx, cs.params.TableName)
 		}
 
 		err = runErr
@@ -131,6 +157,7 @@ func (cs *CoreStream[Req, Resp]) supervise(ctx context.Context) {
 	}
 
 	// Terminal failure path.
+	cs.signalReady(err)
 	cs.wm.fail(err)
 	cs.setTerminalErr(err)
 

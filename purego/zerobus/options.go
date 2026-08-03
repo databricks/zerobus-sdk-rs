@@ -60,6 +60,7 @@ type streamConfig struct {
 	recordType zerobuspb.RecordType
 	descriptor []byte
 	callback   AckCallback
+	waitReady  bool
 	cfg        stream.Config
 }
 
@@ -94,6 +95,20 @@ func WithProto(descriptorProto []byte) StreamOption {
 // together.
 func WithAckCallback(cb AckCallback) StreamOption {
 	return func(c *streamConfig) { c.callback = cb }
+}
+
+// WithWaitForReady makes CreateStream / CreateStreamWithProvider wait for the
+// first stream open to succeed (or fail terminally) before returning. The
+// creation context directly bounds token resolution, handshake, retry backoff,
+// and every attempt before first-open succeeds. Its cancellation is detached
+// after success, so it does not own the live stream.
+//
+// Without this option, stream open remains asynchronous: context values
+// propagate to the stream, but cancellation and deadlines are detached because
+// first-open outlives the CreateStream call. Failures surface on the first
+// Flush, WaitForOffset, or ack callback.
+func WithWaitForReady() StreamOption {
+	return func(c *streamConfig) { c.waitReady = true }
 }
 
 // WithRecovery sets whether the stream reconnects after a recoverable failure.

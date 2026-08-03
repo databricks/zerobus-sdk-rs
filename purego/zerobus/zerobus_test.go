@@ -7,6 +7,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -63,7 +64,7 @@ func TestGRPCTarget(t *testing.T) {
 }
 
 func TestResolveStreamConfigDefaults(t *testing.T) {
-	rt, desc, maxInflight, recovery := zerobus.ResolveStreamConfig()
+	rt, desc, maxInflight, recovery, waitReady := zerobus.ResolveStreamConfig()
 	if rt != int32(zerobuspb.RecordType_PROTO) {
 		t.Errorf("default record type = %d, want PROTO(%d)", rt, zerobuspb.RecordType_PROTO)
 	}
@@ -76,6 +77,9 @@ func TestResolveStreamConfigDefaults(t *testing.T) {
 	if recovery != zerobus.RecoveryEnabled {
 		t.Errorf("default recovery = %v, want RecoveryEnabled", recovery)
 	}
+	if waitReady {
+		t.Error("default waitReady = true, want false")
+	}
 }
 
 // stream_DefaultMaxInflight mirrors internal/stream.DefaultMaxInflight so the
@@ -84,10 +88,11 @@ const stream_DefaultMaxInflight = 1_000_000
 
 func TestResolveStreamConfigOptions(t *testing.T) {
 	desc := []byte("descriptor-bytes")
-	rt, gotDesc, maxInflight, recovery := zerobus.ResolveStreamConfig(
+	rt, gotDesc, maxInflight, recovery, waitReady := zerobus.ResolveStreamConfig(
 		zerobus.WithProto(desc),
 		zerobus.WithMaxInflight(42),
 		zerobus.WithRecovery(zerobus.RecoveryDisabled),
+		zerobus.WithWaitForReady(),
 	)
 	if rt != int32(zerobuspb.RecordType_PROTO) {
 		t.Errorf("record type = %d, want PROTO(%d)", rt, zerobuspb.RecordType_PROTO)
@@ -101,11 +106,14 @@ func TestResolveStreamConfigOptions(t *testing.T) {
 	if recovery != zerobus.RecoveryDisabled {
 		t.Errorf("recovery = %v, want RecoveryDisabled", recovery)
 	}
+	if !waitReady {
+		t.Error("waitReady = false, want true")
+	}
 }
 
 func TestWithJSONClearsDescriptor(t *testing.T) {
 	// WithProto then WithJSON must drop the descriptor: a JSON stream carries none.
-	rt, desc, _, _ := zerobus.ResolveStreamConfig(zerobus.WithProto([]byte("d")), zerobus.WithJSON())
+	rt, desc, _, _, _ := zerobus.ResolveStreamConfig(zerobus.WithProto([]byte("d")), zerobus.WithJSON())
 	if rt != int32(zerobuspb.RecordType_JSON) {
 		t.Errorf("record type = %d, want JSON", rt)
 	}
@@ -193,6 +201,7 @@ type echoServer struct {
 	zerobuspb.UnimplementedZerobusServer
 	streamID string
 	noAcks   bool
+	noReady  bool
 }
 
 func (s *echoServer) EphemeralStream(stream zerobuspb.Zerobus_EphemeralStreamServer) error {
@@ -202,6 +211,10 @@ func (s *echoServer) EphemeralStream(stream zerobuspb.Zerobus_EphemeralStreamSer
 	}
 	if req.GetCreateStream() == nil {
 		return io.ErrUnexpectedEOF
+	}
+	if s.noReady {
+		<-stream.Context().Done()
+		return stream.Context().Err()
 	}
 	if err := stream.Send(&zerobuspb.EphemeralStreamResponse{
 		Payload: &zerobuspb.EphemeralStreamResponse_CreateStreamResponse{
@@ -464,6 +477,200 @@ func TestFlushReportsTerminalFailureWithNoRecords(t *testing.T) {
 	// report success.
 	if err := st.Flush(); err == nil {
 		t.Error("Flush on a terminally failed stream = nil, want the open failure")
+	}
+}
+
+type streamContextKey struct{}
+
+type contextProbeProvider struct {
+	key       any
+	started   chan struct{}
+	release   chan struct{}
+	values    chan any
+	startOnce sync.Once
+}
+
+func newContextProbeProvider(key any) *contextProbeProvider {
+	return &contextProbeProvider{
+		key:     key,
+		started: make(chan struct{}),
+		release: make(chan struct{}),
+		values:  make(chan any, 1),
+	}
+}
+
+func (p *contextProbeProvider) GetHeaders(ctx context.Context, _ string) (map[string]string, error) {
+	p.startOnce.Do(func() { close(p.started) })
+	select {
+	case p.values <- ctx.Value(p.key):
+	default:
+	}
+	select {
+	case <-p.release:
+		return map[string]string{"authorization": "Bearer t"}, nil
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
+}
+
+func (*contextProbeProvider) Invalidate(context.Context, string) {}
+
+func TestCreateStreamAsyncPropagatesValuesButDetachesCancellation(t *testing.T) {
+	conn := dialEcho(t, &echoServer{streamID: "stream-async-context"})
+	sdk := zerobus.NewWithConn(conn, "https://ws.zerobus.databricks.com", "https://ws.databricks.com")
+	defer sdk.Close()
+
+	key := streamContextKey{}
+	provider := newContextProbeProvider(key)
+	ctx, cancel := context.WithCancel(context.WithValue(context.Background(), key, "trace-value"))
+	st, err := sdk.CreateStreamWithProvider(
+		ctx, "main.sales.orders", provider, zerobus.WithJSON(),
+	)
+	if err != nil {
+		cancel()
+		t.Fatalf("CreateStreamWithProvider: %v", err)
+	}
+	defer st.Close()
+
+	select {
+	case <-provider.started:
+	case <-time.After(time.Second):
+		cancel()
+		t.Fatal("headers provider was not called")
+	}
+	cancel()
+	close(provider.release)
+	select {
+	case got := <-provider.values:
+		if got != "trace-value" {
+			t.Fatalf("context value = %v, want trace-value", got)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("headers provider did not observe context value")
+	}
+
+	if _, err := st.IngestRecordOffset([]byte(`{"id":1}`)); err != nil {
+		t.Fatalf("IngestRecordOffset after caller cancellation: %v", err)
+	}
+	if err := st.Flush(); err != nil {
+		t.Fatalf("Flush after caller cancellation: %v", err)
+	}
+}
+
+func TestCreateStreamWaitForReadyContextCancelsHeadersProvider(t *testing.T) {
+	conn := dialEcho(t, &echoServer{streamID: "stream-ready-context"})
+	sdk := zerobus.NewWithConn(conn, "https://ws.zerobus.databricks.com", "https://ws.databricks.com")
+	defer sdk.Close()
+
+	key := streamContextKey{}
+	provider := newContextProbeProvider(key)
+	valueCtx := context.WithValue(context.Background(), key, "trace-value")
+	ctx, cancel := context.WithTimeout(valueCtx, 25*time.Millisecond)
+	defer cancel()
+	st, err := sdk.CreateStreamWithProvider(
+		ctx, "main.sales.orders", provider,
+		zerobus.WithJSON(), zerobus.WithWaitForReady(),
+	)
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("CreateStreamWithProvider error = %v, want DeadlineExceeded", err)
+	}
+	if st != nil {
+		t.Fatalf("CreateStreamWithProvider returned stream on cancellation: %#v", st)
+	}
+	select {
+	case got := <-provider.values:
+		if got != "trace-value" {
+			t.Fatalf("context value = %v, want trace-value", got)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("headers provider did not observe context value")
+	}
+	if n := sdk.OpenStreamCount(); n != 0 {
+		t.Fatalf("SDK tracks %d streams after cancelled wait-ready create, want 0", n)
+	}
+}
+
+func TestCreateStreamWaitForReadyContextCancelsHandshake(t *testing.T) {
+	conn := dialEcho(t, &echoServer{streamID: "stream-ready-handshake", noReady: true})
+	sdk := zerobus.NewWithConn(conn, "https://ws.zerobus.databricks.com", "https://ws.databricks.com")
+	defer sdk.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 25*time.Millisecond)
+	defer cancel()
+	st, err := sdk.CreateStreamWithProvider(
+		ctx,
+		"main.sales.orders",
+		zerobus.NewStaticHeadersProvider(map[string]string{"authorization": "Bearer t"}),
+		zerobus.WithJSON(),
+		zerobus.WithWaitForReady(),
+	)
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("CreateStreamWithProvider error = %v, want DeadlineExceeded", err)
+	}
+	if st != nil {
+		t.Fatalf("CreateStreamWithProvider returned stream on cancellation: %#v", st)
+	}
+	if n := sdk.OpenStreamCount(); n != 0 {
+		t.Fatalf("SDK tracks %d streams after cancelled handshake, want 0", n)
+	}
+}
+
+func TestCreateStreamWithProviderWaitForReadySucceeds(t *testing.T) {
+	conn := dialEcho(t, &echoServer{streamID: "stream-ready"})
+	sdk := zerobus.NewWithConn(conn, "https://ws.zerobus.databricks.com", "https://ws.databricks.com")
+	defer sdk.Close()
+	provider := zerobus.NewStaticHeadersProvider(map[string]string{"authorization": "Bearer t"})
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	st, err := sdk.CreateStreamWithProvider(
+		ctx, "main.sales.orders", provider, zerobus.WithJSON(), zerobus.WithWaitForReady(),
+	)
+	if err != nil {
+		cancel()
+		t.Fatalf("CreateStreamWithProvider(WithWaitForReady): %v", err)
+	}
+	defer st.Close()
+	if got := st.ServerID(); got == "" {
+		cancel()
+		t.Fatal("ServerID is empty after wait-ready create")
+	}
+	cancel()
+	if _, err := st.IngestRecordOffset([]byte(`{"id":1}`)); err != nil {
+		t.Fatalf("IngestRecordOffset after creation-context cancellation: %v", err)
+	}
+	if err := st.Flush(); err != nil {
+		t.Fatalf("Flush after creation-context cancellation: %v", err)
+	}
+}
+
+func TestCreateStreamWithProviderWaitForReadyFailsFastOnOpenError(t *testing.T) {
+	conn := dialEcho(t, &echoServer{streamID: "stream-ready-fail"})
+	sdk := zerobus.NewWithConn(conn, "https://ws.zerobus.databricks.com", "https://ws.databricks.com")
+	defer sdk.Close()
+
+	// Missing auth headers makes open fail terminally; wait-ready mode surfaces
+	// it from CreateStreamWithProvider rather than deferring to Flush.
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	st, err := sdk.CreateStreamWithProvider(
+		ctx,
+		"main.sales.orders",
+		zerobus.NewStaticHeadersProvider(nil),
+		zerobus.WithJSON(),
+		zerobus.WithRecovery(zerobus.RecoveryDisabled),
+		zerobus.WithWaitForReady(),
+	)
+	if err == nil {
+		if st != nil {
+			_ = st.Close()
+		}
+		t.Fatal("CreateStreamWithProvider succeeded, want wait-ready open failure")
+	}
+	if st != nil {
+		t.Fatalf("CreateStreamWithProvider returned stream on failure: %#v", st)
+	}
+	if n := sdk.OpenStreamCount(); n != 0 {
+		t.Fatalf("SDK tracks %d streams after failed wait-ready create, want 0", n)
 	}
 }
 

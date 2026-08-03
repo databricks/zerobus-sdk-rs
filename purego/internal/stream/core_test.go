@@ -107,6 +107,116 @@ func TestCoreStreamFailedRecoveryPreservesServerID(t *testing.T) {
 	}
 }
 
+func TestCoreStreamWaitReadyReturnsOnFirstSuccessfulOpen(t *testing.T) {
+	rpc := newFakeRPC()
+	cs := newTestStream(t, newFakeOpener(rpc))
+
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	if err := cs.WaitReady(ctx); err != nil {
+		t.Fatalf("WaitReady: %v", err)
+	}
+	if got := cs.ServerID(); got == "" {
+		t.Fatal("ServerID is empty after WaitReady success")
+	}
+}
+
+func TestCoreStreamWaitReadyReturnsTerminalOpenFailure(t *testing.T) {
+	cfg := testConfig()
+	cfg.Recovery = RecoveryDisabled
+	cs := newCoreForTest(testParams(), cfg, &fakeOpener{openErr: errors.New("open failed")}, nil)
+	t.Cleanup(func() { _ = cs.Close() })
+
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	err := cs.WaitReady(ctx)
+	if err == nil || !strings.Contains(err.Error(), "open failed") {
+		t.Fatalf("WaitReady error = %v, want open failure", err)
+	}
+}
+
+func TestCoreStreamWaitReadyRetriesOpenBeforeSuccess(t *testing.T) {
+	cfg := testConfig()
+	opener := &scriptedOpenOpener{
+		steps: []openStep{
+			{err: status.Error(codes.Unavailable, "transient open failure")},
+			{rpc: newFakeRPC()},
+		},
+	}
+	cs := newCoreForTest(testParams(), cfg, opener, nil)
+	t.Cleanup(func() { _ = cs.Close() })
+
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	if err := cs.WaitReady(ctx); err != nil {
+		t.Fatalf("WaitReady: %v", err)
+	}
+	if got := opener.openCount(); got != 2 {
+		t.Fatalf("Open attempts = %d, want 2", got)
+	}
+}
+
+func TestCoreStreamFirstOpenContextCancelsRecoveryBackoff(t *testing.T) {
+	openingCtx, cancelOpening := context.WithCancel(context.Background())
+	cfg := testConfig()
+	cfg.RecoveryBackoff = time.Hour
+	opener := &fakeOpener{openErr: status.Error(codes.Unavailable, "try again")}
+	cs := NewCoreStream[encodedMsg, ephemeralResp](
+		openingCtx,
+		testParams(),
+		cfg,
+		opener,
+		jsonEncoder{},
+		offsetAckModel{},
+		nil,
+	)
+	t.Cleanup(func() { _ = cs.Close() })
+
+	waitCondition(t, func() bool { return opener.openCount() == 1 }, time.Second)
+	cancelOpening()
+
+	waitCtx, cancelWait := context.WithTimeout(context.Background(), time.Second)
+	defer cancelWait()
+	if err := cs.WaitReady(waitCtx); !errors.Is(err, context.Canceled) {
+		t.Fatalf("WaitReady error = %v, want context.Canceled", err)
+	}
+	if got := opener.openCount(); got != 1 {
+		t.Fatalf("Open attempts = %d, want 1 after cancelling retry backoff", got)
+	}
+}
+
+func TestCoreStreamOpeningContextDetachesAfterReady(t *testing.T) {
+	rpc := newFakeRPC()
+	openingCtx, cancelOpening := context.WithCancel(context.Background())
+	cs := NewCoreStream[encodedMsg, ephemeralResp](
+		openingCtx,
+		testParams(),
+		testConfig(),
+		newFakeOpener(rpc),
+		jsonEncoder{},
+		offsetAckModel{},
+		nil,
+	)
+	t.Cleanup(func() { _ = cs.Close() })
+
+	waitCtx, cancelWait := context.WithTimeout(context.Background(), time.Second)
+	defer cancelWait()
+	if err := cs.WaitReady(waitCtx); err != nil {
+		t.Fatalf("WaitReady: %v", err)
+	}
+	cancelOpening()
+
+	offset, err := cs.Ingest(context.Background(), []byte(`{"id":1}`))
+	if err != nil {
+		t.Fatalf("Ingest after opening-context cancellation: %v", err)
+	}
+	<-rpc.sends
+	rpc.ack(offset)
+	if err := cs.WaitForOffset(waitCtx, offset); err != nil {
+		t.Fatalf("WaitForOffset after opening-context cancellation: %v", err)
+	}
+}
+
 func TestCoreStreamIngestAndFlush(t *testing.T) {
 	rpc := newFakeRPC()
 	cs := newTestStream(t, newFakeOpener(rpc))
@@ -251,6 +361,7 @@ func TestCoreStreamCloseLinearizesWithIngest(t *testing.T) {
 		release: release,
 	}
 	cs := NewCoreStream[encodedMsg, ephemeralResp](
+		context.Background(),
 		testParams(),
 		testConfig(),
 		newFakeOpener(rpc),
@@ -598,6 +709,7 @@ func TestCoreStreamEncodesConcurrentIngestsOutsideOffsetLock(t *testing.T) {
 
 	enc := &concurrentEncoder{entered: entered, release: release}
 	cs := NewCoreStream[encodedMsg, ephemeralResp](
+		context.Background(),
 		testParams(),
 		testConfig(),
 		newFakeOpener(rpc),
@@ -804,6 +916,7 @@ func TestCoreStreamRecvPumpStaysOutstandingDuringClassification(t *testing.T) {
 	defer releaseModel()
 	model := &blockingAckModel{entered: make(chan struct{}), release: release}
 	cs := NewCoreStream[encodedMsg, ephemeralResp](
+		context.Background(),
 		testParams(),
 		testConfig(),
 		&scriptedOpener{rpc: rpc},
@@ -2643,6 +2756,7 @@ func TestCoreStreamEncoderErrorReleasesCapacity(t *testing.T) {
 	cfg := testConfig()
 	cfg.MaxInflight = 1
 	cs := NewCoreStream[encodedMsg, ephemeralResp](
+		context.Background(),
 		testParams(),
 		cfg,
 		newFakeOpener(rpc),

@@ -15,6 +15,10 @@ var errClosed = errors.New("stream: buffer closed")
 // WaitForOffset target permanently unreachable.
 var errWatermarkClosed = errors.New("stream: closed before offset was acknowledged")
 
+// errClosedBeforeReady is returned when teardown happens before any successful
+// open completes.
+var errClosedBeforeReady = errors.New("stream: closed before first open completed")
+
 // ErrPayloadTooLarge marks an ingest call whose encoded request exceeds the
 // configured per-message limit.
 var ErrPayloadTooLarge = errors.New("stream: ingest payload too large")
