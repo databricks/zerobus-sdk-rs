@@ -2,7 +2,7 @@
 //!
 //! This module is transport-specific: it builds the bidirectional gRPC stream
 //! used by `ZerobusStream` to talk to the Zerobus service. The Arrow Flight
-//! transport has its own equivalent in `arrow_stream.rs`.
+//! transport has its own equivalent in `stream/arrow/connection.rs`.
 
 use std::sync::Arc;
 

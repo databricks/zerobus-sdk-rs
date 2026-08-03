@@ -110,19 +110,25 @@ zerobus_rust_sdk/
 │   │   ├── lib.rs                      # Crate root and public re-exports
 │   │   ├── sdk.rs                      # Main SDK client implementation
 │   │   ├── builder/                    # Builder pattern for SDK initialization
-│   │   ├── stream/                     # Core gRPC ingestion stream
+│   │   ├── stream/                     # Ingestion streams by transport
 │   │   │   ├── mod.rs                  # Stream module entry point
-│   │   │   └── grpc/                   # gRPC stream internals
-│   │   │       ├── mod.rs
-│   │   │       ├── connection.rs       # Connection setup and management
-│   │   │       ├── ingest.rs           # Record ingestion path
-│   │   │       ├── sender.rs           # Outbound request sender
-│   │   │       ├── receiver.rs         # Inbound response receiver
-│   │   │       ├── acks.rs             # Acknowledgement tracking
-│   │   │       ├── callback_handler.rs # Ack/error callback dispatch
-│   │   │       ├── supervisor.rs       # Stream supervision and reconnect
-│   │   │       ├── close.rs            # Graceful close handling
-│   │   │       └── types.rs            # Shared gRPC stream types
+│   │   │   ├── grpc/                   # Proto/JSON gRPC stream internals
+│   │   │   │   ├── mod.rs
+│   │   │   │   ├── connection.rs       # Connection setup and management
+│   │   │   │   ├── ingest.rs           # Record ingestion path
+│   │   │   │   ├── sender.rs           # Outbound request sender
+│   │   │   │   ├── receiver.rs         # Inbound response receiver
+│   │   │   │   ├── acks.rs             # Acknowledgement tracking
+│   │   │   │   ├── callback_handler.rs # Ack/error callback dispatch
+│   │   │   │   ├── supervisor.rs       # Stream supervision and reconnect
+│   │   │   │   ├── close.rs            # Graceful close handling
+│   │   │   │   └── types.rs            # Shared gRPC stream types
+│   │   │   └── arrow/                  # Arrow Flight stream (feature: arrow-flight)
+│   │   │       ├── mod.rs              # Public stream API and lifecycle
+│   │   │       ├── connection.rs       # Flight transport and request encoding
+│   │   │       ├── acks.rs             # ACK processing and server rotation
+│   │   │       ├── supervisor.rs       # Recovery, replay, and finalization
+│   │   │       └── batch.rs            # Pending batches and IPC helpers
 │   │   ├── multiplexed_stream.rs       # Multiplexed stream implementation
 │   │   ├── default_token_factory.rs    # OAuth 2.0 token handling
 │   │   ├── token_cache.rs              # OAuth token caching
@@ -138,7 +144,6 @@ zerobus_rust_sdk/
 │   │   ├── landing_zone.rs             # Inflight record buffer
 │   │   ├── offset_generator.rs         # Logical offset tracking
 │   │   ├── proxy.rs                    # HTTP proxy support
-│   │   ├── arrow_stream.rs             # Arrow Flight stream (feature: arrow-flight)
 │   │   ├── arrow_configuration.rs      # Arrow Flight options (feature: arrow-flight)
 │   │   ├── arrow_metadata.rs           # Arrow Flight metadata (feature: arrow-flight)
 │   │   └── zeroparser/                 # Descriptor-driven protobuf parser (feature: zeroparser)

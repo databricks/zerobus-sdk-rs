@@ -360,8 +360,9 @@ mod tests {
     /// Pins the invariant the whole `InvalidSchema` feature rests on: the
     /// server's `ErrorInfo` detail survives the `FlightError::Tonic -> tonic::Status`
     /// conversion. Production never sees the raw `Status` — the Arrow setup and
-    /// reconnect paths (`arrow_stream.rs`) call `from_setup_status(flight_error.into())`,
-    /// so the details must round-trip through this `From` for schema-mismatch
+    /// reconnect paths (`stream/arrow/connection.rs`) call
+    /// `from_setup_status(flight_error.into())`, so the details must round-trip through
+    /// this `From` for schema-mismatch
     /// classification to work at all. Building a `Status` directly (as the other
     /// tests do) would skip this conversion and mask a regression here.
     #[cfg(feature = "arrow-flight")]
