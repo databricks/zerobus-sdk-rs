@@ -41,16 +41,6 @@ func (s *DynamicProtoStream) IngestJSONOffsetContext(ctx context.Context, record
 	return s.Stream.IngestRecordOffsetContext(ctx, encoded)
 }
 
-// IngestJSONStringOffset converts one JSON string payload and queues it.
-func (s *DynamicProtoStream) IngestJSONStringOffset(record string) (int64, error) {
-	return s.IngestJSONStringOffsetContext(context.Background(), record)
-}
-
-// IngestJSONStringOffsetContext is IngestJSONStringOffset with caller context.
-func (s *DynamicProtoStream) IngestJSONStringOffsetContext(ctx context.Context, record string) (int64, error) {
-	return s.IngestJSONOffsetContext(ctx, []byte(record))
-}
-
 // IngestJSONRecordsOffset converts JSON byte payloads and queues one batch.
 func (s *DynamicProtoStream) IngestJSONRecordsOffset(records [][]byte) (int64, error) {
 	return s.IngestJSONRecordsOffsetContext(context.Background(), records)
@@ -75,45 +65,6 @@ func (s *DynamicProtoStream) IngestJSONRecordsOffsetContext(ctx context.Context,
 	batch, err := s.encodeJSONBatchContext(ctx, records)
 	if err != nil {
 		return -1, &Error{Op: "IngestJSONRecordsOffset", cause: err, retryable: false}
-	}
-	return s.Stream.IngestRecordsOffsetContext(ctx, batch)
-}
-
-// IngestJSONStringsOffset converts JSON string payloads and queues one batch.
-func (s *DynamicProtoStream) IngestJSONStringsOffset(records []string) (int64, error) {
-	return s.IngestJSONStringsOffsetContext(context.Background(), records)
-}
-
-// IngestJSONStringsOffsetContext is IngestJSONStringsOffset with caller context.
-func (s *DynamicProtoStream) IngestJSONStringsOffsetContext(ctx context.Context, records []string) (int64, error) {
-	total, err := totalStringLength(records)
-	if err != nil {
-		return -1, &Error{Op: "IngestJSONStringsOffset", cause: err, retryable: false}
-	}
-	if err := s.validateJSONBatch(len(records), total); err != nil {
-		return -1, &Error{Op: "IngestJSONStringsOffset", cause: err, retryable: false}
-	}
-	if len(records) == 0 {
-		return -1, nil
-	}
-	if err := s.acquireConversion(ctx); err != nil {
-		return -1, &Error{Op: "IngestJSONStringsOffset", cause: err, retryable: false}
-	}
-	defer s.releaseConversion()
-	batch := make([][]byte, len(records))
-	for i := range records {
-		if err := ctx.Err(); err != nil {
-			return -1, &Error{Op: "IngestJSONStringsOffset", cause: err, retryable: false}
-		}
-		encoded, err := s.encodeJSONRecord([]byte(records[i]))
-		if err != nil {
-			return -1, &Error{
-				Op:        "IngestJSONStringsOffset",
-				cause:     fmt.Errorf("record %d: %w", i, err),
-				retryable: false,
-			}
-		}
-		batch[i] = encoded
 	}
 	return s.Stream.IngestRecordsOffsetContext(ctx, batch)
 }
@@ -161,6 +112,8 @@ func (s *DynamicProtoStream) validateJSONBatch(recordCount, rawBytes int) error 
 }
 
 func (s *DynamicProtoStream) acquireConversion(ctx context.Context) error {
+	// Serialize conversion so concurrent callers cannot each allocate a full
+	// pre-ingestion batch before stream backpressure applies.
 	if s.conversionGate == nil {
 		return ctx.Err()
 	}
@@ -179,17 +132,6 @@ func (s *DynamicProtoStream) releaseConversion() {
 }
 
 func totalByteLength(records [][]byte) (int, error) {
-	total := 0
-	for _, record := range records {
-		if len(record) > int(^uint(0)>>1)-total {
-			return 0, fmt.Errorf("%w: raw batch size overflows int", stream.ErrPayloadTooLarge)
-		}
-		total += len(record)
-	}
-	return total, nil
-}
-
-func totalStringLength(records []string) (int, error) {
 	total := 0
 	for _, record := range records {
 		if len(record) > int(^uint(0)>>1)-total {

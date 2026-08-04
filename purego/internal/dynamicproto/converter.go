@@ -18,41 +18,32 @@ type Converter struct {
 	message protoreflect.MessageDescriptor
 }
 
-// NewFromDescriptorProtoBytes creates a converter from serialized descriptor bytes.
-// The payload may be either DescriptorProto or FileDescriptorProto.
+// NewFromDescriptorProtoBytes creates a converter from a serialized DescriptorProto.
 func NewFromDescriptorProtoBytes(descBytes []byte) (*Converter, error) {
 	if len(descBytes) == 0 {
 		return nil, fmt.Errorf("dynamicproto: descriptor bytes are empty")
 	}
 
-	var file descriptorpb.FileDescriptorProto
-	if err := proto.Unmarshal(descBytes, &file); err != nil || len(file.GetMessageType()) == 0 {
-		var msg descriptorpb.DescriptorProto
-		if err2 := proto.Unmarshal(descBytes, &msg); err2 != nil {
-			return nil, fmt.Errorf("dynamicproto: parse descriptor bytes: %w", err2)
-		}
-		file = descriptorpb.FileDescriptorProto{
-			Name:    proto.String("zerobus_dynamic.proto"),
-			Syntax:  proto.String("proto2"),
-			Package: proto.String("zerobus.dynamic"),
-			MessageType: []*descriptorpb.DescriptorProto{
-				&msg,
-			},
-		}
+	var msg descriptorpb.DescriptorProto
+	if err := proto.Unmarshal(descBytes, &msg); err != nil {
+		return nil, fmt.Errorf("dynamicproto: parse descriptor bytes: %w", err)
 	}
-	if len(file.GetMessageType()) == 0 {
-		return nil, fmt.Errorf("dynamicproto: no message descriptors found")
+	file := descriptorpb.FileDescriptorProto{
+		Name:        proto.String("zerobus_dynamic.proto"),
+		Syntax:      proto.String("proto2"),
+		Package:     proto.String("zerobus.dynamic"),
+		MessageType: []*descriptorpb.DescriptorProto{&msg},
 	}
 
 	fd, err := protodesc.NewFile(&file, nil)
 	if err != nil {
 		return nil, fmt.Errorf("dynamicproto: build file descriptor: %w", err)
 	}
-	msg := fd.Messages().Get(0)
-	if msg == nil {
+	message := fd.Messages().Get(0)
+	if message == nil {
 		return nil, fmt.Errorf("dynamicproto: missing top-level message descriptor")
 	}
-	return &Converter{message: msg}, nil
+	return &Converter{message: message}, nil
 }
 
 // EncodeJSONBytes converts one JSON payload to protobuf bytes.

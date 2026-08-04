@@ -173,12 +173,12 @@ func TestConverter_UnknownFieldIgnored(t *testing.T) {
 	}
 }
 
-func TestConverter_MalformedDescriptorReportsFallbackError(t *testing.T) {
+func TestConverter_RejectsMalformedDescriptor(t *testing.T) {
 	_, err := NewFromDescriptorProtoBytes([]byte{0x0a, 0x01})
 	if err == nil {
 		t.Fatal("expected malformed descriptor error")
 	}
-	if strings.Contains(err.Error(), "%!w(<nil>)") {
-		t.Fatalf("error wrapped nil instead of fallback parse error: %v", err)
+	if !strings.Contains(err.Error(), "parse descriptor bytes") {
+		t.Fatalf("error = %v, want descriptor parse error", err)
 	}
 }

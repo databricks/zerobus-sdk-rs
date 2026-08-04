@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -50,15 +51,14 @@ func TestSDKDynamicDescriptor_CacheHit(t *testing.T) {
 	sdk := newSDK(nil, "https://workspace.zerobus.cloud.databricks.com", server.URL, sdkConfig{
 		dynamicSchemaHTTPClient:   server.Client(),
 		dynamicSchemaFetchTimeout: time.Second,
-		dynamicSchemaCacheTTL:     time.Minute,
 	})
-	b1, _, err := sdk.dynamicDescriptorAndConverter(
+	b1, c1, err := sdk.dynamicDescriptorAndConverter(
 		context.Background(), "main.sales.orders", "id", "secret",
 	)
 	if err != nil {
 		t.Fatalf("dynamicDescriptorAndConverter() first call error = %v", err)
 	}
-	b2, _, err := sdk.dynamicDescriptorAndConverter(
+	b2, c2, err := sdk.dynamicDescriptorAndConverter(
 		context.Background(), "main.sales.orders", "id", "secret",
 	)
 	if err != nil {
@@ -66,6 +66,9 @@ func TestSDKDynamicDescriptor_CacheHit(t *testing.T) {
 	}
 	if string(b1) != string(b2) {
 		t.Fatalf("cached descriptor mismatch")
+	}
+	if c1 != c2 {
+		t.Fatal("cached converter was rebuilt")
 	}
 	if tokenCalls.Load() != 1 {
 		t.Fatalf("token calls = %d, want 1", tokenCalls.Load())
@@ -134,7 +137,6 @@ func TestSDKDynamicDescriptor_CacheIsCredentialScoped(t *testing.T) {
 
 	sdk := newSDK(nil, "https://workspace.zerobus.cloud.databricks.com", server.URL, sdkConfig{
 		dynamicSchemaHTTPClient: server.Client(),
-		dynamicSchemaCacheTTL:   time.Minute,
 	})
 	for _, credentials := range [][2]string{
 		{"id-1", "secret-1"},
@@ -156,12 +158,12 @@ func TestSDKDynamicDescriptor_CacheIsCredentialScoped(t *testing.T) {
 }
 
 func TestSDKStoreDynamicDescriptor_PrunesExpiredEntries(t *testing.T) {
-	sdk := newSDK(nil, "https://zerobus", "https://uc", sdkConfig{
-		dynamicSchemaCacheTTL: time.Nanosecond,
-	})
-	sdk.storeDynamicDescriptor("old", []byte("old"))
-	time.Sleep(time.Millisecond)
-	sdk.storeDynamicDescriptor("new", []byte("new"))
+	sdk := newSDK(nil, "https://zerobus", "https://uc", sdkConfig{})
+	sdk.dynamicSchemaCache["old"] = cachedDescriptor{
+		descriptor: []byte("old"),
+		expiresAt:  time.Now().Add(-time.Second),
+	}
+	sdk.storeDynamicDescriptor("new", []byte("new"), nil)
 	if len(sdk.dynamicSchemaCache) != 1 {
 		t.Fatalf("cache entries = %d, want 1", len(sdk.dynamicSchemaCache))
 	}
@@ -170,23 +172,19 @@ func TestSDKStoreDynamicDescriptor_PrunesExpiredEntries(t *testing.T) {
 	}
 }
 
-func TestSDKStoreDynamicDescriptor_EnforcesByteBudget(t *testing.T) {
-	sdk := newSDK(nil, "https://zerobus", "https://uc", sdkConfig{
-		dynamicSchemaCacheTTL: time.Minute,
-	})
-	sdk.dynamicSchemaCacheMaxBytes = 10
-	sdk.storeDynamicDescriptor("first", []byte("123456"))
-	time.Sleep(time.Millisecond)
-	sdk.storeDynamicDescriptor("second", []byte("abcdef"))
-	if _, ok := sdk.dynamicSchemaCache["first"]; ok {
+func TestSDKStoreDynamicDescriptor_EnforcesEntryLimit(t *testing.T) {
+	sdk := newSDK(nil, "https://zerobus", "https://uc", sdkConfig{})
+	for i := range maxDynamicSchemaCacheEntries + 1 {
+		sdk.storeDynamicDescriptor(fmt.Sprintf("entry-%03d", i), []byte("descriptor"), nil)
+	}
+	if got := len(sdk.dynamicSchemaCache); got != maxDynamicSchemaCacheEntries {
+		t.Fatalf("cache entries = %d, want %d", got, maxDynamicSchemaCacheEntries)
+	}
+	if _, ok := sdk.dynamicSchemaCache["entry-000"]; ok {
 		t.Fatal("oldest descriptor was not evicted")
 	}
-	if got := sdk.dynamicSchemaCacheBytes; got != 6 {
-		t.Fatalf("cache bytes = %d, want 6", got)
-	}
-	sdk.storeDynamicDescriptor("oversized", []byte("12345678901"))
-	if _, ok := sdk.dynamicSchemaCache["oversized"]; ok {
-		t.Fatal("oversized descriptor was cached")
+	if _, ok := sdk.dynamicSchemaCache[fmt.Sprintf("entry-%03d", maxDynamicSchemaCacheEntries)]; !ok {
+		t.Fatal("newest descriptor was not cached")
 	}
 }
 
@@ -195,25 +193,9 @@ func TestSDKStoreDynamicDescriptor_DoesNotPopulateClosedSDK(t *testing.T) {
 	sdk.mu.Lock()
 	sdk.closed = true
 	sdk.mu.Unlock()
-	sdk.storeDynamicDescriptor("closed", []byte("descriptor"))
+	sdk.storeDynamicDescriptor("closed", []byte("descriptor"), nil)
 	if len(sdk.dynamicSchemaCache) != 0 {
 		t.Fatal("closed SDK cache was populated")
-	}
-}
-
-func TestSDKDynamicDescriptor_EvictsInvalidCachedDescriptor(t *testing.T) {
-	sdk := newSDK(nil, "https://zerobus", "https://uc", sdkConfig{
-		dynamicSchemaCacheTTL: time.Minute,
-	})
-	key := dynamicSchemaCacheKey("https://uc", "main.sales.orders", "id", "secret")
-	sdk.storeDynamicDescriptor(key, []byte{0x0a, 0x01})
-	if _, _, err := sdk.dynamicDescriptorAndConverter(
-		context.Background(), "main.sales.orders", "id", "secret",
-	); err == nil {
-		t.Fatal("expected invalid cached descriptor error")
-	}
-	if _, ok := sdk.dynamicSchemaCache[key]; ok {
-		t.Fatal("invalid cached descriptor was not evicted")
 	}
 }
 

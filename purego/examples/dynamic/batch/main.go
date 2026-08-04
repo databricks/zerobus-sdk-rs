@@ -42,13 +42,13 @@ func main() {
 	defer stream.Close()
 
 	now := config.NowMicros()
-	records := []string{
-		config.MakeOrderJSON(1, "Alice Smith", "Wireless Mouse", 2, 25.99, "pending", now),
-		config.MakeOrderJSON(2, "Bob Johnson", "Mechanical Keyboard", 1, 89.99, "shipped", now),
-		config.MakeOrderJSON(3, "Carol Williams", "USB-C Hub", 3, 45.00, "delivered", now),
+	records := [][]byte{
+		[]byte(config.MakeOrderJSON(1, "Alice Smith", "Wireless Mouse", 2, 25.99, "pending", now)),
+		[]byte(config.MakeOrderJSON(2, "Bob Johnson", "Mechanical Keyboard", 1, 89.99, "shipped", now)),
+		[]byte(config.MakeOrderJSON(3, "Carol Williams", "USB-C Hub", 3, 45.00, "delivered", now)),
 	}
 
-	batchOffset, err := stream.IngestJSONStringsOffset(records)
+	batchOffset, err := stream.IngestJSONRecordsOffset(records)
 	if err != nil {
 		log.Fatalf("ingest batch: %v", err)
 	}

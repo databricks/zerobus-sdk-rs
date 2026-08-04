@@ -880,16 +880,16 @@ func TestDynamicProtoPublicFlow(t *testing.T) {
 	}
 	defer dynamic.Close()
 
-	if _, err := dynamic.IngestJSONStringOffset(
-		`{"payload":{"name":"missing id"}}`,
+	if _, err := dynamic.IngestJSONOffset(
+		[]byte(`{"payload":{"name":"missing id"}}`),
 	); err == nil {
 		t.Fatal("missing required id was accepted")
 	}
 	if got := len(ingests); got != 0 {
 		t.Fatalf("failed dynamic record queued %d requests, want 0", got)
 	}
-	if _, err := dynamic.IngestJSONStringOffset(
-		`{"id":"1","payload":{}}`,
+	if _, err := dynamic.IngestJSONOffset(
+		[]byte(`{"id":"1","payload":{}}`),
 	); err == nil {
 		t.Fatal("missing nested required payload.name was accepted")
 	}
@@ -901,14 +901,14 @@ func TestDynamicProtoPublicFlow(t *testing.T) {
 	if len(singleRecord) <= 256 {
 		t.Fatalf("test JSON size = %d, want above MaxPayloadBytes", len(singleRecord))
 	}
-	if _, err := dynamic.IngestJSONStringOffset(singleRecord); err != nil {
-		t.Fatalf("IngestJSONStringOffset() error = %v", err)
+	if _, err := dynamic.IngestJSONOffset([]byte(singleRecord)); err != nil {
+		t.Fatalf("IngestJSONOffset() error = %v", err)
 	}
-	if _, err := dynamic.IngestJSONStringsOffset([]string{
-		`{"id":"2","payload":{"name":"second","tags":[],"attributes":{}}}`,
-		`{"id":"3","payload":{"name":"third","tags":["30"],"attributes":{"b":9}}}`,
+	if _, err := dynamic.IngestJSONRecordsOffset([][]byte{
+		[]byte(`{"id":"2","payload":{"name":"second","tags":[],"attributes":{}}}`),
+		[]byte(`{"id":"3","payload":{"name":"third","tags":["30"],"attributes":{"b":9}}}`),
 	}); err != nil {
-		t.Fatalf("IngestJSONStringsOffset() error = %v", err)
+		t.Fatalf("IngestJSONRecordsOffset() error = %v", err)
 	}
 	if err := dynamic.Flush(); err != nil {
 		t.Fatalf("Flush() error = %v", err)

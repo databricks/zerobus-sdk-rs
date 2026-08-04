@@ -97,7 +97,7 @@ if err != nil {
 defer stream.Close()
 
 for _, rec := range records {
-    if _, err := stream.IngestJSONStringOffset(rec); err != nil { // queue only
+    if _, err := stream.IngestJSONOffset([]byte(rec)); err != nil { // queue only
         log.Fatal(err)
     }
 }
