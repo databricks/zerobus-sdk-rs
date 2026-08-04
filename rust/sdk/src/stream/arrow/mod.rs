@@ -20,7 +20,7 @@ use arrow_flight::error::FlightError;
 use bytes::Bytes;
 use tokio::sync::{mpsc, watch, Mutex, Notify, Semaphore};
 use tokio::task::JoinHandle;
-use tokio::time::{timeout, Duration};
+use tokio::time::{timeout, Duration, Instant};
 use tokio_retry::strategy::FixedInterval;
 use tokio_retry::RetryIf;
 use tracing::{debug, error, info, instrument, warn};
@@ -48,6 +48,20 @@ mod supervisor;
 const LOG_TARGET: &str = module_path!();
 
 type BatchSender = Arc<Mutex<Option<mpsc::Sender<Result<RecordBatch, FlightError>>>>>;
+
+/// Converts a configured relative timeout into an absolute monotonic-clock deadline.
+pub(super) fn configured_deadline(
+    started_at: Instant,
+    timeout: Duration,
+    option_name: &str,
+) -> ZerobusResult<Instant> {
+    started_at.checked_add(timeout).ok_or_else(|| {
+        ZerobusError::InvalidArgument(format!(
+            "{option_name} ({}ms) exceeds the platform monotonic-clock range",
+            timeout.as_millis()
+        ))
+    })
+}
 
 /// Test-only barrier used to pause `reconnect` at a precise point — the new connection
 /// is established but pending ranges are not yet rebuilt — so a test can schedule a
@@ -252,6 +266,18 @@ impl ZerobusArrowStream {
                 "max_inflight_batches must be greater than 0".to_string(),
             ));
         }
+
+        let validation_started_at = Instant::now();
+        configured_deadline(
+            validation_started_at,
+            Duration::from_millis(options.recovery_timeout_ms),
+            "recovery_timeout_ms",
+        )?;
+        configured_deadline(
+            validation_started_at,
+            Duration::from_millis(options.server_lack_of_ack_timeout_ms),
+            "server_lack_of_ack_timeout_ms",
+        )?;
 
         let (last_ack_tx, _last_ack_rx) = watch::channel(None);
         let is_closed = Arc::new(AtomicBool::new(false));

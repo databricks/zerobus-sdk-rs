@@ -9,15 +9,15 @@ use std::sync::Arc;
 use arrow_flight::error::FlightError;
 use tokio::sync::{mpsc, watch, Mutex};
 use tokio::task::{spawn, JoinHandle};
-use tokio::time::{sleep, timeout, timeout_at, Duration, Instant};
+use tokio::time::{sleep, timeout_at, Duration, Instant};
 use tracing::{debug, error, info, warn};
 
 use super::acks::{pause_and_detach_sender, AckProcessor};
 use super::batch::{rebuild_pending_for_replay, PendingBatch};
 use super::connection::{FlightConnection, FlightResponseStream, RequestBodyControl};
 use super::{
-    ArrowStreamConfigurationOptions, ArrowTableProperties, BatchSender, RecordBatch,
-    ZerobusArrowStream,
+    configured_deadline, ArrowStreamConfigurationOptions, ArrowTableProperties, BatchSender,
+    RecordBatch, ZerobusArrowStream,
 };
 use crate::errors::ZerobusError;
 use crate::headers_provider::HeadersProvider;
@@ -189,11 +189,21 @@ impl Supervisor {
 
                     let _ = self.server_error_tx.send(None);
 
-                    // Share one deadline across reconnect and auth-rejection
-                    // invalidation so refresh receives only the remaining recovery
-                    // timeout instead of starting a second full timeout.
-                    let recovery_deadline =
-                        Instant::now() + Duration::from_millis(self.options.recovery_timeout_ms);
+                    // Share one absolute timeout budget across reconnect and
+                    // auth-rejection invalidation.
+                    let recovery_timeout = Duration::from_millis(self.options.recovery_timeout_ms);
+                    let recovery_started = Instant::now();
+                    let recovery_deadline = match configured_deadline(
+                        recovery_started,
+                        recovery_timeout,
+                        "recovery_timeout_ms",
+                    ) {
+                        Ok(deadline) => deadline,
+                        Err(error) => {
+                            pending_error = Some(error);
+                            continue;
+                        }
+                    };
                     let reconnect_result = timeout_at(recovery_deadline, self.reconnect()).await;
 
                     match reconnect_result {
@@ -275,18 +285,30 @@ impl Supervisor {
                     // a terminal rejection. The stream is already finalized and waiters
                     // have the real error; bound the callback so the supervisor cannot
                     // remain alive indefinitely.
-                    if error.is_auth_rejection()
-                        && timeout(
+                    if error.is_auth_rejection() {
+                        match configured_deadline(
+                            Instant::now(),
                             Duration::from_millis(self.options.recovery_timeout_ms),
-                            self.headers_provider.invalidate(),
-                        )
-                        .await
-                        .is_err()
-                    {
-                        warn!(target: super::LOG_TARGET,
-                            timeout_ms = self.options.recovery_timeout_ms,
-                            "Terminal headers provider invalidation timed out"
-                        );
+                            "recovery_timeout_ms",
+                        ) {
+                            Ok(deadline) => {
+                                if timeout_at(deadline, self.headers_provider.invalidate())
+                                    .await
+                                    .is_err()
+                                {
+                                    warn!(target: super::LOG_TARGET,
+                                        timeout_ms = self.options.recovery_timeout_ms,
+                                        "Terminal headers provider invalidation timed out"
+                                    );
+                                }
+                            }
+                            Err(deadline_error) => {
+                                warn!(target: super::LOG_TARGET,
+                                    error = %deadline_error,
+                                    "Skipping terminal headers provider invalidation because its deadline is unrepresentable"
+                                );
+                            }
+                        }
                     }
                     return Err(error);
                 }

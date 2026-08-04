@@ -814,6 +814,10 @@ deadline on the recovered connection. Configure this timeout together with
 `max_inflight_batches` so the server can acknowledge a full allowed backlog
 within the timeout.
 
+Arrow stream construction rejects `recovery_timeout_ms` and
+`server_lack_of_ack_timeout_ms` values whose deadlines cannot be represented by
+the platform monotonic clock. Server-advertised graceful-rotation periods are
+capped at one year.
 
 **Example:**
 

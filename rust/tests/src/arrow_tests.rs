@@ -11,8 +11,8 @@ mod arrow_flight_tests {
     use crate::utils::{
         advance_tokio_time_near_instant_limit, create_test_arrow_schema,
         create_test_dict_record_batch, create_test_dict_schema, create_test_record_batch,
-        record_batch_to_ipc_bytes, run_with_paused_time_watchdog, setup_tracing,
-        CountingHeadersProvider, HangingInvalidationHeadersProvider, TestHeadersProvider,
+        record_batch_to_ipc_bytes, setup_tracing, CountingHeadersProvider,
+        HangingInvalidationHeadersProvider, TestHeadersProvider,
     };
 
     const TABLE_NAME: &str = "test_catalog.test_schema.test_table";
@@ -126,26 +126,12 @@ mod arrow_flight_tests {
         }
 
         #[tokio::test(start_paused = true)]
-        async fn test_max_recovery_timeout_does_not_overflow_initial_deadline(
+        async fn test_unrepresentable_recovery_timeout_is_rejected(
         ) -> Result<(), Box<dyn std::error::Error>> {
             setup_tracing();
 
-            let (mock_server, server_url) = start_mock_flight_server().await?;
+            let (_mock_server, server_url) = start_mock_flight_server().await?;
             let schema = create_test_arrow_schema();
-            mock_server
-                .inject_responses(
-                    TABLE_NAME,
-                    vec![MockFlightResponse::FailSetup {
-                        status: Status::unauthenticated("stale credential"),
-                    }],
-                )
-                .await;
-
-            let invalidations = Arc::new(std::sync::atomic::AtomicUsize::new(0));
-            let provider = Arc::new(CountingHeadersProvider {
-                get_headers_calls: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
-                invalidations: Arc::clone(&invalidations),
-            });
             let sdk = ZerobusSdk::builder()
                 .endpoint(server_url)
                 .unity_catalog_url("https://mock-uc.com")
@@ -154,32 +140,56 @@ mod arrow_flight_tests {
 
             advance_tokio_time_near_instant_limit().await;
 
-            let stream_result = run_with_paused_time_watchdog(
-                sdk.stream_builder()
-                    .table(TABLE_NAME)
-                    .headers_provider(provider)
-                    .arrow(schema)
-                    .recovery(true)
-                    .recovery_backoff_ms(0)
-                    .recovery_timeout_ms(u64::MAX)
-                    .recovery_retries(1)
-                    .build_arrow(),
-            )
-            .await;
+            let stream_result = sdk
+                .stream_builder()
+                .table(TABLE_NAME)
+                .headers_provider(Arc::new(TestHeadersProvider::default()))
+                .arrow(schema)
+                .recovery_timeout_ms(u64::MAX)
+                .build_arrow()
+                .await;
 
             match stream_result {
-                Ok(stream) => {
-                    assert!(!stream.is_closed());
-                    assert_eq!(
-                        invalidations.load(std::sync::atomic::Ordering::SeqCst),
-                        1,
-                        "the rejected credential must still be invalidated"
-                    );
-                }
-                Err(ZerobusError::CreateStreamError(status)) => {
-                    assert_eq!(status.code(), tonic::Code::DeadlineExceeded);
+                Err(ZerobusError::InvalidArgument(message)) => {
+                    assert!(message.contains("recovery_timeout_ms"));
                 }
                 Err(error) => panic!("unexpected stream creation error: {error}"),
+                Ok(_) => panic!("unrepresentable recovery timeout was accepted"),
+            }
+
+            Ok(())
+        }
+
+        #[tokio::test(start_paused = true)]
+        async fn test_unrepresentable_ack_timeout_is_rejected(
+        ) -> Result<(), Box<dyn std::error::Error>> {
+            setup_tracing();
+
+            let (_mock_server, server_url) = start_mock_flight_server().await?;
+            let schema = create_test_arrow_schema();
+            let sdk = ZerobusSdk::builder()
+                .endpoint(server_url)
+                .unity_catalog_url("https://mock-uc.com")
+                .tls_config(Arc::new(NoTlsConfig))
+                .build()?;
+
+            advance_tokio_time_near_instant_limit().await;
+
+            let stream_result = sdk
+                .stream_builder()
+                .table(TABLE_NAME)
+                .headers_provider(Arc::new(TestHeadersProvider::default()))
+                .arrow(schema)
+                .server_lack_of_ack_timeout_ms(u64::MAX)
+                .build_arrow()
+                .await;
+
+            match stream_result {
+                Err(ZerobusError::InvalidArgument(message)) => {
+                    assert!(message.contains("server_lack_of_ack_timeout_ms"));
+                }
+                Err(error) => panic!("unexpected stream creation error: {error}"),
+                Ok(_) => panic!("unrepresentable ACK timeout was accepted"),
             }
 
             Ok(())
@@ -2190,10 +2200,10 @@ mod arrow_flight_tests {
             // loopback socket, preventing paused time from auto-advancing to a timer.
             let delayed_ack_armed = delayed_ack_armed.notified();
             tokio::pin!(delayed_ack_armed);
-            let watchdog = std::time::Instant::now() + std::time::Duration::from_secs(5);
+            let watchdog_started = std::time::Instant::now();
             while futures::poll!(delayed_ack_armed.as_mut()).is_pending() {
                 assert!(
-                    std::time::Instant::now() < watchdog,
+                    watchdog_started.elapsed() < std::time::Duration::from_secs(5),
                     "mock server did not arm the delayed ACK"
                 );
                 tokio::task::yield_now().await;
@@ -2993,6 +3003,67 @@ mod arrow_flight_tests {
 
     mod recovery_tests {
         use super::*;
+
+        /// The supervisor must surface a non-retryable configuration error if a timeout
+        /// that was representable at construction can no longer form a runtime deadline.
+        #[tokio::test(start_paused = true)]
+        async fn test_unrepresentable_runtime_recovery_deadline_is_rejected(
+        ) -> Result<(), Box<dyn std::error::Error>> {
+            const RECOVERY_TIMEOUT_MS: u64 = 32 * 365 * 24 * 60 * 60 * 1_000;
+
+            setup_tracing();
+
+            let (mock_server, server_url) = start_mock_flight_server().await?;
+            let schema = create_test_arrow_schema();
+            mock_server
+                .inject_responses(
+                    TABLE_NAME,
+                    vec![MockFlightResponse::Error {
+                        status: tonic::Status::unavailable("Connection lost"),
+                        delay_ms: 0,
+                    }],
+                )
+                .await;
+
+            let sdk = ZerobusSdk::builder()
+                .endpoint(server_url)
+                .unity_catalog_url("https://mock-uc.com")
+                .tls_config(Arc::new(NoTlsConfig))
+                .build()?;
+            let stream = sdk
+                .stream_builder()
+                .table(TABLE_NAME)
+                .headers_provider(Arc::new(TestHeadersProvider::default()))
+                .arrow(schema.clone())
+                .recovery(true)
+                .recovery_backoff_ms(0)
+                .recovery_timeout_ms(RECOVERY_TIMEOUT_MS)
+                .recovery_retries(1)
+                .build_arrow()
+                .await?;
+
+            advance_tokio_time_near_instant_limit().await;
+
+            let batch = create_test_record_batch(schema, vec![1], vec![Some("replay")]);
+            stream.ingest_batch(batch).await?;
+            let watchdog_started = std::time::Instant::now();
+            while !stream.is_closed() {
+                assert!(
+                    watchdog_started.elapsed() < std::time::Duration::from_secs(5),
+                    "near-limit recovery did not terminate"
+                );
+                tokio::task::yield_now().await;
+            }
+            match stream.flush().await {
+                Err(ZerobusError::InvalidArgument(message)) => {
+                    assert!(message.contains("recovery_timeout_ms"));
+                }
+                Err(error) => panic!("unexpected recovery error: {error}"),
+                Ok(()) => panic!("unrepresentable recovery deadline was accepted"),
+            }
+            assert_eq!(stream.get_unacked_batches().await?.len(), 1);
+            Ok(())
+        }
 
         /// close() during the reconnect rebuild window must slice with the pre-reconnect
         /// watermark. A barrier parks reconnect after the new connection is established but

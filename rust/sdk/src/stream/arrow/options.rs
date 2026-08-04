@@ -47,6 +47,8 @@ pub struct ArrowStreamConfigurationOptions {
     /// Timeout in milliseconds for each stream recovery attempt.
     ///
     /// If a recovery attempt takes longer than this, it will be retried.
+    /// Values whose absolute deadline cannot be represented by the platform's
+    /// monotonic clock are rejected when the stream is built.
     ///
     /// Default: 15,000 (15 seconds)
     pub recovery_timeout_ms: u64,
@@ -74,6 +76,8 @@ pub struct ArrowStreamConfigurationOptions {
     /// acknowledge a full allowed backlog in time. Replayed batches receive a fresh deadline
     /// on the recovered connection. Expiry fails the stream and triggers recovery when
     /// recovery is enabled.
+    /// Values whose absolute deadline cannot be represented by the platform's
+    /// monotonic clock are rejected when the stream is built.
     ///
     /// Default: 60,000 (60 seconds)
     pub server_lack_of_ack_timeout_ms: u64,
@@ -126,6 +130,7 @@ pub struct ArrowStreamConfigurationOptions {
     /// If the server advertises less than 500ms (including zero), the SDK skips the ACK
     /// wait and makes a best-effort local cleanup attempt for up to 500ms; the server may
     /// already have hard-closed, so clean peer shutdown cannot be guaranteed in that case.
+    /// Server-advertised grace periods longer than one year are capped at one year.
     /// Close signals are honored even when recovery is disabled: the SDK performs transport
     /// cleanup and terminates without reconnecting. Batches accepted while paused remain
     /// available through `get_unacked_batches()`.

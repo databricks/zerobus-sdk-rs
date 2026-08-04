@@ -11,7 +11,7 @@ use tokio::sync::OwnedSemaphorePermit;
 use tokio::time::{Duration, Instant};
 use tracing::debug;
 
-use super::RecordBatch;
+use super::{configured_deadline, RecordBatch};
 use crate::errors::ZerobusError;
 use crate::offset_generator::OffsetId;
 use crate::ZerobusResult;
@@ -148,16 +148,22 @@ pub(super) fn oldest_pending_ack_deadline(
     pending: &[PendingBatch],
     submitted_records: u64,
     ack_timeout: Duration,
-) -> Option<PendingAckDeadline> {
-    pending
+) -> ZerobusResult<Option<PendingAckDeadline>> {
+    let Some(batch) = pending
         .iter()
         .find(|batch| batch.start_record < submitted_records)
-        .map(|batch| PendingAckDeadline {
-            identity: batch.identity(),
-            // The public timeout is a u64 millisecond value. Tokio's supported
-            // 64-bit Instant implementations can represent that full range.
-            deadline: batch.enqueued_at + ack_timeout,
-        })
+    else {
+        return Ok(None);
+    };
+    let deadline = configured_deadline(
+        batch.enqueued_at,
+        ack_timeout,
+        "server_lack_of_ack_timeout_ms",
+    )?;
+    Ok(Some(PendingAckDeadline {
+        identity: batch.identity(),
+        deadline,
+    }))
 }
 
 /// Rebuilds pending batches with connection-relative ranges and transfers each retained
@@ -251,7 +257,29 @@ mod tests {
     use tokio::sync::Semaphore;
     use tokio::time::{Duration, Instant};
 
-    use super::{rebuild_pending_for_replay, PendingBatch, RecordBatch};
+    use crate::ZerobusError;
+
+    use super::{
+        oldest_pending_ack_deadline, rebuild_pending_for_replay, PendingBatch, RecordBatch,
+    };
+
+    #[allow(clippy::manual_div_ceil)]
+    fn latest_whole_second_instant(start: Instant) -> Instant {
+        let mut low = 0_u64;
+        let mut high = u64::MAX;
+        while low < high {
+            let mid = ((low as u128 + high as u128 + 1) / 2) as u64;
+            if start.checked_add(Duration::from_secs(mid)).is_some() {
+                low = mid;
+            } else {
+                high = mid - 1;
+            }
+        }
+        assert!(low < u64::MAX, "test requires a bounded Instant range");
+        start
+            .checked_add(Duration::from_secs(low))
+            .expect("largest whole-second Instant")
+    }
 
     fn pending_batch(rows: i32, start_record: u64, end_record: u64) -> PendingBatch {
         let schema = Arc::new(Schema::new(vec![Field::new("id", DataType::Int32, false)]));
@@ -291,5 +319,20 @@ mod tests {
         let (_replay, _records) = rebuild_pending_for_replay(&mut pending, 0);
 
         assert!(pending[0].enqueued_at() > original);
+    }
+
+    #[test]
+    fn unrepresentable_ack_deadline_is_rejected() {
+        let mut batch = pending_batch(1, 0, 1);
+        batch.set_enqueued_at(latest_whole_second_instant(Instant::now()));
+
+        let error = oldest_pending_ack_deadline(&[batch], 1, Duration::from_secs(1))
+            .expect_err("an unrepresentable configured deadline must be rejected");
+        match error {
+            ZerobusError::InvalidArgument(message) => {
+                assert!(message.contains("server_lack_of_ack_timeout_ms"));
+            }
+            other => panic!("expected an invalid-argument error, got {other:?}"),
+        }
     }
 }

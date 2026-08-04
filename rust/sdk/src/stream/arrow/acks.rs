@@ -27,6 +27,7 @@ use crate::offset_generator::OffsetId;
 use crate::ZerobusResult;
 
 const ROTATION_DRAIN_TIMEOUT_MS: u64 = 500;
+const MAX_SERVER_ROTATION_GRACE: Duration = Duration::from_secs(365 * 24 * 60 * 60);
 
 /// Owns the shared stream state and configuration used while processing ACKs.
 pub(super) struct AckProcessor {
@@ -316,19 +317,43 @@ impl AckProcessor {
         server_duration_ms: u64,
         configured_ack_wait_ms: Option<u64>,
     ) -> RotationDeadlines {
-        let now = Instant::now();
+        Self::rotation_deadlines_at(Instant::now(), server_duration_ms, configured_ack_wait_ms)
+    }
+
+    fn rotation_deadlines_at(
+        rotation_started_at: Instant,
+        server_duration_ms: u64,
+        configured_ack_wait_ms: Option<u64>,
+    ) -> RotationDeadlines {
         let drain_budget = Duration::from_millis(ROTATION_DRAIN_TIMEOUT_MS);
-        let server_grace = Duration::from_millis(server_duration_ms);
-        let bounded_fallback = now + Duration::from_secs(365 * 24 * 60 * 60);
-        let server_deadline = now.checked_add(server_grace).unwrap_or(bounded_fallback);
+        let advertised_server_grace = Duration::from_millis(server_duration_ms);
+        let server_grace = advertised_server_grace.min(MAX_SERVER_ROTATION_GRACE);
+        if server_grace != advertised_server_grace {
+            warn!(target: super::LOG_TARGET,
+                server_duration_ms,
+                max_server_rotation_grace_ms = MAX_SERVER_ROTATION_GRACE.as_millis(),
+                "Server rotation grace exceeds the client limit; clamping it"
+            );
+        }
+        let server_deadline = match rotation_started_at.checked_add(server_grace) {
+            Some(deadline) => deadline,
+            // No later deadline can be represented at this clock boundary.
+            None => rotation_started_at,
+        };
         let available_ack_wait = server_grace.saturating_sub(drain_budget);
         let configured_ack_wait = configured_ack_wait_ms
             .map(Duration::from_millis)
             .unwrap_or(available_ack_wait);
         let ack_wait = available_ack_wait.min(configured_ack_wait);
-        let ack_deadline = now.checked_add(ack_wait).unwrap_or(server_deadline);
+        let ack_deadline = match rotation_started_at.checked_add(ack_wait) {
+            Some(deadline) => deadline,
+            None => server_deadline,
+        };
         let drain_deadline = if server_grace < drain_budget {
-            now + drain_budget
+            match rotation_started_at.checked_add(drain_budget) {
+                Some(deadline) => deadline,
+                None => server_deadline,
+            }
         } else {
             server_deadline
         };
@@ -339,7 +364,13 @@ impl AckProcessor {
     }
 
     fn bounded_rotation_drain_deadline(close_deadline: Instant) -> Instant {
-        close_deadline.min(Instant::now() + Duration::from_millis(ROTATION_DRAIN_TIMEOUT_MS))
+        let now = Instant::now();
+        let bounded_deadline =
+            match now.checked_add(Duration::from_millis(ROTATION_DRAIN_TIMEOUT_MS)) {
+                Some(deadline) => deadline,
+                None => close_deadline,
+            };
+        close_deadline.min(bounded_deadline)
     }
 
     /// Half-closes the active request and drains the response under the rotation
@@ -410,7 +441,10 @@ impl AckProcessor {
 
     /// Returns the oldest submitted batch and its absolute ACK deadline while holding
     /// the pending lock that also synchronizes submitted-watermark publication.
-    async fn oldest_ack_deadline(&self, ack_timeout: Duration) -> Option<PendingAckDeadline> {
+    async fn oldest_ack_deadline(
+        &self,
+        ack_timeout: Duration,
+    ) -> ZerobusResult<Option<PendingAckDeadline>> {
         let pending = self.pending_batches.lock().await;
         let submitted_records = self.submitted_records.load(Ordering::Acquire);
         oldest_pending_ack_deadline(&pending, submitted_records, ack_timeout)
@@ -423,14 +457,16 @@ impl AckProcessor {
         &self,
         expected: PendingAckDeadline,
         ack_timeout: Duration,
-    ) -> Option<usize> {
+    ) -> ZerobusResult<Option<usize>> {
         let pending = self.pending_batches.lock().await;
         let submitted_records = self.submitted_records.load(Ordering::Acquire);
-        oldest_pending_ack_deadline(&pending, submitted_records, ack_timeout)
-            .filter(|current| {
-                current.identity == expected.identity && Instant::now() >= current.deadline
-            })
-            .map(|_| pending.len())
+        Ok(
+            oldest_pending_ack_deadline(&pending, submitted_records, ack_timeout)?
+                .filter(|current| {
+                    current.identity == expected.identity && Instant::now() >= current.deadline
+                })
+                .map(|_| pending.len()),
+        )
     }
 
     /// Waits without arming an ACK timeout while no submitted batch is pending.
@@ -569,7 +605,7 @@ impl AckProcessor {
             }
 
             let event = match &rotation {
-                RotationState::Open => match self.oldest_ack_deadline(ack_timeout).await {
+                RotationState::Open => match self.oldest_ack_deadline(ack_timeout).await? {
                     Some(pending_deadline) => {
                         self.wait_with_pending_deadline(
                             &mut response_stream,
@@ -598,7 +634,7 @@ impl AckProcessor {
                 AckEvent::RequestSendFailed => continue,
                 AckEvent::AckDeadline(expected) => {
                     if let Some(pending_count) =
-                        self.expired_pending_count(expected, ack_timeout).await
+                        self.expired_pending_count(expected, ack_timeout).await?
                     {
                         error!(target: super::LOG_TARGET,
                             pending_count,
@@ -703,6 +739,7 @@ mod tests {
     use super::super::RecordBatch;
     use super::{
         AckProcessor, FlightAckMetadata, OffsetId, PendingBatch, RequestBodyControl, ZerobusError,
+        MAX_SERVER_ROTATION_GRACE, ROTATION_DRAIN_TIMEOUT_MS,
     };
 
     fn one_col_schema() -> Arc<ArrowSchema> {
@@ -1016,10 +1053,14 @@ mod tests {
         let fired = processor
             .oldest_ack_deadline(ACK_TIMEOUT)
             .await
+            .expect("deadline calculation")
             .expect("expired head");
 
         assert_eq!(
-            processor.expired_pending_count(fired, ACK_TIMEOUT).await,
+            processor
+                .expired_pending_count(fired, ACK_TIMEOUT)
+                .await
+                .expect("deadline recheck"),
             Some(2)
         );
 
@@ -1028,6 +1069,22 @@ mod tests {
         assert!(processor
             .expired_pending_count(fired, ACK_TIMEOUT)
             .await
+            .expect("deadline recheck")
             .is_none());
+    }
+
+    #[test]
+    fn server_rotation_grace_is_capped() {
+        let rotation_started_at = Instant::now();
+        let deadlines = AckProcessor::rotation_deadlines_at(rotation_started_at, u64::MAX, None);
+
+        assert_eq!(
+            deadlines.drain.duration_since(rotation_started_at),
+            MAX_SERVER_ROTATION_GRACE
+        );
+        assert_eq!(
+            deadlines.ack.duration_since(rotation_started_at),
+            MAX_SERVER_ROTATION_GRACE - Duration::from_millis(ROTATION_DRAIN_TIMEOUT_MS)
+        );
     }
 }
