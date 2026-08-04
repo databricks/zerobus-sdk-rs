@@ -25,8 +25,12 @@
 ### Documentation
 
 - Clarified that callbacks may call stream methods, including `Close`.
+- Finalized the README for the initial PureGo release.
 
 ### Internal Changes
+
+- Added a build-only release validation workflow for the SDK and examples.
+- Added a module-local Apache 2.0 license for Go module distribution.
 
 ### API Changes
 
