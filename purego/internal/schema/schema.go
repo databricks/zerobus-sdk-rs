@@ -101,17 +101,29 @@ func DescriptorFromUCColumns(columns []UcColumn, messageName string) (*descripto
 		}
 	})
 
-	collector := &messageCollector{used: map[string]struct{}{}}
+	collector := newMessageCollector()
+	for _, c := range sorted {
+		if c.TypeName == "MAP" {
+			if err := collector.reserveMapEntry(c.Name, c.Name); err != nil {
+				return nil, err
+			}
+		}
+	}
 	fields := make([]*descriptorpb.FieldDescriptorProto, 0, len(sorted))
+	usedNumbers := make(map[int32]string, len(sorted))
 	for _, c := range sorted {
 		if err := validateFieldName(c.Name); err != nil {
+			return nil, err
+		}
+		number, err := fieldNumber(c, usedNumbers)
+		if err != nil {
 			return nil, err
 		}
 		fieldType, typeName, repeated, err := columnToProto(c, collector)
 		if err != nil {
 			return nil, err
 		}
-		fields = append(fields, fieldDescriptor(c.Name, c.Position+1, fieldType, typeName, c.Nullable, repeated))
+		fields = append(fields, fieldDescriptor(c.Name, number, fieldType, typeName, c.Nullable, repeated))
 	}
 
 	return &descriptorpb.DescriptorProto{
@@ -428,8 +440,31 @@ func typeRefToComplex(ref *typeRef, depth int) (*complexType, error) {
 }
 
 type messageCollector struct {
-	nested []*descriptorpb.DescriptorProto
-	used   map[string]struct{}
+	nested         []*descriptorpb.DescriptorProto
+	used           map[string]struct{}
+	mapEntryOwners map[string]string
+}
+
+func newMessageCollector() *messageCollector {
+	return &messageCollector{
+		used:           make(map[string]struct{}),
+		mapEntryOwners: make(map[string]string),
+	}
+}
+
+func (c *messageCollector) reserveMapEntry(fieldName, path string) error {
+	entryName := sanitizeMessageName(fieldName) + "Entry"
+	if previous, ok := c.mapEntryOwners[entryName]; ok {
+		return schemaErrf(
+			"map fields %q and %q require the same protobuf entry name %q",
+			previous,
+			path,
+			entryName,
+		)
+	}
+	c.mapEntryOwners[entryName] = path
+	c.used[entryName] = struct{}{}
+	return nil
 }
 
 func (c *messageCollector) uniqueName(base string) string {
@@ -502,10 +537,9 @@ func mapComplexTypeToProtobuf(
 			return 0, nil, schemaErrf("maps with complex value types not supported for field %q", path)
 		}
 		entryName := sanitizeMessageName(fieldName) + "Entry"
-		if _, exists := collector.used[entryName]; exists {
-			return 0, nil, schemaErrf("map entry name collision for field %q", path)
+		if _, reserved := collector.mapEntryOwners[entryName]; !reserved {
+			return 0, nil, schemaErrf("map entry name was not reserved for field %q", path)
 		}
-		collector.used[entryName] = struct{}{}
 		entry := generateMapEntry(entryName, primitiveProtoType(ct.key.prim), valueType, valueTypeName)
 		collector.nested = append(collector.nested, entry)
 		return descriptorpb.FieldDescriptorProto_TYPE_MESSAGE, &entryName, nil
@@ -514,7 +548,14 @@ func mapComplexTypeToProtobuf(
 }
 
 func generateStructMessage(messageName string, fields []structField) (*descriptorpb.DescriptorProto, error) {
-	local := &messageCollector{used: map[string]struct{}{}}
+	local := newMessageCollector()
+	for _, f := range fields {
+		if f.typ.kind == complexKindMap {
+			if err := local.reserveMapEntry(f.name, messageName+"."+f.name); err != nil {
+				return nil, err
+			}
+		}
+	}
 	out := make([]*descriptorpb.FieldDescriptorProto, 0, len(fields))
 	for i, f := range fields {
 		if err := validateFieldName(f.name); err != nil {
@@ -533,6 +574,44 @@ func generateStructMessage(messageName string, fields []structField) (*descripto
 		Field:      out,
 		NestedType: local.nested,
 	}, nil
+}
+
+const (
+	maxProtobufFieldNumber   = int64(1<<29 - 1)
+	firstReservedFieldNumber = int64(19_000)
+	lastReservedFieldNumber  = int64(19_999)
+)
+
+func fieldNumber(column UcColumn, used map[int32]string) (int32, error) {
+	number := int64(column.Position) + 1
+	if number < 1 || number > maxProtobufFieldNumber {
+		return 0, schemaErrf(
+			"invalid field number for column %q: UC position %d produces %d; valid range is 1-%d",
+			column.Name,
+			column.Position,
+			number,
+			maxProtobufFieldNumber,
+		)
+	}
+	if number >= firstReservedFieldNumber && number <= lastReservedFieldNumber {
+		return 0, schemaErrf(
+			"invalid field number for column %q: UC position %d produces reserved protobuf number %d",
+			column.Name,
+			column.Position,
+			number,
+		)
+	}
+	fieldNumber := int32(number)
+	if previous, ok := used[fieldNumber]; ok {
+		return 0, schemaErrf(
+			"columns %q and %q use duplicate protobuf field number %d",
+			previous,
+			column.Name,
+			fieldNumber,
+		)
+	}
+	used[fieldNumber] = column.Name
+	return fieldNumber, nil
 }
 
 func generateMapEntry(

@@ -13,7 +13,6 @@ type DynamicProtoStream struct {
 	*Stream
 	converter               *dynamicproto.Converter
 	conversionGate          chan struct{}
-	maxPayloadBytes         int
 	maxBatchRecords         int
 	maxBufferedPayloadBytes int64
 }
@@ -153,14 +152,6 @@ func (s *DynamicProtoStream) validateJSONBatch(recordCount, rawBytes int) error 
 	if recordCount > maxRecords {
 		return fmt.Errorf("%w: %d records exceeds MaxBatchRecords=%d",
 			stream.ErrPayloadTooLarge, recordCount, maxRecords)
-	}
-	maxBytes := s.maxPayloadBytes
-	if maxBytes <= 0 {
-		maxBytes = stream.DefaultMaxPayloadBytes
-	}
-	if rawBytes > maxBytes {
-		return fmt.Errorf("%w: raw batch exceeds MaxPayloadBytes=%d",
-			stream.ErrPayloadTooLarge, maxBytes)
 	}
 	maxBufferedBytes := s.maxBufferedPayloadBytes
 	if maxBufferedBytes <= 0 {

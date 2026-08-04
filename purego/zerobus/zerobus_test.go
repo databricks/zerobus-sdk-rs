@@ -873,6 +873,7 @@ func TestDynamicProtoPublicFlow(t *testing.T) {
 		"id",
 		"secret",
 		zerobus.WithWaitForReady(),
+		zerobus.WithMaxPayloadBytes(256),
 	)
 	if err != nil {
 		t.Fatalf("CreateDynamicProtoStream() error = %v", err)
@@ -887,9 +888,12 @@ func TestDynamicProtoPublicFlow(t *testing.T) {
 	if got := len(ingests); got != 0 {
 		t.Fatalf("failed dynamic record queued %d requests, want 0", got)
 	}
-	if _, err := dynamic.IngestJSONStringOffset(
-		`{"id":"1","payload":{"name":"first","tags":["10","20"],"attributes":{"a":7}},"extra":"ignored"}`,
-	); err != nil {
+	singleRecord := `{"id":"1","payload":{"name":"first","tags":["10","20"],"attributes":{"a":7}},"extra":"` +
+		strings.Repeat("x", 512) + `"}`
+	if len(singleRecord) <= 256 {
+		t.Fatalf("test JSON size = %d, want above MaxPayloadBytes", len(singleRecord))
+	}
+	if _, err := dynamic.IngestJSONStringOffset(singleRecord); err != nil {
 		t.Fatalf("IngestJSONStringOffset() error = %v", err)
 	}
 	if _, err := dynamic.IngestJSONStringsOffset([]string{

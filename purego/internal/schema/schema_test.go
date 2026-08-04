@@ -71,6 +71,108 @@ func TestDescriptorFromUCColumns_ComplexTypes(t *testing.T) {
 	}
 }
 
+func TestDescriptorFromUCColumns_ReservesMapEntryNamesBeforeStructNames(t *testing.T) {
+	mapColumn := UcColumn{
+		Name:     "tags",
+		TypeName: "MAP",
+		TypeJSON: `{"type":"map","keyType":"string","valueType":"integer"}`,
+	}
+	structColumn := UcColumn{
+		Name:     "tags_entry",
+		TypeName: "STRUCT",
+		TypeJSON: `{"type":"struct","fields":[{"name":"value","type":"string","nullable":true}]}`,
+	}
+	tests := []struct {
+		name      string
+		mapPos    int32
+		structPos int32
+	}{
+		{name: "map first", mapPos: 0, structPos: 1},
+		{name: "struct first", mapPos: 1, structPos: 0},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			mapCol := mapColumn
+			mapCol.Position = tc.mapPos
+			structCol := structColumn
+			structCol.Position = tc.structPos
+			desc, err := DescriptorFromUCColumns([]UcColumn{mapCol, structCol}, "Message")
+			if err != nil {
+				t.Fatalf("DescriptorFromUCColumns() error = %v", err)
+			}
+			if got := fieldByName(t, desc, "tags").GetTypeName(); got != "TagsEntry" {
+				t.Fatalf("map entry name = %q, want TagsEntry", got)
+			}
+			if got := fieldByName(t, desc, "tags_entry").GetTypeName(); got != "TagsEntry2" {
+				t.Fatalf("struct type name = %q, want TagsEntry2", got)
+			}
+			if _, err := protodesc.NewFile(&descriptorpb.FileDescriptorProto{
+				Name:        proto.String("map_collision_test.proto"),
+				Syntax:      proto.String("proto2"),
+				MessageType: []*descriptorpb.DescriptorProto{desc},
+			}, nil); err != nil {
+				t.Fatalf("generated descriptor is invalid: %v", err)
+			}
+		})
+	}
+}
+
+func TestDescriptorFromUCColumns_RejectsMapEntryNameCollision(t *testing.T) {
+	_, err := DescriptorFromUCColumns([]UcColumn{
+		{
+			Name:     "a_b",
+			TypeName: "MAP",
+			TypeJSON: `{"type":"map","keyType":"string","valueType":"integer"}`,
+			Position: 0,
+		},
+		{
+			Name:     "a__b",
+			TypeName: "MAP",
+			TypeJSON: `{"type":"map","keyType":"string","valueType":"integer"}`,
+			Position: 1,
+		},
+	}, "Message")
+	if err == nil ||
+		!strings.Contains(err.Error(), `"a_b"`) ||
+		!strings.Contains(err.Error(), `"a__b"`) {
+		t.Fatalf("collision error = %v, want both map field names", err)
+	}
+}
+
+func TestDescriptorFromUCColumns_RejectsInvalidFieldNumbers(t *testing.T) {
+	tests := []struct {
+		name     string
+		position int32
+		want     string
+	}{
+		{name: "overflow", position: int32(1<<31 - 1), want: "valid range"},
+		{name: "above protobuf maximum", position: 536_870_911, want: "valid range"},
+		{name: "reserved range", position: 18_999, want: "reserved protobuf number 19000"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := DescriptorFromUCColumns([]UcColumn{{
+				Name:     "value",
+				TypeName: "STRING",
+				Position: tc.position,
+			}}, "Message")
+			if err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("field-number error = %v, want %q", err, tc.want)
+			}
+		})
+	}
+
+	_, err := DescriptorFromUCColumns([]UcColumn{
+		{Name: "first", TypeName: "STRING", Position: 0},
+		{Name: "second", TypeName: "STRING", Position: 0},
+	}, "Message")
+	if err == nil ||
+		!strings.Contains(err.Error(), `"first"`) ||
+		!strings.Contains(err.Error(), `"second"`) {
+		t.Fatalf("duplicate-number error = %v, want both column names", err)
+	}
+}
+
 func TestDescriptorFromUCColumns_InvalidName(t *testing.T) {
 	_, err := DescriptorFromUCColumns([]UcColumn{
 		{Name: "bad-name", TypeName: "STRING", Position: 0},

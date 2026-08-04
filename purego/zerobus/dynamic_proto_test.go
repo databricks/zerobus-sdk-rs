@@ -216,15 +216,11 @@ func TestSDKDynamicDescriptor_EvictsInvalidCachedDescriptor(t *testing.T) {
 func TestDynamicProtoStreamRejectsBatchBeforeConversion(t *testing.T) {
 	ds := &DynamicProtoStream{
 		conversionGate:          make(chan struct{}, 1),
-		maxPayloadBytes:         128,
 		maxBatchRecords:         1,
 		maxBufferedPayloadBytes: 64,
 	}
 	if _, err := ds.IngestJSONRecordsOffset([][]byte{[]byte(`{}`), []byte(`{}`)}); !errors.Is(err, stream.ErrPayloadTooLarge) {
 		t.Fatalf("batch count error = %v, want ErrPayloadTooLarge", err)
-	}
-	if _, err := ds.IngestJSONOffset(make([]byte, 129)); !errors.Is(err, stream.ErrPayloadTooLarge) {
-		t.Fatalf("payload error = %v, want ErrPayloadTooLarge", err)
 	}
 	if _, err := ds.IngestJSONOffset(make([]byte, 65)); !errors.Is(err, stream.ErrPayloadTooLarge) {
 		t.Fatalf("buffered payload error = %v, want ErrPayloadTooLarge", err)

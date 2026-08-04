@@ -329,7 +329,6 @@ func (s *SDK) CreateDynamicProtoStream(
 		Stream:          base,
 		converter:       converter,
 		conversionGate:  make(chan struct{}, 1),
-		maxPayloadBytes: positiveOrDefault(sc.cfg.MaxPayloadBytes, stream.DefaultMaxPayloadBytes),
 		maxBatchRecords: positiveOrDefault(sc.cfg.MaxBatchRecords, stream.DefaultMaxBatchRecords),
 		maxBufferedPayloadBytes: positiveOrDefault64(
 			sc.cfg.MaxBufferedPayloadBytes,
