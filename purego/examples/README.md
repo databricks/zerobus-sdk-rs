@@ -10,6 +10,7 @@ Runnable examples for `github.com/databricks/zerobus-sdk/purego`.
 | JSON batch   | JSON             | One atomic batch                 | `json/batch`   |
 | Proto single | Protocol Buffers | Single-record loop, then `Flush` | `proto/single` |
 | Proto batch  | Protocol Buffers | One atomic batch                 | `proto/batch`  |
+| Proto runtime | Runtime Protocol Buffers | Descriptor and messages built in Go | `proto/runtime` |
 | Dynamic single | Dynamic Proto (UC schema fetch) | Single-record loop, then `Flush` | `dynamic/single` |
 | Dynamic batch  | Dynamic Proto (UC schema fetch) | One atomic batch | `dynamic/batch` |
 
@@ -57,17 +58,22 @@ go run ./json/single
 go run ./json/batch
 go run ./proto/single
 go run ./proto/batch
+go run ./proto/runtime
 go run ./dynamic/single
 go run ./dynamic/batch
 ```
 
 ## Regenerating the proto bindings
 
-Proto examples use bindings generated from `proto/orders.proto` into `proto/pb/`.
-Regenerate after schema edits (`protoc` and `protoc-gen-go` required):
+The proto single and batch examples use bindings generated from
+`proto/orders.proto` into `proto/pb/`. Regenerate after schema edits (`protoc`
+and `protoc-gen-go` required):
 
 ```bash
 cd proto && ./generate_proto.sh
 ```
 
 `orders.proto` mirrors the table schema. Keep them in sync.
+
+The proto runtime example builds its descriptor and messages directly in Go. It
+does not use `.proto` files or generated bindings.

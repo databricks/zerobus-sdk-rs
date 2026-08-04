@@ -31,6 +31,7 @@
 ### Documentation
 
 - Clarified that callbacks may call stream methods, including `Close`.
+- Added an example that builds protobuf descriptors and messages directly in Go.
 
 ### Internal Changes
 
