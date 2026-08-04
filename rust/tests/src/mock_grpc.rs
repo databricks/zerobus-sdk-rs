@@ -17,12 +17,39 @@ use databricks::zerobus::{
 };
 use prost_types::Duration as ProtobufDuration;
 use rcgen::{generate_simple_self_signed, CertifiedKey};
-use tokio::sync::{mpsc, Mutex};
+use tokio::sync::{mpsc, Mutex, Semaphore};
 use tokio::time::sleep;
 use tokio_stream::Stream;
 use tonic::transport::{Identity, ServerTlsConfig};
 use tonic::{Request, Response, Status, Streaming};
 use tracing::{debug, error, info, warn};
+
+#[derive(Debug)]
+pub struct MockResponseGate {
+    semaphore: Semaphore,
+}
+
+impl MockResponseGate {
+    #[allow(dead_code)]
+    pub fn new() -> Self {
+        Self {
+            semaphore: Semaphore::new(0),
+        }
+    }
+
+    #[allow(dead_code)]
+    pub fn release(&self) {
+        self.semaphore.add_permits(1);
+    }
+
+    async fn wait(&self) {
+        self.semaphore
+            .acquire()
+            .await
+            .expect("Mock response gate should remain open")
+            .forget();
+    }
+}
 
 /// Mock response that can be injected into the mock server
 #[derive(Debug, Clone)]
@@ -33,6 +60,12 @@ pub enum MockResponse {
     RecordAck {
         ack_up_to_offset: i64,
         delay_ms: u64,
+    },
+    /// Successful record acknowledgment released explicitly by a test
+    #[allow(dead_code)]
+    GatedRecordAck {
+        ack_up_to_offset: i64,
+        gate: Arc<MockResponseGate>,
     },
     /// Close stream signal
     #[allow(dead_code)]
@@ -453,6 +486,31 @@ async fn handle_mock_response(
                 }
                 info!(
                     "Sending RecordAck response for {} with ack_up_to_offset: {}",
+                    request_type, ack_up_to_offset
+                );
+                let response = EphemeralStreamResponse {
+                    payload: Some(ResponsePayload::IngestRecordResponse(
+                        IngestRecordResponse {
+                            durability_ack_up_to_offset: Some(*ack_up_to_offset),
+                        },
+                    )),
+                };
+                if tx.send(Ok(response)).await.is_err() {
+                    return (false, current_index);
+                }
+                (true, current_index + 1)
+            } else {
+                (true, current_index)
+            }
+        }
+        MockResponse::GatedRecordAck {
+            ack_up_to_offset,
+            gate,
+        } => {
+            if offset == Some(*ack_up_to_offset) {
+                gate.wait().await;
+                info!(
+                    "Sending gated RecordAck response for {} with ack_up_to_offset: {}",
                     request_type, ack_up_to_offset
                 );
                 let response = EphemeralStreamResponse {
