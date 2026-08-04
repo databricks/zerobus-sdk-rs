@@ -11,9 +11,9 @@ Runnable examples for `github.com/databricks/zerobus-sdk/purego`.
 | Proto single | Protocol Buffers | Single-record loop, then `Flush` | `proto/single` |
 | Proto batch  | Protocol Buffers | One atomic batch                 | `proto/batch`  |
 | Proto runtime | Runtime Protocol Buffers | Descriptor and messages built in Go | `proto/runtime` |
-| Dynamic single | Dynamic Proto (UC schema fetch) | Single-record loop, then `Flush` | `dynamic/single` |
-| Dynamic batch  | Dynamic Proto (UC schema fetch) | One atomic batch | `dynamic/batch` |
-| Dynamic message | Protocol Buffers (UC schema fetch) | Runtime messages, then `Flush` | `dynamic/proto` |
+| UC proto JSON single | Protocol Buffers (UC descriptor) | JSON loop, then `Flush` | `dynamic/single` |
+| UC proto JSON batch | Protocol Buffers (UC descriptor) | One JSON batch | `dynamic/batch` |
+| UC proto messages | Protocol Buffers (UC descriptor) | Runtime messages, then `Flush` | `dynamic/proto` |
 
 Every example uses **loop-then-`Flush()`**: queue records, then flush once.
 

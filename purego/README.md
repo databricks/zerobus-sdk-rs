@@ -76,18 +76,31 @@ first successful open, so it does not terminate the live stream.
 - **Protocol Buffers** (default): `WithProto(descriptorProto)`.
 - **JSON**: `WithJSON()`.
 
+`IngestJSONOffset` and `IngestJSONRecordsOffset` queue JSON directly on JSON
+streams and convert it to protobuf on proto streams.
+
 ## Dynamic proto with UC schema fetch
 
-`CreateDynamicProtoStream` fetches table schema from Unity Catalog, converts it
-to a runtime protobuf descriptor, and accepts raw JSON records that are
-converted to protobuf before ingest.
+Fetch the table schema explicitly, then create a regular proto stream. The
+stream can accept either protobuf bytes or JSON converted at ingest time.
 
 ```go
-stream, err := sdk.CreateDynamicProtoStream(
+descriptor, err := sdk.FetchProtoDescriptor(
     ctx,
     "catalog.schema.table",
     clientID,
     clientSecret,
+)
+if err != nil {
+    log.Fatal(err)
+}
+
+stream, err := sdk.CreateStream(
+    ctx,
+    "catalog.schema.table",
+    clientID,
+    clientSecret,
+    zerobus.WithProto(descriptor),
 )
 if err != nil {
     log.Fatal(err)
@@ -164,9 +177,9 @@ if _, err := stream.IngestRecordOffset(rec); err != nil {
 Streams reconnect automatically on recoverable failures (default 4 retries).
 Disable with `WithRecovery(zerobus.RecoveryDisabled)`.
 After close/failure, use `GetUnackedRecords` / `GetUnackedBatches` to replay.
-For `DynamicProtoStream`, these methods return the converted protobuf bytes.
-Replay them through the embedded `Stream.IngestRecordOffset` /
-`Stream.IngestRecordsOffset`, not through the `IngestJSON*` methods.
+For proto streams, records queued through `IngestJSON*` are returned as
+converted protobuf bytes. Replay them through `IngestRecordOffset` /
+`IngestRecordsOffset`, not through the `IngestJSON*` methods.
 
 Recovery and buffering can be tuned with `WithRecoveryRetries`,
 `WithRecoveryTimeout`, `WithRecoveryBackoff`, `WithLackOfAckTimeout`,

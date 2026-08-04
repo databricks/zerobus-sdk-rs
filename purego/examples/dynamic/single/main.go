@@ -14,9 +14,18 @@ import (
 	"github.com/databricks/zerobus-sdk/purego/zerobus"
 )
 
-func openStream(sdk *zerobus.SDK, cfg config.Settings) (*zerobus.DynamicProtoStream, error) {
-	return sdk.CreateDynamicProtoStream(context.Background(), cfg.TableName,
-		cfg.ClientID, cfg.ClientSecret)
+func openStream(sdk *zerobus.SDK, cfg config.Settings) (*zerobus.Stream, error) {
+	ctx := context.Background()
+	descriptor, err := sdk.FetchProtoDescriptor(
+		ctx, cfg.TableName, cfg.ClientID, cfg.ClientSecret,
+	)
+	if err != nil {
+		return nil, err
+	}
+	return sdk.CreateStream(
+		ctx, cfg.TableName, cfg.ClientID, cfg.ClientSecret,
+		zerobus.WithProto(descriptor),
+	)
 }
 
 func main() {
@@ -31,7 +40,7 @@ func main() {
 
 	stream, err := openStream(sdk, cfg)
 	if err != nil {
-		log.Fatalf("create dynamic stream: %v", err)
+		log.Fatalf("create stream: %v", err)
 	}
 	defer stream.Close()
 

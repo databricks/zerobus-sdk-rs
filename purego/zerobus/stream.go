@@ -3,6 +3,7 @@ package zerobus
 import (
 	"context"
 
+	"github.com/databricks/zerobus-sdk/purego/internal/dynamicproto"
 	"github.com/databricks/zerobus-sdk/purego/internal/stream"
 	"github.com/databricks/zerobus-sdk/purego/internal/zerobuspb"
 )
@@ -10,7 +11,12 @@ import (
 // Stream is an open ingestion stream.
 // Use ingest methods to queue records, then Flush/WaitForOffset to confirm.
 type Stream struct {
-	core *stream.CoreStream[*zerobuspb.EphemeralStreamRequest, *zerobuspb.EphemeralStreamResponse]
+	core                    *stream.CoreStream[*zerobuspb.EphemeralStreamRequest, *zerobuspb.EphemeralStreamResponse]
+	recordType              zerobuspb.RecordType
+	jsonConverter           *dynamicproto.Converter
+	conversionGate          chan struct{}
+	maxBatchRecords         int
+	maxBufferedPayloadBytes int64
 	// sdk is the SDK that created this stream. Close deregisters from it so a
 	// long-lived SDK does not retain streams the caller has already closed.
 	sdk *SDK

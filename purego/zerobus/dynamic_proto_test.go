@@ -14,6 +14,7 @@ import (
 
 	"github.com/databricks/zerobus-sdk/purego/internal/dynamicproto"
 	"github.com/databricks/zerobus-sdk/purego/internal/stream"
+	"github.com/databricks/zerobus-sdk/purego/internal/zerobuspb"
 	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/types/descriptorpb"
 )
@@ -23,7 +24,7 @@ type retryableSchemaTestError struct{}
 func (retryableSchemaTestError) Error() string     { return "retryable" }
 func (retryableSchemaTestError) IsRetryable() bool { return true }
 
-func TestSDKDynamicDescriptor_CacheHit(t *testing.T) {
+func TestSDKFetchProtoDescriptor_CacheHit(t *testing.T) {
 	var tokenCalls atomic.Int32
 	var schemaCalls atomic.Int32
 
@@ -49,26 +50,23 @@ func TestSDKDynamicDescriptor_CacheHit(t *testing.T) {
 	defer server.Close()
 
 	sdk := newSDK(nil, "https://workspace.zerobus.cloud.databricks.com", server.URL, sdkConfig{
-		dynamicSchemaHTTPClient:   server.Client(),
+		httpClient:                server.Client(),
 		dynamicSchemaFetchTimeout: time.Second,
 	})
-	b1, c1, err := sdk.dynamicDescriptorAndConverter(
+	b1, err := sdk.fetchProtoDescriptor(
 		context.Background(), "main.sales.orders", "id", "secret",
 	)
 	if err != nil {
-		t.Fatalf("dynamicDescriptorAndConverter() first call error = %v", err)
+		t.Fatalf("fetchProtoDescriptor() first call error = %v", err)
 	}
-	b2, c2, err := sdk.dynamicDescriptorAndConverter(
+	b2, err := sdk.fetchProtoDescriptor(
 		context.Background(), "main.sales.orders", "id", "secret",
 	)
 	if err != nil {
-		t.Fatalf("dynamicDescriptorAndConverter() second call error = %v", err)
+		t.Fatalf("fetchProtoDescriptor() second call error = %v", err)
 	}
 	if string(b1) != string(b2) {
 		t.Fatalf("cached descriptor mismatch")
-	}
-	if c1 != c2 {
-		t.Fatal("cached converter was rebuilt")
 	}
 	if tokenCalls.Load() != 1 {
 		t.Fatalf("token calls = %d, want 1", tokenCalls.Load())
@@ -78,7 +76,7 @@ func TestSDKDynamicDescriptor_CacheHit(t *testing.T) {
 	}
 }
 
-func TestDynamicProtoStreamEncodeBatch(t *testing.T) {
+func TestStreamEncodeJSONBatch(t *testing.T) {
 	desc := &descriptorpb.DescriptorProto{
 		Name: proto.String("Order"),
 		Field: []*descriptorpb.FieldDescriptorProto{
@@ -98,7 +96,11 @@ func TestDynamicProtoStreamEncodeBatch(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewFromDescriptorProtoBytes() error = %v", err)
 	}
-	ds := &DynamicProtoStream{converter: c}
+	ds := &Stream{
+		recordType:     zerobuspb.RecordType_PROTO,
+		jsonConverter:  c,
+		conversionGate: make(chan struct{}, 1),
+	}
 	out, err := ds.encodeJSONBatchContext(context.Background(), [][]byte{
 		[]byte(`{"id":1}`),
 		[]byte(`{"id":2}`),
@@ -111,7 +113,7 @@ func TestDynamicProtoStreamEncodeBatch(t *testing.T) {
 	}
 }
 
-func TestDynamicProtoStreamMessageDescriptor(t *testing.T) {
+func TestStreamMessageDescriptor(t *testing.T) {
 	desc := &descriptorpb.DescriptorProto{
 		Name: proto.String("Order"),
 		Field: []*descriptorpb.FieldDescriptorProto{
@@ -132,7 +134,7 @@ func TestDynamicProtoStreamMessageDescriptor(t *testing.T) {
 		t.Fatalf("NewFromDescriptorProtoBytes() error = %v", err)
 	}
 
-	stream := &DynamicProtoStream{converter: converter}
+	stream := &Stream{jsonConverter: converter}
 	got := stream.MessageDescriptor()
 	if got == nil {
 		t.Fatal("MessageDescriptor() = nil")
@@ -145,7 +147,36 @@ func TestDynamicProtoStreamMessageDescriptor(t *testing.T) {
 	}
 }
 
-func TestSDKDynamicDescriptor_CacheIsCredentialScoped(t *testing.T) {
+func TestCreateStreamRejectsInvalidDescriptor(t *testing.T) {
+	sdk := newSDK(nil, "https://zerobus", "https://uc", sdkConfig{})
+	message := &descriptorpb.DescriptorProto{Name: proto.String("Order")}
+	fileBytes, err := proto.Marshal(&descriptorpb.FileDescriptorProto{
+		Name:        proto.String("orders.proto"),
+		Syntax:      proto.String("proto2"),
+		MessageType: []*descriptorpb.DescriptorProto{message},
+	})
+	if err != nil {
+		t.Fatalf("marshal FileDescriptorProto: %v", err)
+	}
+	for name, descriptor := range map[string][]byte{
+		"malformed":           []byte("bad descriptor"),
+		"FileDescriptorProto": fileBytes,
+	} {
+		t.Run(name, func(t *testing.T) {
+			_, err := sdk.CreateStreamWithProvider(
+				context.Background(),
+				"main.sales.orders",
+				NewStaticHeadersProvider(map[string]string{"authorization": "Bearer token"}),
+				WithProto(descriptor),
+			)
+			if err == nil || !strings.Contains(err.Error(), "invalid DescriptorProto") {
+				t.Fatalf("CreateStreamWithProvider() error = %v, want descriptor error", err)
+			}
+		})
+	}
+}
+
+func TestSDKFetchProtoDescriptor_CacheIsCredentialScoped(t *testing.T) {
 	var tokenCalls atomic.Int32
 	var schemaCalls atomic.Int32
 	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -170,17 +201,17 @@ func TestSDKDynamicDescriptor_CacheIsCredentialScoped(t *testing.T) {
 	defer server.Close()
 
 	sdk := newSDK(nil, "https://workspace.zerobus.cloud.databricks.com", server.URL, sdkConfig{
-		dynamicSchemaHTTPClient: server.Client(),
+		httpClient: server.Client(),
 	})
 	for _, credentials := range [][2]string{
 		{"id-1", "secret-1"},
 		{"id-2", "secret-1"},
 		{"id-1", "secret-2"},
 	} {
-		if _, _, err := sdk.dynamicDescriptorAndConverter(
+		if _, err := sdk.fetchProtoDescriptor(
 			context.Background(), "main.sales.orders", credentials[0], credentials[1],
 		); err != nil {
-			t.Fatalf("dynamicDescriptorAndConverter() error = %v", err)
+			t.Fatalf("fetchProtoDescriptor() error = %v", err)
 		}
 	}
 	if got := tokenCalls.Load(); got != 3 {
@@ -197,7 +228,7 @@ func TestSDKStoreDynamicDescriptor_PrunesExpiredEntries(t *testing.T) {
 		descriptor: []byte("old"),
 		expiresAt:  time.Now().Add(-time.Second),
 	}
-	sdk.storeDynamicDescriptor("new", []byte("new"), nil)
+	sdk.storeDynamicDescriptor("new", []byte("new"))
 	if len(sdk.dynamicSchemaCache) != 1 {
 		t.Fatalf("cache entries = %d, want 1", len(sdk.dynamicSchemaCache))
 	}
@@ -209,7 +240,7 @@ func TestSDKStoreDynamicDescriptor_PrunesExpiredEntries(t *testing.T) {
 func TestSDKStoreDynamicDescriptor_EnforcesEntryLimit(t *testing.T) {
 	sdk := newSDK(nil, "https://zerobus", "https://uc", sdkConfig{})
 	for i := range maxDynamicSchemaCacheEntries + 1 {
-		sdk.storeDynamicDescriptor(fmt.Sprintf("entry-%03d", i), []byte("descriptor"), nil)
+		sdk.storeDynamicDescriptor(fmt.Sprintf("entry-%03d", i), []byte("descriptor"))
 	}
 	if got := len(sdk.dynamicSchemaCache); got != maxDynamicSchemaCacheEntries {
 		t.Fatalf("cache entries = %d, want %d", got, maxDynamicSchemaCacheEntries)
@@ -227,14 +258,15 @@ func TestSDKStoreDynamicDescriptor_DoesNotPopulateClosedSDK(t *testing.T) {
 	sdk.mu.Lock()
 	sdk.closed = true
 	sdk.mu.Unlock()
-	sdk.storeDynamicDescriptor("closed", []byte("descriptor"), nil)
+	sdk.storeDynamicDescriptor("closed", []byte("descriptor"))
 	if len(sdk.dynamicSchemaCache) != 0 {
 		t.Fatal("closed SDK cache was populated")
 	}
 }
 
-func TestDynamicProtoStreamRejectsBatchBeforeConversion(t *testing.T) {
-	ds := &DynamicProtoStream{
+func TestStreamRejectsJSONBatchBeforeConversion(t *testing.T) {
+	ds := &Stream{
+		recordType:              zerobuspb.RecordType_PROTO,
 		conversionGate:          make(chan struct{}, 1),
 		maxBatchRecords:         1,
 		maxBufferedPayloadBytes: 64,

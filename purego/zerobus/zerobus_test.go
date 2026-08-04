@@ -747,14 +747,14 @@ func TestIngestContextCancelsBackpressure(t *testing.T) {
 		{
 			name: "record",
 			ingest: func(st *zerobus.Stream, ctx context.Context) error {
-				_, err := st.IngestRecordOffsetContext(ctx, []byte(`{"id":2}`))
+				_, err := st.IngestJSONOffsetContext(ctx, []byte(`{"id":2}`))
 				return err
 			},
 		},
 		{
 			name: "batch",
 			ingest: func(st *zerobus.Stream, ctx context.Context) error {
-				_, err := st.IngestRecordsOffsetContext(ctx, [][]byte{[]byte(`{"id":2}`)})
+				_, err := st.IngestJSONRecordsOffsetContext(ctx, [][]byte{[]byte(`{"id":2}`)})
 				return err
 			},
 		},
@@ -775,8 +775,8 @@ func TestIngestContextCancelsBackpressure(t *testing.T) {
 			if err != nil {
 				t.Fatalf("CreateStreamWithProvider: %v", err)
 			}
-			if _, err := st.IngestRecordOffset([]byte(`{"id":1}`)); err != nil {
-				t.Fatalf("first IngestRecordOffset: %v", err)
+			if _, err := st.IngestJSONOffset([]byte(`{"id":1}`)); err != nil {
+				t.Fatalf("first IngestJSONOffset: %v", err)
 			}
 
 			ctx, cancel := context.WithTimeout(context.Background(), 25*time.Millisecond)
@@ -801,7 +801,7 @@ func waitFor(t *testing.T, cond func() bool, what string) {
 	}
 }
 
-func TestDynamicProtoPublicFlow(t *testing.T) {
+func TestFetchProtoDescriptorPublicFlow(t *testing.T) {
 	uc := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
 		case r.URL.Path == "/oidc/v1/token":
@@ -861,22 +861,32 @@ func TestDynamicProtoPublicFlow(t *testing.T) {
 		conn,
 		"https://ws.zerobus.databricks.com",
 		uc.URL,
-		zerobus.WithDynamicSchemaHTTPClient(uc.Client()),
+		zerobus.WithHTTPClient(uc.Client()),
 	)
 	t.Cleanup(func() { _ = sdk.Close() })
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	dynamic, err := sdk.CreateDynamicProtoStream(
+	descriptorBytes, err := sdk.FetchProtoDescriptor(
 		ctx,
 		"main.sales.orders",
 		"id",
 		"secret",
+	)
+	if err != nil {
+		t.Fatalf("FetchProtoDescriptor() error = %v", err)
+	}
+	dynamic, err := sdk.CreateStream(
+		ctx,
+		"main.sales.orders",
+		"id",
+		"secret",
+		zerobus.WithProto(descriptorBytes),
 		zerobus.WithWaitForReady(),
 		zerobus.WithMaxPayloadBytes(256),
 	)
 	if err != nil {
-		t.Fatalf("CreateDynamicProtoStream() error = %v", err)
+		t.Fatalf("CreateStream() error = %v", err)
 	}
 	defer dynamic.Close()
 

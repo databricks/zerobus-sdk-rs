@@ -11,9 +11,10 @@
 - Added opt-in wait-ready stream creation whose context bounds the complete
   first-open process; asynchronous creation now preserves context values while
   detaching caller cancellation.
-- Added `CreateDynamicProtoStream`, which fetches Unity Catalog table schemas
-  with the same client credentials, builds runtime protobuf descriptors, and
-  exposes JSON ingest methods that convert to protobuf bytes automatically.
+- Added `FetchProtoDescriptor` for building protobuf descriptors from Unity
+  Catalog table schemas.
+- Added `Stream.IngestJSONOffset` and `Stream.IngestJSONRecordsOffset`. JSON
+  streams queue JSON directly; proto streams convert it before ingestion.
 
 ### Deprecations
 
@@ -40,5 +41,5 @@
 ### API Changes
 
 - Protocol Buffers are now the default record type.
-- Added `DynamicProtoStream.MessageDescriptor` for constructing protobuf
-  messages directly from UC-derived schemas.
+- Added `Stream.MessageDescriptor` for constructing protobuf messages directly
+  from the configured schema.

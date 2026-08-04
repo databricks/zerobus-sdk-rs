@@ -24,10 +24,19 @@ func main() {
 	}
 	defer sdk.Close()
 
-	stream, err := sdk.CreateDynamicProtoStream(context.Background(), cfg.TableName,
-		cfg.ClientID, cfg.ClientSecret)
+	ctx := context.Background()
+	descriptor, err := sdk.FetchProtoDescriptor(
+		ctx, cfg.TableName, cfg.ClientID, cfg.ClientSecret,
+	)
 	if err != nil {
-		log.Fatalf("create dynamic stream: %v", err)
+		log.Fatalf("fetch descriptor: %v", err)
+	}
+	stream, err := sdk.CreateStream(
+		ctx, cfg.TableName, cfg.ClientID, cfg.ClientSecret,
+		zerobus.WithProto(descriptor),
+	)
+	if err != nil {
+		log.Fatalf("create stream: %v", err)
 	}
 	defer stream.Close()
 

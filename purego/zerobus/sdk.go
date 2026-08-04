@@ -100,7 +100,7 @@ type SDK struct {
 	conn            *transport.Conn
 	// Shared OAuth token cache across streams.
 	tokenCache                *auth.SharedTokenCache
-	dynamicSchemaHTTPClient   *http.Client
+	httpClient                *http.Client
 	dynamicSchemaFetchTimeout time.Duration
 	dynamicSchemaCache        map[string]cachedDescriptor
 
@@ -113,7 +113,6 @@ type SDK struct {
 
 type cachedDescriptor struct {
 	descriptor []byte
-	converter  *dynamicproto.Converter
 	expiresAt  time.Time
 	storedAt   time.Time
 }
@@ -135,7 +134,7 @@ func newSDK(conn *transport.Conn, zerobusEndpoint, ucEndpoint string, cfg sdkCon
 		ucEndpoint:                strings.TrimSpace(ucEndpoint),
 		conn:                      conn,
 		tokenCache:                auth.NewSharedTokenCache(),
-		dynamicSchemaHTTPClient:   cfg.dynamicSchemaHTTPClient,
+		httpClient:                cfg.httpClient,
 		dynamicSchemaFetchTimeout: fetchTimeout,
 		dynamicSchemaCache:        make(map[string]cachedDescriptor),
 		streams:                   make(map[*Stream]struct{}),
@@ -227,9 +226,13 @@ func (s *SDK) CreateStream(
 	tableName, clientID, clientSecret string,
 	opts ...StreamOption,
 ) (*Stream, error) {
+	authOpts := []auth.OAuthOption{auth.WithSharedTokenCache(s.tokenCache)}
+	if s.httpClient != nil {
+		authOpts = append(authOpts, auth.WithHTTPClient(s.httpClient))
+	}
 	provider, err := auth.NewOAuthHeadersProvider(
 		clientID, clientSecret, s.zerobusEndpoint, s.ucEndpoint,
-		auth.WithSharedTokenCache(s.tokenCache),
+		authOpts...,
 	)
 	if err != nil {
 		return nil, &Error{Op: "CreateStream", cause: err, retryable: false}
@@ -254,67 +257,30 @@ func (s *SDK) CreateStreamWithProvider(
 	return s.createStream(ctx, "CreateStreamWithProvider", tableName, provider, opts...)
 }
 
-// CreateDynamicProtoStream opens a stream that accepts JSON payloads and
-// converts them to protobuf bytes using a runtime descriptor built from the
-// Unity Catalog table schema.
-func (s *SDK) CreateDynamicProtoStream(
+// FetchProtoDescriptor returns a protobuf descriptor built from a Unity Catalog
+// table schema.
+func (s *SDK) FetchProtoDescriptor(
 	ctx context.Context,
 	tableName, clientID, clientSecret string,
-	opts ...StreamOption,
-) (*DynamicProtoStream, error) {
+) ([]byte, error) {
 	if s.isClosed() {
 		return nil, &Error{
-			Op:        "CreateDynamicProtoStream",
+			Op:        "FetchProtoDescriptor",
 			cause:     fmt.Errorf("SDK is closed"),
 			retryable: false,
 		}
 	}
-
-	sc := streamConfigFromOptions(opts)
-	descBytes, converter, err := s.dynamicDescriptorAndConverter(
+	descBytes, err := s.fetchProtoDescriptor(
 		ctx, tableName, clientID, clientSecret,
 	)
 	if err != nil {
 		return nil, &Error{
-			Op:        "CreateDynamicProtoStream",
+			Op:        "FetchProtoDescriptor",
 			cause:     err,
 			retryable: dynamicSchemaErrorRetryable(err),
 		}
 	}
-
-	sc.recordType = zerobuspb.RecordType_PROTO
-	sc.descriptor = descBytes
-	authOpts := []auth.OAuthOption{auth.WithSharedTokenCache(s.tokenCache)}
-	if s.dynamicSchemaHTTPClient != nil {
-		authOpts = append(authOpts, auth.WithHTTPClient(s.dynamicSchemaHTTPClient))
-	}
-	provider, err := auth.NewOAuthHeadersProvider(
-		clientID, clientSecret, s.zerobusEndpoint, s.ucEndpoint,
-		authOpts...,
-	)
-	if err != nil {
-		return nil, &Error{
-			Op:        "CreateDynamicProtoStream",
-			cause:     err,
-			retryable: false,
-		}
-	}
-	base, err := s.createStreamConfigured(
-		ctx, "CreateDynamicProtoStream", tableName, provider, sc,
-	)
-	if err != nil {
-		return nil, err
-	}
-	return &DynamicProtoStream{
-		Stream:          base,
-		converter:       converter,
-		conversionGate:  make(chan struct{}, 1),
-		maxBatchRecords: positiveOrDefault(sc.cfg.MaxBatchRecords, stream.DefaultMaxBatchRecords),
-		maxBufferedPayloadBytes: positiveOrDefault64(
-			sc.cfg.MaxBufferedPayloadBytes,
-			stream.DefaultMaxBufferedPayloadBytes,
-		),
-	}, nil
+	return descBytes, nil
 }
 
 func (s *SDK) createStream(
@@ -345,6 +311,18 @@ func (s *SDK) createStreamConfigured(
 	if err := validateStreamArgs(tableName, sc); err != nil {
 		return nil, &Error{Op: op, cause: err, retryable: false}
 	}
+	var jsonConverter *dynamicproto.Converter
+	if sc.recordType == zerobuspb.RecordType_PROTO {
+		var err error
+		jsonConverter, err = dynamicproto.NewFromDescriptorProtoBytes(sc.descriptor)
+		if err != nil {
+			return nil, &Error{
+				Op:        op,
+				cause:     fmt.Errorf("invalid DescriptorProto: %w", err),
+				retryable: false,
+			}
+		}
+	}
 
 	params := stream.StreamParams{
 		TableName:       tableName,
@@ -360,7 +338,17 @@ func (s *SDK) createStreamConfigured(
 	if err != nil {
 		return nil, wrapErr(op, err)
 	}
-	st := &Stream{core: core, sdk: s}
+	st := &Stream{
+		core:                    core,
+		sdk:                     s,
+		recordType:              sc.recordType,
+		jsonConverter:           jsonConverter,
+		maxBatchRecords:         positiveOrDefault(sc.cfg.MaxBatchRecords, stream.DefaultMaxBatchRecords),
+		maxBufferedPayloadBytes: positiveOrDefault64(sc.cfg.MaxBufferedPayloadBytes, stream.DefaultMaxBufferedPayloadBytes),
+	}
+	if sc.recordType == zerobuspb.RecordType_PROTO {
+		st.conversionGate = make(chan struct{}, 1)
+	}
 	s.mu.Lock()
 	if s.closed {
 		s.mu.Unlock()
@@ -392,86 +380,80 @@ func validateStreamArgs(tableName string, sc streamConfig) error {
 	return nil
 }
 
-func (s *SDK) dynamicDescriptorAndConverter(
+func (s *SDK) fetchProtoDescriptor(
 	ctx context.Context,
 	tableName, clientID, clientSecret string,
-) ([]byte, *dynamicproto.Converter, error) {
+) ([]byte, error) {
 	tableName = strings.TrimSpace(tableName)
 	if tableName == "" {
-		return nil, nil, fmt.Errorf("table name is required")
+		return nil, fmt.Errorf("table name is required")
 	}
 	if strings.TrimSpace(clientID) == "" {
-		return nil, nil, fmt.Errorf("clientID is required")
+		return nil, fmt.Errorf("clientID is required")
 	}
 	if strings.TrimSpace(clientSecret) == "" {
-		return nil, nil, fmt.Errorf("clientSecret is required")
+		return nil, fmt.Errorf("clientSecret is required")
 	}
 
 	cacheKey := dynamicSchemaCacheKey(s.ucEndpoint, tableName, clientID, clientSecret)
-	if desc, converter, ok := s.getDynamicDescriptorFromCache(cacheKey); ok {
-		return desc, converter, nil
+	if desc, ok := s.getDynamicDescriptorFromCache(cacheKey); ok {
+		return desc, nil
 	}
 
 	fetcher, err := ucschema.New(ucschema.Config{
 		WorkspaceEndpoint: s.ucEndpoint,
 		ClientID:          clientID,
 		ClientSecret:      clientSecret,
-		HTTPClient:        s.dynamicSchemaHTTPClient,
+		HTTPClient:        s.httpClient,
 		RequestTimeout:    s.dynamicSchemaFetchTimeout,
 	})
 	if err != nil {
-		return nil, nil, err
+		return nil, err
 	}
 	tableSchema, err := fetcher.FetchTableSchema(ctx, tableName)
 	if err != nil {
-		return nil, nil, err
+		return nil, err
 	}
 	msgDescriptor, err := schema.DescriptorFromUCSchema(tableSchema)
 	if err != nil {
-		return nil, nil, err
+		return nil, err
 	}
 	descBytes, err := proto.Marshal(msgDescriptor)
 	if err != nil {
-		return nil, nil, fmt.Errorf("serialize descriptor: %w", err)
+		return nil, fmt.Errorf("serialize descriptor: %w", err)
 	}
-	converter, err := dynamicproto.NewFromDescriptorProtoBytes(descBytes)
-	if err != nil {
-		return nil, nil, fmt.Errorf("validate descriptor: %w", err)
-	}
-	s.storeDynamicDescriptor(cacheKey, descBytes, converter)
-	return descBytes, converter, nil
+	s.storeDynamicDescriptor(cacheKey, descBytes)
+	return descBytes, nil
 }
 
 func (s *SDK) getDynamicDescriptorFromCache(
 	cacheKey string,
-) ([]byte, *dynamicproto.Converter, bool) {
+) ([]byte, bool) {
 	now := time.Now()
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.closed {
-		return nil, nil, false
+		return nil, false
 	}
 	item, ok := s.dynamicSchemaCache[cacheKey]
 	if !ok {
-		return nil, nil, false
+		return nil, false
 	}
 	if now.After(item.expiresAt) {
 		delete(s.dynamicSchemaCache, cacheKey)
-		return nil, nil, false
+		return nil, false
 	}
 	dup := append([]byte(nil), item.descriptor...)
-	return dup, item.converter, true
+	return dup, true
 }
 
 func (s *SDK) storeDynamicDescriptor(
 	cacheKey string,
 	desc []byte,
-	converter *dynamicproto.Converter,
 ) {
 	now := time.Now()
 	item := cachedDescriptor{
 		descriptor: append([]byte(nil), desc...),
-		converter:  converter,
 		expiresAt:  now.Add(defaultDynamicSchemaCacheTTL),
 		storedAt:   now,
 	}

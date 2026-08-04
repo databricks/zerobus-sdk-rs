@@ -15,7 +15,7 @@ type Option func(*sdkConfig)
 type sdkConfig struct {
 	applicationName           string
 	tlsConfig                 *tls.Config
-	dynamicSchemaHTTPClient   *http.Client
+	httpClient                *http.Client
 	dynamicSchemaFetchTimeout time.Duration
 }
 
@@ -33,20 +33,20 @@ func WithTLSConfig(tc *tls.Config) Option {
 	return func(c *sdkConfig) { c.tlsConfig = tc }
 }
 
-// WithDynamicSchemaFetchTimeout sets the timeout used by
-// CreateDynamicProtoStream for Unity Catalog schema requests.
+// WithProtoDescriptorFetchTimeout sets the timeout used by
+// FetchProtoDescriptor for Unity Catalog schema requests.
 // A non-positive value keeps the default.
-func WithDynamicSchemaFetchTimeout(d time.Duration) Option {
+func WithProtoDescriptorFetchTimeout(d time.Duration) Option {
 	return func(c *sdkConfig) { c.dynamicSchemaFetchTimeout = d }
 }
 
-// WithDynamicSchemaHTTPClient overrides the HTTP client used for Unity Catalog
-// schema/token requests in CreateDynamicProtoStream.
+// WithHTTPClient overrides the HTTP client used for OAuth and Unity Catalog
+// schema requests.
 // A nil client is ignored.
-func WithDynamicSchemaHTTPClient(client *http.Client) Option {
+func WithHTTPClient(client *http.Client) Option {
 	return func(c *sdkConfig) {
 		if client != nil {
-			c.dynamicSchemaHTTPClient = client
+			c.httpClient = client
 		}
 	}
 }
@@ -98,10 +98,8 @@ func WithJSON() StreamOption {
 	}
 }
 
-// WithProto selects Protocol Buffer record encoding. descriptorProto is the
-// serialized message descriptor (a FileDescriptorProto / DescriptorProto) the
-// service uses to interpret the raw protobuf record bytes; it is required for
-// proto streams.
+// WithProto selects Protocol Buffer record encoding. descriptorProto must be a
+// serialized DescriptorProto that describes each record.
 func WithProto(descriptorProto []byte) StreamOption {
 	return func(c *streamConfig) {
 		c.recordType = zerobuspb.RecordType_PROTO

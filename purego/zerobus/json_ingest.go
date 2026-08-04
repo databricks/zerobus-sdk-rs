@@ -4,35 +4,32 @@ import (
 	"context"
 	"fmt"
 
-	"github.com/databricks/zerobus-sdk/purego/internal/dynamicproto"
 	"github.com/databricks/zerobus-sdk/purego/internal/stream"
+	"github.com/databricks/zerobus-sdk/purego/internal/zerobuspb"
 	"google.golang.org/protobuf/reflect/protoreflect"
 )
 
-// DynamicProtoStream wraps a proto stream and accepts JSON input payloads.
-type DynamicProtoStream struct {
-	*Stream
-	converter               *dynamicproto.Converter
-	conversionGate          chan struct{}
-	maxBatchRecords         int
-	maxBufferedPayloadBytes int64
-}
-
-// MessageDescriptor returns the protobuf descriptor fetched for this stream.
-func (s *DynamicProtoStream) MessageDescriptor() protoreflect.MessageDescriptor {
-	if s == nil || s.converter == nil {
+// MessageDescriptor returns the protobuf descriptor configured for this stream.
+// It returns nil for JSON streams.
+func (s *Stream) MessageDescriptor() protoreflect.MessageDescriptor {
+	if s == nil || s.jsonConverter == nil {
 		return nil
 	}
-	return s.converter.MessageDescriptor()
+	return s.jsonConverter.MessageDescriptor()
 }
 
-// IngestJSONOffset converts one JSON payload and queues it for ingestion.
-func (s *DynamicProtoStream) IngestJSONOffset(record []byte) (int64, error) {
+// IngestJSONOffset queues one JSON payload.
+// Proto streams convert it to protobuf before ingestion.
+func (s *Stream) IngestJSONOffset(record []byte) (int64, error) {
 	return s.IngestJSONOffsetContext(context.Background(), record)
 }
 
 // IngestJSONOffsetContext is IngestJSONOffset with caller context.
-func (s *DynamicProtoStream) IngestJSONOffsetContext(ctx context.Context, record []byte) (int64, error) {
+func (s *Stream) IngestJSONOffsetContext(ctx context.Context, record []byte) (int64, error) {
+	if s.recordType == zerobuspb.RecordType_JSON {
+		offset, err := s.core.Ingest(ctx, record)
+		return offset, wrapErr("IngestJSONOffset", err)
+	}
 	if err := s.validateJSONBatch(1, len(record)); err != nil {
 		return -1, &Error{Op: "IngestJSONOffset", cause: err, retryable: false}
 	}
@@ -47,16 +44,22 @@ func (s *DynamicProtoStream) IngestJSONOffsetContext(ctx context.Context, record
 	if err != nil {
 		return -1, &Error{Op: "IngestJSONOffset", cause: err, retryable: false}
 	}
-	return s.Stream.IngestRecordOffsetContext(ctx, encoded)
+	offset, err := s.core.Ingest(ctx, encoded)
+	return offset, wrapErr("IngestJSONOffset", err)
 }
 
-// IngestJSONRecordsOffset converts JSON byte payloads and queues one batch.
-func (s *DynamicProtoStream) IngestJSONRecordsOffset(records [][]byte) (int64, error) {
+// IngestJSONRecordsOffset queues JSON payloads as one batch.
+// Proto streams convert them to protobuf before ingestion.
+func (s *Stream) IngestJSONRecordsOffset(records [][]byte) (int64, error) {
 	return s.IngestJSONRecordsOffsetContext(context.Background(), records)
 }
 
 // IngestJSONRecordsOffsetContext is IngestJSONRecordsOffset with caller context.
-func (s *DynamicProtoStream) IngestJSONRecordsOffsetContext(ctx context.Context, records [][]byte) (int64, error) {
+func (s *Stream) IngestJSONRecordsOffsetContext(ctx context.Context, records [][]byte) (int64, error) {
+	if s.recordType == zerobuspb.RecordType_JSON {
+		offset, err := s.core.IngestBatch(ctx, records)
+		return offset, wrapErr("IngestJSONRecordsOffset", err)
+	}
 	total, err := totalByteLength(records)
 	if err != nil {
 		return -1, &Error{Op: "IngestJSONRecordsOffset", cause: err, retryable: false}
@@ -75,17 +78,21 @@ func (s *DynamicProtoStream) IngestJSONRecordsOffsetContext(ctx context.Context,
 	if err != nil {
 		return -1, &Error{Op: "IngestJSONRecordsOffset", cause: err, retryable: false}
 	}
-	return s.Stream.IngestRecordsOffsetContext(ctx, batch)
+	offset, err := s.core.IngestBatch(ctx, batch)
+	return offset, wrapErr("IngestJSONRecordsOffset", err)
 }
 
-func (s *DynamicProtoStream) encodeJSONRecord(record []byte) ([]byte, error) {
-	if s == nil || s.converter == nil {
-		return nil, fmt.Errorf("dynamic proto stream is not initialized")
+func (s *Stream) encodeJSONRecord(record []byte) ([]byte, error) {
+	if s == nil || s.recordType != zerobuspb.RecordType_PROTO {
+		return nil, fmt.Errorf("JSON conversion requires a proto stream")
 	}
-	return s.converter.EncodeJSONBytes(record)
+	if s.jsonConverter == nil {
+		return nil, fmt.Errorf("JSON conversion is unavailable")
+	}
+	return s.jsonConverter.EncodeJSONBytes(record)
 }
 
-func (s *DynamicProtoStream) encodeJSONBatchContext(ctx context.Context, records [][]byte) ([][]byte, error) {
+func (s *Stream) encodeJSONBatchContext(ctx context.Context, records [][]byte) ([][]byte, error) {
 	out := make([][]byte, len(records))
 	for i := range records {
 		if err := ctx.Err(); err != nil {
@@ -100,7 +107,7 @@ func (s *DynamicProtoStream) encodeJSONBatchContext(ctx context.Context, records
 	return out, nil
 }
 
-func (s *DynamicProtoStream) validateJSONBatch(recordCount, rawBytes int) error {
+func (s *Stream) validateJSONBatch(recordCount, rawBytes int) error {
 	maxRecords := s.maxBatchRecords
 	if maxRecords <= 0 {
 		maxRecords = stream.DefaultMaxBatchRecords
@@ -120,10 +127,9 @@ func (s *DynamicProtoStream) validateJSONBatch(recordCount, rawBytes int) error 
 	return nil
 }
 
-func (s *DynamicProtoStream) acquireConversion(ctx context.Context) error {
-	// Serialize conversion to bound memory before stream backpressure applies.
+func (s *Stream) acquireConversion(ctx context.Context) error {
 	if s.conversionGate == nil {
-		return ctx.Err()
+		return fmt.Errorf("JSON conversion is unavailable")
 	}
 	select {
 	case s.conversionGate <- struct{}{}:
@@ -133,7 +139,7 @@ func (s *DynamicProtoStream) acquireConversion(ctx context.Context) error {
 	}
 }
 
-func (s *DynamicProtoStream) releaseConversion() {
+func (s *Stream) releaseConversion() {
 	if s.conversionGate != nil {
 		<-s.conversionGate
 	}
