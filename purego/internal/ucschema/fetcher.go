@@ -284,7 +284,7 @@ func isRetryableTransportError(ctx context.Context, err error) bool {
 	if err == nil {
 		return false
 	}
-	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+	if ctx.Err() != nil {
 		return errors.Is(context.Cause(ctx), errRequestTimeout)
 	}
 	var nerr net.Error

@@ -10,7 +10,7 @@ import (
 )
 
 // MessageDescriptor returns the protobuf descriptor configured for this stream.
-// It returns nil for JSON streams.
+// It returns nil for JSON streams or unsupported descriptor formats.
 func (s *Stream) MessageDescriptor() protoreflect.MessageDescriptor {
 	if s == nil || s.jsonConverter == nil {
 		return nil
@@ -86,6 +86,9 @@ func (s *Stream) encodeJSONRecord(record []byte) ([]byte, error) {
 	if s == nil || s.recordType != zerobuspb.RecordType_PROTO {
 		return nil, fmt.Errorf("JSON conversion requires a proto stream")
 	}
+	if s.jsonConverterErr != nil {
+		return nil, fmt.Errorf("JSON conversion is unavailable: %w", s.jsonConverterErr)
+	}
 	if s.jsonConverter == nil {
 		return nil, fmt.Errorf("JSON conversion is unavailable")
 	}
@@ -128,6 +131,9 @@ func (s *Stream) validateJSONBatch(recordCount, rawBytes int) error {
 }
 
 func (s *Stream) acquireConversion(ctx context.Context) error {
+	if s.jsonConverterErr != nil {
+		return fmt.Errorf("JSON conversion is unavailable: %w", s.jsonConverterErr)
+	}
 	if s.conversionGate == nil {
 		return fmt.Errorf("JSON conversion is unavailable")
 	}

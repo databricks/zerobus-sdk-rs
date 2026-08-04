@@ -98,8 +98,9 @@ func WithJSON() StreamOption {
 	}
 }
 
-// WithProto selects Protocol Buffer record encoding. descriptorProto must be a
-// serialized DescriptorProto that describes each record.
+// WithProto selects Protocol Buffer record encoding. descriptorProto may be a
+// serialized DescriptorProto or FileDescriptorProto. Runtime JSON conversion
+// and MessageDescriptor require DescriptorProto.
 func WithProto(descriptorProto []byte) StreamOption {
 	return func(c *streamConfig) {
 		c.recordType = zerobuspb.RecordType_PROTO

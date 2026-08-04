@@ -147,8 +147,7 @@ func TestStreamMessageDescriptor(t *testing.T) {
 	}
 }
 
-func TestCreateStreamRejectsInvalidDescriptor(t *testing.T) {
-	sdk := newSDK(nil, "https://zerobus", "https://uc", sdkConfig{})
+func TestStreamJSONConversionRejectsUnsupportedDescriptor(t *testing.T) {
 	message := &descriptorpb.DescriptorProto{Name: proto.String("Order")}
 	fileBytes, err := proto.Marshal(&descriptorpb.FileDescriptorProto{
 		Name:        proto.String("orders.proto"),
@@ -163,14 +162,18 @@ func TestCreateStreamRejectsInvalidDescriptor(t *testing.T) {
 		"FileDescriptorProto": fileBytes,
 	} {
 		t.Run(name, func(t *testing.T) {
-			_, err := sdk.CreateStreamWithProvider(
-				context.Background(),
-				"main.sales.orders",
-				NewStaticHeadersProvider(map[string]string{"authorization": "Bearer token"}),
-				WithProto(descriptor),
-			)
-			if err == nil || !strings.Contains(err.Error(), "invalid DescriptorProto") {
-				t.Fatalf("CreateStreamWithProvider() error = %v, want descriptor error", err)
+			_, converterErr := dynamicproto.NewFromDescriptorProtoBytes(descriptor)
+			if converterErr == nil {
+				t.Fatal("descriptor unexpectedly supports JSON conversion")
+			}
+			stream := &Stream{
+				recordType:       zerobuspb.RecordType_PROTO,
+				jsonConverterErr: converterErr,
+				conversionGate:   make(chan struct{}, 1),
+			}
+			if _, err := stream.IngestJSONOffset([]byte(`{"id":1}`)); err == nil ||
+				!strings.Contains(err.Error(), "JSON conversion is unavailable") {
+				t.Fatalf("IngestJSONOffset() error = %v, want conversion error", err)
 			}
 		})
 	}

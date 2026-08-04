@@ -182,6 +182,38 @@ func TestFetchTableSchema_RequestTimeoutRetryable(t *testing.T) {
 	}
 }
 
+func TestFetchTableSchema_HTTPClientTimeoutRetryable(t *testing.T) {
+	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/oidc/v1/token" {
+			_ = json.NewEncoder(w).Encode(map[string]any{"access_token": "abc"})
+			return
+		}
+		<-r.Context().Done()
+	}))
+	defer srv.Close()
+
+	client := srv.Client()
+	client.Timeout = 20 * time.Millisecond
+	fetcher, err := New(Config{
+		WorkspaceEndpoint: srv.URL,
+		ClientID:          "id",
+		ClientSecret:      "secret",
+		HTTPClient:        client,
+		RequestTimeout:    time.Second,
+	})
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+	_, err = fetcher.FetchTableSchema(context.Background(), "main.sales.orders")
+	if err == nil {
+		t.Fatal("expected HTTP client timeout")
+	}
+	var fetchErr *FetchError
+	if !errors.As(err, &fetchErr) || !fetchErr.IsRetryable() {
+		t.Fatalf("timeout error = %v, want retryable FetchError", err)
+	}
+}
+
 func TestFetchTableSchema_CallerCancellationNotRetryable(t *testing.T) {
 	srv := newUCServer(t, http.StatusOK, http.StatusOK)
 	defer srv.Close()

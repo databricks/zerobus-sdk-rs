@@ -311,18 +311,6 @@ func (s *SDK) createStreamConfigured(
 	if err := validateStreamArgs(tableName, sc); err != nil {
 		return nil, &Error{Op: op, cause: err, retryable: false}
 	}
-	var jsonConverter *dynamicproto.Converter
-	if sc.recordType == zerobuspb.RecordType_PROTO {
-		var err error
-		jsonConverter, err = dynamicproto.NewFromDescriptorProtoBytes(sc.descriptor)
-		if err != nil {
-			return nil, &Error{
-				Op:        op,
-				cause:     fmt.Errorf("invalid DescriptorProto: %w", err),
-				retryable: false,
-			}
-		}
-	}
 
 	params := stream.StreamParams{
 		TableName:       tableName,
@@ -342,11 +330,11 @@ func (s *SDK) createStreamConfigured(
 		core:                    core,
 		sdk:                     s,
 		recordType:              sc.recordType,
-		jsonConverter:           jsonConverter,
 		maxBatchRecords:         positiveOrDefault(sc.cfg.MaxBatchRecords, stream.DefaultMaxBatchRecords),
 		maxBufferedPayloadBytes: positiveOrDefault64(sc.cfg.MaxBufferedPayloadBytes, stream.DefaultMaxBufferedPayloadBytes),
 	}
 	if sc.recordType == zerobuspb.RecordType_PROTO {
+		st.jsonConverter, st.jsonConverterErr = dynamicproto.NewFromDescriptorProtoBytes(sc.descriptor)
 		st.conversionGate = make(chan struct{}, 1)
 	}
 	s.mu.Lock()

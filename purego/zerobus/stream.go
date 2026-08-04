@@ -14,6 +14,7 @@ type Stream struct {
 	core                    *stream.CoreStream[*zerobuspb.EphemeralStreamRequest, *zerobuspb.EphemeralStreamResponse]
 	recordType              zerobuspb.RecordType
 	jsonConverter           *dynamicproto.Converter
+	jsonConverterErr        error
 	conversionGate          chan struct{}
 	maxBatchRecords         int
 	maxBufferedPayloadBytes int64
