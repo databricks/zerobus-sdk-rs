@@ -569,10 +569,6 @@ impl AckProcessor {
                 return Ok(());
             }
 
-            if self.request_send_failure.take() {
-                return Err(Self::request_send_error());
-            }
-
             if let RotationState::WaitingForAcks {
                 target_records,
                 deadlines,
@@ -631,7 +627,12 @@ impl AckProcessor {
 
             match event {
                 AckEvent::PendingBatchAvailable => continue,
-                AckEvent::RequestSendFailed => continue,
+                AckEvent::RequestSendFailed => {
+                    if self.request_send_failure.take() {
+                        return Err(Self::request_send_error());
+                    }
+                    continue;
+                }
                 AckEvent::AckDeadline(expected) => {
                     if let Some(pending_count) =
                         self.expired_pending_count(expected, ack_timeout).await?
@@ -730,9 +731,11 @@ mod tests {
     use std::sync::Arc;
 
     use arrow_array::Int32Array;
+    use arrow_flight::error::FlightError;
     use arrow_flight::PutResult;
     use arrow_schema::{DataType, Field, Schema as ArrowSchema};
-    use futures::stream::iter;
+    use futures::stream::{iter, pending};
+    use futures::StreamExt as _;
     use tokio::sync::{watch, Mutex, Semaphore};
     use tokio::time::{Duration, Instant};
 
@@ -796,6 +799,83 @@ mod tests {
         match error {
             ZerobusError::StreamClosedError(status) => {
                 assert_eq!(status.code(), tonic::Code::Unavailable);
+            }
+            other => panic!("expected a stream-closed error, got {other:?}"),
+        }
+    }
+
+    /// A buffered ACK is authoritative even when the request sender has already
+    /// reported failure. Apply its durable watermark before asking recovery to replay.
+    #[tokio::test]
+    async fn ready_ack_is_applied_before_reported_request_send_failure() {
+        let schema = one_col_schema();
+        let sem = Arc::new(Semaphore::new(1));
+        let pending_batches = Arc::new(Mutex::new(vec![pending_batch(
+            &sem,
+            batch_with_rows(&schema, 10),
+            0,
+            0,
+            10,
+        )]));
+        let response_stream = iter([Ok(PutResult {
+            app_metadata: serde_json::to_vec(&FlightAckMetadata {
+                ack_up_to_offset: 0,
+                ack_up_to_records: 5,
+                close_stream_duration_ms: None,
+            })
+            .unwrap()
+            .into(),
+        })])
+        .chain(pending::<Result<PutResult, FlightError>>());
+        let last_acked_records = Arc::new(AtomicU64::new(0));
+        let (processor, request_body, _last_ack_rx) = ack_processor(
+            Arc::clone(&pending_batches),
+            Arc::new(AtomicU64::new(10)),
+            Arc::clone(&last_acked_records),
+            false,
+        );
+        processor.request_send_failure.report();
+
+        let error = processor
+            .process(Box::pin(response_stream), request_body)
+            .await
+            .expect_err("the reported request-send failure must trigger recovery");
+
+        match error {
+            ZerobusError::StreamClosedError(status) => {
+                assert_eq!(status.code(), tonic::Code::Unavailable);
+            }
+            other => panic!("expected a stream-closed error, got {other:?}"),
+        }
+        assert_eq!(last_acked_records.load(Ordering::Acquire), 5);
+        assert_eq!(pending_batches.lock().await.len(), 1);
+    }
+
+    /// A peer status already buffered on the response stream must keep its real
+    /// error and retry classification instead of being masked by local send failure.
+    #[tokio::test]
+    async fn ready_server_error_wins_reported_request_send_failure() {
+        let response_stream = iter([Err::<PutResult, FlightError>(
+            tonic::Status::permission_denied("permanent server rejection").into(),
+        )]);
+        let (processor, request_body, _last_ack_rx) = ack_processor(
+            Arc::new(Mutex::new(Vec::new())),
+            Arc::new(AtomicU64::new(0)),
+            Arc::new(AtomicU64::new(0)),
+            false,
+        );
+        processor.request_send_failure.report();
+
+        let error = processor
+            .process(Box::pin(response_stream), request_body)
+            .await
+            .expect_err("the ready server rejection must be returned");
+
+        assert!(!error.is_retryable());
+        match error {
+            ZerobusError::StreamClosedError(status) => {
+                assert_eq!(status.code(), tonic::Code::PermissionDenied);
+                assert_eq!(status.message(), "permanent server rejection");
             }
             other => panic!("expected a stream-closed error, got {other:?}"),
         }
