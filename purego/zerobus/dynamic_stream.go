@@ -6,6 +6,7 @@ import (
 
 	"github.com/databricks/zerobus-sdk/purego/internal/dynamicproto"
 	"github.com/databricks/zerobus-sdk/purego/internal/stream"
+	"google.golang.org/protobuf/reflect/protoreflect"
 )
 
 // DynamicProtoStream wraps a proto stream and accepts JSON input payloads.
@@ -15,6 +16,14 @@ type DynamicProtoStream struct {
 	conversionGate          chan struct{}
 	maxBatchRecords         int
 	maxBufferedPayloadBytes int64
+}
+
+// MessageDescriptor returns the protobuf descriptor fetched for this stream.
+func (s *DynamicProtoStream) MessageDescriptor() protoreflect.MessageDescriptor {
+	if s == nil || s.converter == nil {
+		return nil
+	}
+	return s.converter.MessageDescriptor()
 }
 
 // IngestJSONOffset converts one JSON payload and queues it for ingestion.

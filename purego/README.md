@@ -106,6 +106,31 @@ if err := stream.Flush(); err != nil { // wait once at the end
 
 See `examples/dynamic/single/main.go` for a complete example.
 
+To skip JSON conversion while retaining UC schema discovery, build dynamic
+protobuf messages from the stream descriptor:
+
+```go
+descriptor := stream.MessageDescriptor()
+idField := descriptor.Fields().ByName("id")
+
+for _, id := range ids {
+    message := dynamicpb.NewMessage(descriptor)
+    message.Set(idField, protoreflect.ValueOfInt64(id))
+    record, err := proto.Marshal(message)
+    if err != nil {
+        log.Fatal(err)
+    }
+    if _, err := stream.IngestRecordOffset(record); err != nil {
+        log.Fatal(err)
+    }
+}
+if err := stream.Flush(); err != nil {
+    log.Fatal(err)
+}
+```
+
+See `examples/dynamic/proto/main.go` for a complete example.
+
 Dynamic JSON follows protobuf JSON value rules:
 
 - `DATE` is days since 1970-01-01.

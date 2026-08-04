@@ -13,6 +13,7 @@ Runnable examples for `github.com/databricks/zerobus-sdk/purego`.
 | Proto runtime | Runtime Protocol Buffers | Descriptor and messages built in Go | `proto/runtime` |
 | Dynamic single | Dynamic Proto (UC schema fetch) | Single-record loop, then `Flush` | `dynamic/single` |
 | Dynamic batch  | Dynamic Proto (UC schema fetch) | One atomic batch | `dynamic/batch` |
+| Dynamic message | Protocol Buffers (UC schema fetch) | Runtime messages, then `Flush` | `dynamic/proto` |
 
 Every example uses **loop-then-`Flush()`**: queue records, then flush once.
 
@@ -61,6 +62,7 @@ go run ./proto/batch
 go run ./proto/runtime
 go run ./dynamic/single
 go run ./dynamic/batch
+go run ./dynamic/proto
 ```
 
 ## Regenerating the proto bindings

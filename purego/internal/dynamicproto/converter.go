@@ -46,6 +46,14 @@ func NewFromDescriptorProtoBytes(descBytes []byte) (*Converter, error) {
 	return &Converter{message: message}, nil
 }
 
+// MessageDescriptor returns the converter's runtime message descriptor.
+func (c *Converter) MessageDescriptor() protoreflect.MessageDescriptor {
+	if c == nil {
+		return nil
+	}
+	return c.message
+}
+
 // EncodeJSONBytes converts one JSON payload to protobuf bytes.
 func (c *Converter) EncodeJSONBytes(record []byte) ([]byte, error) {
 	if c == nil || c.message == nil {

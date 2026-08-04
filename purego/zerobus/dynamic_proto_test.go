@@ -111,6 +111,40 @@ func TestDynamicProtoStreamEncodeBatch(t *testing.T) {
 	}
 }
 
+func TestDynamicProtoStreamMessageDescriptor(t *testing.T) {
+	desc := &descriptorpb.DescriptorProto{
+		Name: proto.String("Order"),
+		Field: []*descriptorpb.FieldDescriptorProto{
+			{
+				Name:   proto.String("id"),
+				Number: proto.Int32(1),
+				Label:  descriptorpb.FieldDescriptorProto_LABEL_OPTIONAL.Enum(),
+				Type:   descriptorpb.FieldDescriptorProto_TYPE_INT64.Enum(),
+			},
+		},
+	}
+	b, err := proto.Marshal(desc)
+	if err != nil {
+		t.Fatalf("marshal descriptor: %v", err)
+	}
+	converter, err := dynamicproto.NewFromDescriptorProtoBytes(b)
+	if err != nil {
+		t.Fatalf("NewFromDescriptorProtoBytes() error = %v", err)
+	}
+
+	stream := &DynamicProtoStream{converter: converter}
+	got := stream.MessageDescriptor()
+	if got == nil {
+		t.Fatal("MessageDescriptor() = nil")
+	}
+	if got.Name() != "Order" {
+		t.Fatalf("MessageDescriptor().Name() = %q, want Order", got.Name())
+	}
+	if got.Fields().ByName("id") == nil {
+		t.Fatal("MessageDescriptor() missing id field")
+	}
+}
+
 func TestSDKDynamicDescriptor_CacheIsCredentialScoped(t *testing.T) {
 	var tokenCalls atomic.Int32
 	var schemaCalls atomic.Int32

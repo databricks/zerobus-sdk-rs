@@ -40,3 +40,5 @@
 ### API Changes
 
 - Protocol Buffers are now the default record type.
+- Added `DynamicProtoStream.MessageDescriptor` for constructing protobuf
+  messages directly from UC-derived schemas.
