@@ -50,6 +50,7 @@ var _ wireStream[encodedMsg, ephemeralResp] = (*transport.Stream)(nil)
 
 // NewProtoJSONStream builds a proto or JSON ingestion stream.
 func NewProtoJSONStream(
+	openingCtx context.Context,
 	conn *transport.Conn,
 	params StreamParams,
 	cfg Config,
@@ -64,6 +65,6 @@ func NewProtoJSONStream(
 		return nil, err
 	}
 	return NewCoreStream[encodedMsg, ephemeralResp](
-		params, cfg, NewEphemeralOpener(conn), enc, ackMdl, callback,
+		openingCtx, params, cfg, NewEphemeralOpener(conn), enc, ackMdl, callback,
 	), nil
 }

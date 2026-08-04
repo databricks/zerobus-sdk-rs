@@ -36,6 +36,10 @@
 // genuinely low-volume cases where each record must be confirmed before
 // continuing.
 //
+// Stream creation is asynchronous by default: CreateStream returns after local
+// validation while first-open runs in the background. Pass WithWaitForReady to
+// make CreateStream block until first-open succeeds or fails terminally.
+//
 // # Authentication
 //
 // CreateStream uses the Unity Catalog OAuth 2.0 client-credentials flow. For
@@ -192,7 +196,8 @@ func (s *SDK) Close() error {
 }
 
 // CreateStream opens an OAuth-authenticated ingestion stream for tableName.
-// It returns quickly; connection failures surface on Flush/WaitForOffset/callbacks.
+// By default it returns quickly and first-open runs in the background.
+// Use WithWaitForReady to block until first-open succeeds or fails.
 func (s *SDK) CreateStream(
 	ctx context.Context,
 	tableName, clientID, clientSecret string,
@@ -226,7 +231,7 @@ func (s *SDK) CreateStreamWithProvider(
 }
 
 func (s *SDK) createStream(
-	_ context.Context,
+	ctx context.Context,
 	op, tableName string,
 	provider HeadersProvider,
 	opts ...StreamOption,
@@ -247,8 +252,12 @@ func (s *SDK) createStream(
 		DescriptorProto: sc.descriptor,
 		HeadersProvider: provider,
 	}
-	// NewProtoJSONStream validates config and starts background stream opening.
-	core, err := stream.NewProtoJSONStream(s.conn, params, sc.cfg, sc.callback)
+	// NewProtoJSONStream validates config and starts first-open.
+	openingCtx := context.WithoutCancel(ctx)
+	if sc.waitReady {
+		openingCtx = ctx
+	}
+	core, err := stream.NewProtoJSONStream(openingCtx, s.conn, params, sc.cfg, sc.callback)
 	if err != nil {
 		return nil, wrapErr(op, err)
 	}
@@ -263,6 +272,14 @@ func (s *SDK) createStream(
 	}
 	s.streams[st] = struct{}{}
 	s.mu.Unlock()
+
+	if sc.waitReady {
+		if err := st.core.WaitReady(ctx); err != nil {
+			_ = st.terminate()
+			s.forget(st)
+			return nil, wrapErr(op, err)
+		}
+	}
 	return st, nil
 }
 

@@ -8,6 +8,9 @@
   can interrupt buffer backpressure.
 - Exposed recovery timeout/backoff, lack-of-ack timeout, maximum batch records,
   and server-pause wait controls as stream options.
+- Added opt-in wait-ready stream creation whose context bounds the complete
+  first-open process; asynchronous creation now preserves context values while
+  detaching caller cancellation.
 
 ### Deprecations
 

@@ -61,6 +61,18 @@ stream, err := sdk.CreateStreamWithProvider(ctx, "catalog.schema.table",
 
 `NewStaticHeadersProvider` returns fixed headers for tests or external credentials.
 
+By default, stream open is asynchronous: `CreateStream` returns after argument
+validation while first-open runs in the background, and terminal open failures
+surface on `Flush`/`WaitForOffset`/ack callbacks. Values from the creation
+context propagate to the connection and later reconnects, but cancellation and
+deadlines are detached because first-open outlives the call.
+
+Pass `WithWaitForReady()` to make `CreateStream` /
+`CreateStreamWithProvider` block until first-open succeeds or fails. In this
+mode, the creation context directly bounds token resolution, handshake, retry
+backoff, and every attempt before success. Cancellation is detached after the
+first successful open, so it does not terminate the live stream.
+
 ## Record types
 
 - **Protocol Buffers** (default): `WithProto(descriptorProto)`.

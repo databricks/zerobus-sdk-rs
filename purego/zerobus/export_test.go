@@ -27,14 +27,14 @@ func (s *SDK) OpenStreamCount() int {
 
 // ResolveStreamConfig applies the given options and returns the resolved record
 // type, descriptor, and a subset of the core config for assertion.
-func ResolveStreamConfig(opts ...StreamOption) (recordType int32, descriptor []byte, maxInflight int, recovery RecoverySetting) {
+func ResolveStreamConfig(opts ...StreamOption) (recordType int32, descriptor []byte, maxInflight int, recovery RecoverySetting, waitReady bool) {
 	sc := defaultStreamConfig()
 	for _, opt := range opts {
 		if opt != nil {
 			opt(&sc)
 		}
 	}
-	return int32(sc.recordType), sc.descriptor, sc.cfg.MaxInflight, sc.cfg.Recovery
+	return int32(sc.recordType), sc.descriptor, sc.cfg.MaxInflight, sc.cfg.Recovery, sc.waitReady
 }
 
 // ResolveStreamTuning applies options and returns the public tuning values that
