@@ -17,7 +17,7 @@ use databricks::zerobus::{
 };
 use prost_types::Duration as ProtobufDuration;
 use rcgen::{generate_simple_self_signed, CertifiedKey};
-use tokio::sync::{mpsc, Mutex, Semaphore};
+use tokio::sync::{mpsc, Mutex, Notify, Semaphore};
 use tokio::time::sleep;
 use tokio_stream::Stream;
 use tonic::transport::{Identity, ServerTlsConfig};
@@ -90,6 +90,8 @@ pub struct MockZerobusServer {
     write_count: Arc<Mutex<u64>>,
     /// Track response index across multiple connection attempts
     response_indices: Arc<Mutex<HashMap<String, usize>>>,
+    /// Observation that a delayed setup response registered its timer.
+    delayed_setup_armed: Arc<Notify>,
 }
 
 impl MockZerobusServer {
@@ -100,7 +102,15 @@ impl MockZerobusServer {
             max_offset_sent: Arc::new(Mutex::new(-1)),
             write_count: Arc::new(Mutex::new(0)),
             response_indices: Arc::new(Mutex::new(HashMap::new())),
+            delayed_setup_armed: Arc::new(Notify::new()),
         }
+    }
+
+    /// Returns a notification that fires immediately before the mock waits on a
+    /// scripted delayed setup response.
+    #[allow(dead_code)]
+    pub fn delayed_setup_armed(&self) -> Arc<Notify> {
+        Arc::clone(&self.delayed_setup_armed)
     }
 
     /// Inject responses for a specific stream (identified by table name for simplicity)
@@ -154,6 +164,7 @@ impl Zerobus for MockZerobusServer {
         let max_offset_sent = Arc::clone(&self.max_offset_sent);
         let write_count = Arc::clone(&self.write_count);
         let response_indices = Arc::clone(&self.response_indices);
+        let delayed_setup_armed = Arc::clone(&self.delayed_setup_armed);
 
         tokio::spawn(async move {
             let mut table_name = String::new();
@@ -236,6 +247,7 @@ impl Zerobus for MockZerobusServer {
                                         }
                                         MockResponse::Error { status, delay_ms } => {
                                             if *delay_ms > 0 {
+                                                delayed_setup_armed.notify_one();
                                                 sleep(Duration::from_millis(*delay_ms)).await;
                                             }
                                             info!(
@@ -438,6 +450,7 @@ async fn start_mock_server_inner(
         max_offset_sent: Arc::clone(&mock_server.max_offset_sent),
         write_count: Arc::clone(&mock_server.write_count),
         response_indices: Arc::clone(&mock_server.response_indices),
+        delayed_setup_armed: Arc::clone(&mock_server.delayed_setup_armed),
     };
 
     let addr: std::net::SocketAddr = "127.0.0.1:0".parse()?;
