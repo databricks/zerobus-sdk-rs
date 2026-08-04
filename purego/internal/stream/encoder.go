@@ -12,13 +12,16 @@ import (
 
 // encodedMsg is a wire-ready EphemeralStream ingest request, built once at
 // Ingest time and held in the buffer until the sender transmits it. It is the
-// Req type used by the proto/JSON core. Encoding is eager so the buffer never
-// retains live user objects.
+// Req type the proto/JSON core is instantiated with; the Arrow path will use a
+// Flight frame instead. Encoding is eager so the buffer never retains live user
+// objects.
 type encodedMsg = *zerobuspb.EphemeralStreamRequest
 
 // encoder turns user records into offset-independent wire messages and recovers
 // them again for GetUnacked. It is the send-side per-encoding seam. The core is
-// generic over the wire message type Req.
+// generic over the wire message type Req and
+// never names a concrete proto type — proto/JSON supply encoder[encodedMsg];
+// Arrow will supply encoder[flightFrame].
 //
 // The sender replaces the encoded offset with a connection-local wire offset.
 type encoder[Req any] interface {

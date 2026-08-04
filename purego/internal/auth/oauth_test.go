@@ -1358,7 +1358,9 @@ func TestSharedTokenCacheDisabled(t *testing.T) {
 }
 
 func TestWithSharedTokenCacheZeroValueIsIgnored(t *testing.T) {
-	// A zero-value SharedTokenCache is ignored; the provider keeps its own cache.
+	// A zero-value SharedTokenCache holds no usable cache. It must be ignored
+	// (falling back to the provider's own cache) rather than installed, which
+	// would previously panic on a nil map at the first Token call.
 	srv := &tokenServer{accessToken: "tok", expiresIn: 3600}
 	ts := httptest.NewServer(srv)
 	defer ts.Close()

@@ -166,8 +166,11 @@ func IsAuthRejection(err error) bool {
 // pending data; the caller must fail fast instead. Errors that carry no gRPC
 // status (code Unknown) are treated as transient and are not classified here.
 //
-// FailedPrecondition is terminal because reconnecting cannot repair conditions
-// such as a table schema mismatch.
+// FailedPrecondition is terminal here but retryable in the Rust core (and so in
+// every SDK that inherits its classification over FFI). The service returns it
+// for state a reconnect cannot change, such as a table whose schema no longer
+// matches the stream, so retrying only delays the same failure. Revisit this if
+// the service ever uses it for a transient condition.
 //
 // Canceled is deliberately absent: a server-sent Canceled status is transient,
 // unlike a caller's context.Canceled, which the stream classifies separately.

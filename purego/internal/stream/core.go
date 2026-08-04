@@ -249,8 +249,10 @@ func (w *watermark) waitFor(ctx context.Context, target int64) error {
 // CoreStream is the protocol-agnostic ingestion core. It owns the buffer,
 // sender goroutine, receiver goroutine, ack watermark, and the supervisor
 // that reconnects on failure. It is generic over the wire request/response
-// types. The encoder, ackModel, and wireStream provide protocol-specific
-// behavior.
+// types (Req/Resp): proto/JSON instantiate it over EphemeralStream, Arrow over
+// Flight. The three specialization points — encoder, ackModel, and the
+// wireStream returned by opener — are injected, so this core is written once
+// and never names a concrete proto type.
 //
 // The per-stream goroutines:
 //
@@ -456,6 +458,8 @@ func (cs *CoreStream[Req, Resp]) Ingest(ctx context.Context, record []byte) (int
 // Ingest in hot paths: it amortizes per-message overhead across the batch.
 func (cs *CoreStream[Req, Resp]) IngestBatch(ctx context.Context, records [][]byte) (int64, error) {
 	if len(records) == 0 {
+		// Rust returns Ok(None) for empty batches; in Go we model that as a
+		// no-op with sentinel offset -1 and no queueing.
 		return -1, nil
 	}
 	if len(records) > cs.cfg.MaxBatchRecords {
@@ -488,7 +492,7 @@ func (cs *CoreStream[Req, Resp]) checkRawSize(size int) error {
 }
 
 // enqueueEncoded reserves capacity and encodes before assigning an offset.
-// Failed ingestion returns -1 because valid offsets start at 0.
+// Failed ingest returns -1 to match the original Go SDK (offsets start at 0).
 func (cs *CoreStream[Req, Resp]) enqueueEncoded(
 	ctx context.Context,
 	weight int64,

@@ -783,7 +783,9 @@ func TestTokenCacheWaiterSharesLeaderRetryableTimeout(t *testing.T) {
 	leaderMinting := make(chan struct{})
 	release := make(chan struct{})
 
-	// timeoutErr is retryable and unwraps to a context deadline.
+	// timeoutErr is retryable AND unwraps to a context deadline, mirroring the
+	// TokenError a client-Timeout mint produces after the isRetryableTransportError
+	// fix (retryable=true, cause wraps context.DeadlineExceeded).
 	leaderErr := &timeoutRetryErr{}
 
 	const waiters = 10

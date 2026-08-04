@@ -5,6 +5,9 @@ import (
 )
 
 // ackModel extracts connection-local ack offsets and classifies other responses.
+//
+// TODO(arrow): the Arrow wire path will supply its own ackModel over a Flight
+// response, mapping a cumulative record count back to an offset.
 type ackModel[Resp any] interface {
 	// classify reports what a server response means to the core: an ack offset,
 	// a pause request, or an unknown/malformed response the receiver must fail

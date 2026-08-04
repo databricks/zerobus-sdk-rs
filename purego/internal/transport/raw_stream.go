@@ -34,12 +34,13 @@ var defaultHandshakeTimeout = 15 * time.Second
 // defaultDrainTimeout bounds gracefulClose's drain-to-EOF when the caller's
 // context has no deadline, so it can't hang on an unresponsive server. This caps
 // only the clean-close wait (letting the server send END_STREAM rather than an
-// abrupt reset), not any ack wait. A var so tests can shrink it via
-// export_test.go; tests that override it therefore must not call t.Parallel().
+// abrupt reset), not any ack wait — ack handling lands in a later layer. A var so
+// tests can shrink it via export_test.go; tests that override it therefore must
+// not call t.Parallel().
 var defaultDrainTimeout = 500 * time.Millisecond
 
 // bidiRPC is the subset of a generated gRPC bidirectional streaming client that
-// rawStream needs.
+// rawStream needs. EphemeralStream satisfies it, as will Arrow Flight's DoPut.
 type bidiRPC[Req, Resp any] interface {
 	Send(*Req) error
 	Recv() (*Resp, error)
@@ -169,7 +170,7 @@ func (s *rawStream[Req, Resp]) gracefulClose(ctx context.Context) error {
 // is bounded off-goroutine via a select on hctx; when hctx fires, teardown
 // cancels that context and handshake waits for the goroutine, so it never
 // outlives the call. teardown must cancel the RPC's context and is safe to call
-// more than once. Callers must supply it.
+// more than once. Reusers (e.g. a future Arrow/Flight wireStream) must supply it.
 //
 // An hctx expiry always fails the handshake, but a terminal status the server
 // managed to send first is reported in place of hctx.Err(), so a rejection racing
