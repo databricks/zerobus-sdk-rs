@@ -33,10 +33,13 @@
 
 - Clarified that callbacks may call stream methods, including `Close`.
 - Added an example that builds protobuf descriptors and messages directly in Go.
+- Finalized the README for the initial PureGo release.
 
 ### Internal Changes
 
 - Added UC schema and runtime dynamic-protobuf conversion helpers.
+- Added a build-only release validation workflow for the SDK and examples.
+- Added a module-local Apache 2.0 license for Go module distribution.
 
 ### API Changes
 

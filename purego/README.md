@@ -1,6 +1,10 @@
-# Zerobus pure-Go SDK (work in progress)
+# Zerobus pure-Go SDK
 
 A native pure-Go Zerobus ingestion SDK.
+
+## Requirements
+
+PureGo requires Go 1.25 or later.
 
 ## Quick start
 
@@ -199,6 +203,16 @@ purego/
     ├── ucschema/         UC REST schema fetch client
     ├── dynamicproto/     JSON -> protobuf runtime conversion
     └── zerobuspb/        generated protobuf bindings
+```
+
+## Releasing
+
+PureGo is distributed as a Go module through Git tags; there are no binary
+artifacts or package-registry uploads. Releases use `purego/v<version>` tags.
+Consumers can install a tagged module with:
+
+```bash
+go get github.com/databricks/zerobus-sdk/purego@v0.1.0
 ```
 
 ## Regenerating the protobuf bindings
