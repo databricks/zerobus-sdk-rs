@@ -8,6 +8,11 @@
 
 ### Bug Fixes
 
+- **Arrow Flight — acknowledgment deadlines are pending-relative** (Beta): no
+  timer runs while a stream is idle. During normal stream operation, each batch
+  receives an absolute deadline when it becomes pending; responses and partial
+  acknowledgments do not extend it. Recovery refreshes the deadline when
+  replaying a batch on a replacement connection.
 - Fixed Arrow Flight recovery sender lifetime: replacement senders are now published
   only after pending replay succeeds, while initial supervisor handoff and failed or
   cancelled replay promptly drop redundant senders instead of retaining incomplete

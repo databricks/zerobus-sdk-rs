@@ -183,6 +183,7 @@ impl Supervisor {
                     // lifts the gate; failed attempts remain paused for retry/finalization.
                     pause_and_detach_sender(&self.ingest_mutex, &self.is_paused, &self.batch_tx)
                         .await;
+                    self.ack_processor.clear_request_send_failure();
 
                     sleep(Duration::from_millis(self.options.recovery_backoff_ms)).await;
 

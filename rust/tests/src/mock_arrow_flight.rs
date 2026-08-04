@@ -14,7 +14,7 @@ use arrow_flight::{
 use futures::Stream;
 use rcgen::{generate_simple_self_signed, CertifiedKey};
 use serde::{Deserialize, Serialize};
-use tokio::sync::{mpsc, Mutex};
+use tokio::sync::{mpsc, Mutex, Notify};
 use tokio::time::sleep;
 use tonic::transport::{Identity, ServerTlsConfig};
 use tonic::{Request, Response, Status, Streaming};
@@ -112,6 +112,8 @@ pub struct MockFlightServer {
     request_half_closes: Arc<AtomicU64>,
     /// Number of request bodies that ended with a transport error/reset.
     request_resets: Arc<AtomicU64>,
+    /// One-shot observation that a scripted delayed ACK registered its timer.
+    delayed_ack_armed: Arc<Notify>,
 }
 
 impl MockFlightServer {
@@ -125,7 +127,14 @@ impl MockFlightServer {
             auto_ack_records: Arc::new(Mutex::new(Vec::new())),
             request_half_closes: Arc::new(AtomicU64::new(0)),
             request_resets: Arc::new(AtomicU64::new(0)),
+            delayed_ack_armed: Arc::new(Notify::new()),
         }
+    }
+
+    /// Returns a notification that fires immediately before the mock waits on a
+    /// scripted delayed ACK.
+    pub fn delayed_ack_armed(&self) -> Arc<Notify> {
+        Arc::clone(&self.delayed_ack_armed)
     }
 
     /// Inject responses for a specific table
@@ -261,6 +270,7 @@ impl FlightService for MockFlightServer {
         let auto_ack_records = Arc::clone(&self.auto_ack_records);
         let request_half_closes = Arc::clone(&self.request_half_closes);
         let request_resets = Arc::clone(&self.request_resets);
+        let delayed_ack_armed = Arc::clone(&self.delayed_ack_armed);
 
         tokio::spawn(async move {
             let mut stream_responses: Vec<MockFlightResponse> = Vec::new();
@@ -420,6 +430,7 @@ impl FlightService for MockFlightServer {
                                 .unwrap_or(false)
                             {
                                 if *delay_ms > 0 {
+                                    delayed_ack_armed.notify_one();
                                     sleep(Duration::from_millis(*delay_ms)).await;
                                 }
 
@@ -683,6 +694,7 @@ async fn start_mock_flight_server_inner(
         auto_ack_records: Arc::clone(&mock_server.auto_ack_records),
         request_half_closes: Arc::clone(&mock_server.request_half_closes),
         request_resets: Arc::clone(&mock_server.request_resets),
+        delayed_ack_armed: Arc::clone(&mock_server.delayed_ack_armed),
     };
 
     let addr: std::net::SocketAddr = "127.0.0.1:0".parse()?;

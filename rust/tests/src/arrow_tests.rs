@@ -2133,6 +2133,94 @@ mod arrow_flight_tests {
     mod timeout_tests {
         use super::*;
 
+        /// Idle time before ingestion must not consume a future batch's ACK deadline.
+        #[tokio::test]
+        async fn test_ack_timeout_starts_when_batch_becomes_pending(
+        ) -> Result<(), Box<dyn std::error::Error>> {
+            setup_tracing();
+
+            const ACK_TIMEOUT_MS: u64 = 1_000;
+            const IDLE_MS: u64 = 800;
+            const ACK_DELAY_MS: u64 = 400;
+            const PAST_OLD_DEADLINE_MS: u64 = ACK_TIMEOUT_MS - IDLE_MS + 1;
+
+            let (mock_server, server_url) = start_mock_flight_server().await?;
+            let schema = create_test_arrow_schema();
+            mock_server
+                .inject_responses(
+                    TABLE_NAME,
+                    vec![MockFlightResponse::BatchAck {
+                        ack_up_to_offset: 0,
+                        delay_ms: ACK_DELAY_MS,
+                        ack_up_to_records: 1,
+                    }],
+                )
+                .await;
+
+            let sdk = ZerobusSdk::builder()
+                .endpoint(server_url)
+                .unity_catalog_url("https://mock-uc.com")
+                .tls_config(Arc::new(NoTlsConfig))
+                .build()?;
+            let mut stream = sdk
+                .stream_builder()
+                .table(TABLE_NAME)
+                .headers_provider(Arc::new(TestHeadersProvider::default()))
+                .arrow(schema.clone())
+                .server_lack_of_ack_timeout_ms(ACK_TIMEOUT_MS)
+                .flush_timeout_ms(ACK_TIMEOUT_MS * 2)
+                .recovery(false)
+                .build_arrow()
+                .await?;
+
+            let ack_idle = stream.arm_ack_idle_notify().await;
+            tokio::time::timeout(std::time::Duration::from_secs(5), ack_idle.notified())
+                .await
+                .expect("ACK processor should enter its no-pending wait");
+
+            tokio::time::pause();
+            tokio::time::advance(std::time::Duration::from_millis(IDLE_MS)).await;
+
+            // Clone before ingestion so the one-shot notification cannot be missed.
+            let delayed_ack_armed = mock_server.delayed_ack_armed();
+            let batch = create_test_record_batch(schema, vec![2], vec![Some("target")]);
+            let offset = stream.ingest_batch(batch).await?;
+
+            // Keep this current-thread runtime runnable while the batch crosses the real
+            // loopback socket, preventing paused time from auto-advancing to a timer.
+            let delayed_ack_armed = delayed_ack_armed.notified();
+            tokio::pin!(delayed_ack_armed);
+            let watchdog = std::time::Instant::now() + std::time::Duration::from_secs(5);
+            while futures::poll!(delayed_ack_armed.as_mut()).is_pending() {
+                assert!(
+                    std::time::Instant::now() < watchdog,
+                    "mock server did not arm the delayed ACK"
+                );
+                tokio::task::yield_now().await;
+            }
+
+            // This crosses the old response-relative deadline, but remains well before
+            // the target batch's pending-relative deadline.
+            tokio::time::advance(std::time::Duration::from_millis(PAST_OLD_DEADLINE_MS)).await;
+            tokio::task::yield_now().await;
+            assert!(
+                !stream.is_closed(),
+                "idle time must not consume the target batch's ACK deadline"
+            );
+
+            tokio::time::advance(std::time::Duration::from_millis(
+                ACK_DELAY_MS - PAST_OLD_DEADLINE_MS,
+            ))
+            .await;
+            tokio::task::yield_now().await;
+            stream.wait_for_offset(offset).await?;
+            assert!(!stream.is_closed());
+
+            tokio::time::resume();
+            stream.close().await?;
+            Ok(())
+        }
+
         #[tokio::test]
         async fn test_ack_timeout() -> Result<(), Box<dyn std::error::Error>> {
             setup_tracing();
@@ -2184,6 +2272,62 @@ mod arrow_flight_tests {
                 err
             );
 
+            Ok(())
+        }
+
+        /// A batch accepted after the local request sender closes is buffered but not
+        /// submitted, so it has no ACK deadline on the failed connection. The send
+        /// failure itself must wake the supervisor and start recovery.
+        #[tokio::test]
+        async fn test_closed_request_sender_starts_recovery(
+        ) -> Result<(), Box<dyn std::error::Error>> {
+            setup_tracing();
+
+            let (mock_server, server_url) = start_mock_flight_server().await?;
+            let schema = create_test_arrow_schema();
+            mock_server
+                .inject_responses(
+                    TABLE_NAME,
+                    vec![MockFlightResponse::HoldResponseAfterRequestEof],
+                )
+                .await;
+
+            let sdk = ZerobusSdk::builder()
+                .endpoint(server_url)
+                .unity_catalog_url("https://mock-uc.com")
+                .tls_config(Arc::new(NoTlsConfig))
+                .build()?;
+            let mut stream = sdk
+                .stream_builder()
+                .table(TABLE_NAME)
+                .headers_provider(Arc::new(TestHeadersProvider::default()))
+                .arrow(schema.clone())
+                .server_lack_of_ack_timeout_ms(30_000)
+                .flush_timeout_ms(60_000)
+                .recovery(true)
+                .recovery_backoff_ms(0)
+                .recovery_retries(1)
+                .build_arrow()
+                .await?;
+
+            let (reconnect_reached, reconnect_proceed) =
+                stream.arm_reconnect_rebuild_barrier().await;
+            stream.replace_batch_sender_with_closed_channel().await;
+
+            let batch = create_test_record_batch(schema, vec![1], vec![Some("replay")]);
+            let offset = stream.ingest_batch(batch).await?;
+
+            tokio::time::timeout(
+                std::time::Duration::from_secs(5),
+                reconnect_reached.notified(),
+            )
+            .await
+            .expect("request send failure must start recovery without an ACK deadline");
+            reconnect_proceed.notify_one();
+
+            stream.wait_for_offset(offset).await?;
+            assert_eq!(mock_server.get_batch_count().await, 1);
+            stream.close().await?;
             Ok(())
         }
 

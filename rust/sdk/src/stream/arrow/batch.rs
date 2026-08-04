@@ -8,6 +8,7 @@ use std::io::Cursor;
 use arrow_ipc::{reader::StreamReader, writer::IpcWriteOptions, CompressionType};
 use bytes::Bytes;
 use tokio::sync::OwnedSemaphorePermit;
+use tokio::time::{Duration, Instant};
 use tracing::debug;
 
 use super::RecordBatch;
@@ -25,8 +26,27 @@ pub(super) struct PendingBatch {
     /// Cumulative record count after this batch.
     /// Batch is fully acked when `acked_records >= end_record`.
     end_record: u64,
+    /// Time this batch most recently became pending on the active connection.
+    /// Only replay onto a replacement connection refreshes this timestamp.
+    enqueued_at: Instant,
     /// Backpressure permit; dropping it frees one `max_inflight_batches` slot.
     permit: OwnedSemaphorePermit,
+}
+
+/// Stable identity used to confirm that a fired ACK deadline still belongs to the
+/// same oldest pending batch.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) struct PendingBatchIdentity {
+    offset_id: OffsetId,
+    start_record: u64,
+    end_record: u64,
+}
+
+/// The oldest submitted batch and its absolute acknowledgment deadline.
+#[derive(Clone, Copy, Debug)]
+pub(super) struct PendingAckDeadline {
+    pub(super) identity: PendingBatchIdentity,
+    pub(super) deadline: Instant,
 }
 
 impl PendingBatch {
@@ -42,6 +62,7 @@ impl PendingBatch {
             offset_id,
             start_record,
             end_record,
+            enqueued_at: Instant::now(),
             permit,
         }
     }
@@ -52,6 +73,14 @@ impl PendingBatch {
 
     pub(super) fn is_fully_acknowledged(&self, acked_records: u64) -> bool {
         acked_records >= self.end_record
+    }
+
+    fn identity(&self) -> PendingBatchIdentity {
+        PendingBatchIdentity {
+            offset_id: self.offset_id,
+            start_record: self.start_record,
+            end_record: self.end_record,
+        }
     }
 
     /// Returns the batch portion not durably acknowledged, avoiding duplicate retry of an
@@ -100,6 +129,35 @@ impl PendingBatch {
     pub(super) fn record_count(&self) -> usize {
         self.batch.num_rows()
     }
+
+    #[cfg(test)]
+    pub(super) fn set_enqueued_at(&mut self, enqueued_at: Instant) {
+        self.enqueued_at = enqueued_at;
+    }
+
+    #[cfg(test)]
+    pub(super) fn enqueued_at(&self) -> Instant {
+        self.enqueued_at
+    }
+}
+
+/// Calculates the absolute deadline for the oldest pending batch submitted on the
+/// active connection. Batches buffered after a graceful-close pause have ranges at
+/// or beyond `submitted_records` and are not awaiting an ACK from that connection.
+pub(super) fn oldest_pending_ack_deadline(
+    pending: &[PendingBatch],
+    submitted_records: u64,
+    ack_timeout: Duration,
+) -> Option<PendingAckDeadline> {
+    pending
+        .iter()
+        .find(|batch| batch.start_record < submitted_records)
+        .map(|batch| PendingAckDeadline {
+            identity: batch.identity(),
+            // The public timeout is a u64 millisecond value. Tokio's supported
+            // 64-bit Instant implementations can represent that full range.
+            deadline: batch.enqueued_at + ack_timeout,
+        })
 }
 
 /// Rebuilds pending batches with connection-relative ranges and transfers each retained
@@ -191,8 +249,9 @@ mod tests {
     use arrow_array::Int32Array;
     use arrow_schema::{DataType, Field, Schema};
     use tokio::sync::Semaphore;
+    use tokio::time::{Duration, Instant};
 
-    use super::{PendingBatch, RecordBatch};
+    use super::{rebuild_pending_for_replay, PendingBatch, RecordBatch};
 
     fn pending_batch(rows: i32, start_record: u64, end_record: u64) -> PendingBatch {
         let schema = Arc::new(Schema::new(vec![Field::new("id", DataType::Int32, false)]));
@@ -220,5 +279,17 @@ mod tests {
     fn recovery_slice_drops_fully_acknowledged_batch() {
         let batch = pending_batch(5, 10, 15);
         assert!(batch.unacknowledged_suffix(15).is_none());
+    }
+
+    #[test]
+    fn replay_refreshes_pending_timestamp() {
+        let mut batch = pending_batch(5, 0, 5);
+        let original = Instant::now() - Duration::from_secs(1);
+        batch.set_enqueued_at(original);
+        let mut pending = vec![batch];
+
+        let (_replay, _records) = rebuild_pending_for_replay(&mut pending, 0);
+
+        assert!(pending[0].enqueued_at() > original);
     }
 }

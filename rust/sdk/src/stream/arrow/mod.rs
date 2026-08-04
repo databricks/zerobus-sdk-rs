@@ -18,9 +18,7 @@ use std::sync::Arc;
 
 use arrow_flight::error::FlightError;
 use bytes::Bytes;
-#[cfg(feature = "test-hooks")]
-use tokio::sync::Notify;
-use tokio::sync::{mpsc, watch, Mutex, Semaphore};
+use tokio::sync::{mpsc, watch, Mutex, Notify, Semaphore};
 use tokio::task::JoinHandle;
 use tokio::time::{timeout, Duration};
 use tokio_retry::strategy::FixedInterval;
@@ -71,6 +69,11 @@ struct ReconnectRebuildBarrier {
 /// partial ack has landed before it proceeds.
 #[cfg(feature = "test-hooks")]
 type AckAppliedGate = Arc<Mutex<Option<Arc<Notify>>>>;
+
+/// Test-only gate: when armed, the ACK processor fires the notify immediately before
+/// waiting without any pending-work deadline.
+#[cfg(feature = "test-hooks")]
+type AckIdleGate = Arc<Mutex<Option<Arc<Notify>>>>;
 
 /// Test-only barrier that parks `close()` after the supervisor and sender are gone but
 /// before pending batches are finalized, allowing cancellation-safe teardown tests.
@@ -173,6 +176,11 @@ pub struct ZerobusArrowStream {
     receiver_task: Arc<Mutex<Option<JoinHandle<ZerobusResult<()>>>>>,
     /// Accepted batches not yet fully acknowledged; retained for replay or retrieval.
     pending_batches: Arc<Mutex<Vec<PendingBatch>>>,
+    /// Wakes the ACK processor when a batch is submitted after an idle period.
+    pending_notify: Arc<Notify>,
+    /// Carries a closed request-sender failure to the ACK processor so retained work
+    /// starts recovery even when no submitted batch is eligible for an ACK deadline.
+    request_send_failure: Arc<acks::RequestSendFailure>,
     /// Unacknowledged batch suffixes finalized after terminal failure or failed close.
     failed_batches: Arc<Mutex<Vec<RecordBatch>>>,
     /// Count of recovery attempts.
@@ -213,6 +221,9 @@ pub struct ZerobusArrowStream {
     /// Test seam (see [`AckAppliedGate`]); compiled only under `test-hooks`.
     #[cfg(feature = "test-hooks")]
     ack_applied_gate: AckAppliedGate,
+    /// Test seam (see [`AckIdleGate`]); compiled only under `test-hooks`.
+    #[cfg(feature = "test-hooks")]
+    ack_idle_gate: AckIdleGate,
     /// Test seam (see [`CloseFinalizeGate`]); compiled only under `test-hooks`.
     #[cfg(feature = "test-hooks")]
     close_finalize_gate: CloseFinalizeGate,
@@ -245,6 +256,8 @@ impl ZerobusArrowStream {
         let (last_ack_tx, _last_ack_rx) = watch::channel(None);
         let is_closed = Arc::new(AtomicBool::new(false));
         let pending_batches = Arc::new(Mutex::new(Vec::new()));
+        let pending_notify = Arc::new(Notify::new());
+        let request_send_failure = Arc::new(acks::RequestSendFailure::default());
         let failed_batches = Arc::new(Mutex::new(Vec::new()));
         let recovery_attempts = Arc::new(AtomicU32::new(0));
         let batch_tx = Arc::new(Mutex::new(None));
@@ -270,6 +283,8 @@ impl ZerobusArrowStream {
             close_flush_error: Mutex::new(None),
             receiver_task,
             pending_batches,
+            pending_notify,
+            request_send_failure,
             failed_batches,
             recovery_attempts,
             endpoint: endpoint.to_string(),
@@ -289,6 +304,8 @@ impl ZerobusArrowStream {
             reconnect_rebuild_gate: Arc::new(Mutex::new(None)),
             #[cfg(feature = "test-hooks")]
             ack_applied_gate: Arc::new(Mutex::new(None)),
+            #[cfg(feature = "test-hooks")]
+            ack_idle_gate: Arc::new(Mutex::new(None)),
             #[cfg(feature = "test-hooks")]
             close_finalize_gate: Arc::new(Mutex::new(None)),
         };
@@ -505,6 +522,7 @@ impl ZerobusArrowStream {
                         offset_id = offset_id,
                         "Send failed but recovery enabled - supervisor will handle recovery"
                     );
+                    self.request_send_failure.report();
                     return Ok(offset_id);
                 }
 
@@ -533,6 +551,9 @@ impl ZerobusArrowStream {
             self.submitted_records.store(end_record, Ordering::Release);
             send_permit.send(Ok(batch));
         }
+        // Notify after publishing `submitted_records`: waking earlier could let the ACK
+        // processor observe the batch as buffered-but-unsent and go idle again.
+        self.pending_notify.notify_one();
 
         debug!(offset_id = offset_id, "Batch queued for ingestion");
         Ok(offset_id)
@@ -969,6 +990,27 @@ impl ZerobusArrowStream {
         let notify = Arc::new(Notify::new());
         *self.ack_applied_gate.lock().await = Some(Arc::clone(&notify));
         notify
+    }
+
+    /// Test-only: arms a one-shot notification for the next time the ACK processor
+    /// enters its no-pending wait with no ACK deadline armed.
+    #[cfg(feature = "test-hooks")]
+    #[doc(hidden)]
+    pub async fn arm_ack_idle_notify(&self) -> Arc<Notify> {
+        let notify = Arc::new(Notify::new());
+        *self.ack_idle_gate.lock().await = Some(Arc::clone(&notify));
+        notify
+    }
+
+    /// Test-only: replaces the active batch sender with a sender whose receiver is
+    /// already closed, making the next `ingest_batch` exercise its `reserve()` failure.
+    #[cfg(feature = "test-hooks")]
+    #[doc(hidden)]
+    pub async fn replace_batch_sender_with_closed_channel(&self) {
+        let _guard = self.ingest_mutex.lock().await;
+        let (closed_tx, closed_rx) = mpsc::channel(1);
+        drop(closed_rx);
+        *self.batch_tx.lock().await = Some(closed_tx);
     }
 
     /// Test-only: parks the next `close()` after supervisor/sender teardown but before
