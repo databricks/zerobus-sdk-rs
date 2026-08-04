@@ -1,20 +1,17 @@
-package config
+// Package exampleutil contains shared example data helpers.
+package exampleutil
 
 import (
 	"fmt"
 	"time"
 )
 
-// NowMicros returns the current time as microseconds since the Unix epoch (UTC),
-// the encoding Delta TIMESTAMP columns expect.
+// NowMicros returns the current Unix timestamp in microseconds.
 func NowMicros() int64 {
 	return time.Now().UnixMicro()
 }
 
-// MakeOrderJSON builds one order record as a JSON string matching the example
-// `orders` table columns: id INT, customer_name STRING, product_name STRING,
-// quantity INT, price DOUBLE, status STRING, created_at TIMESTAMP,
-// updated_at TIMESTAMP.
+// MakeOrderJSON builds a JSON record for the example orders table.
 func MakeOrderJSON(id int, customer, product string, quantity int, price float64, status string, ts int64) string {
 	return fmt.Sprintf(
 		`{"id": %d, "customer_name": %q, "product_name": %q, "quantity": %d, `+

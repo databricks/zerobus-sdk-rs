@@ -23,6 +23,7 @@ import (
 	"google.golang.org/protobuf/proto"
 
 	"github.com/databricks/zerobus-sdk/purego/examples/config"
+	"github.com/databricks/zerobus-sdk/purego/examples/internal/exampleutil"
 	"github.com/databricks/zerobus-sdk/purego/examples/proto/pb"
 	"github.com/databricks/zerobus-sdk/purego/zerobus"
 )
@@ -64,7 +65,7 @@ func main() {
 	}
 	defer stream.Close()
 
-	now := config.NowMicros()
+	now := exampleutil.NowMicros()
 
 	// Queue records one at a time without per-record waits.
 	orders := []*pb.Order{

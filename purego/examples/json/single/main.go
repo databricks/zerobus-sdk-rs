@@ -21,6 +21,7 @@ import (
 	"log"
 
 	"github.com/databricks/zerobus-sdk/purego/examples/config"
+	"github.com/databricks/zerobus-sdk/purego/examples/internal/exampleutil"
 	"github.com/databricks/zerobus-sdk/purego/zerobus"
 )
 
@@ -46,13 +47,13 @@ func main() {
 		log.Fatalf("create stream: %v", err)
 	}
 
-	now := config.NowMicros()
+	now := exampleutil.NowMicros()
 
 	// 3. Queue records without per-record waits.
 	records := []string{
-		config.MakeOrderJSON(1, "Alice Smith", "Wireless Mouse", 2, 25.99, "pending", now),
-		config.MakeOrderJSON(2, "Bob Johnson", "Mechanical Keyboard", 1, 89.99, "shipped", now),
-		config.MakeOrderJSON(3, "Carol Williams", "USB-C Hub", 3, 45.00, "delivered", now),
+		exampleutil.MakeOrderJSON(1, "Alice Smith", "Wireless Mouse", 2, 25.99, "pending", now),
+		exampleutil.MakeOrderJSON(2, "Bob Johnson", "Mechanical Keyboard", 1, 89.99, "shipped", now),
+		exampleutil.MakeOrderJSON(3, "Carol Williams", "USB-C Hub", 3, 45.00, "delivered", now),
 	}
 	for i, rec := range records {
 		offset, err := stream.IngestRecordOffset([]byte(rec))
