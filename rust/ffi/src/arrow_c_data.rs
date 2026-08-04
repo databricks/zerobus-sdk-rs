@@ -68,8 +68,11 @@ mod tests {
 
         let schema = Schema::new(vec![Field::new("id", arrow_schema::DataType::Int32, false)]);
         let releases = Arc::new(AtomicUsize::new(0));
-        let (mut array, mut schema_ffi) =
-            export_batch(&schema, vec![Arc::new(Int32Array::from(vec![1]))], Arc::clone(&releases));
+        let (mut array, mut schema_ffi) = export_batch(
+            &schema,
+            vec![Arc::new(Int32Array::from(vec![1]))],
+            Arc::clone(&releases),
+        );
         let mut result = CResult::success();
 
         let offset = zerobus_arrow_stream_ingest_c_data(
@@ -93,8 +96,11 @@ mod tests {
 
         let schema = Schema::new(vec![Field::new("id", arrow_schema::DataType::Int32, false)]);
         let releases = Arc::new(AtomicUsize::new(0));
-        let (mut array, schema_ffi) =
-            export_batch(&schema, vec![Arc::new(Int32Array::from(vec![1]))], Arc::clone(&releases));
+        let (mut array, schema_ffi) = export_batch(
+            &schema,
+            vec![Arc::new(Int32Array::from(vec![1]))],
+            Arc::clone(&releases),
+        );
         let mut result = CResult::success();
 
         let offset = zerobus_arrow_stream_ingest_c_data(

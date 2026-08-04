@@ -380,7 +380,11 @@ pub extern "C" fn zerobus_arrow_stream_ingest_c_data(
 ) -> i64 {
     ffi_guard(result, -1, move || {
         if array.is_null() || schema.is_null() {
-            write_error_result(result, "ArrowArray and ArrowSchema pointers are required", false);
+            write_error_result(
+                result,
+                "ArrowArray and ArrowSchema pointers are required",
+                false,
+            );
             return -1;
         }
 
@@ -388,7 +392,11 @@ pub extern "C" fn zerobus_arrow_stream_ingest_c_data(
         let schema = unsafe { FFI_ArrowSchema::from_raw(schema.cast::<FFI_ArrowSchema>()) };
 
         if array.is_released() || schema.release.is_none() {
-            write_error_result(result, "Arrow C Data input has already been released", false);
+            write_error_result(
+                result,
+                "Arrow C Data input has already been released",
+                false,
+            );
             return -1;
         }
 

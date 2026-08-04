@@ -5346,7 +5346,11 @@ mod arrow_flight_tests {
             );
             assert_eq!(
                 mock_server.get_decoded_utf8_columns().await,
-                vec![vec![Some("a".to_string()), Some("b".to_string()), Some("a".to_string()),]],
+                vec![vec![
+                    Some("a".to_string()),
+                    Some("b".to_string()),
+                    Some("a".to_string()),
+                ]],
                 "hydrated dictionary payload must preserve logical values",
             );
 

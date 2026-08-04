@@ -744,7 +744,10 @@ impl FlightService for MockFlightServer {
                         };
                         let ack_bytes = serde_json::to_vec(&ack_metadata).unwrap();
 
-                        debug!("Auto-acking offset: {}, records: {}", metadata.offset_id, records);
+                        debug!(
+                            "Auto-acking offset: {}, records: {}",
+                            metadata.offset_id, records
+                        );
                         let put_result = PutResult {
                             app_metadata: ack_bytes.into(),
                         };

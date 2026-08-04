@@ -174,11 +174,17 @@ mod tests {
             Arc::new(StringArray::from(vec!["x", "y"])),
         )
         .unwrap();
-        let schema =
-            Schema::new(vec![Field::new("category", dictionary.data_type().clone(), false)]);
+        let schema = Schema::new(vec![Field::new(
+            "category",
+            dictionary.data_type().clone(),
+            false,
+        )]);
         let releases = Arc::new(AtomicUsize::new(0));
-        let (array, schema_ffi) =
-            export_batch(&schema, vec![Arc::new(dictionary.clone())], Arc::clone(&releases));
+        let (array, schema_ffi) = export_batch(
+            &schema,
+            vec![Arc::new(dictionary.clone())],
+            Arc::clone(&releases),
+        );
 
         let batch = unsafe { import_c_data_record_batch(array, schema_ffi) }.unwrap();
         let actual = batch
@@ -254,8 +260,11 @@ mod tests {
     fn import_rejects_already_released_input() {
         let schema = Schema::new(vec![Field::new("id", DataType::Int32, false)]);
         let releases = Arc::new(AtomicUsize::new(0));
-        let (mut array, mut schema_ffi) =
-            export_batch(&schema, vec![Arc::new(Int32Array::from(vec![1]))], Arc::clone(&releases));
+        let (mut array, mut schema_ffi) = export_batch(
+            &schema,
+            vec![Arc::new(Int32Array::from(vec![1]))],
+            Arc::clone(&releases),
+        );
         release_ffi_array(&mut array);
         release_ffi_schema(&mut schema_ffi);
 
@@ -270,8 +279,11 @@ mod tests {
     fn import_preserves_nested_struct_list_until_all_batch_owners_drop() {
         let (schema, source_batch) = nested_struct_list_batch();
         let releases = Arc::new(AtomicUsize::new(0));
-        let (array, schema_ffi) =
-            export_batch(schema.as_ref(), source_batch.columns().to_vec(), Arc::clone(&releases));
+        let (array, schema_ffi) = export_batch(
+            schema.as_ref(),
+            source_batch.columns().to_vec(),
+            Arc::clone(&releases),
+        );
         drop(source_batch);
         drop(schema);
 
@@ -369,7 +381,10 @@ mod tests {
         );
         let batch = RecordBatch::try_new(
             Arc::clone(&schema),
-            vec![Arc::new(Int32Array::from(vec![100, 200, 300])), Arc::new(nested_array)],
+            vec![
+                Arc::new(Int32Array::from(vec![100, 200, 300])),
+                Arc::new(nested_array),
+            ],
         )
         .unwrap();
         (schema, batch)
@@ -434,7 +449,10 @@ mod tests {
         let ipc_started = Instant::now();
         for _ in 0..BENCHMARK_ITERATIONS {
             let mut reader = StreamReader::try_new(Cursor::new(ipc.as_slice()), None).unwrap();
-            assert_eq!(reader.next().unwrap().unwrap().num_rows(), BENCHMARK_ROW_COUNT);
+            assert_eq!(
+                reader.next().unwrap().unwrap().num_rows(),
+                BENCHMARK_ROW_COUNT
+            );
         }
         let ipc_elapsed = ipc_started.elapsed();
 
