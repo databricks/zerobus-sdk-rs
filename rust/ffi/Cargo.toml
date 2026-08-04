@@ -7,12 +7,14 @@ license = "Apache-2.0"
 publish = false
 
 [lib]
-crate-type = ["staticlib", "cdylib"]
+# `rlib` is used only by workspace integration tests that call the real C ABI.
+# Published FFI artifacts remain the static and dynamic libraries.
+crate-type = ["rlib", "staticlib", "cdylib"]
 
 [dependencies]
-databricks-zerobus-ingest-sdk = { path = "../sdk", version = "2.0.1", features = ["arrow-flight", "testing"] }
+databricks-zerobus-ingest-sdk = { path = "../sdk", version = "2.0.1", features = ["arrow-flight", "internal-arrow-c-data", "testing"] }
 
-# Arrow IPC for serializing/deserializing RecordBatches across the FFI boundary
+# Arrow IPC fallback plus schema and unacknowledged-batch serialization.
 arrow-ipc.workspace = true
 
 # FFI helpers
@@ -33,6 +35,10 @@ serde_json.workspace = true
 # Logging
 tracing.workspace = true
 tracing-subscriber = { workspace = true, features = ["fmt"] }
+
+[dev-dependencies]
+arrow-array = { workspace = true, features = ["ffi"] }
+arrow-schema = { workspace = true, features = ["ffi"] }
 
 [build-dependencies]
 cbindgen.workspace = true

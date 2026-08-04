@@ -4,6 +4,11 @@ mod utils;
 mod arrow_flight_tests {
     use std::sync::Arc;
 
+    use arrow_array::{Array, RecordBatch, StructArray};
+    use arrow_schema::DataType;
+    use databricks_zerobus_ingest_sdk::internal::arrow_c_data::{
+        import_c_data_record_batch, FFI_ArrowArray, FFI_ArrowSchema,
+    };
     use databricks_zerobus_ingest_sdk::{NoTlsConfig, ZerobusError, ZerobusSdk};
     use tracing::info;
 
@@ -30,9 +35,24 @@ mod arrow_flight_tests {
             .to_vec()
     }
 
+    /// Exports a batch to canonical Arrow C Data owners and imports it through the
+    /// production shared importer before Flight encoding.
+    ///
+    /// This helper validates C-Data-shaped `RecordBatch` compatibility with the Flight
+    /// pipeline only. Ownership transfer and released-input behavior are covered by
+    /// `rust/ffi` Task 1/2 tests — do not use this helper to assert ownership semantics.
+    fn import_through_c_data(batch: RecordBatch) -> RecordBatch {
+        let schema = batch.schema();
+        let struct_array = StructArray::from(batch);
+        let array = FFI_ArrowArray::new(&struct_array.to_data());
+        let schema_ffi = FFI_ArrowSchema::try_from(schema.as_ref()).unwrap();
+        unsafe { import_c_data_record_batch(array, schema_ffi) }.unwrap()
+    }
+
     mod stream_creation_tests {
-        use super::*;
         use tonic::Status;
+
+        use super::*;
 
         #[tokio::test]
         async fn test_successful_arrow_stream_creation() -> Result<(), Box<dyn std::error::Error>> {
@@ -4762,6 +4782,58 @@ mod arrow_flight_tests {
         }
 
         #[tokio::test]
+        async fn test_c_data_imported_batch_with_compression(
+        ) -> Result<(), Box<dyn std::error::Error>> {
+            setup_tracing();
+            info!("Starting test_c_data_imported_batch_with_compression");
+
+            let (mock_server, server_url) = start_mock_flight_server().await?;
+            let schema = create_test_arrow_schema();
+
+            mock_server
+                .inject_responses(
+                    TABLE_NAME,
+                    vec![MockFlightResponse::BatchAck {
+                        ack_up_to_offset: 0,
+                        delay_ms: 0,
+                        ack_up_to_records: 1,
+                    }],
+                )
+                .await;
+
+            let sdk = ZerobusSdk::builder()
+                .endpoint(server_url.clone())
+                .unity_catalog_url("https://mock-uc.com")
+                .tls_config(Arc::new(NoTlsConfig))
+                .build()?;
+
+            let stream = sdk
+                .stream_builder()
+                .table(TABLE_NAME)
+                .headers_provider(Arc::new(TestHeadersProvider::default()))
+                .arrow(schema.clone())
+                .ipc_compression(Some(arrow_ipc::CompressionType::ZSTD))
+                .build_arrow()
+                .await?;
+
+            let batch = create_test_record_batch(schema, vec![1], vec![Some("c-data")]);
+            let imported = import_through_c_data(batch);
+            let offset = stream.ingest_batch(imported).await?;
+            stream.flush().await?;
+            assert_eq!(offset, 0);
+
+            assert_eq!(mock_server.get_total_records_received().await, 1);
+            assert_eq!(mock_server.get_batch_count().await, 1);
+            assert_eq!(
+                mock_server.get_zstd_compressed_record_batch_count().await,
+                1,
+                "expected ZSTD compression metadata on the wire IPC record batch",
+            );
+
+            Ok(())
+        }
+
+        #[tokio::test]
         async fn test_mixed_ingest_batch_and_ipc() -> Result<(), Box<dyn std::error::Error>> {
             setup_tracing();
             info!("Starting test_mixed_ingest_batch_and_ipc");
@@ -4902,6 +4974,63 @@ mod arrow_flight_tests {
             // Without chunking the whole batch lands in one Flight message
             // (batch_count == 1, max_offset == 0).  With chunking in place each
             // chunk gets its own physical offset, so both counters grow.
+            let batch_count = mock_server.get_batch_count().await;
+            assert!(
+                batch_count >= 2,
+                "Expected large batch to be split into ≥2 Flight messages (chunks), got {batch_count}",
+            );
+
+            let max_offset = mock_server.get_max_offset_received().await;
+            assert!(
+                max_offset >= 1,
+                "Expected max wire offset ≥1 (multiple chunks), got {max_offset}",
+            );
+
+            Ok(())
+        }
+
+        #[tokio::test]
+        async fn test_c_data_imported_large_batch_is_split_into_chunks(
+        ) -> Result<(), Box<dyn std::error::Error>> {
+            setup_tracing();
+            info!("Starting test_c_data_imported_large_batch_is_split_into_chunks");
+
+            let (mock_server, server_url) = start_mock_flight_server().await?;
+            let schema = create_test_arrow_schema();
+
+            mock_server
+                .inject_responses(
+                    TABLE_NAME,
+                    vec![MockFlightResponse::BatchAck {
+                        ack_up_to_offset: 1,
+                        delay_ms: 0,
+                        ack_up_to_records: LARGE_BATCH_ROWS as u64,
+                    }],
+                )
+                .await;
+
+            let sdk = ZerobusSdk::builder()
+                .endpoint(server_url)
+                .unity_catalog_url("https://mock-uc.com")
+                .tls_config(Arc::new(NoTlsConfig))
+                .build()?;
+
+            let stream = sdk
+                .stream_builder()
+                .table(TABLE_NAME)
+                .headers_provider(Arc::new(TestHeadersProvider::default()))
+                .arrow(schema.clone())
+                .flush_timeout_ms(10_000)
+                .build_arrow()
+                .await?;
+
+            let batch =
+                create_large_test_record_batch(schema, LARGE_BATCH_ROWS, PAYLOAD_BYTES_PER_ROW);
+            let imported = import_through_c_data(batch);
+            let offset = stream.ingest_batch(imported).await?;
+            stream.flush().await?;
+            assert_eq!(offset, 0);
+
             let batch_count = mock_server.get_batch_count().await;
             assert!(
                 batch_count >= 2,
@@ -5154,6 +5283,72 @@ mod arrow_flight_tests {
             stream.wait_for_offset(offset).await?;
 
             assert!(mock_server.get_batch_count().await >= 1);
+
+            Ok(())
+        }
+
+        #[tokio::test]
+        async fn test_c_data_imported_dictionary_batch() -> Result<(), Box<dyn std::error::Error>> {
+            setup_tracing();
+            info!("Starting test_c_data_imported_dictionary_batch");
+
+            let (mock_server, server_url) = start_mock_flight_server().await?;
+            let schema = create_test_dict_schema();
+
+            mock_server
+                .inject_responses(
+                    TABLE_NAME,
+                    vec![MockFlightResponse::BatchAck {
+                        ack_up_to_offset: 0,
+                        delay_ms: 0,
+                        ack_up_to_records: 3,
+                    }],
+                )
+                .await;
+
+            let sdk = ZerobusSdk::builder()
+                .endpoint(server_url.clone())
+                .unity_catalog_url("https://mock-uc.com")
+                .tls_config(Arc::new(NoTlsConfig))
+                .build()?;
+
+            let stream = sdk
+                .stream_builder()
+                .table(TABLE_NAME)
+                .headers_provider(Arc::new(TestHeadersProvider::default()))
+                .arrow(schema.clone())
+                .build_arrow()
+                .await?;
+
+            let batch = create_test_dict_record_batch(
+                schema,
+                vec![1, 2, 3],
+                vec![Some("a"), Some("b"), Some("a")],
+            );
+            let imported = import_through_c_data(batch);
+            assert!(
+                matches!(imported.column(1).data_type(), DataType::Dictionary(_, _)),
+                "test setup: imported batch must retain dictionary encoding before Flight",
+            );
+            let offset = stream.ingest_batch(imported).await?;
+            stream.flush().await?;
+            assert_eq!(offset, 0);
+
+            assert_eq!(mock_server.get_total_records_received().await, 3);
+            assert_eq!(
+                mock_server.get_record_batch_message_count().await,
+                1,
+                "expected a RecordBatch IPC message on the wire",
+            );
+            assert!(
+                !mock_server.wire_ipc_schema_has_dictionary_encoding().await,
+                "Flight encoder should hydrate dictionary columns before IPC encoding",
+            );
+            assert_eq!(
+                mock_server.get_decoded_utf8_columns().await,
+                vec![vec![Some("a".to_string()), Some("b".to_string()), Some("a".to_string()),]],
+                "hydrated dictionary payload must preserve logical values",
+            );
 
             Ok(())
         }

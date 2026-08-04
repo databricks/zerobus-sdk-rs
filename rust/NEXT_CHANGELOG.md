@@ -27,6 +27,9 @@
 
 ### Internal Changes
 
+- Added Arrow C Data `RecordBatch` conversion behind a disabled-by-default
+  wrapper-only SDK feature so current and future native bindings can share one
+  ownership implementation. No supported Rust SDK or Flight behavior changed.
 - Reorganized Arrow Flight under `stream/arrow/` with focused API, connection,
   ACK, supervisor, and batch modules and no public API changes. Its tracing
   target now follows the module path:
