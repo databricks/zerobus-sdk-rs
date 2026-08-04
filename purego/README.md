@@ -1,8 +1,6 @@
 # Zerobus pure-Go SDK (work in progress)
 
-A native pure-Go Zerobus ingestion SDK. No cgo or FFI required.
-
-This module is isolated from the cgo SDK in `go/`.
+A native pure-Go Zerobus ingestion SDK.
 
 ## Quick start
 

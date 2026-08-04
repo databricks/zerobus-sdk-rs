@@ -1,6 +1,6 @@
 // Package zerobuspb holds the protobuf and gRPC bindings for the Zerobus
 // ingestion service, generated from the canonical schema at
-// rust/sdk/zerobus_service.proto (shared by all SDKs).
+// rust/sdk/zerobus_service.proto.
 //
 // It is internal to the pure-Go SDK: the wire types and the generated
 // ZerobusClient (a bidirectional EphemeralStream RPC) are implementation

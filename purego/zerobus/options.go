@@ -28,9 +28,7 @@ func WithApplicationName(name string) Option {
 	return func(c *sdkConfig) { c.applicationName = name }
 }
 
-// WithTLSConfig secures the connection with a custom TLS configuration,
-// replacing the default of system root CAs. It is intended for pinning a custom
-// CA or for tests; production callers rarely need it.
+// WithTLSConfig replaces the default system-root TLS configuration.
 func WithTLSConfig(tc *tls.Config) Option {
 	return func(c *sdkConfig) { c.tlsConfig = tc }
 }

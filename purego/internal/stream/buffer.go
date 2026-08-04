@@ -3,10 +3,6 @@
 // Protocol-specific behaviour (encoding, ack parsing, wire transport) is
 // injected through the encoder, ackModel, and wireStream interfaces, so
 // proto and JSON share one implementation.
-//
-// Arrow Flight will reuse these seams but not unchanged: buffer entries carry no
-// record count, and recovery replays whole entries, so a partially acknowledged
-// batch cannot be sliced. Both are core changes, not encoder changes.
 package stream
 
 import (
@@ -23,8 +19,7 @@ const defaultMaxInflight = 1_000_000
 
 // item is one unit of work in the buffer: an already-encoded wire message
 // paired with the logical offset that identifies it for acknowledgment. Req is
-// the wire request type the core is instantiated with (encodedMsg for
-// proto/JSON; a Flight frame for Arrow).
+// the wire request type used by the core.
 type item[Req any] struct {
 	offset  int64
 	payload Req

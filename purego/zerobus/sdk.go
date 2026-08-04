@@ -98,9 +98,7 @@ type SDK struct {
 	zerobusEndpoint string
 	ucEndpoint      string
 	conn            *transport.Conn
-	// tokenCache backs every OAuth provider this SDK creates so a token minted
-	// for a table is reused by later streams on the same table instead of
-	// re-minting per stream.
+	// Shared OAuth token cache across streams.
 	tokenCache                *auth.SharedTokenCache
 	dynamicSchemaHTTPClient   *http.Client
 	dynamicSchemaFetchTimeout time.Duration
@@ -109,8 +107,7 @@ type SDK struct {
 	// mu guards the open-stream set, descriptor cache, and closed flag.
 	mu     sync.Mutex
 	closed bool
-	// streams holds the streams this SDK created and has not yet torn down, so
-	// Close can terminate them. Entries are removed by Stream.Close.
+	// Open streams owned by this SDK.
 	streams map[*Stream]struct{}
 }
 
@@ -207,9 +204,6 @@ func (s *SDK) Close() error {
 	s.dynamicSchemaCache = make(map[string]cachedDescriptor)
 	s.mu.Unlock()
 
-	// Each teardown waits on its own supervisor goroutine, so terminate
-	// concurrently rather than summing every stream's teardown on the shutdown
-	// path.
 	errs := make([]error, len(open)+1)
 	var wg sync.WaitGroup
 	for i, st := range open {
@@ -220,8 +214,7 @@ func (s *SDK) Close() error {
 		}()
 	}
 	wg.Wait()
-	// Close the connection only after the streams are down, so a supervisor
-	// cannot reconnect onto a connection that is going away.
+	// Close the connection after stream teardown.
 	errs[len(open)] = s.conn.Close()
 	return wrapErr("Close", errors.Join(errs...))
 }
@@ -359,7 +352,6 @@ func (s *SDK) createStreamConfigured(
 		DescriptorProto: sc.descriptor,
 		HeadersProvider: provider,
 	}
-	// NewProtoJSONStream validates config and starts first-open.
 	openingCtx := context.WithoutCancel(ctx)
 	if sc.waitReady {
 		openingCtx = ctx
@@ -372,8 +364,7 @@ func (s *SDK) createStreamConfigured(
 	s.mu.Lock()
 	if s.closed {
 		s.mu.Unlock()
-		// Terminate rather than leak the supervisor goroutine NewProtoJSONStream
-		// already started.
+		// Stop the stream created before Close won the race.
 		_ = core.Terminate()
 		return nil, &Error{Op: op, cause: fmt.Errorf("SDK is closed"), retryable: false}
 	}

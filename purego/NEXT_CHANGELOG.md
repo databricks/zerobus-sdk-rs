@@ -14,9 +14,6 @@
 - Added `CreateDynamicProtoStream`, which fetches Unity Catalog table schemas
   with the same client credentials, builds runtime protobuf descriptors, and
   exposes JSON ingest methods that convert to protobuf bytes automatically.
-- Added internal UC schema conversion and runtime dynamic-protobuf conversion
-  modules plus focused tests for schema fetch, descriptor generation, and JSON
-  conversion failures.
 
 ### Deprecations
 
@@ -25,8 +22,8 @@
 - Correctly normalize IPv6 Zerobus endpoints and reject plaintext HTTP
   endpoints because the SDK always uses TLS.
 - Validate application names before adding them to the gRPC user-agent.
-- Return offset `-1` (not `0`) from failed ingest calls, matching the
-  original Go SDK so callers can distinguish errors from the first real offset.
+- Return offset `-1` from failed ingest calls so callers can distinguish errors
+  from the first real offset.
 - Generate valid map entry names regardless of column order and report invalid
   Unity Catalog positions as schema errors.
 - Apply `MaxPayloadBytes` to encoded protobuf payloads instead of source JSON.
@@ -37,6 +34,8 @@
 
 ### Internal Changes
 
+- Added UC schema and runtime dynamic-protobuf conversion helpers.
+
 ### API Changes
 
-- Protocol Buffers are now the default record type, matching the other SDKs.
+- Protocol Buffers are now the default record type.

@@ -43,8 +43,7 @@ func ResolveStreamConfig(opts ...StreamOption) (recordType int32, descriptor []b
 	return int32(sc.recordType), sc.descriptor, sc.cfg.MaxInflight, sc.cfg.Recovery, sc.waitReady
 }
 
-// ResolveStreamTuning applies options and returns the public tuning values that
-// need wiring assertions.
+// ResolveStreamTuning returns recovery and batch tuning from options.
 func ResolveStreamTuning(opts ...StreamOption) (
 	recoveryTimeout, recoveryBackoff, lackOfAckTimeout time.Duration,
 	maxBatchRecords int,

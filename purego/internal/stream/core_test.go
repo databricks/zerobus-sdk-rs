@@ -1156,8 +1156,6 @@ func TestCoreStreamMalformedAckTearsDownAndRecovers(t *testing.T) {
 	}
 }
 
-// TestCoreStreamIngestOnClosedStreamErrors verifies that Ingest on a cleanly
-// closed stream returns (-1, err), matching the original Go SDK.
 func TestCoreStreamIngestOnClosedStreamErrors(t *testing.T) {
 	rpc := newFakeRPC()
 	cs := newTestStream(t, newFakeOpener(rpc))
@@ -1337,8 +1335,6 @@ func TestIsRetryable(t *testing.T) {
 		{name: "status not found", err: status.Error(codes.NotFound, "gone"), want: false},
 		{name: "status wrapped invalid argument", err: fmt.Errorf("recv: %w", status.Error(codes.InvalidArgument, "bad")), want: false},
 		{name: "status unavailable", err: status.Error(codes.Unavailable, "try later"), want: true},
-		// Terminal here but retryable in the Rust core; pinned so the divergence
-		// cannot change silently.
 		{name: "status failed precondition", err: status.Error(codes.FailedPrecondition, "schema changed"), want: false},
 		// A server-sent Canceled status is not the caller's context.Canceled.
 		{name: "status canceled", err: status.Error(codes.Canceled, "server canceled"), want: true},
@@ -1758,8 +1754,7 @@ func TestCoreStreamSendEOFYieldsToReceiverStatus(t *testing.T) {
 	if _, err := cs.Ingest(context.Background(), []byte(`{}`)); err != nil {
 		t.Fatalf("Ingest: %v", err)
 	}
-	// Recv stays parked until the status below, so the sender's io.EOF is
-	// necessarily the cause that ends the run — the case that used to be misread.
+	// Recv stays parked until the status below, so the sender's io.EOF ends the run.
 	select {
 	case <-rpc.sendStarted:
 	case <-time.After(time.Second):

@@ -112,8 +112,7 @@ func (s *DynamicProtoStream) validateJSONBatch(recordCount, rawBytes int) error 
 }
 
 func (s *DynamicProtoStream) acquireConversion(ctx context.Context) error {
-	// Serialize conversion so concurrent callers cannot each allocate a full
-	// pre-ingestion batch before stream backpressure applies.
+	// Serialize conversion to bound memory before stream backpressure applies.
 	if s.conversionGate == nil {
 		return ctx.Err()
 	}

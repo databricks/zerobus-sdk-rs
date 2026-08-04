@@ -1,19 +1,7 @@
 // Batch dynamic-proto ingestion example.
-//
-// Fetches schema from Unity Catalog, converts JSON records to protobuf at
-// runtime, and queues a whole batch in one call.
-//
-// Set these environment variables before running:
-//
-//	ZEROBUS_SERVER_ENDPOINT, DATABRICKS_WORKSPACE_URL, ZEROBUS_TABLE_NAME,
-//	DATABRICKS_CLIENT_ID, DATABRICKS_CLIENT_SECRET
-//
+// See examples/README.md for setup.
+// Run from the examples directory:
 //	go run ./dynamic/batch
-//
-// Target table:
-//
-//	orders(id INT, customer_name STRING, product_name STRING, quantity INT,
-//	       price DOUBLE, status STRING, created_at TIMESTAMP, updated_at TIMESTAMP)
 package main
 
 import (
