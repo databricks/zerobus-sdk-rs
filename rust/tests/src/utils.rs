@@ -106,6 +106,7 @@ impl HeadersProvider for CountingHeadersProvider {
 pub struct HangingInvalidationHeadersProvider {
     pub invalidations: Arc<std::sync::atomic::AtomicUsize>,
     pub cancellations: Arc<std::sync::atomic::AtomicUsize>,
+    pub invalidation_armed: Arc<tokio::sync::Notify>,
 }
 
 struct InvalidationCancellationGuard(Arc<std::sync::atomic::AtomicUsize>);
@@ -128,6 +129,7 @@ impl HeadersProvider for HangingInvalidationHeadersProvider {
     async fn invalidate(&self) {
         self.invalidations
             .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        self.invalidation_armed.notify_one();
         let _guard = InvalidationCancellationGuard(Arc::clone(&self.cancellations));
         std::future::pending::<()>().await;
     }

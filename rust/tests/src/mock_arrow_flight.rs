@@ -114,6 +114,8 @@ pub struct MockFlightServer {
     request_resets: Arc<AtomicU64>,
     /// One-shot observation that a scripted delayed ACK registered its timer.
     delayed_ack_armed: Arc<Notify>,
+    /// Observation that a delayed setup rejection registered its timer.
+    delayed_setup_armed: Arc<Notify>,
 }
 
 impl MockFlightServer {
@@ -128,6 +130,7 @@ impl MockFlightServer {
             request_half_closes: Arc::new(AtomicU64::new(0)),
             request_resets: Arc::new(AtomicU64::new(0)),
             delayed_ack_armed: Arc::new(Notify::new()),
+            delayed_setup_armed: Arc::new(Notify::new()),
         }
     }
 
@@ -135,6 +138,12 @@ impl MockFlightServer {
     /// scripted delayed ACK.
     pub fn delayed_ack_armed(&self) -> Arc<Notify> {
         Arc::clone(&self.delayed_ack_armed)
+    }
+
+    /// Returns a notification that fires immediately before the mock waits on a
+    /// scripted delayed setup rejection.
+    pub fn delayed_setup_armed(&self) -> Arc<Notify> {
+        Arc::clone(&self.delayed_setup_armed)
     }
 
     /// Inject responses for a specific table
@@ -271,6 +280,7 @@ impl FlightService for MockFlightServer {
         let request_half_closes = Arc::clone(&self.request_half_closes);
         let request_resets = Arc::clone(&self.request_resets);
         let delayed_ack_armed = Arc::clone(&self.delayed_ack_armed);
+        let delayed_setup_armed = Arc::clone(&self.delayed_setup_armed);
 
         tokio::spawn(async move {
             let mut stream_responses: Vec<MockFlightResponse> = Vec::new();
@@ -333,6 +343,7 @@ impl FlightService for MockFlightServer {
                                 indices.insert(table_name.clone(), response_index);
                             }
                             if delay_ms > 0 {
+                                delayed_setup_armed.notify_one();
                                 sleep(Duration::from_millis(delay_ms)).await;
                             }
                             info!("Rejecting connection setup: {:?}", status);
@@ -495,6 +506,7 @@ impl FlightService for MockFlightServer {
                         }
                         MockFlightResponse::FailSetupAfter { status, delay_ms } => {
                             if *delay_ms > 0 {
+                                delayed_setup_armed.notify_one();
                                 sleep(Duration::from_millis(*delay_ms)).await;
                             }
                             let status = status.clone();
@@ -695,6 +707,7 @@ async fn start_mock_flight_server_inner(
         request_half_closes: Arc::clone(&mock_server.request_half_closes),
         request_resets: Arc::clone(&mock_server.request_resets),
         delayed_ack_armed: Arc::clone(&mock_server.delayed_ack_armed),
+        delayed_setup_armed: Arc::clone(&mock_server.delayed_setup_armed),
     };
 
     let addr: std::net::SocketAddr = "127.0.0.1:0".parse()?;
