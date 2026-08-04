@@ -125,10 +125,6 @@ func (s *DynamicProtoStream) encodeJSONRecord(record []byte) ([]byte, error) {
 	return s.converter.EncodeJSONBytes(record)
 }
 
-func (s *DynamicProtoStream) encodeJSONBatch(records [][]byte) ([][]byte, error) {
-	return s.encodeJSONBatchContext(context.Background(), records)
-}
-
 func (s *DynamicProtoStream) encodeJSONBatchContext(ctx context.Context, records [][]byte) ([][]byte, error) {
 	out := make([][]byte, len(records))
 	for i := range records {

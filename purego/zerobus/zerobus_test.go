@@ -888,6 +888,14 @@ func TestDynamicProtoPublicFlow(t *testing.T) {
 	if got := len(ingests); got != 0 {
 		t.Fatalf("failed dynamic record queued %d requests, want 0", got)
 	}
+	if _, err := dynamic.IngestJSONStringOffset(
+		`{"id":"1","payload":{}}`,
+	); err == nil {
+		t.Fatal("missing nested required payload.name was accepted")
+	}
+	if got := len(ingests); got != 0 {
+		t.Fatalf("failed nested dynamic record queued %d requests, want 0", got)
+	}
 	singleRecord := `{"id":"1","payload":{"name":"first","tags":["10","20"],"attributes":{"a":7}},"extra":"` +
 		strings.Repeat("x", 512) + `"}`
 	if len(singleRecord) <= 256 {

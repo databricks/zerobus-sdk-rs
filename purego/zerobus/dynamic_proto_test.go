@@ -52,13 +52,17 @@ func TestSDKDynamicDescriptor_CacheHit(t *testing.T) {
 		dynamicSchemaFetchTimeout: time.Second,
 		dynamicSchemaCacheTTL:     time.Minute,
 	})
-	b1, err := sdk.dynamicDescriptor(context.Background(), "main.sales.orders", "id", "secret")
+	b1, _, err := sdk.dynamicDescriptorAndConverter(
+		context.Background(), "main.sales.orders", "id", "secret",
+	)
 	if err != nil {
-		t.Fatalf("dynamicDescriptor() first call error = %v", err)
+		t.Fatalf("dynamicDescriptorAndConverter() first call error = %v", err)
 	}
-	b2, err := sdk.dynamicDescriptor(context.Background(), "main.sales.orders", "id", "secret")
+	b2, _, err := sdk.dynamicDescriptorAndConverter(
+		context.Background(), "main.sales.orders", "id", "secret",
+	)
 	if err != nil {
-		t.Fatalf("dynamicDescriptor() second call error = %v", err)
+		t.Fatalf("dynamicDescriptorAndConverter() second call error = %v", err)
 	}
 	if string(b1) != string(b2) {
 		t.Fatalf("cached descriptor mismatch")
@@ -92,12 +96,12 @@ func TestDynamicProtoStreamEncodeBatch(t *testing.T) {
 		t.Fatalf("NewFromDescriptorProtoBytes() error = %v", err)
 	}
 	ds := &DynamicProtoStream{converter: c}
-	out, err := ds.encodeJSONBatch([][]byte{
+	out, err := ds.encodeJSONBatchContext(context.Background(), [][]byte{
 		[]byte(`{"id":1}`),
 		[]byte(`{"id":2}`),
 	})
 	if err != nil {
-		t.Fatalf("encodeJSONBatch() error = %v", err)
+		t.Fatalf("encodeJSONBatchContext() error = %v", err)
 	}
 	if len(out) != 2 {
 		t.Fatalf("batch len = %d, want 2", len(out))
@@ -137,10 +141,10 @@ func TestSDKDynamicDescriptor_CacheIsCredentialScoped(t *testing.T) {
 		{"id-2", "secret-1"},
 		{"id-1", "secret-2"},
 	} {
-		if _, err := sdk.dynamicDescriptor(
+		if _, _, err := sdk.dynamicDescriptorAndConverter(
 			context.Background(), "main.sales.orders", credentials[0], credentials[1],
 		); err != nil {
-			t.Fatalf("dynamicDescriptor() error = %v", err)
+			t.Fatalf("dynamicDescriptorAndConverter() error = %v", err)
 		}
 	}
 	if got := tokenCalls.Load(); got != 3 {
@@ -203,7 +207,7 @@ func TestSDKDynamicDescriptor_EvictsInvalidCachedDescriptor(t *testing.T) {
 	})
 	key := dynamicSchemaCacheKey("https://uc", "main.sales.orders", "id", "secret")
 	sdk.storeDynamicDescriptor(key, []byte{0x0a, 0x01})
-	if _, err := sdk.dynamicDescriptor(
+	if _, _, err := sdk.dynamicDescriptorAndConverter(
 		context.Background(), "main.sales.orders", "id", "secret",
 	); err == nil {
 		t.Fatal("expected invalid cached descriptor error")

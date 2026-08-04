@@ -414,14 +414,6 @@ func validateStreamArgs(tableName string, sc streamConfig) error {
 	return nil
 }
 
-func (s *SDK) dynamicDescriptor(
-	ctx context.Context,
-	tableName, clientID, clientSecret string,
-) ([]byte, error) {
-	desc, _, err := s.dynamicDescriptorAndConverter(ctx, tableName, clientID, clientSecret)
-	return desc, err
-}
-
 func (s *SDK) dynamicDescriptorAndConverter(
 	ctx context.Context,
 	tableName, clientID, clientSecret string,
