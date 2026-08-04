@@ -74,8 +74,8 @@ pub struct ArrowStreamConfigurationOptions {
     /// when it becomes pending; responses and partial acknowledgments do not refresh it.
     /// Configure this timeout together with `max_inflight_batches` so the server can
     /// acknowledge a full allowed backlog in time. Replayed batches receive a fresh deadline
-    /// on the recovered connection. Expiry fails the stream and triggers recovery when
-    /// recovery is enabled.
+    /// after the full replay has completed and ACK processing can resume on the recovered
+    /// connection. Expiry fails the stream and triggers recovery when recovery is enabled.
     /// Values whose absolute deadline cannot be represented by the platform's
     /// monotonic clock are rejected when the stream is built.
     ///

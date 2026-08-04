@@ -11,8 +11,8 @@ mod arrow_flight_tests {
     use crate::utils::{
         advance_tokio_time_near_instant_limit, create_test_arrow_schema,
         create_test_dict_record_batch, create_test_dict_schema, create_test_record_batch,
-        record_batch_to_ipc_bytes, setup_tracing, CountingHeadersProvider,
-        HangingInvalidationHeadersProvider, TestHeadersProvider,
+        record_batch_to_ipc_bytes, run_with_paused_time_watchdog, setup_tracing,
+        CountingHeadersProvider, HangingInvalidationHeadersProvider, TestHeadersProvider,
     };
 
     const TABLE_NAME: &str = "test_catalog.test_schema.test_table";
@@ -3062,6 +3062,85 @@ mod arrow_flight_tests {
                 Ok(()) => panic!("unrepresentable recovery deadline was accepted"),
             }
             assert_eq!(stream.get_unacked_batches().await?.len(), 1);
+            Ok(())
+        }
+
+        /// Time spent replaying a recovered backlog must not consume the batches' ACK
+        /// budget before the replacement response processor can observe acknowledgments.
+        #[tokio::test(start_paused = true)]
+        async fn test_replay_ack_deadline_starts_after_replay_completes(
+        ) -> Result<(), Box<dyn std::error::Error>> {
+            const ACK_TIMEOUT_MS: u64 = 100;
+            const REPLAY_DELAY_MS: u64 = ACK_TIMEOUT_MS + 1;
+            const ACK_DELAY_MS: u64 = 50;
+
+            setup_tracing();
+
+            let (mock_server, server_url) = start_mock_flight_server().await?;
+            let schema = create_test_arrow_schema();
+            mock_server
+                .inject_responses(
+                    TABLE_NAME,
+                    vec![
+                        MockFlightResponse::BatchAck {
+                            ack_up_to_offset: 0,
+                            delay_ms: 0,
+                            ack_up_to_records: 0,
+                        },
+                        MockFlightResponse::Error {
+                            status: tonic::Status::unavailable("Connection lost"),
+                            delay_ms: 0,
+                        },
+                        MockFlightResponse::BatchAck {
+                            ack_up_to_offset: 1,
+                            delay_ms: ACK_DELAY_MS,
+                            ack_up_to_records: 2,
+                        },
+                    ],
+                )
+                .await;
+
+            let delayed_ack_armed = mock_server.delayed_ack_armed();
+            let sdk = ZerobusSdk::builder()
+                .endpoint(server_url)
+                .unity_catalog_url("https://mock-uc.com")
+                .tls_config(Arc::new(NoTlsConfig))
+                .build()?;
+            let stream = sdk
+                .stream_builder()
+                .table(TABLE_NAME)
+                .headers_provider(Arc::new(TestHeadersProvider::default()))
+                .arrow(schema.clone())
+                .max_inflight_batches(2)
+                .server_lack_of_ack_timeout_ms(ACK_TIMEOUT_MS)
+                .recovery(true)
+                .recovery_backoff_ms(0)
+                .recovery_retries(1)
+                .build_arrow()
+                .await?;
+
+            let (replay_reached, replay_proceed) = stream.arm_replay_send_barrier().await;
+            let first = create_test_record_batch(schema.clone(), vec![1], vec![Some("first")]);
+            stream.ingest_batch(first).await?;
+            let second = create_test_record_batch(schema, vec![2], vec![Some("second")]);
+            let second_offset = stream.ingest_batch(second).await?;
+
+            run_with_paused_time_watchdog(replay_reached.notified()).await;
+            tokio::time::advance(std::time::Duration::from_millis(REPLAY_DELAY_MS)).await;
+            replay_proceed.notify_one();
+
+            // The mock notifies immediately before awaiting its delayed-ACK timer, so
+            // advancing time below cannot race timer registration.
+            run_with_paused_time_watchdog(delayed_ack_armed.notified()).await;
+            tokio::time::advance(std::time::Duration::from_millis(ACK_DELAY_MS)).await;
+            run_with_paused_time_watchdog(stream.wait_for_offset(second_offset)).await?;
+
+            assert!(!stream.is_closed());
+            assert_eq!(
+                mock_server.get_total_records_received().await,
+                4,
+                "both batches should be sent once initially and once during recovery"
+            );
             Ok(())
         }
 

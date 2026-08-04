@@ -57,12 +57,30 @@ impl PendingBatch {
         end_record: u64,
         permit: OwnedSemaphorePermit,
     ) -> Self {
+        Self::new_at(
+            batch,
+            offset_id,
+            start_record,
+            end_record,
+            Instant::now(),
+            permit,
+        )
+    }
+
+    fn new_at(
+        batch: RecordBatch,
+        offset_id: OffsetId,
+        start_record: u64,
+        end_record: u64,
+        enqueued_at: Instant,
+        permit: OwnedSemaphorePermit,
+    ) -> Self {
         Self {
             batch,
             offset_id,
             start_record,
             end_record,
-            enqueued_at: Instant::now(),
+            enqueued_at,
             permit,
         }
     }
@@ -130,8 +148,7 @@ impl PendingBatch {
         self.batch.num_rows()
     }
 
-    #[cfg(test)]
-    pub(super) fn set_enqueued_at(&mut self, enqueued_at: Instant) {
+    pub(super) fn refresh_enqueued_at(&mut self, enqueued_at: Instant) {
         self.enqueued_at = enqueued_at;
     }
 
@@ -166,6 +183,17 @@ pub(super) fn oldest_pending_ack_deadline(
     }))
 }
 
+/// Gives every replayed batch one shared ACK-budget origin immediately before
+/// acknowledgment processing resumes on the replacement connection.
+pub(super) fn refresh_pending_ack_deadlines(
+    pending: &mut [PendingBatch],
+    replay_completed_at: Instant,
+) {
+    for batch in pending {
+        batch.refresh_enqueued_at(replay_completed_at);
+    }
+}
+
 /// Rebuilds pending batches with connection-relative ranges and transfers each retained
 /// batch's backpressure permit to its replacement.
 pub(super) fn rebuild_pending_for_replay(
@@ -188,11 +216,12 @@ pub(super) fn rebuild_pending_for_replay(
         cumulative_records = end_record;
 
         replay.push(batch.clone());
-        rebuilt.push(PendingBatch::new(
+        rebuilt.push(PendingBatch::new_at(
             batch,
             pending_batch.offset_id,
             start_record,
             end_record,
+            pending_batch.enqueued_at,
             pending_batch.permit,
         ));
     }
@@ -260,7 +289,8 @@ mod tests {
     use crate::ZerobusError;
 
     use super::{
-        oldest_pending_ack_deadline, rebuild_pending_for_replay, PendingBatch, RecordBatch,
+        oldest_pending_ack_deadline, rebuild_pending_for_replay, refresh_pending_ack_deadlines,
+        PendingBatch, RecordBatch,
     };
 
     #[allow(clippy::manual_div_ceil)]
@@ -310,21 +340,33 @@ mod tests {
     }
 
     #[test]
-    fn replay_refreshes_pending_timestamp() {
+    fn replay_rebuild_preserves_pending_timestamp() {
         let mut batch = pending_batch(5, 0, 5);
         let original = Instant::now() - Duration::from_secs(1);
-        batch.set_enqueued_at(original);
+        batch.refresh_enqueued_at(original);
         let mut pending = vec![batch];
 
         let (_replay, _records) = rebuild_pending_for_replay(&mut pending, 0);
 
-        assert!(pending[0].enqueued_at() > original);
+        assert_eq!(pending[0].enqueued_at(), original);
+    }
+
+    #[test]
+    fn replay_deadlines_share_completion_timestamp() {
+        let mut pending = vec![pending_batch(1, 0, 1), pending_batch(1, 1, 2)];
+        let replay_completed_at = Instant::now();
+
+        refresh_pending_ack_deadlines(&mut pending, replay_completed_at);
+
+        assert!(pending
+            .iter()
+            .all(|batch| batch.enqueued_at() == replay_completed_at));
     }
 
     #[test]
     fn unrepresentable_ack_deadline_is_rejected() {
         let mut batch = pending_batch(1, 0, 1);
-        batch.set_enqueued_at(latest_whole_second_instant(Instant::now()));
+        batch.refresh_enqueued_at(latest_whole_second_instant(Instant::now()));
 
         let error = oldest_pending_ack_deadline(&[batch], 1, Duration::from_secs(1))
             .expect_err("an unrepresentable configured deadline must be rejected");

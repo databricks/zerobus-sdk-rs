@@ -12,7 +12,8 @@
   while a stream is idle. During normal stream operation, each batch receives
   an absolute deadline when it becomes pending; responses and partial
   acknowledgments do not extend it. Recovery refreshes the deadline when
-  replaying a batch on a replacement connection.
+  the full replay completes and ACK processing can resume on the replacement
+  connection.
 - Arrow Flight rejects unrepresentable timeout values: stream creation returns
   `InvalidArgument` when ACK or recovery deadlines exceed the platform
   monotonic-clock range. Server-advertised graceful-rotation periods are capped

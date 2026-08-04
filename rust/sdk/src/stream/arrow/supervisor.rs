@@ -13,7 +13,7 @@ use tokio::time::{sleep, timeout_at, Duration, Instant};
 use tracing::{debug, error, info, warn};
 
 use super::acks::{pause_and_detach_sender, AckProcessor};
-use super::batch::{rebuild_pending_for_replay, PendingBatch};
+use super::batch::{rebuild_pending_for_replay, refresh_pending_ack_deadlines, PendingBatch};
 use super::connection::{FlightConnection, FlightResponseStream, RequestBodyControl};
 use super::{
     configured_deadline, ArrowStreamConfigurationOptions, ArrowTableProperties, BatchSender,
@@ -47,6 +47,8 @@ pub(super) struct Supervisor {
     sdk_identifier: Arc<str>,
     #[cfg(feature = "test-hooks")]
     reconnect_rebuild_gate: super::ReconnectRebuildGate,
+    #[cfg(feature = "test-hooks")]
+    replay_send_gate: super::ReplaySendGate,
 }
 
 impl Supervisor {
@@ -73,6 +75,8 @@ impl Supervisor {
             sdk_identifier: Arc::clone(&stream.sdk_identifier),
             #[cfg(feature = "test-hooks")]
             reconnect_rebuild_gate: Arc::clone(&stream.reconnect_rebuild_gate),
+            #[cfg(feature = "test-hooks")]
+            replay_send_gate: Arc::clone(&stream.replay_send_gate),
         }
     }
 
@@ -360,6 +364,8 @@ impl Supervisor {
             &self.submitted_records,
             &self.last_acked_records,
             acked_before_disconnect,
+            #[cfg(feature = "test-hooks")]
+            Some(&self.replay_send_gate),
         )
         .await;
 
@@ -368,6 +374,13 @@ impl Supervisor {
         // cannot observe an unpaused stream without its active sender.
         Self::commit_reconnect_after_replay(replay_result, tx, &self.batch_tx, &self.is_paused)
             .await?;
+
+        // ACK processing cannot resume until reconnect returns. Refresh only after replay
+        // is fully committed so connection setup, backlog sends, and sender publication do
+        // not consume any batch's new ACK budget.
+        let mut pending = self.pending_batches.lock().await;
+        refresh_pending_ack_deadlines(&mut pending, Instant::now());
+        drop(pending);
 
         Ok((response_stream, request_body))
     }
@@ -395,7 +408,8 @@ impl Supervisor {
     /// The rebuilt pending set and the counter reset are installed together under the
     /// `pending_batches` lock, before any send: a replay-send failure keeps pending (and
     /// permits) intact, and no concurrent ingest can observe reset counters against stale
-    /// ranges. Caller holds `ingest_mutex`.
+    /// ranges. The caller refreshes pending ACK timestamps together only after replay is
+    /// committed, immediately before ACK processing can resume. Caller holds `ingest_mutex`.
     async fn replay_pending_batches(
         tx: &mpsc::Sender<Result<RecordBatch, FlightError>>,
         pending_batches: &Arc<Mutex<Vec<PendingBatch>>>,
@@ -403,6 +417,7 @@ impl Supervisor {
         submitted_records: &Arc<AtomicU64>,
         last_acked_records: &Arc<AtomicU64>,
         acked_before_disconnect: u64,
+        #[cfg(feature = "test-hooks")] replay_send_gate: Option<&super::ReplaySendGate>,
     ) -> ZerobusResult<()> {
         let replay_batches: Vec<RecordBatch> = {
             let mut pending = pending_batches.lock().await;
@@ -437,6 +452,18 @@ impl Supervisor {
                 )));
             }
             submitted_records.fetch_add(record_count, Ordering::Release);
+
+            #[cfg(feature = "test-hooks")]
+            {
+                let barrier = match replay_send_gate {
+                    Some(gate) => gate.lock().await.take(),
+                    None => None,
+                };
+                if let Some(barrier) = barrier {
+                    barrier.reached.notify_one();
+                    barrier.proceed.notified().await;
+                }
+            }
         }
 
         Ok(())
@@ -494,7 +521,7 @@ mod tests {
     use arrow_schema::{DataType, Field, Schema as ArrowSchema};
     use futures::stream::iter;
     use tokio::sync::{mpsc, Mutex, Semaphore};
-    use tokio::time::{timeout, Duration};
+    use tokio::time::{timeout, Duration, Instant};
 
     use super::super::metadata::FlightAckMetadata;
     use super::{
@@ -600,6 +627,8 @@ mod tests {
             &submitted_records,
             &last_acked_records,
             acked_before_disconnect,
+            #[cfg(feature = "test-hooks")]
+            None,
         )
         .await
         .expect("replay should succeed");
@@ -622,10 +651,15 @@ mod tests {
     async fn replay_send_failure_retains_pending_permits_and_cumulative() {
         let schema = one_col_schema();
         let sem = Arc::new(Semaphore::new(4));
-        let pending = Arc::new(Mutex::new(vec![
+        let original_enqueued_at = Instant::now() - Duration::from_secs(1);
+        let mut pending_batches = vec![
             pending_batch(&sem, batch_with_rows(&schema, 3), 0, 0, 3),
             pending_batch(&sem, batch_with_rows(&schema, 2), 1, 3, 5),
-        ]));
+        ];
+        for batch in &mut pending_batches {
+            batch.refresh_enqueued_at(original_enqueued_at);
+        }
+        let pending = Arc::new(Mutex::new(pending_batches));
         assert_eq!(
             sem.available_permits(),
             2,
@@ -648,6 +682,8 @@ mod tests {
             &submitted,
             &last_acked,
             0,
+            #[cfg(feature = "test-hooks")]
+            None,
         )
         .await;
         assert!(res.is_err(), "replay must surface the send failure");
@@ -660,6 +696,12 @@ mod tests {
         );
         assert_eq!(guard[0].record_range(), (0, 3));
         assert_eq!(guard[1].record_range(), (3, 5));
+        assert!(
+            guard
+                .iter()
+                .all(|batch| batch.enqueued_at() == original_enqueued_at),
+            "failed replay must not refresh pending ACK timestamps"
+        );
         drop(guard);
 
         assert_eq!(
@@ -690,10 +732,15 @@ mod tests {
     async fn replay_success_reinstalls_and_sends_all() {
         let schema = one_col_schema();
         let sem = Arc::new(Semaphore::new(4));
-        let pending = Arc::new(Mutex::new(vec![
+        let original_enqueued_at = Instant::now() - Duration::from_secs(1);
+        let mut pending_batches = vec![
             pending_batch(&sem, batch_with_rows(&schema, 3), 0, 0, 3),
             pending_batch(&sem, batch_with_rows(&schema, 2), 1, 3, 5),
-        ]));
+        ];
+        for batch in &mut pending_batches {
+            batch.refresh_enqueued_at(original_enqueued_at);
+        }
+        let pending = Arc::new(Mutex::new(pending_batches));
         let cumulative = Arc::new(AtomicU64::new(0));
         let submitted = Arc::new(AtomicU64::new(0));
         let last_acked = Arc::new(AtomicU64::new(9));
@@ -707,11 +754,21 @@ mod tests {
             &submitted,
             &last_acked,
             0,
+            #[cfg(feature = "test-hooks")]
+            None,
         )
         .await;
         assert!(res.is_ok());
 
-        assert_eq!(pending.lock().await.len(), 2);
+        let pending_guard = pending.lock().await;
+        assert_eq!(pending_guard.len(), 2);
+        assert!(
+            pending_guard
+                .iter()
+                .all(|batch| batch.enqueued_at() == original_enqueued_at),
+            "the replay send phase must not start pending ACK deadlines"
+        );
+        drop(pending_guard);
         assert_eq!(cumulative.load(Ordering::Relaxed), 5);
         assert_eq!(submitted.load(Ordering::Acquire), 5);
         assert_eq!(last_acked.load(Ordering::Relaxed), 0);
@@ -747,6 +804,8 @@ mod tests {
             &submitted,
             &last_acked,
             4,
+            #[cfg(feature = "test-hooks")]
+            None,
         )
         .await;
         assert!(res.is_ok());

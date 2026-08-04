@@ -78,6 +78,18 @@ struct ReconnectRebuildBarrier {
     proceed: Arc<Notify>,
 }
 
+/// Test-only barrier used to pause recovery after its first replay send, before the
+/// remaining backlog is sent and pending ACK timestamps are refreshed.
+#[cfg(feature = "test-hooks")]
+type ReplaySendGate = Arc<Mutex<Option<ReplaySendBarrier>>>;
+
+#[cfg(feature = "test-hooks")]
+#[derive(Clone)]
+struct ReplaySendBarrier {
+    reached: Arc<Notify>,
+    proceed: Arc<Notify>,
+}
+
 /// Test-only gate: when armed, the ACK processor fires the notify right after applying a
 /// non-empty ack (i.e. after storing `last_acked_records`), letting a test confirm a
 /// partial ack has landed before it proceeds.
@@ -232,6 +244,9 @@ pub struct ZerobusArrowStream {
     /// Test seam (see [`ReconnectRebuildGate`]); compiled only under `test-hooks`.
     #[cfg(feature = "test-hooks")]
     reconnect_rebuild_gate: ReconnectRebuildGate,
+    /// Test seam (see [`ReplaySendGate`]); compiled only under `test-hooks`.
+    #[cfg(feature = "test-hooks")]
+    replay_send_gate: ReplaySendGate,
     /// Test seam (see [`AckAppliedGate`]); compiled only under `test-hooks`.
     #[cfg(feature = "test-hooks")]
     ack_applied_gate: AckAppliedGate,
@@ -328,6 +343,8 @@ impl ZerobusArrowStream {
             sdk_identifier,
             #[cfg(feature = "test-hooks")]
             reconnect_rebuild_gate: Arc::new(Mutex::new(None)),
+            #[cfg(feature = "test-hooks")]
+            replay_send_gate: Arc::new(Mutex::new(None)),
             #[cfg(feature = "test-hooks")]
             ack_applied_gate: Arc::new(Mutex::new(None)),
             #[cfg(feature = "test-hooks")]
@@ -1001,6 +1018,20 @@ impl ZerobusArrowStream {
         let reached = Arc::new(Notify::new());
         let proceed = Arc::new(Notify::new());
         *self.reconnect_rebuild_gate.lock().await = Some(ReconnectRebuildBarrier {
+            reached: Arc::clone(&reached),
+            proceed: Arc::clone(&proceed),
+        });
+        (reached, proceed)
+    }
+
+    /// Test-only: pauses the next recovery after its first replay send and before the
+    /// remaining backlog is sent or its pending ACK timestamps are refreshed.
+    #[cfg(feature = "test-hooks")]
+    #[doc(hidden)]
+    pub async fn arm_replay_send_barrier(&self) -> (Arc<Notify>, Arc<Notify>) {
+        let reached = Arc::new(Notify::new());
+        let proceed = Arc::new(Notify::new());
+        *self.replay_send_gate.lock().await = Some(ReplaySendBarrier {
             reached: Arc::clone(&reached),
             proceed: Arc::clone(&proceed),
         });

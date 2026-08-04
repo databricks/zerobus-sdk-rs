@@ -955,7 +955,7 @@ mod tests {
         let schema = one_col_schema();
         let sem = Arc::new(Semaphore::new(1));
         let mut pending = pending_batch(&sem, batch_with_rows(&schema, 1), 0, 0, 1);
-        pending.set_enqueued_at(Instant::now() - ACK_TIMEOUT);
+        pending.refresh_enqueued_at(Instant::now() - ACK_TIMEOUT);
         let pending_batches = Arc::new(Mutex::new(vec![pending]));
         let response_stream = iter([Ok(PutResult {
             app_metadata: serde_json::to_vec(&FlightAckMetadata {
@@ -993,7 +993,7 @@ mod tests {
         let schema = one_col_schema();
         let sem = Arc::new(Semaphore::new(1));
         let mut pending = pending_batch(&sem, batch_with_rows(&schema, 10), 0, 0, 10);
-        pending.set_enqueued_at(Instant::now() - ACK_TIMEOUT);
+        pending.refresh_enqueued_at(Instant::now() - ACK_TIMEOUT);
         let pending_batches = Arc::new(Mutex::new(vec![pending]));
         let response_stream = iter([5, 10].map(|acked_records| {
             Ok(PutResult {
@@ -1040,9 +1040,9 @@ mod tests {
         let sem = Arc::new(Semaphore::new(2));
         let expired_at = Instant::now() - ACK_TIMEOUT;
         let mut first = pending_batch(&sem, batch_with_rows(&schema, 1), 0, 0, 1);
-        first.set_enqueued_at(expired_at);
+        first.refresh_enqueued_at(expired_at);
         let mut second = pending_batch(&sem, batch_with_rows(&schema, 1), 1, 1, 2);
-        second.set_enqueued_at(expired_at);
+        second.refresh_enqueued_at(expired_at);
         let pending_batches = Arc::new(Mutex::new(vec![first, second]));
         let (processor, _request_body, _last_ack_rx) = ack_processor(
             Arc::clone(&pending_batches),

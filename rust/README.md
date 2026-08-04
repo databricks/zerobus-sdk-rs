@@ -810,7 +810,8 @@ absolute limit on how long the oldest batch may remain pending during normal
 stream operation, not an inactivity timeout. No timer runs while the stream is
 idle. A batch's deadline starts when it becomes pending; responses and partial
 acknowledgments do not pause or extend it. Replayed batches receive a fresh
-deadline on the recovered connection. Configure this timeout together with
+deadline after the full replay completes and acknowledgment processing can
+resume on the recovered connection. Configure this timeout together with
 `max_inflight_batches` so the server can acknowledge a full allowed backlog
 within the timeout.
 
