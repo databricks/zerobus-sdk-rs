@@ -402,7 +402,7 @@ impl Supervisor {
                             // The reconnect result is newer and more specific than the
                             // error that initiated recovery unless sender commit returned
                             // its private signal that close won the atomic race.
-                            if self.close_has_started() {
+                            if Self::should_finalize_reconnect_error(self.close_has_started(), &e) {
                                 let error = Self::close_reconnect_error(e, recovery_error);
                                 return self.finish(Some(error)).await;
                             }
@@ -609,6 +609,13 @@ impl Supervisor {
                 if status.code() == tonic::Code::Cancelled
                     && status.message() == EXPLICIT_CLOSE_INTERRUPTED_RECOVERY
         )
+    }
+
+    fn should_finalize_reconnect_error(
+        close_has_started: bool,
+        reconnect_error: &ZerobusError,
+    ) -> bool {
+        close_has_started || Self::is_explicit_close_recovery_cancellation(reconnect_error)
     }
 
     fn close_reconnect_error(
@@ -869,6 +876,24 @@ mod tests {
             .expect_err("terminal error must win an empty close")
             .to_string()
             .contains("idle stream rejected"));
+    }
+
+    #[test]
+    fn explicit_close_cancellation_finalizes_before_close_publication() {
+        let reconnect_error = Supervisor::explicit_close_recovery_cancellation();
+        assert!(Supervisor::should_finalize_reconnect_error(
+            false,
+            &reconnect_error
+        ));
+
+        let recovery_error =
+            ZerobusError::StreamClosedError(tonic::Status::unavailable("transport lost"));
+        let selected = Supervisor::close_reconnect_error(reconnect_error, recovery_error);
+        assert!(matches!(
+            selected,
+            ZerobusError::StreamClosedError(status)
+                if status.code() == tonic::Code::Unavailable
+        ));
     }
 
     #[tokio::test]
