@@ -3,6 +3,7 @@
 //! `Supervisor` owns cloned connection configuration and shared stream state.
 //! It is the sole task that reconnects, replays pending work, and finalizes failures.
 
+use std::future::Future;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::Arc;
 
@@ -17,13 +18,23 @@ use super::batch::{rebuild_pending_for_replay, refresh_pending_ack_deadlines, Pe
 use super::connection::{FlightConnection, FlightResponseStream, RequestBodyControl};
 use super::{
     configured_deadline, ArrowStreamConfigurationOptions, ArrowTableProperties, BatchSender,
-    RecordBatch, ZerobusArrowStream,
+    CloseState, RecordBatch, ZerobusArrowStream,
 };
 use crate::errors::ZerobusError;
 use crate::headers_provider::HeadersProvider;
+use crate::offset_generator::OffsetId;
 use crate::proxy::ConnectorFactory;
 use crate::tls_config::TlsConfig;
 use crate::ZerobusResult;
+
+const EXPLICIT_CLOSE_INTERRUPTED_RECOVERY: &str = "Explicit close interrupted recovery";
+
+#[derive(Default)]
+struct ReplayGates<'a> {
+    #[cfg(feature = "test-hooks")]
+    replay_send: Option<&'a super::ReplaySendGate>,
+    replay_progress: Option<&'a super::ReplayProgressGate>,
+}
 
 pub(super) struct Supervisor {
     endpoint: String,
@@ -35,6 +46,10 @@ pub(super) struct Supervisor {
     ack_processor: AckProcessor,
     batch_tx: BatchSender,
     is_closed: Arc<AtomicBool>,
+    close_teardown_started: Arc<AtomicBool>,
+    close_state_tx: watch::Sender<CloseState>,
+    close_outcome: Arc<Mutex<Option<ZerobusResult<()>>>>,
+    last_ack_tx: watch::Sender<Option<OffsetId>>,
     pending_batches: Arc<Mutex<Vec<PendingBatch>>>,
     failed_batches: Arc<Mutex<Vec<RecordBatch>>>,
     recovery_attempts: Arc<AtomicU32>,
@@ -49,6 +64,12 @@ pub(super) struct Supervisor {
     reconnect_rebuild_gate: super::ReconnectRebuildGate,
     #[cfg(feature = "test-hooks")]
     replay_send_gate: super::ReplaySendGate,
+    #[cfg(feature = "test-hooks")]
+    recovery_backoff_gate: super::RecoveryBackoffGate,
+    #[cfg(feature = "test-hooks")]
+    replay_progress_gate: super::ReplayProgressGate,
+    #[cfg(feature = "test-hooks")]
+    close_finalize_gate: super::CloseFinalizeGate,
 }
 
 impl Supervisor {
@@ -63,6 +84,10 @@ impl Supervisor {
             ack_processor: AckProcessor::new(stream),
             batch_tx: Arc::clone(&stream.batch_tx),
             is_closed: Arc::clone(&stream.is_closed),
+            close_teardown_started: Arc::clone(&stream.close_teardown_started),
+            close_state_tx: stream.close_state_tx.clone(),
+            close_outcome: Arc::clone(&stream.close_outcome),
+            last_ack_tx: stream.last_ack_tx.clone(),
             pending_batches: Arc::clone(&stream.pending_batches),
             failed_batches: Arc::clone(&stream.failed_batches),
             recovery_attempts: Arc::clone(&stream.recovery_attempts),
@@ -77,6 +102,12 @@ impl Supervisor {
             reconnect_rebuild_gate: Arc::clone(&stream.reconnect_rebuild_gate),
             #[cfg(feature = "test-hooks")]
             replay_send_gate: Arc::clone(&stream.replay_send_gate),
+            #[cfg(feature = "test-hooks")]
+            recovery_backoff_gate: Arc::clone(&stream.recovery_backoff_gate),
+            #[cfg(feature = "test-hooks")]
+            replay_progress_gate: Arc::clone(&stream.replay_progress_gate),
+            #[cfg(feature = "test-hooks")]
+            close_finalize_gate: Arc::clone(&stream.close_finalize_gate),
         }
     }
 
@@ -86,6 +117,122 @@ impl Supervisor {
     ) -> JoinHandle<ZerobusResult<()>> {
         let (response_stream, request_body) = initial_connection.into_supervisor_io();
         spawn(self.run(response_stream, request_body))
+    }
+
+    fn close_has_started(&self) -> bool {
+        self.close_state_tx.borrow().has_started()
+    }
+
+    async fn wait_for_close_request(close_rx: &mut watch::Receiver<CloseState>) {
+        loop {
+            if close_rx.borrow_and_update().has_started() {
+                return;
+            }
+            if close_rx.changed().await.is_err() {
+                std::future::pending::<()>().await;
+            }
+        }
+    }
+
+    async fn wait_for_flush_completion(close_rx: &mut watch::Receiver<CloseState>) {
+        loop {
+            if matches!(
+                &*close_rx.borrow_and_update(),
+                CloseState::FlushCompleted { .. } | CloseState::Finalized
+            ) {
+                return;
+            }
+            if close_rx.changed().await.is_err() {
+                std::future::pending::<()>().await;
+            }
+        }
+    }
+
+    async fn process_until_flush_completion<F>(
+        process: F,
+        close_rx: &mut watch::Receiver<CloseState>,
+    ) -> ZerobusResult<()>
+    where
+        F: Future<Output = ZerobusResult<()>>,
+    {
+        tokio::pin!(process);
+        tokio::select! {
+            // Poll ACK/error processing first even when FlushCompleted is already visible.
+            // A ready response must be applied before close selects its stable outcome.
+            biased;
+            result = &mut process => result,
+            _ = Self::wait_for_flush_completion(close_rx) => Ok(()),
+        }
+    }
+
+    async fn select_reconnect_before_close<R, RF, CF>(
+        reconnect: RF,
+        close_requested: CF,
+    ) -> Option<R>
+    where
+        RF: Future<Output = R>,
+        CF: Future<Output = ()>,
+    {
+        tokio::pin!(reconnect);
+        tokio::pin!(close_requested);
+        tokio::select! {
+            // Preserve a newer, already-observed reconnect result when close becomes
+            // ready simultaneously; a pending reconnect is still dropped on close.
+            biased;
+            result = &mut reconnect => Some(result),
+            _ = &mut close_requested => None,
+        }
+    }
+
+    /// Selects and stores one terminal outcome, detaches the active sender, then performs
+    /// finalization exactly once. An acknowledged close target wins a concurrent error;
+    /// otherwise a concrete supervisor error wins close's synthetic flush result.
+    async fn finish(&self, terminal_error: Option<ZerobusError>) -> ZerobusResult<()> {
+        let state = self.close_state_tx.borrow().clone();
+        let (candidate, terminal_won) =
+            state.outcome_candidate(*self.last_ack_tx.borrow(), terminal_error);
+
+        let outcome = {
+            let mut stored = self.close_outcome.lock().await;
+            stored.get_or_insert_with(|| candidate.clone()).clone()
+        };
+
+        if terminal_won {
+            if let Err(error) = &outcome {
+                let _ = self.server_error_tx.send(Some(error.clone()));
+            }
+        }
+
+        // Detaching the final sender serializes with ingest. Explicit close drops the active
+        // ACK/RPC future after FlushCompleted; only server rotation promises request-body EOF.
+        pause_and_detach_sender(&self.ingest_mutex, &self.is_paused, &self.batch_tx).await;
+
+        #[cfg(feature = "test-hooks")]
+        {
+            let barrier = self.close_finalize_gate.lock().await.take();
+            if let Some(barrier) = barrier {
+                barrier.reached.notify_one();
+                barrier.proceed.notified().await;
+            }
+        }
+
+        Self::finalize_closed(
+            &self.ingest_mutex,
+            &self.is_closed,
+            &self.pending_batches,
+            &self.failed_batches,
+            &self.last_acked_records,
+        )
+        .await;
+        self.close_teardown_started.store(false, Ordering::Release);
+        self.close_state_tx.send_replace(CloseState::Finalized);
+
+        if terminal_won {
+            if let Err(error) = &outcome {
+                let _ = self.server_error_tx.send(Some(error.clone()));
+            }
+        }
+        outcome
     }
 
     async fn run(
@@ -103,6 +250,7 @@ impl Supervisor {
         // classify as non-retryable — while still surfacing the original error if
         // retries are ultimately exhausted.
         let mut reconnect_auth_retry = false;
+        let mut close_rx = self.close_state_tx.subscribe();
 
         loop {
             if self.is_closed.load(Ordering::Relaxed) {
@@ -116,16 +264,15 @@ impl Supervisor {
             let result = if let Some(e) = pending_error.take() {
                 Err(e)
             } else {
-                self.ack_processor
-                    .process(
-                        response_stream
-                            .take()
-                            .expect("response_stream present when no pending reconnect error"),
-                        request_body
-                            .take()
-                            .expect("request_body present when no pending reconnect error"),
-                    )
-                    .await
+                let process = self.ack_processor.process(
+                    response_stream
+                        .take()
+                        .expect("response_stream present when no pending reconnect error"),
+                    request_body
+                        .take()
+                        .expect("request_body present when no pending reconnect error"),
+                );
+                Self::process_until_flush_completion(process, &mut close_rx).await
             };
 
             // Check if stream was closed during processing.
@@ -134,10 +281,17 @@ impl Supervisor {
                 return result;
             }
 
+            // A close request linearizes before any recovery work. Active ACK processing
+            // reaches here only after either a real result or close's flush completion.
+            if self.close_has_started() {
+                return self.finish(result.as_ref().err().cloned()).await;
+            }
+
             // Handle the result.
             match result {
                 Ok(()) => {
-                    // Stream ended gracefully.
+                    // Defensive: AckProcessor currently returns Ok only after is_closed,
+                    // which the fast path above handles before this match.
                     debug!(target: super::LOG_TARGET, "Supervisor: process_acks completed successfully");
                     return Ok(());
                 }
@@ -154,23 +308,7 @@ impl Supervisor {
                             max_retries = self.options.recovery_retries,
                             "Supervisor: Max recovery retries exceeded"
                         );
-                        // Publish the terminal error before finalization (so a waiter
-                        // checking is_closed right after it already sees the real error;
-                        // reconnect-failure errors carried via pending_error are never
-                        // pre-published by ACK processing) and again after (to wake
-                        // already-parked waiters). finalize_closed also drains pending
-                        // under ingest_mutex so a concurrent ingest can't be omitted.
-                        let _ = self.server_error_tx.send(Some(error.clone()));
-                        Self::finalize_closed(
-                            &self.ingest_mutex,
-                            &self.is_closed,
-                            &self.pending_batches,
-                            &self.failed_batches,
-                            &self.last_acked_records,
-                        )
-                        .await;
-                        let _ = self.server_error_tx.send(Some(error.clone()));
-                        return result;
+                        return self.finish(Some(error.clone())).await;
                     }
 
                     info!(target: super::LOG_TARGET,
@@ -189,7 +327,30 @@ impl Supervisor {
                         .await;
                     self.ack_processor.clear_request_send_failure();
 
-                    sleep(Duration::from_millis(self.options.recovery_backoff_ms)).await;
+                    let recovery_error = error.clone();
+                    #[cfg(feature = "test-hooks")]
+                    {
+                        let barrier = self.recovery_backoff_gate.lock().await.take();
+                        if let Some(barrier) = barrier {
+                            barrier.reached.notify_one();
+                            tokio::select! {
+                                biased;
+                                _ = Self::wait_for_close_request(&mut close_rx) => {
+                                    return self.finish(Some(recovery_error.clone())).await;
+                                }
+                                _ = barrier.proceed.notified() => {}
+                            }
+                        }
+                    }
+                    tokio::select! {
+                        // A close request stops backoff immediately and preserves the error
+                        // that caused recovery.
+                        biased;
+                        _ = Self::wait_for_close_request(&mut close_rx) => {
+                            return self.finish(Some(recovery_error)).await;
+                        }
+                        _ = sleep(Duration::from_millis(self.options.recovery_backoff_ms)) => {}
+                    }
 
                     let _ = self.server_error_tx.send(None);
 
@@ -208,10 +369,29 @@ impl Supervisor {
                             continue;
                         }
                     };
-                    let reconnect_result = timeout_at(recovery_deadline, self.reconnect()).await;
-
+                    let reconnect_result = match Self::select_reconnect_before_close(
+                        timeout_at(recovery_deadline, self.reconnect()),
+                        Self::wait_for_close_request(&mut close_rx),
+                    )
+                    .await
+                    {
+                        Some(result) => result,
+                        // Dropping reconnect cancels connector/header work, DoPut setup,
+                        // ready-signal waiting, or a partial replay as one operation.
+                        None => {
+                            return self.finish(Some(recovery_error.clone())).await;
+                        }
+                    };
                     match reconnect_result {
                         Ok(Ok((new_response_stream, new_request_body))) => {
+                            // `commit_reconnect_after_replay` checks the close flag while
+                            // holding ingest_mutex. If close begins after it returns, do not
+                            // install the returned connection into the supervisor loop. Replay
+                            // handoffs without observed ACKs remain retrievable by design;
+                            // retrying them has the transport's normal at-least-once semantics.
+                            if self.close_has_started() {
+                                return self.finish(Some(recovery_error)).await;
+                            }
                             info!(target: super::LOG_TARGET, "Supervisor: Recovery successful, resuming");
                             self.recovery_attempts.store(0, Ordering::Relaxed);
                             // is_paused was already cleared inside reconnect().
@@ -219,18 +399,30 @@ impl Supervisor {
                             request_body = Some(new_request_body);
                         }
                         Ok(Err(e)) => {
+                            // The reconnect result is newer and more specific than the
+                            // error that initiated recovery unless sender commit returned
+                            // its private signal that close won the atomic race.
+                            if self.close_has_started() {
+                                let error = Self::close_reconnect_error(e, recovery_error);
+                                return self.finish(Some(error)).await;
+                            }
                             warn!(target: super::LOG_TARGET, "Supervisor: Reconnection failed: {}", e);
                             // Ask the provider to invalidate cached authentication
                             // state after an auth rejection, then retry even though
                             // such errors are otherwise non-retryable. Preserve this
                             // reconnect error if refresh or later recovery cannot proceed.
                             if e.is_auth_rejection() {
-                                match timeout_at(
-                                    recovery_deadline,
-                                    self.headers_provider.invalidate(),
-                                )
-                                .await
-                                {
+                                let invalidation = tokio::select! {
+                                    biased;
+                                    _ = Self::wait_for_close_request(&mut close_rx) => {
+                                        return self.finish(Some(e.clone())).await;
+                                    }
+                                    result = timeout_at(
+                                        recovery_deadline,
+                                        self.headers_provider.invalidate(),
+                                    ) => result,
+                                };
+                                match invalidation {
                                     Ok(()) => reconnect_auth_retry = true,
                                     Err(_) => {
                                         warn!(target: super::LOG_TARGET,
@@ -238,27 +430,16 @@ impl Supervisor {
                                             "Recovery deadline reached while invalidating \
                                              the headers provider; terminating recovery"
                                         );
-                                        // A custom provider must not stall recovery
-                                        // indefinitely. Close with the original auth
-                                        // rejection; publish before and after
-                                        // finalization for waiter race-freedom.
-                                        let _ = self.server_error_tx.send(Some(e.clone()));
-                                        Self::finalize_closed(
-                                            &self.ingest_mutex,
-                                            &self.is_closed,
-                                            &self.pending_batches,
-                                            &self.failed_batches,
-                                            &self.last_acked_records,
-                                        )
-                                        .await;
-                                        let _ = self.server_error_tx.send(Some(e.clone()));
-                                        return Err(e);
+                                        return self.finish(Some(e)).await;
                                     }
                                 }
                             }
                             pending_error = Some(e);
                         }
                         Err(_timeout) => {
+                            if self.close_has_started() {
+                                return self.finish(Some(recovery_error)).await;
+                            }
                             warn!(target: super::LOG_TARGET, "Supervisor: Reconnection timed out");
                             pending_error = Some(ZerobusError::ConnectionTimeout(format!(
                                 "Reconnection timed out after {}ms",
@@ -269,22 +450,7 @@ impl Supervisor {
                 }
                 Err(error) => {
                     error!(target: super::LOG_TARGET, "Supervisor: Non-retriable error, closing stream: {}", error);
-                    // Publish the terminal error before finalization (so a waiter
-                    // checking is_closed right after it already sees the real error;
-                    // reconnect-failure errors carried via pending_error are never
-                    // pre-published by ACK processing) and again after (to wake
-                    // already-parked waiters). finalize_closed drains pending under
-                    // ingest_mutex so a concurrent ingest can't be omitted.
-                    let _ = self.server_error_tx.send(Some(error.clone()));
-                    Self::finalize_closed(
-                        &self.ingest_mutex,
-                        &self.is_closed,
-                        &self.pending_batches,
-                        &self.failed_batches,
-                        &self.last_acked_records,
-                    )
-                    .await;
-                    let _ = self.server_error_tx.send(Some(error.clone()));
+                    let outcome = self.finish(Some(error.clone())).await;
                     // Ask the provider to invalidate cached authentication state after
                     // a terminal rejection. The stream is already finalized and waiters
                     // have the real error; bound the callback so the supervisor cannot
@@ -314,7 +480,7 @@ impl Supervisor {
                             }
                         }
                     }
-                    return Err(error);
+                    return outcome;
                 }
             }
         }
@@ -364,16 +530,34 @@ impl Supervisor {
             &self.submitted_records,
             &self.last_acked_records,
             acked_before_disconnect,
-            #[cfg(feature = "test-hooks")]
-            Some(&self.replay_send_gate),
+            ReplayGates {
+                #[cfg(feature = "test-hooks")]
+                replay_send: Some(&self.replay_send_gate),
+                replay_progress: {
+                    #[cfg(feature = "test-hooks")]
+                    {
+                        Some(&self.replay_progress_gate)
+                    }
+                    #[cfg(not(feature = "test-hooks"))]
+                    {
+                        None
+                    }
+                },
+            },
         )
         .await;
 
         // Commit the replacement sender only after replay succeeds. While ingest_mutex
         // remains held, publish the sender before clearing the pause gate so normal ingest
         // cannot observe an unpaused stream without its active sender.
-        Self::commit_reconnect_after_replay(replay_result, tx, &self.batch_tx, &self.is_paused)
-            .await?;
+        Self::commit_reconnect_after_replay(
+            replay_result,
+            tx,
+            &self.batch_tx,
+            &self.is_paused,
+            &self.close_teardown_started,
+        )
+        .await?;
 
         // ACK processing cannot resume until reconnect returns. Refresh only after replay
         // is fully committed so connection setup, backlog sends, and sender publication do
@@ -391,14 +575,51 @@ impl Supervisor {
         tx: mpsc::Sender<Result<RecordBatch, FlightError>>,
         batch_tx: &BatchSender,
         is_paused: &AtomicBool,
+        close_teardown_started: &AtomicBool,
     ) -> ZerobusResult<()> {
         replay_result?;
+        if close_teardown_started.load(Ordering::Acquire) {
+            return Err(Self::explicit_close_recovery_cancellation());
+        }
         {
             let mut tx_guard = batch_tx.lock().await;
             *tx_guard = Some(tx.clone());
+            // Close may begin after the first check. Ingest cannot observe this temporary
+            // sender because reconnect still holds ingest_mutex; remove it before lifting
+            // the pause gate so no replacement is published after close begins.
+            if close_teardown_started.load(Ordering::Acquire) {
+                *tx_guard = None;
+                return Err(Self::explicit_close_recovery_cancellation());
+            }
         }
         is_paused.store(false, Ordering::Relaxed);
         Ok(())
+    }
+
+    fn explicit_close_recovery_cancellation() -> ZerobusError {
+        ZerobusError::StreamClosedError(tonic::Status::cancelled(
+            EXPLICIT_CLOSE_INTERRUPTED_RECOVERY,
+        ))
+    }
+
+    fn is_explicit_close_recovery_cancellation(error: &ZerobusError) -> bool {
+        matches!(
+            error,
+            ZerobusError::StreamClosedError(status)
+                if status.code() == tonic::Code::Cancelled
+                    && status.message() == EXPLICIT_CLOSE_INTERRUPTED_RECOVERY
+        )
+    }
+
+    fn close_reconnect_error(
+        reconnect_error: ZerobusError,
+        recovery_error: ZerobusError,
+    ) -> ZerobusError {
+        if Self::is_explicit_close_recovery_cancellation(&reconnect_error) {
+            recovery_error
+        } else {
+            reconnect_error
+        }
     }
 
     /// Rebuilds `pending_batches` for replay after a reconnect and replays them over
@@ -417,7 +638,7 @@ impl Supervisor {
         submitted_records: &Arc<AtomicU64>,
         last_acked_records: &Arc<AtomicU64>,
         acked_before_disconnect: u64,
-        #[cfg(feature = "test-hooks")] replay_send_gate: Option<&super::ReplaySendGate>,
+        replay_gates: ReplayGates<'_>,
     ) -> ZerobusResult<()> {
         let replay_batches: Vec<RecordBatch> = {
             let mut pending = pending_batches.lock().await;
@@ -444,7 +665,11 @@ impl Supervisor {
         // held by the caller); pending stays intact on failure. The replacement response
         // stream is not polled until replay returns, so publishing after each successful
         // handoff cannot race a valid acknowledgement on this connection.
-        for batch in replay_batches {
+        let replay_barrier = match replay_gates.replay_progress {
+            Some(gate) => gate.lock().await.take(),
+            None => None,
+        };
+        for (index, batch) in replay_batches.into_iter().enumerate() {
             let record_count = batch.num_rows() as u64;
             if tx.send(Ok(batch)).await.is_err() {
                 return Err(ZerobusError::StreamClosedError(tonic::Status::internal(
@@ -452,10 +677,15 @@ impl Supervisor {
                 )));
             }
             submitted_records.fetch_add(record_count, Ordering::Release);
-
+            if index == 0 {
+                if let Some(barrier) = &replay_barrier {
+                    barrier.reached.notify_one();
+                    barrier.proceed.notified().await;
+                }
+            }
             #[cfg(feature = "test-hooks")]
             {
-                let barrier = match replay_send_gate {
+                let barrier = match replay_gates.replay_send {
                     Some(gate) => gate.lock().await.take(),
                     None => None,
                 };
@@ -514,19 +744,20 @@ impl Supervisor {
 mod tests {
     use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
     use std::sync::Arc;
+    use std::task::Poll;
 
     use arrow_array::Int32Array;
     use arrow_flight::error::FlightError;
     use arrow_flight::PutResult;
     use arrow_schema::{DataType, Field, Schema as ArrowSchema};
     use futures::stream::iter;
-    use tokio::sync::{mpsc, Mutex, Semaphore};
+    use tokio::sync::{mpsc, watch, Mutex, Semaphore};
     use tokio::time::{timeout, Duration, Instant};
 
     use super::super::metadata::FlightAckMetadata;
     use super::{
-        pause_and_detach_sender, AckProcessor, BatchSender, PendingBatch, RecordBatch, Supervisor,
-        ZerobusError,
+        pause_and_detach_sender, AckProcessor, BatchSender, CloseState, PendingBatch, RecordBatch,
+        ReplayGates, Supervisor, ZerobusError, ZerobusResult,
     };
     use crate::offset_generator::OffsetId;
 
@@ -559,18 +790,105 @@ mod tests {
         )
     }
 
+    fn flush_completed_state(
+        target_offset: Option<OffsetId>,
+        result: ZerobusResult<()>,
+    ) -> CloseState {
+        CloseState::FlushCompleted {
+            request: super::super::CloseRequest { target_offset },
+            result,
+        }
+    }
+
+    #[tokio::test]
+    async fn ready_process_error_wins_over_visible_flush_completion() {
+        let (close_tx, mut close_rx) = watch::channel(CloseState::Open);
+        close_tx.send_replace(flush_completed_state(
+            Some(0),
+            Err(ZerobusError::StreamClosedError(
+                tonic::Status::deadline_exceeded("Flush timed out"),
+            )),
+        ));
+
+        let result = Supervisor::process_until_flush_completion(
+            async {
+                Err(ZerobusError::StreamClosedError(
+                    tonic::Status::unauthenticated("ready peer rejection"),
+                ))
+            },
+            &mut close_rx,
+        )
+        .await
+        .expect_err("a ready peer error must win");
+        assert!(result.to_string().contains("ready peer rejection"));
+    }
+
+    #[tokio::test]
+    async fn ready_ack_work_is_polled_before_visible_flush_completion() {
+        let (close_tx, mut close_rx) = watch::channel(CloseState::Open);
+        close_tx.send_replace(flush_completed_state(Some(0), Ok(())));
+        let process_polled = Arc::new(AtomicBool::new(false));
+        let process_polled_clone = Arc::clone(&process_polled);
+        let process = std::future::poll_fn(move |_cx| {
+            process_polled_clone.store(true, Ordering::Release);
+            Poll::<ZerobusResult<()>>::Pending
+        });
+
+        timeout(
+            Duration::from_secs(1),
+            Supervisor::process_until_flush_completion(process, &mut close_rx),
+        )
+        .await
+        .expect("visible FlushCompleted must stop pending processing")
+        .expect("flush completion is clean");
+        assert!(process_polled.load(Ordering::Acquire));
+    }
+
+    #[tokio::test]
+    async fn ready_reconnect_result_wins_over_ready_close_request() {
+        let selected = Supervisor::select_reconnect_before_close(
+            std::future::ready("reconnect result"),
+            std::future::ready(()),
+        )
+        .await;
+
+        assert_eq!(selected, Some("reconnect result"));
+    }
+
+    #[test]
+    fn empty_close_target_does_not_mask_terminal_error() {
+        let state = flush_completed_state(None, Ok(()));
+        let (outcome, terminal_won) = state.outcome_candidate(
+            None,
+            Some(ZerobusError::CreateStreamError(
+                tonic::Status::unauthenticated("idle stream rejected"),
+            )),
+        );
+        assert!(terminal_won);
+        assert!(outcome
+            .expect_err("terminal error must win an empty close")
+            .to_string()
+            .contains("idle stream rejected"));
+    }
+
     #[tokio::test]
     async fn failed_replay_leaves_sender_detached_and_closes_request_channel() {
         let (tx, mut request_rx) = mpsc::channel::<Result<RecordBatch, FlightError>>(1);
         let batch_tx: BatchSender = Arc::new(Mutex::new(None));
         let is_paused = AtomicBool::new(true);
+        let close_teardown_started = AtomicBool::new(false);
         let replay_result = Err(ZerobusError::StreamClosedError(tonic::Status::internal(
             "failed replay",
         )));
 
-        let result =
-            Supervisor::commit_reconnect_after_replay(replay_result, tx, &batch_tx, &is_paused)
-                .await;
+        let result = Supervisor::commit_reconnect_after_replay(
+            replay_result,
+            tx,
+            &batch_tx,
+            &is_paused,
+            &close_teardown_started,
+        )
+        .await;
 
         assert!(result.is_err());
         assert!(batch_tx.lock().await.is_none());
@@ -627,8 +945,7 @@ mod tests {
             &submitted_records,
             &last_acked_records,
             acked_before_disconnect,
-            #[cfg(feature = "test-hooks")]
-            None,
+            ReplayGates::default(),
         )
         .await
         .expect("replay should succeed");
@@ -682,8 +999,7 @@ mod tests {
             &submitted,
             &last_acked,
             0,
-            #[cfg(feature = "test-hooks")]
-            None,
+            ReplayGates::default(),
         )
         .await;
         assert!(res.is_err(), "replay must surface the send failure");
@@ -754,8 +1070,7 @@ mod tests {
             &submitted,
             &last_acked,
             0,
-            #[cfg(feature = "test-hooks")]
-            None,
+            ReplayGates::default(),
         )
         .await;
         assert!(res.is_ok());
@@ -804,8 +1119,7 @@ mod tests {
             &submitted,
             &last_acked,
             4,
-            #[cfg(feature = "test-hooks")]
-            None,
+            ReplayGates::default(),
         )
         .await;
         assert!(res.is_ok());

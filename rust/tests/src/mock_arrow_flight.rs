@@ -76,6 +76,16 @@ pub enum MockFlightResponse {
     FailSetup { status: Status },
     /// Reject a connection's setup after a delay.
     FailSetupAfter { status: Status, delay_ms: u64 },
+    /// Park the DoPut RPC before returning its response stream to the client.
+    HoldDoPut {
+        reached: Arc<Notify>,
+        proceed: Arc<Notify>,
+    },
+    /// Park setup after receiving the schema but before emitting the ready signal.
+    HoldSetup {
+        reached: Arc<Notify>,
+        proceed: Arc<Notify>,
+    },
     /// Close stream (drop the connection) - useful for testing recovery.
     CloseStream { delay_ms: u64 },
     /// Graceful close signal - sends a close signal with grace period duration.
@@ -268,6 +278,34 @@ impl FlightService for MockFlightServer {
 
         info!("Received DoPut request for table: {}", table_name);
 
+        // A scripted DoPut hold models the RPC/HTTP2 handshake itself: the client has
+        // opened the request but `FlightServiceClient::do_put().await` has not returned.
+        // Consume it here so the spawned response task begins at the following script item.
+        let do_put_hold = {
+            let response_map = self.responses.lock().await;
+            let response_index = {
+                let indices = self.response_indices.lock().await;
+                *indices.get(&table_name).unwrap_or(&0)
+            };
+            match response_map
+                .get(&table_name)
+                .and_then(|responses| responses.get(response_index))
+            {
+                Some(MockFlightResponse::HoldDoPut { reached, proceed }) => {
+                    Some((response_index, Arc::clone(reached), Arc::clone(proceed)))
+                }
+                _ => None,
+            }
+        };
+        if let Some((response_index, reached, proceed)) = do_put_hold {
+            self.response_indices
+                .lock()
+                .await
+                .insert(table_name.clone(), response_index + 1);
+            reached.notify_one();
+            proceed.notified().await;
+        }
+
         let mut stream = request.into_inner();
         let (tx, rx) = mpsc::channel(100);
 
@@ -325,6 +363,20 @@ impl FlightService for MockFlightServer {
                 if is_first_message {
                     is_first_message = false;
                     if flight_data.app_metadata.is_empty() {
+                        if let Some(MockFlightResponse::HoldSetup { reached, proceed }) =
+                            stream_responses.get(response_index)
+                        {
+                            let reached = Arc::clone(reached);
+                            let proceed = Arc::clone(proceed);
+                            response_index += 1;
+                            {
+                                let mut indices = response_indices.lock().await;
+                                indices.insert(table_name.clone(), response_index);
+                            }
+                            reached.notify_one();
+                            proceed.notified().await;
+                        }
+
                         // A scripted FailSetup rejects this connection's setup: send the
                         // error instead of the ready signal (simulates a reconnect failure).
                         let setup_failure = match stream_responses.get(response_index) {
@@ -517,6 +569,12 @@ impl FlightService for MockFlightServer {
                             }
                             let _ = tx.send(Err(status)).await;
                             return;
+                        }
+                        MockFlightResponse::HoldDoPut { .. } => {
+                            unreachable!("HoldDoPut is consumed by the DoPut handler")
+                        }
+                        MockFlightResponse::HoldSetup { .. } => {
+                            unreachable!("HoldSetup is consumed by the schema message")
                         }
                         MockFlightResponse::CloseStream { delay_ms } => {
                             // CloseStream triggers immediately - simulates server closing without ack

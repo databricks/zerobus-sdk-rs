@@ -18,6 +18,10 @@
   `InvalidArgument` when ACK or recovery deadlines exceed the platform
   monotonic-clock range. Server-advertised graceful-rotation periods are capped
   at one year.
+- Fixed Arrow Flight explicit close during recovery. Close now interrupts recovery
+  backoff, connection setup, ready-signal waiting, and replay; the supervisor finalizes
+  exactly once, preserves real peer/authentication errors, and retains only the correct
+  unacknowledged batch suffixes.
 - Fixed Arrow Flight recovery sender lifetime: replacement senders are now published
   only after pending replay succeeds, while initial supervisor handoff and failed or
   cancelled replay promptly drop redundant senders instead of retaining incomplete

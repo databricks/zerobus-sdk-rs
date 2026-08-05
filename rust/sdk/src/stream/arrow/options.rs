@@ -136,8 +136,10 @@ pub struct ArrowStreamConfigurationOptions {
     /// available through `get_unacked_batches()`.
     ///
     /// The clean half-close guarantee applies to the active connection during normal
-    /// server rotation. Explicit close during recovery remains best-effort and may abort
-    /// an incomplete replacement request.
+    /// server rotation. Explicit close interrupts any recovery phase, cancels an incomplete
+    /// replacement request, and retains its unacknowledged suffixes for retrieval. As with
+    /// any lost acknowledgment, retrying those suffixes can duplicate records the server
+    /// made durable before the replacement connection was interrupted.
     ///
     /// Default: `None` (use the available server grace period)
     pub stream_paused_max_wait_time_ms: Option<u64>,
