@@ -84,7 +84,7 @@ fn ipc_schema_bytes_to_arrow_schema(
 // =============================================================================
 
 /// Arrow IPC compression codec.
-#[pyclass]
+#[pyclass(from_py_object)]
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum IPCCompression {
     /// No compression (default).
@@ -123,7 +123,7 @@ impl IPCCompression {
 ///
 /// **Beta**: Arrow Flight ingestion is in Beta. The API is stabilising but
 /// may still change before reaching GA.
-#[pyclass]
+#[pyclass(from_py_object)]
 #[derive(Clone)]
 pub struct ArrowStreamConfigurationOptions {
     #[pyo3(get, set)]
@@ -184,12 +184,13 @@ impl Default for ArrowStreamConfigurationOptions {
 impl ArrowStreamConfigurationOptions {
     #[new]
     #[pyo3(signature = (**kwargs))]
-    fn new(kwargs: Option<&pyo3::types::PyDict>) -> PyResult<Self> {
+    fn new(kwargs: Option<&Bound<'_, pyo3::types::PyDict>>) -> PyResult<Self> {
         let mut options = Self::default();
 
         if let Some(kwargs) = kwargs {
-            for (key, value) in kwargs {
-                let key_str: &str = key.extract()?;
+            for (key, value) in kwargs.iter() {
+                let key_str: String = key.extract()?;
+                let key_str = key_str.as_str();
                 match key_str {
                     "max_inflight_batches" => options.max_inflight_batches = value.extract()?,
                     "recovery" => options.recovery = value.extract()?,
@@ -308,11 +309,11 @@ pub struct ZerobusArrowStream {
 #[pymethods]
 impl ZerobusArrowStream {
     /// Ingest a single Arrow RecordBatch (as IPC bytes) and return the offset.
-    fn ingest_batch(&self, py: Python, ipc_bytes: &PyBytes) -> PyResult<i64> {
+    fn ingest_batch(&self, py: Python, ipc_bytes: &Bound<'_, PyBytes>) -> PyResult<i64> {
         let batch = ipc_bytes_to_record_batch(ipc_bytes.as_bytes()).map_err(map_error)?;
         let stream = self.inner.clone();
         let runtime = self.runtime.clone();
-        py.allow_threads(|| {
+        py.detach(|| {
             runtime.block_on(async move {
                 let guard = stream.read().await;
                 guard.ingest_batch(batch).await.map_err(map_error)
@@ -325,7 +326,7 @@ impl ZerobusArrowStream {
         let stream = self.inner.clone();
         let runtime = self.runtime.clone();
 
-        py.allow_threads(|| {
+        py.detach(|| {
             runtime.block_on(async move {
                 let guard = stream.read().await;
                 guard.wait_for_offset(offset).await.map_err(map_error)
@@ -338,7 +339,7 @@ impl ZerobusArrowStream {
         let stream = self.inner.clone();
         let runtime = self.runtime.clone();
 
-        py.allow_threads(|| {
+        py.detach(|| {
             runtime.block_on(async move {
                 let guard = stream.read().await;
                 guard.flush().await.map_err(map_error)
@@ -351,7 +352,7 @@ impl ZerobusArrowStream {
         let stream = self.inner.clone();
         let runtime = self.runtime.clone();
 
-        py.allow_threads(|| {
+        py.detach(|| {
             runtime.block_on(async move {
                 let mut guard = stream.write().await;
                 guard.close().await.map_err(map_error)
@@ -364,7 +365,7 @@ impl ZerobusArrowStream {
     fn is_closed(&self, py: Python) -> bool {
         let stream = self.inner.clone();
         let runtime = self.runtime.clone();
-        py.allow_threads(|| {
+        py.detach(|| {
             runtime.block_on(async move {
                 let guard = stream.read().await;
                 guard.is_closed()
@@ -377,7 +378,7 @@ impl ZerobusArrowStream {
     fn table_name(&self, py: Python) -> String {
         let stream = self.inner.clone();
         let runtime = self.runtime.clone();
-        py.allow_threads(|| {
+        py.detach(|| {
             runtime.block_on(async move {
                 let guard = stream.read().await;
                 guard.table_name().to_string()
@@ -386,16 +387,16 @@ impl ZerobusArrowStream {
     }
 
     /// Get unacknowledged batches as a list of Arrow IPC byte buffers.
-    fn get_unacked_batches(&self, py: Python) -> PyResult<Vec<PyObject>> {
+    fn get_unacked_batches(&self, py: Python) -> PyResult<Vec<Py<PyAny>>> {
         let stream = self.inner.clone();
         let runtime = self.runtime.clone();
 
-        py.allow_threads(|| {
+        py.detach(|| {
             runtime.block_on(async move {
                 let guard = stream.read().await;
                 let batches = guard.get_unacked_batches().await.map_err(map_error)?;
 
-                Python::with_gil(|py| {
+                Python::attach(|py| {
                     let mut out = Vec::with_capacity(batches.len());
                     for batch in &batches {
                         let ipc = record_batch_to_ipc_bytes(batch).map_err(map_error)?;
@@ -424,20 +425,24 @@ pub struct AsyncZerobusArrowStream {
 #[pymethods]
 impl AsyncZerobusArrowStream {
     /// Ingest a single Arrow RecordBatch (as IPC bytes) and return the offset.
-    fn ingest_batch<'py>(&self, py: Python<'py>, ipc_bytes: &PyBytes) -> PyResult<&'py PyAny> {
+    fn ingest_batch<'py>(
+        &self,
+        py: Python<'py>,
+        ipc_bytes: &Bound<'_, PyBytes>,
+    ) -> PyResult<Bound<'py, PyAny>> {
         let batch = ipc_bytes_to_record_batch(ipc_bytes.as_bytes()).map_err(map_error)?;
         let stream = self.inner.clone();
-        pyo3_asyncio::tokio::future_into_py(py, async move {
+        pyo3_async_runtimes::tokio::future_into_py(py, async move {
             let guard = stream.read().await;
             guard.ingest_batch(batch).await.map_err(map_error)
         })
     }
 
     /// Wait for a specific offset to be acknowledged.
-    fn wait_for_offset<'py>(&self, py: Python<'py>, offset: i64) -> PyResult<&'py PyAny> {
+    fn wait_for_offset<'py>(&self, py: Python<'py>, offset: i64) -> PyResult<Bound<'py, PyAny>> {
         let stream = self.inner.clone();
 
-        pyo3_asyncio::tokio::future_into_py(py, async move {
+        pyo3_async_runtimes::tokio::future_into_py(py, async move {
             let guard = stream.read().await;
             guard.wait_for_offset(offset).await.map_err(map_error)?;
             Ok(())
@@ -445,10 +450,10 @@ impl AsyncZerobusArrowStream {
     }
 
     /// Flush all pending batches.
-    fn flush<'py>(&self, py: Python<'py>) -> PyResult<&'py PyAny> {
+    fn flush<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
         let stream = self.inner.clone();
 
-        pyo3_asyncio::tokio::future_into_py(py, async move {
+        pyo3_async_runtimes::tokio::future_into_py(py, async move {
             let guard = stream.read().await;
             guard.flush().await.map_err(map_error)?;
             Ok(())
@@ -456,10 +461,10 @@ impl AsyncZerobusArrowStream {
     }
 
     /// Close the stream gracefully.
-    fn close<'py>(&self, py: Python<'py>) -> PyResult<&'py PyAny> {
+    fn close<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
         let stream = self.inner.clone();
 
-        pyo3_asyncio::tokio::future_into_py(py, async move {
+        pyo3_async_runtimes::tokio::future_into_py(py, async move {
             let mut guard = stream.write().await;
             guard.close().await.map_err(map_error)?;
             Ok(())
@@ -489,15 +494,15 @@ impl AsyncZerobusArrowStream {
     }
 
     /// Get unacknowledged batches as a list of Arrow IPC byte buffers.
-    fn get_unacked_batches<'py>(&self, py: Python<'py>) -> PyResult<&'py PyAny> {
+    fn get_unacked_batches<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
         let stream = self.inner.clone();
 
-        pyo3_asyncio::tokio::future_into_py(py, async move {
+        pyo3_async_runtimes::tokio::future_into_py(py, async move {
             let guard = stream.read().await;
             let batches = guard.get_unacked_batches().await.map_err(map_error)?;
 
-            Python::with_gil(|py| {
-                let mut out: Vec<PyObject> = Vec::with_capacity(batches.len());
+            Python::attach(|py| {
+                let mut out: Vec<Py<PyAny>> = Vec::with_capacity(batches.len());
                 for batch in &batches {
                     let ipc = record_batch_to_ipc_bytes(batch).map_err(map_error)?;
                     out.push(PyBytes::new(py, &ipc).into());
@@ -519,7 +524,7 @@ fn build_arrow_builder<'a>(
     schema_ipc_bytes: &[u8],
     client_id: Option<String>,
     client_secret: Option<String>,
-    headers_provider: Option<PyObject>,
+    headers_provider: Option<Py<PyAny>>,
     options: &ArrowStreamConfigurationOptions,
 ) -> PyResult<StreamBuilder<'a>> {
     let schema = ipc_schema_bytes_to_arrow_schema(schema_ipc_bytes).map_err(map_error)?;
@@ -556,7 +561,7 @@ pub fn create_arrow_stream_sync(
     let runtime_for_return = runtime.clone();
     let schema_bytes = schema_ipc_bytes.to_vec();
 
-    let stream = py.allow_threads(|| {
+    let stream = py.detach(|| {
         runtime.block_on(async move {
             let sdk_guard = sdk.read().await;
             let builder = build_arrow_builder(
@@ -585,7 +590,7 @@ pub fn create_arrow_stream_with_headers_provider_sync(
     py: Python,
     table_name: String,
     schema_ipc_bytes: &[u8],
-    headers_provider: PyObject,
+    headers_provider: Py<PyAny>,
     options: Option<&ArrowStreamConfigurationOptions>,
 ) -> PyResult<ZerobusArrowStream> {
     let opts = options.cloned().unwrap_or_default();
@@ -594,7 +599,7 @@ pub fn create_arrow_stream_with_headers_provider_sync(
     let runtime_for_return = runtime.clone();
     let schema_bytes = schema_ipc_bytes.to_vec();
 
-    let stream = py.allow_threads(|| {
+    let stream = py.detach(|| {
         runtime.block_on(async move {
             let sdk_guard = sdk.read().await;
             let builder = build_arrow_builder(
@@ -628,7 +633,7 @@ pub fn recreate_arrow_stream_sync(
     let runtime = runtime.clone();
     let runtime_for_return = runtime.clone();
 
-    let stream = py.allow_threads(|| {
+    let stream = py.detach(|| {
         runtime.block_on(async move {
             let old_guard = old.read().await;
             let sdk_guard = sdk.read().await;
@@ -655,11 +660,11 @@ pub fn create_arrow_stream_async<'py>(
     client_id: String,
     client_secret: String,
     options: Option<ArrowStreamConfigurationOptions>,
-) -> PyResult<&'py PyAny> {
+) -> PyResult<Bound<'py, PyAny>> {
     let opts = options.unwrap_or_default();
     let sdk = sdk.clone();
 
-    pyo3_asyncio::tokio::future_into_py(py, async move {
+    pyo3_async_runtimes::tokio::future_into_py(py, async move {
         let sdk_guard = sdk.read().await;
         let builder = build_arrow_builder(
             &*sdk_guard,
@@ -683,13 +688,13 @@ pub fn create_arrow_stream_with_headers_provider_async<'py>(
     py: Python<'py>,
     table_name: String,
     schema_ipc_bytes: Vec<u8>,
-    headers_provider: PyObject,
+    headers_provider: Py<PyAny>,
     options: Option<ArrowStreamConfigurationOptions>,
-) -> PyResult<&'py PyAny> {
+) -> PyResult<Bound<'py, PyAny>> {
     let opts = options.unwrap_or_default();
     let sdk = sdk.clone();
 
-    pyo3_asyncio::tokio::future_into_py(py, async move {
+    pyo3_async_runtimes::tokio::future_into_py(py, async move {
         let sdk_guard = sdk.read().await;
         let builder = build_arrow_builder(
             &*sdk_guard,
@@ -712,11 +717,11 @@ pub fn recreate_arrow_stream_async<'py>(
     sdk: &Arc<RwLock<RustSdk>>,
     py: Python<'py>,
     old_stream: &AsyncZerobusArrowStream,
-) -> PyResult<&'py PyAny> {
+) -> PyResult<Bound<'py, PyAny>> {
     let sdk = sdk.clone();
     let old = old_stream.inner.clone();
 
-    pyo3_asyncio::tokio::future_into_py(py, async move {
+    pyo3_async_runtimes::tokio::future_into_py(py, async move {
         let old_guard = old.read().await;
         let sdk_guard = sdk.read().await;
         let stream = sdk_guard

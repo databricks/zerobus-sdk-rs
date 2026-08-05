@@ -60,7 +60,7 @@ impl RecordAcknowledgment {
         let runtime = self.runtime.clone();
         let offset = self.offset;
 
-        py.allow_threads(|| {
+        py.detach(|| {
             runtime.block_on(async move {
                 let guard = stream.read().await;
                 guard.wait_for_offset(offset).await.map_err(map_error)
@@ -95,13 +95,17 @@ impl ZerobusStream {
         since = "0.3.0",
         note = "Use ingest_record_offset() instead for better performance"
     )]
-    fn ingest_record(&self, py: Python, payload: &PyAny) -> PyResult<RecordAcknowledgment> {
+    fn ingest_record(
+        &self,
+        py: Python,
+        payload: &Bound<'_, PyAny>,
+    ) -> PyResult<RecordAcknowledgment> {
         let record_payload = extract_record_payload(payload)?;
         let stream = self.inner.clone();
         let runtime = self.runtime.clone();
 
         // Stage 1: enqueue and get the offset.
-        let offset = py.allow_threads(|| {
+        let offset = py.detach(|| {
             runtime.block_on(async move {
                 let guard = stream.read().await;
                 guard
@@ -120,12 +124,12 @@ impl ZerobusStream {
     }
 
     /// Ingest a single record and return the offset directly (optimized API)
-    fn ingest_record_offset(&self, py: Python, payload: &PyAny) -> PyResult<i64> {
+    fn ingest_record_offset(&self, py: Python, payload: &Bound<'_, PyAny>) -> PyResult<i64> {
         let record_payload = extract_record_payload(payload)?;
         let stream = self.inner.clone();
         let runtime = self.runtime.clone();
 
-        py.allow_threads(|| {
+        py.detach(|| {
             runtime.block_on(async move {
                 let guard = stream.read().await;
                 guard
@@ -137,7 +141,7 @@ impl ZerobusStream {
     }
 
     /// Ingest a single record without waiting for acknowledgment (fire-and-forget)
-    fn ingest_record_nowait(&self, payload: &PyAny) -> PyResult<()> {
+    fn ingest_record_nowait(&self, payload: &Bound<'_, PyAny>) -> PyResult<()> {
         let record_payload = extract_record_payload(payload)?;
         let stream = self.inner.clone();
 
@@ -150,7 +154,11 @@ impl ZerobusStream {
     }
 
     /// Ingest multiple records and return one offset for the whole batch (batch API)
-    fn ingest_records_offset(&self, py: Python, payloads: &PyAny) -> PyResult<Option<i64>> {
+    fn ingest_records_offset(
+        &self,
+        py: Python,
+        payloads: &Bound<'_, PyAny>,
+    ) -> PyResult<Option<i64>> {
         let record_payloads = extract_record_payloads(payloads)?;
         if record_payloads.is_empty() {
             return Ok(None);
@@ -159,7 +167,7 @@ impl ZerobusStream {
         let stream = self.inner.clone();
         let runtime = self.runtime.clone();
 
-        py.allow_threads(|| {
+        py.detach(|| {
             runtime.block_on(async move {
                 let guard = stream.read().await;
                 guard
@@ -171,7 +179,7 @@ impl ZerobusStream {
     }
 
     /// Ingest multiple records without waiting for acknowledgments (batch fire-and-forget)
-    fn ingest_records_nowait(&self, payloads: &PyAny) -> PyResult<()> {
+    fn ingest_records_nowait(&self, payloads: &Bound<'_, PyAny>) -> PyResult<()> {
         let record_payloads = extract_record_payloads(payloads)?;
         let stream = self.inner.clone();
 
@@ -189,7 +197,7 @@ impl ZerobusStream {
         let stream = self.inner.clone();
         let runtime = self.runtime.clone();
 
-        py.allow_threads(|| {
+        py.detach(|| {
             runtime.block_on(async move {
                 let guard = stream.read().await;
                 guard.wait_for_offset(offset).await.map_err(map_error)
@@ -202,7 +210,7 @@ impl ZerobusStream {
         let stream = self.inner.clone();
         let runtime = self.runtime.clone();
 
-        py.allow_threads(|| {
+        py.detach(|| {
             runtime.block_on(async move {
                 let guard = stream.read().await;
                 guard.flush().await.map_err(map_error)
@@ -215,7 +223,7 @@ impl ZerobusStream {
         let stream = self.inner.clone();
         let runtime = self.runtime.clone();
 
-        py.allow_threads(|| {
+        py.detach(|| {
             runtime.block_on(async move {
                 let mut guard = stream.write().await;
                 guard.close().await.map_err(map_error)
@@ -224,17 +232,17 @@ impl ZerobusStream {
     }
 
     /// Get unacknowledged records
-    fn get_unacked_records(&self, py: Python) -> PyResult<Vec<PyObject>> {
+    fn get_unacked_records(&self, py: Python) -> PyResult<Vec<Py<PyAny>>> {
         let stream = self.inner.clone();
         let runtime = self.runtime.clone();
 
-        py.allow_threads(|| {
+        py.detach(|| {
             runtime.block_on(async move {
                 let guard = stream.read().await;
                 let records = guard.get_unacked_records().await.map_err(map_error)?;
 
-                Python::with_gil(|py| {
-                    let out: Vec<PyObject> = records
+                Python::attach(|py| {
+                    let out: Vec<Py<PyAny>> = records
                         .map(|record| encoded_record_to_pybytes(py, record))
                         .collect();
                     Ok(out)
@@ -244,17 +252,17 @@ impl ZerobusStream {
     }
 
     /// Get unacknowledged batches
-    fn get_unacked_batches(&self, py: Python) -> PyResult<Vec<Vec<PyObject>>> {
+    fn get_unacked_batches(&self, py: Python) -> PyResult<Vec<Vec<Py<PyAny>>>> {
         let stream = self.inner.clone();
         let runtime = self.runtime.clone();
 
-        py.allow_threads(|| {
+        py.detach(|| {
             runtime.block_on(async move {
                 let guard = stream.read().await;
                 let batches = guard.get_unacked_batches().await.map_err(map_error)?;
 
-                Python::with_gil(|py| {
-                    let out: Vec<Vec<PyObject>> = batches
+                Python::attach(|py| {
+                    let out: Vec<Vec<Py<PyAny>>> = batches
                         .into_iter()
                         .map(|batch| {
                             batch
@@ -344,7 +352,7 @@ impl ZerobusSdk {
         let runtime = self.runtime.clone();
         let runtime_for_stream = self.runtime.clone();
 
-        let stream = py.allow_threads(|| {
+        let stream = py.detach(|| {
             runtime.block_on(async move {
                 let sdk_guard = sdk.read().await;
                 let builder = sdk_guard.stream_builder().oauth(client_id, client_secret);
@@ -365,7 +373,7 @@ impl ZerobusSdk {
         &self,
         py: Python,
         table_properties: TableProperties,
-        headers_provider: PyObject,
+        headers_provider: Py<PyAny>,
         options: Option<StreamConfigurationOptions>,
     ) -> PyResult<ZerobusStream> {
         let opts = options.unwrap_or_default();
@@ -375,7 +383,7 @@ impl ZerobusSdk {
         let runtime = self.runtime.clone();
         let runtime_for_stream = self.runtime.clone();
 
-        let stream = py.allow_threads(|| {
+        let stream = py.detach(|| {
             runtime.block_on(async move {
                 let sdk_guard = sdk.read().await;
                 let builder = sdk_guard.stream_builder().headers_provider(provider);
@@ -400,7 +408,7 @@ impl ZerobusSdk {
         &self,
         py: Python,
         table_name: String,
-        schema_ipc_bytes: &PyBytes,
+        schema_ipc_bytes: &Bound<'_, PyBytes>,
         client_id: String,
         client_secret: String,
         options: Option<&ArrowStreamConfigurationOptions>,
@@ -423,8 +431,8 @@ impl ZerobusSdk {
         &self,
         py: Python,
         table_name: String,
-        schema_ipc_bytes: &PyBytes,
-        headers_provider: PyObject,
+        schema_ipc_bytes: &Bound<'_, PyBytes>,
+        headers_provider: Py<PyAny>,
         options: Option<&ArrowStreamConfigurationOptions>,
     ) -> PyResult<ZerobusArrowStream> {
         arrow::create_arrow_stream_with_headers_provider_sync(
@@ -454,7 +462,7 @@ impl ZerobusSdk {
         let runtime = self.runtime.clone();
         let runtime_for_stream = self.runtime.clone();
 
-        let new_stream = py.allow_threads(|| {
+        let new_stream = py.detach(|| {
             runtime.block_on(async move {
                 let guard = old_stream_inner.read().await;
                 let sdk_guard = sdk.read().await;
