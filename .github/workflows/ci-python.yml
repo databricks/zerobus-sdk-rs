@@ -136,14 +136,13 @@ jobs:
 
       - name: Install and import the 3.9 wheel on every supported version
         run: |
-          wheel="$(ls "$PWD"/dist/*.whl)"
           for v in 3.9 3.10 3.11 3.12 3.13 3.14; do
             echo "::group::Python $v"
             "python$v" -m venv "/tmp/abi3-$v"
-            "/tmp/abi3-$v/bin/python" -m pip install --quiet --no-deps "$wheel"
-            # Run outside python/, or the source tree shadows the installed
-            # package and the native module is missing.
-            (cd /tmp && "/tmp/abi3-$v/bin/python" - <<'PY'
+            "/tmp/abi3-$v/bin/python" -m pip install --quiet --no-deps dist/*.whl
+            # -I keeps the working directory off sys.path, so this imports the
+            # installed wheel rather than the source tree next to it.
+            "/tmp/abi3-$v/bin/python" -I - <<'PY'
           import sys
 
           import zerobus
@@ -154,7 +153,6 @@ jobs:
           aio.ZerobusSdk("grpc.example.com:443", "https://example.com")
           print(f"OK on {sys.version.split()[0]}")
           PY
-            )
             echo "::endgroup::"
           done
 
