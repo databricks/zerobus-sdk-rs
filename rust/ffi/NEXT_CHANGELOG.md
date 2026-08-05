@@ -6,6 +6,10 @@
 
 ### New Features and Improvements
 
+- Added `zerobus_arrow_stream_ingest_c_data`, an ownership-transferring Arrow C
+  Data Interface ingestion API. It imports a canonical `ArrowArray` and
+  `ArrowSchema` without an IPC encode/decode round trip, then uses the existing
+  Flight encoder for dictionaries, compression, chunking, and framing.
 - Add callback-based async overloads for all previously blocking stream operations: stream creation (`zerobus_sdk_create_stream_async`, `zerobus_sdk_create_stream_with_headers_provider_async`), stream recreation (`zerobus_sdk_recreate_stream_async`), offset-returning ingest calls (`zerobus_stream_ingest_proto_record_async`, `zerobus_stream_ingest_json_record_async`, `zerobus_stream_ingest_proto_records_async`, `zerobus_stream_ingest_json_records_async`), completion methods (`zerobus_stream_wait_for_offset_async`, `zerobus_stream_flush_async`, `zerobus_stream_close_async`), and unacked-record retrieval (`zerobus_stream_get_unacked_records_async`). These APIs return immediately after validation/scheduling and complete via callbacks; caller-owned string/descriptor/config inputs are copied before return, and SDK/stream handles must remain valid until callback completion.
 
 ### Bug Fixes
@@ -28,6 +32,10 @@
 
 ### Internal Changes
 
+- Reused the Rust SDK's wrapper-only importer to implement the C Data API added
+  in this release. This internal extraction introduces no further changes to
+  that API's ABI, ownership contract, errors, or generated header beyond the
+  additions described under New Features.
 - Add headers-provider ownership tests: `free_user_data` fires once on `Drop` and once on failed create, a null destroy callback is a no-op, and a teardown test that reproduces the recovery-vs-teardown race (a blocking in-flight `get_headers` on one `Arc` clone while another is dropped) asserts the free is deferred until the callback returns. Test-only; no ABI or behavior change.
 - Fix the darwin static-library build in `release-ffi.yml`: invoke `cargo-zigbuild rustc` (the binary directly) instead of `cargo zigbuild rustc`, which routed `rustc` as a positional into the zigbuild subcommand and failed with `unexpected argument 'rustc'`. Release tooling only; no ABI or behavior change.
 - Add ack-callback live-teardown / use-after-free tests. They drive the real `CallbackAckCallback` bridge over a heap-allocated `user_data` through the real callback-handler task, then tear it down via the production teardown code, asserting no callback fires after teardown returns and that `user_data` is safe to release at that point. All teardown paths are covered: drain-within-`callback_max_wait_time_ms`, wait-indefinitely, and a callback still synchronously in-flight when a bounded budget expires — which the drain aborts but cannot preempt, so the callback outlives `teardown()` and `user_data` must stay alive until it finishes. Test-only; no ABI or behavior change.

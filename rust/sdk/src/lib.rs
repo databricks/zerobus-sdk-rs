@@ -94,6 +94,10 @@ pub use tls_config::{SecureTlsConfig, TlsConfig};
 #[cfg(feature = "zeroparser")]
 pub mod zeroparser;
 
+#[cfg(feature = "internal-arrow-c-data")]
+#[doc(hidden)]
+pub mod internal;
+
 /// The type of the stream connection created with the server.
 /// Currently we only support ephemeral streams on the server side, so we support only that in the SDK as well.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

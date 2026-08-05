@@ -67,6 +67,12 @@ prost-build = { version = "0.14", optional = true }
 default = []
 # Arrow Flight is in Beta
 arrow-flight = ["dep:arrow-flight", "dep:arrow-array", "dep:arrow-schema", "dep:arrow-ipc", "dep:futures", "dep:tonic-types"]
+# Wrapper-only Arrow C Data importer. Not a supported public Rust SDK feature.
+internal-arrow-c-data = [
+    "arrow-flight",
+    "arrow-array/ffi",
+    "arrow-schema/ffi",
+]
 # Zero-copy protobuf parser.
 zeroparser = ["dep:self_cell", "dep:prost-build"]
 testing = ["dep:futures"]

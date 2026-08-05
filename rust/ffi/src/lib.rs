@@ -18,7 +18,9 @@ extern crate libc;
 // A comment between each declaration breaks rustfmt's contiguous-`mod` grouping,
 // so it cannot alphabetize them and reorder the generated header.
 mod common;
-// arrow must follow common and precede builder/sdk/stream/proto_schema.
+// C Data types must precede the Arrow entry points that reference them.
+mod arrow_c_data;
+// arrow must follow common and arrow_c_data and precede builder/sdk/stream/proto_schema.
 mod arrow;
 // builder follows arrow.
 mod builder;
@@ -34,14 +36,14 @@ mod proto_schema;
 mod tests;
 
 pub use arrow::*;
+pub use arrow_c_data::*;
 pub use builder::*;
 pub use common::*;
-pub use proto_schema::*;
-pub use sdk::*;
-pub use stream::*;
-
 // Re-exported SDK types referenced via `crate::` paths by the test module.
 #[cfg(test)]
 pub(crate) use databricks_zerobus_ingest_sdk::databricks::zerobus::RecordType;
 #[cfg(test)]
 pub(crate) use databricks_zerobus_ingest_sdk::ZerobusError;
+pub use proto_schema::*;
+pub use sdk::*;
+pub use stream::*;
