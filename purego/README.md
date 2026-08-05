@@ -92,6 +92,20 @@ streams and convert it to protobuf on proto streams.
 Fetch the table schema explicitly, then create a regular proto stream. The
 stream can accept either protobuf bytes or JSON converted at ingest time.
 
+Fetched descriptors are cached for five minutes, up to 128 entries per SDK.
+Concurrent fetches for the same table and credentials share one UC request.
+After changing a table schema, call `RefreshProtoDescriptorFromUC` to bypass
+the cached entry and replace it with a fresh descriptor:
+
+```go
+descriptor, err := sdk.RefreshProtoDescriptorFromUC(
+    ctx,
+    "catalog.schema.table",
+    clientID,
+    clientSecret,
+)
+```
+
 UC schema conversion rejects nullable array/map fields and collections that
 allow null elements or values because protobuf cannot preserve those
 distinctions. JSON ingestion also rejects explicit `null` collection fields.

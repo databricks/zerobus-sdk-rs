@@ -65,6 +65,10 @@ go run ./dynamic/batch
 go run ./dynamic/proto
 ```
 
+The dynamic examples use `FetchProtoDescriptorFromUC`, which caches successful
+results. In a long-lived SDK, use `RefreshProtoDescriptorFromUC` after changing
+the table schema.
+
 ## Regenerating the proto bindings
 
 The proto single and batch examples use bindings generated from

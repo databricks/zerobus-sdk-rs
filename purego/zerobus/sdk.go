@@ -103,8 +103,9 @@ type SDK struct {
 	httpClient                *http.Client
 	dynamicSchemaFetchTimeout time.Duration
 	dynamicSchemaCache        map[string]cachedDescriptor
+	dynamicSchemaFetches      map[string]*descriptorFetch
 
-	// mu guards the open-stream set, descriptor cache, and closed flag.
+	// mu guards the open-stream set, descriptor cache/fetches, and closed flag.
 	mu     sync.Mutex
 	closed bool
 	// Open streams owned by this SDK.
@@ -115,6 +116,13 @@ type cachedDescriptor struct {
 	descriptor []byte
 	expiresAt  time.Time
 	storedAt   time.Time
+}
+
+type descriptorFetch struct {
+	done       chan struct{}
+	descriptor []byte
+	err        error
+	waiters    int
 }
 
 const (
@@ -137,6 +145,7 @@ func newSDK(conn *transport.Conn, zerobusEndpoint, ucEndpoint string, cfg sdkCon
 		httpClient:                cfg.httpClient,
 		dynamicSchemaFetchTimeout: fetchTimeout,
 		dynamicSchemaCache:        make(map[string]cachedDescriptor),
+		dynamicSchemaFetches:      make(map[string]*descriptorFetch),
 		streams:                   make(map[*Stream]struct{}),
 	}
 }
@@ -258,24 +267,60 @@ func (s *SDK) CreateStreamWithProvider(
 }
 
 // FetchProtoDescriptorFromUC returns a protobuf descriptor built from a Unity
-// Catalog table schema.
+// Catalog table schema. Successful descriptors are cached for five minutes,
+// with at most 128 entries per SDK. Concurrent misses for the same table and
+// credentials share one request. Use RefreshProtoDescriptorFromUC to bypass a
+// cached descriptor after a schema change.
 func (s *SDK) FetchProtoDescriptorFromUC(
 	ctx context.Context,
 	tableName, clientID, clientSecret string,
 ) ([]byte, error) {
+	return s.fetchProtoDescriptorFromUC(
+		ctx,
+		"FetchProtoDescriptorFromUC",
+		tableName,
+		clientID,
+		clientSecret,
+		false,
+	)
+}
+
+// RefreshProtoDescriptorFromUC fetches a fresh Unity Catalog table schema,
+// replaces its cached descriptor, and returns it. Concurrent refreshes for the
+// same table and credentials share one request. Cancelling one caller stops
+// only that caller's wait; it does not cancel the shared fetch.
+func (s *SDK) RefreshProtoDescriptorFromUC(
+	ctx context.Context,
+	tableName, clientID, clientSecret string,
+) ([]byte, error) {
+	return s.fetchProtoDescriptorFromUC(
+		ctx,
+		"RefreshProtoDescriptorFromUC",
+		tableName,
+		clientID,
+		clientSecret,
+		true,
+	)
+}
+
+func (s *SDK) fetchProtoDescriptorFromUC(
+	ctx context.Context,
+	op, tableName, clientID, clientSecret string,
+	refresh bool,
+) ([]byte, error) {
 	if s.isClosed() {
 		return nil, &Error{
-			Op:        "FetchProtoDescriptorFromUC",
+			Op:        op,
 			cause:     fmt.Errorf("SDK is closed"),
 			retryable: false,
 		}
 	}
-	descBytes, err := s.fetchProtoDescriptor(
-		ctx, tableName, clientID, clientSecret,
+	descBytes, err := s.fetchProtoDescriptorCached(
+		ctx, tableName, clientID, clientSecret, refresh,
 	)
 	if err != nil {
 		return nil, &Error{
-			Op:        "FetchProtoDescriptorFromUC",
+			Op:        op,
 			cause:     err,
 			retryable: dynamicSchemaErrorRetryable(err),
 		}
@@ -383,6 +428,14 @@ func (s *SDK) fetchProtoDescriptor(
 	ctx context.Context,
 	tableName, clientID, clientSecret string,
 ) ([]byte, error) {
+	return s.fetchProtoDescriptorCached(ctx, tableName, clientID, clientSecret, false)
+}
+
+func (s *SDK) fetchProtoDescriptorCached(
+	ctx context.Context,
+	tableName, clientID, clientSecret string,
+	refresh bool,
+) ([]byte, error) {
 	tableName = strings.TrimSpace(tableName)
 	if tableName == "" {
 		return nil, fmt.Errorf("table name is required")
@@ -393,12 +446,36 @@ func (s *SDK) fetchProtoDescriptor(
 	if strings.TrimSpace(clientSecret) == "" {
 		return nil, fmt.Errorf("clientSecret is required")
 	}
-
-	cacheKey := dynamicSchemaCacheKey(s.ucEndpoint, tableName, clientID, clientSecret)
-	if desc, ok := s.getDynamicDescriptorFromCache(cacheKey); ok {
-		return desc, nil
+	if err := ctx.Err(); err != nil {
+		return nil, context.Cause(ctx)
 	}
 
+	cacheKey := dynamicSchemaCacheKey(s.ucEndpoint, tableName, clientID, clientSecret)
+	desc, cached, fetch, leader, err := s.cachedDescriptorOrJoinFetch(cacheKey, !refresh)
+	if err != nil {
+		return nil, err
+	}
+	if cached {
+		return desc, nil
+	}
+	if leader {
+		sharedCtx := context.WithoutCancel(ctx)
+		go s.runDescriptorFetch(
+			sharedCtx,
+			cacheKey,
+			tableName,
+			clientID,
+			clientSecret,
+			fetch,
+		)
+	}
+	return s.waitForDescriptorFetch(ctx, fetch)
+}
+
+func (s *SDK) loadProtoDescriptor(
+	ctx context.Context,
+	tableName, clientID, clientSecret string,
+) ([]byte, error) {
 	fetcher, err := ucschema.New(ucschema.Config{
 		WorkspaceEndpoint: s.ucEndpoint,
 		ClientID:          clientID,
@@ -421,29 +498,76 @@ func (s *SDK) fetchProtoDescriptor(
 	if err != nil {
 		return nil, fmt.Errorf("serialize descriptor: %w", err)
 	}
-	s.storeDynamicDescriptor(cacheKey, descBytes)
 	return descBytes, nil
 }
 
-func (s *SDK) getDynamicDescriptorFromCache(
+func (s *SDK) cachedDescriptorOrJoinFetch(
 	cacheKey string,
-) ([]byte, bool) {
+	allowCached bool,
+) ([]byte, bool, *descriptorFetch, bool, error) {
 	now := time.Now()
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.closed {
-		return nil, false
+		return nil, false, nil, false, fmt.Errorf("SDK is closed")
 	}
-	item, ok := s.dynamicSchemaCache[cacheKey]
-	if !ok {
-		return nil, false
+	if allowCached {
+		if item, ok := s.dynamicSchemaCache[cacheKey]; ok {
+			if now.After(item.expiresAt) {
+				delete(s.dynamicSchemaCache, cacheKey)
+			} else {
+				dup := append([]byte(nil), item.descriptor...)
+				return dup, true, nil, false, nil
+			}
+		}
 	}
-	if now.After(item.expiresAt) {
-		delete(s.dynamicSchemaCache, cacheKey)
-		return nil, false
+	if fetch, ok := s.dynamicSchemaFetches[cacheKey]; ok {
+		fetch.waiters++
+		return nil, false, fetch, false, nil
 	}
-	dup := append([]byte(nil), item.descriptor...)
-	return dup, true
+	fetch := &descriptorFetch{
+		done:    make(chan struct{}),
+		waiters: 1,
+	}
+	s.dynamicSchemaFetches[cacheKey] = fetch
+	return nil, false, fetch, true, nil
+}
+
+func (s *SDK) runDescriptorFetch(
+	ctx context.Context,
+	cacheKey, tableName, clientID, clientSecret string,
+	fetch *descriptorFetch,
+) {
+	desc, err := s.loadProtoDescriptor(ctx, tableName, clientID, clientSecret)
+
+	s.mu.Lock()
+	if err == nil && !s.closed {
+		s.storeDynamicDescriptorLocked(cacheKey, desc, time.Now())
+	}
+	fetch.descriptor = append([]byte(nil), desc...)
+	fetch.err = err
+	if current := s.dynamicSchemaFetches[cacheKey]; current == fetch {
+		delete(s.dynamicSchemaFetches, cacheKey)
+	}
+	close(fetch.done)
+	s.mu.Unlock()
+}
+
+func (s *SDK) waitForDescriptorFetch(
+	ctx context.Context,
+	fetch *descriptorFetch,
+) ([]byte, error) {
+	defer func() {
+		s.mu.Lock()
+		fetch.waiters--
+		s.mu.Unlock()
+	}()
+	select {
+	case <-fetch.done:
+		return append([]byte(nil), fetch.descriptor...), fetch.err
+	case <-ctx.Done():
+		return nil, context.Cause(ctx)
+	}
 }
 
 func (s *SDK) storeDynamicDescriptor(
@@ -451,15 +575,23 @@ func (s *SDK) storeDynamicDescriptor(
 	desc []byte,
 ) {
 	now := time.Now()
-	item := cachedDescriptor{
-		descriptor: append([]byte(nil), desc...),
-		expiresAt:  now.Add(defaultDynamicSchemaCacheTTL),
-		storedAt:   now,
-	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.closed {
 		return
+	}
+	s.storeDynamicDescriptorLocked(cacheKey, desc, now)
+}
+
+func (s *SDK) storeDynamicDescriptorLocked(
+	cacheKey string,
+	desc []byte,
+	now time.Time,
+) {
+	item := cachedDescriptor{
+		descriptor: append([]byte(nil), desc...),
+		expiresAt:  now.Add(defaultDynamicSchemaCacheTTL),
+		storedAt:   now,
 	}
 	for key, cached := range s.dynamicSchemaCache {
 		if now.After(cached.expiresAt) {
