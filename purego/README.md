@@ -6,6 +6,10 @@ A native pure-Go Zerobus ingestion SDK.
 
 PureGo requires Go 1.25 or later.
 
+## Requirements
+
+PureGo requires Go 1.25 or later.
+
 ## Quick start
 
 ```go

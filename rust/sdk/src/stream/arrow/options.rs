@@ -47,6 +47,8 @@ pub struct ArrowStreamConfigurationOptions {
     /// Timeout in milliseconds for each stream recovery attempt.
     ///
     /// If a recovery attempt takes longer than this, it will be retried.
+    /// Values whose absolute deadline cannot be represented by the platform's
+    /// monotonic clock are rejected when the stream is built.
     ///
     /// Default: 15,000 (15 seconds)
     pub recovery_timeout_ms: u64,
@@ -65,10 +67,17 @@ pub struct ArrowStreamConfigurationOptions {
     /// Default: 4
     pub recovery_retries: u32,
 
-    /// Timeout in milliseconds for waiting for server acknowledgements.
+    /// Maximum time in milliseconds that a batch may remain pending during normal stream
+    /// operation without being fully acknowledged on the active connection.
     ///
-    /// If no acknowledgement is received within this time (and there are pending batches),
-    /// the stream will be considered failed and recovery will be triggered (if enabled).
+    /// No timer runs while there are no pending batches. A batch's absolute deadline starts
+    /// when it becomes pending; responses and partial acknowledgments do not refresh it.
+    /// Configure this timeout together with `max_inflight_batches` so the server can
+    /// acknowledge a full allowed backlog in time. Replayed batches receive a fresh deadline
+    /// after the full replay has completed and ACK processing can resume on the recovered
+    /// connection. Expiry fails the stream and triggers recovery when recovery is enabled.
+    /// Values whose absolute deadline cannot be represented by the platform's
+    /// monotonic clock are rejected when the stream is built.
     ///
     /// Default: 60,000 (60 seconds)
     pub server_lack_of_ack_timeout_ms: u64,
@@ -121,6 +130,7 @@ pub struct ArrowStreamConfigurationOptions {
     /// If the server advertises less than 500ms (including zero), the SDK skips the ACK
     /// wait and makes a best-effort local cleanup attempt for up to 500ms; the server may
     /// already have hard-closed, so clean peer shutdown cannot be guaranteed in that case.
+    /// Server-advertised grace periods longer than one year are capped at one year.
     /// Close signals are honored even when recovery is disabled: the SDK performs transport
     /// cleanup and terminates without reconnecting. Batches accepted while paused remain
     /// available through `get_unacked_batches()`.

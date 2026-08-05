@@ -7,12 +7,16 @@ use std::mem::replace;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 
+use arrow_flight::error::FlightError;
+use arrow_flight::PutResult;
 use futures::StreamExt;
-use tokio::sync::{watch, Mutex};
-use tokio::time::{sleep_until, timeout, Duration, Instant};
+use tokio::sync::{watch, Mutex, Notify};
+use tokio::time::{sleep_until, Duration, Instant};
 use tracing::{debug, error, info, warn};
 
-use super::batch::PendingBatch;
+use super::batch::{
+    oldest_pending_ack_deadline, PendingAckDeadline, PendingBatch, PendingBatchIdentity,
+};
 use super::connection::{FlightResponseStream, RequestBodyControl};
 use super::metadata::FlightAckMetadata;
 #[cfg(feature = "test-hooks")]
@@ -23,12 +27,15 @@ use crate::offset_generator::OffsetId;
 use crate::ZerobusResult;
 
 const ROTATION_DRAIN_TIMEOUT_MS: u64 = 500;
+const MAX_SERVER_ROTATION_GRACE: Duration = Duration::from_secs(365 * 24 * 60 * 60);
 
 /// Owns the shared stream state and configuration used while processing ACKs.
 pub(super) struct AckProcessor {
     is_closed: Arc<AtomicBool>,
     last_ack_tx: watch::Sender<Option<OffsetId>>,
     pending_batches: Arc<Mutex<Vec<PendingBatch>>>,
+    pending_notify: Arc<Notify>,
+    request_send_failure: Arc<RequestSendFailure>,
     server_error_tx: watch::Sender<Option<ZerobusError>>,
     submitted_records: Arc<AtomicU64>,
     last_acked_records: Arc<AtomicU64>,
@@ -38,6 +45,8 @@ pub(super) struct AckProcessor {
     options: ArrowStreamConfigurationOptions,
     #[cfg(feature = "test-hooks")]
     ack_applied_gate: AckAppliedGate,
+    #[cfg(feature = "test-hooks")]
+    ack_idle_gate: super::AckIdleGate,
 }
 
 /// State captured when rotation stops waiting for acknowledgments and begins transport
@@ -67,6 +76,38 @@ enum RotationState {
 struct RotationDeadlines {
     ack: Instant,
     drain: Instant,
+}
+
+/// Event that wakes the acknowledgment processor before transport drain begins.
+enum AckEvent {
+    Response(Option<Result<PutResult, FlightError>>),
+    PendingBatchAvailable,
+    RequestSendFailed,
+    AckDeadline(PendingAckDeadline),
+}
+
+/// Coalesces request-sender failures until the supervisor has paused the failed
+/// connection. The notification wakes an ACK processor that has no deadline armed.
+#[derive(Default)]
+pub(super) struct RequestSendFailure {
+    pending: AtomicBool,
+    notify: Notify,
+}
+
+impl RequestSendFailure {
+    pub(super) fn report(&self) {
+        if !self.pending.swap(true, Ordering::AcqRel) {
+            self.notify.notify_one();
+        }
+    }
+
+    fn take(&self) -> bool {
+        self.pending.swap(false, Ordering::AcqRel)
+    }
+
+    fn clear(&self) {
+        self.pending.store(false, Ordering::Release);
+    }
 }
 
 /// Borrowed view of the active connection's acknowledgment bookkeeping.
@@ -198,6 +239,8 @@ impl AckProcessor {
             is_closed: Arc::clone(&stream.is_closed),
             last_ack_tx: stream.last_ack_tx.clone(),
             pending_batches: Arc::clone(&stream.pending_batches),
+            pending_notify: Arc::clone(&stream.pending_notify),
+            request_send_failure: Arc::clone(&stream.request_send_failure),
             server_error_tx: stream.server_error_tx.clone(),
             submitted_records: Arc::clone(&stream.submitted_records),
             last_acked_records: Arc::clone(&stream.last_acked_records),
@@ -207,6 +250,8 @@ impl AckProcessor {
             options: stream.options.clone(),
             #[cfg(feature = "test-hooks")]
             ack_applied_gate: Arc::clone(&stream.ack_applied_gate),
+            #[cfg(feature = "test-hooks")]
+            ack_idle_gate: Arc::clone(&stream.ack_idle_gate),
         }
     }
 
@@ -223,6 +268,8 @@ impl AckProcessor {
             is_closed: Arc::new(AtomicBool::new(false)),
             last_ack_tx,
             pending_batches,
+            pending_notify: Arc::new(Notify::new()),
+            request_send_failure: Arc::new(RequestSendFailure::default()),
             server_error_tx,
             submitted_records,
             last_acked_records,
@@ -235,6 +282,8 @@ impl AckProcessor {
             },
             #[cfg(feature = "test-hooks")]
             ack_applied_gate: Arc::new(Mutex::new(None)),
+            #[cfg(feature = "test-hooks")]
+            ack_idle_gate: Arc::new(Mutex::new(None)),
         };
         (
             processor,
@@ -268,19 +317,43 @@ impl AckProcessor {
         server_duration_ms: u64,
         configured_ack_wait_ms: Option<u64>,
     ) -> RotationDeadlines {
-        let now = Instant::now();
+        Self::rotation_deadlines_at(Instant::now(), server_duration_ms, configured_ack_wait_ms)
+    }
+
+    fn rotation_deadlines_at(
+        rotation_started_at: Instant,
+        server_duration_ms: u64,
+        configured_ack_wait_ms: Option<u64>,
+    ) -> RotationDeadlines {
         let drain_budget = Duration::from_millis(ROTATION_DRAIN_TIMEOUT_MS);
-        let server_grace = Duration::from_millis(server_duration_ms);
-        let bounded_fallback = now + Duration::from_secs(365 * 24 * 60 * 60);
-        let server_deadline = now.checked_add(server_grace).unwrap_or(bounded_fallback);
+        let advertised_server_grace = Duration::from_millis(server_duration_ms);
+        let server_grace = advertised_server_grace.min(MAX_SERVER_ROTATION_GRACE);
+        if server_grace != advertised_server_grace {
+            warn!(target: super::LOG_TARGET,
+                server_duration_ms,
+                max_server_rotation_grace_ms = MAX_SERVER_ROTATION_GRACE.as_millis(),
+                "Server rotation grace exceeds the client limit; clamping it"
+            );
+        }
+        let server_deadline = match rotation_started_at.checked_add(server_grace) {
+            Some(deadline) => deadline,
+            // No later deadline can be represented at this clock boundary.
+            None => rotation_started_at,
+        };
         let available_ack_wait = server_grace.saturating_sub(drain_budget);
         let configured_ack_wait = configured_ack_wait_ms
             .map(Duration::from_millis)
             .unwrap_or(available_ack_wait);
         let ack_wait = available_ack_wait.min(configured_ack_wait);
-        let ack_deadline = now.checked_add(ack_wait).unwrap_or(server_deadline);
+        let ack_deadline = match rotation_started_at.checked_add(ack_wait) {
+            Some(deadline) => deadline,
+            None => server_deadline,
+        };
         let drain_deadline = if server_grace < drain_budget {
-            now + drain_budget
+            match rotation_started_at.checked_add(drain_budget) {
+                Some(deadline) => deadline,
+                None => server_deadline,
+            }
         } else {
             server_deadline
         };
@@ -291,7 +364,13 @@ impl AckProcessor {
     }
 
     fn bounded_rotation_drain_deadline(close_deadline: Instant) -> Instant {
-        close_deadline.min(Instant::now() + Duration::from_millis(ROTATION_DRAIN_TIMEOUT_MS))
+        let now = Instant::now();
+        let bounded_deadline =
+            match now.checked_add(Duration::from_millis(ROTATION_DRAIN_TIMEOUT_MS)) {
+                Some(deadline) => deadline,
+                None => close_deadline,
+            };
+        close_deadline.min(bounded_deadline)
     }
 
     /// Half-closes the active request and drains the response under the rotation
@@ -360,6 +439,102 @@ impl AckProcessor {
         }
     }
 
+    /// Returns the oldest submitted batch and its absolute ACK deadline while holding
+    /// the pending lock that also synchronizes submitted-watermark publication.
+    async fn oldest_ack_deadline(
+        &self,
+        ack_timeout: Duration,
+    ) -> ZerobusResult<Option<PendingAckDeadline>> {
+        let pending = self.pending_batches.lock().await;
+        let submitted_records = self.submitted_records.load(Ordering::Acquire);
+        oldest_pending_ack_deadline(&pending, submitted_records, ack_timeout)
+    }
+
+    /// Returns the pending count from the locked snapshot when a fired deadline still
+    /// belongs to the same expired head. This closes the race with an acknowledgment
+    /// that removes the head as the timer fires.
+    async fn expired_pending_count(
+        &self,
+        expected: PendingAckDeadline,
+        ack_timeout: Duration,
+    ) -> ZerobusResult<Option<usize>> {
+        let pending = self.pending_batches.lock().await;
+        let submitted_records = self.submitted_records.load(Ordering::Acquire);
+        Ok(
+            oldest_pending_ack_deadline(&pending, submitted_records, ack_timeout)?
+                .filter(|current| {
+                    current.identity == expected.identity && Instant::now() >= current.deadline
+                })
+                .map(|_| pending.len()),
+        )
+    }
+
+    /// Waits without arming an ACK timeout while no submitted batch is pending.
+    async fn wait_while_idle(&self, response_stream: &mut FlightResponseStream) -> AckEvent {
+        #[cfg(feature = "test-hooks")]
+        if let Some(notify) = self.ack_idle_gate.lock().await.take() {
+            notify.notify_one();
+        }
+
+        tokio::select! {
+            biased;
+            response = response_stream.next() => AckEvent::Response(response),
+            _ = self.request_send_failure.notify.notified() => AckEvent::RequestSendFailed,
+            _ = self.pending_notify.notified() => AckEvent::PendingBatchAvailable,
+        }
+    }
+
+    /// Waits for a response while enforcing the oldest pending ACK deadline. A ready
+    /// response may win one already-expired tie for a given head; it cannot defer that
+    /// same head twice.
+    async fn wait_with_pending_deadline(
+        &self,
+        response_stream: &mut FlightResponseStream,
+        pending_deadline: PendingAckDeadline,
+        expiry_tie_winner: &mut Option<PendingBatchIdentity>,
+    ) -> AckEvent {
+        if *expiry_tie_winner == Some(pending_deadline.identity)
+            && Instant::now() >= pending_deadline.deadline
+        {
+            return AckEvent::AckDeadline(pending_deadline);
+        }
+
+        let event = tokio::select! {
+            biased;
+            response = response_stream.next() => AckEvent::Response(response),
+            _ = self.request_send_failure.notify.notified() => AckEvent::RequestSendFailed,
+            _ = sleep_until(pending_deadline.deadline) => {
+                AckEvent::AckDeadline(pending_deadline)
+            }
+        };
+
+        *expiry_tie_winner = if matches!(event, AckEvent::Response(_))
+            && Instant::now() >= pending_deadline.deadline
+        {
+            Some(pending_deadline.identity)
+        } else {
+            None
+        };
+        event
+    }
+
+    fn ack_timeout_error() -> ZerobusError {
+        ZerobusError::StreamClosedError(tonic::Status::deadline_exceeded("Server ack timeout"))
+    }
+
+    fn request_send_error() -> ZerobusError {
+        ZerobusError::StreamClosedError(tonic::Status::unavailable(
+            "Flight request stream closed while sending",
+        ))
+    }
+
+    /// Clears all coalesced failures from the old request sender. The supervisor calls
+    /// this only after pausing under `ingest_mutex`, so no later ingest can report a
+    /// failure for that connection.
+    pub(super) fn clear_request_send_failure(&self) {
+        self.request_send_failure.clear();
+    }
+
     /// Processes acknowledgments and the single server-initiated rotation path.
     ///
     /// Rotation pauses sends and snapshots submitted records, waits only for that
@@ -372,6 +547,7 @@ impl AckProcessor {
     ) -> ZerobusResult<()> {
         let ack_timeout = Duration::from_millis(self.options.server_lack_of_ack_timeout_ms);
         let mut rotation = RotationState::Open;
+        let mut expiry_tie_winner: Option<PendingBatchIdentity> = None;
         let request = RequestControl {
             request_body: &request_body,
             ingest_mutex: self.ingest_mutex.as_ref(),
@@ -424,34 +600,52 @@ impl AckProcessor {
                 .await;
             }
 
-            let response = match &rotation {
-                RotationState::Open => match timeout(ack_timeout, response_stream.next()).await {
-                    Ok(response) => response,
-                    Err(_) => {
-                        let pending = self.pending_batches.lock().await;
-                        if !pending.is_empty() {
-                            error!(target: super::LOG_TARGET,
-                                pending_count = pending.len(),
-                                "Server ack timeout with pending batches"
-                            );
-                            return Err(ZerobusError::StreamClosedError(
-                                tonic::Status::deadline_exceeded("Server ack timeout"),
-                            ));
-                        }
-                        continue;
+            let event = match &rotation {
+                RotationState::Open => match self.oldest_ack_deadline(ack_timeout).await? {
+                    Some(pending_deadline) => {
+                        self.wait_with_pending_deadline(
+                            &mut response_stream,
+                            pending_deadline,
+                            &mut expiry_tie_winner,
+                        )
+                        .await
                     }
+                    None => self.wait_while_idle(&mut response_stream).await,
                 },
                 RotationState::WaitingForAcks { deadlines, .. } => {
                     tokio::select! {
+                        biased;
+                        response = response_stream.next() => AckEvent::Response(response),
+                        _ = self.request_send_failure.notify.notified() => {
+                            AckEvent::RequestSendFailed
+                        }
                         _ = sleep_until(deadlines.ack) => continue,
-                        response = response_stream.next() => response,
                     }
                 }
                 RotationState::Draining(_) => unreachable!(),
             };
 
-            match response {
-                Some(Ok(put_result)) => {
+            match event {
+                AckEvent::PendingBatchAvailable => continue,
+                AckEvent::RequestSendFailed => {
+                    if self.request_send_failure.take() {
+                        return Err(Self::request_send_error());
+                    }
+                    continue;
+                }
+                AckEvent::AckDeadline(expected) => {
+                    if let Some(pending_count) =
+                        self.expired_pending_count(expected, ack_timeout).await?
+                    {
+                        error!(target: super::LOG_TARGET,
+                            pending_count,
+                            "Server ack timeout with pending batches"
+                        );
+                        return Err(Self::ack_timeout_error());
+                    }
+                    continue;
+                }
+                AckEvent::Response(Some(Ok(put_result))) => {
                     let ack = match FlightAckMetadata::from_bytes(&put_result.app_metadata) {
                         Ok(ack) => ack,
                         Err(error) => {
@@ -499,7 +693,7 @@ impl AckProcessor {
                         }
                     }
                 }
-                Some(Err(error)) => {
+                AckEvent::Response(Some(Err(error))) => {
                     let status: tonic::Status = error.into();
                     let error = ZerobusError::StreamClosedError(status);
                     if let RotationState::WaitingForAcks { deadlines, .. } = rotation {
@@ -513,7 +707,7 @@ impl AckProcessor {
                     let _ = self.server_error_tx.send(Some(error.clone()));
                     return Err(error);
                 }
-                None => {
+                AckEvent::Response(None) => {
                     if let RotationState::WaitingForAcks { deadlines, .. } = rotation {
                         rotation = RotationState::Draining(DrainState {
                             deadline: Self::bounded_rotation_drain_deadline(deadlines.drain),
@@ -537,14 +731,18 @@ mod tests {
     use std::sync::Arc;
 
     use arrow_array::Int32Array;
+    use arrow_flight::error::FlightError;
     use arrow_flight::PutResult;
     use arrow_schema::{DataType, Field, Schema as ArrowSchema};
-    use futures::stream::iter;
+    use futures::stream::{iter, pending};
+    use futures::StreamExt as _;
     use tokio::sync::{watch, Mutex, Semaphore};
+    use tokio::time::{Duration, Instant};
 
     use super::super::RecordBatch;
     use super::{
         AckProcessor, FlightAckMetadata, OffsetId, PendingBatch, RequestBodyControl, ZerobusError,
+        MAX_SERVER_ROTATION_GRACE, ROTATION_DRAIN_TIMEOUT_MS,
     };
 
     fn one_col_schema() -> Arc<ArrowSchema> {
@@ -592,6 +790,95 @@ mod tests {
             last_acked_records,
             is_paused,
         )
+    }
+
+    #[test]
+    fn request_send_error_is_retryable_unavailable() {
+        let error = AckProcessor::request_send_error();
+        assert!(error.is_retryable());
+        match error {
+            ZerobusError::StreamClosedError(status) => {
+                assert_eq!(status.code(), tonic::Code::Unavailable);
+            }
+            other => panic!("expected a stream-closed error, got {other:?}"),
+        }
+    }
+
+    /// A buffered ACK is authoritative even when the request sender has already
+    /// reported failure. Apply its durable watermark before asking recovery to replay.
+    #[tokio::test]
+    async fn ready_ack_is_applied_before_reported_request_send_failure() {
+        let schema = one_col_schema();
+        let sem = Arc::new(Semaphore::new(1));
+        let pending_batches = Arc::new(Mutex::new(vec![pending_batch(
+            &sem,
+            batch_with_rows(&schema, 10),
+            0,
+            0,
+            10,
+        )]));
+        let response_stream = iter([Ok(PutResult {
+            app_metadata: serde_json::to_vec(&FlightAckMetadata {
+                ack_up_to_offset: 0,
+                ack_up_to_records: 5,
+                close_stream_duration_ms: None,
+            })
+            .unwrap()
+            .into(),
+        })])
+        .chain(pending::<Result<PutResult, FlightError>>());
+        let last_acked_records = Arc::new(AtomicU64::new(0));
+        let (processor, request_body, _last_ack_rx) = ack_processor(
+            Arc::clone(&pending_batches),
+            Arc::new(AtomicU64::new(10)),
+            Arc::clone(&last_acked_records),
+            false,
+        );
+        processor.request_send_failure.report();
+
+        let error = processor
+            .process(Box::pin(response_stream), request_body)
+            .await
+            .expect_err("the reported request-send failure must trigger recovery");
+
+        match error {
+            ZerobusError::StreamClosedError(status) => {
+                assert_eq!(status.code(), tonic::Code::Unavailable);
+            }
+            other => panic!("expected a stream-closed error, got {other:?}"),
+        }
+        assert_eq!(last_acked_records.load(Ordering::Acquire), 5);
+        assert_eq!(pending_batches.lock().await.len(), 1);
+    }
+
+    /// A peer status already buffered on the response stream must keep its real
+    /// error and retry classification instead of being masked by local send failure.
+    #[tokio::test]
+    async fn ready_server_error_wins_reported_request_send_failure() {
+        let response_stream = iter([Err::<PutResult, FlightError>(
+            tonic::Status::permission_denied("permanent server rejection").into(),
+        )]);
+        let (processor, request_body, _last_ack_rx) = ack_processor(
+            Arc::new(Mutex::new(Vec::new())),
+            Arc::new(AtomicU64::new(0)),
+            Arc::new(AtomicU64::new(0)),
+            false,
+        );
+        processor.request_send_failure.report();
+
+        let error = processor
+            .process(Box::pin(response_stream), request_body)
+            .await
+            .expect_err("the ready server rejection must be returned");
+
+        assert!(!error.is_retryable());
+        match error {
+            ZerobusError::StreamClosedError(status) => {
+                assert_eq!(status.code(), tonic::Code::PermissionDenied);
+                assert_eq!(status.message(), "permanent server rejection");
+            }
+            other => panic!("expected a stream-closed error, got {other:?}"),
+        }
     }
 
     /// An acknowledgement beyond the connection-local submitted-record count is a protocol
@@ -738,5 +1025,146 @@ mod tests {
             .await;
 
         assert_eq!(last_acked_records.load(Ordering::Acquire), 5);
+    }
+
+    /// A response already ready at expiry is applied before deadline recovery.
+    #[tokio::test]
+    async fn ready_ack_wins_expired_deadline_tie() {
+        const ACK_TIMEOUT: Duration = Duration::from_millis(10);
+
+        let schema = one_col_schema();
+        let sem = Arc::new(Semaphore::new(1));
+        let mut pending = pending_batch(&sem, batch_with_rows(&schema, 1), 0, 0, 1);
+        pending.refresh_enqueued_at(Instant::now() - ACK_TIMEOUT);
+        let pending_batches = Arc::new(Mutex::new(vec![pending]));
+        let response_stream = iter([Ok(PutResult {
+            app_metadata: serde_json::to_vec(&FlightAckMetadata {
+                ack_up_to_offset: 0,
+                ack_up_to_records: 1,
+                close_stream_duration_ms: None,
+            })
+            .unwrap()
+            .into(),
+        })]);
+        let last_acked_records = Arc::new(AtomicU64::new(0));
+        let (mut processor, request_body, last_ack_rx) = ack_processor(
+            Arc::clone(&pending_batches),
+            Arc::new(AtomicU64::new(1)),
+            Arc::clone(&last_acked_records),
+            false,
+        );
+        processor.options.server_lack_of_ack_timeout_ms = ACK_TIMEOUT.as_millis() as u64;
+
+        let _stream_closed = processor
+            .process(Box::pin(response_stream), request_body)
+            .await;
+
+        assert_eq!(last_acked_records.load(Ordering::Acquire), 1);
+        assert_eq!(*last_ack_rx.borrow(), Some(0));
+        assert!(pending_batches.lock().await.is_empty());
+    }
+
+    /// Only one ready response may defer an already-expired pending head. Partial
+    /// progress does not grant the same head a second response-first tie.
+    #[tokio::test]
+    async fn expired_head_gets_only_one_ready_response() {
+        const ACK_TIMEOUT: Duration = Duration::from_millis(10);
+
+        let schema = one_col_schema();
+        let sem = Arc::new(Semaphore::new(1));
+        let mut pending = pending_batch(&sem, batch_with_rows(&schema, 10), 0, 0, 10);
+        pending.refresh_enqueued_at(Instant::now() - ACK_TIMEOUT);
+        let pending_batches = Arc::new(Mutex::new(vec![pending]));
+        let response_stream = iter([5, 10].map(|acked_records| {
+            Ok(PutResult {
+                app_metadata: serde_json::to_vec(&FlightAckMetadata {
+                    ack_up_to_offset: 0,
+                    ack_up_to_records: acked_records,
+                    close_stream_duration_ms: None,
+                })
+                .unwrap()
+                .into(),
+            })
+        }));
+        let last_acked_records = Arc::new(AtomicU64::new(0));
+        let (mut processor, request_body, _last_ack_rx) = ack_processor(
+            Arc::clone(&pending_batches),
+            Arc::new(AtomicU64::new(10)),
+            Arc::clone(&last_acked_records),
+            false,
+        );
+        processor.options.server_lack_of_ack_timeout_ms = ACK_TIMEOUT.as_millis() as u64;
+
+        let error = processor
+            .process(Box::pin(response_stream), request_body)
+            .await
+            .expect_err("second ready response must not defer the expired head");
+
+        match error {
+            ZerobusError::StreamClosedError(status) => {
+                assert_eq!(status.code(), tonic::Code::DeadlineExceeded);
+            }
+            other => panic!("expected ACK deadline error, got {other:?}"),
+        }
+        assert_eq!(last_acked_records.load(Ordering::Acquire), 5);
+        assert_eq!(pending_batches.lock().await.len(), 1);
+    }
+
+    /// A timer fired for a removed head cannot fail the next head, even when that next
+    /// batch is also already expired; it must receive its own response-first tie.
+    #[tokio::test]
+    async fn deadline_recheck_requires_same_pending_head() {
+        const ACK_TIMEOUT: Duration = Duration::from_millis(10);
+
+        let schema = one_col_schema();
+        let sem = Arc::new(Semaphore::new(2));
+        let expired_at = Instant::now() - ACK_TIMEOUT;
+        let mut first = pending_batch(&sem, batch_with_rows(&schema, 1), 0, 0, 1);
+        first.refresh_enqueued_at(expired_at);
+        let mut second = pending_batch(&sem, batch_with_rows(&schema, 1), 1, 1, 2);
+        second.refresh_enqueued_at(expired_at);
+        let pending_batches = Arc::new(Mutex::new(vec![first, second]));
+        let (processor, _request_body, _last_ack_rx) = ack_processor(
+            Arc::clone(&pending_batches),
+            Arc::new(AtomicU64::new(2)),
+            Arc::new(AtomicU64::new(0)),
+            false,
+        );
+        let fired = processor
+            .oldest_ack_deadline(ACK_TIMEOUT)
+            .await
+            .expect("deadline calculation")
+            .expect("expired head");
+
+        assert_eq!(
+            processor
+                .expired_pending_count(fired, ACK_TIMEOUT)
+                .await
+                .expect("deadline recheck"),
+            Some(2)
+        );
+
+        pending_batches.lock().await.remove(0);
+
+        assert!(processor
+            .expired_pending_count(fired, ACK_TIMEOUT)
+            .await
+            .expect("deadline recheck")
+            .is_none());
+    }
+
+    #[test]
+    fn server_rotation_grace_is_capped() {
+        let rotation_started_at = Instant::now();
+        let deadlines = AckProcessor::rotation_deadlines_at(rotation_started_at, u64::MAX, None);
+
+        assert_eq!(
+            deadlines.drain.duration_since(rotation_started_at),
+            MAX_SERVER_ROTATION_GRACE
+        );
+        assert_eq!(
+            deadlines.ack.duration_since(rotation_started_at),
+            MAX_SERVER_ROTATION_GRACE - Duration::from_millis(ROTATION_DRAIN_TIMEOUT_MS)
+        );
     }
 }

@@ -8,9 +8,10 @@ use std::io::Cursor;
 use arrow_ipc::{reader::StreamReader, writer::IpcWriteOptions, CompressionType};
 use bytes::Bytes;
 use tokio::sync::OwnedSemaphorePermit;
+use tokio::time::{Duration, Instant};
 use tracing::debug;
 
-use super::RecordBatch;
+use super::{configured_deadline, RecordBatch};
 use crate::errors::ZerobusError;
 use crate::offset_generator::OffsetId;
 use crate::ZerobusResult;
@@ -25,8 +26,27 @@ pub(super) struct PendingBatch {
     /// Cumulative record count after this batch.
     /// Batch is fully acked when `acked_records >= end_record`.
     end_record: u64,
+    /// Time this batch most recently became pending on the active connection.
+    /// Only replay onto a replacement connection refreshes this timestamp.
+    enqueued_at: Instant,
     /// Backpressure permit; dropping it frees one `max_inflight_batches` slot.
     permit: OwnedSemaphorePermit,
+}
+
+/// Stable identity used to confirm that a fired ACK deadline still belongs to the
+/// same oldest pending batch.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) struct PendingBatchIdentity {
+    offset_id: OffsetId,
+    start_record: u64,
+    end_record: u64,
+}
+
+/// The oldest submitted batch and its absolute acknowledgment deadline.
+#[derive(Clone, Copy, Debug)]
+pub(super) struct PendingAckDeadline {
+    pub(super) identity: PendingBatchIdentity,
+    pub(super) deadline: Instant,
 }
 
 impl PendingBatch {
@@ -37,11 +57,30 @@ impl PendingBatch {
         end_record: u64,
         permit: OwnedSemaphorePermit,
     ) -> Self {
+        Self::new_at(
+            batch,
+            offset_id,
+            start_record,
+            end_record,
+            Instant::now(),
+            permit,
+        )
+    }
+
+    fn new_at(
+        batch: RecordBatch,
+        offset_id: OffsetId,
+        start_record: u64,
+        end_record: u64,
+        enqueued_at: Instant,
+        permit: OwnedSemaphorePermit,
+    ) -> Self {
         Self {
             batch,
             offset_id,
             start_record,
             end_record,
+            enqueued_at,
             permit,
         }
     }
@@ -52,6 +91,14 @@ impl PendingBatch {
 
     pub(super) fn is_fully_acknowledged(&self, acked_records: u64) -> bool {
         acked_records >= self.end_record
+    }
+
+    fn identity(&self) -> PendingBatchIdentity {
+        PendingBatchIdentity {
+            offset_id: self.offset_id,
+            start_record: self.start_record,
+            end_record: self.end_record,
+        }
     }
 
     /// Returns the batch portion not durably acknowledged, avoiding duplicate retry of an
@@ -100,6 +147,51 @@ impl PendingBatch {
     pub(super) fn record_count(&self) -> usize {
         self.batch.num_rows()
     }
+
+    pub(super) fn refresh_enqueued_at(&mut self, enqueued_at: Instant) {
+        self.enqueued_at = enqueued_at;
+    }
+
+    #[cfg(test)]
+    pub(super) fn enqueued_at(&self) -> Instant {
+        self.enqueued_at
+    }
+}
+
+/// Calculates the absolute deadline for the oldest pending batch submitted on the
+/// active connection. Batches buffered after a graceful-close pause have ranges at
+/// or beyond `submitted_records` and are not awaiting an ACK from that connection.
+pub(super) fn oldest_pending_ack_deadline(
+    pending: &[PendingBatch],
+    submitted_records: u64,
+    ack_timeout: Duration,
+) -> ZerobusResult<Option<PendingAckDeadline>> {
+    let Some(batch) = pending
+        .iter()
+        .find(|batch| batch.start_record < submitted_records)
+    else {
+        return Ok(None);
+    };
+    let deadline = configured_deadline(
+        batch.enqueued_at,
+        ack_timeout,
+        "server_lack_of_ack_timeout_ms",
+    )?;
+    Ok(Some(PendingAckDeadline {
+        identity: batch.identity(),
+        deadline,
+    }))
+}
+
+/// Gives every replayed batch one shared ACK-budget origin immediately before
+/// acknowledgment processing resumes on the replacement connection.
+pub(super) fn refresh_pending_ack_deadlines(
+    pending: &mut [PendingBatch],
+    replay_completed_at: Instant,
+) {
+    for batch in pending {
+        batch.refresh_enqueued_at(replay_completed_at);
+    }
 }
 
 /// Rebuilds pending batches with connection-relative ranges and transfers each retained
@@ -124,11 +216,12 @@ pub(super) fn rebuild_pending_for_replay(
         cumulative_records = end_record;
 
         replay.push(batch.clone());
-        rebuilt.push(PendingBatch::new(
+        rebuilt.push(PendingBatch::new_at(
             batch,
             pending_batch.offset_id,
             start_record,
             end_record,
+            pending_batch.enqueued_at,
             pending_batch.permit,
         ));
     }
@@ -191,8 +284,32 @@ mod tests {
     use arrow_array::Int32Array;
     use arrow_schema::{DataType, Field, Schema};
     use tokio::sync::Semaphore;
+    use tokio::time::{Duration, Instant};
 
-    use super::{PendingBatch, RecordBatch};
+    use crate::ZerobusError;
+
+    use super::{
+        oldest_pending_ack_deadline, rebuild_pending_for_replay, refresh_pending_ack_deadlines,
+        PendingBatch, RecordBatch,
+    };
+
+    #[allow(clippy::manual_div_ceil)]
+    fn latest_whole_second_instant(start: Instant) -> Instant {
+        let mut low = 0_u64;
+        let mut high = u64::MAX;
+        while low < high {
+            let mid = ((low as u128 + high as u128 + 1) / 2) as u64;
+            if start.checked_add(Duration::from_secs(mid)).is_some() {
+                low = mid;
+            } else {
+                high = mid - 1;
+            }
+        }
+        assert!(low < u64::MAX, "test requires a bounded Instant range");
+        start
+            .checked_add(Duration::from_secs(low))
+            .expect("largest whole-second Instant")
+    }
 
     fn pending_batch(rows: i32, start_record: u64, end_record: u64) -> PendingBatch {
         let schema = Arc::new(Schema::new(vec![Field::new("id", DataType::Int32, false)]));
@@ -220,5 +337,44 @@ mod tests {
     fn recovery_slice_drops_fully_acknowledged_batch() {
         let batch = pending_batch(5, 10, 15);
         assert!(batch.unacknowledged_suffix(15).is_none());
+    }
+
+    #[test]
+    fn replay_rebuild_preserves_pending_timestamp() {
+        let mut batch = pending_batch(5, 0, 5);
+        let original = Instant::now() - Duration::from_secs(1);
+        batch.refresh_enqueued_at(original);
+        let mut pending = vec![batch];
+
+        let (_replay, _records) = rebuild_pending_for_replay(&mut pending, 0);
+
+        assert_eq!(pending[0].enqueued_at(), original);
+    }
+
+    #[test]
+    fn replay_deadlines_share_completion_timestamp() {
+        let mut pending = vec![pending_batch(1, 0, 1), pending_batch(1, 1, 2)];
+        let replay_completed_at = Instant::now();
+
+        refresh_pending_ack_deadlines(&mut pending, replay_completed_at);
+
+        assert!(pending
+            .iter()
+            .all(|batch| batch.enqueued_at() == replay_completed_at));
+    }
+
+    #[test]
+    fn unrepresentable_ack_deadline_is_rejected() {
+        let mut batch = pending_batch(1, 0, 1);
+        batch.refresh_enqueued_at(latest_whole_second_instant(Instant::now()));
+
+        let error = oldest_pending_ack_deadline(&[batch], 1, Duration::from_secs(1))
+            .expect_err("an unrepresentable configured deadline must be rejected");
+        match error {
+            ZerobusError::InvalidArgument(message) => {
+                assert!(message.contains("server_lack_of_ack_timeout_ms"));
+            }
+            other => panic!("expected an invalid-argument error, got {other:?}"),
+        }
     }
 }

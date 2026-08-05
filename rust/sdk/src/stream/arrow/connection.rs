@@ -14,7 +14,7 @@ use arrow_flight::error::FlightError;
 use arrow_flight::{FlightClient, FlightData, PutResult};
 use futures::{stream::poll_fn, Stream, StreamExt};
 use tokio::sync::{mpsc, watch};
-use tokio::time::{timeout, Duration, Instant};
+use tokio::time::{timeout, timeout_at, Duration, Instant};
 use tokio_util::sync::CancellationToken;
 use tonic::metadata::MetadataValue;
 use tonic::transport::Channel;
@@ -23,7 +23,8 @@ use tracing::{error, info, warn};
 use super::batch::make_ipc_write_options;
 use super::metadata::{FlightAckMetadata, FlightBatchMetadata};
 use super::{
-    ArrowStreamConfigurationOptions, ArrowTableProperties, RecordBatch, ZerobusArrowStream,
+    configured_deadline, ArrowStreamConfigurationOptions, ArrowTableProperties, RecordBatch,
+    ZerobusArrowStream,
 };
 use crate::errors::ZerobusError;
 use crate::headers_provider::HeadersProvider;
@@ -116,7 +117,9 @@ impl ZerobusArrowStream {
         // reclassifying the attempt as a retryable setup timeout.
         let attempt_timeout = Duration::from_millis(options.recovery_timeout_ms);
         let attempt_started = Instant::now();
-        let result = timeout(attempt_timeout, async {
+        let attempt_deadline =
+            configured_deadline(attempt_started, attempt_timeout, "recovery_timeout_ms")?;
+        let result = timeout_at(attempt_deadline, async {
             let client = Self::create_flight_client(
                 endpoint,
                 tls_config,
@@ -143,9 +146,8 @@ impl ZerobusArrowStream {
                 // Drop the rejected token so the next attempt re-mints. A provider must
                 // not be able to turn a known auth rejection into repeated generic
                 // timeout retries by stalling here.
-                let invalidate_timeout = attempt_timeout.saturating_sub(attempt_started.elapsed());
                 if error.is_auth_rejection()
-                    && timeout(invalidate_timeout, headers_provider.invalidate())
+                    && timeout_at(attempt_deadline, headers_provider.invalidate())
                         .await
                         .is_err()
                 {
