@@ -13,8 +13,14 @@ func GRPCTarget(endpoint string) (string, error) { return grpcTarget(endpoint) }
 
 // NewWithConn builds an SDK around an already-dialed transport connection,
 // bypassing New's dialing so tests can point the SDK at an in-memory server.
-func NewWithConn(conn *transport.Conn, zerobusEndpoint, ucEndpoint string) *SDK {
-	return newSDK(conn, zerobusEndpoint, ucEndpoint)
+func NewWithConn(conn *transport.Conn, zerobusEndpoint, ucEndpoint string, opts ...Option) *SDK {
+	var cfg sdkConfig
+	for _, opt := range opts {
+		if opt != nil {
+			opt(&cfg)
+		}
+	}
+	return newSDK(conn, zerobusEndpoint, ucEndpoint, cfg)
 }
 
 // OpenStreamCount reports how many streams the SDK still tracks for Close, so
@@ -37,8 +43,7 @@ func ResolveStreamConfig(opts ...StreamOption) (recordType int32, descriptor []b
 	return int32(sc.recordType), sc.descriptor, sc.cfg.MaxInflight, sc.cfg.Recovery, sc.waitReady
 }
 
-// ResolveStreamTuning applies options and returns the public tuning values that
-// need wiring assertions.
+// ResolveStreamTuning returns recovery and batch tuning from options.
 func ResolveStreamTuning(opts ...StreamOption) (
 	recoveryTimeout, recoveryBackoff, lackOfAckTimeout time.Duration,
 	maxBatchRecords int,

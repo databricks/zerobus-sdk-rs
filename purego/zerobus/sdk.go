@@ -49,19 +49,26 @@ package zerobus
 
 import (
 	"context"
+	"crypto/sha256"
 	"errors"
 	"fmt"
 	"net"
+	"net/http"
 	"net/url"
 	"strings"
 	"sync"
+	"time"
 	"unicode/utf8"
 
 	"google.golang.org/grpc"
+	"google.golang.org/protobuf/proto"
 
 	"github.com/databricks/zerobus-sdk/purego/internal/auth"
+	"github.com/databricks/zerobus-sdk/purego/internal/dynamicproto"
+	"github.com/databricks/zerobus-sdk/purego/internal/schema"
 	"github.com/databricks/zerobus-sdk/purego/internal/stream"
 	"github.com/databricks/zerobus-sdk/purego/internal/transport"
+	"github.com/databricks/zerobus-sdk/purego/internal/ucschema"
 	"github.com/databricks/zerobus-sdk/purego/internal/zerobuspb"
 )
 
@@ -91,27 +98,46 @@ type SDK struct {
 	zerobusEndpoint string
 	ucEndpoint      string
 	conn            *transport.Conn
-	// tokenCache backs every OAuth provider this SDK creates so a token minted
-	// for a table is reused by later streams on the same table instead of
-	// re-minting per stream.
-	tokenCache *auth.SharedTokenCache
+	// Shared OAuth token cache across streams.
+	tokenCache                *auth.SharedTokenCache
+	httpClient                *http.Client
+	dynamicSchemaFetchTimeout time.Duration
+	dynamicSchemaCache        map[string]cachedDescriptor
 
-	// mu guards the open-stream set and the closed flag.
+	// mu guards the open-stream set, descriptor cache, and closed flag.
 	mu     sync.Mutex
 	closed bool
-	// streams holds the streams this SDK created and has not yet torn down, so
-	// Close can terminate them. Entries are removed by Stream.Close.
+	// Open streams owned by this SDK.
 	streams map[*Stream]struct{}
 }
 
+type cachedDescriptor struct {
+	descriptor []byte
+	expiresAt  time.Time
+	storedAt   time.Time
+}
+
+const (
+	defaultDynamicSchemaFetchTimeout = 10 * time.Second
+	defaultDynamicSchemaCacheTTL     = 5 * time.Minute
+	maxDynamicSchemaCacheEntries     = 128
+)
+
 // newSDK builds an SDK around an existing connection.
-func newSDK(conn *transport.Conn, zerobusEndpoint, ucEndpoint string) *SDK {
+func newSDK(conn *transport.Conn, zerobusEndpoint, ucEndpoint string, cfg sdkConfig) *SDK {
+	fetchTimeout := cfg.dynamicSchemaFetchTimeout
+	if fetchTimeout <= 0 {
+		fetchTimeout = defaultDynamicSchemaFetchTimeout
+	}
 	return &SDK{
-		zerobusEndpoint: strings.TrimSpace(zerobusEndpoint),
-		ucEndpoint:      strings.TrimSpace(ucEndpoint),
-		conn:            conn,
-		tokenCache:      auth.NewSharedTokenCache(),
-		streams:         make(map[*Stream]struct{}),
+		zerobusEndpoint:           strings.TrimSpace(zerobusEndpoint),
+		ucEndpoint:                strings.TrimSpace(ucEndpoint),
+		conn:                      conn,
+		tokenCache:                auth.NewSharedTokenCache(),
+		httpClient:                cfg.httpClient,
+		dynamicSchemaFetchTimeout: fetchTimeout,
+		dynamicSchemaCache:        make(map[string]cachedDescriptor),
+		streams:                   make(map[*Stream]struct{}),
 	}
 }
 
@@ -157,7 +183,7 @@ func New(zerobusEndpoint, ucEndpoint string, opts ...Option) (*SDK, error) {
 	if err != nil {
 		return nil, &Error{Op: "New", cause: err, retryable: false}
 	}
-	return newSDK(conn, zerobusEndpoint, ucEndpoint), nil
+	return newSDK(conn, zerobusEndpoint, ucEndpoint, cfg), nil
 }
 
 // Close terminates open streams and releases the shared connection.
@@ -174,11 +200,9 @@ func (s *SDK) Close() error {
 		open = append(open, st)
 	}
 	s.streams = nil
+	s.dynamicSchemaCache = make(map[string]cachedDescriptor)
 	s.mu.Unlock()
 
-	// Each teardown waits on its own supervisor goroutine, so terminate
-	// concurrently rather than summing every stream's teardown on the shutdown
-	// path.
 	errs := make([]error, len(open)+1)
 	var wg sync.WaitGroup
 	for i, st := range open {
@@ -189,8 +213,7 @@ func (s *SDK) Close() error {
 		}()
 	}
 	wg.Wait()
-	// Close the connection only after the streams are down, so a supervisor
-	// cannot reconnect onto a connection that is going away.
+	// Close the connection after stream teardown.
 	errs[len(open)] = s.conn.Close()
 	return wrapErr("Close", errors.Join(errs...))
 }
@@ -203,9 +226,13 @@ func (s *SDK) CreateStream(
 	tableName, clientID, clientSecret string,
 	opts ...StreamOption,
 ) (*Stream, error) {
+	authOpts := []auth.OAuthOption{auth.WithSharedTokenCache(s.tokenCache)}
+	if s.httpClient != nil {
+		authOpts = append(authOpts, auth.WithHTTPClient(s.httpClient))
+	}
 	provider, err := auth.NewOAuthHeadersProvider(
 		clientID, clientSecret, s.zerobusEndpoint, s.ucEndpoint,
-		auth.WithSharedTokenCache(s.tokenCache),
+		authOpts...,
 	)
 	if err != nil {
 		return nil, &Error{Op: "CreateStream", cause: err, retryable: false}
@@ -230,18 +257,68 @@ func (s *SDK) CreateStreamWithProvider(
 	return s.createStream(ctx, "CreateStreamWithProvider", tableName, provider, opts...)
 }
 
+// FetchProtoDescriptorFromUC returns a protobuf descriptor built from a Unity
+// Catalog table schema.
+func (s *SDK) FetchProtoDescriptorFromUC(
+	ctx context.Context,
+	tableName, clientID, clientSecret string,
+) ([]byte, error) {
+	if s.isClosed() {
+		return nil, &Error{
+			Op:        "FetchProtoDescriptorFromUC",
+			cause:     fmt.Errorf("SDK is closed"),
+			retryable: false,
+		}
+	}
+	descBytes, err := s.fetchProtoDescriptor(
+		ctx, tableName, clientID, clientSecret,
+	)
+	if err != nil {
+		return nil, &Error{
+			Op:        "FetchProtoDescriptorFromUC",
+			cause:     err,
+			retryable: dynamicSchemaErrorRetryable(err),
+		}
+	}
+	return descBytes, nil
+}
+
+// FetchProtoDescriptor returns a protobuf descriptor built from a Unity Catalog
+// table schema.
+//
+// Deprecated: use FetchProtoDescriptorFromUC.
+func (s *SDK) FetchProtoDescriptor(
+	ctx context.Context,
+	tableName, clientID, clientSecret string,
+) ([]byte, error) {
+	return s.FetchProtoDescriptorFromUC(ctx, tableName, clientID, clientSecret)
+}
+
 func (s *SDK) createStream(
 	ctx context.Context,
 	op, tableName string,
 	provider HeadersProvider,
 	opts ...StreamOption,
 ) (*Stream, error) {
+	return s.createStreamConfigured(ctx, op, tableName, provider, streamConfigFromOptions(opts))
+}
+
+func streamConfigFromOptions(opts []StreamOption) streamConfig {
 	sc := defaultStreamConfig()
 	for _, opt := range opts {
 		if opt != nil {
 			opt(&sc)
 		}
 	}
+	return sc
+}
+
+func (s *SDK) createStreamConfigured(
+	ctx context.Context,
+	op, tableName string,
+	provider HeadersProvider,
+	sc streamConfig,
+) (*Stream, error) {
 	if err := validateStreamArgs(tableName, sc); err != nil {
 		return nil, &Error{Op: op, cause: err, retryable: false}
 	}
@@ -252,7 +329,6 @@ func (s *SDK) createStream(
 		DescriptorProto: sc.descriptor,
 		HeadersProvider: provider,
 	}
-	// NewProtoJSONStream validates config and starts first-open.
 	openingCtx := context.WithoutCancel(ctx)
 	if sc.waitReady {
 		openingCtx = ctx
@@ -261,12 +337,21 @@ func (s *SDK) createStream(
 	if err != nil {
 		return nil, wrapErr(op, err)
 	}
-	st := &Stream{core: core, sdk: s}
+	st := &Stream{
+		core:                    core,
+		sdk:                     s,
+		recordType:              sc.recordType,
+		maxBatchRecords:         positiveOrDefault(sc.cfg.MaxBatchRecords, stream.DefaultMaxBatchRecords),
+		maxBufferedPayloadBytes: positiveOrDefault64(sc.cfg.MaxBufferedPayloadBytes, stream.DefaultMaxBufferedPayloadBytes),
+	}
+	if sc.recordType == zerobuspb.RecordType_PROTO {
+		st.jsonConverter, st.jsonConverterErr = dynamicproto.NewFromDescriptorProtoBytes(sc.descriptor)
+		st.conversionGate = make(chan struct{}, 1)
+	}
 	s.mu.Lock()
 	if s.closed {
 		s.mu.Unlock()
-		// Terminate rather than leak the supervisor goroutine NewProtoJSONStream
-		// already started.
+		// Stop the stream created before Close won the race.
 		_ = core.Terminate()
 		return nil, &Error{Op: op, cause: fmt.Errorf("SDK is closed"), retryable: false}
 	}
@@ -294,6 +379,134 @@ func validateStreamArgs(tableName string, sc streamConfig) error {
 	return nil
 }
 
+func (s *SDK) fetchProtoDescriptor(
+	ctx context.Context,
+	tableName, clientID, clientSecret string,
+) ([]byte, error) {
+	tableName = strings.TrimSpace(tableName)
+	if tableName == "" {
+		return nil, fmt.Errorf("table name is required")
+	}
+	if strings.TrimSpace(clientID) == "" {
+		return nil, fmt.Errorf("clientID is required")
+	}
+	if strings.TrimSpace(clientSecret) == "" {
+		return nil, fmt.Errorf("clientSecret is required")
+	}
+
+	cacheKey := dynamicSchemaCacheKey(s.ucEndpoint, tableName, clientID, clientSecret)
+	if desc, ok := s.getDynamicDescriptorFromCache(cacheKey); ok {
+		return desc, nil
+	}
+
+	fetcher, err := ucschema.New(ucschema.Config{
+		WorkspaceEndpoint: s.ucEndpoint,
+		ClientID:          clientID,
+		ClientSecret:      clientSecret,
+		HTTPClient:        s.httpClient,
+		RequestTimeout:    s.dynamicSchemaFetchTimeout,
+	})
+	if err != nil {
+		return nil, err
+	}
+	tableSchema, err := fetcher.FetchTableSchema(ctx, tableName)
+	if err != nil {
+		return nil, err
+	}
+	msgDescriptor, err := schema.DescriptorFromUCSchema(tableSchema)
+	if err != nil {
+		return nil, err
+	}
+	descBytes, err := proto.Marshal(msgDescriptor)
+	if err != nil {
+		return nil, fmt.Errorf("serialize descriptor: %w", err)
+	}
+	s.storeDynamicDescriptor(cacheKey, descBytes)
+	return descBytes, nil
+}
+
+func (s *SDK) getDynamicDescriptorFromCache(
+	cacheKey string,
+) ([]byte, bool) {
+	now := time.Now()
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.closed {
+		return nil, false
+	}
+	item, ok := s.dynamicSchemaCache[cacheKey]
+	if !ok {
+		return nil, false
+	}
+	if now.After(item.expiresAt) {
+		delete(s.dynamicSchemaCache, cacheKey)
+		return nil, false
+	}
+	dup := append([]byte(nil), item.descriptor...)
+	return dup, true
+}
+
+func (s *SDK) storeDynamicDescriptor(
+	cacheKey string,
+	desc []byte,
+) {
+	now := time.Now()
+	item := cachedDescriptor{
+		descriptor: append([]byte(nil), desc...),
+		expiresAt:  now.Add(defaultDynamicSchemaCacheTTL),
+		storedAt:   now,
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.closed {
+		return
+	}
+	for key, cached := range s.dynamicSchemaCache {
+		if now.After(cached.expiresAt) {
+			delete(s.dynamicSchemaCache, key)
+		}
+	}
+	delete(s.dynamicSchemaCache, cacheKey)
+	if len(s.dynamicSchemaCache) >= maxDynamicSchemaCacheEntries {
+		var oldestKey string
+		var oldestTime time.Time
+		for key, cached := range s.dynamicSchemaCache {
+			if oldestKey == "" || cached.storedAt.Before(oldestTime) {
+				oldestKey = key
+				oldestTime = cached.storedAt
+			}
+		}
+		if oldestKey != "" {
+			delete(s.dynamicSchemaCache, oldestKey)
+		}
+	}
+	s.dynamicSchemaCache[cacheKey] = item
+}
+
+func dynamicSchemaCacheKey(ucEndpoint, tableName, clientID, clientSecret string) string {
+	credential := sha256.Sum256([]byte(clientID + "\x00" + clientSecret))
+	return ucEndpoint + "\x00" + tableName + "\x00" + string(credential[:])
+}
+
+func dynamicSchemaErrorRetryable(err error) bool {
+	var classified interface{ IsRetryable() bool }
+	return errors.As(err, &classified) && classified.IsRetryable()
+}
+
+func positiveOrDefault(value, fallback int) int {
+	if value <= 0 {
+		return fallback
+	}
+	return value
+}
+
+func positiveOrDefault64(value, fallback int64) int64 {
+	if value <= 0 {
+		return fallback
+	}
+	return value
+}
+
 // validateApplicationName enforces gRPC metadata character constraints.
 func validateApplicationName(name string) error {
 	if !utf8.ValidString(name) {
@@ -313,6 +526,12 @@ func (s *SDK) forget(st *Stream) {
 	s.mu.Lock()
 	delete(s.streams, st)
 	s.mu.Unlock()
+}
+
+func (s *SDK) isClosed() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.closed
 }
 
 // grpcTarget converts endpoint input to a grpc.NewClient target.

@@ -2,6 +2,7 @@ package zerobus
 
 import (
 	"crypto/tls"
+	"net/http"
 	"time"
 
 	"github.com/databricks/zerobus-sdk/purego/internal/stream"
@@ -12,8 +13,10 @@ import (
 type Option func(*sdkConfig)
 
 type sdkConfig struct {
-	applicationName string
-	tlsConfig       *tls.Config
+	applicationName           string
+	tlsConfig                 *tls.Config
+	httpClient                *http.Client
+	dynamicSchemaFetchTimeout time.Duration
 }
 
 // WithApplicationName appends a caller-supplied identifier such as "my-app/1.0"
@@ -25,11 +28,27 @@ func WithApplicationName(name string) Option {
 	return func(c *sdkConfig) { c.applicationName = name }
 }
 
-// WithTLSConfig secures the connection with a custom TLS configuration,
-// replacing the default of system root CAs. It is intended for pinning a custom
-// CA or for tests; production callers rarely need it.
+// WithTLSConfig replaces the default system-root TLS configuration.
 func WithTLSConfig(tc *tls.Config) Option {
 	return func(c *sdkConfig) { c.tlsConfig = tc }
+}
+
+// WithProtoDescriptorFetchTimeout sets the timeout used by
+// FetchProtoDescriptor for Unity Catalog schema requests.
+// A non-positive value keeps the default.
+func WithProtoDescriptorFetchTimeout(d time.Duration) Option {
+	return func(c *sdkConfig) { c.dynamicSchemaFetchTimeout = d }
+}
+
+// WithHTTPClient overrides the HTTP client used for OAuth and Unity Catalog
+// schema requests.
+// A nil client is ignored.
+func WithHTTPClient(client *http.Client) Option {
+	return func(c *sdkConfig) {
+		if client != nil {
+			c.httpClient = client
+		}
+	}
 }
 
 // RecoverySetting controls whether a stream reconnects after a recoverable
@@ -79,10 +98,8 @@ func WithJSON() StreamOption {
 	}
 }
 
-// WithProto selects Protocol Buffer record encoding. descriptorProto is the
-// serialized message descriptor (a FileDescriptorProto / DescriptorProto) the
-// service uses to interpret the raw protobuf record bytes; it is required for
-// proto streams.
+// WithProto selects Protocol Buffer record encoding. descriptorProto must be a
+// serialized DescriptorProto.
 func WithProto(descriptorProto []byte) StreamOption {
 	return func(c *streamConfig) {
 		c.recordType = zerobuspb.RecordType_PROTO
