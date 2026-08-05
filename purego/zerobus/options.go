@@ -34,7 +34,7 @@ func WithTLSConfig(tc *tls.Config) Option {
 }
 
 // WithProtoDescriptorFetchTimeout sets the timeout used by
-// FetchProtoDescriptor for Unity Catalog schema requests.
+// FetchProtoDescriptorFromUC and RefreshProtoDescriptorFromUC.
 // A non-positive value keeps the default.
 func WithProtoDescriptorFetchTimeout(d time.Duration) Option {
 	return func(c *sdkConfig) { c.dynamicSchemaFetchTimeout = d }

@@ -15,8 +15,8 @@
   Unity Catalog table schemas.
 - Added `RefreshProtoDescriptorFromUC` for bypassing and replacing a cached
   descriptor after a table schema change.
-- Coalesced concurrent descriptor fetches for the same table and credentials
-  while preserving independent caller cancellation.
+- Coalesced compatible descriptor requests while keeping refreshes newer than
+  ordinary fetches, preserving caller cancellation, and stopping abandoned work.
 - Added `Stream.IngestJSONOffset` and `Stream.IngestJSONRecordsOffset`. JSON
   streams queue JSON directly; proto streams convert it before ingestion.
 

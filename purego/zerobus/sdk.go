@@ -103,7 +103,9 @@ type SDK struct {
 	httpClient                *http.Client
 	dynamicSchemaFetchTimeout time.Duration
 	dynamicSchemaCache        map[string]cachedDescriptor
-	dynamicSchemaFetches      map[string]*descriptorFetch
+	dynamicSchemaFetches      map[descriptorFetchKey]*descriptorFetch
+	descriptorGeneration      uint64
+	descriptorFetchWG         sync.WaitGroup
 
 	// mu guards the open-stream set, descriptor cache/fetches, and closed flag.
 	mu     sync.Mutex
@@ -116,19 +118,36 @@ type cachedDescriptor struct {
 	descriptor []byte
 	expiresAt  time.Time
 	storedAt   time.Time
+	generation uint64
+}
+
+type descriptorFetchKey struct {
+	cacheKey string
+	refresh  bool
 }
 
 type descriptorFetch struct {
+	key        descriptorFetchKey
 	done       chan struct{}
 	descriptor []byte
 	err        error
 	waiters    int
+	generation uint64
+	ctx        context.Context
+	cancel     context.CancelCauseFunc
+	completed  bool
+	superseded bool
 }
 
 const (
 	defaultDynamicSchemaFetchTimeout = 10 * time.Second
 	defaultDynamicSchemaCacheTTL     = 5 * time.Minute
 	maxDynamicSchemaCacheEntries     = 128
+)
+
+var (
+	errSDKClosed                = errors.New("SDK is closed")
+	errDescriptorFetchAbandoned = errors.New("descriptor fetch abandoned")
 )
 
 // newSDK builds an SDK around an existing connection.
@@ -145,7 +164,7 @@ func newSDK(conn *transport.Conn, zerobusEndpoint, ucEndpoint string, cfg sdkCon
 		httpClient:                cfg.httpClient,
 		dynamicSchemaFetchTimeout: fetchTimeout,
 		dynamicSchemaCache:        make(map[string]cachedDescriptor),
-		dynamicSchemaFetches:      make(map[string]*descriptorFetch),
+		dynamicSchemaFetches:      make(map[descriptorFetchKey]*descriptorFetch),
 		streams:                   make(map[*Stream]struct{}),
 	}
 }
@@ -210,7 +229,15 @@ func (s *SDK) Close() error {
 	}
 	s.streams = nil
 	s.dynamicSchemaCache = make(map[string]cachedDescriptor)
+	for key, fetch := range s.dynamicSchemaFetches {
+		delete(s.dynamicSchemaFetches, key)
+		s.completeDescriptorFetchLocked(fetch, nil, errSDKClosed)
+		if fetch.cancel != nil {
+			fetch.cancel(errSDKClosed)
+		}
+	}
 	s.mu.Unlock()
+	s.descriptorFetchWG.Wait()
 
 	errs := make([]error, len(open)+1)
 	var wg sync.WaitGroup
@@ -287,8 +314,8 @@ func (s *SDK) FetchProtoDescriptorFromUC(
 
 // RefreshProtoDescriptorFromUC fetches a fresh Unity Catalog table schema,
 // replaces its cached descriptor, and returns it. Concurrent refreshes for the
-// same table and credentials share one request. Cancelling one caller stops
-// only that caller's wait; it does not cancel the shared fetch.
+// same table and credentials share one request. Cancelling a caller does not
+// cancel a fetch that another caller still needs.
 func (s *SDK) RefreshProtoDescriptorFromUC(
 	ctx context.Context,
 	tableName, clientID, clientSecret string,
@@ -311,7 +338,7 @@ func (s *SDK) fetchProtoDescriptorFromUC(
 	if s.isClosed() {
 		return nil, &Error{
 			Op:        op,
-			cause:     fmt.Errorf("SDK is closed"),
+			cause:     errSDKClosed,
 			retryable: false,
 		}
 	}
@@ -398,7 +425,7 @@ func (s *SDK) createStreamConfigured(
 		s.mu.Unlock()
 		// Stop the stream created before Close won the race.
 		_ = core.Terminate()
-		return nil, &Error{Op: op, cause: fmt.Errorf("SDK is closed"), retryable: false}
+		return nil, &Error{Op: op, cause: errSDKClosed, retryable: false}
 	}
 	s.streams[st] = struct{}{}
 	s.mu.Unlock()
@@ -451,7 +478,9 @@ func (s *SDK) fetchProtoDescriptorCached(
 	}
 
 	cacheKey := dynamicSchemaCacheKey(s.ucEndpoint, tableName, clientID, clientSecret)
-	desc, cached, fetch, leader, err := s.cachedDescriptorOrJoinFetch(cacheKey, !refresh)
+	desc, cached, fetch, leader, err := s.cachedDescriptorOrJoinFetch(
+		ctx, cacheKey, refresh,
+	)
 	if err != nil {
 		return nil, err
 	}
@@ -459,10 +488,8 @@ func (s *SDK) fetchProtoDescriptorCached(
 		return desc, nil
 	}
 	if leader {
-		sharedCtx := context.WithoutCancel(ctx)
 		go s.runDescriptorFetch(
-			sharedCtx,
-			cacheKey,
+			fetch.ctx,
 			tableName,
 			clientID,
 			clientSecret,
@@ -502,16 +529,24 @@ func (s *SDK) loadProtoDescriptor(
 }
 
 func (s *SDK) cachedDescriptorOrJoinFetch(
+	ctx context.Context,
 	cacheKey string,
-	allowCached bool,
+	refresh bool,
 ) ([]byte, bool, *descriptorFetch, bool, error) {
 	now := time.Now()
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.closed {
-		return nil, false, nil, false, fmt.Errorf("SDK is closed")
+		return nil, false, nil, false, errSDKClosed
 	}
-	if allowCached {
+	refreshKey := descriptorFetchKey{cacheKey: cacheKey, refresh: true}
+	if refresh {
+		if fetch, ok := s.dynamicSchemaFetches[refreshKey]; ok {
+			fetch.waiters++
+			return nil, false, fetch, false, nil
+		}
+	}
+	if !refresh {
 		if item, ok := s.dynamicSchemaCache[cacheKey]; ok {
 			if now.After(item.expiresAt) {
 				delete(s.dynamicSchemaCache, cacheKey)
@@ -520,54 +555,116 @@ func (s *SDK) cachedDescriptorOrJoinFetch(
 				return dup, true, nil, false, nil
 			}
 		}
+		if fetch, ok := s.dynamicSchemaFetches[refreshKey]; ok {
+			fetch.waiters++
+			return nil, false, fetch, false, nil
+		}
 	}
-	if fetch, ok := s.dynamicSchemaFetches[cacheKey]; ok {
-		fetch.waiters++
-		return nil, false, fetch, false, nil
+	fetchKey := descriptorFetchKey{cacheKey: cacheKey, refresh: refresh}
+	if !refresh {
+		if fetch, ok := s.dynamicSchemaFetches[fetchKey]; ok && !fetch.superseded {
+			fetch.waiters++
+			return nil, false, fetch, false, nil
+		}
+	} else {
+		// Starting a refresh establishes a freshness barrier even if it fails.
+		ordinaryKey := descriptorFetchKey{cacheKey: cacheKey}
+		if ordinary := s.dynamicSchemaFetches[ordinaryKey]; ordinary != nil {
+			ordinary.superseded = true
+		}
 	}
+	sharedCtx, cancel := context.WithCancelCause(context.WithoutCancel(ctx))
+	s.descriptorGeneration++
 	fetch := &descriptorFetch{
-		done:    make(chan struct{}),
-		waiters: 1,
+		key:        fetchKey,
+		done:       make(chan struct{}),
+		waiters:    1,
+		generation: s.descriptorGeneration,
+		ctx:        sharedCtx,
+		cancel:     cancel,
 	}
-	s.dynamicSchemaFetches[cacheKey] = fetch
+	s.dynamicSchemaFetches[fetchKey] = fetch
+	s.descriptorFetchWG.Add(1)
 	return nil, false, fetch, true, nil
 }
 
 func (s *SDK) runDescriptorFetch(
 	ctx context.Context,
-	cacheKey, tableName, clientID, clientSecret string,
+	tableName, clientID, clientSecret string,
 	fetch *descriptorFetch,
 ) {
+	defer s.descriptorFetchWG.Done()
 	desc, err := s.loadProtoDescriptor(ctx, tableName, clientID, clientSecret)
 
 	s.mu.Lock()
-	if err == nil && !s.closed {
-		s.storeDynamicDescriptorLocked(cacheKey, desc, time.Now())
+	defer s.mu.Unlock()
+	if fetch.completed {
+		return
 	}
-	fetch.descriptor = append([]byte(nil), desc...)
-	fetch.err = err
-	if current := s.dynamicSchemaFetches[cacheKey]; current == fetch {
-		delete(s.dynamicSchemaFetches, cacheKey)
+	current := s.dynamicSchemaFetches[fetch.key] == fetch
+	if err == nil && !s.closed && current {
+		if !fetch.superseded {
+			item, cached := s.dynamicSchemaCache[fetch.key.cacheKey]
+			if !cached || fetch.generation >= item.generation {
+				s.storeDynamicDescriptorLocked(
+					fetch.key.cacheKey, desc, time.Now(), fetch.generation,
+				)
+			}
+		}
 	}
-	close(fetch.done)
-	s.mu.Unlock()
+	if current {
+		delete(s.dynamicSchemaFetches, fetch.key)
+	}
+	s.completeDescriptorFetchLocked(fetch, desc, err)
 }
 
 func (s *SDK) waitForDescriptorFetch(
 	ctx context.Context,
 	fetch *descriptorFetch,
 ) ([]byte, error) {
-	defer func() {
-		s.mu.Lock()
-		fetch.waiters--
-		s.mu.Unlock()
-	}()
+	var desc []byte
+	var err error
 	select {
 	case <-fetch.done:
-		return append([]byte(nil), fetch.descriptor...), fetch.err
+		desc = append([]byte(nil), fetch.descriptor...)
+		err = fetch.err
 	case <-ctx.Done():
-		return nil, context.Cause(ctx)
+		err = context.Cause(ctx)
 	}
+	s.leaveDescriptorFetch(fetch)
+	return desc, err
+}
+
+func (s *SDK) leaveDescriptorFetch(fetch *descriptorFetch) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if fetch.waiters > 0 {
+		fetch.waiters--
+	}
+	if fetch.waiters != 0 || fetch.completed {
+		return
+	}
+	if current := s.dynamicSchemaFetches[fetch.key]; current == fetch {
+		delete(s.dynamicSchemaFetches, fetch.key)
+	}
+	s.completeDescriptorFetchLocked(fetch, nil, errDescriptorFetchAbandoned)
+	if fetch.cancel != nil {
+		fetch.cancel(errDescriptorFetchAbandoned)
+	}
+}
+
+func (s *SDK) completeDescriptorFetchLocked(
+	fetch *descriptorFetch,
+	desc []byte,
+	err error,
+) {
+	if fetch.completed {
+		return
+	}
+	fetch.descriptor = append([]byte(nil), desc...)
+	fetch.err = err
+	fetch.completed = true
+	close(fetch.done)
 }
 
 func (s *SDK) storeDynamicDescriptor(
@@ -580,18 +677,21 @@ func (s *SDK) storeDynamicDescriptor(
 	if s.closed {
 		return
 	}
-	s.storeDynamicDescriptorLocked(cacheKey, desc, now)
+	s.descriptorGeneration++
+	s.storeDynamicDescriptorLocked(cacheKey, desc, now, s.descriptorGeneration)
 }
 
 func (s *SDK) storeDynamicDescriptorLocked(
 	cacheKey string,
 	desc []byte,
 	now time.Time,
+	generation uint64,
 ) {
 	item := cachedDescriptor{
 		descriptor: append([]byte(nil), desc...),
 		expiresAt:  now.Add(defaultDynamicSchemaCacheTTL),
 		storedAt:   now,
+		generation: generation,
 	}
 	for key, cached := range s.dynamicSchemaCache {
 		if now.After(cached.expiresAt) {

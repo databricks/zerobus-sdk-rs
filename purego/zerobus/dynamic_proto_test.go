@@ -35,10 +35,11 @@ func waitForDescriptorFetchWaiters(
 	deadline := time.Now().Add(5 * time.Second)
 	for {
 		sdk.mu.Lock()
-		fetch := sdk.dynamicSchemaFetches[cacheKey]
 		got := 0
-		if fetch != nil {
-			got = fetch.waiters
+		for key, fetch := range sdk.dynamicSchemaFetches {
+			if key.cacheKey == cacheKey {
+				got += fetch.waiters
+			}
 		}
 		sdk.mu.Unlock()
 		if got == want {
@@ -165,6 +166,392 @@ func TestSDKRefreshProtoDescriptorFromUC_BypassesAndReplacesCache(t *testing.T) 
 	}
 	if got := tokenCalls.Load(); got != 2 {
 		t.Fatalf("token calls = %d, want 2", got)
+	}
+	if got := schemaCalls.Load(); got != 2 {
+		t.Fatalf("schema calls = %d, want 2", got)
+	}
+}
+
+func TestSDKRefreshProtoDescriptorFromUC_DoesNotJoinOlderFetch(t *testing.T) {
+	var schemaCalls atomic.Int32
+	oldFetchStarted := make(chan struct{})
+	releaseOldFetch := make(chan struct{})
+	var releaseOnce sync.Once
+	release := func() { releaseOnce.Do(func() { close(releaseOldFetch) }) }
+
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.URL.Path == "/oidc/v1/token":
+			_ = json.NewEncoder(w).Encode(map[string]any{"access_token": "abc"})
+		case strings.HasPrefix(r.URL.Path, "/api/2.1/unity-catalog/tables/"):
+			call := schemaCalls.Add(1)
+			columns := []map[string]any{
+				{"name": "id", "type_name": "LONG", "position": 0},
+			}
+			if call == 1 {
+				close(oldFetchStarted)
+				<-releaseOldFetch
+			} else {
+				columns = append(columns, map[string]any{
+					"name": "note", "type_name": "STRING", "position": 1,
+				})
+			}
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"name":         "orders",
+				"catalog_name": "main",
+				"schema_name":  "sales",
+				"columns":      columns,
+			})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+	defer release()
+
+	sdk := newSDK(nil, "https://workspace.zerobus.cloud.databricks.com", server.URL, sdkConfig{
+		httpClient: server.Client(),
+	})
+	ordinaryResult := make(chan []byte, 1)
+	ordinaryErr := make(chan error, 1)
+	go func() {
+		desc, err := sdk.FetchProtoDescriptorFromUC(
+			context.Background(), "main.sales.orders", "id", "secret",
+		)
+		ordinaryResult <- desc
+		ordinaryErr <- err
+	}()
+	select {
+	case <-oldFetchStarted:
+	case <-time.After(5 * time.Second):
+		t.Fatal("ordinary fetch did not start")
+	}
+
+	refreshCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	refreshed, err := sdk.RefreshProtoDescriptorFromUC(
+		refreshCtx, "main.sales.orders", "id", "secret",
+	)
+	if err != nil {
+		t.Fatalf("RefreshProtoDescriptorFromUC() error = %v", err)
+	}
+	if got := schemaCalls.Load(); got != 2 {
+		t.Fatalf("schema calls before releasing old fetch = %d, want 2", got)
+	}
+	cacheKey := dynamicSchemaCacheKey(server.URL, "main.sales.orders", "id", "secret")
+	for i := range maxDynamicSchemaCacheEntries {
+		sdk.storeDynamicDescriptor(
+			fmt.Sprintf("other-%03d", i),
+			[]byte("other"),
+		)
+	}
+	sdk.mu.Lock()
+	_, refreshedStillCached := sdk.dynamicSchemaCache[cacheKey]
+	sdk.mu.Unlock()
+	if refreshedStillCached {
+		t.Fatal("refreshed descriptor was not evicted for the test")
+	}
+
+	release()
+	if err := <-ordinaryErr; err != nil {
+		t.Fatalf("ordinary fetch error = %v", err)
+	}
+	ordinary := <-ordinaryResult
+	if string(ordinary) == string(refreshed) {
+		t.Fatal("test descriptors unexpectedly match")
+	}
+	sdk.mu.Lock()
+	_, staleWasCached := sdk.dynamicSchemaCache[cacheKey]
+	sdk.mu.Unlock()
+	if staleWasCached {
+		t.Fatal("older fetch repopulated the evicted cache entry")
+	}
+	cached, err := sdk.FetchProtoDescriptorFromUC(
+		context.Background(), "main.sales.orders", "id", "secret",
+	)
+	if err != nil {
+		t.Fatalf("FetchProtoDescriptorFromUC() after refresh error = %v", err)
+	}
+	if string(cached) != string(refreshed) {
+		t.Fatal("older fetch overwrote the refreshed descriptor")
+	}
+	if got := schemaCalls.Load(); got != 3 {
+		t.Fatalf("schema calls = %d, want 3", got)
+	}
+}
+
+func TestSDKRefreshProtoDescriptorFromUC_FailureStillSupersedesOlderFetch(t *testing.T) {
+	var schemaCalls atomic.Int32
+	oldFetchStarted := make(chan struct{})
+	releaseOldFetch := make(chan struct{})
+	var releaseOnce sync.Once
+	release := func() { releaseOnce.Do(func() { close(releaseOldFetch) }) }
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.URL.Path == "/oidc/v1/token":
+			_ = json.NewEncoder(w).Encode(map[string]any{"access_token": "abc"})
+		case strings.HasPrefix(r.URL.Path, "/api/2.1/unity-catalog/tables/"):
+			switch schemaCalls.Add(1) {
+			case 1:
+				close(oldFetchStarted)
+				<-releaseOldFetch
+			case 2:
+				http.Error(w, "refresh failed", http.StatusInternalServerError)
+				return
+			}
+			columns := []map[string]any{
+				{"name": "id", "type_name": "LONG", "position": 0},
+			}
+			if schemaCalls.Load() >= 3 {
+				columns = append(columns, map[string]any{
+					"name": "note", "type_name": "STRING", "position": 1,
+				})
+			}
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"name":         "orders",
+				"catalog_name": "main",
+				"schema_name":  "sales",
+				"columns":      columns,
+			})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+	defer release()
+
+	sdk := newSDK(nil, "https://workspace.zerobus.cloud.databricks.com", server.URL, sdkConfig{
+		httpClient: server.Client(),
+	})
+	ordinaryResult := make(chan []byte, 1)
+	ordinaryErr := make(chan error, 1)
+	go func() {
+		desc, err := sdk.FetchProtoDescriptorFromUC(
+			context.Background(), "main.sales.orders", "id", "secret",
+		)
+		ordinaryResult <- desc
+		ordinaryErr <- err
+	}()
+	select {
+	case <-oldFetchStarted:
+	case <-time.After(5 * time.Second):
+		t.Fatal("ordinary fetch did not start")
+	}
+
+	if _, err := sdk.RefreshProtoDescriptorFromUC(
+		context.Background(), "main.sales.orders", "id", "secret",
+	); err == nil {
+		t.Fatal("failing refresh returned nil error")
+	}
+	release()
+	if err := <-ordinaryErr; err != nil {
+		t.Fatalf("ordinary fetch error = %v", err)
+	}
+	oldDescriptor := <-ordinaryResult
+	cacheKey := dynamicSchemaCacheKey(server.URL, "main.sales.orders", "id", "secret")
+	sdk.mu.Lock()
+	_, oldWasCached := sdk.dynamicSchemaCache[cacheKey]
+	sdk.mu.Unlock()
+	if oldWasCached {
+		t.Fatal("pre-refresh fetch populated the cache after refresh failed")
+	}
+
+	fresh, err := sdk.FetchProtoDescriptorFromUC(
+		context.Background(), "main.sales.orders", "id", "secret",
+	)
+	if err != nil {
+		t.Fatalf("fetch after failed refresh error = %v", err)
+	}
+	if string(fresh) == string(oldDescriptor) {
+		t.Fatal("fetch after failed refresh returned the old descriptor")
+	}
+	if got := schemaCalls.Load(); got != 3 {
+		t.Fatalf("schema calls = %d, want 3", got)
+	}
+}
+
+func TestSDKRefreshProtoDescriptorFromUC_CoalescesAndIsolatesCancellation(t *testing.T) {
+	var schemaCalls atomic.Int32
+	refreshStarted := make(chan struct{})
+	releaseRefresh := make(chan struct{})
+	var releaseOnce sync.Once
+	release := func() { releaseOnce.Do(func() { close(releaseRefresh) }) }
+
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.URL.Path == "/oidc/v1/token":
+			_ = json.NewEncoder(w).Encode(map[string]any{"access_token": "abc"})
+		case strings.HasPrefix(r.URL.Path, "/api/2.1/unity-catalog/tables/"):
+			call := schemaCalls.Add(1)
+			columns := []map[string]any{
+				{"name": "id", "type_name": "LONG", "position": 0},
+			}
+			if call == 2 {
+				close(refreshStarted)
+				<-releaseRefresh
+				columns = append(columns, map[string]any{
+					"name": "note", "type_name": "STRING", "position": 1,
+				})
+			}
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"name":         "orders",
+				"catalog_name": "main",
+				"schema_name":  "sales",
+				"columns":      columns,
+			})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+	defer release()
+
+	sdk := newSDK(nil, "https://workspace.zerobus.cloud.databricks.com", server.URL, sdkConfig{
+		httpClient: server.Client(),
+	})
+	if _, err := sdk.FetchProtoDescriptorFromUC(
+		context.Background(), "main.sales.orders", "id", "secret",
+	); err != nil {
+		t.Fatalf("initial fetch error = %v", err)
+	}
+
+	leaderResult := make(chan []byte, 1)
+	leaderErr := make(chan error, 1)
+	go func() {
+		desc, err := sdk.RefreshProtoDescriptorFromUC(
+			context.Background(), "main.sales.orders", "id", "secret",
+		)
+		leaderResult <- desc
+		leaderErr <- err
+	}()
+	select {
+	case <-refreshStarted:
+	case <-time.After(5 * time.Second):
+		t.Fatal("refresh request did not start")
+	}
+
+	cacheKey := dynamicSchemaCacheKey(server.URL, "main.sales.orders", "id", "secret")
+	sdk.mu.Lock()
+	delete(sdk.dynamicSchemaCache, cacheKey)
+	sdk.mu.Unlock()
+	waiterCtx, cancelWaiter := context.WithCancel(context.Background())
+	waiterResult := make(chan error, 1)
+	go func() {
+		_, err := sdk.RefreshProtoDescriptorFromUC(
+			waiterCtx, "main.sales.orders", "id", "secret",
+		)
+		waiterResult <- err
+	}()
+	ordinaryResult := make(chan []byte, 1)
+	ordinaryErr := make(chan error, 1)
+	go func() {
+		desc, err := sdk.FetchProtoDescriptorFromUC(
+			context.Background(), "main.sales.orders", "id", "secret",
+		)
+		ordinaryResult <- desc
+		ordinaryErr <- err
+	}()
+	waitForDescriptorFetchWaiters(t, sdk, cacheKey, 3)
+	cancelWaiter()
+	if err := <-waiterResult; !errors.Is(err, context.Canceled) {
+		t.Fatalf("cancelled refresh error = %v, want context.Canceled", err)
+	}
+	waitForDescriptorFetchWaiters(t, sdk, cacheKey, 2)
+
+	release()
+	if err := <-leaderErr; err != nil {
+		t.Fatalf("leader refresh error = %v", err)
+	}
+	refreshed := <-leaderResult
+	if err := <-ordinaryErr; err != nil {
+		t.Fatalf("ordinary fetch error = %v", err)
+	}
+	if ordinary := <-ordinaryResult; string(ordinary) != string(refreshed) {
+		t.Fatal("ordinary cache miss did not join the refresh")
+	}
+	cached, err := sdk.FetchProtoDescriptorFromUC(
+		context.Background(), "main.sales.orders", "id", "secret",
+	)
+	if err != nil {
+		t.Fatalf("cached fetch error = %v", err)
+	}
+	if string(cached) != string(refreshed) {
+		t.Fatal("refresh result was not cached")
+	}
+	if got := schemaCalls.Load(); got != 2 {
+		t.Fatalf("schema calls = %d, want 2", got)
+	}
+}
+
+func TestSDKFetchProtoDescriptor_CacheHitDoesNotJoinFailingRefresh(t *testing.T) {
+	var schemaCalls atomic.Int32
+	refreshStarted := make(chan struct{})
+	releaseRefresh := make(chan struct{})
+	var releaseOnce sync.Once
+	release := func() { releaseOnce.Do(func() { close(releaseRefresh) }) }
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.URL.Path == "/oidc/v1/token":
+			_ = json.NewEncoder(w).Encode(map[string]any{"access_token": "abc"})
+		case strings.HasPrefix(r.URL.Path, "/api/2.1/unity-catalog/tables/"):
+			if schemaCalls.Add(1) == 2 {
+				close(refreshStarted)
+				<-releaseRefresh
+				http.Error(w, "refresh failed", http.StatusInternalServerError)
+				return
+			}
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"name":         "orders",
+				"catalog_name": "main",
+				"schema_name":  "sales",
+				"columns": []map[string]any{
+					{"name": "id", "type_name": "LONG", "position": 0},
+				},
+			})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+	defer release()
+
+	sdk := newSDK(nil, "https://workspace.zerobus.cloud.databricks.com", server.URL, sdkConfig{
+		httpClient: server.Client(),
+	})
+	cachedDescriptor, err := sdk.FetchProtoDescriptorFromUC(
+		context.Background(), "main.sales.orders", "id", "secret",
+	)
+	if err != nil {
+		t.Fatalf("initial fetch error = %v", err)
+	}
+	refreshResult := make(chan error, 1)
+	go func() {
+		_, err := sdk.RefreshProtoDescriptorFromUC(
+			context.Background(), "main.sales.orders", "id", "secret",
+		)
+		refreshResult <- err
+	}()
+	select {
+	case <-refreshStarted:
+	case <-time.After(5 * time.Second):
+		t.Fatal("refresh request did not start")
+	}
+
+	fetchCtx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	duringRefresh, err := sdk.FetchProtoDescriptorFromUC(
+		fetchCtx, "main.sales.orders", "id", "secret",
+	)
+	if err != nil {
+		t.Fatalf("cache hit during refresh error = %v", err)
+	}
+	if string(duringRefresh) != string(cachedDescriptor) {
+		t.Fatal("cache hit during refresh returned different descriptor")
+	}
+
+	release()
+	if err := <-refreshResult; err == nil {
+		t.Fatal("failing refresh returned nil error")
 	}
 	if got := schemaCalls.Load(); got != 2 {
 		t.Fatalf("schema calls = %d, want 2", got)
@@ -344,6 +731,188 @@ func TestSDKFetchProtoDescriptor_CallerCancellationDoesNotCancelSharedFetch(t *t
 	}
 }
 
+func TestSDKFetchProtoDescriptor_LastCancellationStopsFetch(t *testing.T) {
+	schemaStarted := make(chan struct{})
+	schemaCancelled := make(chan struct{})
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.URL.Path == "/oidc/v1/token":
+			_ = json.NewEncoder(w).Encode(map[string]any{"access_token": "abc"})
+		case strings.HasPrefix(r.URL.Path, "/api/2.1/unity-catalog/tables/"):
+			close(schemaStarted)
+			<-r.Context().Done()
+			close(schemaCancelled)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	sdk := newSDK(nil, "https://workspace.zerobus.cloud.databricks.com", server.URL, sdkConfig{
+		httpClient:                server.Client(),
+		dynamicSchemaFetchTimeout: time.Minute,
+	})
+	ctx, cancel := context.WithCancel(context.Background())
+	result := make(chan error, 1)
+	go func() {
+		_, err := sdk.FetchProtoDescriptorFromUC(
+			ctx, "main.sales.orders", "id", "secret",
+		)
+		result <- err
+	}()
+	select {
+	case <-schemaStarted:
+	case <-time.After(5 * time.Second):
+		t.Fatal("schema request did not start")
+	}
+
+	cancel()
+	select {
+	case err := <-result:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("fetch error = %v, want context.Canceled", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("cancelled fetch did not return")
+	}
+	select {
+	case <-schemaCancelled:
+	case <-time.After(5 * time.Second):
+		t.Fatal("shared schema request was not cancelled")
+	}
+	cacheKey := dynamicSchemaCacheKey(server.URL, "main.sales.orders", "id", "secret")
+	waitForDescriptorFetchWaiters(t, sdk, cacheKey, 0)
+}
+
+func TestSDKCloseCancelsDescriptorFetch(t *testing.T) {
+	schemaStarted := make(chan struct{})
+	schemaCancelled := make(chan struct{})
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.URL.Path == "/oidc/v1/token":
+			_ = json.NewEncoder(w).Encode(map[string]any{"access_token": "abc"})
+		case strings.HasPrefix(r.URL.Path, "/api/2.1/unity-catalog/tables/"):
+			close(schemaStarted)
+			<-r.Context().Done()
+			close(schemaCancelled)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	sdk, err := New(
+		"https://workspace.zerobus.cloud.databricks.com",
+		server.URL,
+		WithHTTPClient(server.Client()),
+		WithProtoDescriptorFetchTimeout(time.Minute),
+	)
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+	result := make(chan error, 1)
+	go func() {
+		_, err := sdk.FetchProtoDescriptorFromUC(
+			context.Background(), "main.sales.orders", "id", "secret",
+		)
+		result <- err
+	}()
+	select {
+	case <-schemaStarted:
+	case <-time.After(5 * time.Second):
+		t.Fatal("schema request did not start")
+	}
+
+	if err := sdk.Close(); err != nil {
+		t.Fatalf("Close() error = %v", err)
+	}
+	select {
+	case err := <-result:
+		if !errors.Is(err, errSDKClosed) {
+			t.Fatalf("fetch error = %v, want SDK closed", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("fetch waiter was not released by Close")
+	}
+	select {
+	case <-schemaCancelled:
+	case <-time.After(5 * time.Second):
+		t.Fatal("schema request was not cancelled by Close")
+	}
+}
+
+func TestSDKFetchProtoDescriptor_FailedSharedFetchCanRetry(t *testing.T) {
+	var schemaCalls atomic.Int32
+	firstStarted := make(chan struct{})
+	releaseFirst := make(chan struct{})
+	var releaseOnce sync.Once
+	release := func() { releaseOnce.Do(func() { close(releaseFirst) }) }
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.URL.Path == "/oidc/v1/token":
+			_ = json.NewEncoder(w).Encode(map[string]any{"access_token": "abc"})
+		case strings.HasPrefix(r.URL.Path, "/api/2.1/unity-catalog/tables/"):
+			if schemaCalls.Add(1) == 1 {
+				close(firstStarted)
+				<-releaseFirst
+				http.Error(w, "temporary failure", http.StatusInternalServerError)
+				return
+			}
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"name":         "orders",
+				"catalog_name": "main",
+				"schema_name":  "sales",
+				"columns": []map[string]any{
+					{"name": "id", "type_name": "LONG", "position": 0},
+				},
+			})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+	defer release()
+
+	sdk := newSDK(nil, "https://workspace.zerobus.cloud.databricks.com", server.URL, sdkConfig{
+		httpClient: server.Client(),
+	})
+	const callers = 2
+	start := make(chan struct{})
+	errs := make(chan error, callers)
+	for range callers {
+		go func() {
+			<-start
+			_, err := sdk.FetchProtoDescriptorFromUC(
+				context.Background(), "main.sales.orders", "id", "secret",
+			)
+			errs <- err
+		}()
+	}
+	close(start)
+	select {
+	case <-firstStarted:
+	case <-time.After(5 * time.Second):
+		t.Fatal("shared failing request did not start")
+	}
+	cacheKey := dynamicSchemaCacheKey(server.URL, "main.sales.orders", "id", "secret")
+	waitForDescriptorFetchWaiters(t, sdk, cacheKey, callers)
+	release()
+	for range callers {
+		if err := <-errs; err == nil {
+			t.Fatal("shared failing fetch returned nil error")
+		}
+	}
+
+	if _, err := sdk.FetchProtoDescriptorFromUC(
+		context.Background(), "main.sales.orders", "id", "secret",
+	); err != nil {
+		t.Fatalf("retry after shared failure error = %v", err)
+	}
+	if got := schemaCalls.Load(); got != 2 {
+		t.Fatalf("schema calls = %d, want 2", got)
+	}
+}
+
 func TestStreamEncodeJSONBatch(t *testing.T) {
 	desc := &descriptorpb.DescriptorProto{
 		Name: proto.String("Order"),
@@ -490,6 +1059,50 @@ func TestSDKFetchProtoDescriptor_CacheIsCredentialScoped(t *testing.T) {
 	}
 	if got := schemaCalls.Load(); got != 3 {
 		t.Fatalf("schema calls = %d, want 3", got)
+	}
+}
+
+func TestSDKFetchProtoDescriptor_ExpiredEntryRefetches(t *testing.T) {
+	var schemaCalls atomic.Int32
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.URL.Path == "/oidc/v1/token":
+			_ = json.NewEncoder(w).Encode(map[string]any{"access_token": "abc"})
+		case strings.HasPrefix(r.URL.Path, "/api/2.1/unity-catalog/tables/"):
+			schemaCalls.Add(1)
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"name":         "orders",
+				"catalog_name": "main",
+				"schema_name":  "sales",
+				"columns": []map[string]any{
+					{"name": "id", "type_name": "LONG", "position": 0},
+				},
+			})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	sdk := newSDK(nil, "https://workspace.zerobus.cloud.databricks.com", server.URL, sdkConfig{
+		httpClient: server.Client(),
+	})
+	cacheKey := dynamicSchemaCacheKey(server.URL, "main.sales.orders", "id", "secret")
+	sdk.dynamicSchemaCache[cacheKey] = cachedDescriptor{
+		descriptor: []byte("stale"),
+		expiresAt:  time.Now().Add(-time.Second),
+	}
+	desc, err := sdk.FetchProtoDescriptorFromUC(
+		context.Background(), "main.sales.orders", "id", "secret",
+	)
+	if err != nil {
+		t.Fatalf("FetchProtoDescriptorFromUC() error = %v", err)
+	}
+	if string(desc) == "stale" {
+		t.Fatal("expired descriptor was returned")
+	}
+	if got := schemaCalls.Load(); got != 1 {
+		t.Fatalf("schema calls = %d, want 1", got)
 	}
 }
 

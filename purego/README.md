@@ -93,7 +93,10 @@ Fetch the table schema explicitly, then create a regular proto stream. The
 stream can accept either protobuf bytes or JSON converted at ingest time.
 
 Fetched descriptors are cached for five minutes, up to 128 entries per SDK.
-Concurrent fetches for the same table and credentials share one UC request.
+Concurrent refreshes share one request and never join an older ordinary fetch.
+Ordinary cache misses coalesce, or join an active refresh when no cached
+descriptor is available.
+Shared work stops when all waiting callers cancel or the SDK closes.
 After changing a table schema, call `RefreshProtoDescriptorFromUC` to bypass
 the cached entry and replace it with a fresh descriptor:
 
