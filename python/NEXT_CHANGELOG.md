@@ -21,6 +21,11 @@
   supports CPython up to 3.12. The wheel targets the stable ABI (`abi3`), so pip
   installed it on 3.14 and the process crashed when you created a `ZerobusSdk`.
   The bindings now use PyO3 0.29, which supports 3.14.
+- `requires-python` is now `>=3.9,<3.15`, so pip no longer installs the SDK on a
+  CPython version it has not been tested against. The package declared no upper
+  bound before, which is what let pip pick the `abi3` wheel on 3.14 and crash
+  rather than report that the version is unsupported. The bound moves up as each
+  new CPython version is added to CI.
 
 ### Documentation
 

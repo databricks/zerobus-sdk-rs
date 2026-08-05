@@ -8,7 +8,7 @@ This document covers Python-specific development setup and workflow.
 
 ### Prerequisites
 
-- **Python 3.9 or higher**
+- **Python 3.9 through 3.14**
 - **Git**
 - **Rust toolchain** (required for building the native extension)
   - Install from [rustup.rs](https://rustup.rs/)

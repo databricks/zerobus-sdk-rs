@@ -85,7 +85,7 @@ Pre-built wheels are available for:
 Requires **Python 3.9-3.14**. The SDK is tested on CPython 3.9 through 3.14.
 
 The wheel uses the CPython stable ABI (`abi3`), so one wheel works on every
-supported version. The free-threaded builds (like`3.14t`) are not
+supported version. The free-threaded builds (like `3.14t`) are not
 supported, because the stable ABI does not cover them.
 
 ### Dependencies
