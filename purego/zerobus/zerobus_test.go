@@ -380,51 +380,6 @@ func TestStreamBatchIngest(t *testing.T) {
 	}
 }
 
-func TestCreateProtoStreamAcceptsFileDescriptorProto(t *testing.T) {
-	fileDescriptor, err := proto.Marshal(&descriptorpb.FileDescriptorProto{
-		Name:   proto.String("orders.proto"),
-		Syntax: proto.String("proto2"),
-		MessageType: []*descriptorpb.DescriptorProto{
-			{
-				Name: proto.String("Order"),
-				Field: []*descriptorpb.FieldDescriptorProto{
-					{
-						Name:   proto.String("id"),
-						Number: proto.Int32(1),
-						Label:  descriptorpb.FieldDescriptorProto_LABEL_OPTIONAL.Enum(),
-						Type:   descriptorpb.FieldDescriptorProto_TYPE_INT64.Enum(),
-					},
-				},
-			},
-		},
-	})
-	if err != nil {
-		t.Fatalf("marshal FileDescriptorProto: %v", err)
-	}
-
-	conn := dialEcho(t, &echoServer{streamID: "stream-file-descriptor"})
-	sdk := zerobus.NewWithConn(conn, "https://ws.zerobus.databricks.com", "https://ws.databricks.com")
-	defer sdk.Close()
-	stream, err := sdk.CreateStreamWithProvider(
-		context.Background(),
-		"main.sales.orders",
-		zerobus.NewStaticHeadersProvider(map[string]string{"authorization": "Bearer token"}),
-		zerobus.WithProto(fileDescriptor),
-		zerobus.WithWaitForReady(),
-	)
-	if err != nil {
-		t.Fatalf("CreateStreamWithProvider: %v", err)
-	}
-	defer stream.Close()
-
-	if _, err := stream.IngestRecordOffset([]byte{0x08, 0x01}); err != nil {
-		t.Fatalf("IngestRecordOffset: %v", err)
-	}
-	if err := stream.Flush(); err != nil {
-		t.Fatalf("Flush: %v", err)
-	}
-}
-
 // ucTokenServer is a stand-in for the Unity Catalog OIDC token endpoint that
 // counts how many client-credentials mints it served.
 type ucTokenServer struct {

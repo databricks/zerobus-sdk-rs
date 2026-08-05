@@ -28,8 +28,6 @@
 - Generate valid map entry names regardless of column order and report invalid
   Unity Catalog positions as schema errors.
 - Apply `MaxPayloadBytes` to encoded protobuf payloads instead of source JSON.
-- Preserve `FileDescriptorProto` support for raw protobuf ingestion; runtime
-  JSON conversion continues to require `DescriptorProto`.
 - Classify Unity Catalog HTTP client timeouts as retryable.
 
 ### Documentation
