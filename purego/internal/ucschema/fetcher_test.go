@@ -183,14 +183,16 @@ func TestFetchTableSchema_RequestTimeoutRetryable(t *testing.T) {
 }
 
 func TestFetchTableSchema_HTTPClientTimeoutRetryable(t *testing.T) {
+	releaseHandler := make(chan struct{})
 	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/oidc/v1/token" {
 			_ = json.NewEncoder(w).Encode(map[string]any{"access_token": "abc"})
 			return
 		}
-		<-r.Context().Done()
+		<-releaseHandler
 	}))
 	defer srv.Close()
+	defer close(releaseHandler)
 
 	client := srv.Client()
 	client.Timeout = 20 * time.Millisecond
