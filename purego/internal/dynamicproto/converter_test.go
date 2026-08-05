@@ -38,6 +38,32 @@ func testDescriptorBytes(t *testing.T) []byte {
 	return b
 }
 
+func collectionDescriptorBytes(t *testing.T) []byte {
+	t.Helper()
+	desc, err := schema.DescriptorFromUCColumns([]schema.UcColumn{
+		{
+			Name:     "items",
+			TypeName: "ARRAY",
+			TypeJSON: `{"type":"array","elementType":"long","containsNull":false}`,
+			Position: 0,
+		},
+		{
+			Name:     "lookup",
+			TypeName: "MAP",
+			TypeJSON: `{"type":"map","keyType":"string","valueType":"long","valueContainsNull":false}`,
+			Position: 1,
+		},
+	}, "Collections")
+	if err != nil {
+		t.Fatalf("DescriptorFromUCColumns() error = %v", err)
+	}
+	encoded, err := proto.Marshal(desc)
+	if err != nil {
+		t.Fatalf("marshal descriptor: %v", err)
+	}
+	return encoded
+}
+
 func TestConverter_EncodeJSONBytes(t *testing.T) {
 	c, err := NewFromDescriptorProtoBytes(testDescriptorBytes(t))
 	if err != nil {
@@ -96,8 +122,8 @@ func TestConverter_MissingNestedRequiredFields(t *testing.T) {
 				`{"name":"inner","type":{"type":"struct","fields":[` +
 				`{"name":"id","type":"long","nullable":false}` +
 				`]},"nullable":true}` +
-				`]}}`,
-			Nullable: true,
+				`]},"containsNull":false}`,
+			Nullable: false,
 			Position: 1,
 		},
 		{
@@ -105,8 +131,8 @@ func TestConverter_MissingNestedRequiredFields(t *testing.T) {
 			TypeName: "MAP",
 			TypeJSON: `{"type":"map","keyType":"string","valueType":{"type":"struct","fields":[` +
 				`{"name":"v","type":"string","nullable":false}` +
-				`]}}`,
-			Nullable: true,
+				`]},"valueContainsNull":false}`,
+			Nullable: false,
 			Position: 2,
 		},
 	}, "RequiredFields")
@@ -172,6 +198,37 @@ func TestConverter_UnknownFieldRejected(t *testing.T) {
 		t.Fatal("unknown field was accepted")
 	} else if !strings.Contains(err.Error(), "unknown") {
 		t.Fatalf("EncodeJSONBytes() error = %v, want unknown-field error", err)
+	}
+}
+
+func TestConverter_RejectsNullCollections(t *testing.T) {
+	converter, err := NewFromDescriptorProtoBytes(collectionDescriptorBytes(t))
+	if err != nil {
+		t.Fatalf("NewFromDescriptorProtoBytes() error = %v", err)
+	}
+	for _, record := range []string{
+		`{}`,
+		`{"items":[],"lookup":{}}`,
+	} {
+		if _, err := converter.EncodeJSONBytes([]byte(record)); err != nil {
+			t.Fatalf("valid record %s rejected: %v", record, err)
+		}
+	}
+	tests := []struct {
+		name   string
+		record string
+	}{
+		{name: "array field", record: `{"items":null,"lookup":{}}`},
+		{name: "map field", record: `{"items":[],"lookup":null}`},
+		{name: "array element", record: `{"items":[null],"lookup":{}}`},
+		{name: "map value", record: `{"items":[],"lookup":{"a":null}}`},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if _, err := converter.EncodeJSONBytes([]byte(tc.record)); err == nil {
+				t.Fatalf("null collection value in %s was accepted", tc.record)
+			}
+		})
 	}
 }
 

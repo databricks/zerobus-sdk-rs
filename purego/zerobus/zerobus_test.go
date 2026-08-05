@@ -836,8 +836,8 @@ func TestFetchProtoDescriptorPublicFlow(t *testing.T) {
 						"type_name": "STRUCT",
 						"type_json": `{"type":"struct","fields":[` +
 							`{"name":"name","type":"string","nullable":false},` +
-							`{"name":"tags","type":{"type":"array","elementType":"long"},"nullable":true},` +
-							`{"name":"attributes","type":{"type":"map","keyType":"string","valueType":"integer"},"nullable":true}` +
+							`{"name":"tags","type":{"type":"array","elementType":"long","containsNull":false},"nullable":false},` +
+							`{"name":"attributes","type":{"type":"map","keyType":"string","valueType":"integer","valueContainsNull":false},"nullable":false}` +
 							`]}`,
 						"nullable": true,
 						"position": 2,

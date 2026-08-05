@@ -25,11 +25,14 @@
 - Validate application names before adding them to the gRPC user-agent.
 - Return offset `-1` from failed ingest calls so callers can distinguish errors
   from the first real offset.
-- Generate valid map entry names regardless of column order and report invalid
-  Unity Catalog positions as schema errors.
+- Reuse compatible map entry descriptors when UC field names normalize to the
+  same protobuf name, and report incompatible collisions.
+- Report invalid Unity Catalog positions as schema errors.
 - Apply `MaxPayloadBytes` to encoded protobuf payloads instead of source JSON.
 - Reject unknown JSON fields instead of silently dropping them during dynamic
   protobuf conversion.
+- Reject nullable collections and null collection values that protobuf cannot
+  represent without losing their semantics.
 - Classify Unity Catalog HTTP client timeouts and connection failures as
   retryable while keeping TLS certificate failures terminal.
 

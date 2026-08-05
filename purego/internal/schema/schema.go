@@ -4,6 +4,7 @@ package schema
 import (
 	"encoding/json"
 	"fmt"
+	"reflect"
 	"slices"
 	"strings"
 
@@ -104,9 +105,7 @@ func DescriptorFromUCColumns(columns []UcColumn, messageName string) (*descripto
 	collector := newMessageCollector()
 	for _, c := range sorted {
 		if c.TypeName == "MAP" {
-			if err := collector.reserveMapEntry(c.Name, c.Name); err != nil {
-				return nil, err
-			}
+			collector.reserveMapEntry(c.Name, c.Name)
 		}
 	}
 	fields := make([]*descriptorpb.FieldDescriptorProto, 0, len(sorted))
@@ -169,6 +168,9 @@ func columnToProto(c UcColumn, collector *messageCollector) (descriptorpb.FieldD
 		complexType, err := parseTypeJSON(c.TypeJSON)
 		if err != nil {
 			return 0, nil, false, schemaErrf("invalid type_json for column %q: %v", c.Name, err)
+		}
+		if err := validateCollectionRepresentation(complexType, c.Nullable, c.Name); err != nil {
+			return 0, nil, false, err
 		}
 		repeated := complexType.kind == complexKindArray || complexType.kind == complexKindMap
 		typ, typeName, err := mapComplexTypeToProtobuf(complexType, c.Name, c.Name, collector)
@@ -307,12 +309,14 @@ const (
 )
 
 type complexType struct {
-	kind   complexKind
-	prim   primitiveType
-	fields []structField
-	elem   *complexType
-	key    *complexType
-	value  *complexType
+	kind              complexKind
+	prim              primitiveType
+	fields            []structField
+	elem              *complexType
+	key               *complexType
+	value             *complexType
+	containsNull      *bool
+	valueContainsNull *bool
 }
 
 type structField struct {
@@ -341,11 +345,13 @@ func (r *typeRef) UnmarshalJSON(data []byte) error {
 }
 
 type complexTypeJSON struct {
-	Type        string            `json:"type"`
-	Fields      []structFieldJSON `json:"fields"`
-	ElementType *typeRef          `json:"elementType"`
-	KeyType     *typeRef          `json:"keyType"`
-	ValueType   *typeRef          `json:"valueType"`
+	Type              string            `json:"type"`
+	Fields            []structFieldJSON `json:"fields"`
+	ElementType       *typeRef          `json:"elementType"`
+	KeyType           *typeRef          `json:"keyType"`
+	ValueType         *typeRef          `json:"valueType"`
+	ContainsNull      *bool             `json:"containsNull"`
+	ValueContainsNull *bool             `json:"valueContainsNull"`
 }
 
 type structFieldJSON struct {
@@ -423,7 +429,11 @@ func typeRefToComplex(ref *typeRef, depth int) (*complexType, error) {
 		if err != nil {
 			return nil, err
 		}
-		return &complexType{kind: complexKindArray, elem: elem}, nil
+		return &complexType{
+			kind:         complexKindArray,
+			elem:         elem,
+			containsNull: ref.complex.ContainsNull,
+		}, nil
 	case "map":
 		key, err := typeRefToComplex(ref.complex.KeyType, depth+1)
 		if err != nil {
@@ -433,38 +443,81 @@ func typeRefToComplex(ref *typeRef, depth int) (*complexType, error) {
 		if err != nil {
 			return nil, err
 		}
-		return &complexType{kind: complexKindMap, key: key, value: value}, nil
+		return &complexType{
+			kind:              complexKindMap,
+			key:               key,
+			value:             value,
+			valueContainsNull: ref.complex.ValueContainsNull,
+		}, nil
 	default:
 		return nil, schemaErrf("unsupported complex type %q", ref.complex.Type)
 	}
 }
 
+func validateCollectionRepresentation(ct *complexType, nullable bool, path string) error {
+	switch ct.kind {
+	case complexKindArray:
+		if nullable {
+			return schemaErrf(
+				"nullable array field %q is unsupported because protobuf cannot distinguish null from empty",
+				path,
+			)
+		}
+		if ct.containsNull == nil {
+			return schemaErrf("array field %q is missing containsNull", path)
+		}
+		if *ct.containsNull {
+			return schemaErrf(
+				"array field %q allows null elements, which protobuf cannot represent",
+				path,
+			)
+		}
+	case complexKindMap:
+		if nullable {
+			return schemaErrf(
+				"nullable map field %q is unsupported because protobuf cannot distinguish null from empty",
+				path,
+			)
+		}
+		if ct.valueContainsNull == nil {
+			return schemaErrf("map field %q is missing valueContainsNull", path)
+		}
+		if *ct.valueContainsNull {
+			return schemaErrf(
+				"map field %q allows null values, which protobuf cannot represent",
+				path,
+			)
+		}
+	}
+	return nil
+}
+
 type messageCollector struct {
 	nested         []*descriptorpb.DescriptorProto
 	used           map[string]struct{}
+	mapEntryNames  map[string]string
 	mapEntryOwners map[string]string
+	mapEntryTypes  map[string]*complexType
 }
 
 func newMessageCollector() *messageCollector {
 	return &messageCollector{
 		used:           make(map[string]struct{}),
+		mapEntryNames:  make(map[string]string),
 		mapEntryOwners: make(map[string]string),
+		mapEntryTypes:  make(map[string]*complexType),
 	}
 }
 
-func (c *messageCollector) reserveMapEntry(fieldName, path string) error {
+func (c *messageCollector) reserveMapEntry(fieldName, path string) {
+	// Protobuf requires this exact implicit name for a map field, so sanitized
+	// collisions cannot use numeric suffixes. Compatible maps share the entry.
 	entryName := sanitizeMessageName(fieldName) + "Entry"
-	if previous, ok := c.mapEntryOwners[entryName]; ok {
-		return schemaErrf(
-			"map fields %q and %q require the same protobuf entry name %q",
-			previous,
-			path,
-			entryName,
-		)
+	c.mapEntryNames[fieldName] = entryName
+	if _, exists := c.mapEntryOwners[entryName]; !exists {
+		c.mapEntryOwners[entryName] = path
+		c.used[entryName] = struct{}{}
 	}
-	c.mapEntryOwners[entryName] = path
-	c.used[entryName] = struct{}{}
-	return nil
 }
 
 func (c *messageCollector) uniqueName(base string) string {
@@ -518,6 +571,22 @@ func mapComplexTypeToProtobuf(
 		if ct.key == nil || ct.key.kind != complexKindPrimitive || !validMapKey(ct.key.prim) {
 			return 0, nil, schemaErrf("unsupported map key type for field %q (must be integral, bool, or string)", path)
 		}
+		entryName, reserved := collector.mapEntryNames[fieldName]
+		if !reserved {
+			return 0, nil, schemaErrf("map entry name was not reserved for field %q", path)
+		}
+		if existing, ok := collector.mapEntryTypes[entryName]; ok {
+			if reflect.DeepEqual(existing, ct) {
+				return descriptorpb.FieldDescriptorProto_TYPE_MESSAGE, &entryName, nil
+			}
+			return 0, nil, schemaErrf(
+				"map fields %q and %q require incompatible protobuf entries named %q",
+				collector.mapEntryOwners[entryName],
+				path,
+				entryName,
+			)
+		}
+		collector.mapEntryTypes[entryName] = ct
 		base := sanitizeMessageName(path)
 		var valueType descriptorpb.FieldDescriptorProto_Type
 		var valueTypeName *string
@@ -536,10 +605,6 @@ func mapComplexTypeToProtobuf(
 		default:
 			return 0, nil, schemaErrf("maps with complex value types not supported for field %q", path)
 		}
-		entryName := sanitizeMessageName(fieldName) + "Entry"
-		if _, reserved := collector.mapEntryOwners[entryName]; !reserved {
-			return 0, nil, schemaErrf("map entry name was not reserved for field %q", path)
-		}
 		entry := generateMapEntry(entryName, primitiveProtoType(ct.key.prim), valueType, valueTypeName)
 		collector.nested = append(collector.nested, entry)
 		return descriptorpb.FieldDescriptorProto_TYPE_MESSAGE, &entryName, nil
@@ -551,9 +616,7 @@ func generateStructMessage(messageName string, fields []structField) (*descripto
 	local := newMessageCollector()
 	for _, f := range fields {
 		if f.typ.kind == complexKindMap {
-			if err := local.reserveMapEntry(f.name, messageName+"."+f.name); err != nil {
-				return nil, err
-			}
+			local.reserveMapEntry(f.name, messageName+"."+f.name)
 		}
 	}
 	out := make([]*descriptorpb.FieldDescriptorProto, 0, len(fields))
@@ -562,6 +625,9 @@ func generateStructMessage(messageName string, fields []structField) (*descripto
 			return nil, err
 		}
 		path := messageName + "_" + f.name
+		if err := validateCollectionRepresentation(f.typ, f.nullable, path); err != nil {
+			return nil, err
+		}
 		typ, typeName, err := mapComplexTypeToProtobuf(f.typ, path, f.name, local)
 		if err != nil {
 			return nil, err

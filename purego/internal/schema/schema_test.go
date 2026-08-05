@@ -46,13 +46,13 @@ func TestDescriptorFromUCColumns_ComplexTypes(t *testing.T) {
 		{
 			Name:     "attrs",
 			TypeName: "MAP",
-			TypeJSON: `{"name":"attrs","type":{"type":"map","keyType":"string","valueType":"integer"}}`,
+			TypeJSON: `{"name":"attrs","type":{"type":"map","keyType":"string","valueType":"integer","valueContainsNull":false}}`,
 			Position: 0,
 		},
 		{
 			Name:     "items",
 			TypeName: "ARRAY",
-			TypeJSON: `{"name":"items","type":{"type":"array","elementType":{"type":"struct","fields":[{"name":"id","type":"long","nullable":false}]}}}`,
+			TypeJSON: `{"name":"items","type":{"type":"array","elementType":{"type":"struct","fields":[{"name":"id","type":"long","nullable":false}]},"containsNull":false}}`,
 			Position: 1,
 		},
 	}
@@ -71,11 +71,93 @@ func TestDescriptorFromUCColumns_ComplexTypes(t *testing.T) {
 	}
 }
 
+func TestDescriptorFromUCColumns_RejectsUnrepresentableCollectionNullability(t *testing.T) {
+	tests := []struct {
+		name   string
+		column UcColumn
+		want   string
+	}{
+		{
+			name: "nullable array",
+			column: UcColumn{
+				Name:     "items",
+				TypeName: "ARRAY",
+				TypeJSON: `{"type":"array","elementType":"long","containsNull":false}`,
+				Nullable: true,
+			},
+			want: "nullable array",
+		},
+		{
+			name: "nullable map",
+			column: UcColumn{
+				Name:     "items",
+				TypeName: "MAP",
+				TypeJSON: `{"type":"map","keyType":"string","valueType":"long","valueContainsNull":false}`,
+				Nullable: true,
+			},
+			want: "nullable map",
+		},
+		{
+			name: "nullable array elements",
+			column: UcColumn{
+				Name:     "items",
+				TypeName: "ARRAY",
+				TypeJSON: `{"type":"array","elementType":"long","containsNull":true}`,
+			},
+			want: "allows null elements",
+		},
+		{
+			name: "nullable map values",
+			column: UcColumn{
+				Name:     "items",
+				TypeName: "MAP",
+				TypeJSON: `{"type":"map","keyType":"string","valueType":"long","valueContainsNull":true}`,
+			},
+			want: "allows null values",
+		},
+		{
+			name: "array missing containsNull",
+			column: UcColumn{
+				Name:     "items",
+				TypeName: "ARRAY",
+				TypeJSON: `{"type":"array","elementType":"long"}`,
+			},
+			want: "missing containsNull",
+		},
+		{
+			name: "map missing valueContainsNull",
+			column: UcColumn{
+				Name:     "items",
+				TypeName: "MAP",
+				TypeJSON: `{"type":"map","keyType":"string","valueType":"long"}`,
+			},
+			want: "missing valueContainsNull",
+		},
+		{
+			name: "nested nullable array",
+			column: UcColumn{
+				Name:     "payload",
+				TypeName: "STRUCT",
+				TypeJSON: `{"type":"struct","fields":[{"name":"items","type":{"type":"array","elementType":"long","containsNull":false},"nullable":true}]}`,
+			},
+			want: "nullable array",
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := DescriptorFromUCColumns([]UcColumn{tc.column}, "Message")
+			if err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("DescriptorFromUCColumns() error = %v, want %q", err, tc.want)
+			}
+		})
+	}
+}
+
 func TestDescriptorFromUCColumns_ReservesMapEntryNamesBeforeStructNames(t *testing.T) {
 	mapColumn := UcColumn{
 		Name:     "tags",
 		TypeName: "MAP",
-		TypeJSON: `{"type":"map","keyType":"string","valueType":"integer"}`,
+		TypeJSON: `{"type":"map","keyType":"string","valueType":"integer","valueContainsNull":false}`,
 	}
 	structColumn := UcColumn{
 		Name:     "tags_entry",
@@ -117,18 +199,51 @@ func TestDescriptorFromUCColumns_ReservesMapEntryNamesBeforeStructNames(t *testi
 	}
 }
 
-func TestDescriptorFromUCColumns_RejectsMapEntryNameCollision(t *testing.T) {
-	_, err := DescriptorFromUCColumns([]UcColumn{
+func TestDescriptorFromUCColumns_SharesCompatibleMapEntryNameCollision(t *testing.T) {
+	desc, err := DescriptorFromUCColumns([]UcColumn{
 		{
 			Name:     "a_b",
 			TypeName: "MAP",
-			TypeJSON: `{"type":"map","keyType":"string","valueType":"integer"}`,
+			TypeJSON: `{"type":"map","keyType":"string","valueType":"integer","valueContainsNull":false}`,
 			Position: 0,
 		},
 		{
 			Name:     "a__b",
 			TypeName: "MAP",
-			TypeJSON: `{"type":"map","keyType":"string","valueType":"integer"}`,
+			TypeJSON: `{"type":"map","keyType":"string","valueType":"integer","valueContainsNull":false}`,
+			Position: 1,
+		},
+	}, "Message")
+	if err != nil {
+		t.Fatalf("DescriptorFromUCColumns() error = %v", err)
+	}
+	if got := fieldByName(t, desc, "a_b").GetTypeName(); got != "ABEntry" {
+		t.Fatalf("a_b entry name = %q, want ABEntry", got)
+	}
+	if got := fieldByName(t, desc, "a__b").GetTypeName(); got != "ABEntry" {
+		t.Fatalf("a__b entry name = %q, want ABEntry", got)
+	}
+	if _, err := protodesc.NewFile(&descriptorpb.FileDescriptorProto{
+		Name:        proto.String("map_entry_collision_test.proto"),
+		Syntax:      proto.String("proto2"),
+		MessageType: []*descriptorpb.DescriptorProto{desc},
+	}, nil); err != nil {
+		t.Fatalf("generated descriptor is invalid: %v", err)
+	}
+}
+
+func TestDescriptorFromUCColumns_RejectsIncompatibleMapEntryNameCollision(t *testing.T) {
+	_, err := DescriptorFromUCColumns([]UcColumn{
+		{
+			Name:     "a_b",
+			TypeName: "MAP",
+			TypeJSON: `{"type":"map","keyType":"string","valueType":"integer","valueContainsNull":false}`,
+			Position: 0,
+		},
+		{
+			Name:     "a__b",
+			TypeName: "MAP",
+			TypeJSON: `{"type":"map","keyType":"string","valueType":"string","valueContainsNull":false}`,
 			Position: 1,
 		},
 	}, "Message")
@@ -187,7 +302,7 @@ func TestDescriptorFromUCColumns_NestedArrayRejected(t *testing.T) {
 		{
 			Name:     "nested",
 			TypeName: "ARRAY",
-			TypeJSON: `{"name":"nested","type":{"type":"array","elementType":{"type":"array","elementType":"long"}}}`,
+			TypeJSON: `{"name":"nested","type":{"type":"array","elementType":{"type":"array","elementType":"long","containsNull":false},"containsNull":false}}`,
 			Position: 0,
 		},
 	}, "M")
@@ -280,7 +395,7 @@ func TestDescriptorFromUCColumns_MapAndNestedVariant(t *testing.T) {
 			TypeName: "STRUCT",
 			TypeJSON: `{"type":"struct","fields":[` +
 				`{"name":"variant","type":"variant","nullable":true},` +
-				`{"name":"attributes","type":{"type":"map","keyType":"string","valueType":"integer"},"nullable":true}` +
+				`{"name":"attributes","type":{"type":"map","keyType":"string","valueType":"integer","valueContainsNull":false},"nullable":false}` +
 				`]}`,
 			Nullable: true,
 			Position: 0,
@@ -325,7 +440,7 @@ func TestDescriptorFromUCColumns_RejectsMapKeyAndDeepNesting(t *testing.T) {
 	_, err := DescriptorFromUCColumns([]UcColumn{{
 		Name:     "bad",
 		TypeName: "MAP",
-		TypeJSON: `{"type":"map","keyType":"double","valueType":"integer"}`,
+		TypeJSON: `{"type":"map","keyType":"double","valueType":"integer","valueContainsNull":false}`,
 	}}, "Message")
 	if err == nil {
 		t.Fatal("expected unsupported map key error")
@@ -333,7 +448,7 @@ func TestDescriptorFromUCColumns_RejectsMapKeyAndDeepNesting(t *testing.T) {
 
 	deep := `"integer"`
 	for range maxNestingDepth + 2 {
-		deep = `{"type":"array","elementType":` + deep + `}`
+		deep = `{"type":"array","elementType":` + deep + `,"containsNull":false}`
 	}
 	_, err = DescriptorFromUCColumns([]UcColumn{{
 		Name:     "deep",

@@ -88,6 +88,10 @@ streams and convert it to protobuf on proto streams.
 Fetch the table schema explicitly, then create a regular proto stream. The
 stream can accept either protobuf bytes or JSON converted at ingest time.
 
+UC schema conversion rejects nullable array/map fields and collections that
+allow null elements or values because protobuf cannot preserve those
+distinctions. JSON ingestion also rejects explicit `null` collection fields.
+
 ```go
 descriptor, err := sdk.FetchProtoDescriptorFromUC(
     ctx,
