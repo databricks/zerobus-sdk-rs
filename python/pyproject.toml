@@ -7,7 +7,7 @@ name = "databricks-zerobus-ingest-sdk"
 dynamic = ["version"]
 description = "Databricks Zerobus Ingest SDK for Python"
 readme = "README.md"
-requires-python = ">=3.9"
+requires-python = ">=3.9,<3.15"
 keywords = ["zerobus", "databricks", "sdk"]
 license = {file = "LICENSE"}
 classifiers = [
