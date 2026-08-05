@@ -89,7 +89,7 @@ Fetch the table schema explicitly, then create a regular proto stream. The
 stream can accept either protobuf bytes or JSON converted at ingest time.
 
 ```go
-descriptor, err := sdk.FetchProtoDescriptor(
+descriptor, err := sdk.FetchProtoDescriptorFromUC(
     ctx,
     "catalog.schema.table",
     clientID,

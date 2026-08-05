@@ -16,7 +16,7 @@ import (
 
 func openStream(sdk *zerobus.SDK, cfg config.Settings) (*zerobus.Stream, error) {
 	ctx := context.Background()
-	descriptor, err := sdk.FetchProtoDescriptor(
+	descriptor, err := sdk.FetchProtoDescriptorFromUC(
 		ctx, cfg.TableName, cfg.ClientID, cfg.ClientSecret,
 	)
 	if err != nil {

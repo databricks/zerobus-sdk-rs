@@ -257,15 +257,15 @@ func (s *SDK) CreateStreamWithProvider(
 	return s.createStream(ctx, "CreateStreamWithProvider", tableName, provider, opts...)
 }
 
-// FetchProtoDescriptor returns a protobuf descriptor built from a Unity Catalog
-// table schema.
-func (s *SDK) FetchProtoDescriptor(
+// FetchProtoDescriptorFromUC returns a protobuf descriptor built from a Unity
+// Catalog table schema.
+func (s *SDK) FetchProtoDescriptorFromUC(
 	ctx context.Context,
 	tableName, clientID, clientSecret string,
 ) ([]byte, error) {
 	if s.isClosed() {
 		return nil, &Error{
-			Op:        "FetchProtoDescriptor",
+			Op:        "FetchProtoDescriptorFromUC",
 			cause:     fmt.Errorf("SDK is closed"),
 			retryable: false,
 		}
@@ -275,12 +275,23 @@ func (s *SDK) FetchProtoDescriptor(
 	)
 	if err != nil {
 		return nil, &Error{
-			Op:        "FetchProtoDescriptor",
+			Op:        "FetchProtoDescriptorFromUC",
 			cause:     err,
 			retryable: dynamicSchemaErrorRetryable(err),
 		}
 	}
 	return descBytes, nil
+}
+
+// FetchProtoDescriptor returns a protobuf descriptor built from a Unity Catalog
+// table schema.
+//
+// Deprecated: use FetchProtoDescriptorFromUC.
+func (s *SDK) FetchProtoDescriptor(
+	ctx context.Context,
+	tableName, clientID, clientSecret string,
+) ([]byte, error) {
+	return s.FetchProtoDescriptorFromUC(ctx, tableName, clientID, clientSecret)
 }
 
 func (s *SDK) createStream(

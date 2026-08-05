@@ -25,7 +25,7 @@ func main() {
 	defer sdk.Close()
 
 	ctx := context.Background()
-	descriptor, err := sdk.FetchProtoDescriptor(
+	descriptor, err := sdk.FetchProtoDescriptorFromUC(
 		ctx, cfg.TableName, cfg.ClientID, cfg.ClientSecret,
 	)
 	if err != nil {
