@@ -6,11 +6,13 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
+use arrow_array::{Array, StringArray};
 use arrow_flight::flight_service_server::{FlightService, FlightServiceServer};
 use arrow_flight::{
     Action, ActionType, Criteria, Empty, FlightData, FlightDescriptor, FlightInfo,
     HandshakeRequest, HandshakeResponse, PutResult, SchemaResult, Ticket,
 };
+use arrow_schema::Schema;
 use futures::Stream;
 use rcgen::{generate_simple_self_signed, CertifiedKey};
 use serde::{Deserialize, Serialize};
@@ -19,6 +21,59 @@ use tokio::time::sleep;
 use tonic::transport::{Identity, ServerTlsConfig};
 use tonic::{Request, Response, Status, Streaming};
 use tracing::{debug, error, info, warn};
+
+/// Observations extracted from an Arrow IPC message header on the wire.
+struct IpcWireObservation {
+    dictionary_messages: u64,
+    record_batch_messages: u64,
+    zstd_record_batches: u64,
+    rows: u64,
+    schema_has_dictionary_encoding: bool,
+}
+
+fn observe_ipc_data_header(data_header: &[u8]) -> IpcWireObservation {
+    let mut observation = IpcWireObservation {
+        dictionary_messages: 0,
+        record_batch_messages: 0,
+        zstd_record_batches: 0,
+        rows: 0,
+        schema_has_dictionary_encoding: false,
+    };
+
+    let Some(msg) = arrow_ipc::root_as_message(data_header).ok() else {
+        return observation;
+    };
+
+    if let Some(schema) = msg.header_as_schema() {
+        if let Some(fields) = schema.fields() {
+            for idx in 0..fields.len() {
+                let field = fields.get(idx);
+                if field.dictionary().is_some() {
+                    observation.schema_has_dictionary_encoding = true;
+                    break;
+                }
+            }
+        }
+    }
+
+    if msg.header_as_dictionary_batch().is_some() {
+        observation.dictionary_messages = 1;
+    }
+
+    if let Some(record_batch) = msg.header_as_record_batch() {
+        observation.record_batch_messages = 1;
+        if record_batch
+            .compression()
+            .map(|compression| compression.codec() == arrow_ipc::CompressionType::ZSTD)
+            .unwrap_or(false)
+        {
+            observation.zstd_record_batches = 1;
+        }
+        observation.rows = record_batch.length() as u64;
+    }
+
+    observation
+}
 
 /// Metadata sent with each FlightData batch from the client.
 /// Must match the SDK's FlightBatchMetadata format.
@@ -116,6 +171,16 @@ pub struct MockFlightServer {
     delayed_ack_armed: Arc<Notify>,
     /// Observation that a delayed setup rejection registered its timer.
     delayed_setup_armed: Arc<Notify>,
+    /// Record-batch IPC messages whose header declares ZSTD body compression.
+    zstd_compressed_record_batch_count: Arc<Mutex<u64>>,
+    /// IPC messages carrying a DictionaryBatch header (distinct from record batches).
+    dictionary_message_count: Arc<Mutex<u64>>,
+    /// IPC messages carrying a RecordBatch header.
+    record_batch_message_count: Arc<Mutex<u64>>,
+    /// True when any observed IPC schema message declares dictionary encoding.
+    wire_ipc_schema_has_dictionary_encoding: Arc<Mutex<bool>>,
+    /// Logical UTF-8 column values decoded from received record batches.
+    decoded_utf8_columns: Arc<Mutex<Vec<Vec<Option<String>>>>>,
 }
 
 impl MockFlightServer {
@@ -131,6 +196,11 @@ impl MockFlightServer {
             request_resets: Arc::new(AtomicU64::new(0)),
             delayed_ack_armed: Arc::new(Notify::new()),
             delayed_setup_armed: Arc::new(Notify::new()),
+            zstd_compressed_record_batch_count: Arc::new(Mutex::new(0)),
+            dictionary_message_count: Arc::new(Mutex::new(0)),
+            record_batch_message_count: Arc::new(Mutex::new(0)),
+            wire_ipc_schema_has_dictionary_encoding: Arc::new(Mutex::new(false)),
+            decoded_utf8_columns: Arc::new(Mutex::new(Vec::new())),
         }
     }
 
@@ -184,6 +254,32 @@ impl MockFlightServer {
         self.request_resets.load(Ordering::Relaxed)
     }
 
+    /// Record-batch IPC messages whose header declares ZSTD body compression.
+    pub async fn get_zstd_compressed_record_batch_count(&self) -> u64 {
+        *self.zstd_compressed_record_batch_count.lock().await
+    }
+
+    /// IPC messages carrying a DictionaryBatch header.
+    #[allow(dead_code)]
+    pub async fn get_dictionary_message_count(&self) -> u64 {
+        *self.dictionary_message_count.lock().await
+    }
+
+    /// IPC messages carrying a RecordBatch header.
+    pub async fn get_record_batch_message_count(&self) -> u64 {
+        *self.record_batch_message_count.lock().await
+    }
+
+    /// Whether any observed IPC schema message declares dictionary encoding.
+    pub async fn wire_ipc_schema_has_dictionary_encoding(&self) -> bool {
+        *self.wire_ipc_schema_has_dictionary_encoding.lock().await
+    }
+
+    /// Logical UTF-8 column values decoded from received record batches.
+    pub async fn get_decoded_utf8_columns(&self) -> Vec<Vec<Option<String>>> {
+        self.decoded_utf8_columns.lock().await.clone()
+    }
+
     /// Reset the server state
     #[allow(dead_code)]
     pub async fn reset(&self) {
@@ -197,6 +293,11 @@ impl MockFlightServer {
         self.auto_ack_records.lock().await.clear();
         self.request_half_closes.store(0, Ordering::Relaxed);
         self.request_resets.store(0, Ordering::Relaxed);
+        *self.zstd_compressed_record_batch_count.lock().await = 0;
+        *self.dictionary_message_count.lock().await = 0;
+        *self.record_batch_message_count.lock().await = 0;
+        *self.wire_ipc_schema_has_dictionary_encoding.lock().await = false;
+        self.decoded_utf8_columns.lock().await.clear();
     }
 }
 
@@ -281,6 +382,13 @@ impl FlightService for MockFlightServer {
         let request_resets = Arc::clone(&self.request_resets);
         let delayed_ack_armed = Arc::clone(&self.delayed_ack_armed);
         let delayed_setup_armed = Arc::clone(&self.delayed_setup_armed);
+        let zstd_compressed_record_batch_count =
+            Arc::clone(&self.zstd_compressed_record_batch_count);
+        let dictionary_message_count = Arc::clone(&self.dictionary_message_count);
+        let record_batch_message_count = Arc::clone(&self.record_batch_message_count);
+        let wire_ipc_schema_has_dictionary_encoding =
+            Arc::clone(&self.wire_ipc_schema_has_dictionary_encoding);
+        let decoded_utf8_columns = Arc::clone(&self.decoded_utf8_columns);
 
         tokio::spawn(async move {
             let mut stream_responses: Vec<MockFlightResponse> = Vec::new();
@@ -292,6 +400,7 @@ impl FlightService for MockFlightServer {
             // auto-acks (the server derives ack_up_to_records per connection).
             let mut expected_offset: i64 = 0;
             let mut connection_record_count: u64 = 0;
+            let mut wire_schema: Option<Arc<Schema>> = None;
 
             // Load configured responses
             {
@@ -321,10 +430,37 @@ impl FlightService for MockFlightServer {
                         break false;
                     }
                 };
+                let observation = if !flight_data.data_header.is_empty() {
+                    observe_ipc_data_header(&flight_data.data_header)
+                } else {
+                    IpcWireObservation {
+                        dictionary_messages: 0,
+                        record_batch_messages: 0,
+                        zstd_record_batches: 0,
+                        rows: 0,
+                        schema_has_dictionary_encoding: false,
+                    }
+                };
+                if observation.schema_has_dictionary_encoding {
+                    *wire_ipc_schema_has_dictionary_encoding.lock().await = true;
+                }
+                if observation.dictionary_messages > 0 {
+                    let mut count = dictionary_message_count.lock().await;
+                    *count += observation.dictionary_messages;
+                }
+                if observation.record_batch_messages > 0 {
+                    let mut count = record_batch_message_count.lock().await;
+                    *count += observation.record_batch_messages;
+                }
+                if observation.zstd_record_batches > 0 {
+                    let mut count = zstd_compressed_record_batch_count.lock().await;
+                    *count += observation.zstd_record_batches;
+                }
                 // Handle schema message (first message has no app_metadata or empty app_metadata)
                 if is_first_message {
                     is_first_message = false;
                     if flight_data.app_metadata.is_empty() {
+                        wire_schema = Schema::try_from(&flight_data).ok().map(Arc::new);
                         // A scripted FailSetup rejects this connection's setup: send the
                         // error instead of the ready signal (simulates a reconnect failure).
                         let setup_failure = match stream_responses.get(response_index) {
@@ -410,19 +546,42 @@ impl FlightService for MockFlightServer {
                         *count += 1;
                     }
 
-                    // Decode the IPC data_header flatbuffer to get the actual row count.
-                    let rows = arrow_ipc::root_as_message(&flight_data.data_header)
-                        .ok()
-                        .and_then(|msg| msg.header_as_record_batch())
-                        .map(|rb| rb.length() as u64)
-                        .unwrap_or(0);
-                    if rows > 0 {
+                    // Decode row counts from record-batch IPC headers when batch metadata is present.
+                    if observation.rows > 0 {
                         // Connection-local counter drives acks (mirrors the server's
                         // per-connection cumulative tracker); the global row_count is
                         // kept only as a cross-connection observation metric.
-                        connection_record_count += rows;
+                        connection_record_count += observation.rows;
                         let mut count = row_count.lock().await;
-                        *count += rows;
+                        *count += observation.rows;
+                    }
+                    if observation.record_batch_messages > 0 {
+                        if let Some(schema) = &wire_schema {
+                            match arrow_flight::utils::flight_data_to_arrow_batch(
+                                &flight_data,
+                                Arc::clone(schema),
+                                &HashMap::new(),
+                            ) {
+                                Ok(batch) => {
+                                    let mut decoded = decoded_utf8_columns.lock().await;
+                                    for column in batch.columns() {
+                                        if let Some(strings) =
+                                            column.as_any().downcast_ref::<StringArray>()
+                                        {
+                                            decoded.push(
+                                                strings
+                                                    .iter()
+                                                    .map(|value| value.map(str::to_string))
+                                                    .collect(),
+                                            );
+                                        }
+                                    }
+                                }
+                                Err(error) => {
+                                    warn!("Failed to decode received record batch: {error}");
+                                }
+                            }
+                        }
                     }
                 }
 
@@ -708,6 +867,15 @@ async fn start_mock_flight_server_inner(
         request_resets: Arc::clone(&mock_server.request_resets),
         delayed_ack_armed: Arc::clone(&mock_server.delayed_ack_armed),
         delayed_setup_armed: Arc::clone(&mock_server.delayed_setup_armed),
+        zstd_compressed_record_batch_count: Arc::clone(
+            &mock_server.zstd_compressed_record_batch_count,
+        ),
+        dictionary_message_count: Arc::clone(&mock_server.dictionary_message_count),
+        record_batch_message_count: Arc::clone(&mock_server.record_batch_message_count),
+        wire_ipc_schema_has_dictionary_encoding: Arc::clone(
+            &mock_server.wire_ipc_schema_has_dictionary_encoding,
+        ),
+        decoded_utf8_columns: Arc::clone(&mock_server.decoded_utf8_columns),
     };
 
     let addr: std::net::SocketAddr = "127.0.0.1:0".parse()?;

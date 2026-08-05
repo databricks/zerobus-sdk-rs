@@ -87,6 +87,20 @@ typedef struct CResult {
 typedef struct CHeaders (*HeadersProviderCallback)(void *user_data);
 
 /**
+ * Opaque C ABI view of a canonical Arrow C Data Interface ArrowArray.
+ */
+typedef struct CArrowArray {
+  uint8_t _private[0];
+} CArrowArray;
+
+/**
+ * Opaque C ABI view of a canonical Arrow C Data Interface ArrowSchema.
+ */
+typedef struct CArrowSchema {
+  uint8_t _private[0];
+} CArrowSchema;
+
+/**
  * An array of Arrow IPC-encoded batches, returned by `zerobus_arrow_stream_get_unacked_batches`.
  * Must be freed with `zerobus_arrow_free_batch_array`.
  */
@@ -301,6 +315,30 @@ int64_t zerobus_arrow_stream_ingest_batch(struct CArrowStream *stream,
                                           const uint8_t *ipc_bytes,
                                           uintptr_t ipc_len,
                                           struct CResult *result);
+
+/**
+ * Ingests one canonical Arrow C Data Interface RecordBatch.
+ *
+ * When both `array` and `schema` are non-null, this function consumes them on
+ * every success or error path. Their release callbacks are cleared before
+ * validation, and the imported buffers may remain owned by the stream until
+ * acknowledgment, recovery finalization, or stream destruction.
+ *
+ * Every non-null pointer must address a valid, properly aligned canonical
+ * `ArrowArray` / `ArrowSchema` structure satisfying the Arrow C Data
+ * Interface. All referenced children, dictionaries, buffers, `private_data`,
+ * and release callbacks must remain valid for the lifetime required by the
+ * producer contract. After ownership transfer, the SDK may invoke release
+ * asynchronously on an internal runtime thread. Release callbacks must
+ * therefore be thread-safe and must not unwind or throw across the C ABI.
+ *
+ * Malformed, dangling, or malicious structures are caller undefined behavior
+ * and cannot be safely validated by this function.
+ */
+int64_t zerobus_arrow_stream_ingest_c_data(struct CArrowStream *stream,
+                                           struct CArrowArray *array,
+                                           struct CArrowSchema *schema,
+                                           struct CResult *result);
 
 /**
  * Ingests one Arrow RecordBatch supplied as Arrow IPC stream bytes.

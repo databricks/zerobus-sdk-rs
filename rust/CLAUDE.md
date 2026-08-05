@@ -64,6 +64,9 @@ Any change to the Rust SDK's public API surface has cascading effects:
 ## Feature flags
 
 - `arrow-flight` — Arrow Flight support (Beta). API is stabilising but may still change before GA.
+- `internal-arrow-c-data` — Unsupported wrapper-only C Data importer shared by
+  the repository's native bindings. Disabled by default; external Rust users
+  must not depend on its API stability.
 - `zeroparser` — Zero-copy, single-pass protobuf parser driven by `prost_types::DescriptorProto`. Off by default; opt-in for downstream consumers. Source under `sdk/src/zeroparser/`; see its README for details.
 - `testing` — Test utilities.
 

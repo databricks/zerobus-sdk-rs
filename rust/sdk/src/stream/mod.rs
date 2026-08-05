@@ -10,6 +10,9 @@
 mod arrow;
 mod grpc;
 
+#[cfg(feature = "internal-arrow-c-data")]
+pub(crate) use arrow::c_data as arrow_c_data;
+
 #[cfg(feature = "arrow-flight")]
 pub(crate) use arrow::ArrowTableProperties;
 #[cfg(feature = "arrow-flight")]

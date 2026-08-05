@@ -6,8 +6,9 @@
 //! This directory module provides [`ZerobusArrowStream`] for ingesting Arrow
 //! [`RecordBatch`] data into Databricks Delta tables using Arrow Flight. Native Rust
 //! callers use [`ZerobusArrowStream::ingest_batch`] with `RecordBatch` values; FFI
-//! callers (Go, Python, Java, TypeScript) use
-//! [`ZerobusArrowStream::ingest_ipc_batch`] with pre-serialised Arrow IPC bytes.
+//! wrappers can use [`ZerobusArrowStream::ingest_ipc_batch`] with pre-serialised
+//! Arrow IPC bytes. The C FFI can also import canonical Arrow C Data through the
+//! wrapper-only shared importer before calling [`ZerobusArrowStream::ingest_batch`].
 //!
 //! `ZerobusArrowStream` owns caller-facing state. Transport setup, acknowledgment
 //! processing, pending-batch mechanics, and recovery supervision live in private
@@ -37,6 +38,9 @@ use crate::offset_generator::{OffsetId, OffsetIdGenerator};
 use crate::proxy::ConnectorFactory;
 use crate::tls_config::TlsConfig;
 use crate::ZerobusResult;
+
+#[cfg(feature = "internal-arrow-c-data")]
+pub(crate) mod c_data;
 
 mod acks;
 mod batch;
