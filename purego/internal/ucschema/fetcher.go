@@ -288,11 +288,11 @@ func isRetryableTransportError(ctx context.Context, err error) bool {
 		return errors.Is(context.Cause(ctx), errRequestTimeout)
 	}
 	var nerr net.Error
-	if errors.As(err, &nerr) {
+	if errors.As(err, &nerr) && nerr.Timeout() {
 		return true
 	}
-	var uerr *url.Error
-	return errors.As(err, &uerr)
+	var opErr *net.OpError
+	return errors.As(err, &opErr)
 }
 
 func validateEndpoint(endpoint string) error {

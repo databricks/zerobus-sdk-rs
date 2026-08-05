@@ -163,13 +163,15 @@ func TestConverter_MissingNestedRequiredFields(t *testing.T) {
 	}
 }
 
-func TestConverter_UnknownFieldIgnored(t *testing.T) {
+func TestConverter_UnknownFieldRejected(t *testing.T) {
 	c, err := NewFromDescriptorProtoBytes(testDescriptorBytes(t))
 	if err != nil {
 		t.Fatalf("NewFromDescriptorProtoBytes() error = %v", err)
 	}
-	if _, err := c.EncodeJSONBytes([]byte(`{"id":1, "unknown": true}`)); err != nil {
-		t.Fatalf("EncodeJSONBytes() error = %v", err)
+	if _, err := c.EncodeJSONBytes([]byte(`{"id":1, "unknown": true}`)); err == nil {
+		t.Fatal("unknown field was accepted")
+	} else if !strings.Contains(err.Error(), "unknown") {
+		t.Fatalf("EncodeJSONBytes() error = %v, want unknown-field error", err)
 	}
 }
 

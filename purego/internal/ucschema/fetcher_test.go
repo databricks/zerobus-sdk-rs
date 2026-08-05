@@ -216,6 +216,28 @@ func TestFetchTableSchema_HTTPClientTimeoutRetryable(t *testing.T) {
 	}
 }
 
+func TestFetchTableSchema_TLSCertificateErrorNotRetryable(t *testing.T) {
+	srv := httptest.NewTLSServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
+	defer srv.Close()
+
+	fetcher, err := New(Config{
+		WorkspaceEndpoint: srv.URL,
+		ClientID:          "id",
+		ClientSecret:      "secret",
+	})
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+	_, err = fetcher.FetchTableSchema(context.Background(), "main.sales.orders")
+	if err == nil {
+		t.Fatal("expected TLS certificate error")
+	}
+	var fetchErr *FetchError
+	if !errors.As(err, &fetchErr) || fetchErr.IsRetryable() {
+		t.Fatalf("TLS certificate error = %v, want non-retryable FetchError", err)
+	}
+}
+
 func TestFetchTableSchema_CallerCancellationNotRetryable(t *testing.T) {
 	srv := newUCServer(t, http.StatusOK, http.StatusOK)
 	defer srv.Close()

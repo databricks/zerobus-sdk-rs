@@ -906,8 +906,8 @@ func TestFetchProtoDescriptorPublicFlow(t *testing.T) {
 	if got := len(ingests); got != 0 {
 		t.Fatalf("failed nested dynamic record queued %d requests, want 0", got)
 	}
-	singleRecord := `{"id":"1","payload":{"name":"first","tags":["10","20"],"attributes":{"a":7}},"extra":"` +
-		strings.Repeat("x", 512) + `"}`
+	singleRecord := `{"id":"1","payload":{"name":"first","tags":["10","20"],"attributes":{"a":7}}}` +
+		strings.Repeat(" ", 512)
 	if len(singleRecord) <= 256 {
 		t.Fatalf("test JSON size = %d, want above MaxPayloadBytes", len(singleRecord))
 	}

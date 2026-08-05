@@ -28,7 +28,10 @@
 - Generate valid map entry names regardless of column order and report invalid
   Unity Catalog positions as schema errors.
 - Apply `MaxPayloadBytes` to encoded protobuf payloads instead of source JSON.
-- Classify Unity Catalog HTTP client timeouts as retryable.
+- Reject unknown JSON fields instead of silently dropping them during dynamic
+  protobuf conversion.
+- Classify Unity Catalog HTTP client timeouts and connection failures as
+  retryable while keeping TLS certificate failures terminal.
 
 ### Documentation
 

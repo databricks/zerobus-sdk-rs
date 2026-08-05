@@ -63,7 +63,7 @@ func (c *Converter) EncodeJSONBytes(record []byte) ([]byte, error) {
 		return nil, fmt.Errorf("dynamicproto: record is empty")
 	}
 	msg := dynamicpb.NewMessage(c.message)
-	unmarshal := protojson.UnmarshalOptions{DiscardUnknown: true}
+	unmarshal := protojson.UnmarshalOptions{}
 	if err := unmarshal.Unmarshal(record, msg); err != nil {
 		return nil, fmt.Errorf("dynamicproto: parse JSON payload: %w", err)
 	}

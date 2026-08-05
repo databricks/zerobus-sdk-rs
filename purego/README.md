@@ -132,7 +132,7 @@ idField := descriptor.Fields().ByName("id")
 
 for _, id := range ids {
     message := dynamicpb.NewMessage(descriptor)
-    message.Set(idField, protoreflect.ValueOfInt64(id))
+    message.Set(idField, protoreflect.ValueOfInt32(int32(id)))
     record, err := proto.Marshal(message)
     if err != nil {
         log.Fatal(err)
