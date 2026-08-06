@@ -6,10 +6,6 @@ A native pure-Go Zerobus ingestion SDK.
 
 PureGo requires Go 1.25 or later.
 
-## Requirements
-
-PureGo requires Go 1.25 or later.
-
 ## Quick start
 
 ```go
@@ -54,6 +50,124 @@ Prefer `IngestRecordsOffset` in hot paths.
 Use per-record `WaitForOffset` only for low-volume strict confirmation flows.
 
 Use `IngestRecordOffsetContext` / `IngestRecordsOffsetContext` to bound admission wait time.
+
+## Arrow Flight (Beta)
+
+**Beta:** Arrow Flight ingestion is in Beta and its API may change before
+general availability.
+
+Arrow streams accept an exact Arrow schema:
+
+- `CreateArrowStream` uses a typed `*arrow.Schema` and OAuth credentials.
+- `CreateArrowStreamWithProvider` uses a typed schema and a custom
+  `HeadersProvider`.
+- `CreateArrowStreamFromIPC` uses a schema-only Arrow IPC stream and OAuth
+  credentials.
+- `CreateArrowStreamFromIPCWithProvider` combines schema IPC with a custom
+  provider.
+
+The constructors copy the schema and do not retain the caller's schema object
+or schema IPC bytes. Stream opening is asynchronous unless
+`WithWaitForReady()` is set, which waits for authentication, table access, and
+the schema-ready handshake.
+
+### Typed RecordBatch ingestion
+
+`IngestBatch` requires one non-empty `arrow.RecordBatch` whose schema,
+including metadata, exactly matches the stream schema. It serializes the batch
+before returning and retains no Arrow objects. Release each caller-owned batch
+immediately after the call, then flush once:
+
+```go
+for _, values := range batchValues {
+    batch := buildRecordBatch(schema, values)
+    _, ingestErr := stream.IngestBatch(batch) // queue only
+    batch.Release()                           // safe after IngestBatch returns
+    if ingestErr != nil {
+        log.Fatal(ingestErr)
+    }
+}
+if err := stream.Flush(); err != nil { // one wait for all queued batches
+    log.Fatal(err)
+}
+```
+
+See `examples/arrow/typed/main.go` for a runnable typed example.
+
+### IPC ingestion
+
+`IngestIPCBatch` accepts a self-contained Arrow IPC stream containing exactly
+one non-empty RecordBatch with the exact stream schema. Complete dictionary
+state must be present. The input bytes are copied before return and may then be
+reused or modified. Compressed IPC is preflighted before decompression, and its
+declared uncompressed buffer sizes count toward
+`WithMaxBufferedPayloadBytes`.
+
+```go
+for _, data := range ipcBatches {
+    if _, err := stream.IngestIPCBatch(data); err != nil { // queue only
+        log.Fatal(err)
+    }
+}
+if err := stream.Flush(); err != nil {
+    log.Fatal(err)
+}
+```
+
+Use `EncodeArrowSchemaIPC` and `DecodeArrowSchemaIPC` for schema-only IPC
+streams.
+
+### Framing, acknowledgements, and recovery
+
+- Arrow IPC body compression is disabled by default. Enable LZ4 Frame or Zstd
+  with `WithArrowCompression`.
+- At most 1,000 unacknowledged logical batches are in flight by default. Each
+  typed or IPC ingest call occupies one slot, regardless of row count. Override
+  this with `WithMaxInflight`, or add a memory bound with
+  `WithMaxBufferedPayloadBytes`.
+- A logical batch is split by rows when needed so each encoded FlightData
+  protobuf is at most 2 MiB. A single row that cannot fit is rejected.
+  `WithMaxPayloadBytes` does not change Arrow framing.
+- The service acknowledges cumulative record counts. A logical batch offset,
+  its callback, and `WaitForOffset` complete only after every row is durable.
+  On recovery, an acknowledged row prefix is removed and only the remaining
+  suffix is replayed.
+
+After a stream closes or fails terminally, `GetUnackedBatches` returns the
+unacknowledged logical batches. A partially acknowledged batch is returned as
+its remaining row suffix. The caller owns every returned RecordBatch and must
+release each one, including on error paths after retrieval:
+
+```go
+batches, err := failed.GetUnackedBatches()
+if err != nil {
+    return err
+}
+defer func() {
+    for _, batch := range batches {
+        batch.Release()
+    }
+}()
+
+for _, batch := range batches {
+    if _, err := retry.IngestBatch(batch); err != nil { // fresh stream
+        return err
+    }
+}
+return retry.Flush()
+```
+
+`GetUnackedIPCBatches` instead returns fresh, caller-owned byte slices. Replay
+them on a fresh stream with `IngestIPCBatch`, followed by one `Flush`.
+
+Arrow-specific options are `WithArrowCompression` and
+`WithArrowConnectionTimeout`; the latter overrides the per-attempt recovery
+timeout when positive. Arrow streams also support `WithWaitForReady`,
+`WithAckCallback`, `WithRecovery`, `WithRecoveryRetries`,
+`WithRecoveryTimeout`, `WithRecoveryBackoff`, `WithLackOfAckTimeout`,
+`WithFlushTimeout`, `WithMaxInflight`, `WithMaxBufferedPayloadBytes`, and
+`WithStreamPausedMaxWait`. Record-type and maximum-batch-record options do not
+apply to Arrow streams.
 
 ## Authentication
 
@@ -221,8 +335,9 @@ Recovery and buffering can be tuned with `WithRecoveryRetries`,
 purego/
 ├── zerobus/              PUBLIC API: SDK, Stream, options, errors
 └── internal/
+    ├── arrowproto/        Arrow IPC ownership, framing, and acknowledgements
     ├── stream/           generic ingestion core (buffer, watermark, supervisor)
-    ├── transport/        gRPC connection, TLS, EphemeralStream handshake
+    ├── transport/        gRPC connection, TLS, stream handshakes
     ├── auth/             HeadersProvider, token cache, UC OAuth
     ├── schema/           UC schema -> protobuf descriptor conversion
     ├── ucschema/         UC REST schema fetch client

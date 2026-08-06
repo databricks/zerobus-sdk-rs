@@ -1,6 +1,6 @@
 // Batch JSON ingestion example.
 //
-// Uses IngestRecordsOffset and waits on the batch offset.
+// Uses IngestRecordsOffset and calls Flush once.
 // Also demonstrates async acks with WithAckCallback.
 //
 // Set these environment variables before running:
@@ -71,15 +71,7 @@ func main() {
 	}
 	log.Printf("Batch of %d records queued; batch offset ID: %d", len(batch), batchOffset)
 
-	// Confirm the batch.
-	if batchOffset >= 0 {
-		if err := stream.WaitForOffset(batchOffset); err != nil {
-			log.Fatalf("wait for offset %d: %v", batchOffset, err)
-		}
-		log.Printf("Batch acknowledged at offset ID: %d", batchOffset)
-	}
-
-	// Flush pending records, then close.
+	// Confirm all queued records once, then close.
 	if err := stream.Flush(); err != nil {
 		log.Fatalf("flush: %v", err)
 	}

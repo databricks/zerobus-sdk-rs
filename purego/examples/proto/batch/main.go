@@ -1,6 +1,6 @@
 // Batch protobuf ingestion example.
 //
-// Uses IngestRecordsOffset with a descriptor from generated bindings.
+// Uses IngestRecordsOffset with generated bindings and calls Flush once.
 //
 // Set these environment variables before running:
 //
@@ -84,14 +84,6 @@ func main() {
 		log.Fatalf("ingest batch: %v", err)
 	}
 	log.Printf("Batch of %d records queued; batch offset ID: %d", len(batch), batchOffset)
-
-	// Waiting on the batch offset confirms the batch.
-	if batchOffset >= 0 {
-		if err := stream.WaitForOffset(batchOffset); err != nil {
-			log.Fatalf("wait for offset %d: %v", batchOffset, err)
-		}
-		log.Printf("Batch acknowledged at offset ID: %d", batchOffset)
-	}
 
 	if err := stream.Flush(); err != nil {
 		log.Fatalf("flush: %v", err)

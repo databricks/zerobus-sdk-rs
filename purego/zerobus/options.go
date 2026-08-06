@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/databricks/zerobus-sdk/purego/internal/arrowproto"
 	"github.com/databricks/zerobus-sdk/purego/internal/stream"
 	"github.com/databricks/zerobus-sdk/purego/internal/zerobuspb"
 )
@@ -69,18 +70,37 @@ const (
 // Stream methods, including Close, may be called from a callback.
 type AckCallback = stream.AckCallback
 
+// ArrowCompression selects compression for Beta Arrow Flight IPC record-batch
+// bodies.
+type ArrowCompression uint8
+
+const (
+	// ArrowCompressionNone disables Arrow IPC compression.
+	ArrowCompressionNone ArrowCompression = iota
+	// ArrowCompressionLZ4Frame enables LZ4 frame compression.
+	ArrowCompressionLZ4Frame
+	// ArrowCompressionZstd enables Zstandard compression.
+	ArrowCompressionZstd
+
+	// ArrowCompressionLZ4 is an alias for ArrowCompressionLZ4Frame.
+	ArrowCompressionLZ4 = ArrowCompressionLZ4Frame
+)
+
 // StreamOption configures a stream created with CreateStream or
-// CreateStreamWithProvider. Record type, recovery behavior, buffering limits,
-// and the ack callback are all set through these options; unset options take
-// their defaults.
+// CreateStreamWithProvider, or their Arrow equivalents. Record type, recovery
+// behavior, buffering limits, and the ack callback are all set through these
+// options; unset options take their defaults.
 type StreamOption func(*streamConfig)
 
 type streamConfig struct {
-	recordType zerobuspb.RecordType
-	descriptor []byte
-	callback   AckCallback
-	waitReady  bool
-	cfg        stream.Config
+	recordType             zerobuspb.RecordType
+	descriptor             []byte
+	callback               AckCallback
+	waitReady              bool
+	maxInflightSet         bool
+	arrowCompression       ArrowCompression
+	arrowConnectionTimeout time.Duration
+	cfg                    stream.Config
 }
 
 func defaultStreamConfig() streamConfig {
@@ -114,11 +134,30 @@ func WithAckCallback(cb AckCallback) StreamOption {
 	return func(c *streamConfig) { c.callback = cb }
 }
 
-// WithWaitForReady makes CreateStream / CreateStreamWithProvider wait for the
-// first stream open to succeed (or fail terminally) before returning. The
-// creation context directly bounds token resolution, handshake, retry backoff,
-// and every attempt before first-open succeeds. Its cancellation is detached
-// after success, so it does not own the live stream.
+// WithArrowCompression selects Arrow IPC record-batch body compression.
+// Supported values are None (the default), LZ4 Frame, and Zstd. It is ignored
+// by proto/JSON streams.
+func WithArrowCompression(compression ArrowCompression) StreamOption {
+	return func(c *streamConfig) { c.arrowCompression = compression }
+}
+
+// WithArrowConnectionTimeout bounds each Arrow Flight connection attempt.
+// WithRecoveryTimeout remains the shared stream-open control; this
+// Arrow-specific option overrides it for Arrow streams when positive and is
+// ignored by proto/JSON streams.
+func WithArrowConnectionTimeout(d time.Duration) StreamOption {
+	return func(c *streamConfig) {
+		if d > 0 {
+			c.arrowConnectionTimeout = d
+		}
+	}
+}
+
+// WithWaitForReady makes stream constructors wait for the first stream open to
+// succeed (or fail terminally) before returning. The creation context directly
+// bounds token resolution, handshake, retry backoff, and every attempt before
+// first-open succeeds. Its cancellation is detached after success, so it does
+// not own the live stream.
 //
 // Without this option, stream open remains asynchronous: context values
 // propagate to the stream, but cancellation and deadlines are detached because
@@ -134,12 +173,15 @@ func WithRecovery(r RecoverySetting) StreamOption {
 	return func(c *streamConfig) { c.cfg.Recovery = r }
 }
 
-// WithMaxInflight caps the number of unacknowledged ingest calls buffered before
-// IngestRecordOffset / IngestRecordsOffset block for backpressure. One call
-// occupies one slot regardless of how many records it carries. A non-positive
-// value keeps the default.
+// WithMaxInflight caps the number of unacknowledged ingest calls buffered
+// before ingestion blocks for backpressure. One call occupies one slot
+// regardless of how many records or rows it carries. A non-positive value keeps
+// the stream-type default: 1,000,000 for proto/JSON and 1,000 for Arrow.
 func WithMaxInflight(n int) StreamOption {
-	return func(c *streamConfig) { c.cfg.MaxInflight = n }
+	return func(c *streamConfig) {
+		c.cfg.MaxInflight = n
+		c.maxInflightSet = n > 0
+	}
 }
 
 // WithMaxBufferedPayloadBytes caps the estimated encoded memory retained by
@@ -181,14 +223,18 @@ func WithFlushTimeout(d time.Duration) StreamOption {
 	return func(c *streamConfig) { c.cfg.FlushTimeout = d }
 }
 
-// WithMaxPayloadBytes caps the encoded size of a single ingest request. A
+// WithMaxPayloadBytes caps the encoded size of one proto/JSON ingest request. A
 // non-positive value keeps the default (just under the 10 MiB service limit).
+// Arrow streams ignore this option because they independently split FlightData
+// frames to the protocol's 2 MiB wire target.
 func WithMaxPayloadBytes(n int) StreamOption {
 	return func(c *streamConfig) { c.cfg.MaxPayloadBytes = n }
 }
 
 // WithMaxBatchRecords caps the number of records accepted by one
 // IngestRecordsOffset call. A non-positive value keeps the default (100,000).
+// Arrow streams ignore this option because each ingest call carries one
+// logical RecordBatch.
 func WithMaxBatchRecords(n int) StreamOption {
 	return func(c *streamConfig) { c.cfg.MaxBatchRecords = n }
 }
@@ -200,5 +246,18 @@ func WithMaxBatchRecords(n int) StreamOption {
 func WithStreamPausedMaxWait(d time.Duration) StreamOption {
 	return func(c *streamConfig) {
 		c.cfg.StreamPausedMaxWait = &d
+	}
+}
+
+func arrowProtocolCompression(compression ArrowCompression) arrowproto.Compression {
+	switch compression {
+	case ArrowCompressionNone:
+		return arrowproto.CompressionNone
+	case ArrowCompressionLZ4Frame:
+		return arrowproto.CompressionLZ4
+	case ArrowCompressionZstd:
+		return arrowproto.CompressionZstd
+	default:
+		return arrowproto.Compression(compression)
 	}
 }

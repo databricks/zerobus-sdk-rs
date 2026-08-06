@@ -14,8 +14,10 @@ Runnable examples for `github.com/databricks/zerobus-sdk/purego`.
 | UC proto JSON single | Protocol Buffers (UC descriptor) | JSON loop, then `Flush` | `dynamic/single` |
 | UC proto JSON batch | Protocol Buffers (UC descriptor) | One JSON batch | `dynamic/batch` |
 | UC proto messages | Protocol Buffers (UC descriptor) | Runtime messages, then `Flush` | `dynamic/proto` |
+| Arrow typed | Arrow Flight (Beta) | Typed RecordBatch loop, then `Flush` | `arrow/typed` |
 
-Every example uses **loop-then-`Flush()`**: queue records, then flush once.
+Examples queue records or batches without per-item waits and call `Flush()` once
+after ingestion.
 
 ## Prerequisites
 
@@ -63,11 +65,29 @@ go run ./proto/runtime
 go run ./dynamic/single
 go run ./dynamic/batch
 go run ./dynamic/proto
+go run ./arrow/typed
 ```
 
 The dynamic examples use `FetchProtoDescriptorFromUC`, which caches successful
 results. In a long-lived SDK, use `RefreshProtoDescriptorFromUC` after changing
 the table schema.
+
+## Arrow Flight (Beta)
+
+Arrow Flight ingestion is in Beta. The typed example creates an
+`*arrow.Schema`, opens the stream with `CreateArrowStream`, queues
+`arrow.RecordBatch` values in a loop, releases each batch immediately after
+`IngestBatch` returns, and flushes once.
+
+On terminal failure, `GetUnackedBatches` returns caller-owned RecordBatch
+references, including only the unacknowledged row suffix of a partially durable
+batch. The example replays them on a fresh stream and releases every returned
+reference.
+
+The SDK also accepts schema-only IPC through `CreateArrowStreamFromIPC` and
+self-contained, one-batch IPC streams through `IngestIPCBatch`. See the main
+PureGo README for IPC ownership, compression, framing, recovery, and Arrow
+stream options.
 
 ## Regenerating the proto bindings
 

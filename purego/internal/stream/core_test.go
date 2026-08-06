@@ -1285,6 +1285,48 @@ func TestCoreStreamByteBackpressureResumesAfterAck(t *testing.T) {
 	rpc.ack(second)
 }
 
+func TestPayloadBuilderWaitsForAdmissionBeforeMaterializing(t *testing.T) {
+	rpc := newFakeRPC()
+	cfg := testConfig()
+	cfg.MaxInflight = 1
+	cfg.MaxBufferedPayloadBytes = 1_024
+	cs := newCoreForTest(testParams(), cfg, newFakeOpener(rpc), nil)
+	t.Cleanup(func() { _ = cs.Terminate() })
+
+	build := func(value string) func() (encodedMsg, uint64, int64, error) {
+		return func() (encodedMsg, uint64, int64, error) {
+			msg, err := jsonEncoder{}.encode([]byte(value))
+			return msg, 1, 128, err
+		}
+	}
+	if _, err := cs.EnqueuePayloadBuilder(context.Background(), 256, build(`{"first":1}`)); err != nil {
+		t.Fatalf("first EnqueuePayloadBuilder: %v", err)
+	}
+	if items, usedBytes := cs.buf.usage(); items != 1 || usedBytes != 128 {
+		t.Fatalf("reconciled usage = (%d,%d), want (1,128)", items, usedBytes)
+	}
+
+	builderCalled := make(chan struct{}, 1)
+	ctx, cancel := context.WithTimeout(context.Background(), 25*time.Millisecond)
+	defer cancel()
+	offset, err := cs.EnqueuePayloadBuilder(
+		ctx,
+		256,
+		func() (encodedMsg, uint64, int64, error) {
+			builderCalled <- struct{}{}
+			return build(`{"second":2}`)()
+		},
+	)
+	if !errors.Is(err, context.DeadlineExceeded) || offset != -1 {
+		t.Fatalf("blocked builder = (%d,%v), want (-1, deadline exceeded)", offset, err)
+	}
+	select {
+	case <-builderCalled:
+		t.Fatal("payload builder ran before count admission")
+	default:
+	}
+}
+
 func TestCoreStreamGetUnackedWithoutCallback(t *testing.T) {
 	rpc := newFakeRPC()
 	cfg := testConfig()

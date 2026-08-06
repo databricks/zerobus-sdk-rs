@@ -19,6 +19,10 @@
   ordinary fetches, preserving caller cancellation, and stopping abandoned work.
 - Added `Stream.IngestJSONOffset` and `Stream.IngestJSONRecordsOffset`. JSON
   streams queue JSON directly; proto streams convert it before ingestion.
+- Added Beta Arrow Flight ingestion for typed `arrow.RecordBatch` values and
+  self-contained IPC batches, with LZ4 Frame or Zstd compression, 2 MiB
+  row-based framing, and record-count recovery for partially acknowledged
+  batches.
 
 ### Deprecations
 
@@ -44,6 +48,8 @@
 
 - Clarified that callbacks may call stream methods, including `Close`.
 - Added an example that builds protobuf descriptors and messages directly in Go.
+- Added a runnable typed Arrow example that releases each RecordBatch after
+  queuing, flushes once, and demonstrates owned unacknowledged-batch replay.
 - Finalized the README for the initial PureGo release.
 
 ### Internal Changes
@@ -51,9 +57,16 @@
 - Added UC schema and runtime dynamic-protobuf conversion helpers.
 - Added a build-only release validation workflow for the SDK and examples.
 - Added a module-local Apache 2.0 license for Go module distribution.
+- Bounded Arrow materialization before serialization, streamed Flight chunks
+  incrementally, and reused connection dictionary state across chunks.
+- Preflighted compressed Arrow IPC expansion, bounded local chunk-search work,
+  retained late ACKs after partial sends, and removed a redundant recovery copy.
 
 ### API Changes
 
 - Protocol Buffers are now the default record type.
 - Added `Stream.MessageDescriptor` for constructing protobuf messages directly
   from the configured schema.
+- Added Beta `ArrowStream`, typed and schema-IPC constructors, typed and IPC
+  ingestion and recovery methods, Arrow compression, and Flight connection
+  timeout options.

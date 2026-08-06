@@ -58,3 +58,15 @@ func ResolveStreamTuning(opts ...StreamOption) (
 	return sc.cfg.RecoveryTimeout, sc.cfg.RecoveryBackoff, sc.cfg.LackOfAckTimeout,
 		sc.cfg.MaxBatchRecords, sc.cfg.StreamPausedMaxWait
 }
+
+// ResolveArrowStreamConfig returns Arrow-specific resolved option values.
+func ResolveArrowStreamConfig(opts ...StreamOption) (
+	maxInflight int,
+	maxPayloadBytes int,
+	compression ArrowCompression,
+	recoveryTimeout time.Duration,
+) {
+	sc := arrowStreamConfigFromOptions(opts)
+	return sc.cfg.MaxInflight, sc.cfg.MaxPayloadBytes, sc.arrowCompression,
+		sc.cfg.RecoveryTimeout
+}

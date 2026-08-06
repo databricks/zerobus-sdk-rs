@@ -50,12 +50,18 @@ type HeadersProvider interface {
 //
 // ctx bounds the GetHeaders call; see HeadersProvider.GetHeaders.
 func (p StreamParams) resolveHeaders(ctx context.Context) (map[string]string, error) {
-	if p.HeadersProvider == nil {
+	return resolveHeaders(ctx, p.TableName, p.HeadersProvider)
+}
+
+// resolveHeaders is the protocol-neutral implementation shared by
+// EphemeralStream and Arrow Flight opens.
+func resolveHeaders(ctx context.Context, tableName string, provider HeadersProvider) (map[string]string, error) {
+	if provider == nil {
 		return nil, nil
 	}
-	headers, err := p.HeadersProvider.GetHeaders(ctx, p.TableName)
+	headers, err := provider.GetHeaders(ctx, tableName)
 	if err != nil {
-		return nil, fmt.Errorf("transport: open %q: headers provider: %w", p.TableName, err)
+		return nil, fmt.Errorf("transport: open %q: headers provider: %w", tableName, err)
 	}
 	// Snapshot provider output so downstream processing can't race or change if
 	// a provider reuses and mutates an internal map.
@@ -69,14 +75,14 @@ func (p StreamParams) resolveHeaders(ctx context.Context) (map[string]string, er
 		// opaquely, and validating first means a doubled invalid key reports as
 		// invalid rather than misleadingly as a duplicate.
 		if !isUsableAsHeaderKey(k) {
-			return nil, fmt.Errorf("transport: open %q: header key %q is not a valid gRPC metadata key", p.TableName, strings.TrimSpace(k))
+			return nil, fmt.Errorf("transport: open %q: header key %q is not a valid gRPC metadata key", tableName, strings.TrimSpace(k))
 		}
 		if !isUsableAsHeaderValue(v) {
-			return nil, fmt.Errorf("transport: open %q: header %q contains invalid value characters", p.TableName, strings.TrimSpace(k))
+			return nil, fmt.Errorf("transport: open %q: header %q contains invalid value characters", tableName, strings.TrimSpace(k))
 		}
 		normalized := normalizeHeaderKey(k)
 		if _, exists := seenNormalizedKeys[normalized]; exists {
-			return nil, fmt.Errorf("transport: open %q: duplicate header key %q after normalization", p.TableName, normalized)
+			return nil, fmt.Errorf("transport: open %q: duplicate header key %q after normalization", tableName, normalized)
 		}
 		seenNormalizedKeys[normalized] = struct{}{}
 	}

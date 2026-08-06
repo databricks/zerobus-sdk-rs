@@ -45,6 +45,33 @@
 // CreateStream uses the Unity Catalog OAuth 2.0 client-credentials flow. For
 // custom authentication, implement HeadersProvider and use
 // CreateStreamWithProvider.
+//
+// # Arrow Flight (Beta)
+//
+// Arrow Flight ingestion is in Beta. CreateArrowStream accepts an
+// *arrow.Schema; CreateArrowStreamFromIPC accepts a schema-only Arrow IPC
+// stream. The WithProvider variants use custom authentication.
+//
+// Queue typed RecordBatch values without per-batch waits. IngestBatch
+// serializes synchronously, so release each caller-owned batch after it
+// returns:
+//
+//	for _, batch := range batches {
+//	    _, err := stream.IngestBatch(batch)
+//	    batch.Release()
+//	    if err != nil {
+//	        log.Fatal(err)
+//	    }
+//	}
+//	if err := stream.Flush(); err != nil {
+//	    log.Fatal(err)
+//	}
+//
+// Arrow streams default to 1,000 unacknowledged batches and split rows into
+// FlightData messages of at most 2 MiB. Partial record-count acknowledgements
+// are retained across recovery. GetUnackedBatches returns caller-owned
+// RecordBatch references that must each be released; GetUnackedIPCBatches
+// returns independent byte slices.
 package zerobus
 
 import (
@@ -88,7 +115,8 @@ type HeadersProvider = transport.HeadersProvider
 
 // NewStaticHeadersProvider returns a HeadersProvider that returns the same fixed
 // headers on every call. It is intended for tests or externally managed
-// credentials; pair it with CreateStreamWithProvider.
+// credentials; pair it with CreateStreamWithProvider or
+// CreateArrowStreamWithProvider.
 func NewStaticHeadersProvider(headers map[string]string) HeadersProvider {
 	return auth.NewStaticHeadersProvider(headers)
 }
@@ -111,7 +139,11 @@ type SDK struct {
 	mu     sync.Mutex
 	closed bool
 	// Open streams owned by this SDK.
-	streams map[*Stream]struct{}
+	streams map[sdkOwnedStream]struct{}
+}
+
+type sdkOwnedStream interface {
+	terminate() error
 }
 
 type cachedDescriptor struct {
@@ -165,7 +197,7 @@ func newSDK(conn *transport.Conn, zerobusEndpoint, ucEndpoint string, cfg sdkCon
 		dynamicSchemaFetchTimeout: fetchTimeout,
 		dynamicSchemaCache:        make(map[string]cachedDescriptor),
 		dynamicSchemaFetches:      make(map[descriptorFetchKey]*descriptorFetch),
-		streams:                   make(map[*Stream]struct{}),
+		streams:                   make(map[sdkOwnedStream]struct{}),
 	}
 }
 
@@ -215,7 +247,7 @@ func New(zerobusEndpoint, ucEndpoint string, opts ...Option) (*SDK, error) {
 }
 
 // Close terminates open streams and releases the shared connection.
-// It is idempotent; CreateStream fails after Close.
+// It is idempotent; stream constructors fail after Close.
 func (s *SDK) Close() error {
 	s.mu.Lock()
 	if s.closed {
@@ -223,7 +255,7 @@ func (s *SDK) Close() error {
 		return nil
 	}
 	s.closed = true
-	open := make([]*Stream, 0, len(s.streams))
+	open := make([]sdkOwnedStream, 0, len(s.streams))
 	for st := range s.streams {
 		open = append(open, st)
 	}
@@ -243,10 +275,10 @@ func (s *SDK) Close() error {
 	var wg sync.WaitGroup
 	for i, st := range open {
 		wg.Add(1)
-		go func() {
+		go func(index int, owned sdkOwnedStream) {
 			defer wg.Done()
-			errs[i] = st.terminate()
-		}()
+			errs[index] = owned.terminate()
+		}(i, st)
 	}
 	wg.Wait()
 	// Close the connection after stream teardown.
@@ -754,7 +786,7 @@ func validateApplicationName(name string) error {
 }
 
 // forget removes a closed stream from the SDK registry.
-func (s *SDK) forget(st *Stream) {
+func (s *SDK) forget(st sdkOwnedStream) {
 	s.mu.Lock()
 	delete(s.streams, st)
 	s.mu.Unlock()

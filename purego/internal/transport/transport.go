@@ -2,15 +2,16 @@
 // ingestion service.
 //
 // It is the lowest layer of the pure-Go SDK: it dials the service, applies TLS
-// and authentication metadata, and exposes the bidirectional EphemeralStream
-// RPC as a Stream. It uses wire types from internal/zerobuspb and does not
-// implement batching, offsets, or acknowledgment handling.
+// and authentication metadata, and exposes bidirectional EphemeralStream and
+// Arrow Flight DoPut RPCs. It does not implement batching, offsets, or
+// acknowledgment handling beyond validating each protocol's setup response.
 package transport
 
 import (
 	"crypto/tls"
 	"fmt"
 
+	"github.com/apache/arrow-go/v18/arrow/flight"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials"
 
@@ -20,8 +21,9 @@ import (
 // Conn is a connection to the Zerobus service. A single Conn is safe for
 // concurrent use and may back many streams; callers must Close it when done.
 type Conn struct {
-	cc     *grpc.ClientConn
-	client zerobuspb.ZerobusClient
+	cc           *grpc.ClientConn
+	client       zerobuspb.ZerobusClient
+	flightClient flight.FlightServiceClient
 }
 
 // Dial connects to the Zerobus gRPC service at endpoint.
@@ -45,7 +47,11 @@ func Dial(endpoint string, opts ...DialOption) (*Conn, error) {
 	if err != nil {
 		return nil, fmt.Errorf("transport: dial %q: %w", endpoint, err)
 	}
-	return &Conn{cc: cc, client: zerobuspb.NewZerobusClient(cc)}, nil
+	return &Conn{
+		cc:           cc,
+		client:       zerobuspb.NewZerobusClient(cc),
+		flightClient: flight.NewFlightServiceClient(cc),
+	}, nil
 }
 
 // Close releases the underlying connection. In-flight streams are terminated.

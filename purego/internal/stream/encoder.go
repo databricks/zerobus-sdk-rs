@@ -34,11 +34,19 @@ type encoder[Req any] interface {
 	encodeBatch(records [][]byte) (Req, error)
 	// stampOffset assigns the connection-local wire offset.
 	stampOffset(msg Req, offset int64)
+	// unitCount reports the number of protocol durability units in msg.
+	// Atomic protocols return one even when msg contains a record batch.
+	unitCount(msg Req) uint64
+	// slice removes an acknowledged durability-unit prefix. It is called only
+	// for a partially acknowledged item during recovery or GetUnacked.
+	slice(msg Req, acknowledgedPrefix uint64) (Req, error)
 	// decode recovers the raw record bytes from a wire message so GetUnacked can
 	// return original content. A single-record message yields one entry; a batch
 	// yields all of its records so no unacked record is silently dropped.
 	decode(msg Req) [][]byte
-	// maxWireSize reports an upper bound across every offset stamp.
+	// maxWireSize reports an upper bound for any one transport frame produced by
+	// Send, across every offset stamp. A wire stream may expand one logical msg
+	// into multiple frames behind its single Send call.
 	maxWireSize(msg Req) int
 	// retainedSize estimates the heap retained by an encoded message before it
 	// is built. It includes raw bytes, per-record containers, framing, and
@@ -99,6 +107,18 @@ func (protoEncoder) encodeBatch(records [][]byte) (encodedMsg, error) {
 
 func (protoEncoder) decode(msg encodedMsg) [][]byte { return extractEphemeralRecords(msg) }
 
+func (protoEncoder) unitCount(encodedMsg) uint64 { return 1 }
+
+func (protoEncoder) slice(msg encodedMsg, acknowledgedPrefix uint64) (encodedMsg, error) {
+	if acknowledgedPrefix == 0 {
+		return msg, nil
+	}
+	return nil, fmt.Errorf(
+		"stream: proto payload is atomic and cannot drop %d acknowledged units",
+		acknowledgedPrefix,
+	)
+}
+
 func (protoEncoder) maxWireSize(msg encodedMsg) int {
 	if msg == nil {
 		return 0
@@ -153,6 +173,18 @@ func (jsonEncoder) encodeBatch(records [][]byte) (encodedMsg, error) {
 
 func (jsonEncoder) decode(msg encodedMsg) [][]byte { return extractEphemeralRecords(msg) }
 
+func (jsonEncoder) unitCount(encodedMsg) uint64 { return 1 }
+
+func (jsonEncoder) slice(msg encodedMsg, acknowledgedPrefix uint64) (encodedMsg, error) {
+	if acknowledgedPrefix == 0 {
+		return msg, nil
+	}
+	return nil, fmt.Errorf(
+		"stream: JSON payload is atomic and cannot drop %d acknowledged units",
+		acknowledgedPrefix,
+	)
+}
+
 func (jsonEncoder) maxWireSize(msg encodedMsg) int {
 	if msg == nil {
 		return 0
@@ -199,6 +231,56 @@ func newEncoder(rt zerobuspb.RecordType) (encoder[encodedMsg], error) {
 	default:
 		return nil, errUnsupportedRecordType(rt)
 	}
+}
+
+// EncoderHooks adapts protocol functions into the generic encoding seam. It is
+// exported within the internal package boundary for protocol implementations
+// whose payload type is defined outside stream.
+type EncoderHooks[Req any] struct {
+	EncodeRecord func(record []byte) (Req, error)
+	EncodeBatch  func(records [][]byte) (Req, error)
+	StampOffset  func(msg Req, offset int64)
+	UnitCount    func(msg Req) uint64
+	Slice        func(msg Req, acknowledgedPrefix uint64) (Req, error)
+	Decode       func(msg Req) [][]byte
+	MaxWireSize  func(msg Req) int
+	RetainedSize func(rawBytes, recordCount int) int64
+}
+
+type hookEncoder[Req any] struct {
+	hooks EncoderHooks[Req]
+}
+
+func (e hookEncoder[Req]) encode(record []byte) (Req, error) {
+	return e.hooks.EncodeRecord(record)
+}
+
+func (e hookEncoder[Req]) encodeBatch(records [][]byte) (Req, error) {
+	return e.hooks.EncodeBatch(records)
+}
+
+func (e hookEncoder[Req]) stampOffset(msg Req, offset int64) {
+	e.hooks.StampOffset(msg, offset)
+}
+
+func (e hookEncoder[Req]) unitCount(msg Req) uint64 {
+	return e.hooks.UnitCount(msg)
+}
+
+func (e hookEncoder[Req]) slice(msg Req, acknowledgedPrefix uint64) (Req, error) {
+	return e.hooks.Slice(msg, acknowledgedPrefix)
+}
+
+func (e hookEncoder[Req]) decode(msg Req) [][]byte {
+	return e.hooks.Decode(msg)
+}
+
+func (e hookEncoder[Req]) maxWireSize(msg Req) int {
+	return e.hooks.MaxWireSize(msg)
+}
+
+func (e hookEncoder[Req]) retainedSize(rawBytes, recordCount int) int64 {
+	return e.hooks.RetainedSize(rawBytes, recordCount)
 }
 
 // extractEphemeralRecords recovers the raw record bytes from an EphemeralStream

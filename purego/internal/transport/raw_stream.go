@@ -40,7 +40,7 @@ var defaultHandshakeTimeout = 15 * time.Second
 var defaultDrainTimeout = 500 * time.Millisecond
 
 // bidiRPC is the subset of a generated gRPC bidirectional streaming client that
-// rawStream needs. EphemeralStream satisfies it, as will Arrow Flight's DoPut.
+// rawStream needs. EphemeralStream and Arrow Flight DoPut both satisfy it.
 type bidiRPC[Req, Resp any] interface {
 	Send(*Req) error
 	Recv() (*Resp, error)
@@ -50,8 +50,8 @@ type bidiRPC[Req, Resp any] interface {
 // rawStream is the protocol-agnostic half of an open ingestion stream: the
 // send/receive plumbing, teardown, and handshake over a bidirectional RPC. It
 // knows nothing about record framing or the setup message; concrete streams
-// embed it and supply those via wire types and handshake hooks. Stream
-// (proto/JSON over EphemeralStream) is the current implementation.
+// embed it and supply those via wire types and handshake hooks. Stream uses
+// EphemeralStream for proto/JSON, while FlightStream uses DoPut for Arrow.
 //
 // Not safe for concurrent send; pair with a single writer goroutine. Sending
 // and receiving from separate goroutines is fine.
@@ -170,7 +170,7 @@ func (s *rawStream[Req, Resp]) gracefulClose(ctx context.Context) error {
 // is bounded off-goroutine via a select on hctx; when hctx fires, teardown
 // cancels that context and handshake waits for the goroutine, so it never
 // outlives the call. teardown must cancel the RPC's context and is safe to call
-// more than once. Reusers (e.g. a future Arrow/Flight wireStream) must supply it.
+// more than once. Every concrete wire stream must supply it.
 //
 // An hctx expiry always fails the handshake, but a terminal status the server
 // managed to send first is reported in place of hctx.Err(), so a rejection racing
