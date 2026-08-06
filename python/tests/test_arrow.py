@@ -8,7 +8,9 @@ classes, without making network connections.
 
 import unittest
 
-import pyarrow as pa
+import pytest
+
+pa = pytest.importorskip("pyarrow")
 
 from zerobus.sdk.shared.arrow import (
     ArrowStreamConfigurationOptions,

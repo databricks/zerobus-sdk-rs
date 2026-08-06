@@ -75,13 +75,18 @@ pip install databricks-zerobus-ingest-sdk
 ```
 
 Pre-built wheels are available for:
+
 - **Linux**: x86_64, aarch64 (manylinux)
 - **macOS**: x86_64, arm64
 - **Windows**: x86_64
 
 ### Python Version
 
-Requires **Python 3.9 or higher**.
+Requires **Python 3.9-3.14**. The SDK is tested on CPython 3.9 through 3.14.
+
+The wheel uses the CPython stable ABI (`abi3`), so one wheel works on every
+supported version. The free-threaded builds (like `3.14t`) are not
+supported, because the stable ABI does not cover them.
 
 ### Dependencies
 
@@ -89,6 +94,18 @@ Requires **Python 3.9 or higher**.
 - `requests` >= 2.28.1, < 3 (only for the `generate_proto` utility tool)
 
 All core ingestion functionality (gRPC, OAuth, stream management) is handled by the native Rust implementation.
+
+Arrow Flight ingestion needs `pyarrow`. Install it with the `arrow` extra:
+
+```bash
+pip install "databricks-zerobus-ingest-sdk[arrow]"
+```
+
+The extra selects the `pyarrow` version for your interpreter, because no single
+`pyarrow` release covers Python 3.9 through 3.14. On Python 3.14 the extra
+installs `pyarrow` 22.0.0 or later, which is the first release with 3.14 wheels.
+On earlier versions it installs `pyarrow` below 22.0.0. Core ingestion (Protobuf
+and JSON) does not need `pyarrow` at all.
 
 ## Quick Start
 
@@ -298,19 +315,19 @@ stream = sdk.create_stream(client_id, client_secret, table_properties, options)
 
 ### Available Options
 
-| Option | Type | Default | Description |
-|--------|------|---------|-------------|
-| `record_type` | `RecordType` | `RecordType.PROTO` | Serialization format: `PROTO` or `JSON` |
-| `max_inflight_records` | `int` | `1000000` | Maximum number of unacknowledged records |
-| `recovery` | `bool` | `True` | Enable automatic stream recovery |
-| `recovery_timeout_ms` | `int` | `15000` | Timeout for recovery operations (ms) |
-| `recovery_backoff_ms` | `int` | `2000` | Delay between recovery attempts (ms) |
-| `recovery_retries` | `int` | `4` | Maximum number of recovery attempts |
-| `flush_timeout_ms` | `int` | `300000` | Timeout for flush operations (ms) |
-| `server_lack_of_ack_timeout_ms` | `int` | `60000` | Server acknowledgment timeout (ms) |
-| `stream_paused_max_wait_time_ms` | `Optional[int]` | `None` | Max wait during graceful stream close. `None` = full server duration, `0` = immediate, `x` = min(x, server_duration) |
-| `callback_max_wait_time_ms` | `Optional[int]` | `5000` | Max wait for callbacks after `close()`. `None` = wait forever |
-| `ack_callback` | `AckCallback` | `None` | Callback invoked on record acknowledgment or error |
+| Option                           | Type            | Default            | Description                                                                                                          |
+| -------------------------------- | --------------- | ------------------ | -------------------------------------------------------------------------------------------------------------------- |
+| `record_type`                    | `RecordType`    | `RecordType.PROTO` | Serialization format: `PROTO` or `JSON`                                                                              |
+| `max_inflight_records`           | `int`           | `1000000`          | Maximum number of unacknowledged records                                                                             |
+| `recovery`                       | `bool`          | `True`             | Enable automatic stream recovery                                                                                     |
+| `recovery_timeout_ms`            | `int`           | `15000`            | Timeout for recovery operations (ms)                                                                                 |
+| `recovery_backoff_ms`            | `int`           | `2000`             | Delay between recovery attempts (ms)                                                                                 |
+| `recovery_retries`               | `int`           | `4`                | Maximum number of recovery attempts                                                                                  |
+| `flush_timeout_ms`               | `int`           | `300000`           | Timeout for flush operations (ms)                                                                                    |
+| `server_lack_of_ack_timeout_ms`  | `int`           | `60000`            | Server acknowledgment timeout (ms)                                                                                   |
+| `stream_paused_max_wait_time_ms` | `Optional[int]` | `None`             | Max wait during graceful stream close. `None` = full server duration, `0` = immediate, `x` = min(x, server_duration) |
+| `callback_max_wait_time_ms`      | `Optional[int]` | `5000`             | Max wait for callbacks after `close()`. `None` = wait forever                                                        |
+| `ack_callback`                   | `AckCallback`   | `None`             | Callback invoked on record acknowledgment or error                                                                   |
 
 ## Error Handling
 
@@ -363,6 +380,7 @@ for batch in unacked_batches:
 ```
 
 **Decoding unacked records:**
+
 - **JSON mode**: `json.loads(record_bytes.decode('utf-8'))`
 - **Protobuf mode**: `YourMessage.FromString(record_bytes)`
 
@@ -376,11 +394,11 @@ prior record. In async code, an [`AckCallback`](#ackcallback) tracks durability 
 blocking. Calling `wait_for_offset()` after every record in a tight loop limits
 throughput to one record per round-trip, so save it for confirming a specific record.
 
-| Method | Throughput | Use case |
-|--------|------------|----------|
+| Method                   | Throughput  | Use case                                                                                                             |
+| ------------------------ | ----------- | -------------------------------------------------------------------------------------------------------------------- |
 | `ingest_record_nowait()` | **Highest** | Fire-and-forget: no offset returned; maximum throughput when you do not need per-record ack tracking in the hot path |
-| `ingest_record_offset()` | Medium | Recommended for most apps: returns an offset after queueing. Ingest in a loop, then `flush()` once |
-| `ingest_record()` | Low | **Deprecated** — prefer offset-based APIs |
+| `ingest_record_offset()` | Medium      | Recommended for most apps: returns an offset after queueing. Ingest in a loop, then `flush()` once                   |
+| `ingest_record()`        | Low         | **Deprecated** — prefer offset-based APIs                                                                            |
 
 **Idiomatic flow:**
 
@@ -421,20 +439,21 @@ stream = await sdk.create_stream(client_id, client_secret, table_properties, opt
 
 **Single record ingestion:**
 
-| Method | Sync | Async | Notes |
-|--------|------|-------|-------|
-| `ingest_record_nowait(record)` | `→ None` | `→ None` (not async) | Fire-and-forget, highest throughput |
-| `ingest_record_offset(record)` | `→ int` | `await → int` | Returns offset after queueing |
-| `ingest_record(record)` | `→ RecordAcknowledgment` | `await → Awaitable` | **Deprecated** since v0.3.0 |
+| Method                         | Sync                     | Async                | Notes                               |
+| ------------------------------ | ------------------------ | -------------------- | ----------------------------------- |
+| `ingest_record_nowait(record)` | `→ None`                 | `→ None` (not async) | Fire-and-forget, highest throughput |
+| `ingest_record_offset(record)` | `→ int`                  | `await → int`        | Returns offset after queueing       |
+| `ingest_record(record)`        | `→ RecordAcknowledgment` | `await → Awaitable`  | **Deprecated** since v0.3.0         |
 
 **Batch ingestion:**
 
-| Method | Sync | Async | Notes |
-|--------|------|-------|-------|
-| `ingest_records_nowait(records)` | `→ None` | `→ None` (not async) | Fire-and-forget |
-| `ingest_records_offset(records)` | `→ int` | `await → int` | Returns final offset |
+| Method                           | Sync     | Async                | Notes                |
+| -------------------------------- | -------- | -------------------- | -------------------- |
+| `ingest_records_nowait(records)` | `→ None` | `→ None` (not async) | Fire-and-forget      |
+| `ingest_records_offset(records)` | `→ int`  | `await → int`        | Returns final offset |
 
 **Accepted record types:**
+
 - **JSON mode**: `dict` (SDK serializes) or `str` (pre-serialized JSON)
 - **Protobuf mode**: `Message` object (SDK serializes) or `bytes` (pre-serialized)
 

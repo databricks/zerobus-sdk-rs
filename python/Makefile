@@ -40,7 +40,7 @@ dev:
 
 lock-dev: # requires uv
 	@test -f LICENSE || cp ../LICENSE LICENSE
-	uv pip compile --generate-hashes --no-emit-index-url --exclude-newer '2026-03-19T00:00:00Z' --output-file requirements-dev.lock requirements-dev.in
+	uv pip compile --universal --python-version 3.9 --generate-hashes --no-emit-index-url --exclude-newer '2026-03-19T00:00:00Z' --output-file requirements-dev.lock requirements-dev.in
 
 install:
 	$(VENV) -m pip install -e .

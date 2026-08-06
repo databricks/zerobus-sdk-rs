@@ -21,7 +21,7 @@ use crate::common::intern_header_name;
 ///                 ("authorization", "Bearer my-custom-token"),
 ///                 ("x-custom-header", "value"),
 ///             ]
-#[pyclass(subclass)]
+#[pyclass(subclass, skip_from_py_object)]
 #[derive(Clone)]
 pub struct HeadersProvider {}
 
@@ -29,7 +29,7 @@ pub struct HeadersProvider {}
 impl HeadersProvider {
     #[new]
     #[pyo3(signature = (**_kwargs))]
-    fn new(_kwargs: Option<&pyo3::types::PyDict>) -> Self {
+    fn new(_kwargs: Option<&Bound<'_, pyo3::types::PyDict>>) -> Self {
         // Accept and ignore kwargs to allow Python subclasses to pass their own arguments
         Self {}
     }
@@ -40,7 +40,7 @@ impl HeadersProvider {
     ///
     /// Returns:
     ///     List of (header_name, header_value) tuples
-    fn get_headers(&self, _py: Python) -> PyResult<PyObject> {
+    fn get_headers(&self, _py: Python) -> PyResult<Py<PyAny>> {
         Err(PyNotImplementedError::new_err(
             "Subclasses must implement get_headers()",
         ))
@@ -53,11 +53,11 @@ impl HeadersProvider {
 
 /// Wrapper that bridges Python HeadersProvider to Rust SDK's HeadersProvider trait
 pub struct HeadersProviderWrapper {
-    py_obj: PyObject,
+    py_obj: Py<PyAny>,
 }
 
 impl HeadersProviderWrapper {
-    pub fn new(py_obj: PyObject) -> Self {
+    pub fn new(py_obj: Py<PyAny>) -> Self {
         Self { py_obj }
     }
 }
@@ -66,7 +66,7 @@ impl HeadersProviderWrapper {
 impl RustHeadersProvider for HeadersProviderWrapper {
     async fn get_headers(&self) -> RustResult<HashMap<&'static str, String>> {
         // Call into Python to get headers
-        let headers_vec: Vec<(String, String)> = Python::with_gil(|py| {
+        let headers_vec: Vec<(String, String)> = Python::attach(|py| {
             let method = self.py_obj.getattr(py, "get_headers")?;
             let result = method.call0(py)?;
             let headers: Vec<(String, String)> = result.extract(py)?;
