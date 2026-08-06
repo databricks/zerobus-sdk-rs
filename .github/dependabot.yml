@@ -42,6 +42,13 @@ updates:
     labels:
       - dependencies
 
+  - package-ecosystem: cargo
+    directory: /python/rust
+    schedule:
+      interval: weekly
+    labels:
+      - dependencies
+
   - package-ecosystem: gomod
     directory: /go
     schedule:

@@ -84,6 +84,6 @@ The public Python API is defined by the classes and functions in `zerobus/`. Cha
 ## Config
 
 - Python >= 3.9 required; tested through 3.14 (free-threaded builds are not supported)
-- Rust >= 1.83 required for the wrapper crate (PyO3 0.29 MSRV)
+- Rust >= 1.88 required for the wrapper crate (Tonic 0.14.6 MSRV)
 - Line length: 120 (black)
 - Formatter: black, isort

@@ -559,7 +559,7 @@ export RUST_LOG=zerobus_sdk=debug  # Only SDK components
 
 ## Building from Source
 
-Building from source requires the **Rust toolchain** (install from [rustup.rs](https://rustup.rs/)).
+Building from source requires the Rust toolchain 1.88 or newer (install from [rustup.rs](https://rustup.rs/)).
 
 ```bash
 git clone https://github.com/databricks/zerobus-sdk.git

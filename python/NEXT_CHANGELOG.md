@@ -26,6 +26,8 @@
   bound before, which is what let pip pick the `abi3` wheel on 3.14 and crash
   rather than report that the version is unsupported. The bound moves up as each
   new CPython version is added to CI.
+- Updated the native extension's transitive `quinn-proto`, `rustls-webpki`, and
+  `rand` dependencies to patched releases.
 
 ### Documentation
 
@@ -41,11 +43,12 @@
   the interpreter to copy the `ack_callback` handle. This avoids PyO3's `py-clone`
   feature, which panics when the interpreter is detached — the exact state of the
   async stream-builder paths.
-- The wrapper crate now declares `rust-version = "1.83"`, the PyO3 0.29 MSRV. This
-  does not change the Rust core SDK's own MSRV.
+- The wrapper crate now declares `rust-version = "1.88"`, matching the effective
+  requirement from Tonic 0.14.6. This does not change the Rust core SDK's own MSRV.
 - The Arrow test module now skips itself when `pyarrow` is absent. `pyarrow` is an
   optional dependency, but the module imported it at the top level, so the whole
   test suite failed to collect on an install without the `arrow` extra.
+- Added Dependabot coverage for the Python extension's Rust crate under `python/rust`.
 
 ### Breaking Changes
 

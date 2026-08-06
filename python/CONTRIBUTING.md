@@ -10,7 +10,7 @@ This document covers Python-specific development setup and workflow.
 
 - **Python 3.9 through 3.14**
 - **Git**
-- **Rust toolchain** (required for building the native extension)
+- Rust toolchain 1.88 or newer (required for building the native extension)
   - Install from [rustup.rs](https://rustup.rs/)
   - Verify: `rustc --version`
 - **maturin** (for building Rust-Python bindings)
