@@ -85,6 +85,23 @@ func TestSDKFetchProtoDescriptorFromUC_RejectsClosedSDK(t *testing.T) {
 	}
 }
 
+// The deprecated alias must delegate, so it reports the same operation as the
+// method it forwards to.
+func TestSDKFetchProtoDescriptor_DelegatesToFromUC(t *testing.T) {
+	sdk := newSDK(nil, "https://zerobus", "https://uc", sdkConfig{})
+	sdk.mu.Lock()
+	sdk.closed = true
+	sdk.mu.Unlock()
+
+	_, err := sdk.FetchProtoDescriptor(
+		context.Background(), "main.sales.orders", "id", "secret",
+	)
+	var sdkErr *Error
+	if !errors.As(err, &sdkErr) || sdkErr.Op != "FetchProtoDescriptorFromUC" {
+		t.Fatalf("FetchProtoDescriptor() error = %v, want Op FetchProtoDescriptorFromUC", err)
+	}
+}
+
 func TestStreamEncodeJSONBatch(t *testing.T) {
 	desc := &descriptorpb.DescriptorProto{
 		Name: proto.String("Order"),
