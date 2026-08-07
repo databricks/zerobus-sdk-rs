@@ -49,7 +49,7 @@ import zerobus._zerobus_core as _core
 from zerobus.sdk.shared.arrow import ArrowStreamConfigurationOptions, IPCCompression
 from zerobus.sdk.sync import ZerobusArrowStream, ZerobusSdk, ZerobusStream
 
-__version__ = "1.4.0"
+__version__ = "1.5.0"
 
 # Re-export common types
 TableProperties = _core.TableProperties
