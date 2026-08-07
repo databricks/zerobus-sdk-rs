@@ -14,20 +14,6 @@ import (
 	"github.com/databricks/zerobus-sdk/purego/zerobus"
 )
 
-func openStream(sdk *zerobus.SDK, cfg config.Settings) (*zerobus.Stream, error) {
-	ctx := context.Background()
-	descriptor, err := sdk.FetchProtoDescriptorFromUC(
-		ctx, cfg.TableName, cfg.ClientID, cfg.ClientSecret,
-	)
-	if err != nil {
-		return nil, err
-	}
-	return sdk.CreateStream(
-		ctx, cfg.TableName, cfg.ClientID, cfg.ClientSecret,
-		zerobus.WithProto(descriptor),
-	)
-}
-
 func main() {
 	cfg := config.Load()
 
@@ -38,7 +24,19 @@ func main() {
 	}
 	defer sdk.Close()
 
-	stream, err := openStream(sdk, cfg)
+	ctx := context.Background()
+	// Fetch the descriptor once; reuse it for every stream on this table.
+	descriptor, err := sdk.FetchProtoDescriptorFromUC(
+		ctx, cfg.TableName, cfg.ClientID, cfg.ClientSecret,
+	)
+	if err != nil {
+		log.Fatalf("fetch descriptor: %v", err)
+	}
+
+	stream, err := sdk.CreateStream(
+		ctx, cfg.TableName, cfg.ClientID, cfg.ClientSecret,
+		zerobus.WithProto(descriptor),
+	)
 	if err != nil {
 		log.Fatalf("create stream: %v", err)
 	}

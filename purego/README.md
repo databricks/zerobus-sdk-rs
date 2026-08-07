@@ -92,11 +92,19 @@ streams and convert it to protobuf on proto streams.
 Fetch the table schema explicitly, then create a regular proto stream. The
 stream can accept either protobuf bytes or JSON converted at ingest time.
 
+> **Fetch the descriptor once and reuse it.** `FetchProtoDescriptorFromUC`
+> performs a Unity Catalog request on every call and the SDK does not cache the
+> result. Call it once per table at startup, hold on to the returned bytes, and
+> pass them to `WithProto` for every stream you open on that table. Fetch again
+> only when the table schema changes. Calling it per stream — or per record —
+> puts a UC round-trip on your ingestion path.
+
 UC schema conversion rejects nullable array/map fields and collections that
 allow null elements or values because protobuf cannot preserve those
 distinctions. JSON ingestion also rejects explicit `null` collection fields.
 
 ```go
+// Fetch once at startup, then reuse `descriptor` for every stream on this table.
 descriptor, err := sdk.FetchProtoDescriptorFromUC(
     ctx,
     "catalog.schema.table",
