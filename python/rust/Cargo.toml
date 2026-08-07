@@ -21,4 +21,4 @@ prost-types = "0.14"
 tonic = "0.14"
 arrow-ipc = { version = "58.2", default-features = false }
 arrow-schema = { version = "58.2", default-features = false }
-arrow-array = { version = "58.2", default-features = false }
+arrow-array = { version = "59.1", default-features = false }
