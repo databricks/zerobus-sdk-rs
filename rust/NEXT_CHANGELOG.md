@@ -22,6 +22,9 @@
   only after pending replay succeeds, while initial supervisor handoff and failed or
   cancelled replay promptly drop redundant senders instead of retaining incomplete
   `DoPut` request channels until later teardown.
+- The OAuth `expires_in` field is now parsed from a quoted integer (`"3600"`) in
+  addition to a plain JSON integer. A value that is missing or does not represent
+  a positive integer still yields no token lifetime, as before.
 
 ### Documentation
 

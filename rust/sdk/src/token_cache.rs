@@ -286,6 +286,47 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn refresh_installs_new_expiry() {
+        // A proactive refresh must re-stabilize the cache: once it returns a
+        // token with a healthy TTL, the following call should hit rather than
+        // refresh again. The first mint uses a within-buffer TTL (30s < 60s
+        // buffer) to force one refresh; later mints return a healthy TTL.
+        let cache = TokenCache::new(true, Duration::from_secs(60));
+        let calls = AtomicUsize::new(0);
+
+        let make = |_reason| async {
+            let n = calls.fetch_add(1, Ordering::SeqCst);
+            let ttl = if n == 0 { 30 } else { 3600 };
+            Ok(fetched(&format!("tok{n}"), Some(ttl)))
+        };
+
+        // Call 1 mints tok0 (within-buffer, immediately due for refresh).
+        let a = cache
+            .get_or_fetch("id", "secret", "c.s.t", make)
+            .await
+            .unwrap();
+        // Call 2 refreshes to tok1 with a healthy TTL.
+        let b = cache
+            .get_or_fetch("id", "secret", "c.s.t", make)
+            .await
+            .unwrap();
+        // Call 3 must be a cache hit on tok1: no further mint.
+        let c = cache
+            .get_or_fetch("id", "secret", "c.s.t", make)
+            .await
+            .unwrap();
+
+        assert_eq!(a, "tok0");
+        assert_eq!(b, "tok1");
+        assert_eq!(c, "tok1", "the refreshed token should be served from cache");
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            2,
+            "refresh should install a new expiry so the third call hits cache"
+        );
+    }
+
+    #[tokio::test]
     async fn separate_tables_get_separate_entries() {
         let cache = TokenCache::new(true, Duration::from_secs(60));
         let calls = AtomicUsize::new(0);
@@ -378,6 +419,96 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn invalidate_affects_only_its_own_key() {
+        let cache = TokenCache::new(true, Duration::from_secs(60));
+        let calls = AtomicUsize::new(0);
+
+        let make = |_reason| async {
+            let n = calls.fetch_add(1, Ordering::SeqCst);
+            Ok(fetched(&format!("tok{n}"), Some(3600)))
+        };
+
+        // Seed two different tables (tok0 and tok1).
+        cache
+            .get_or_fetch("id", "secret", "c.s.t1", make)
+            .await
+            .unwrap();
+        cache
+            .get_or_fetch("id", "secret", "c.s.t2", make)
+            .await
+            .unwrap();
+
+        // Invalidating t1 must not disturb t2.
+        cache.invalidate("id", "secret", "c.s.t1").await;
+
+        // t1 re-mints (tok2); t2 still hits its original cached token (tok1).
+        let t1 = cache
+            .get_or_fetch("id", "secret", "c.s.t1", make)
+            .await
+            .unwrap();
+        let t2 = cache
+            .get_or_fetch("id", "secret", "c.s.t2", make)
+            .await
+            .unwrap();
+
+        assert_eq!(t1, "tok2", "invalidated table should re-mint");
+        assert_eq!(t2, "tok1", "untouched table should still hit cache");
+        assert_eq!(calls.load(Ordering::SeqCst), 3);
+    }
+
+    #[tokio::test]
+    async fn invalidate_unknown_key_is_a_noop() {
+        let cache = TokenCache::new(true, Duration::from_secs(60));
+        let calls = AtomicUsize::new(0);
+
+        let make = |_reason| async {
+            calls.fetch_add(1, Ordering::SeqCst);
+            Ok(fetched("tok", Some(3600)))
+        };
+
+        cache
+            .get_or_fetch("id", "secret", "c.s.t", make)
+            .await
+            .unwrap();
+
+        // Invalidating a key that was never cached must leave the existing
+        // entry intact, so the next call still hits.
+        cache.invalidate("id", "secret", "other.table.here").await;
+        cache
+            .get_or_fetch("id", "secret", "c.s.t", make)
+            .await
+            .unwrap();
+
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            1,
+            "invalidating an unknown key must not evict the cached token"
+        );
+    }
+
+    #[tokio::test]
+    async fn invalidate_on_disabled_cache_is_a_noop() {
+        // A disabled cache never stores anything, so invalidate has nothing to
+        // do; it must simply not panic, and fetching must keep working.
+        let cache = TokenCache::new(false, Duration::from_secs(60));
+        let calls = AtomicUsize::new(0);
+
+        let make = |_reason| async {
+            calls.fetch_add(1, Ordering::SeqCst);
+            Ok(fetched("tok", Some(3600)))
+        };
+
+        cache.invalidate("id", "secret", "c.s.t").await;
+        let token = cache
+            .get_or_fetch("id", "secret", "c.s.t", make)
+            .await
+            .unwrap();
+
+        assert_eq!(token, "tok");
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
     async fn disabled_cache_always_fetches() {
         let cache = TokenCache::new(false, Duration::from_secs(60));
         let calls = AtomicUsize::new(0);
@@ -446,6 +577,35 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn refresh_failure_does_not_serve_expired_token() {
+        let cache = TokenCache::new(true, Duration::from_secs(60));
+
+        // Seed a token with a zero TTL: `expires_at` becomes the mint instant. By
+        // the second await below the monotonic clock has reached or passed it, and
+        // `is_expired` (`Instant::now() >= expires_at`) treats equality as expired,
+        // so the token reads as expired.
+        cache
+            .get_or_fetch("id", "secret", "c.s.t", |_reason| async {
+                Ok(fetched("stale", Some(0)))
+            })
+            .await
+            .unwrap();
+
+        // A retryable refresh failure would serve a still-valid cached token, but
+        // this one has expired, so the error must surface rather than handing the
+        // caller a dead token.
+        let result = cache
+            .get_or_fetch("id", "secret", "c.s.t", |_reason| async {
+                Err(crate::ZerobusError::TokenFetchError("blip".to_string()))
+            })
+            .await;
+        assert!(matches!(
+            result,
+            Err(crate::ZerobusError::TokenFetchError(_))
+        ));
+    }
+
+    #[tokio::test]
     async fn refresh_failure_propagates_non_retryable_error() {
         let cache = TokenCache::new(true, Duration::from_secs(60));
 
@@ -505,22 +665,52 @@ mod tests {
         assert_eq!(served, "valid");
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn single_flight_mints_once_for_concurrent_callers() {
         let cache = Arc::new(TokenCache::new(true, Duration::from_secs(60)));
         let calls = Arc::new(AtomicUsize::new(0));
+        const FOLLOWERS: usize = 15;
 
-        let mut handles = Vec::new();
-        for _ in 0..16 {
+        // Keep the leader's mint in flight (blocked on `gate`) while the
+        // followers pile in.
+        let gate = Arc::new(tokio::sync::Notify::new());
+        let (queued_tx, mut queued_rx) = tokio::sync::mpsc::unbounded_channel();
+
+        // Leader: occupies the slot and blocks inside the mint on `gate`.
+        let leader = {
             let cache = Arc::clone(&cache);
             let calls = Arc::clone(&calls);
-            handles.push(tokio::spawn(async move {
+            let gate = Arc::clone(&gate);
+            tokio::spawn(async move {
+                cache
+                    .get_or_fetch("id", "secret", "c.s.t", |_reason| async move {
+                        calls.fetch_add(1, Ordering::SeqCst);
+                        gate.notified().await;
+                        Ok(fetched("tok", Some(3600)))
+                    })
+                    .await
+                    .unwrap()
+            })
+        };
+
+        // Wait until the leader is inside the mint (one call recorded) before
+        // launching followers, so they cannot win the slot first.
+        while calls.load(Ordering::SeqCst) == 0 {
+            tokio::task::yield_now().await;
+        }
+
+        // Followers: each signals that it has started, then calls get_or_fetch
+        // and contends for the same per-entry lock the leader holds.
+        let mut followers = Vec::new();
+        for _ in 0..FOLLOWERS {
+            let cache = Arc::clone(&cache);
+            let calls = Arc::clone(&calls);
+            let queued_tx = queued_tx.clone();
+            followers.push(tokio::spawn(async move {
+                queued_tx.send(()).unwrap();
                 cache
                     .get_or_fetch("id", "secret", "c.s.t", |_reason| async {
                         calls.fetch_add(1, Ordering::SeqCst);
-                        // Hold the slot briefly so the other callers pile up
-                        // behind the single-flight lock rather than racing.
-                        tokio::time::sleep(Duration::from_millis(20)).await;
                         Ok(fetched("tok", Some(3600)))
                     })
                     .await
@@ -528,13 +718,82 @@ mod tests {
             }));
         }
 
-        for handle in handles {
+        // Once all followers report they have started, release the leader's mint
+        // so it caches the single token.
+        for _ in 0..FOLLOWERS {
+            queued_rx.recv().await.unwrap();
+        }
+        gate.notify_one();
+
+        assert_eq!(leader.await.unwrap(), "tok");
+        for handle in followers {
             assert_eq!(handle.await.unwrap(), "tok");
         }
         assert_eq!(
             calls.load(Ordering::SeqCst),
             1,
             "single-flight must mint exactly once for concurrent same-key callers"
+        );
+    }
+
+    #[tokio::test]
+    async fn cancelled_mint_leaves_cache_usable() {
+        let cache = Arc::new(TokenCache::new(true, Duration::from_secs(60)));
+        let calls = Arc::new(AtomicUsize::new(0));
+
+        // Signals that the leader has entered the mint (and so is holding the
+        // per-entry lock) so we can cancel it at a known point, without relying
+        // on wall-clock timing.
+        let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+
+        let task = {
+            let cache = Arc::clone(&cache);
+            let calls = Arc::clone(&calls);
+            tokio::spawn(async move {
+                cache
+                    .get_or_fetch("id", "secret", "c.s.t", move |_reason| async move {
+                        calls.fetch_add(1, Ordering::SeqCst);
+                        let _ = started_tx.send(());
+                        // Never completes: the task is aborted while awaiting
+                        // here, dropping the get_or_fetch future mid-mint.
+                        std::future::pending::<ZerobusResult<FetchedToken>>().await
+                    })
+                    .await
+            })
+        };
+
+        // Wait until the mint is in flight, then cancel it. Awaiting the aborted
+        // task guarantees its future (and the slot guard) has been dropped.
+        started_rx.await.unwrap();
+        task.abort();
+        assert!(task.await.unwrap_err().is_cancelled());
+
+        // The cancelled leader must have released the lock and left no
+        // half-written entry, so the next caller mints cleanly...
+        let minted = cache
+            .get_or_fetch("id", "secret", "c.s.t", |_reason| async {
+                calls.fetch_add(1, Ordering::SeqCst);
+                Ok(fetched("tok", Some(3600)))
+            })
+            .await
+            .unwrap();
+        assert_eq!(minted, "tok");
+
+        // ...and that freshly minted token is cached, not a phantom entry: a
+        // follow-up call hits without minting again.
+        let cached = cache
+            .get_or_fetch("id", "secret", "c.s.t", |_reason| async {
+                calls.fetch_add(1, Ordering::SeqCst);
+                Ok(fetched("other", Some(3600)))
+            })
+            .await
+            .unwrap();
+        assert_eq!(cached, "tok");
+
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            2,
+            "one aborted mint plus one real mint; the final call must hit cache"
         );
     }
 }
