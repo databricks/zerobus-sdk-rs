@@ -6,10 +6,6 @@ A native pure-Go Zerobus ingestion SDK.
 
 PureGo requires Go 1.25 or later.
 
-## Requirements
-
-PureGo requires Go 1.25 or later.
-
 ## Quick start
 
 ```go
@@ -230,6 +226,22 @@ Consumers can install a tagged module with:
 ```bash
 go get github.com/databricks/zerobus-sdk/purego@v0.1.0
 ```
+
+Cutting a release:
+
+- On the version-bump PR, move `NEXT_CHANGELOG.md` into `CHANGELOG.md` under a
+  `## Release v<semver>` heading — the release notes are extracted by matching
+  that exact heading — and reset `NEXT_CHANGELOG.md` for the next version.
+- Merge the bump PR, then tag its merge commit `purego/v<semver>`. The tag must
+  be reachable from `main`.
+- Dispatch the `zerobus-sdk-purego` workflow in
+  `secure-public-registry-releases-eng` with that tag, leaving `dry-run` on for a
+  rehearsal. It validates the tag and changelog heading, invokes
+  `release-purego.yml` here to build, vet, and test the module, scans the
+  `purego/` source, and creates the GitHub Release from `CHANGELOG.md`.
+- The Git tag is the version of record. Keep the `version` const in
+  `zerobus/sdk.go` (the gRPC user-agent) in sync with it; `release-purego.yml`
+  fails when a `purego/v*` tag disagrees.
 
 ## Regenerating the protobuf bindings
 

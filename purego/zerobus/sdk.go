@@ -293,17 +293,6 @@ func (s *SDK) FetchProtoDescriptorFromUC(
 	return descBytes, nil
 }
 
-// FetchProtoDescriptor returns a protobuf descriptor built from a Unity Catalog
-// table schema.
-//
-// Deprecated: use FetchProtoDescriptorFromUC.
-func (s *SDK) FetchProtoDescriptor(
-	ctx context.Context,
-	tableName, clientID, clientSecret string,
-) ([]byte, error) {
-	return s.FetchProtoDescriptorFromUC(ctx, tableName, clientID, clientSecret)
-}
-
 func (s *SDK) createStream(
 	ctx context.Context,
 	op, tableName string,
