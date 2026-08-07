@@ -11,8 +11,10 @@
 - Added opt-in wait-ready stream creation whose context bounds the complete
   first-open process; asynchronous creation now preserves context values while
   detaching caller cancellation.
-- Added `FetchProtoDescriptor` for building protobuf descriptors from Unity
-  Catalog table schemas.
+- Added `FetchProtoDescriptorFromUC` for building protobuf descriptors from
+  Unity Catalog table schemas. Each call issues a fresh Unity Catalog request:
+  fetch the descriptor once and reuse the returned bytes for every stream on
+  that table, and fetch again only when the table schema changes.
 - Added `Stream.IngestJSONOffset` and `Stream.IngestJSONRecordsOffset`. JSON
   streams queue JSON directly; proto streams convert it before ingestion.
 

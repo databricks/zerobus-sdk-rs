@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -24,14 +23,14 @@ type retryableSchemaTestError struct{}
 func (retryableSchemaTestError) Error() string     { return "retryable" }
 func (retryableSchemaTestError) IsRetryable() bool { return true }
 
-func TestSDKFetchProtoDescriptor_CacheHit(t *testing.T) {
-	var tokenCalls atomic.Int32
+// The SDK does not cache descriptors: each call is a fresh UC round-trip that
+// returns an equivalent descriptor. Callers fetch once and reuse the bytes.
+func TestSDKFetchProtoDescriptor_FetchesOnEveryCall(t *testing.T) {
 	var schemaCalls atomic.Int32
 
 	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
 		case r.URL.Path == "/oidc/v1/token":
-			tokenCalls.Add(1)
 			_ = json.NewEncoder(w).Encode(map[string]any{"access_token": "abc"})
 		case strings.HasPrefix(r.URL.Path, "/api/2.1/unity-catalog/tables/"):
 			schemaCalls.Add(1)
@@ -66,13 +65,40 @@ func TestSDKFetchProtoDescriptor_CacheHit(t *testing.T) {
 		t.Fatalf("fetchProtoDescriptor() second call error = %v", err)
 	}
 	if string(b1) != string(b2) {
-		t.Fatalf("cached descriptor mismatch")
+		t.Fatal("descriptors from repeated fetches differ")
 	}
-	if tokenCalls.Load() != 1 {
-		t.Fatalf("token calls = %d, want 1", tokenCalls.Load())
+	if got := schemaCalls.Load(); got != 2 {
+		t.Fatalf("schema calls = %d, want 2 (no descriptor caching)", got)
 	}
-	if schemaCalls.Load() != 1 {
-		t.Fatalf("schema calls = %d, want 1", schemaCalls.Load())
+}
+
+func TestSDKFetchProtoDescriptorFromUC_RejectsClosedSDK(t *testing.T) {
+	sdk := newSDK(nil, "https://zerobus", "https://uc", sdkConfig{})
+	sdk.mu.Lock()
+	sdk.closed = true
+	sdk.mu.Unlock()
+
+	if _, err := sdk.FetchProtoDescriptorFromUC(
+		context.Background(), "main.sales.orders", "id", "secret",
+	); err == nil || !strings.Contains(err.Error(), "SDK is closed") {
+		t.Fatalf("FetchProtoDescriptorFromUC() error = %v, want closed SDK error", err)
+	}
+}
+
+// The deprecated alias must delegate, so it reports the same operation as the
+// method it forwards to.
+func TestSDKFetchProtoDescriptor_DelegatesToFromUC(t *testing.T) {
+	sdk := newSDK(nil, "https://zerobus", "https://uc", sdkConfig{})
+	sdk.mu.Lock()
+	sdk.closed = true
+	sdk.mu.Unlock()
+
+	_, err := sdk.FetchProtoDescriptor(
+		context.Background(), "main.sales.orders", "id", "secret",
+	)
+	var sdkErr *Error
+	if !errors.As(err, &sdkErr) || sdkErr.Op != "FetchProtoDescriptorFromUC" {
+		t.Fatalf("FetchProtoDescriptor() error = %v, want Op FetchProtoDescriptorFromUC", err)
 	}
 }
 
@@ -176,94 +202,6 @@ func TestStreamJSONConversionRejectsUnsupportedDescriptor(t *testing.T) {
 				t.Fatalf("IngestJSONOffset() error = %v, want conversion error", err)
 			}
 		})
-	}
-}
-
-func TestSDKFetchProtoDescriptor_CacheIsCredentialScoped(t *testing.T) {
-	var tokenCalls atomic.Int32
-	var schemaCalls atomic.Int32
-	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		switch {
-		case r.URL.Path == "/oidc/v1/token":
-			tokenCalls.Add(1)
-			_ = json.NewEncoder(w).Encode(map[string]any{"access_token": "abc"})
-		case strings.HasPrefix(r.URL.Path, "/api/2.1/unity-catalog/tables/"):
-			schemaCalls.Add(1)
-			_ = json.NewEncoder(w).Encode(map[string]any{
-				"name":         "orders",
-				"catalog_name": "main",
-				"schema_name":  "sales",
-				"columns": []map[string]any{
-					{"name": "id", "type_name": "LONG", "position": 0},
-				},
-			})
-		default:
-			http.NotFound(w, r)
-		}
-	}))
-	defer server.Close()
-
-	sdk := newSDK(nil, "https://workspace.zerobus.cloud.databricks.com", server.URL, sdkConfig{
-		httpClient: server.Client(),
-	})
-	for _, credentials := range [][2]string{
-		{"id-1", "secret-1"},
-		{"id-2", "secret-1"},
-		{"id-1", "secret-2"},
-	} {
-		if _, err := sdk.fetchProtoDescriptor(
-			context.Background(), "main.sales.orders", credentials[0], credentials[1],
-		); err != nil {
-			t.Fatalf("fetchProtoDescriptor() error = %v", err)
-		}
-	}
-	if got := tokenCalls.Load(); got != 3 {
-		t.Fatalf("token calls = %d, want 3", got)
-	}
-	if got := schemaCalls.Load(); got != 3 {
-		t.Fatalf("schema calls = %d, want 3", got)
-	}
-}
-
-func TestSDKStoreDynamicDescriptor_PrunesExpiredEntries(t *testing.T) {
-	sdk := newSDK(nil, "https://zerobus", "https://uc", sdkConfig{})
-	sdk.dynamicSchemaCache["old"] = cachedDescriptor{
-		descriptor: []byte("old"),
-		expiresAt:  time.Now().Add(-time.Second),
-	}
-	sdk.storeDynamicDescriptor("new", []byte("new"))
-	if len(sdk.dynamicSchemaCache) != 1 {
-		t.Fatalf("cache entries = %d, want 1", len(sdk.dynamicSchemaCache))
-	}
-	if _, ok := sdk.dynamicSchemaCache["new"]; !ok {
-		t.Fatal("new cache entry missing")
-	}
-}
-
-func TestSDKStoreDynamicDescriptor_EnforcesEntryLimit(t *testing.T) {
-	sdk := newSDK(nil, "https://zerobus", "https://uc", sdkConfig{})
-	for i := range maxDynamicSchemaCacheEntries + 1 {
-		sdk.storeDynamicDescriptor(fmt.Sprintf("entry-%03d", i), []byte("descriptor"))
-	}
-	if got := len(sdk.dynamicSchemaCache); got != maxDynamicSchemaCacheEntries {
-		t.Fatalf("cache entries = %d, want %d", got, maxDynamicSchemaCacheEntries)
-	}
-	if _, ok := sdk.dynamicSchemaCache["entry-000"]; ok {
-		t.Fatal("oldest descriptor was not evicted")
-	}
-	if _, ok := sdk.dynamicSchemaCache[fmt.Sprintf("entry-%03d", maxDynamicSchemaCacheEntries)]; !ok {
-		t.Fatal("newest descriptor was not cached")
-	}
-}
-
-func TestSDKStoreDynamicDescriptor_DoesNotPopulateClosedSDK(t *testing.T) {
-	sdk := newSDK(nil, "https://zerobus", "https://uc", sdkConfig{})
-	sdk.mu.Lock()
-	sdk.closed = true
-	sdk.mu.Unlock()
-	sdk.storeDynamicDescriptor("closed", []byte("descriptor"))
-	if len(sdk.dynamicSchemaCache) != 0 {
-		t.Fatal("closed SDK cache was populated")
 	}
 }
 

@@ -40,6 +40,13 @@
 // validation while first-open runs in the background. Pass WithWaitForReady to
 // make CreateStream block until first-open succeeds or fails terminally.
 //
+// # Proto descriptors from Unity Catalog
+//
+// FetchProtoDescriptorFromUC builds a descriptor from a Unity Catalog table
+// schema. It is a plain remote call with no caching, so fetch the descriptor
+// once and reuse the bytes for every stream on that table; fetch again only
+// after the table schema changes.
+//
 // # Authentication
 //
 // CreateStream uses the Unity Catalog OAuth 2.0 client-credentials flow. For
@@ -49,7 +56,6 @@ package zerobus
 
 import (
 	"context"
-	"crypto/sha256"
 	"errors"
 	"fmt"
 	"net"
@@ -102,26 +108,15 @@ type SDK struct {
 	tokenCache                *auth.SharedTokenCache
 	httpClient                *http.Client
 	dynamicSchemaFetchTimeout time.Duration
-	dynamicSchemaCache        map[string]cachedDescriptor
 
-	// mu guards the open-stream set, descriptor cache, and closed flag.
+	// mu guards the open-stream set and closed flag.
 	mu     sync.Mutex
 	closed bool
 	// Open streams owned by this SDK.
 	streams map[*Stream]struct{}
 }
 
-type cachedDescriptor struct {
-	descriptor []byte
-	expiresAt  time.Time
-	storedAt   time.Time
-}
-
-const (
-	defaultDynamicSchemaFetchTimeout = 10 * time.Second
-	defaultDynamicSchemaCacheTTL     = 5 * time.Minute
-	maxDynamicSchemaCacheEntries     = 128
-)
+const defaultDynamicSchemaFetchTimeout = 10 * time.Second
 
 // newSDK builds an SDK around an existing connection.
 func newSDK(conn *transport.Conn, zerobusEndpoint, ucEndpoint string, cfg sdkConfig) *SDK {
@@ -136,7 +131,6 @@ func newSDK(conn *transport.Conn, zerobusEndpoint, ucEndpoint string, cfg sdkCon
 		tokenCache:                auth.NewSharedTokenCache(),
 		httpClient:                cfg.httpClient,
 		dynamicSchemaFetchTimeout: fetchTimeout,
-		dynamicSchemaCache:        make(map[string]cachedDescriptor),
 		streams:                   make(map[*Stream]struct{}),
 	}
 }
@@ -200,7 +194,6 @@ func (s *SDK) Close() error {
 		open = append(open, st)
 	}
 	s.streams = nil
-	s.dynamicSchemaCache = make(map[string]cachedDescriptor)
 	s.mu.Unlock()
 
 	errs := make([]error, len(open)+1)
@@ -259,6 +252,23 @@ func (s *SDK) CreateStreamWithProvider(
 
 // FetchProtoDescriptorFromUC returns a protobuf descriptor built from a Unity
 // Catalog table schema.
+//
+// Every call performs a fresh Unity Catalog request; the SDK does not cache the
+// result. Fetch the descriptor once and reuse the returned bytes for every
+// stream on that table:
+//
+//	descriptor, err := sdk.FetchProtoDescriptorFromUC(ctx, table, clientID, clientSecret)
+//	if err != nil {
+//	    log.Fatal(err)
+//	}
+//	for range streamCount {
+//	    stream, err := sdk.CreateStream(ctx, table, clientID, clientSecret,
+//	        zerobus.WithProto(descriptor))
+//	    // ...
+//	}
+//
+// Calling it per stream, or worse per record, adds a Unity Catalog round-trip
+// to the hot path. Fetch again only when the table schema changes.
 func (s *SDK) FetchProtoDescriptorFromUC(
 	ctx context.Context,
 	tableName, clientID, clientSecret string,
@@ -394,11 +404,6 @@ func (s *SDK) fetchProtoDescriptor(
 		return nil, fmt.Errorf("clientSecret is required")
 	}
 
-	cacheKey := dynamicSchemaCacheKey(s.ucEndpoint, tableName, clientID, clientSecret)
-	if desc, ok := s.getDynamicDescriptorFromCache(cacheKey); ok {
-		return desc, nil
-	}
-
 	fetcher, err := ucschema.New(ucschema.Config{
 		WorkspaceEndpoint: s.ucEndpoint,
 		ClientID:          clientID,
@@ -421,71 +426,7 @@ func (s *SDK) fetchProtoDescriptor(
 	if err != nil {
 		return nil, fmt.Errorf("serialize descriptor: %w", err)
 	}
-	s.storeDynamicDescriptor(cacheKey, descBytes)
 	return descBytes, nil
-}
-
-func (s *SDK) getDynamicDescriptorFromCache(
-	cacheKey string,
-) ([]byte, bool) {
-	now := time.Now()
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if s.closed {
-		return nil, false
-	}
-	item, ok := s.dynamicSchemaCache[cacheKey]
-	if !ok {
-		return nil, false
-	}
-	if now.After(item.expiresAt) {
-		delete(s.dynamicSchemaCache, cacheKey)
-		return nil, false
-	}
-	dup := append([]byte(nil), item.descriptor...)
-	return dup, true
-}
-
-func (s *SDK) storeDynamicDescriptor(
-	cacheKey string,
-	desc []byte,
-) {
-	now := time.Now()
-	item := cachedDescriptor{
-		descriptor: append([]byte(nil), desc...),
-		expiresAt:  now.Add(defaultDynamicSchemaCacheTTL),
-		storedAt:   now,
-	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if s.closed {
-		return
-	}
-	for key, cached := range s.dynamicSchemaCache {
-		if now.After(cached.expiresAt) {
-			delete(s.dynamicSchemaCache, key)
-		}
-	}
-	delete(s.dynamicSchemaCache, cacheKey)
-	if len(s.dynamicSchemaCache) >= maxDynamicSchemaCacheEntries {
-		var oldestKey string
-		var oldestTime time.Time
-		for key, cached := range s.dynamicSchemaCache {
-			if oldestKey == "" || cached.storedAt.Before(oldestTime) {
-				oldestKey = key
-				oldestTime = cached.storedAt
-			}
-		}
-		if oldestKey != "" {
-			delete(s.dynamicSchemaCache, oldestKey)
-		}
-	}
-	s.dynamicSchemaCache[cacheKey] = item
-}
-
-func dynamicSchemaCacheKey(ucEndpoint, tableName, clientID, clientSecret string) string {
-	credential := sha256.Sum256([]byte(clientID + "\x00" + clientSecret))
-	return ucEndpoint + "\x00" + tableName + "\x00" + string(credential[:])
 }
 
 func dynamicSchemaErrorRetryable(err error) bool {
