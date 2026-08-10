@@ -91,7 +91,7 @@ jobs:
           CARGO_PROFILE_RELEASE_LTO: thin
           CARGO_PROFILE_RELEASE_CODEGEN_UNITS: "1"
           CARGO_PROFILE_RELEASE_STRIP: debuginfo
-        run: cargo build --release -p zerobus-ffi --target ${{ matrix.target }}
+        run: cargo rustc --release -p zerobus-ffi --target ${{ matrix.target }} --crate-type cdylib --crate-type staticlib
 
       - name: Build FFI static library (macOS cross-builds)
         if: matrix.zigbuild
