@@ -1,5 +1,25 @@
 # Version changelog
 
+## Release v1.6.0
+
+### New Features and Improvements
+
+- Built on the monorepo Rust SDK (2.6.0+) via a path dependency (was crates.io
+  2.3.1). Pulls in Arrow Flight improvements and fixes from Rust 2.4–2.6,
+  including variant extension annotation options, invalid-ack watermark
+  rejection, and rotation/ACK drain behavior. Direct Arrow dependencies are
+  bumped from `58.x` to `59.1` to match the Rust SDK (Arrow 58 and 59 types
+  cannot be mixed). Also picks up the vendored `arrow-flight` slice-aware
+  batch-split fix (`rust/third_party/arrow-flight`, arrow-rs#9388 / #5352),
+  which crates.io builds do not ship.
+
+### Internal Changes
+
+- `databricks-zerobus-ingest-sdk` is now
+  `{ path = "../../rust/sdk", version = "2.6.0", features = ["arrow-flight"] }`
+  so wheel builds compile against the local Rust core and its workspace
+  `arrow-flight` path dependency.
+
 ## Release v1.5.0
 
 ### New Features and Improvements
