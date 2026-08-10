@@ -4044,7 +4044,7 @@ dependencies = [
 
 [[package]]
 name = "zerobus-ffi"
-version = "1.5.0"
+version = "1.6.0"
 dependencies = [
  "arrow-array",
  "arrow-ipc",
