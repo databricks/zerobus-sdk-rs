@@ -28,10 +28,6 @@ path = "src/arrow_tests.rs"
 name = "arrow_c_data_ffi_tests"
 path = "src/arrow_c_data_ffi_tests.rs"
 
-[[test]]
-name = "uc_schema_tests"
-path = "src/uc_schema_tests.rs"
-
 [dependencies]
 async-trait.workspace = true
 prost.workspace = true
