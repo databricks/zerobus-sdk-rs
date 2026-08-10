@@ -8,6 +8,9 @@
 
 ### Bug Fixes
 
+- Arrow builders now reject unsupported ACK callbacks instead of silently
+  discarding them. Remove `.ack_callback(...)` before calling `build_arrow()`;
+  otherwise it returns `InvalidArgument`.
 - Arrow Flight acknowledgment deadlines are pending-relative: no timer runs
   while a stream is idle. During normal stream operation, each batch receives
   an absolute deadline when it becomes pending; responses and partial

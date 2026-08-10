@@ -10,6 +10,10 @@
 
 ### Bug Fixes
 
+- Arrow builders now reject unsupported ACK callbacks instead of silently
+  discarding them. Configuring `ackCallback` before calling `ArrowStreamBuilder.build()`
+  throws `IllegalStateException`.
+
 ### Documentation
 
 ### Internal Changes
