@@ -539,12 +539,7 @@ mod tests {
     impl AckCallback for NoopAckCallback {
         fn on_ack(&self, _offset_id: crate::offset_generator::OffsetId) {}
 
-        fn on_error(
-            &self,
-            _offset_id: crate::offset_generator::OffsetId,
-            _error_message: &str,
-        ) {
-        }
+        fn on_error(&self, _offset_id: crate::offset_generator::OffsetId, _error_message: &str) {}
     }
 
     fn test_sdk() -> ZerobusSdk {
