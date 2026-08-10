@@ -166,7 +166,9 @@ public final class StreamBuilder {
   /**
    * Sets the acknowledgment callback.
    *
-   * <p>Applies to JSON and Protocol Buffer (gRPC) streams.
+   * <p>Applies to JSON and Protocol Buffer (gRPC) streams only. Arrow Flight streams do not
+   * support ACK callbacks; configuring one and calling {@link ArrowStreamBuilder#build()} throws
+   * {@link IllegalStateException}.
    *
    * @param ackCallback the acknowledgment callback
    * @return this builder for method chaining
@@ -449,10 +451,14 @@ public final class StreamBuilder {
      * Builds and opens the Arrow Flight stream.
      *
      * @return a future that completes with the {@link ZerobusArrowStream} when ready
-     * @throws IllegalStateException if the table name or authentication has not been set
+     * @throws IllegalStateException if the table name or authentication has not been set, or if
+     *     an ACK callback was configured via {@link StreamBuilder#ackCallback(AckCallback)}
      */
     public CompletableFuture<ZerobusArrowStream> build() {
       base.validateRequired();
+      if (base.ackCallback != null) {
+        throw new IllegalStateException("ackCallback is not supported for Arrow Flight streams");
+      }
       return base.sdk.createArrowStreamInternal(
           base.tableName, schema, base.clientId, base.clientSecret, buildOptions());
     }
