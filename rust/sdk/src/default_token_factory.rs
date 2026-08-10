@@ -254,7 +254,7 @@ impl DefaultTokenFactory {
         if secs == 0 {
             return None;
         }
-        
+
         Some(Duration::from_secs(secs))
     }
 
