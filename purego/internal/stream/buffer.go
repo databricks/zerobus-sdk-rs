@@ -1,12 +1,8 @@
 // Package stream is the generic ingestion core: offset assignment, send/recv
 // goroutines, ack watermark, Flush/WaitForOffset, and the recovery supervisor.
-// Protocol-specific behaviour (encoding, ack parsing, wire transport) is
-// injected through the encoder, ackModel, and wireStream interfaces, so
-// proto and JSON share one implementation.
-//
-// Arrow Flight will reuse these seams but not unchanged: buffer entries carry no
-// record count, and recovery replays whole entries, so a partially acknowledged
-// batch cannot be sliced. Both are core changes, not encoder changes.
+// Protocol-specific behaviour (encoding, ack parsing, payload slicing, and wire
+// transport) is injected through narrow hooks, so atomic offset protocols and
+// record-count protocols share one implementation.
 package stream
 
 import (
@@ -15,20 +11,24 @@ import (
 	"fmt"
 	"math"
 	"sync"
+	"time"
 )
 
 // defaultMaxInflight is the fallback backpressure cap used when a non-positive
 // value reaches newBuffer.
 const defaultMaxInflight = 1_000_000
 
-// item is one unit of work in the buffer: an already-encoded wire message
-// paired with the logical offset that identifies it for acknowledgment. Req is
-// the wire request type the core is instantiated with (encodedMsg for
-// proto/JSON; a Flight frame for Arrow).
+// item is one logical unit of work in the buffer: an already-encoded payload
+// paired with its SDK offset and protocol durability-unit count. Proto/JSON
+// payloads are atomic and always carry one unit; a record-count protocol can
+// carry multiple units and acknowledge a prefix.
 type item[Req any] struct {
-	offset  int64
-	payload Req
-	weight  int64
+	offset     int64
+	payload    Req
+	units      uint64
+	ackedUnits uint64
+	weight     int64
+	pendingAt  time.Time
 }
 
 type discardResult struct {
@@ -54,9 +54,9 @@ type capacityWaiter struct {
 // Concurrency model:
 //   - Many goroutines may call enqueue concurrently.
 //   - Exactly one sender goroutine calls next.
-//   - Exactly one receiver goroutine calls discardThrough as acks arrive.
-//   - The supervisor calls requeue and drain, but only while the sender is
-//     stopped — so next never runs concurrently with requeue or drain.
+//   - Exactly one receiver goroutine calls acknowledge as acks arrive.
+//   - The supervisor calls requeueWithSlicer and drain, but only while the
+//     sender is stopped — so next never runs concurrently with either.
 //
 // All state (queue, flight, capacity, cond) is private; the sender and receiver
 // interact only through these methods, never by touching the fields directly.
@@ -74,6 +74,7 @@ type buffer[Req any] struct {
 	usedBytes        int64
 	accountingReset  bool
 	waiters          *list.List
+	flightRevision   uint64
 }
 
 func newBuffer[Req any](maxInflight int, byteLimit int64) *buffer[Req] {
@@ -184,8 +185,40 @@ func (b *buffer[Req]) release(weight int64) {
 	b.mu.Unlock()
 }
 
-// append adds an item after reserve succeeds.
-func (b *buffer[Req]) append(offset int64, msg Req, weight int64) error {
+// reconcileReservation replaces an admission estimate with the actual retained
+// payload size. Shrinks are always applied immediately. An underestimated
+// reservation may grow only when the unreserved byte budget is already
+// available; it never waits while holding an item slot, which would deadlock if
+// several concurrent builders all underestimated at the count limit.
+func (b *buffer[Req]) reconcileReservation(estimated, actual int64) error {
+	if actual < 0 || actual > b.maxBufferedBytes {
+		return fmt.Errorf("%w: buffered payload weight %d exceeds limit %d",
+			ErrPayloadTooLarge, actual, b.maxBufferedBytes)
+	}
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if b.closed {
+		return errClosed
+	}
+	delta := actual - estimated
+	if delta > b.maxBufferedBytes-b.usedBytes {
+		return fmt.Errorf(
+			"%w: actual retained payload weight %d exceeds reserved estimate %d and remaining byte capacity",
+			ErrPayloadTooLarge,
+			actual,
+			estimated,
+		)
+	}
+	b.usedBytes += delta
+	if delta < 0 {
+		b.grantWaitersLocked()
+	}
+	return nil
+}
+
+// appendUnits adds an item with its protocol durability-unit count after reserve
+// succeeds.
+func (b *buffer[Req]) appendUnits(offset int64, msg Req, units uint64, weight int64) error {
 	b.mu.Lock()
 	if b.closed {
 		if !b.accountingReset {
@@ -196,15 +229,17 @@ func (b *buffer[Req]) append(offset int64, msg Req, weight int64) error {
 		b.cond.Broadcast()
 		return errClosed
 	}
-	b.queue = append(b.queue, item[Req]{offset: offset, payload: msg, weight: weight})
+	b.queue = append(b.queue, item[Req]{
+		offset: offset, payload: msg, units: units, weight: weight,
+	})
 	b.mu.Unlock()
 	b.cond.Signal()
 	return nil
 }
 
 // next blocks until a pending item is available and moves it to the in-flight
-// list, returning the item. The sender must later call discard (on ack) or
-// requeue (on reconnect) for every item returned by next.
+// list, returning the item. Every item it returns is later either acknowledged
+// or requeued for replay; see the concurrency model on buffer.
 //
 // Returns errClosed when the buffer has been closed and drained.
 // Returns ctx.Err() if ctx is cancelled while waiting.
@@ -242,21 +277,60 @@ func (b *buffer[Req]) next(ctx context.Context) (item[Req], error) {
 	it := b.queue[0]
 	b.queue[0] = item[Req]{} // release the departed slot's payload for GC
 	b.queue = b.queue[1:]
+	it.pendingAt = time.Now()
 	b.flight = append(b.flight, it)
+	b.flightRevision++
 	b.mu.Unlock()
 	return it, nil
 }
 
-// discardThrough removes every in-flight item whose offset is <= offset (all
-// now acknowledged by the server), releases its count and byte capacity, and
-// grants queued admission waiters in FIFO order. It is the receiver's only hook
-// for ack-driven eviction. Returns the contiguous discarded offset range
-// without allocating per-item callback metadata.
-func (b *buffer[Req]) discardThrough(offset int64) discardResult {
+// acknowledge applies logical durability progress to the in-flight prefix,
+// releasing count and byte capacity for every fully acknowledged item and
+// granting queued admission waiters in FIFO order. A partial acknowledgment is
+// retained on the first unacknowledged item so recovery or GetUnacked can slice
+// its payload through the protocol hook. It returns the contiguous discarded
+// offset range without allocating per-item callback metadata.
+func (b *buffer[Req]) acknowledge(
+	resolution AckResolution,
+) (discardResult, bool, error) {
 	b.mu.Lock()
+	defer b.mu.Unlock()
+
+	discardCount := 0
+	if resolution.FullyAcknowledgedOffset >= 0 {
+		for discardCount < len(b.flight) &&
+			b.flight[discardCount].offset <= resolution.FullyAcknowledgedOffset {
+			discardCount++
+		}
+		if discardCount == 0 ||
+			b.flight[discardCount-1].offset != resolution.FullyAcknowledgedOffset {
+			return discardResult{}, false, fmt.Errorf(
+				"stream: fully acknowledged logical offset %d is not in flight",
+				resolution.FullyAcknowledgedOffset,
+			)
+		}
+	}
+	if resolution.PartialOffset >= 0 {
+		if discardCount >= len(b.flight) ||
+			b.flight[discardCount].offset != resolution.PartialOffset {
+			return discardResult{}, false, fmt.Errorf(
+				"stream: partially acknowledged logical offset %d is not first in flight",
+				resolution.PartialOffset,
+			)
+		}
+		partial := b.flight[discardCount]
+		if resolution.PartialUnits == 0 ||
+			resolution.PartialUnits >= partial.units {
+			return discardResult{}, false, fmt.Errorf(
+				"stream: partial prefix %d is invalid for logical offset %d with %d units",
+				resolution.PartialUnits, resolution.PartialOffset, partial.units,
+			)
+		}
+	}
+
 	var result discardResult
 	var releasedBytes int64
-	for len(b.flight) > 0 && b.flight[0].offset <= offset {
+	for range discardCount {
 		if result.count == 0 {
 			result.first = b.flight[0].offset
 		}
@@ -266,45 +340,96 @@ func (b *buffer[Req]) discardThrough(offset int64) discardResult {
 		b.flight[0] = item[Req]{} // release the acked payload for GC
 		b.flight = b.flight[1:]
 	}
+
+	progressed := result.count > 0
+	if resolution.PartialOffset >= 0 {
+		if resolution.PartialUnits > b.flight[0].ackedUnits {
+			b.flight[0].ackedUnits = resolution.PartialUnits
+			// Durable progress inside the item refreshes its lack-of-ack budget:
+			// a server acknowledging rows is demonstrably alive, so a batch
+			// larger than one timeout's worth of work must not be torn down. A
+			// duplicate or stale partial makes no progress and leaves the
+			// deadline untouched, so a stalled server cannot postpone recovery.
+			b.flight[0].pendingAt = time.Now()
+			progressed = true
+		}
+	}
+	if progressed {
+		b.flightRevision++
+	}
 	b.usedItems -= result.count
 	b.usedBytes -= releasedBytes
 	b.grantWaitersLocked()
-	b.mu.Unlock()
-	return result
+	return result, progressed, nil
 }
 
-// requeue moves all in-flight items back to the front of the pending queue so
-// they are re-sent after a reconnect. Called by the supervisor on stream failure.
-func (b *buffer[Req]) requeue() {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	if len(b.flight) == 0 {
-		return
-	}
-	// Prepend in-flight items (in order) before any still-pending ones.
-	requeued := make([]item[Req], 0, len(b.flight)+len(b.queue))
-	requeued = append(requeued, b.flight...)
-	requeued = append(requeued, b.queue...)
-	b.queue = requeued
-	// Zero departed slots so payload references in the old backing array become
-	// GC-collectible after flight is reset.
-	for i := range b.flight {
-		b.flight[i] = item[Req]{}
-	}
-	b.flight = b.flight[:0]
-	b.cond.Broadcast()
-}
+// requeueWithSlicer moves all in-flight items back to the front of the pending
+// queue so they are re-sent after a reconnect. Called by the supervisor on
+// stream failure.
+//
+// Partially acknowledged items are sliced outside b.mu, then validated against
+// a revision counter before the snapshot is installed, so concurrent queue
+// admission stays available while an expensive re-encode runs. A nil slice
+// function rejects partially acknowledged items, which is correct for protocols
+// whose payloads are atomic. The retained byte charge stays conservative until
+// the item is fully discarded.
+func (b *buffer[Req]) requeueWithSlicer(
+	slice func(payload Req, acknowledgedPrefix uint64) (Req, error),
+) error {
+	for {
+		b.mu.Lock()
+		if len(b.flight) == 0 {
+			b.mu.Unlock()
+			return nil
+		}
+		revision := b.flightRevision
+		snapshot := append([]item[Req](nil), b.flight...)
+		b.mu.Unlock()
 
-// highestInFlight returns the greatest offset the sender has observed on the
-// current connection. Pending records are deliberately excluded: the server
-// cannot legitimately acknowledge work that has not entered the send path.
-func (b *buffer[Req]) highestInFlight() (int64, bool) {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	if len(b.flight) == 0 {
-		return 0, false
+		for i := range snapshot {
+			if snapshot[i].ackedUnits == 0 {
+				snapshot[i].pendingAt = time.Time{}
+				continue
+			}
+			if slice == nil {
+				return fmt.Errorf(
+					"stream: no payload slicer for partially acknowledged logical offset %d",
+					snapshot[i].offset,
+				)
+			}
+			payload, err := slice(snapshot[i].payload, snapshot[i].ackedUnits)
+			if err != nil {
+				return fmt.Errorf(
+					"stream: slice logical offset %d after %d acknowledged units: %w",
+					snapshot[i].offset, snapshot[i].ackedUnits, err,
+				)
+			}
+			snapshot[i].payload = payload
+			snapshot[i].units -= snapshot[i].ackedUnits
+			snapshot[i].ackedUnits = 0
+			snapshot[i].pendingAt = time.Time{}
+		}
+
+		b.mu.Lock()
+		if b.flightRevision != revision {
+			b.mu.Unlock()
+			continue
+		}
+		// Prepend the validated in-flight snapshot before every item admitted
+		// while the transform ran.
+		requeued := make([]item[Req], 0, len(snapshot)+len(b.queue))
+		requeued = append(requeued, snapshot...)
+		requeued = append(requeued, b.queue...)
+		b.queue = requeued
+		for i := range b.flight {
+			b.flight[i] = item[Req]{}
+		}
+		b.flight = b.flight[:0]
+		b.flightRevision++
+		b.mu.Unlock()
+		b.cond.Broadcast()
+		return nil
 	}
-	return b.flight[len(b.flight)-1].offset, true
 }
 
 // drain returns all items currently in the buffer (pending + in-flight) and
@@ -321,6 +446,7 @@ func (b *buffer[Req]) drain() []item[Req] {
 	all = append(all, b.queue...)
 	b.queue = nil
 	b.flight = nil
+	b.flightRevision++
 	b.closed = true
 	b.accountingReset = true
 	b.usedItems = 0
@@ -349,4 +475,17 @@ func (b *buffer[Req]) inFlight() int {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	return len(b.flight)
+}
+
+// oldestInFlightDeadline returns the absolute deadline of the oldest pending
+// item. Acknowledging part of that item refreshes its budget, while a partial
+// that repeats known progress does not. Replay assigns a fresh connection-local
+// pendingAt when next observes the item again.
+func (b *buffer[Req]) oldestInFlightDeadline(timeout time.Duration) (time.Time, bool) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if len(b.flight) == 0 || b.flight[0].pendingAt.IsZero() {
+		return time.Time{}, false
+	}
+	return b.flight[0].pendingAt.Add(timeout), true
 }

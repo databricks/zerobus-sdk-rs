@@ -253,3 +253,42 @@ func TestEncoderReusesOffsetPointer(t *testing.T) {
 		t.Fatalf("offset = %d, want 2", got)
 	}
 }
+
+// TestAtomicEncoderUnitCountAndSlice pins the durability-unit contract for the
+// proto and JSON encoders. slice runs on every reconnect via requeueWithSlicer,
+// so its identity case is on the recovery path for the shipping protocols.
+func TestAtomicEncoderUnitCountAndSlice(t *testing.T) {
+	encoders := map[string]encoder[encodedMsg]{
+		"proto": protoEncoder{},
+		"json":  jsonEncoder{},
+	}
+	for name, enc := range encoders {
+		t.Run(name, func(t *testing.T) {
+			single, err := enc.encode([]byte("record"))
+			if err != nil {
+				t.Fatalf("encode: %v", err)
+			}
+			batch, err := enc.encodeBatch([][]byte{[]byte("a"), []byte("b")})
+			if err != nil {
+				t.Fatalf("encodeBatch: %v", err)
+			}
+			// A batch is atomic to the server, so it is one unit despite
+			// carrying several records.
+			for label, msg := range map[string]encodedMsg{"single": single, "batch": batch} {
+				if got := enc.unitCount(msg); got != 1 {
+					t.Fatalf("%s unitCount = %d, want 1", label, got)
+				}
+				got, err := enc.slice(msg, 0)
+				if err != nil {
+					t.Fatalf("%s slice(0): %v", label, err)
+				}
+				if got != msg {
+					t.Fatalf("%s slice(0) must return the payload unchanged", label)
+				}
+				if _, err := enc.slice(msg, 1); err == nil {
+					t.Fatalf("%s accepted a non-zero acknowledged prefix", label)
+				}
+			}
+		})
+	}
+}

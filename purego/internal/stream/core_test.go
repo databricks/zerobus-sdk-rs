@@ -1122,6 +1122,64 @@ func TestCoreStreamRejectsAckWhenSendFails(t *testing.T) {
 	}
 }
 
+// TestCoreStreamRecoversAfterAckDuringFailedSend covers a server that
+// acknowledges a record while the client's Send for it is still outstanding and
+// then aborts the stream. The unusable acknowledgment must be discarded and the
+// retryable send failure must drive recovery: the core does not know how much of
+// that Send reached the server, which is not a server protocol violation.
+func TestCoreStreamRecoversAfterAckDuringFailedSend(t *testing.T) {
+	blocked := newControlledSendRPC()
+	replay := newFakeRPC()
+	opener := &mixedOpener{streams: []wireStream[encodedMsg, ephemeralResp]{
+		transport.NewFakeStreamForTesting(blocked),
+		transport.NewFakeStreamForTesting(replay),
+	}}
+
+	cfg := testConfig()
+	cfg.RecoveryRetries = 2
+	cs := newCoreForTest(testParams(), cfg, opener, nil)
+	t.Cleanup(func() { cs.Terminate() })
+
+	offset, err := cs.Ingest(context.Background(), []byte(`{}`))
+	if err != nil {
+		t.Fatalf("Ingest: %v", err)
+	}
+	<-blocked.started
+	blocked.ack(offset)
+	blocked.result <- errors.New("send failed")
+
+	// The record was never confirmed submitted, so it must be replayed rather
+	// than the stream dying with a non-retryable protocol error.
+	waitCondition(t, func() bool { return len(replay.sends) > 0 }, 3*time.Second)
+	replay.ack(0)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	if err := cs.WaitForOffset(ctx, offset); err != nil {
+		t.Fatalf("WaitForOffset after recovery: %v (terminal=%v)", err, cs.terminalErr())
+	}
+}
+
+// mixedOpener hands out pre-built connections of differing fake types in order.
+type mixedOpener struct {
+	mu      sync.Mutex
+	streams []wireStream[encodedMsg, ephemeralResp]
+	idx     int
+}
+
+func (o *mixedOpener) Open(
+	context.Context, transport.StreamParams,
+) (wireStream[encodedMsg, ephemeralResp], error) {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	if o.idx >= len(o.streams) {
+		return nil, fmt.Errorf("mixedOpener: no connection left")
+	}
+	stream := o.streams[o.idx]
+	o.idx++
+	return stream, nil
+}
+
 // TestCoreStreamMalformedAckTearsDownAndRecovers verifies that an
 // uninterpretable server response (an ack missing its offset) tears the stream
 // down instead of being silently ignored, and the supervisor reconnects.
@@ -1326,6 +1384,18 @@ func TestIsRetryable(t *testing.T) {
 		{name: "closed", err: errClosed, want: false},
 		{name: "classified retryable", err: fmt.Errorf("wrapped: %w", &classifiedError{retryable: true}), want: true},
 		{name: "classified terminal", err: &classifiedError{retryable: false}, want: false},
+		// An acknowledgment the submitted ranges cannot support is a protocol
+		// violation: reconnecting would replay into the same disagreement.
+		{
+			name: "invalid acknowledgment",
+			err:  &invalidAcknowledgment{cause: errors.New("ack of 9 units")},
+			want: false,
+		},
+		{
+			name: "invalid acknowledgment when wrapped",
+			err:  fmt.Errorf("recv: %w", &invalidAcknowledgment{cause: errors.New("bad ack")}),
+			want: false,
+		},
 		{name: "open budget", err: &openBudgetExceeded{cause: context.DeadlineExceeded}, want: true},
 		{name: "context deadline", err: context.DeadlineExceeded, want: false},
 		{name: "ordinary transport", err: errors.New("connection reset"), want: true},

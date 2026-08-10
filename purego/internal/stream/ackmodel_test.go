@@ -18,12 +18,12 @@ func TestClassifyAck(t *testing.T) {
 			},
 		},
 	}
-	kind, off, _ := offsetAckModel{}.classify(resp)
-	if kind != ackResponse {
-		t.Fatalf("want ackResponse, got %v", kind)
+	classified := offsetAckModel{}.classify(resp)
+	if !classified.hasAck || classified.failure != usableResponse {
+		t.Fatalf("want usable ack response, got %+v", classified)
 	}
-	if off != 42 {
-		t.Fatalf("want offset 42, got %d", off)
+	if classified.legacyOffset != 42 {
+		t.Fatalf("want offset 42, got %d", classified.legacyOffset)
 	}
 }
 
@@ -37,9 +37,9 @@ func TestClassifyAckOffsetZero(t *testing.T) {
 			},
 		},
 	}
-	kind, off, _ := offsetAckModel{}.classify(resp)
-	if kind != ackResponse || off != 0 {
-		t.Fatalf("want ackResponse offset 0, got kind=%v off=%d", kind, off)
+	classified := offsetAckModel{}.classify(resp)
+	if !classified.hasAck || classified.legacyOffset != 0 {
+		t.Fatalf("want ack response offset 0, got %+v", classified)
 	}
 }
 
@@ -51,12 +51,12 @@ func TestClassifyPause(t *testing.T) {
 			},
 		},
 	}
-	kind, _, pause := offsetAckModel{}.classify(resp)
-	if kind != pauseResponse {
-		t.Fatalf("want pauseResponse, got %v", kind)
+	classified := offsetAckModel{}.classify(resp)
+	if classified.pause == nil || classified.failure != usableResponse {
+		t.Fatalf("want usable pause response, got %+v", classified)
 	}
-	if pause.duration != 3*time.Second {
-		t.Fatalf("want 3s pause, got %v", pause.duration)
+	if classified.pause.duration != 3*time.Second {
+		t.Fatalf("want 3s pause, got %v", classified.pause.duration)
 	}
 }
 
@@ -68,12 +68,12 @@ func TestClassifyMalformedAckMissingOffset(t *testing.T) {
 			IngestRecordResponse: &zerobuspb.IngestRecordResponse{}, // offset absent
 		},
 	}
-	kind, off, _ := offsetAckModel{}.classify(resp)
-	if kind != malformedResponse {
-		t.Fatalf("want malformedResponse for absent offset, got %v", kind)
+	classified := offsetAckModel{}.classify(resp)
+	if classified.failure != malformedResponse {
+		t.Fatalf("want malformedResponse for absent offset, got %+v", classified)
 	}
-	if off != 0 {
-		t.Fatalf("want offset 0 for malformed, got %d", off)
+	if classified.legacyOffset != 0 {
+		t.Fatalf("want offset 0 for malformed, got %d", classified.legacyOffset)
 	}
 }
 
@@ -85,12 +85,12 @@ func TestClassifyMalformedAckNegativeOffset(t *testing.T) {
 			},
 		},
 	}
-	kind, off, _ := offsetAckModel{}.classify(resp)
-	if kind != malformedResponse {
-		t.Fatalf("want malformedResponse for negative offset, got %v", kind)
+	classified := offsetAckModel{}.classify(resp)
+	if classified.failure != malformedResponse {
+		t.Fatalf("want malformedResponse for negative offset, got %+v", classified)
 	}
-	if off != 0 {
-		t.Fatalf("want offset 0 for malformed, got %d", off)
+	if classified.legacyOffset != 0 {
+		t.Fatalf("want offset 0 for malformed, got %d", classified.legacyOffset)
 	}
 }
 
@@ -98,9 +98,9 @@ func TestClassifyMalformedAckNegativeOffset(t *testing.T) {
 // can fail the stream on a wire-contract mismatch.
 func TestClassifyUnknown(t *testing.T) {
 	for _, resp := range []ephemeralResp{nil, {}} {
-		kind, _, _ := offsetAckModel{}.classify(resp)
-		if kind != unknownResponse {
-			t.Fatalf("want unknownResponse, got %v", kind)
+		classified := offsetAckModel{}.classify(resp)
+		if classified.failure != unknownResponse {
+			t.Fatalf("want unknownResponse, got %+v", classified)
 		}
 	}
 }

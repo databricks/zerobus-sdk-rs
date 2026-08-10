@@ -665,7 +665,7 @@ type blockingAckModel struct {
 	once    sync.Once
 }
 
-func (m *blockingAckModel) classify(resp ephemeralResp) (respKind, int64, pauseSignal) {
+func (m *blockingAckModel) classify(resp ephemeralResp) responseClassification {
 	m.once.Do(func() { close(m.entered) })
 	<-m.release
 	return (offsetAckModel{}).classify(resp)

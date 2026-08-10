@@ -249,10 +249,11 @@ func (w *watermark) waitFor(ctx context.Context, target int64) error {
 // CoreStream is the protocol-agnostic ingestion core. It owns the buffer,
 // sender goroutine, receiver goroutine, ack watermark, and the supervisor
 // that reconnects on failure. It is generic over the wire request/response
-// types (Req/Resp): proto/JSON instantiate it over EphemeralStream, Arrow over
-// Flight. The three specialization points — encoder, ackModel, and the
-// wireStream returned by opener — are injected, so this core is written once
-// and never names a concrete proto type.
+// types (Req/Resp): proto/JSON instantiate it over EphemeralStream. The
+// specialization points — encoder, ackModel (optionally also resolvingAckModel
+// for record-count durability), and the wireStream returned by opener
+// (optionally also submissionReceiptStream for multi-frame sends) — are
+// injected, so this core is written once and never names a concrete proto type.
 //
 // The per-stream goroutines:
 //
@@ -291,6 +292,10 @@ type CoreStream[Req, Resp any] struct {
 	offsetExhausted atomic.Bool
 	// lastEnqueued is the highest queued offset.
 	lastEnqueued atomic.Int64
+	// durableProgress advances for full or partial acknowledgment progress. It
+	// lets a partially acknowledged multi-unit item reset the recovery budget
+	// even though the public logical watermark cannot advance yet.
+	durableProgress atomic.Uint64
 
 	// done is closed when the supervisor exits (terminal state).
 	done chan struct{}
@@ -498,6 +503,75 @@ func (cs *CoreStream[Req, Resp]) enqueueEncoded(
 	weight int64,
 	encodeFn func() (Req, error),
 ) (int64, error) {
+	return cs.enqueuePayload(ctx, weight, 0, encodeFn)
+}
+
+// EnqueuePayload admits an already-built protocol payload. units is the number
+// of durability units represented by the logical item and retainedBytes is its
+// conservative buffer-memory charge. This exported/internal extension point is
+// for typed protocol wrappers whose input is not []byte.
+func (cs *CoreStream[Req, Resp]) EnqueuePayload(
+	ctx context.Context,
+	payload Req,
+	units uint64,
+	retainedBytes int64,
+) (int64, error) {
+	if units == 0 {
+		return -1, fmt.Errorf("stream: payload must contain at least one durability unit")
+	}
+	if reported := cs.enc.unitCount(payload); reported != units {
+		return -1, fmt.Errorf(
+			"stream: payload reports %d durability units, caller supplied %d",
+			reported, units,
+		)
+	}
+	return cs.enqueuePayload(ctx, retainedBytes, units, func() (Req, error) {
+		return payload, nil
+	})
+}
+
+// EnqueuePayloadBuilder reserves one item and a conservative byte estimate
+// before invoking build. It is the typed protocol path for inputs whose
+// materialization is expensive (for example a serialize-and-compress step).
+//
+// build must return the payload, its durability-unit count, and its actual
+// retained byte charge. The reservation is reconciled before the payload is
+// published. Underestimates can consume only byte capacity that is immediately
+// available; they never wait while retaining a built payload and an item slot.
+func (cs *CoreStream[Req, Resp]) EnqueuePayloadBuilder(
+	ctx context.Context,
+	estimatedRetainedBytes int64,
+	build func() (payload Req, units uint64, retainedBytes int64, err error),
+) (int64, error) {
+	if build == nil {
+		return -1, fmt.Errorf("stream: payload builder is required")
+	}
+	return cs.enqueuePayloadReserved(
+		ctx,
+		estimatedRetainedBytes,
+		func() (Req, uint64, int64, error) {
+			return build()
+		},
+	)
+}
+
+func (cs *CoreStream[Req, Resp]) enqueuePayload(
+	ctx context.Context,
+	weight int64,
+	explicitUnits uint64,
+	build func() (Req, error),
+) (int64, error) {
+	return cs.enqueuePayloadReserved(ctx, weight, func() (Req, uint64, int64, error) {
+		payload, err := build()
+		return payload, explicitUnits, weight, err
+	})
+}
+
+func (cs *CoreStream[Req, Resp]) enqueuePayloadReserved(
+	ctx context.Context,
+	estimatedWeight int64,
+	build func() (Req, uint64, int64, error),
+) (int64, error) {
 	if cs.isClosed() {
 		if err := cs.terminalErr(); err != nil {
 			return -1, err
@@ -513,14 +587,35 @@ func (cs *CoreStream[Req, Resp]) enqueueEncoded(
 	if cs.offsetExhausted.Load() {
 		return -1, ErrOffsetExhausted
 	}
-	if err := cs.buf.reserve(ctx, weight); err != nil {
+	if err := cs.buf.reserve(ctx, estimatedWeight); err != nil {
 		return -1, err
 	}
 
-	msg, err := encodeFn()
+	msg, explicitUnits, actualWeight, err := build()
 	if err != nil {
-		cs.buf.release(weight)
+		cs.buf.release(estimatedWeight)
 		return -1, err
+	}
+	if err := cs.buf.reconcileReservation(estimatedWeight, actualWeight); err != nil {
+		cs.buf.release(estimatedWeight)
+		return -1, err
+	}
+	weight := actualWeight
+	units := explicitUnits
+	reportedUnits := cs.enc.unitCount(msg)
+	if units == 0 {
+		units = reportedUnits
+	} else if reportedUnits != units {
+		cs.buf.release(weight)
+		return -1, fmt.Errorf(
+			"stream: payload reports %d durability units, builder supplied %d",
+			reportedUnits,
+			units,
+		)
+	}
+	if units == 0 {
+		cs.buf.release(weight)
+		return -1, fmt.Errorf("stream: encoded payload contains no durability units")
 	}
 	if size := cs.enc.maxWireSize(msg); size > cs.cfg.MaxPayloadBytes {
 		cs.buf.release(weight)
@@ -541,7 +636,7 @@ func (cs *CoreStream[Req, Resp]) enqueueEncoded(
 	}
 	offset := cs.nextOffset
 	cs.enc.stampOffset(msg, offset)
-	if err := cs.buf.append(offset, msg, weight); err != nil {
+	if err := cs.buf.appendUnits(offset, msg, units, weight); err != nil {
 		cs.offsetMu.Unlock()
 		return -1, err
 	}
@@ -614,10 +709,21 @@ func (cs *CoreStream[Req, Resp]) GetUnackedBatches() ([][][]byte, error) {
 	items := cs.consolidateUnacked()
 	out := make([][][]byte, 0, len(items))
 	for _, it := range items {
+		payload := it.payload
+		if it.ackedUnits > 0 {
+			var err error
+			payload, err = cs.enc.slice(payload, it.ackedUnits)
+			if err != nil {
+				return nil, fmt.Errorf(
+					"stream: recover unacknowledged logical offset %d: %w",
+					it.offset, err,
+				)
+			}
+		}
 		// Re-extract the raw record bytes from the encoded message so callers get
 		// back the original record content. decode clones, so the retained payload
 		// is never aliased.
-		out = append(out, cs.enc.decode(it.payload))
+		out = append(out, cs.enc.decode(payload))
 	}
 	return out, nil
 }
@@ -744,9 +850,21 @@ func (cs *CoreStream[Req, Resp]) consolidateUnacked() []item[Req] {
 type sendEvent struct {
 	logicalOffset  int64
 	physicalOffset int64
+	unitStart      uint64
+	unitEnd        uint64
+	receiptUnits   uint64
 	completed      bool
 	err            error
 }
+
+type partialSubmissionFailure struct {
+	cause     error
+	unitStart uint64
+	unitEnd   uint64
+}
+
+func (e *partialSubmissionFailure) Error() string { return e.cause.Error() }
+func (e *partialSubmissionFailure) Unwrap() error { return e.cause }
 
 // runOnce operates one transport stream until a worker exits. lifecycleCtx owns
 // the live connection after open; openingCtx bounds only this open attempt.
@@ -782,9 +900,14 @@ func (cs *CoreStream[Req, Resp]) runOnce(
 	cs.signalReady(nil)
 	openedAt := time.Now()
 	startAck := cs.wm.current()
+	startDurableProgress := cs.durableProgress.Load()
 
-	// Resend unacknowledged items on the new connection.
-	cs.buf.requeue()
+	// Resend unacknowledged items on the new connection. A record-count
+	// protocol slices any durably acknowledged prefix before replay.
+	if err := cs.buf.requeueWithSlicer(cs.enc.slice); err != nil {
+		stream.Close()
+		return wrapValidation(err), false
+	}
 
 	// senderCtx controls only this connection's sender.
 	senderCtx, cancelSender := context.WithCancel(lifecycleCtx)
@@ -798,11 +921,20 @@ func (cs *CoreStream[Req, Resp]) runOnce(
 	// cap 2: at most a {start, completed} pair for the one record in flight.
 	sendEvents := make(chan sendEvent, 2)
 	sendConsumed := make(chan struct{}, 1)
+	ackProgress := make(chan uint64, 1)
 
 	go cs.sender(senderCtx, stream, senderExitCh, flightSignal, sendEvents, sendConsumed)
 	go func() {
 		defer close(receiverDone)
-		cs.receiver(stream, receiverExitCh, pauseCh, flightSignal, sendEvents, sendConsumed)
+		cs.receiver(
+			stream,
+			receiverExitCh,
+			pauseCh,
+			flightSignal,
+			sendEvents,
+			sendConsumed,
+			ackProgress,
+		)
 	}()
 
 	var senderParked bool
@@ -882,12 +1014,49 @@ waitLoop:
 		default:
 		}
 	case errors.As(cause, &ps):
-		stream.Close()
-		if !senderExited {
-			<-senderExitCh
-		}
-		<-receiverDone
+		// A server-requested rotation is orderly: park the sender, half-close
+		// requests, and drain responses to EOF before reconnecting. This lets the
+		// service finish late acknowledgments and observe END_STREAM instead of
+		// an abrupt cancellation. gracefulTeardown still hard-aborts if the
+		// shared drain budget expires.
+		cs.gracefulTeardown(
+			stream, senderExited, senderExitCh, receiverDone,
+		)
 	default:
+		// A multi-frame Send can fail after earlier frames were accepted. Keep
+		// Recv alive briefly so a server ACK that follows the Send error can
+		// establish durability for that submitted prefix before recovery slices
+		// and replays the remainder.
+		var partial *partialSubmissionFailure
+		waitedForReceiver := false
+		if !receiverReported && errors.As(cause, &partial) {
+			waitedForReceiver = true
+			timer := time.NewTimer(cs.cfg.DrainTimeout)
+			waiting := true
+			for waiting {
+				select {
+				case acknowledged := <-ackProgress:
+					if acknowledged > partial.unitStart &&
+						acknowledged <= partial.unitEnd {
+						waiting = false
+					}
+				case receiverErr := <-receiverExitCh:
+					receiverReported = true
+					if receiverErr != nil && !errors.Is(receiverErr, context.Canceled) {
+						cause = receiverErr
+					}
+					waiting = false
+				case <-timer.C:
+					waiting = false
+				}
+			}
+			if !timer.Stop() {
+				select {
+				case <-timer.C:
+				default:
+				}
+			}
+		}
 		// gRPC reports a server-side abort to Send as an opaque io.EOF and carries
 		// the real status (auth, schema, protocol) on Recv, so an EOF cause is not
 		// authoritative yet. Let the receiver report first, bounded by DrainTimeout:
@@ -895,7 +1064,7 @@ waitLoop:
 		// leaving recovery to retry a permanent rejection and skip credential
 		// invalidation. A failed send does not end the receiver, so it is still
 		// reading and the server's status is what unblocks it.
-		if !receiverReported && errors.Is(cause, io.EOF) {
+		if !receiverReported && !waitedForReceiver && errors.Is(cause, io.EOF) {
 			timer := time.NewTimer(cs.cfg.DrainTimeout)
 			select {
 			case receiverErr := <-receiverExitCh:
@@ -916,6 +1085,7 @@ waitLoop:
 		<-receiverDone
 	}
 	resetRecoveryBudget = cs.wm.current() > startAck ||
+		cs.durableProgress.Load() > startDurableProgress ||
 		time.Since(openedAt) >= cs.cfg.RecoveryResetAfter
 	return cause, resetRecoveryBudget
 }
@@ -986,6 +1156,7 @@ func (cs *CoreStream[Req, Resp]) sender(
 	}
 	physicalOffset := int64(0)
 	physicalExhausted := false
+	submittedUnits := uint64(0)
 	for {
 		if physicalExhausted {
 			errCh <- fmt.Errorf("stream: physical offset space exhausted")
@@ -996,9 +1167,15 @@ func (cs *CoreStream[Req, Resp]) sender(
 			errCh <- nil // ctx cancelled or buffer closed — clean exit
 			return
 		}
+		if it.units > ^uint64(0)-submittedUnits {
+			errCh <- fmt.Errorf("stream: submitted durability-unit space exhausted")
+			return
+		}
+		unitEnd := submittedUnits + it.units
 		cs.enc.stampOffset(it.payload, physicalOffset)
 		if !publish(sendEvent{
 			logicalOffset: it.offset, physicalOffset: physicalOffset,
+			unitStart: submittedUnits, unitEnd: unitEnd,
 		}) {
 			errCh <- nil
 			return
@@ -1008,15 +1185,60 @@ func (cs *CoreStream[Req, Resp]) sender(
 		case flightSignal <- struct{}{}:
 		default:
 		}
-		err = stream.Send(it.payload)
+		var receipt SubmissionReceipt
+		if receiptStream, ok := stream.(submissionReceiptStream[Req]); ok {
+			receipt, err = receiptStream.SendWithReceipt(it.payload)
+		} else {
+			err = stream.Send(it.payload)
+			if err == nil {
+				receipt.SubmittedUnits = it.units
+			}
+		}
+		if receipt.SubmittedUnits > it.units {
+			err = fmt.Errorf(
+				"stream: send offset %d reported %d submitted units for %d-unit payload",
+				it.offset,
+				receipt.SubmittedUnits,
+				it.units,
+			)
+		} else if err == nil && receipt.SubmittedUnits != it.units {
+			err = fmt.Errorf(
+				"stream: send offset %d completed with %d of %d units submitted",
+				it.offset,
+				receipt.SubmittedUnits,
+				it.units,
+			)
+		}
 		sendEvents <- sendEvent{
 			logicalOffset:  it.offset,
 			physicalOffset: physicalOffset,
+			unitStart:      submittedUnits,
+			unitEnd:        unitEnd,
+			receiptUnits:   receipt.SubmittedUnits,
 			completed:      true,
 			err:            err,
 		}
+		// The receiver must consume the receipt before the supervisor tears down
+		// a failed multi-frame send, or an ACK already received for an earlier
+		// frame could be lost.
+		select {
+		case <-sendConsumed:
+		case <-senderCtx.Done():
+			if err == nil {
+				errCh <- nil
+				return
+			}
+		}
 		if err != nil {
-			errCh <- fmt.Errorf("stream: send offset %d: %w", it.offset, err)
+			sendErr := err
+			if receipt.SubmittedUnits > 0 {
+				sendErr = &partialSubmissionFailure{
+					cause:     err,
+					unitStart: submittedUnits,
+					unitEnd:   submittedUnits + receipt.SubmittedUnits,
+				}
+			}
+			errCh <- fmt.Errorf("stream: send offset %d: %w", it.offset, sendErr)
 			return
 		}
 		if physicalOffset == math.MaxInt64 {
@@ -1024,12 +1246,7 @@ func (cs *CoreStream[Req, Resp]) sender(
 		} else {
 			physicalOffset++
 		}
-		select {
-		case <-sendConsumed:
-		case <-senderCtx.Done():
-			errCh <- nil
-			return
-		}
+		submittedUnits = unitEnd
 	}
 }
 
@@ -1041,6 +1258,7 @@ func (cs *CoreStream[Req, Resp]) receiver(
 	flightSignal <-chan struct{},
 	sendEvents <-chan sendEvent,
 	sendConsumed chan<- struct{},
+	ackProgress chan uint64,
 ) {
 	type recvResult struct {
 		resp Resp
@@ -1065,10 +1283,12 @@ func (cs *CoreStream[Req, Resp]) receiver(
 		}
 	}()
 	var stopRecvOnce sync.Once
-	stopRecv := func() {
+	stopRecv := func(abort bool) {
 		stopRecvOnce.Do(func() {
 			close(recvStop)
-			stream.Close()
+			if abort {
+				stream.Close()
+			}
 		})
 		<-recvDone
 	}
@@ -1076,12 +1296,34 @@ func (cs *CoreStream[Req, Resp]) receiver(
 	lackTimer := time.NewTimer(cs.cfg.LackOfAckTimeout)
 	lackTimer.Stop()
 	lackTimerArmed := false
+	var lackDeadline time.Time
+	_, usesRecordCountAcks := cs.ackMdl.(resolvingAckModel[Resp])
 	armLackTimer := func() {
-		if lackTimerArmed || cs.buf.inFlight() == 0 {
+		if !usesRecordCountAcks {
+			if lackTimerArmed || cs.buf.inFlight() == 0 {
+				return
+			}
+			lackTimer.Reset(cs.cfg.LackOfAckTimeout)
+			lackTimerArmed = true
 			return
 		}
-		lackTimer.Reset(cs.cfg.LackOfAckTimeout)
+		deadline, ok := cs.buf.oldestInFlightDeadline(cs.cfg.LackOfAckTimeout)
+		if !ok {
+			return
+		}
+		if lackTimerArmed && deadline.Equal(lackDeadline) {
+			return
+		}
+		if lackTimerArmed {
+			lackTimer.Stop()
+		}
+		wait := time.Until(deadline)
+		if wait < 0 {
+			wait = 0
+		}
+		lackTimer.Reset(wait)
 		lackTimerArmed = true
+		lackDeadline = deadline
 	}
 	disarmLackTimer := func() {
 		if !lackTimerArmed {
@@ -1090,17 +1332,29 @@ func (cs *CoreStream[Req, Resp]) receiver(
 		// Go 1.23+ guarantees that Stop prevents stale timer values.
 		lackTimer.Stop()
 		lackTimerArmed = false
+		lackDeadline = time.Time{}
 	}
-	// syncLackTimer realigns the ack-silence budget with the in-flight set. Only
-	// durable progress restarts it: a stale or duplicate cumulative ack must not
-	// extend the budget, or a server repeating one offset could postpone recovery
-	// indefinitely while later offsets stay unacknowledged.
+	// syncLackTimer preserves the proto/JSON ack-silence behavior while
+	// record-count protocols use the absolute deadline of their oldest pending
+	// logical item. A partial, stale, or duplicate row ACK cannot move it.
 	syncLackTimer := func(progressed bool) {
-		if cs.buf.inFlight() == 0 {
+		if !usesRecordCountAcks {
+			if cs.buf.inFlight() == 0 {
+				disarmLackTimer()
+				return
+			}
+			if progressed {
+				disarmLackTimer()
+			}
+			armLackTimer()
+			return
+		}
+		deadline, ok := cs.buf.oldestInFlightDeadline(cs.cfg.LackOfAckTimeout)
+		if !ok {
 			disarmLackTimer()
 			return
 		}
-		if progressed {
+		if lackTimerArmed && !deadline.Equal(lackDeadline) {
 			disarmLackTimer()
 		}
 		armLackTimer()
@@ -1117,120 +1371,285 @@ func (cs *CoreStream[Req, Resp]) receiver(
 	}
 	defer stopPauseTimer()
 
-	lastAckedPhysical := int64(-1)
-	sendingPhysical := int64(-1)
-	sendingLogical := int64(-1)
-	pendingPhysicalAck := int64(-1)
-	sentBasePhysical := int64(0)
-	var sentLogical []int64
+	lastAckedUnits := uint64(0)
+	submittedUnits := uint64(0)
+	nextPhysical := int64(0)
+	var submitted []SubmittedRange
+	var sending *SubmittedRange
+	var pendingAckUnits uint64
+	pendingAck := false
 
-	applyLogicalAck := func(offset int64) error {
-		current := cs.wm.current()
-		if offset <= current {
+	ackState := func(includeSending bool) AckState {
+		ranges := submitted
+		limit := submittedUnits
+		if includeSending && sending != nil {
+			ranges = make([]SubmittedRange, len(submitted)+1)
+			copy(ranges, submitted)
+			ranges[len(submitted)] = *sending
+			limit = sending.UnitEnd
+		}
+		return AckState{
+			Ranges:            ranges,
+			AcknowledgedUnits: lastAckedUnits,
+			SubmittedUnits:    limit,
+		}
+	}
+	// resolveAck maps one server response onto logical durability progress. A
+	// protocol-supplied model is re-resolved against the core's own view of the
+	// submitted ranges and must agree, since a hook that claimed progress those
+	// ranges do not support would corrupt the buffer. The built-in offset model
+	// already resolves through ResolveAcknowledgedUnits, so cross-checking it
+	// would compare a pure function against itself on every ack.
+	resolveAck := func(resp Resp, legacyOffset int64, state AckState) (AckResolution, error) {
+		model, ok := cs.ackMdl.(resolvingAckModel[Resp])
+		if !ok {
+			return resolveOffsetAck(legacyOffset, state)
+		}
+		resolution, err := model.resolve(resp, state)
+		if err != nil {
+			return AckResolution{}, err
+		}
+		canonical, err := ResolveAcknowledgedUnits(resolution.AcknowledgedUnits, state)
+		if err != nil {
+			return AckResolution{}, err
+		}
+		if resolution != canonical {
+			return AckResolution{}, fmt.Errorf(
+				"stream: acknowledgment model returned inconsistent resolution: got %+v, want %+v",
+				resolution, canonical,
+			)
+		}
+		return resolution, nil
+	}
+	applyResolution := func(resolution AckResolution) error {
+		if resolution.AcknowledgedUnits <= lastAckedUnits {
 			syncLackTimer(false)
 			return nil
 		}
-		highest, ok := cs.buf.highestInFlight()
-		if !ok || offset > highest {
-			return fmt.Errorf(
-				"stream: server ack offset %d exceeds highest in-flight offset %d",
-				offset, highest,
-			)
+		discarded, progressed, err := cs.buf.acknowledge(resolution)
+		if err != nil {
+			return err
 		}
-		discarded := cs.buf.discardThrough(offset)
+		if progressed {
+			cs.durableProgress.Add(1)
+		}
+		lastAckedUnits = resolution.AcknowledgedUnits
+		if progressed {
+			// Keep only the latest cumulative progress. runOnce uses this to
+			// bound late-ACK draining after a receipt-bearing Send failure.
+			select {
+			case ackProgress <- lastAckedUnits:
+			default:
+				select {
+				case <-ackProgress:
+				default:
+				}
+				select {
+				case ackProgress <- lastAckedUnits:
+				default:
+				}
+			}
+		}
+		if resolution.FullyAcknowledgedOffset >= 0 {
+			prune := 0
+			for prune < len(submitted) &&
+				submitted[prune].LogicalOffset <= resolution.FullyAcknowledgedOffset {
+				prune++
+			}
+			submitted = submitted[prune:]
+			if len(submitted) == 0 {
+				submitted = nil
+			}
+		}
 		if discarded.count > 0 {
 			cs.wm.advance(discarded.last)
 			cs.dispatcher.enqueueAcks(discarded.first, discarded.last)
 		}
-		syncLackTimer(discarded.count > 0)
+		syncLackTimer(progressed)
 		if cs.buf.inFlight() == 0 && pauseState != nil {
 			stopPauseTimer()
 			return *pauseState
 		}
 		return nil
 	}
-	applyPhysicalAck := func(offset int64) error {
-		if offset <= lastAckedPhysical {
-			syncLackTimer(false)
-			return nil
-		}
-		index := offset - sentBasePhysical
-		if index < 0 || index >= int64(len(sentLogical)) {
-			return fmt.Errorf(
-				"stream: server ack offset %d exceeds highest completed physical offset %d",
-				offset, sentBasePhysical+int64(len(sentLogical))-1,
-			)
-		}
-		logical := sentLogical[index]
-		if err := applyLogicalAck(logical); err != nil {
+	applyAck := func(resp Resp, legacyOffset int64) error {
+		state := ackState(true)
+		resolution, err := resolveAck(resp, legacyOffset, state)
+		if err != nil {
 			return err
 		}
-		lastAckedPhysical = offset
-		sentLogical = sentLogical[index+1:]
-		sentBasePhysical = offset + 1
-		if len(sentLogical) == 0 {
-			sentLogical = nil
+		if sending != nil && resolution.AcknowledgedUnits > submittedUnits {
+			if !pendingAck || resolution.AcknowledgedUnits > pendingAckUnits {
+				pendingAck = true
+				pendingAckUnits = resolution.AcknowledgedUnits
+			}
+			if submittedUnits <= lastAckedUnits {
+				syncLackTimer(false)
+				return nil
+			}
+			completed, err := ResolveAcknowledgedUnits(
+				submittedUnits, ackState(false),
+			)
+			if err != nil {
+				return err
+			}
+			return applyResolution(completed)
 		}
-		return nil
+		return applyResolution(resolution)
 	}
 	handleSendEvent := func(event sendEvent) error {
 		if !event.completed {
-			sendingPhysical = event.physicalOffset
-			sendingLogical = event.logicalOffset
+			if sending != nil {
+				return fmt.Errorf("stream: overlapping Send operations")
+			}
+			if event.physicalOffset != nextPhysical {
+				return fmt.Errorf(
+					"stream: physical send offset %d is not contiguous after %d",
+					event.physicalOffset, nextPhysical-1,
+				)
+			}
+			if event.unitStart != submittedUnits || event.unitEnd <= event.unitStart {
+				return fmt.Errorf(
+					"stream: submitted unit range [%d,%d) is not contiguous after %d",
+					event.unitStart, event.unitEnd, submittedUnits,
+				)
+			}
+			sending = &SubmittedRange{
+				WireOffset:    event.physicalOffset,
+				LogicalOffset: event.logicalOffset,
+				UnitStart:     event.unitStart,
+				UnitEnd:       event.unitEnd,
+				ItemUnitEnd:   event.unitEnd,
+			}
 			return nil
 		}
+		// rejectSubmission releases the sender and clears the active-send state
+		// before reporting a protocol violation. The completion event has
+		// already been consumed, so leaving sending or pendingAck set would
+		// make resolvePendingOnExit wait for an event that can never arrive.
+		rejectSubmission := func(err error) error {
+			sending = nil
+			pendingAck = false
+			pendingAckUnits = 0
+			sendConsumed <- struct{}{}
+			return err
+		}
+		if sending == nil ||
+			event.physicalOffset != sending.WireOffset ||
+			event.logicalOffset != sending.LogicalOffset ||
+			event.unitStart != sending.UnitStart ||
+			event.unitEnd != sending.UnitEnd {
+			return rejectSubmission(fmt.Errorf(
+				"stream: Send completion does not match active submission",
+			))
+		}
+		submittedCount := event.unitEnd - event.unitStart
+		if event.receiptUnits > submittedCount {
+			return rejectSubmission(fmt.Errorf(
+				"stream: submission receipt %d exceeds active range size %d",
+				event.receiptUnits,
+				submittedCount,
+			))
+		}
+		if event.err == nil && event.receiptUnits != submittedCount {
+			return rejectSubmission(fmt.Errorf(
+				"stream: completed Send submitted %d of %d units",
+				event.receiptUnits,
+				submittedCount,
+			))
+		}
+
 		var result error
+		submissionLimit := submittedUnits + event.receiptUnits
 		if event.err == nil {
-			expected := sentBasePhysical + int64(len(sentLogical))
-			if event.physicalOffset != expected {
-				result = fmt.Errorf(
-					"stream: physical send offset %d is not contiguous after %d",
-					event.physicalOffset, expected-1,
+			submitted = append(submitted, *sending)
+			submittedUnits = sending.UnitEnd
+			submissionLimit = submittedUnits
+			if nextPhysical < math.MaxInt64 {
+				nextPhysical++
+			}
+		} else if event.receiptUnits > 0 {
+			partial := *sending
+			partial.UnitEnd = submissionLimit
+			submitted = append(submitted, partial)
+			submittedUnits = submissionLimit
+		}
+		if pendingAck {
+			// A failed Send leaves the core unsure how much of the item reached
+			// the server, so an ack covering units it cannot account for is
+			// unusable rather than a server protocol violation. Keep the part
+			// the submitted ranges do support and let the retryable send failure
+			// drive recovery.
+			if pendingAckUnits > submittedUnits {
+				pendingAckUnits = submittedUnits
+			}
+			if pendingAckUnits > lastAckedUnits {
+				resolution, err := ResolveAcknowledgedUnits(
+					pendingAckUnits, ackState(false),
 				)
-			} else {
-				sentLogical = append(sentLogical, event.logicalOffset)
+				if err != nil {
+					result = &invalidAcknowledgment{cause: err}
+				} else {
+					result = applyResolution(resolution)
+				}
 			}
 		}
-		sendingPhysical = -1
-		sendingLogical = -1
-		var ackErr error
-		if event.err == nil && pendingPhysicalAck >= 0 {
-			ackErr = applyPhysicalAck(pendingPhysicalAck)
-		}
-		pendingPhysicalAck = -1
-		if result == nil {
-			result = ackErr
-		}
+		sending = nil
+		pendingAck = false
+		pendingAckUnits = 0
 		sendConsumed <- struct{}{}
 		return result
 	}
-	resolvePendingOnExit := func() error {
-		if pendingPhysicalAck < 0 || sendingPhysical < 0 {
+	resolvePendingOnExit := func(abort bool) error {
+		if !pendingAck || sending == nil {
 			return nil
 		}
-		if sendingLogical < 0 {
-			return fmt.Errorf("stream: missing logical offset for active send")
+		if abort {
+			stream.Close()
+			return handleSendEvent(<-sendEvents)
 		}
-		stream.Close()
-		return handleSendEvent(<-sendEvents)
+		// Preserve an orderly pause when the active Send is about to complete.
+		// A stuck Send cannot hold rotation forever: fall back to a hard abort
+		// after the same bounded drain budget used by lifecycle teardown.
+		timer := time.NewTimer(cs.cfg.DrainTimeout)
+		defer timer.Stop()
+		select {
+		case event := <-sendEvents:
+			return handleSendEvent(event)
+		case <-timer.C:
+			stream.Close()
+			return handleSendEvent(<-sendEvents)
+		}
 	}
 	handleTerminal := func(err error) {
 		var ps pauseSignal
-		if err != nil && !errors.As(err, &ps) {
+		isPause := errors.As(err, &ps)
+		if err != nil && !isPause {
 			// Real receiver failures are authoritative. Publish before any
 			// operation that can close the transport and unblock Send.
 			errCh <- err
-			stopRecv()
+			// An ACK can arrive while a multi-frame Send is still active. Once
+			// the receiver reports a real failure, aborting the transport makes
+			// that Send return its authoritative submission receipt. Reconcile
+			// the receipt and apply the buffered ACK before recovery snapshots
+			// the buffer, but never replace the receiver's error with a receipt
+			// or acknowledgment reconciliation error.
+			_ = resolvePendingOnExit(true)
+			stopRecv(true)
 			return
 		}
-		if pendingErr := resolvePendingOnExit(); pendingErr != nil {
-			if err == nil || errors.As(err, &ps) {
+		if pendingErr := resolvePendingOnExit(!isPause); pendingErr != nil {
+			if err == nil || isPause {
 				err = pendingErr
+				// Reconciling the buffered ack can itself complete a pending
+				// rotation, so the replacement decides whether this exit is
+				// still an orderly pause rather than a hard failure.
+				isPause = errors.As(err, &ps)
 			}
 		}
 		// Publish the resolved clean/pause outcome before final pump teardown.
 		errCh <- err
-		stopRecv()
+		stopRecv(err != nil && !isPause)
 	}
 
 	for {
@@ -1251,10 +1670,11 @@ func (cs *CoreStream[Req, Resp]) receiver(
 			}
 			continue
 		case <-flightSignal:
-			armLackTimer()
+			syncLackTimer(false)
 			continue
 		case <-lackC:
 			lackTimerArmed = false
+			lackDeadline = time.Time{}
 			if pauseState != nil {
 				continue
 			}
@@ -1285,19 +1705,44 @@ func (cs *CoreStream[Req, Resp]) receiver(
 			return
 		}
 
-		kind, offset, pause := cs.ackMdl.classify(r.resp)
-		if kind == unknownResponse || kind == malformedResponse {
+		classified := cs.ackMdl.classify(r.resp)
+		if classified.failure == unknownResponse ||
+			classified.failure == malformedResponse {
 			// A response the ack model can't interpret (unrecognized type, or an
 			// ack missing/with a negative offset) is a protocol violation. Tear the
 			// stream down rather than silently dropping it; the supervisor decides
 			// whether to reconnect. handleTerminal reaps the pump's next Recv.
-			handleTerminal(fmt.Errorf("stream: unusable server response (kind %d)", kind))
+			handleTerminal(fmt.Errorf(
+				"stream: unusable server response (failure %d)",
+				classified.failure,
+			))
 			return
 		}
-		if kind == pauseResponse {
+		if classified.hasAck {
+			for {
+				select {
+				case event := <-sendEvents:
+					if err := handleSendEvent(event); err != nil {
+						handleTerminal(err)
+						return
+					}
+				default:
+					goto sendsDrained
+				}
+			}
+		sendsDrained:
+			if err := applyAck(r.resp, classified.legacyOffset); err != nil {
+				handleTerminal(err)
+				return
+			}
+		}
+
+		// Apply inline durability progress before parking the sender or deciding
+		// that rotation can begin immediately.
+		if classified.pause != nil {
 			if pauseState == nil {
-				pauseCopy := pause
-				wait := cs.effectivePauseWait(pause.duration)
+				pauseCopy := *classified.pause
+				wait := cs.effectivePauseWait(pauseCopy.duration)
 				pauseCopy.resumeAt = time.Now().Add(wait)
 				pauseState = &pauseCopy
 				select {
@@ -1318,33 +1763,6 @@ func (cs *CoreStream[Req, Resp]) receiver(
 			// Drain late acks during the pause.
 			continue
 		}
-
-		if kind == ackResponse {
-			for {
-				select {
-				case event := <-sendEvents:
-					if err := handleSendEvent(event); err != nil {
-						handleTerminal(err)
-						return
-					}
-				default:
-					goto sendsDrained
-				}
-			}
-		sendsDrained:
-			if sendingPhysical >= 0 && offset == sendingPhysical {
-				if offset > pendingPhysicalAck {
-					pendingPhysicalAck = offset
-				}
-				continue
-			}
-			if err := applyPhysicalAck(offset); err != nil {
-				handleTerminal(err)
-				return
-			}
-		}
-		// Non-ack, non-pause kinds already returned above; the next Recv is
-		// already outstanding.
 	}
 }
 
