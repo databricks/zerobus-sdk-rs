@@ -345,8 +345,7 @@ public class StreamBuilderTest {
             .ackCallback(callback)
             .arrow(emptySchema());
 
-    IllegalStateException ex =
-        assertThrows(IllegalStateException.class, arrowBuilder::build);
+    IllegalStateException ex = assertThrows(IllegalStateException.class, arrowBuilder::build);
     assertEquals("ackCallback is not supported for Arrow Flight streams", ex.getMessage());
   }
 
