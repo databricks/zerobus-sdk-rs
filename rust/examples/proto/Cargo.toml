@@ -17,6 +17,10 @@ name = "proto_dynamic_batch"
 path = "dynamic/batch.rs"
 
 [[example]]
+name = "proto_dynamic_from_uc"
+path = "dynamic/from_uc.rs"
+
+[[example]]
 name = "proto_dynamic_single"
 path = "dynamic/single.rs"
 

@@ -131,6 +131,15 @@ pub enum ZerobusError {
     /// Returned when OAuth token fetching fails due to network or server errors.
     #[error("Token fetch failed: {0}")]
     TokenFetchError(String),
+    /// Returned when resolving a table's schema from Unity Catalog failed (see
+    /// [`crate::uc_schema`]). `retryable` is set for transport errors and 5xx/429
+    /// responses, unset for a rejected request or an unusable body.
+    ///
+    /// `#[non_exhaustive]` so further detail (e.g. the HTTP status) can be added
+    /// later without a breaking change.
+    #[error("Failed to fetch table schema from Unity Catalog: {message}.")]
+    #[non_exhaustive]
+    SchemaFetchError { message: String, retryable: bool },
 }
 
 /// List of gRPC status codes that indicate unretriable errors.
@@ -210,6 +219,9 @@ impl ZerobusError {
             ZerobusError::InvalidStateError(_) => false,
             ZerobusError::ConnectionTimeout(_) => true,
             ZerobusError::TokenFetchError(_) => true,
+            // Classified at the fetch site, where the HTTP status and transport
+            // error are known.
+            ZerobusError::SchemaFetchError { retryable, .. } => *retryable,
         }
     }
 

@@ -17,6 +17,7 @@ This directory contains examples demonstrating Protocol Buffers-based data inges
   - [Running the Example](#running-the-example-2)
   - [Code Highlights](#code-highlights-2)
   - [Dynamic Batch](#dynamic-batch)
+  - [Dynamic Schema from Unity Catalog](#dynamic-schema-from-unity-catalog)
 - [Adapting for Your Custom Table](#adapting-for-your-custom-table)
   - [Generate Schema Files](#generate-schema-files)
   - [Update Example Files](#update-example-files)
@@ -43,6 +44,7 @@ The examples are grouped by how the protobuf schema is obtained:
   are built field-by-field with `DynamicRecord`.
   - **`dynamic/single.rs`** - Build the descriptor in code and ingest dynamic records one at a time
   - **`dynamic/batch.rs`** - Ingest multiple dynamic records at once using `ingest_records_offset()`
+  - **`dynamic/from_uc.rs`** - Fetch the schema from Unity Catalog with `fetch_message_descriptor` and feed it to `.dynamic_proto(...)`, so no columns are hardcoded
 
 ## Three Ways to Pass Data
 
@@ -270,6 +272,57 @@ if let Some(offset) = stream.ingest_records_offset(batch).await? {
 }
 stream.flush().await?;
 ```
+
+### Dynamic Schema from Unity Catalog
+
+`dynamic/from_uc.rs` goes one step further: instead of assembling the columns in code,
+`fetch_message_descriptor` reads the table's schema from Unity Catalog and the resolved
+descriptor is handed to the ordinary `.dynamic_proto(...)` selector. Nothing about the
+schema is hardcoded, so the same program works against any table the credentials can read:
+
+```bash
+cargo run -p rust-examples-proto --example proto_dynamic_from_uc
+```
+
+```rust
+// `unity_catalog_url` is required — it is where the schema is fetched from.
+let sdk = ZerobusSdk::builder()
+    .endpoint(SERVER_ENDPOINT)
+    .unity_catalog_url(DATABRICKS_WORKSPACE_URL)
+    .build()?;
+
+// Fetch the descriptor from the live table metadata.
+let descriptor = sdk
+    .fetch_message_descriptor(TABLE_NAME, DATABRICKS_CLIENT_ID, DATABRICKS_CLIENT_SECRET)
+    .await?;
+
+// The fetched schema can be inspected when the columns are genuinely unknown.
+for field in descriptor.fields() {
+    println!("  {} ({:?})", field.name(), field.kind());
+}
+
+// Plug it into the same builder used for a hand-built descriptor.
+let mut stream = sdk
+    .stream_builder()
+    .table(TABLE_NAME)
+    .oauth(DATABRICKS_CLIENT_ID, DATABRICKS_CLIENT_SECRET)
+    .dynamic_proto(descriptor)
+    .build()
+    .await?;
+
+// Records are built exactly as in the examples above.
+for i in 0..1_000i64 {
+    let mut record = stream.new_record()?;
+    record.set("id", i)?.set("customer_name", "Alice Smith")?;
+    stream.ingest_record_offset(ProtoBytes(record.encode()?)).await?; // queue only
+}
+stream.flush().await?; // wait once for all pending acks
+```
+
+This needs `.oauth(...)` credentials (they are presented to the Unity Catalog REST
+API) and `unity_catalog_url` on the SDK builder. `sdk.fetch_message_descriptor(...)`
+uses that configured URL; for direct control over the endpoint, call
+`uc_schema::fetch_message_descriptor(unity_catalog_url, table, client_id, client_secret)`.
 
 ## Adapting for Your Custom Table
 

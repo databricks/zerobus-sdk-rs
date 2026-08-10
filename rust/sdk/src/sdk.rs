@@ -117,6 +117,49 @@ impl ZerobusSdk {
         StreamBuilder::new(self)
     }
 
+    /// Fetch `table_name`'s schema from Unity Catalog and resolve it to a
+    /// [`MessageDescriptor`](crate::MessageDescriptor), using this SDK's configured
+    /// `unity_catalog_url`. Pass the result to
+    /// [`dynamic_proto`](StreamBuilder::dynamic_proto). For direct control over the
+    /// endpoint, use [`uc_schema::fetch_message_descriptor`](crate::uc_schema::fetch_message_descriptor).
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// # use databricks_zerobus_ingest_sdk::ZerobusSdk;
+    /// # async fn example(sdk: &ZerobusSdk) -> Result<(), Box<dyn std::error::Error>> {
+    /// let descriptor = sdk
+    ///     .fetch_message_descriptor("catalog.schema.table", "client-id", "client-secret")
+    ///     .await?;
+    /// let stream = sdk
+    ///     .stream_builder()
+    ///     .table("catalog.schema.table")
+    ///     .oauth("client-id", "client-secret")
+    ///     .dynamic_proto(descriptor)
+    ///     .build()
+    ///     .await?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// See [`uc_schema::fetch_message_descriptor`](crate::uc_schema::fetch_message_descriptor).
+    pub async fn fetch_message_descriptor(
+        &self,
+        table_name: &str,
+        client_id: &str,
+        client_secret: &str,
+    ) -> ZerobusResult<crate::MessageDescriptor> {
+        crate::uc_schema::fetch_message_descriptor(
+            &self.unity_catalog_url,
+            table_name,
+            client_id,
+            client_secret,
+        )
+        .await
+    }
+
     /// Creates a new SDK instance with explicit configuration.
     ///
     /// This is used internally by the builder pattern. `sdk_identifier` is the

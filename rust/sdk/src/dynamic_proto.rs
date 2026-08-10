@@ -9,8 +9,10 @@
 //!
 //! Obtain the [`MessageDescriptor`] from [`message_descriptor`], which resolves a
 //! [`prost_types::DescriptorProto`] (built with
-//! [`crate::schema::descriptor_from_uc_columns`] or fetched from Unity Catalog),
-//! or from your own [`prost_reflect::DescriptorPool`].
+//! [`crate::schema::descriptor_from_uc_columns`]), or from your own
+//! [`prost_reflect::DescriptorPool`]. To read the schema straight from Unity
+//! Catalog instead, see [`crate::uc_schema`] (or
+//! [`ZerobusSdk::fetch_message_descriptor`](crate::ZerobusSdk::fetch_message_descriptor)).
 //!
 //! Ingest in a loop, then `flush()` once — never wait per record.
 //!
