@@ -1379,13 +1379,16 @@ func (cs *CoreStream[Req, Resp]) receiver(
 	var pendingAckUnits uint64
 	pendingAck := false
 
+	// Scratch space for the submitted ranges plus the in-flight one. Models are
+	// forbidden from retaining Ranges, so one buffer can back every ack instead
+	// of allocating a fresh copy each time.
+	var ackScratch []SubmittedRange
 	ackState := func(includeSending bool) AckState {
 		ranges := submitted
 		limit := submittedUnits
 		if includeSending && sending != nil {
-			ranges = make([]SubmittedRange, len(submitted)+1)
-			copy(ranges, submitted)
-			ranges[len(submitted)] = *sending
+			ackScratch = append(append(ackScratch[:0], submitted...), *sending)
+			ranges = ackScratch
 			limit = sending.UnitEnd
 		}
 		return AckState{
