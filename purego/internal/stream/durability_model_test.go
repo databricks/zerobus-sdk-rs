@@ -298,6 +298,13 @@ func newRowOpener(wires ...WireStream[*rowPayload, *rowResponse]) *rowOpener {
 	return &rowOpener{wires: wires}
 }
 
+// count reports how many connections have been handed out.
+func (o *rowOpener) count() int {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	return o.opened
+}
+
 func (o *rowOpener) open(
 	context.Context, StreamParams,
 ) (WireStream[*rowPayload, *rowResponse], error) {
@@ -975,16 +982,71 @@ func TestHookProtocolImpossibleReceiptIsTerminal(t *testing.T) {
 			if isRetryable(err) {
 				t.Errorf("terminal error %v is retryable, so recovery replays it", err)
 			}
-			opener.mu.Lock()
-			opened := opener.opened
-			opener.mu.Unlock()
-			if opened != 1 {
-				t.Errorf("opened %d connections, want 1: payload was replayed", opened)
+			if got := opener.count(); got != 1 {
+				t.Errorf("opened %d connections, want 1: payload was replayed", got)
 			}
 			if got := len(second.sends); got != 0 {
 				t.Errorf("second connection received %d sends, want 0", got)
 			}
 		})
+	}
+}
+
+// TestHookProtocolPromotedItemGetsFreshAckBudget covers an item promoted to head
+// by a full ack of its predecessor. Ordered acks mean it could not have been made
+// durable sooner, so it must start a fresh budget on promotion instead of
+// inheriting the deadline it was given on entering flight.
+func TestHookProtocolPromotedItemGetsFreshAckBudget(t *testing.T) {
+	const timeout = time.Second
+	first := newRowWire()
+	second := newRowWire()
+	opener := newRowOpener(first, second)
+	cfg := rowConfig()
+	cfg.Recovery = RecoveryEnabled
+	cfg.RecoveryRetries = 3
+	cfg.RecoveryBackoff = time.Millisecond
+	cfg.LackOfAckTimeout = timeout
+	cs := newRowStreamWithAcks(t, cfg, opener, rowAckHooks())
+
+	// A and B enter flight together, so they share one original deadline.
+	if _, err := cs.IngestBatch(context.Background(), [][]byte{
+		[]byte("a0"), []byte("a1"),
+	}); err != nil {
+		t.Fatalf("IngestBatch(A): %v", err)
+	}
+	if _, err := cs.IngestBatch(context.Background(), [][]byte{
+		[]byte("b0"),
+	}); err != nil {
+		t.Fatalf("IngestBatch(B): %v", err)
+	}
+	first.nextSend(t)
+	first.nextSend(t)
+
+	// Partial progress carries A past that shared deadline.
+	time.Sleep(timeout / 2)
+	first.ackRows(1)
+
+	// Complete A on a row boundary once B's original deadline has passed.
+	time.Sleep(timeout * 7 / 10)
+	first.ackRows(2)
+
+	// Leave room for an unrefreshed deadline to fire before B is acked. A
+	// promotion that keeps the stale deadline reconnects here rather than
+	// closing, so the replay is what the assertion has to catch.
+	time.Sleep(timeout / 5)
+	if got := opener.count(); got != 1 {
+		t.Fatalf("opened %d connections, want 1: promoting B replayed it", got)
+	}
+
+	first.ackRows(3)
+	if err := cs.Flush(context.Background()); err != nil {
+		t.Fatalf("Flush after promoting B to head: %v", err)
+	}
+	if got := opener.count(); got != 1 {
+		t.Errorf("opened %d connections, want 1: B was replayed", got)
+	}
+	if got := len(second.sends); got != 0 {
+		t.Errorf("second connection received %d sends, want 0", got)
 	}
 }
 

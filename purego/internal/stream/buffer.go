@@ -342,17 +342,18 @@ func (b *buffer[Req]) acknowledge(
 	}
 
 	progressed := result.count > 0
-	if resolution.PartialOffset >= 0 {
-		if resolution.PartialUnits > b.flight[0].ackedUnits {
-			b.flight[0].ackedUnits = resolution.PartialUnits
-			// Durable progress inside the item refreshes its lack-of-ack budget:
-			// a server acknowledging rows is demonstrably alive, so a batch
-			// larger than one timeout's worth of work must not be torn down. A
-			// duplicate or stale partial makes no progress and leaves the
-			// deadline untouched, so a stalled server cannot postpone recovery.
-			b.flight[0].pendingAt = time.Now()
-			progressed = true
-		}
+	if resolution.PartialOffset >= 0 &&
+		resolution.PartialUnits > b.flight[0].ackedUnits {
+		b.flight[0].ackedUnits = resolution.PartialUnits
+		progressed = true
+	}
+	if progressed && len(b.flight) > 0 {
+		// Durable progress refreshes the head's lack-of-ack budget, whether it
+		// landed inside the head or promoted a new one: ordered acks mean a
+		// promoted item could not have been made durable sooner. A stale ack
+		// makes no progress and never reaches here, so a stalled server cannot
+		// postpone recovery.
+		b.flight[0].pendingAt = time.Now()
 	}
 	if progressed {
 		b.flightRevision++
@@ -478,9 +479,9 @@ func (b *buffer[Req]) inFlight() int {
 }
 
 // oldestInFlightDeadline returns the absolute deadline of the oldest pending
-// item. Acknowledging part of that item refreshes its budget, while a partial
-// that repeats known progress does not. Replay assigns a fresh connection-local
-// pendingAt when next observes the item again.
+// item. Durable progress refreshes that item's budget, while an ack repeating
+// known progress does not. Replay assigns a fresh connection-local pendingAt
+// when next observes the item again.
 func (b *buffer[Req]) oldestInFlightDeadline(timeout time.Duration) (time.Time, bool) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
