@@ -1194,20 +1194,22 @@ func (cs *CoreStream[Req, Resp]) sender(
 				receipt.SubmittedUnits = it.units
 			}
 		}
+		// A receipt over the payload size, or a short receipt from a successful
+		// Send, is a transport defect: a replay would hit the same defect.
 		if receipt.SubmittedUnits > it.units {
-			err = fmt.Errorf(
+			err = wrapValidation(fmt.Errorf(
 				"stream: send offset %d reported %d submitted units for %d-unit payload",
 				it.offset,
 				receipt.SubmittedUnits,
 				it.units,
-			)
+			))
 		} else if err == nil && receipt.SubmittedUnits != it.units {
-			err = fmt.Errorf(
+			err = wrapValidation(fmt.Errorf(
 				"stream: send offset %d completed with %d of %d units submitted",
 				it.offset,
 				receipt.SubmittedUnits,
 				it.units,
-			)
+			))
 		}
 		sendEvents <- sendEvent{
 			logicalOffset:  it.offset,
@@ -1543,18 +1545,18 @@ func (cs *CoreStream[Req, Resp]) receiver(
 		}
 		submittedCount := event.unitEnd - event.unitStart
 		if event.receiptUnits > submittedCount {
-			return rejectSubmission(fmt.Errorf(
+			return rejectSubmission(wrapValidation(fmt.Errorf(
 				"stream: submission receipt %d exceeds active range size %d",
 				event.receiptUnits,
 				submittedCount,
-			))
+			)))
 		}
 		if event.err == nil && event.receiptUnits != submittedCount {
-			return rejectSubmission(fmt.Errorf(
+			return rejectSubmission(wrapValidation(fmt.Errorf(
 				"stream: completed Send submitted %d of %d units",
 				event.receiptUnits,
 				submittedCount,
-			))
+			)))
 		}
 
 		var result error

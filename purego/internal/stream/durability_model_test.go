@@ -271,6 +271,22 @@ func (w *overReportingRowWire) SendWithReceipt(
 	return SubmissionReceipt{SubmittedUnits: uint64(len(payload.rows)) + 5}, nil
 }
 
+// shortSuccessRowWire submits every row but reports a prefix receipt with a nil
+// error, so accepting it would strand the rows it leaves out.
+type shortSuccessRowWire struct {
+	*rowWire
+	reportRows uint64
+}
+
+func (w *shortSuccessRowWire) SendWithReceipt(
+	payload *rowPayload,
+) (SubmissionReceipt, error) {
+	if err := w.rowWire.Send(payload); err != nil {
+		return SubmissionReceipt{}, err
+	}
+	return SubmissionReceipt{SubmittedUnits: w.reportRows}, nil
+}
+
 // rowOpener hands out pre-built connections in order.
 type rowOpener struct {
 	mu     sync.Mutex
@@ -894,6 +910,81 @@ func TestHookProtocolBadReceiptDoesNotWedgeTeardown(t *testing.T) {
 	case <-done:
 	case <-time.After(10 * time.Second):
 		t.Fatal("Terminate hung after an invalid submission receipt")
+	}
+}
+
+// TestHookProtocolImpossibleReceiptIsTerminal covers the receipt shapes no
+// correct transport produces. Both are deterministic, so the spare connection
+// offered here must go unused.
+func TestHookProtocolImpossibleReceiptIsTerminal(t *testing.T) {
+	tests := []struct {
+		name    string
+		wire    func() WireStream[*rowPayload, *rowResponse]
+		release func(WireStream[*rowPayload, *rowResponse])
+		wantErr string
+	}{
+		{
+			name: "receipt exceeds payload",
+			wire: func() WireStream[*rowPayload, *rowResponse] {
+				return newOverReportingRowWire()
+			},
+			release: func(w WireStream[*rowPayload, *rowResponse]) {
+				over := w.(*overReportingRowWire)
+				<-over.started
+				close(over.release)
+			},
+			// The receiver rejects first, so its wording reaches the caller.
+			wantErr: "exceeds active range size",
+		},
+		{
+			name: "successful send reports a short receipt",
+			wire: func() WireStream[*rowPayload, *rowResponse] {
+				return &shortSuccessRowWire{rowWire: newRowWire(), reportRows: 1}
+			},
+			release: func(WireStream[*rowPayload, *rowResponse]) {},
+			wantErr: "of 2 units submitted",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			first := tc.wire()
+			second := newRowWire()
+			opener := newRowOpener(first, second)
+			cfg := rowConfig()
+			cfg.Recovery = RecoveryEnabled
+			cfg.RecoveryRetries = 3
+			cfg.RecoveryBackoff = time.Millisecond
+			cs := newRowStreamWithAcks(t, cfg, opener, rowAckHooks())
+
+			if _, err := cs.IngestBatch(context.Background(), [][]byte{
+				[]byte("r0"), []byte("r1"),
+			}); err != nil {
+				t.Fatalf("IngestBatch: %v", err)
+			}
+			tc.release(first)
+
+			waitCondition(t, cs.IsClosed, 5*time.Second)
+			err := cs.terminalErr()
+			if err == nil {
+				t.Fatal("stream closed without a terminal error")
+			}
+			if !strings.Contains(err.Error(), tc.wantErr) {
+				t.Fatalf("terminal error = %v, want it to mention %q", err, tc.wantErr)
+			}
+			if isRetryable(err) {
+				t.Errorf("terminal error %v is retryable, so recovery replays it", err)
+			}
+			opener.mu.Lock()
+			opened := opener.opened
+			opener.mu.Unlock()
+			if opened != 1 {
+				t.Errorf("opened %d connections, want 1: payload was replayed", opened)
+			}
+			if got := len(second.sends); got != 0 {
+				t.Errorf("second connection received %d sends, want 0", got)
+			}
+		})
 	}
 }
 
