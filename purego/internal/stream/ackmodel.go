@@ -26,11 +26,35 @@ type SubmittedRange struct {
 
 // AckState is the connection-local state supplied to an acknowledgment model.
 // Ranges contains submitted logical items that have not been fully
-// acknowledged, in submission order. A model must not retain or mutate it.
+// acknowledged, in submission order. Active is the item whose Send is still
+// outstanding; it is held separately so that acknowledging mid-send costs
+// nothing rather than copying the whole outstanding window into a combined
+// slice, which under continuous ingestion would be most acknowledgments.
+// Iterate both in submission order with NumRanges and RangeAt. A model must
+// not retain or mutate Ranges.
 type AckState struct {
 	Ranges            []SubmittedRange
+	Active            SubmittedRange
+	HasActive         bool
 	AcknowledgedUnits uint64
 	SubmittedUnits    uint64
+}
+
+// NumRanges returns the number of submitted ranges, counting Active.
+func (s AckState) NumRanges() int {
+	if s.HasActive {
+		return len(s.Ranges) + 1
+	}
+	return len(s.Ranges)
+}
+
+// RangeAt returns the i-th submitted range in submission order. Active sorts
+// after everything in Ranges, since its Send started last.
+func (s AckState) RangeAt(i int) SubmittedRange {
+	if s.HasActive && i == len(s.Ranges) {
+		return s.Active
+	}
+	return s.Ranges[i]
 }
 
 // AckResolution translates one cumulative protocol acknowledgment into logical
@@ -82,7 +106,8 @@ func ResolveAcknowledgedUnits(ackedUnits uint64, state AckState) (AckResolution,
 	}
 
 resolveLoop:
-	for i, submitted := range state.Ranges {
+	for i := range state.NumRanges() {
+		submitted := state.RangeAt(i)
 		if submitted.UnitStart >= submitted.UnitEnd {
 			return resolution, fmt.Errorf(
 				"stream: invalid submitted range [%d,%d) for logical offset %d",
@@ -99,10 +124,10 @@ resolveLoop:
 				itemUnitEnd, submitted.UnitEnd, submitted.LogicalOffset,
 			)
 		}
-		if i > 0 && submitted.UnitStart != state.Ranges[i-1].UnitEnd {
+		if i > 0 && submitted.UnitStart != state.RangeAt(i-1).UnitEnd {
 			return resolution, fmt.Errorf(
 				"stream: submitted unit range starts at %d after %d",
-				submitted.UnitStart, state.Ranges[i-1].UnitEnd,
+				submitted.UnitStart, state.RangeAt(i-1).UnitEnd,
 			)
 		}
 		switch {

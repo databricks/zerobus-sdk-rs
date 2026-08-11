@@ -383,6 +383,63 @@ func TestResolveAcknowledgedUnits(t *testing.T) {
 			},
 		},
 		{
+			// The still-sending item resolves like any other range, so an ack
+			// arriving mid-send can retire it without the core having to
+			// combine it into Ranges first.
+			name:       "active range resolves fully",
+			ackedUnits: 7,
+			state: AckState{
+				Ranges:         twoItems,
+				Active:         SubmittedRange{LogicalOffset: 2, UnitStart: 5, UnitEnd: 7, ItemUnitEnd: 7},
+				HasActive:      true,
+				SubmittedUnits: 7,
+			},
+			want: AckResolution{
+				AcknowledgedUnits: 7, FullyAcknowledgedOffset: 2, PartialOffset: -1,
+			},
+		},
+		{
+			name:       "active range resolves partially",
+			ackedUnits: 6,
+			state: AckState{
+				Ranges:         twoItems,
+				Active:         SubmittedRange{LogicalOffset: 2, UnitStart: 5, UnitEnd: 7, ItemUnitEnd: 7},
+				HasActive:      true,
+				SubmittedUnits: 7,
+			},
+			want: AckResolution{
+				AcknowledgedUnits: 6, FullyAcknowledgedOffset: 1,
+				PartialOffset: 2, PartialUnits: 1,
+			},
+		},
+		{
+			// Contiguity is enforced across the Ranges/Active seam too, so a
+			// gap there is caught rather than silently resolved.
+			name:       "active range not contiguous with ranges",
+			ackedUnits: 7,
+			state: AckState{
+				Ranges:         twoItems,
+				Active:         SubmittedRange{LogicalOffset: 2, UnitStart: 6, UnitEnd: 8, ItemUnitEnd: 8},
+				HasActive:      true,
+				SubmittedUnits: 8,
+			},
+			wantErr: "submitted unit range starts at 6 after 5",
+		},
+		{
+			// With no Ranges behind it the active item is the whole window.
+			name:       "active range alone",
+			ackedUnits: 2,
+			state: AckState{
+				Active:         SubmittedRange{LogicalOffset: 9, UnitStart: 0, UnitEnd: 4, ItemUnitEnd: 4},
+				HasActive:      true,
+				SubmittedUnits: 4,
+			},
+			want: AckResolution{
+				AcknowledgedUnits: 2, FullyAcknowledgedOffset: -1,
+				PartialOffset: 9, PartialUnits: 2,
+			},
+		},
+		{
 			name:       "partial prefix of first item",
 			ackedUnits: 2,
 			state:      AckState{Ranges: twoItems, SubmittedUnits: 5},

@@ -1379,23 +1379,18 @@ func (cs *CoreStream[Req, Resp]) receiver(
 	var pendingAckUnits uint64
 	pendingAck := false
 
-	// Scratch space for the submitted ranges plus the in-flight one. Models are
-	// forbidden from retaining Ranges, so one buffer can back every ack instead
-	// of allocating a fresh copy each time.
-	var ackScratch []SubmittedRange
 	ackState := func(includeSending bool) AckState {
-		ranges := submitted
-		limit := submittedUnits
-		if includeSending && sending != nil {
-			ackScratch = append(append(ackScratch[:0], submitted...), *sending)
-			ranges = ackScratch
-			limit = sending.UnitEnd
-		}
-		return AckState{
-			Ranges:            ranges,
+		state := AckState{
+			Ranges:            submitted,
 			AcknowledgedUnits: lastAckedUnits,
-			SubmittedUnits:    limit,
+			SubmittedUnits:    submittedUnits,
 		}
+		if includeSending && sending != nil {
+			state.Active = *sending
+			state.HasActive = true
+			state.SubmittedUnits = sending.UnitEnd
+		}
+		return state
 	}
 	// resolveAck maps one server response onto logical durability progress. A
 	// protocol-supplied model is re-resolved against the core's own view of the
