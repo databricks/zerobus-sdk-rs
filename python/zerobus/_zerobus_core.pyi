@@ -582,6 +582,13 @@ class arrow:
         ipc_compression: "arrow.IPCCompression"
         """IPC compression codec. Default: IPCCompression.None"""
 
+        stream_paused_max_wait_time_ms: Optional[int]
+        """Maximum ACK-wait cap during server-initiated graceful rotation.
+        None uses the server grace period available after reserving bounded
+        transport-cleanup time, 0 skips ACK waiting, and positive values cap the
+        ACK wait at min(value, remaining grace) milliseconds. Bounded transport
+        cleanup still runs when ACK waiting is skipped. Default: None"""
+
         def __init__(
             self,
             *,
@@ -594,6 +601,7 @@ class arrow:
             flush_timeout_ms: int = 300000,
             connection_timeout_ms: int = 30000,
             ipc_compression: "arrow.IPCCompression" = ...,
+            stream_paused_max_wait_time_ms: Optional[int] = None,
         ) -> None: ...
         def __repr__(self) -> str: ...
 

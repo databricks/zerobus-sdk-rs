@@ -328,6 +328,28 @@ public class StreamBuilderTest {
   }
 
   @Test
+  void arrowBuildRejectsAckCallback() {
+    AckCallback callback =
+        new AckCallback() {
+          @Override
+          public void onAck(long offsetId) {}
+
+          @Override
+          public void onError(long offsetId, String errorMessage) {}
+        };
+
+    StreamBuilder.ArrowStreamBuilder arrowBuilder =
+        builder()
+            .table("catalog.schema.table")
+            .oauth("client-id", "client-secret")
+            .ackCallback(callback)
+            .arrow(emptySchema());
+
+    IllegalStateException ex = assertThrows(IllegalStateException.class, arrowBuilder::build);
+    assertEquals("ackCallback is not supported for Arrow Flight streams", ex.getMessage());
+  }
+
+  @Test
   void arrowBuildRoutesToCreateArrowStreamInternal() {
     assumeNativeLibrary();
     ZerobusSdk sdk = mock(ZerobusSdk.class);

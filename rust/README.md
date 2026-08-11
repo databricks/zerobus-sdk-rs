@@ -802,8 +802,8 @@ Also accepts `0` or `no`.
 | `flush_timeout_ms` | `u64` | 300,000 | Timeout for flush operations (ms) |
 | `record_type` | `RecordType` | `RecordType::Proto` | Record serialization format (Proto or Json) |
 | `stream_paused_max_wait_time_ms` | `Option<u64>` | `None` | Max time to wait for outstanding acknowledgments during graceful close (`None` = server grace remaining after reserving transport cleanup time, `Some(0)` = skip the ACK wait, `Some(x)` = the smaller of `x` and that remaining grace). A bounded request/response drain still runs after the ACK wait. |
-| `ack_callback` | `Option<Arc<dyn AckCallback>>` | `None` | Optional callback for acknowledgment notifications |
-| `callback_max_wait_time_ms` | `Option<u64>` | `None` | Maximum time to wait for callback processing to complete after closing the stream (`None` = wait indefinitely, `Some(x)` = wait up to `x` ms) |
+| `ack_callback` | `Option<Arc<dyn AckCallback>>` | `None` | **gRPC JSON/proto streams only.** Optional callback for acknowledgment notifications. Not supported for Arrow Flight streams. |
+| `callback_max_wait_time_ms` | `Option<u64>` | `Some(5_000)` | **gRPC JSON/proto streams only.** Maximum time to wait for callback processing to complete after closing the stream (`None` = wait indefinitely, `Some(x)` = wait up to `x` ms) |
 
 For Arrow Flight streams *(Beta)*, `server_lack_of_ack_timeout_ms` is an
 absolute limit on how long the oldest batch may remain pending during normal
@@ -818,7 +818,9 @@ within the timeout.
 Arrow stream construction rejects `recovery_timeout_ms` and
 `server_lack_of_ack_timeout_ms` values whose deadlines cannot be represented by
 the platform monotonic clock. Server-advertised graceful-rotation periods are
-capped at one year.
+capped at one year. If `ack_callback` was configured on the builder,
+`build_arrow()` returns `ZerobusError::InvalidArgument` instead of silently
+ignoring the callback.
 
 **Example:**
 

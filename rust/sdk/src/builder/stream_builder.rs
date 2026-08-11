@@ -314,6 +314,10 @@ impl<'a> StreamBuilder<'a> {
     }
 
     /// Set the acknowledgment callback (gRPC streams only).
+    ///
+    /// `build_arrow()` rejects this option with
+    /// [`ZerobusError::InvalidArgument`] because Arrow Flight streams do not
+    /// support acknowledgment callbacks.
     pub fn ack_callback(mut self, callback: Arc<dyn AckCallback>) -> Self {
         self.grpc_config.ack_callback = Some(callback);
         self
@@ -457,10 +461,32 @@ impl<'a> StreamBuilder<'a> {
     /// Build and open an Arrow Flight ingestion stream.
     ///
     /// Returns an error if table name, authentication, or format has not been set,
-    /// or if a non-Arrow format was selected (use `build()` instead).
+    /// if a non-Arrow format was selected (use `build()` instead), or if
+    /// [`ack_callback`](Self::ack_callback) was configured (callbacks are
+    /// unsupported for Arrow Flight streams).
     #[cfg(feature = "arrow-flight")]
     pub async fn build_arrow(self) -> ZerobusResult<ZerobusArrowStream> {
         self.validate()?;
+
+        let schema = match self.format.as_ref() {
+            Some(FormatConfig::Arrow(schema)) => Arc::clone(schema),
+            Some(_) => {
+                return Err(ZerobusError::InvalidArgument(
+                    "non-Arrow format requires .build() instead of .build_arrow()".into(),
+                ));
+            }
+            None => {
+                return Err(ZerobusError::InvalidArgument(
+                    "record format is required: call .arrow() before .build_arrow()".into(),
+                ));
+            }
+        };
+
+        if self.grpc_config.ack_callback.is_some() {
+            return Err(ZerobusError::InvalidArgument(
+                "ack_callback is not supported for Arrow Flight streams".into(),
+            ));
+        }
 
         // Arrow-only: a zero bound deadlocks ingest / panics the channel. Not in the
         // shared validate() since it's irrelevant to JSON/proto build().
@@ -479,20 +505,6 @@ impl<'a> StreamBuilder<'a> {
         }
 
         let headers_provider = self.resolve_headers_provider()?;
-
-        let schema = match self.format {
-            Some(FormatConfig::Arrow(schema)) => schema,
-            Some(_) => {
-                return Err(ZerobusError::InvalidArgument(
-                    "non-Arrow format requires .build() instead of .build_arrow()".into(),
-                ));
-            }
-            None => {
-                return Err(ZerobusError::InvalidArgument(
-                    "record format is required: call .arrow() before .build_arrow()".into(),
-                ));
-            }
-        };
 
         let table_properties = ArrowTableProperties {
             table_name: self.table_name,
@@ -519,6 +531,16 @@ impl<'a> StreamBuilder<'a> {
 mod tests {
     use super::*;
     use std::collections::HashMap;
+
+    #[cfg(feature = "arrow-flight")]
+    struct NoopAckCallback;
+
+    #[cfg(feature = "arrow-flight")]
+    impl AckCallback for NoopAckCallback {
+        fn on_ack(&self, _offset_id: crate::offset_generator::OffsetId) {}
+
+        fn on_error(&self, _offset_id: crate::offset_generator::OffsetId, _error_message: &str) {}
+    }
 
     fn test_sdk() -> ZerobusSdk {
         ZerobusSdk::new_with_config(
@@ -789,6 +811,59 @@ mod tests {
             .arrow(schema)
             .max_inflight_batches(500)
             .connection_timeout_ms(10_000);
+    }
+
+    #[cfg(feature = "arrow-flight")]
+    #[tokio::test]
+    async fn arrow_builder_rejects_ack_callback() {
+        use arrow_schema::{DataType, Field, Schema as ArrowSchema};
+
+        let sdk = test_sdk();
+        let schema = Arc::new(ArrowSchema::new(vec![Field::new(
+            "id",
+            DataType::Int32,
+            false,
+        )]));
+        let result = sdk
+            .stream_builder()
+            .table("t")
+            .oauth("a", "b")
+            .arrow(schema)
+            .ack_callback(Arc::new(NoopAckCallback))
+            .build_arrow()
+            .await;
+
+        match result {
+            Err(ZerobusError::InvalidArgument(msg)) => {
+                assert!(msg.contains("ack_callback"));
+                assert!(msg.contains("Arrow Flight"));
+            }
+            _ => panic!("expected InvalidArgument error"),
+        }
+    }
+
+    #[cfg(feature = "arrow-flight")]
+    #[tokio::test]
+    async fn arrow_builder_reports_format_error_before_ack_callback_error() {
+        let sdk = test_sdk();
+        let result = sdk
+            .stream_builder()
+            .table("t")
+            .oauth("a", "b")
+            .json()
+            .ack_callback(Arc::new(NoopAckCallback))
+            .build_arrow()
+            .await;
+
+        match result {
+            Err(ZerobusError::InvalidArgument(msg)) => {
+                assert_eq!(
+                    msg,
+                    "non-Arrow format requires .build() instead of .build_arrow()"
+                );
+            }
+            _ => panic!("expected non-Arrow format InvalidArgument error"),
+        }
     }
 
     #[cfg(feature = "arrow-flight")]

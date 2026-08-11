@@ -910,6 +910,8 @@ Used with `ZerobusArrowStream`. Build via `ArrowStreamConfigurationOptions.build
 | `ipcCompression` | `IPCCompressionType.NONE` | Arrow IPC compression codec on the wire (`NONE`, `LZ4_FRAME`, `ZSTD`) |
 | `streamPausedMaxWaitTimeMs` | `-1` | Max time to wait in the paused state during graceful close. `-1` = full server duration, `0` = immediate recovery, `>0` = `min(this, server_duration)` ms |
 
+`ackCallback` is not supported for Arrow Flight streams. Configuring it on `StreamBuilder` before calling `ArrowStreamBuilder.build()` throws `IllegalStateException`.
+
 ## Logging
 
 The Databricks Zerobus Ingest SDK for Java uses the standard [SLF4J logging framework](https://www.slf4j.org/). The SDK only depends on `slf4j-api`, which means **you need to add an SLF4J implementation** to your classpath to see log output.
@@ -1170,6 +1172,8 @@ CompletableFuture<ZerobusArrowStream> StreamBuilder.ArrowStreamBuilder.build()  
 ```
 
 `ArrowStreamBuilder` additionally supports `maxInflightBatches(int)`, `connectionTimeoutMs(long)`, `ipcCompression(IPCCompressionType)`, and `streamPausedMaxWaitTimeMs(long)`.
+
+Configuring `ackCallback` before calling `ArrowStreamBuilder.build()` throws `IllegalStateException` because Arrow Flight streams do not support ACK callbacks.
 
 ---
 

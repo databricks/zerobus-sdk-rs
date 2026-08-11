@@ -180,6 +180,7 @@ class TestArrowStreamConfigurationOptions(unittest.TestCase):
         self.assertIsInstance(options.flush_timeout_ms, int)
         self.assertIsInstance(options.connection_timeout_ms, int)
         self.assertEqual(options.ipc_compression, IPCCompression.NONE)
+        self.assertIsNone(options.stream_paused_max_wait_time_ms)
 
     def test_kwargs_construction(self):
         options = ArrowStreamConfigurationOptions(
@@ -201,6 +202,7 @@ class TestArrowStreamConfigurationOptions(unittest.TestCase):
             server_lack_of_ack_timeout_ms=30000,
             flush_timeout_ms=5000,
             connection_timeout_ms=8000,
+            stream_paused_max_wait_time_ms=2500,
         )
         self.assertEqual(options.max_inflight_batches, 20)
         self.assertTrue(options.recovery)
@@ -210,6 +212,7 @@ class TestArrowStreamConfigurationOptions(unittest.TestCase):
         self.assertEqual(options.server_lack_of_ack_timeout_ms, 30000)
         self.assertEqual(options.flush_timeout_ms, 5000)
         self.assertEqual(options.connection_timeout_ms, 8000)
+        self.assertEqual(options.stream_paused_max_wait_time_ms, 2500)
 
     def test_unknown_kwarg_raises(self):
         with self.assertRaises(ValueError):
@@ -219,8 +222,10 @@ class TestArrowStreamConfigurationOptions(unittest.TestCase):
         options = ArrowStreamConfigurationOptions()
         options.max_inflight_batches = 99
         options.recovery = False
+        options.stream_paused_max_wait_time_ms = 1500
         self.assertEqual(options.max_inflight_batches, 99)
         self.assertFalse(options.recovery)
+        self.assertEqual(options.stream_paused_max_wait_time_ms, 1500)
 
     def test_ipc_compression_lz4(self):
         options = ArrowStreamConfigurationOptions(ipc_compression=IPCCompression.LZ4_FRAME)
@@ -257,6 +262,7 @@ class TestArrowStreamConfigurationOptions(unittest.TestCase):
         self.assertIn("max_inflight_batches", repr_str)
         self.assertIn("recovery", repr_str)
         self.assertIn("ipc_compression", repr_str)
+        self.assertIn("stream_paused_max_wait_time_ms", repr_str)
 
 
 class TestSerializeBatchEmptyRecordBatch(unittest.TestCase):
