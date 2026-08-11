@@ -110,6 +110,7 @@ impl<T: Clone> LandingZone<T> {
     ///
     /// This method will block if the maximum number of inflight requests has been reached,
     /// providing automatic backpressure control.
+    #[cfg(test)]
     pub async fn add(&self, request: T) {
         let reservation = self.reserve_capacity().await;
         self.enqueue_reserved(request, reservation);

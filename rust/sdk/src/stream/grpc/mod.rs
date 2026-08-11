@@ -49,6 +49,8 @@ use types::{IngestRequest, OneshotMap, RecordLandingZone};
 
 #[cfg(feature = "testing")]
 pub use callback_handler::CallbackHandlerHarness;
+#[cfg(feature = "testing")]
+pub(crate) use close::StreamShutdownHandle;
 
 /// Maximum time to wait for the receiver/sender tasks to finish during stream
 /// teardown.
@@ -122,6 +124,8 @@ pub struct ZerobusStream {
     is_closed: Arc<AtomicBool>,
     /// Sync mutex to ensure that offset generation and record ingestion happen atomically.
     sync_mutex: Arc<tokio::sync::Mutex<()>>,
+    /// Persistent signal that wakes capacity waiters when the stream becomes terminal.
+    terminal_token: CancellationToken,
     /// Watch channel for last error received from the server.
     server_error_rx: tokio::sync::watch::Receiver<Option<ZerobusError>>,
     /// Cancellation token to signal receiver and sender tasks to abort. It is sent either when stream is closed or dropped.
@@ -153,11 +157,13 @@ impl ZerobusStream {
 
         let oneshot_map = Arc::new(tokio::sync::Mutex::new(HashMap::new()));
         let is_closed = Arc::new(AtomicBool::new(false));
+        let sync_mutex = Arc::new(tokio::sync::Mutex::new(()));
         let failed_records = Arc::new(RwLock::new(Vec::new()));
         let logical_offset_id_generator = OffsetIdGenerator::default();
 
         let (server_error_tx, server_error_rx) = tokio::sync::watch::channel(None);
         let cancellation_token = CancellationToken::new();
+        let terminal_token = CancellationToken::new();
         // Create callback channel and spawn callback handler task only if callback is defined
         let (callback_tx, callback_handler_task) = if options.ack_callback.is_some() {
             let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
@@ -180,6 +186,8 @@ impl ZerobusStream {
             Arc::clone(&oneshot_map),
             logical_last_received_offset_id_tx.clone(),
             Arc::clone(&is_closed),
+            Arc::clone(&sync_mutex),
+            terminal_token.clone(),
             Arc::clone(&failed_records),
             stream_init_result_tx,
             server_error_tx,
@@ -208,7 +216,8 @@ impl ZerobusStream {
             _logical_last_received_offset_id_rx,
             failed_records,
             is_closed,
-            sync_mutex: Arc::new(tokio::sync::Mutex::new(())),
+            sync_mutex,
+            terminal_token,
             server_error_rx,
             cancellation_token,
             callback_handler_task,
@@ -246,6 +255,7 @@ impl ZerobusStream {
 impl Drop for ZerobusStream {
     fn drop(&mut self) {
         self.is_closed.store(true, Ordering::Relaxed);
+        self.terminal_token.cancel();
         self.cancellation_token.cancel();
         self.supervisor_task.abort();
         if let Some(callback_handler_task) = self.callback_handler_task.take() {

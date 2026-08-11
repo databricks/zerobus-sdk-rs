@@ -8,6 +8,9 @@
 
 ### Bug Fixes
 
+- Fixed multiplexed-stream admission during terminal sub-stream failure so
+  accepted records are retained for recovery, capacity waiters keep their FIFO
+  position, and waits fail after 30 seconds with actionable timeout context.
 - Arrow Flight acknowledgment deadlines are pending-relative: no timer runs
   while a stream is idle. During normal stream operation, each batch receives
   an absolute deadline when it becomes pending; responses and partial
