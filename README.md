@@ -22,7 +22,7 @@ Zerobus is a high-throughput streaming service for direct data ingestion into Da
 | TypeScript | [`typescript/`](typescript/) | [`@databricks/zerobus-ingest-sdk`](https://www.npmjs.com/package/@databricks/zerobus-ingest-sdk)               |
 | Java       | [`java/`](java/)             | [`com.databricks:zerobus-ingest-sdk`](https://central.sonatype.com/artifact/com.databricks/zerobus-ingest-sdk) |
 | C++        | [`cpp/`](cpp/)               | Source / CMake (`zerobus::zerobus`)                                                                            |
-| C#         | [`dotnet/`](dotnet/)         | [`Databricks.Zerobus`](https://www.nuget.org/packages/Databricks.Zerobus)                                      |
+| C#         | [`dotnet/`](dotnet/)         | [`Databricks.Zerobus.Ingest.Sdk`](https://www.nuget.org/packages/Databricks.Zerobus.Ingest.Sdk)                |
 
 ## Platform Support
 
