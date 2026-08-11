@@ -45,6 +45,32 @@ class HeadersProviderNativeTest {
     assertEquals(1, invalidations.get());
   }
 
+  @Test
+  void timedOutCallbacksRemainSerialized() {
+    assumeTrue(NativeLoader.isLoaded(), "Native library not available");
+    AtomicInteger calls = new AtomicInteger();
+    AtomicInteger activeCalls = new AtomicInteger();
+    AtomicInteger maxActiveCalls = new AtomicInteger();
+
+    HeadersProvider provider =
+        () -> {
+          int active = activeCalls.incrementAndGet();
+          maxActiveCalls.accumulateAndGet(active, Math::max);
+          try {
+            if (calls.getAndIncrement() == 0) {
+              Thread.sleep(500);
+            }
+            return Collections.singletonMap("authorization", "Bearer token");
+          } finally {
+            activeCalls.decrementAndGet();
+          }
+        };
+
+    assertEquals("OK", NativeTestHelper.nativeTestHeadersProviderSerialization(provider));
+    assertEquals(2, calls.get());
+    assertEquals(1, maxActiveCalls.get());
+  }
+
   @SuppressWarnings({"rawtypes", "unchecked"})
   private static Map<String, String> nonStringMap() {
     Map map = new HashMap();

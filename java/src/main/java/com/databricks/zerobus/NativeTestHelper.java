@@ -38,4 +38,12 @@ public class NativeTestHelper {
    * @return {@code "OK"} on success, otherwise an error description
    */
   public static native String nativeTestHeadersProviderCallbacks(HeadersProvider provider);
+
+  /**
+   * Verifies that timed-out callbacks remain serialized until their blocking JNI call returns.
+   *
+   * @param provider the stateful provider used by the native test
+   * @return {@code "OK"} on success, otherwise an error description
+   */
+  public static native String nativeTestHeadersProviderSerialization(HeadersProvider provider);
 }

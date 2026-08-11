@@ -31,11 +31,15 @@ impl From<ZerobusError> for LocalFrameError {
 
 pub struct JavaHeadersProvider {
     provider_ref: GlobalRef,
+    callback_lock: Arc<tokio::sync::Mutex<()>>,
 }
 
 impl JavaHeadersProvider {
     pub fn new(provider_ref: GlobalRef) -> Self {
-        Self { provider_ref }
+        Self {
+            provider_ref,
+            callback_lock: Arc::new(tokio::sync::Mutex::new(())),
+        }
     }
 
     pub fn into_arc(self) -> Arc<dyn HeadersProvider> {
@@ -46,16 +50,24 @@ impl JavaHeadersProvider {
 #[async_trait]
 impl HeadersProvider for JavaHeadersProvider {
     async fn get_headers(&self) -> ZerobusResult<HashMap<&'static str, String>> {
+        let guard = Arc::clone(&self.callback_lock).lock_owned().await;
         let provider_ref = self.provider_ref.clone();
-        tokio::task::spawn_blocking(move || get_headers_blocking(provider_ref))
-            .await
-            .map_err(|error| provider_retryable_error(format!("callback task failed: {error}")))?
+        tokio::task::spawn_blocking(move || {
+            let _guard = guard;
+            get_headers_blocking(provider_ref)
+        })
+        .await
+        .map_err(|error| provider_retryable_error(format!("callback task failed: {error}")))?
     }
 
     async fn invalidate(&self) {
+        let guard = Arc::clone(&self.callback_lock).lock_owned().await;
         let provider_ref = self.provider_ref.clone();
-        if let Err(error) =
-            tokio::task::spawn_blocking(move || invalidate_blocking(provider_ref)).await
+        if let Err(error) = tokio::task::spawn_blocking(move || {
+            let _guard = guard;
+            invalidate_blocking(provider_ref)
+        })
+        .await
         {
             tracing::error!("HeadersProvider.invalidate callback task failed: {error}");
         }
