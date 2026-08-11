@@ -23,10 +23,10 @@ This document covers Java-specific development setup and workflow.
 
 2. **Build the project:**
    ```bash
-   mvn clean install
+   mvn clean install -Dzerobus.skipNativeLibCheck=true
    ```
 
-   This will generate protobuf Java classes, compile the source code, run tests, and install the artifact to your local Maven repository.
+   This will generate protobuf Java classes, compile the source code, run tests, and install the artifact to your local Maven repository. Omit `-Dzerobus.skipNativeLibCheck=true` only when you have staged release JNI libraries under `src/main/resources/native/` and want to build a redistributable SDK JAR.
 
 3. **Run tests:**
    ```bash
@@ -97,10 +97,10 @@ mvn spotless:apply
 mvn spotless:check
 
 # Create JARs (regular + fat JAR)
-mvn package
+mvn package -Dzerobus.skipNativeLibCheck=true
 
 # Install to local Maven repo
-mvn install
+mvn install -Dzerobus.skipNativeLibCheck=true
 
 # Generate protobuf classes
 mvn protobuf:compile

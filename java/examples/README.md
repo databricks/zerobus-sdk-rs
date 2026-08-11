@@ -146,7 +146,7 @@ export DATABRICKS_CLIENT_SECRET="your-client-secret"
 
 ```bash
 cd ..  # Go to SDK root
-mvn package -DskipTests
+mvn package -DskipTests -Dzerobus.skipNativeLibCheck=true
 ```
 
 ## Running Examples

@@ -3,10 +3,16 @@ mod utils;
 
 use std::sync::Arc;
 
-use databricks_zerobus_ingest_sdk::{NoTlsConfig, StreamType, ZerobusError, ZerobusSdk};
+use databricks_zerobus_ingest_sdk::{
+    message_descriptor, NoTlsConfig, ProtoBytes, StreamType, ZerobusError, ZerobusSdk,
+};
 use mock_grpc::{start_mock_server, MockResponse};
 use tracing::info;
-use utils::{create_test_descriptor_proto, setup_tracing, TestCallback, TestHeadersProvider};
+use utils::{
+    advance_tokio_time_near_instant_limit, create_test_descriptor_proto,
+    run_with_paused_time_watchdog, setup_tracing, CountingHeadersProvider,
+    HangingInvalidationHeadersProvider, TestCallback, TestHeadersProvider,
+};
 
 const TABLE_NAME: &str = "test_catalog.test_schema.test_table";
 
@@ -107,11 +113,13 @@ mod stream_initialization_and_basic_lifecycle_tests {
 
         let (mock_server, server_url) = start_mock_server().await?;
 
+        // A non-auth non-retriable error (auth rejections now get one initial-setup
+        // refresh retry; a permanent error like InvalidArgument must still fail at once).
         mock_server
             .inject_responses(
                 TABLE_NAME,
                 vec![MockResponse::Error {
-                    status: tonic::Status::unauthenticated("Non-retriable error"),
+                    status: tonic::Status::invalid_argument("Non-retriable error"),
                     delay_ms: 0,
                 }],
             )
@@ -183,6 +191,489 @@ mod stream_initialization_and_basic_lifecycle_tests {
         let duration = start_time.elapsed();
         assert!(result.is_err());
         assert!(duration.as_millis() <= 300);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_initial_auth_rejection_refreshes_once_then_succeeds(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        setup_tracing();
+
+        let (mock_server, server_url) = start_mock_server().await?;
+        mock_server
+            .inject_responses(
+                TABLE_NAME,
+                vec![
+                    MockResponse::Error {
+                        status: tonic::Status::unauthenticated("stale credential"),
+                        delay_ms: 0,
+                    },
+                    MockResponse::CreateStream {
+                        stream_id: "test_stream_1".to_string(),
+                        delay_ms: 0,
+                    },
+                ],
+            )
+            .await;
+
+        let get_headers_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let invalidations = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let provider = Arc::new(CountingHeadersProvider {
+            get_headers_calls: Arc::clone(&get_headers_calls),
+            invalidations: Arc::clone(&invalidations),
+        });
+        let sdk = ZerobusSdk::builder()
+            .endpoint(server_url)
+            .unity_catalog_url("https://mock-uc.com")
+            .tls_config(Arc::new(NoTlsConfig))
+            .build()?;
+
+        let stream = sdk
+            .stream_builder()
+            .table(TABLE_NAME)
+            .headers_provider(provider)
+            .compiled_proto(create_test_descriptor_proto().unwrap_or_default())
+            .recovery(true)
+            .recovery_backoff_ms(0)
+            .recovery_retries(1)
+            .build()
+            .await?;
+
+        assert_eq!(
+            get_headers_calls.load(std::sync::atomic::Ordering::SeqCst),
+            2,
+            "the retry must fetch headers again after invalidation"
+        );
+        assert_eq!(
+            invalidations.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "the rejected initial credential must be invalidated exactly once"
+        );
+        assert_eq!(stream.stream_type, StreamType::Ephemeral);
+
+        Ok(())
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn test_max_recovery_timeout_does_not_overflow_initial_deadline(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        setup_tracing();
+
+        let (mock_server, server_url) = start_mock_server().await?;
+        mock_server
+            .inject_responses(
+                TABLE_NAME,
+                vec![
+                    MockResponse::Error {
+                        status: tonic::Status::unauthenticated("stale credential"),
+                        delay_ms: 0,
+                    },
+                    MockResponse::CreateStream {
+                        stream_id: "test_stream_1".to_string(),
+                        delay_ms: 0,
+                    },
+                ],
+            )
+            .await;
+
+        let invalidations = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let provider = Arc::new(CountingHeadersProvider {
+            get_headers_calls: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            invalidations: Arc::clone(&invalidations),
+        });
+        let sdk = ZerobusSdk::builder()
+            .endpoint(server_url)
+            .unity_catalog_url("https://mock-uc.com")
+            .tls_config(Arc::new(NoTlsConfig))
+            .build()?;
+
+        advance_tokio_time_near_instant_limit().await;
+
+        let stream_result = run_with_paused_time_watchdog(
+            sdk.stream_builder()
+                .table(TABLE_NAME)
+                .headers_provider(provider)
+                .compiled_proto(create_test_descriptor_proto().unwrap_or_default())
+                .recovery(true)
+                .recovery_backoff_ms(0)
+                .recovery_timeout_ms(u64::MAX)
+                .recovery_retries(1)
+                .build(),
+        )
+        .await;
+
+        match stream_result {
+            Ok(stream) => {
+                assert_eq!(stream.stream_type, StreamType::Ephemeral);
+                assert_eq!(
+                    invalidations.load(std::sync::atomic::Ordering::SeqCst),
+                    1,
+                    "the rejected credential must still be invalidated"
+                );
+            }
+            Err(ZerobusError::CreateStreamError(status)) => {
+                assert_eq!(status.code(), tonic::Code::DeadlineExceeded);
+            }
+            Err(error) => panic!("unexpected stream creation error: {error}"),
+        }
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_repeated_initial_auth_rejection_stops_after_one_refresh(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        setup_tracing();
+
+        let (mock_server, server_url) = start_mock_server().await?;
+        mock_server
+            .inject_responses(
+                TABLE_NAME,
+                vec![
+                    MockResponse::Error {
+                        status: tonic::Status::unauthenticated("stale credential"),
+                        delay_ms: 0,
+                    },
+                    MockResponse::Error {
+                        status: tonic::Status::permission_denied("refreshed credential rejected"),
+                        delay_ms: 0,
+                    },
+                    // A regression that retries auth failures repeatedly would reach this
+                    // third setup attempt instead of surfacing the second rejection.
+                    MockResponse::Error {
+                        status: tonic::Status::unauthenticated("unexpected third setup attempt"),
+                        delay_ms: 0,
+                    },
+                ],
+            )
+            .await;
+
+        let get_headers_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let invalidations = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let provider = Arc::new(CountingHeadersProvider {
+            get_headers_calls: Arc::clone(&get_headers_calls),
+            invalidations: Arc::clone(&invalidations),
+        });
+        let sdk = ZerobusSdk::builder()
+            .endpoint(server_url)
+            .unity_catalog_url("https://mock-uc.com")
+            .tls_config(Arc::new(NoTlsConfig))
+            .build()?;
+
+        let result = sdk
+            .stream_builder()
+            .table(TABLE_NAME)
+            .headers_provider(provider)
+            .compiled_proto(create_test_descriptor_proto().unwrap_or_default())
+            .recovery(true)
+            .recovery_backoff_ms(0)
+            .recovery_retries(5)
+            .build()
+            .await;
+        let error = match result {
+            Ok(_) => panic!("the second auth rejection must terminate initial setup"),
+            Err(error) => error,
+        };
+
+        assert!(
+            error.to_string().contains("refreshed credential rejected"),
+            "the second auth rejection must surface unchanged, got: {error}"
+        );
+        assert!(!error.is_retryable());
+        assert_eq!(
+            get_headers_calls.load(std::sync::atomic::Ordering::SeqCst),
+            2,
+            "only the initial attempt and one refreshed attempt may fetch headers"
+        );
+        assert_eq!(
+            invalidations.load(std::sync::atomic::Ordering::SeqCst),
+            2,
+            "each rejected credential is invalidated, but only the first gets a retry"
+        );
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_initial_non_auth_permanent_error_is_not_retried(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        setup_tracing();
+
+        let (mock_server, server_url) = start_mock_server().await?;
+        mock_server
+            .inject_responses(
+                TABLE_NAME,
+                vec![MockResponse::Error {
+                    status: tonic::Status::invalid_argument("invalid initial schema"),
+                    delay_ms: 0,
+                }],
+            )
+            .await;
+
+        let get_headers_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let invalidations = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let provider = Arc::new(CountingHeadersProvider {
+            get_headers_calls: Arc::clone(&get_headers_calls),
+            invalidations: Arc::clone(&invalidations),
+        });
+        let sdk = ZerobusSdk::builder()
+            .endpoint(server_url)
+            .unity_catalog_url("https://mock-uc.com")
+            .tls_config(Arc::new(NoTlsConfig))
+            .build()?;
+
+        let result = sdk
+            .stream_builder()
+            .table(TABLE_NAME)
+            .headers_provider(provider)
+            .compiled_proto(create_test_descriptor_proto().unwrap_or_default())
+            .recovery(true)
+            .recovery_backoff_ms(0)
+            .recovery_retries(5)
+            .build()
+            .await;
+        let error = match result {
+            Ok(_) => panic!("a permanent non-auth setup error must not be retried"),
+            Err(error) => error,
+        };
+
+        assert!(
+            error.to_string().contains("invalid initial schema"),
+            "the original setup rejection must surface, got: {error}"
+        );
+        assert!(!error.is_retryable());
+        assert_eq!(
+            get_headers_calls.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "a permanent non-auth setup error must stop after the first attempt"
+        );
+        assert_eq!(
+            invalidations.load(std::sync::atomic::Ordering::SeqCst),
+            0,
+            "non-auth setup failures must not invalidate credentials"
+        );
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_initial_auth_rejection_requires_retry_budget(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        setup_tracing();
+
+        let (mock_server, server_url) = start_mock_server().await?;
+        mock_server
+            .inject_responses(
+                TABLE_NAME,
+                vec![MockResponse::Error {
+                    status: tonic::Status::unauthenticated("stale credential without retry budget"),
+                    delay_ms: 0,
+                }],
+            )
+            .await;
+
+        let get_headers_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let invalidations = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let provider = Arc::new(CountingHeadersProvider {
+            get_headers_calls: Arc::clone(&get_headers_calls),
+            invalidations: Arc::clone(&invalidations),
+        });
+        let sdk = ZerobusSdk::builder()
+            .endpoint(server_url)
+            .unity_catalog_url("https://mock-uc.com")
+            .tls_config(Arc::new(NoTlsConfig))
+            .build()?;
+
+        let result = sdk
+            .stream_builder()
+            .table(TABLE_NAME)
+            .headers_provider(provider)
+            .compiled_proto(create_test_descriptor_proto().unwrap_or_default())
+            .recovery(true)
+            .recovery_backoff_ms(0)
+            .recovery_retries(0)
+            .build()
+            .await;
+        let error = match result {
+            Ok(_) => panic!("an auth rejection must not retry without recovery budget"),
+            Err(error) => error,
+        };
+
+        assert!(error
+            .to_string()
+            .contains("stale credential without retry budget"));
+        assert_eq!(
+            get_headers_calls.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "zero retry budget must allow only the initial header fetch"
+        );
+        assert_eq!(
+            invalidations.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "the rejected credential is invalidated even when no retry remains"
+        );
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_initial_auth_rejection_does_not_get_separate_retry_budget(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        setup_tracing();
+
+        let (mock_server, server_url) = start_mock_server().await?;
+        mock_server
+            .inject_responses(
+                TABLE_NAME,
+                vec![
+                    MockResponse::Error {
+                        status: tonic::Status::unavailable("transient setup failure"),
+                        delay_ms: 0,
+                    },
+                    MockResponse::Error {
+                        status: tonic::Status::unauthenticated("auth rejected after budget spent"),
+                        delay_ms: 0,
+                    },
+                ],
+            )
+            .await;
+
+        let get_headers_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let invalidations = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let provider = Arc::new(CountingHeadersProvider {
+            get_headers_calls: Arc::clone(&get_headers_calls),
+            invalidations: Arc::clone(&invalidations),
+        });
+        let sdk = ZerobusSdk::builder()
+            .endpoint(server_url)
+            .unity_catalog_url("https://mock-uc.com")
+            .tls_config(Arc::new(NoTlsConfig))
+            .build()?;
+
+        let result = sdk
+            .stream_builder()
+            .table(TABLE_NAME)
+            .headers_provider(provider)
+            .compiled_proto(create_test_descriptor_proto().unwrap_or_default())
+            .recovery(true)
+            .recovery_backoff_ms(0)
+            .recovery_retries(1)
+            .build()
+            .await;
+        let error = match result {
+            Ok(_) => panic!("auth refresh must use the shared recovery budget"),
+            Err(error) => error,
+        };
+
+        assert!(error
+            .to_string()
+            .contains("auth rejected after budget spent"));
+        assert_eq!(
+            get_headers_calls.load(std::sync::atomic::Ordering::SeqCst),
+            2,
+            "the exhausted shared budget must prevent a third attempt"
+        );
+        assert_eq!(
+            invalidations.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "the auth rejection is invalidated but cannot receive an extra retry"
+        );
+
+        Ok(())
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn test_initial_auth_invalidation_timeout_preserves_one_retry_limit(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        const ATTEMPT_TIMEOUT_MS: u64 = 600;
+        const SETUP_REJECTION_DELAY_MS: u64 = 300;
+
+        setup_tracing();
+
+        let (mock_server, server_url) = start_mock_server().await?;
+        mock_server
+            .inject_responses(
+                TABLE_NAME,
+                vec![
+                    MockResponse::Error {
+                        status: tonic::Status::unauthenticated("first rejected credential"),
+                        delay_ms: SETUP_REJECTION_DELAY_MS,
+                    },
+                    MockResponse::Error {
+                        status: tonic::Status::permission_denied("second rejected credential"),
+                        delay_ms: SETUP_REJECTION_DELAY_MS,
+                    },
+                    // A stalled invalidation must not turn the auth path into generic
+                    // timeout retries that consume the rest of the recovery budget.
+                    MockResponse::Error {
+                        status: tonic::Status::unauthenticated("unexpected third setup attempt"),
+                        delay_ms: 0,
+                    },
+                ],
+            )
+            .await;
+
+        let delayed_setup_armed = mock_server.delayed_setup_armed();
+        let invalidations = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let cancellations = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let invalidation_armed = Arc::new(tokio::sync::Notify::new());
+        let provider = Arc::new(HangingInvalidationHeadersProvider {
+            invalidations: Arc::clone(&invalidations),
+            cancellations: Arc::clone(&cancellations),
+            invalidation_armed: Arc::clone(&invalidation_armed),
+        });
+        let sdk = ZerobusSdk::builder()
+            .endpoint(server_url)
+            .unity_catalog_url("https://mock-uc.com")
+            .tls_config(Arc::new(NoTlsConfig))
+            .build()?;
+
+        let build_stream = sdk
+            .stream_builder()
+            .table(TABLE_NAME)
+            .headers_provider(provider)
+            .compiled_proto(create_test_descriptor_proto().unwrap_or_default())
+            .recovery(true)
+            .recovery_backoff_ms(0)
+            .recovery_timeout_ms(ATTEMPT_TIMEOUT_MS)
+            .recovery_retries(5)
+            .build();
+        let drive_attempt_deadlines = async {
+            for _ in 0..2 {
+                // Do not advance until the server delay and then the client
+                // invalidation are both known to be pending.
+                run_with_paused_time_watchdog(delayed_setup_armed.notified()).await;
+                tokio::time::advance(std::time::Duration::from_millis(SETUP_REJECTION_DELAY_MS))
+                    .await;
+                run_with_paused_time_watchdog(invalidation_armed.notified()).await;
+                tokio::time::advance(std::time::Duration::from_millis(
+                    ATTEMPT_TIMEOUT_MS - SETUP_REJECTION_DELAY_MS,
+                ))
+                .await;
+            }
+        };
+        let (result, ()) = tokio::join!(build_stream, drive_attempt_deadlines);
+        let error = match result {
+            Ok(_) => panic!("stalled invalidation must not bypass the one-auth-retry limit"),
+            Err(error) => error,
+        };
+
+        assert!(
+            error.to_string().contains("second rejected credential"),
+            "the final auth rejection must be preserved, got: {error}"
+        );
+        assert!(!error.is_retryable());
+        assert_eq!(
+            invalidations.load(std::sync::atomic::Ordering::SeqCst),
+            2,
+            "only the initial attempt and one auth retry may invalidate credentials"
+        );
+        assert_eq!(
+            cancellations.load(std::sync::atomic::Ordering::SeqCst),
+            2,
+            "each stalled invalidation must be cancelled at the setup deadline"
+        );
+
         Ok(())
     }
 
@@ -805,6 +1296,60 @@ mod schema_tests {
         let ingest_result = ingest_future;
 
         assert_eq!(ingest_result, 0);
+        assert_eq!(mock_server.get_write_count().await, 1);
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_dynamic_proto_record_ingestion() -> Result<(), Box<dyn std::error::Error>> {
+        setup_tracing();
+        info!("Starting test_dynamic_proto_record_ingestion");
+
+        let (mock_server, server_url) = start_mock_server().await?;
+
+        mock_server
+            .inject_responses(
+                TABLE_NAME,
+                vec![
+                    MockResponse::CreateStream {
+                        stream_id: "test_stream_dynamic_proto".to_string(),
+                        delay_ms: 0,
+                    },
+                    MockResponse::RecordAck {
+                        ack_up_to_offset: 0,
+                        delay_ms: 50,
+                    },
+                ],
+            )
+            .await;
+
+        let sdk = ZerobusSdk::builder()
+            .endpoint(server_url.clone())
+            .unity_catalog_url("https://mock-uc.com")
+            .tls_config(Arc::new(NoTlsConfig))
+            .build()?;
+
+        let descriptor = message_descriptor(&create_test_descriptor_proto().unwrap())?;
+        let stream = sdk
+            .stream_builder()
+            .table(TABLE_NAME)
+            .headers_provider(Arc::new(TestHeadersProvider::default()))
+            .dynamic_proto(descriptor)
+            .max_inflight_requests(100)
+            .recovery(false)
+            .build()
+            .await?;
+
+        let mut record = stream.new_record()?;
+        record.set("id", 1i64)?.set("message", "hello")?;
+
+        let offset = stream
+            .ingest_record_offset(ProtoBytes(record.encode()?))
+            .await?;
+        stream.flush().await?;
+
+        assert_eq!(offset, 0);
         assert_eq!(mock_server.get_write_count().await, 1);
 
         Ok(())

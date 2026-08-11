@@ -16,11 +16,40 @@ use databricks::zerobus::{
     IngestRecordResponse,
 };
 use prost_types::Duration as ProtobufDuration;
-use tokio::sync::{mpsc, Mutex};
+use rcgen::{generate_simple_self_signed, CertifiedKey};
+use tokio::sync::{mpsc, Mutex, Notify, Semaphore};
 use tokio::time::sleep;
 use tokio_stream::Stream;
+use tonic::transport::{Identity, ServerTlsConfig};
 use tonic::{Request, Response, Status, Streaming};
 use tracing::{debug, error, info, warn};
+
+#[derive(Debug)]
+pub struct MockResponseGate {
+    semaphore: Semaphore,
+}
+
+impl MockResponseGate {
+    #[allow(dead_code)]
+    pub fn new() -> Self {
+        Self {
+            semaphore: Semaphore::new(0),
+        }
+    }
+
+    #[allow(dead_code)]
+    pub fn release(&self) {
+        self.semaphore.add_permits(1);
+    }
+
+    async fn wait(&self) {
+        self.semaphore
+            .acquire()
+            .await
+            .expect("Mock response gate should remain open")
+            .forget();
+    }
+}
 
 /// Mock response that can be injected into the mock server
 #[derive(Debug, Clone)]
@@ -31,6 +60,12 @@ pub enum MockResponse {
     RecordAck {
         ack_up_to_offset: i64,
         delay_ms: u64,
+    },
+    /// Successful record acknowledgment released explicitly by a test
+    #[allow(dead_code)]
+    GatedRecordAck {
+        ack_up_to_offset: i64,
+        gate: Arc<MockResponseGate>,
     },
     /// Close stream signal
     #[allow(dead_code)]
@@ -55,6 +90,8 @@ pub struct MockZerobusServer {
     write_count: Arc<Mutex<u64>>,
     /// Track response index across multiple connection attempts
     response_indices: Arc<Mutex<HashMap<String, usize>>>,
+    /// Observation that a delayed setup response registered its timer.
+    delayed_setup_armed: Arc<Notify>,
 }
 
 impl MockZerobusServer {
@@ -65,7 +102,15 @@ impl MockZerobusServer {
             max_offset_sent: Arc::new(Mutex::new(-1)),
             write_count: Arc::new(Mutex::new(0)),
             response_indices: Arc::new(Mutex::new(HashMap::new())),
+            delayed_setup_armed: Arc::new(Notify::new()),
         }
+    }
+
+    /// Returns a notification that fires immediately before the mock waits on a
+    /// scripted delayed setup response.
+    #[allow(dead_code)]
+    pub fn delayed_setup_armed(&self) -> Arc<Notify> {
+        Arc::clone(&self.delayed_setup_armed)
     }
 
     /// Inject responses for a specific stream (identified by table name for simplicity)
@@ -119,6 +164,7 @@ impl Zerobus for MockZerobusServer {
         let max_offset_sent = Arc::clone(&self.max_offset_sent);
         let write_count = Arc::clone(&self.write_count);
         let response_indices = Arc::clone(&self.response_indices);
+        let delayed_setup_armed = Arc::clone(&self.delayed_setup_armed);
 
         tokio::spawn(async move {
             let mut table_name = String::new();
@@ -159,8 +205,11 @@ impl Zerobus for MockZerobusServer {
                             }
 
                             // Search for the next CreateStream response starting from response_index.
+                            // Bind the start separately so mutating `response_index` in the loop
+                            // body (to persist resume state) doesn't trip `clippy::mut_range_bound`.
                             let mut create_stream_found = false;
-                            for idx in response_index..stream_responses.len() {
+                            let search_start = response_index;
+                            for idx in search_start..stream_responses.len() {
                                 if let Some(mock_response) = stream_responses.get(idx) {
                                     match mock_response {
                                         MockResponse::CreateStream {
@@ -198,6 +247,7 @@ impl Zerobus for MockZerobusServer {
                                         }
                                         MockResponse::Error { status, delay_ms } => {
                                             if *delay_ms > 0 {
+                                                delayed_setup_armed.notify_one();
                                                 sleep(Duration::from_millis(*delay_ms)).await;
                                             }
                                             info!(
@@ -371,6 +421,27 @@ impl Zerobus for MockZerobusServer {
 /// Helper function to create a mock server and return its address
 pub async fn start_mock_server() -> Result<(MockZerobusServer, String), Box<dyn std::error::Error>>
 {
+    start_mock_server_inner(None, "http", "127.0.0.1").await
+}
+
+/// Starts the mock server with a runtime-generated TLS identity.
+#[allow(dead_code)]
+pub async fn start_mock_tls_server(
+) -> Result<(MockZerobusServer, String, Vec<u8>), Box<dyn std::error::Error>> {
+    let CertifiedKey { cert, key_pair } =
+        generate_simple_self_signed(vec!["localhost".to_string()])?;
+    let cert_pem = cert.pem();
+    let identity = Identity::from_pem(cert_pem.as_bytes(), key_pair.serialize_pem().as_bytes());
+    let tls = ServerTlsConfig::new().identity(identity);
+    let (server, server_url) = start_mock_server_inner(Some(tls), "https", "localhost").await?;
+    Ok((server, server_url, cert_pem.into_bytes()))
+}
+
+async fn start_mock_server_inner(
+    tls: Option<ServerTlsConfig>,
+    scheme: &str,
+    endpoint_host: &str,
+) -> Result<(MockZerobusServer, String), Box<dyn std::error::Error>> {
     info!("Starting mock Zerobus server");
     let mock_server = MockZerobusServer::new();
     let server_clone = MockZerobusServer {
@@ -379,17 +450,22 @@ pub async fn start_mock_server() -> Result<(MockZerobusServer, String), Box<dyn 
         max_offset_sent: Arc::clone(&mock_server.max_offset_sent),
         write_count: Arc::clone(&mock_server.write_count),
         response_indices: Arc::clone(&mock_server.response_indices),
+        delayed_setup_armed: Arc::clone(&mock_server.delayed_setup_armed),
     };
 
     let addr: std::net::SocketAddr = "127.0.0.1:0".parse()?;
     let listener = tokio::net::TcpListener::bind(addr).await?;
     let local_addr = listener.local_addr()?;
-    let server_url = format!("http://{}", local_addr);
+    let server_url = format!("{}://{}:{}", scheme, endpoint_host, local_addr.port());
     info!("Mock server will listen on: {}", server_url);
 
+    let mut server = tonic::transport::Server::builder();
+    if let Some(tls) = tls {
+        server = server.tls_config(tls)?;
+    }
+    let router = server.add_service(ZerobusServer::new(server_clone));
     tokio::spawn(async move {
-        if let Err(e) = tonic::transport::Server::builder()
-            .add_service(ZerobusServer::new(server_clone))
+        if let Err(e) = router
             .serve_with_incoming(tokio_stream::wrappers::TcpListenerStream::new(listener))
             .await
         {
@@ -423,6 +499,31 @@ async fn handle_mock_response(
                 }
                 info!(
                     "Sending RecordAck response for {} with ack_up_to_offset: {}",
+                    request_type, ack_up_to_offset
+                );
+                let response = EphemeralStreamResponse {
+                    payload: Some(ResponsePayload::IngestRecordResponse(
+                        IngestRecordResponse {
+                            durability_ack_up_to_offset: Some(*ack_up_to_offset),
+                        },
+                    )),
+                };
+                if tx.send(Ok(response)).await.is_err() {
+                    return (false, current_index);
+                }
+                (true, current_index + 1)
+            } else {
+                (true, current_index)
+            }
+        }
+        MockResponse::GatedRecordAck {
+            ack_up_to_offset,
+            gate,
+        } => {
+            if offset == Some(*ack_up_to_offset) {
+                gate.wait().await;
+                info!(
+                    "Sending gated RecordAck response for {} with ack_up_to_offset: {}",
                     request_type, ack_up_to_offset
                 );
                 let response = EphemeralStreamResponse {

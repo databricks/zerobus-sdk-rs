@@ -83,6 +83,7 @@ This SDK includes native libraries for the following platforms:
 | macOS    | x86_64       | Supported |
 | macOS    | aarch64 (Apple Silicon) | Supported |
 
+Linux glibc builds support glibc 2.26 and newer, including Amazon Linux 2.
 On Linux, the libc flavor (glibc vs musl) is detected at runtime. To override detection, set
 `-Dzerobus.libc=musl` or `-Dzerobus.libc=glibc` on the JVM command line.
 
@@ -215,7 +216,7 @@ Clone and build the SDK:
 ```bash
 git clone https://github.com/databricks/zerobus-sdk.git
 cd zerobus-sdk/java
-mvn clean package
+mvn clean package -Dzerobus.skipNativeLibCheck=true
 ```
 
 This generates two JAR files in the `target/` directory:
@@ -227,6 +228,10 @@ This generates two JAR files in the `target/` directory:
 - **Fat JAR**: `zerobus-ingest-sdk-0.2.0-jar-with-dependencies.jar` (~19MB, includes native libraries + all dependencies)
   - Contains SDK classes plus all dependencies bundled
   - Self-contained, easier to deploy
+
+The skip flag is for local Java-only builds. Release builds must stage the JNI
+libraries under `src/main/resources/native/` and run Maven without that flag so
+the packaged JAR includes native libraries.
 
 **Which JAR to use?**
 - **Regular JAR**: When using Maven/Gradle (recommended)

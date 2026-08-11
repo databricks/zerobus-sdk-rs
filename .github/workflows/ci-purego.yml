@@ -98,3 +98,8 @@ jobs:
       # covers data races regardless of target OS; no Windows entry needed.
       - name: Run tests (race detector)
         run: go test -race ./...
+
+      - name: Run tests (CGO disabled)
+        env:
+          CGO_ENABLED: "0"
+        run: go test ./...

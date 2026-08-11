@@ -37,16 +37,11 @@ pub mod databricks {
     }
 }
 
-#[cfg(feature = "arrow-flight")]
-mod arrow_configuration;
-#[cfg(feature = "arrow-flight")]
-mod arrow_metadata;
-#[cfg(feature = "arrow-flight")]
-mod arrow_stream;
 mod builder;
 mod callbacks;
 mod client_warnings;
 mod default_token_factory;
+mod dynamic_proto;
 mod errors;
 mod headers_provider;
 mod landing_zone;
@@ -63,14 +58,14 @@ pub mod stream_options;
 mod tls_config;
 mod token_cache;
 
-#[cfg(feature = "arrow-flight")]
-pub use arrow_configuration::ArrowStreamConfigurationOptions;
-#[cfg(feature = "arrow-flight")]
-pub use arrow_stream::{ArrowSchema, DataType, Field, RecordBatch, TimeUnit, ZerobusArrowStream};
 pub use builder::{StreamBuilder, ZerobusSdkBuilder};
 pub use callbacks::AckCallback;
 pub use default_token_factory::DefaultTokenFactory;
-pub use errors::ZerobusError;
+pub use dynamic_proto::{
+    message_descriptor, missing_required_fields, DynamicMessage, DynamicRecord, IntoDynamicValue,
+    MessageDescriptor, Value,
+};
+pub use errors::{SchemaValidationCause, ZerobusError};
 #[cfg(feature = "testing")]
 pub use headers_provider::NoAuthHeadersProvider;
 pub use headers_provider::{HeadersProvider, OAuthHeadersProvider};
@@ -83,7 +78,14 @@ pub use record_types::{
     ProtoBytes, ProtoEncodedRecord, ProtoMessage,
 };
 pub use sdk::{ZerobusSdk, DEFAULT_SDK_IDENTIFIER};
+#[cfg(feature = "testing")]
+pub use stream::CallbackHandlerHarness;
 pub use stream::ZerobusStream;
+#[cfg(feature = "arrow-flight")]
+pub use stream::{
+    ArrowSchema, ArrowStreamConfigurationOptions, DataType, Field, RecordBatch, TimeUnit,
+    ZerobusArrowStream,
+};
 pub use stream_configuration::StreamConfigurationOptions;
 #[cfg(feature = "testing")]
 pub use tls_config::NoTlsConfig;
@@ -91,6 +93,10 @@ pub use tls_config::{SecureTlsConfig, TlsConfig};
 
 #[cfg(feature = "zeroparser")]
 pub mod zeroparser;
+
+#[cfg(feature = "internal-arrow-c-data")]
+#[doc(hidden)]
+pub mod internal;
 
 /// The type of the stream connection created with the server.
 /// Currently we only support ephemeral streams on the server side, so we support only that in the SDK as well.
@@ -117,6 +123,7 @@ pub enum StreamType {
 pub(crate) struct TableProperties {
     pub(crate) table_name: String,
     pub(crate) descriptor_proto: Option<prost_types::DescriptorProto>,
+    pub(crate) message_descriptor: Option<MessageDescriptor>,
 }
 
 pub type ZerobusResult<T> = Result<T, ZerobusError>;

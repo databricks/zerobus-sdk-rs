@@ -48,7 +48,8 @@ Run from `python/`:
 
 PyO3 handles memory management automatically via Python reference counting. Key considerations:
 
-- **GIL release**: Async operations release the GIL, allowing concurrent Python threads. The tokio runtime is initialized at module import via `pyo3_asyncio::tokio::init()`.
+- **GIL release**: Async operations release the GIL, allowing concurrent Python threads. The tokio runtime is initialized at module import via `pyo3_async_runtimes::tokio::init()`.
+- **PyO3 API**: The bindings use PyO3 0.29 and the `Bound<'py, T>` API. Use `Python::attach` (not `with_gil`), `Python::detach` (not `allow_threads`), and `cast` (not `downcast`). `Py<T>` is not unconditionally `Clone` — use `clone_ref(py)` under an attached interpreter.
 - **Object lifetime**: PyO3 classes are ref-counted by Python's GC. No explicit free needed, but `close()` should still be called to flush pending records before GC cleanup.
 - **Error mapping**: Rust `ZerobusError` maps to `ZerobusException` / `NonRetriableException` Python exception classes.
 - **Serialization**: Proto descriptors and record payloads cross as Python `bytes`. JSON records cross as Python `str`. No extra serialization layer — PyO3 handles the conversion.
@@ -82,6 +83,7 @@ The public Python API is defined by the classes and functions in `zerobus/`. Cha
 
 ## Config
 
-- Python >= 3.9 required
+- Python >= 3.9 required; tested through 3.14 (free-threaded builds are not supported)
+- Rust >= 1.88 required for the wrapper crate (Tonic 0.14.6 MSRV)
 - Line length: 120 (black)
 - Formatter: black, isort

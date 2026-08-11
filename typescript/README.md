@@ -42,21 +42,14 @@ The Databricks Zerobus Ingest SDK for TypeScript provides a high-performance cli
 - **Node.js**: >= 16
 - **Databricks workspace** with Zerobus access enabled
 
-### Build Requirements
+### Source Build Requirements
 
 - **Rust toolchain**: 1.70 or higher - [Install Rust](https://rustup.rs/)
 - **Cargo**: Included with Rust
+- Platform C/C++ build tools
 
-### Dependencies
-
-These will be installed automatically:
-
-```json
-{
-  "@napi-rs/cli": "^2.18.4",
-  "napi-build": "^0.3.3"
-}
-```
+You only need these source-build tools when npm cannot use a pre-built native
+package for your platform, or when developing the SDK from this repository.
 
 ## Quick Start User Guide
 
@@ -66,108 +59,30 @@ Before using the SDK, you need a Databricks workspace URL, a Delta table, and a 
 
 ### Installation
 
-#### Prerequisites
-
-Before installing the SDK, ensure you have the required tools:
-
-**1. Node.js >= 16**
-
-Check if Node.js is installed:
 ```bash
-node --version
+npm install @databricks/zerobus-ingest-sdk
 ```
 
-If not installed, download from [nodejs.org](https://nodejs.org/).
+On supported platforms, npm installs the TypeScript package and the matching
+pre-built native binary package automatically.
 
-**2. Rust Toolchain (1.70+)**
+#### Local Development From Source
 
-The SDK requires Rust to compile the native addon. Install using `rustup` (the official Rust installer):
+Clone and build from source only when modifying this SDK or when your platform
+does not have a pre-built native binary:
 
-**On Linux and macOS:**
 ```bash
-curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
+git clone https://github.com/databricks/zerobus-sdk.git
+cd zerobus-sdk/typescript
+npm install
+npm run build
 ```
-
-Follow the prompts (typically just press Enter to accept defaults).
-
-**On Windows:**
-
-Download and run the installer from [rustup.rs](https://rustup.rs/), or use:
-```powershell
-# Using winget
-winget install Rustlang.Rustup
-
-# Or download from https://rustup.rs/
-```
-
-**Verify Installation:**
-```bash
-rustc --version
-cargo --version
-```
-
-You should see version 1.70 or higher. If the commands aren't found, restart your terminal or add Rust to your PATH:
-```bash
-# Linux/macOS
-source $HOME/.cargo/env
-
-# Windows (PowerShell)
-# Restart your terminal
-```
-
-**Additional Platform Requirements:**
-
-- **Linux**: Build essentials
-  ```bash
-  # Ubuntu/Debian
-  sudo apt-get install build-essential
-
-  # CentOS/RHEL
-  sudo yum groupinstall "Development Tools"
-  ```
-
-- **macOS**: Xcode Command Line Tools
-  ```bash
-  xcode-select --install
-  ```
-
-- **Windows**: Visual Studio Build Tools
-  - Install [Visual Studio Build Tools](https://visualstudio.microsoft.com/downloads/#build-tools-for-visual-studio-2022)
-  - During installation, select "Desktop development with C++"
-
-#### Installation Steps
-
-1. Clone the repository:
-   ```bash
-   git clone https://github.com/databricks/zerobus-sdk.git
-   cd zerobus-sdk/ts
-   ```
-
-2. Install dependencies:
-   ```bash
-   npm install
-   ```
-
-3. Build the native addon:
-   ```bash
-   npm run build
-   ```
-
-   This will compile the Rust code into a native Node.js addon (`.node` file) for your platform.
-
-4. Verify the build:
-   ```bash
-   # You should see a .node file
-   ls -la *.node
-   ```
-
-5. The SDK is now ready to use! You can:
-   - Use it directly in this directory for examples
-   - Link it globally: `npm link`
-   - Or copy it into your project's `node_modules`
 
 **Troubleshooting:**
 
+- **Unsupported platform or source build requested**: Install Rust 1.70+,
+  Cargo, and your platform C/C++ build tools, clone this repository, and run
+  `npm install` followed by `npm run build` from `zerobus-sdk/typescript`
 - **"rustc: command not found"**: Restart your terminal after installing Rust
 - **Build fails on Windows**: Ensure Visual Studio Build Tools are installed with C++ support
 - **Build fails on Linux**: Install build-essential or equivalent package
@@ -227,8 +142,6 @@ const stream = await sdk.createStream(
 );
 
 try {
-    let lastOffset: bigint;
-
     // Send all records
     for (let i = 0; i < 100; i++) {
         const record = {
@@ -237,12 +150,12 @@ try {
             humidity: 50 + (i % 40)
         };
 
-        // ingestRecordOffset returns immediately after queuing
-        lastOffset = await stream.ingestRecordOffset(record);
+        // Queue the record; do not wait for its acknowledgement here
+        await stream.ingestRecordOffset(record);
     }
 
     // Wait for all records to be acknowledged
-    await stream.waitForOffset(lastOffset);
+    await stream.flush();
     console.log('Successfully ingested 100 records!');
 } finally {
     await stream.close();
@@ -258,7 +171,15 @@ Protocol Buffers is the default serialization format and provides efficient bina
 Before starting, ensure you have:
 
 1. **Protocol Buffer Compiler (`protoc`)** - Required for generating descriptor files
-2. **protobufjs** and **protobufjs-cli** - Already included in package.json devDependencies
+2. **protobufjs** - Required at runtime by your generated Protocol Buffer code
+3. **protobufjs-cli** - Required during development to generate JavaScript and type declarations
+
+Install the JavaScript runtime and code-generation tools in your application:
+
+```bash
+npm install protobufjs
+npm install --save-dev protobufjs-cli
+```
 
 #### Step 1: Install Protocol Buffer Compiler
 
@@ -299,7 +220,9 @@ protoc --version
 
 #### Step 2: Define Your Protocol Buffer Schema
 
-The SDK includes an example schema at `schemas/air_quality.proto`:
+Create `schemas/air_quality.proto` in your application with the following
+example schema. Also create an `examples/generated` directory for the generated
+JavaScript and type declarations:
 
 ```protobuf
 syntax = "proto2";
@@ -319,13 +242,8 @@ message AirQuality {
 Generate TypeScript code from your proto schema:
 
 ```bash
-npm run build:proto
-```
-
-This runs:
-```bash
-pbjs -t static-module -w commonjs -o examples/generated/air_quality.js schemas/air_quality.proto
-pbts -o examples/generated/air_quality.d.ts examples/generated/air_quality.js
+npx pbjs -t static-module -w commonjs -o examples/generated/air_quality.js schemas/air_quality.proto
+npx pbts -o examples/generated/air_quality.d.ts examples/generated/air_quality.js
 ```
 
 **Output:**
@@ -355,7 +273,7 @@ That's it! The SDK will automatically extract the message descriptor from this f
 ```typescript
 import { ZerobusSdk, RecordType } from '@databricks/zerobus-ingest-sdk';
 import * as airQuality from './examples/generated/air_quality';
-import { loadDescriptorProto } from '@databricks/zerobus-ingest-sdk/utils/descriptor';
+import { loadDescriptorProto } from '@databricks/zerobus-ingest-sdk/utils/descriptor.js';
 
 // Configuration
 const zerobusEndpoint = 'https://<workspace-id>.zerobus.<region>.cloud.databricks.com';
@@ -392,7 +310,6 @@ const stream = await sdk.createStream(tableProperties, clientId, clientSecret, o
 
 try {
     const AirQuality = airQuality.examples.AirQuality;
-    let lastOffset: bigint;
 
     // Send all records
     for (let i = 0; i < 100; i++) {
@@ -402,12 +319,12 @@ try {
             humidity: 50 + i
         });
 
-        // ingestRecordOffset returns immediately after queuing
-        lastOffset = await stream.ingestRecordOffset(record);
+        // Queue the record; do not wait for its acknowledgement here
+        await stream.ingestRecordOffset(record);
     }
 
     // Wait for all records to be acknowledged
-    await stream.waitForOffset(lastOffset);
+    await stream.flush();
     console.log('Successfully ingested 100 records!');
 } finally {
     await stream.close();
@@ -470,24 +387,16 @@ message NestedData {
    EOF
    ```
 
-2. **Add build script to package.json:**
-   ```json
-   {
-     "scripts": {
-       "build:proto:myschema": "pbjs -t static-module -w commonjs -o examples/generated/my_schema.js schemas/my_schema.proto && pbts -o examples/generated/my_schema.d.ts examples/generated/my_schema.js"
-     }
-   }
-   ```
-
-3. **Generate code and descriptor:**
+2. **Generate code and descriptor:**
    ```bash
-   npm run build:proto:myschema
+   npx pbjs -t static-module -w commonjs -o examples/generated/my_schema.js schemas/my_schema.proto
+   npx pbts -o examples/generated/my_schema.d.ts examples/generated/my_schema.js
    protoc --descriptor_set_out=schemas/my_schema_descriptor.pb --include_imports schemas/my_schema.proto
    ```
 
-4. **Load descriptor in your code:**
+3. **Load descriptor in your code:**
    ```typescript
-   import { loadDescriptorProto } from '@databricks/zerobus-ingest-sdk/utils/descriptor';
+   import { loadDescriptorProto } from '@databricks/zerobus-ingest-sdk/utils/descriptor.js';
    const descriptorBase64 = loadDescriptorProto({
        descriptorPath: 'schemas/my_schema_descriptor.pb',
        protoFileName: 'my_schema.proto',
@@ -501,7 +410,7 @@ message NestedData {
 - Install `protoc` (see Step 1 above)
 
 **"Cannot find module './generated/air_quality'"**
-- Run `npm run build:proto` to generate TypeScript code
+- Run the `npx pbjs` and `npx pbts` commands from Step 3
 
 **"Descriptor file not found"**
 - Generate the descriptor file using the commands in Step 4
@@ -513,27 +422,27 @@ message NestedData {
 - Make sure you're using `loadDescriptorProto()` from the utils
 
 **Build fails on proto generation**
-- Ensure protobufjs is installed: `npm install --save-dev protobufjs protobufjs-cli`
+- Ensure the runtime and CLI are installed: `npm install protobufjs` and
+  `npm install --save-dev protobufjs-cli`
 
 #### Quick Reference
 
-Complete setup from scratch:
+After creating `schemas/air_quality.proto` and the `examples/generated`
+directory as described above:
 ```bash
-# Install dependencies and build SDK
-npm install
-npm run build
+# Install the SDK and protobuf codegen tools
+npm install @databricks/zerobus-ingest-sdk protobufjs
+npm install --save-dev protobufjs-cli
 
-# Setup Protocol Buffers
-npm run build:proto
+# Generate protobuf code and descriptor
+npx pbjs -t static-module -w commonjs -o examples/generated/air_quality.js schemas/air_quality.proto
+npx pbts -o examples/generated/air_quality.d.ts examples/generated/air_quality.js
 protoc --descriptor_set_out=schemas/air_quality_descriptor.pb --include_imports schemas/air_quality.proto
-
-# Run example
-npm run example:proto:single
 ```
 
 #### Why Two Steps (TypeScript + Descriptor)?
 
-1. **TypeScript Code Generation** (`npm run build:proto`):
+1. **TypeScript Code Generation** (`npx pbjs` and `npx pbts`):
    - Creates JavaScript/TypeScript code for your application
    - Provides type-safe message creation and encoding
    - Used in your application code
@@ -547,9 +456,13 @@ Both are necessary for Protocol Buffers ingestion!
 
 ## Usage Examples
 
-See the `examples/` directory for complete, runnable examples. See [examples/README.md](examples/README.md) for detailed instructions.
+The source repository contains complete, runnable examples in `examples/`.
+Clone and build the repository using the [local development](#local-development-from-source)
+instructions, then see [examples/README.md](examples/README.md) for details.
 
 ### Running Examples
+
+Run these commands from the cloned repository's `typescript` directory:
 
 ```bash
 # Set environment variables
@@ -718,13 +631,15 @@ const stream = await sdk.createStream(
 ## Descriptor Utilities
 
 The SDK provides a helper function to extract Protocol Buffer descriptors from FileDescriptorSets.
+Use the `.js` subpath shown below for compatibility with CommonJS and native
+Node.js ESM imports.
 
 ### loadDescriptorProto()
 
 Extracts a specific message descriptor from a FileDescriptorSet:
 
 ```typescript
-import { loadDescriptorProto } from '@databricks/zerobus-ingest-sdk/utils/descriptor';
+import { loadDescriptorProto } from '@databricks/zerobus-ingest-sdk/utils/descriptor.js';
 
 const descriptorBase64 = loadDescriptorProto({
     descriptorPath: 'schemas/my_schema_descriptor.pb',

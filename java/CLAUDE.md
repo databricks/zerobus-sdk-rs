@@ -48,7 +48,7 @@ Run from `java/`:
 - `mvn compile` — Compile
 - `mvn test` — Run tests
 - `mvn test -Dtest=ClassName#method` — Run specific test
-- `mvn clean package` — Build JAR (includes fat JAR)
+- `mvn clean package -Dzerobus.skipNativeLibCheck=true` — Build local Java JARs without staged release JNI libraries
 - `mvn spotless:check` — Check formatting (Google Java Format)
 - `mvn spotless:apply` — Auto-format
 

@@ -1,7 +1,7 @@
 cmake_minimum_required(VERSION 3.16)
 
 project(zerobus_cpp
-    VERSION 0.1.0
+    VERSION 0.1.1
     DESCRIPTION "Zerobus C++ SDK (wrapper over the Zerobus C FFI)"
     LANGUAGES CXX)
 
@@ -69,7 +69,8 @@ add_library(zerobus_cpp
     src/stream.cpp
     src/arrow_stream.cpp
     src/proto_schema.cpp
-    src/headers_callback.cpp)
+    src/headers_callback.cpp
+    src/ack_callback.cpp)
 add_library(zerobus::zerobus ALIAS zerobus_cpp)
 
 target_compile_features(zerobus_cpp PUBLIC cxx_std_17)

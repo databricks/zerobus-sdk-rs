@@ -11,12 +11,12 @@ use tonic::transport::{Channel, Endpoint};
 use tracing::{error, info, instrument};
 
 use crate::databricks::zerobus::zerobus_client::ZerobusClient;
-use crate::proxy::{self, ConnectorFactory, ProxyConnector};
+use crate::proxy::{self, ConnectorFactory};
 use crate::stream::ZerobusStream;
 use crate::{StreamBuilder, TlsConfig, ZerobusError, ZerobusResult, ZerobusSdkBuilder};
 
 #[cfg(feature = "arrow-flight")]
-use crate::arrow_stream::ZerobusArrowStream;
+use crate::stream::ZerobusArrowStream;
 
 /// Default identifier the SDK sends as the HTTP `user-agent` header on every
 /// request. Use [`ZerobusSdkBuilder::application_name`] to append an
@@ -55,7 +55,7 @@ pub struct ZerobusSdk {
     shared_channel: tokio::sync::Mutex<Option<ZerobusClient<Channel>>>,
     pub(crate) workspace_id: String,
     pub(crate) tls_config: Arc<dyn TlsConfig>,
-    connector_factory: Option<ConnectorFactory>,
+    pub(crate) connector_factory: Option<ConnectorFactory>,
     /// Final value sent as the HTTP `user-agent` header on every request.
     /// Either `"zerobus-sdk-rs/<version>"` or `"zerobus-sdk-rs/<version> <application_name>"`.
     pub(crate) sdk_identifier: Arc<str>,
@@ -274,6 +274,7 @@ impl ZerobusSdk {
         let new_stream = ZerobusArrowStream::new(
             &self.zerobus_endpoint,
             Arc::clone(&self.tls_config),
+            self.connector_factory.clone(),
             stream.table_properties.clone(),
             stream.headers_provider(),
             stream.options().clone(),
@@ -318,15 +319,8 @@ impl ZerobusSdk {
 
             let endpoint = self.tls_config.configure_endpoint(endpoint)?;
 
-            // A caller-supplied factory (from `ZerobusSdkBuilder::connector_factory`)
-            // fully replaces the default env-var proxy detection
-            // (`https_proxy`/`HTTPS_PROXY` and friends).
             let host = endpoint.uri().host().unwrap_or_default().to_string();
-            let proxy_connector = match &self.connector_factory {
-                Some(factory) => factory(&host).map(ProxyConnector::into_inner),
-                None if !proxy::is_no_proxy(&host) => proxy::create_proxy_connector(),
-                None => None,
-            };
+            let proxy_connector = proxy::resolve_connector(&host, self.connector_factory.as_ref())?;
 
             let channel = match proxy_connector {
                 Some(pc) => endpoint.connect_with_connector_lazy(pc),

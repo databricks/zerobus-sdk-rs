@@ -3,7 +3,7 @@ use std::pin::Pin;
 use std::sync::{Arc, Mutex};
 
 use pyo3::prelude::*;
-use pyo3_asyncio::tokio::future_into_py;
+use pyo3_async_runtimes::tokio::future_into_py;
 use tokio::sync::RwLock;
 
 use databricks_zerobus_ingest_sdk::{
@@ -56,7 +56,7 @@ impl PyAckFuture {
 
 #[pymethods]
 impl PyAckFuture {
-    fn __await__<'py>(slf: PyRef<'_, Self>, py: Python<'py>) -> PyResult<&'py PyAny> {
+    fn __await__<'py>(slf: PyRef<'_, Self>, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
         let inner_clone = slf.inner.clone();
 
         let rust_future = async move {
@@ -97,7 +97,11 @@ impl ZerobusStream {
         since = "0.3.0",
         note = "Use ingest_record_offset() instead for better performance"
     )]
-    fn ingest_record<'py>(&self, py: Python<'py>, payload: &PyAny) -> PyResult<&'py PyAny> {
+    fn ingest_record<'py>(
+        &self,
+        py: Python<'py>,
+        payload: &Bound<'_, PyAny>,
+    ) -> PyResult<Bound<'py, PyAny>> {
         let record_payload = extract_record_payload(payload)?;
         let stream_clone = self.inner.clone();
 
@@ -127,7 +131,11 @@ impl ZerobusStream {
     }
 
     /// Ingest a single record and return the offset ID (async)
-    fn ingest_record_offset<'py>(&self, py: Python<'py>, payload: &PyAny) -> PyResult<&'py PyAny> {
+    fn ingest_record_offset<'py>(
+        &self,
+        py: Python<'py>,
+        payload: &Bound<'_, PyAny>,
+    ) -> PyResult<Bound<'py, PyAny>> {
         let record_payload = extract_record_payload(payload)?;
         let stream = self.inner.clone();
 
@@ -142,11 +150,11 @@ impl ZerobusStream {
     }
 
     /// Ingest a single record without waiting (fire-and-forget async)
-    fn ingest_record_nowait(&self, payload: &PyAny) -> PyResult<()> {
+    fn ingest_record_nowait(&self, payload: &Bound<'_, PyAny>) -> PyResult<()> {
         let record_payload = extract_record_payload(payload)?;
         let stream = self.inner.clone();
 
-        pyo3_asyncio::tokio::get_runtime().spawn(async move {
+        pyo3_async_runtimes::tokio::get_runtime().spawn(async move {
             let guard = stream.read().await;
             let _ = guard.ingest_record_offset(record_payload).await;
         });
@@ -158,8 +166,8 @@ impl ZerobusStream {
     fn ingest_records_offset<'py>(
         &self,
         py: Python<'py>,
-        payloads: &PyAny,
-    ) -> PyResult<&'py PyAny> {
+        payloads: &Bound<'_, PyAny>,
+    ) -> PyResult<Bound<'py, PyAny>> {
         let record_payloads = extract_record_payloads(payloads)?;
         let stream = self.inner.clone();
 
@@ -174,11 +182,11 @@ impl ZerobusStream {
     }
 
     /// Ingest a batch of records without waiting (async)
-    fn ingest_records_nowait(&self, payloads: &PyAny) -> PyResult<()> {
+    fn ingest_records_nowait(&self, payloads: &Bound<'_, PyAny>) -> PyResult<()> {
         let record_payloads = extract_record_payloads(payloads)?;
         let stream = self.inner.clone();
 
-        pyo3_asyncio::tokio::get_runtime().spawn(async move {
+        pyo3_async_runtimes::tokio::get_runtime().spawn(async move {
             let guard = stream.read().await;
             let _ = guard.ingest_records_offset(record_payloads).await;
         });
@@ -187,7 +195,7 @@ impl ZerobusStream {
     }
 
     /// Wait for a specific offset to be acknowledged (async)
-    fn wait_for_offset<'py>(&self, py: Python<'py>, offset: i64) -> PyResult<&'py PyAny> {
+    fn wait_for_offset<'py>(&self, py: Python<'py>, offset: i64) -> PyResult<Bound<'py, PyAny>> {
         let stream = self.inner.clone();
         future_into_py(py, async move {
             let guard = stream.read().await;
@@ -197,7 +205,7 @@ impl ZerobusStream {
     }
 
     /// Flush the stream (async)
-    fn flush<'py>(&self, py: Python<'py>) -> PyResult<&'py PyAny> {
+    fn flush<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
         let stream = self.inner.clone();
         future_into_py(py, async move {
             let guard = stream.read().await;
@@ -207,7 +215,7 @@ impl ZerobusStream {
     }
 
     /// Close the stream (async)
-    fn close<'py>(&self, py: Python<'py>) -> PyResult<&'py PyAny> {
+    fn close<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
         let stream = self.inner.clone();
         future_into_py(py, async move {
             let mut guard = stream.write().await;
@@ -217,15 +225,15 @@ impl ZerobusStream {
     }
 
     /// Get unacknowledged records
-    fn get_unacked_records<'py>(&self, py: Python<'py>) -> PyResult<&'py PyAny> {
+    fn get_unacked_records<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
         let stream = self.inner.clone();
 
         future_into_py(py, async move {
             let guard = stream.read().await;
             let records = guard.get_unacked_records().await.map_err(map_error)?;
 
-            Python::with_gil(|py| {
-                let out: Vec<PyObject> =
+            Python::attach(|py| {
+                let out: Vec<Py<PyAny>> =
                     records.map(|r| encoded_record_to_pybytes(py, r)).collect();
                 Ok(out)
             })
@@ -233,15 +241,15 @@ impl ZerobusStream {
     }
 
     /// Get unacknowledged batches
-    fn get_unacked_batches<'py>(&self, py: Python<'py>) -> PyResult<&'py PyAny> {
+    fn get_unacked_batches<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
         let stream = self.inner.clone();
 
         future_into_py(py, async move {
             let guard = stream.read().await;
             let batches = guard.get_unacked_batches().await.map_err(map_error)?;
 
-            Python::with_gil(|py| {
-                let out: Vec<Vec<PyObject>> = batches
+            Python::attach(|py| {
+                let out: Vec<Vec<Py<PyAny>>> = batches
                     .into_iter()
                     .map(|batch| {
                         batch
@@ -296,7 +304,7 @@ impl ZerobusSdk {
     ///
     /// Kept as a no-op for backwards compatibility. Rust SDK 2.0.0 removed the
     /// underlying field; TLS is always controlled via the SDK builder.
-    fn set_use_tls<'py>(&self, py: Python<'py>, _use_tls: bool) -> PyResult<&'py PyAny> {
+    fn set_use_tls<'py>(&self, py: Python<'py>, _use_tls: bool) -> PyResult<Bound<'py, PyAny>> {
         future_into_py(py, async move { Ok(()) })
     }
 
@@ -309,7 +317,7 @@ impl ZerobusSdk {
         client_secret: String,
         table_properties: &TableProperties,
         options: Option<StreamConfigurationOptions>,
-    ) -> PyResult<&'py PyAny> {
+    ) -> PyResult<Bound<'py, PyAny>> {
         let sdk = self.inner.clone();
         let table_properties = table_properties.clone();
         let opts = options.unwrap_or_default();
@@ -333,9 +341,9 @@ impl ZerobusSdk {
         &self,
         py: Python<'py>,
         table_properties: &TableProperties,
-        headers_provider: PyObject,
+        headers_provider: Py<PyAny>,
         options: Option<StreamConfigurationOptions>,
-    ) -> PyResult<&'py PyAny> {
+    ) -> PyResult<Bound<'py, PyAny>> {
         let sdk = self.inner.clone();
         let table_properties = table_properties.clone();
         let opts = options.unwrap_or_default();
@@ -364,7 +372,7 @@ impl ZerobusSdk {
         client_id: String,
         client_secret: String,
         options: Option<ArrowStreamConfigurationOptions>,
-    ) -> PyResult<&'py PyAny> {
+    ) -> PyResult<Bound<'py, PyAny>> {
         arrow::create_arrow_stream_async(
             &self.inner,
             py,
@@ -383,9 +391,9 @@ impl ZerobusSdk {
         py: Python<'py>,
         table_name: String,
         schema_ipc_bytes: Vec<u8>,
-        headers_provider: PyObject,
+        headers_provider: Py<PyAny>,
         options: Option<ArrowStreamConfigurationOptions>,
-    ) -> PyResult<&'py PyAny> {
+    ) -> PyResult<Bound<'py, PyAny>> {
         arrow::create_arrow_stream_with_headers_provider_async(
             &self.inner,
             py,
@@ -401,7 +409,7 @@ impl ZerobusSdk {
         &self,
         py: Python<'py>,
         old_stream: &AsyncZerobusArrowStream,
-    ) -> PyResult<&'py PyAny> {
+    ) -> PyResult<Bound<'py, PyAny>> {
         arrow::recreate_arrow_stream_async(&self.inner, py, old_stream)
     }
 
@@ -410,7 +418,7 @@ impl ZerobusSdk {
         &self,
         py: Python<'py>,
         old_stream: &ZerobusStream,
-    ) -> PyResult<&'py PyAny> {
+    ) -> PyResult<Bound<'py, PyAny>> {
         let sdk = self.inner.clone();
         let old_stream_inner = old_stream.inner.clone();
 

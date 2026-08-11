@@ -1,14 +1,15 @@
 use std::sync::Arc;
 
 use hyper_http_proxy::{Intercept, Proxy, ProxyConnector as HyperProxyConnector};
+use hyper_rustls::{HttpsConnector, HttpsConnectorBuilder};
 use hyper_util::client::legacy::connect::HttpConnector;
 use tracing::info;
 
 use crate::ZerobusError;
 
-pub(crate) type ProxiedConnector = HyperProxyConnector<HttpConnector>;
+pub(crate) type ProxiedConnector = HyperProxyConnector<HttpsConnector<HttpConnector>>;
 
-/// A proxy connector for the gRPC channel.
+/// A proxy connector for Zerobus gRPC transport channels, including Arrow Flight.
 ///
 /// Construct with [`ProxyConnector::new`] and install via
 /// [`crate::ZerobusSdkBuilder::connector_factory`] to override the SDK's
@@ -21,7 +22,7 @@ pub(crate) type ProxiedConnector = HyperProxyConnector<HttpConnector>;
 pub struct ProxyConnector(ProxiedConnector);
 
 impl ProxyConnector {
-    /// Build a proxy connector that routes all gRPC traffic through
+    /// Build a proxy connector that routes all Zerobus gRPC traffic through
     /// `proxy_uri` (e.g. `"http://corp-proxy:3128"` or
     /// `"https://corp-proxy:3128"`).
     #[allow(clippy::result_large_err)]
@@ -36,24 +37,38 @@ impl ProxyConnector {
 
 #[allow(clippy::result_large_err)]
 fn build_connector(proxy_uri: &str) -> Result<ProxiedConnector, ZerobusError> {
-    let uri = proxy_uri.parse().map_err(|e| {
-        ZerobusError::InvalidArgument(format!("failed to parse proxy URL '{}': {}", proxy_uri, e))
-    })?;
+    let uri: tonic::transport::Uri = proxy_uri
+        .parse()
+        .map_err(|e| ZerobusError::InvalidArgument(format!("failed to parse proxy URL: {}", e)))?;
+    info!(
+        scheme = uri.scheme_str().unwrap_or_default(),
+        host = uri.host().unwrap_or_default(),
+        port = uri.port_u16(),
+        "Using HTTP proxy"
+    );
     let mut proxy = Proxy::new(Intercept::All, uri);
     // gRPC is HTTP/2 and cannot traverse a regular HTTP/1 forward proxy;
     // force CONNECT tunneling for all targets (matches gRPC core behavior).
     proxy.force_connect();
-    let mut http_connector = HttpConnector::new();
-    // Allow non-http target schemes (e.g. https:// CONNECT targets) through
-    // the underlying TCP connector; without this, HttpConnector rejects them.
-    http_connector.enforce_http(false);
-    // `from_proxy` (vs `from_proxy_unsecured`) attaches a TLS connector used
-    // only for the client→proxy hop when the proxy URL is https://. The
-    // CONNECT tunnel still carries raw TCP; tonic applies its own TLS to the
-    // target endpoint on top.
-    HyperProxyConnector::from_proxy(http_connector, proxy).map_err(|e| {
-        ZerobusError::ChannelCreationError(format!("failed to build proxy connector: {}", e))
-    })
+    // TLS here is exclusively for an HTTPS proxy. The proxy connector itself
+    // must return the raw CONNECT tunnel so tonic can apply the endpoint's TLS
+    // exactly once. Giving `HyperProxyConnector` its own target TLS config
+    // would make HTTPS endpoints perform a second TLS handshake.
+    let proxy_transport = HttpsConnectorBuilder::new()
+        .with_native_roots()
+        .map_err(|e| {
+            ZerobusError::ChannelCreationError(format!(
+                "failed to load native roots for proxy connector: {}",
+                e
+            ))
+        })?
+        .https_or_http()
+        .enable_http1()
+        .build();
+    Ok(HyperProxyConnector::from_proxy_unsecured(
+        proxy_transport,
+        proxy,
+    ))
 }
 
 /// Signature for caller-supplied proxy selection. Given the target host,
@@ -61,8 +76,26 @@ fn build_connector(proxy_uri: &str) -> Result<ProxiedConnector, ZerobusError> {
 ///
 /// Set via [`crate::ZerobusSdkBuilder::connector_factory`]. When a factory is
 /// installed it fully replaces the default env-var proxy detection — callers
-/// own the complete proxy decision, including any no-proxy bypass rules.
+/// own the complete proxy decision, including any no-proxy bypass rules. The
+/// selected policy applies to both standard and Arrow Flight streams, including
+/// replacement channels created during recovery.
 pub type ConnectorFactory = Arc<dyn Fn(&str) -> Option<ProxyConnector> + Send + Sync>;
+
+/// Resolves the connector policy for a target host.
+///
+/// A caller-supplied factory fully replaces environment-based proxy discovery.
+/// Without a factory, the standard gRPC proxy and no-proxy environment variables
+/// determine whether the connection is proxied.
+pub(crate) fn resolve_connector(
+    host: &str,
+    connector_factory: Option<&ConnectorFactory>,
+) -> Result<Option<ProxiedConnector>, ZerobusError> {
+    match connector_factory {
+        Some(factory) => Ok(factory(host).map(ProxyConnector::into_inner)),
+        None if !is_no_proxy(host) => create_proxy_connector(),
+        None => Ok(None),
+    }
+}
 
 /// Env var names checked for proxy URL, in gRPC core precedence order.
 const PROXY_ENV_VARS: &[&str] = &[
@@ -96,19 +129,14 @@ fn read_first_env(names: &[&str]) -> Option<String> {
 /// For each name the lowercase variant is checked first, then uppercase
 /// (matching standard convention and gRPC core behavior).
 ///
-/// Uses `from_proxy` so `https://` proxy URLs work (TLS handshake on the
-/// client→proxy hop using the system trust store). The CONNECT tunnel still
-/// carries raw TCP; tonic applies TLS to the target on top.
-pub(crate) fn create_proxy_connector() -> Option<ProxiedConnector> {
-    let proxy_url = read_first_env(PROXY_ENV_VARS)?;
-    info!("Using HTTP proxy: {}", proxy_url);
-    match build_connector(&proxy_url) {
-        Ok(pc) => Some(pc),
-        Err(e) => {
-            tracing::warn!("{}", e);
-            None
-        }
-    }
+/// The underlying connector handles TLS for `https://` proxy URLs using the
+/// system trust store. The CONNECT tunnel remains raw so tonic applies any
+/// target TLS exactly once.
+pub(crate) fn create_proxy_connector() -> Result<Option<ProxiedConnector>, ZerobusError> {
+    let Some(proxy_url) = read_first_env(PROXY_ENV_VARS) else {
+        return Ok(None);
+    };
+    build_connector(&proxy_url).map(Some)
 }
 
 /// Checks whether a given host should bypass the proxy.
@@ -192,5 +220,17 @@ mod tests {
             "example.com",
             "other.com , example.com , more.com"
         ));
+    }
+
+    #[test]
+    fn invalid_proxy_error_does_not_expose_credentials() {
+        let result = build_connector("http://proxy-user:super-secret@/proxy");
+        let error = match result {
+            Ok(_) => panic!("expected invalid proxy URL to fail"),
+            Err(error) => error.to_string(),
+        };
+
+        assert!(!error.contains("proxy-user"));
+        assert!(!error.contains("super-secret"));
     }
 }

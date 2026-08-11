@@ -21,3 +21,19 @@ func SetDefaultDrainTimeout(d time.Duration) (restore func()) {
 	defaultDrainTimeout = d
 	return func() { defaultDrainTimeout = prev }
 }
+
+// SetDefaultHeadersTimeout overrides the no-deadline header-resolution timeout
+// and returns a restore func for tests.
+func SetDefaultHeadersTimeout(d time.Duration) (restore func()) {
+	prev := defaultHeadersTimeout
+	defaultHeadersTimeout = d
+	return func() { defaultHeadersTimeout = prev }
+}
+
+// SetDefaultHandshakeTimeout overrides the no-deadline handshake timeout and
+// returns a restore func for tests.
+func SetDefaultHandshakeTimeout(d time.Duration) (restore func()) {
+	prev := defaultHandshakeTimeout
+	defaultHandshakeTimeout = d
+	return func() { defaultHandshakeTimeout = prev }
+}

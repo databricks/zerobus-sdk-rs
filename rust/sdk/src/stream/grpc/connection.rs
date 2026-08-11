@@ -2,15 +2,16 @@
 //!
 //! This module is transport-specific: it builds the bidirectional gRPC stream
 //! used by `ZerobusStream` to talk to the Zerobus service. The Arrow Flight
-//! transport has its own equivalent in `arrow_stream.rs`.
+//! transport has its own equivalent in `stream/arrow/connection.rs`.
 
 use std::sync::Arc;
 
 use prost::Message;
+use tokio::time::Duration;
 use tokio_stream::wrappers::ReceiverStream;
 use tonic::metadata::MetadataValue;
 use tonic::transport::Channel;
-use tracing::{debug, error, info, instrument};
+use tracing::{debug, error, info, instrument, warn};
 
 use super::ZerobusStream;
 use crate::databricks::zerobus::ephemeral_stream_request::Payload as RequestPayload;
@@ -50,6 +51,59 @@ impl ZerobusStream {
         if let Err(err) = &result {
             if err.is_auth_rejection() {
                 headers_provider.invalidate().await;
+            }
+        }
+        result
+    }
+
+    /// Initial-setup variant of [`create_stream_connection`] that bounds both the
+    /// connection and the post-rejection credential invalidation under a single
+    /// `recovery_timeout_ms` deadline.
+    ///
+    /// This preserves the original auth rejection if a custom provider stalls in
+    /// `invalidate()`, so a stalled provider cannot turn a known auth rejection into a
+    /// retryable `DeadlineExceeded` and thereby bypass the one-shot auth-retry limit.
+    /// Reconnect keeps using [`create_stream_connection`] so its behavior is unchanged.
+    pub(super) async fn create_initial_stream_connection(
+        channel: ZerobusClient<Channel>,
+        table_properties: &TableProperties,
+        headers_provider: &Arc<dyn HeadersProvider>,
+        record_type: RecordType,
+        recovery_timeout_ms: u64,
+    ) -> ZerobusResult<(
+        tokio::sync::mpsc::Sender<EphemeralStreamRequest>,
+        tonic::Streaming<EphemeralStreamResponse>,
+        String,
+    )> {
+        let attempt_timeout = Duration::from_millis(recovery_timeout_ms);
+        let attempt_started = tokio::time::Instant::now();
+        let result = tokio::time::timeout(
+            attempt_timeout,
+            Self::create_stream_connection_inner(
+                channel,
+                table_properties,
+                headers_provider,
+                record_type,
+            ),
+        )
+        .await
+        .map_err(|_| {
+            ZerobusError::CreateStreamError(tonic::Status::deadline_exceeded(
+                "Stream creation timed out",
+            ))
+        })?;
+
+        if let Err(err) = &result {
+            let invalidate_timeout = attempt_timeout.saturating_sub(attempt_started.elapsed());
+            if err.is_auth_rejection()
+                && tokio::time::timeout(invalidate_timeout, headers_provider.invalidate())
+                    .await
+                    .is_err()
+            {
+                warn!(
+                    timeout_ms = recovery_timeout_ms,
+                    "Initial headers provider invalidation timed out; preserving auth rejection"
+                );
             }
         }
         result

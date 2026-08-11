@@ -5,11 +5,14 @@ import (
 	"errors"
 	"io"
 	"net"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/metadata"
+	"google.golang.org/grpc/status"
 	"google.golang.org/grpc/test/bufconn"
 	"google.golang.org/protobuf/proto"
 
@@ -52,6 +55,9 @@ type fakeServer struct {
 	// hangDrain makes the server ignore the client's half-close and never end the
 	// stream, so GracefulClose can't drain to io.EOF and must hit its ctx deadline.
 	hangDrain bool
+	// authRejectCode, when not codes.OK, makes open fail with that gRPC status
+	// after receiving create.
+	authRejectCode codes.Code
 	// drainGate, when non-nil, holds io.EOF back until closed, so a test can
 	// assert GracefulClose keeps draining rather than returning at the first ack.
 	drainGate chan struct{}
@@ -81,6 +87,9 @@ func (f *fakeServer) EphemeralStream(stream zerobuspb.Zerobus_EphemeralStreamSer
 	if f.hangHandshake {
 		<-stream.Context().Done()
 		return stream.Context().Err()
+	}
+	if f.authRejectCode != codes.OK {
+		return status.Error(f.authRejectCode, "bad credentials")
 	}
 
 	var resp *zerobuspb.EphemeralStreamResponse
@@ -135,6 +144,34 @@ func (f *fakeServer) EphemeralStream(stream zerobuspb.Zerobus_EphemeralStreamSer
 	}
 }
 
+type stubHeadersProvider struct {
+	headers         map[string]string
+	calls           atomic.Int32
+	invalidateCalls atomic.Int32
+	lastTable       atomic.Value // string
+}
+
+func (p *stubHeadersProvider) GetHeaders(_ context.Context, tableName string) (map[string]string, error) {
+	p.calls.Add(1)
+	p.lastTable.Store(tableName)
+	out := make(map[string]string, len(p.headers))
+	for k, v := range p.headers {
+		out[k] = v
+	}
+	return out, nil
+}
+
+func (p *stubHeadersProvider) Invalidate(_ context.Context, tableName string) {
+	p.invalidateCalls.Add(1)
+	p.lastTable.Store(tableName)
+}
+
+// authProvider returns a HeadersProvider that supplies a single authorization
+// header, for tests that just need the stream authenticated.
+func authProvider(token string) transport.HeadersProvider {
+	return &stubHeadersProvider{headers: map[string]string{"authorization": token}}
+}
+
 // firstMD returns the first metadata value for key, or "".
 func firstMD(md metadata.MD, key string) string {
 	if vs := md.Get(key); len(vs) > 0 {
@@ -143,27 +180,58 @@ func firstMD(md metadata.MD, key string) string {
 	return ""
 }
 
+// heldRecvErrorStream delays surfacing RecvMsg's real result until release is
+// closed, letting a test force "server status captured first, deadline observed
+// second" ordering in Conn.Open's handshake path.
+type heldRecvErrorStream struct {
+	grpc.ClientStream
+	release  <-chan struct{}
+	captured chan<- struct{}
+}
+
+func (s *heldRecvErrorStream) RecvMsg(m any) error {
+	err := s.ClientStream.RecvMsg(m)
+	select {
+	case s.captured <- struct{}{}:
+	default:
+	}
+	<-s.release
+	return err
+}
+
 // dialFake starts srv on an in-memory listener and returns a Conn wired to it.
 // The server and connection are torn down via t.Cleanup.
 func dialFake(t *testing.T, srv *fakeServer) *transport.Conn {
+	return dialFakeWithExtraDialOptions(t, srv)
+}
+
+// dialFakeWithExtraDialOptions is dialFake plus optional grpc-go dial options
+// (for example a client stream interceptor).
+func dialFakeWithExtraDialOptions(t *testing.T, srv *fakeServer, extraOpts ...grpc.DialOption) *transport.Conn {
 	t.Helper()
 
 	lis := bufconn.Listen(1 << 20)
 	gsrv := grpc.NewServer()
 	zerobuspb.RegisterZerobusServer(gsrv, srv)
+	serveDone := make(chan struct{})
 	go func() {
-		if err := gsrv.Serve(lis); err != nil {
+		defer close(serveDone)
+		if err := gsrv.Serve(lis); err != nil && !errors.Is(err, grpc.ErrServerStopped) {
 			t.Errorf("fake server stopped: %v", err)
 		}
 	}()
-	t.Cleanup(gsrv.Stop)
+	t.Cleanup(func() {
+		gsrv.Stop()
+		<-serveDone
+	})
 
 	dialer := grpc.WithContextDialer(func(ctx context.Context, _ string) (net.Conn, error) {
 		return lis.DialContext(ctx)
 	})
+	opts := append([]grpc.DialOption{dialer}, extraOpts...)
 	conn, err := transport.Dial("passthrough:///bufnet",
 		transport.WithInsecure(),
-		transport.WithGRPCDialOptions(dialer),
+		transport.WithGRPCDialOptions(opts...),
 	)
 	if err != nil {
 		t.Fatalf("Dial: %v", err)
@@ -183,13 +251,16 @@ func TestOpenHandshake(t *testing.T) {
 		TableName:       "main.sales.orders",
 		RecordType:      zerobuspb.RecordType_PROTO,
 		DescriptorProto: []byte("descriptor-bytes"),
-		Token:           "tok-abc",
+		HeadersProvider: authProvider("Bearer tok-abc"),
 	})
 	if err != nil {
 		t.Fatalf("Open: %v", err)
 	}
-	if got, want := stream.ID(), "stream-123"; got != want {
-		t.Errorf("stream ID = %q, want %q", got, want)
+	if got, want := stream.ServerID(), "stream-123"; got != want {
+		t.Errorf("server stream ID = %q, want %q", got, want)
+	}
+	if got, want := stream.ID(), stream.ServerID(); got != want {
+		t.Errorf("deprecated ID = %q, want %q", got, want)
 	}
 
 	got := <-srv.seen
@@ -207,15 +278,18 @@ func TestOpenHandshake(t *testing.T) {
 	}
 }
 
-func TestOpenPreservesKnownAuthScheme(t *testing.T) {
-	for _, tok := range []string{"Bearer tok", "basic dXNlcg==", "DPoP proof"} {
+// TestOpenSendsAuthValueVerbatim verifies the transport sends the provider's
+// authorization value exactly as given (only trimmed), leaving scheme formatting
+// to the provider rather than rewriting it.
+func TestOpenSendsAuthValueVerbatim(t *testing.T) {
+	for _, tok := range []string{"Bearer tok", "basic dXNlcg==", "DPoP proof", "raw-token", "Custom abc"} {
 		srv := &fakeServer{streamID: "s", seen: make(chan observed, 1)}
 		conn := dialFake(t, srv)
 
 		_, err := conn.Open(context.Background(), transport.StreamParams{
-			TableName:  "c.s.t",
-			RecordType: zerobuspb.RecordType_JSON,
-			Token:      tok,
+			TableName:       "c.s.t",
+			RecordType:      zerobuspb.RecordType_JSON,
+			HeadersProvider: authProvider(tok),
 		})
 		if err != nil {
 			t.Fatalf("Open %q: %v", tok, err)
@@ -226,22 +300,69 @@ func TestOpenPreservesKnownAuthScheme(t *testing.T) {
 	}
 }
 
-func TestOpenPrefixesUnknownScheme(t *testing.T) {
-	srv := &fakeServer{streamID: "s", seen: make(chan observed, 1)}
-	conn := dialFake(t, srv)
-
-	// A value whose first word is not a known scheme is a bare token and gets
-	// prefixed, rather than being sent unprefixed.
-	_, err := conn.Open(context.Background(), transport.StreamParams{
-		TableName:  "c.s.t",
-		RecordType: zerobuspb.RecordType_JSON,
-		Token:      "my token",
-	})
-	if err != nil {
-		t.Fatalf("Open: %v", err)
+func TestOpenRejectsInvalidHeaders(t *testing.T) {
+	cases := []struct {
+		name    string
+		headers map[string]string
+	}{
+		{
+			name:    "authorization with newline",
+			headers: map[string]string{"authorization": "tok\nen"},
+		},
+		{
+			name:    "authorization with null",
+			headers: map[string]string{"authorization": "tok\x00en"},
+		},
+		{
+			name:    "authorization with carriage return after scheme",
+			headers: map[string]string{"authorization": "Bearer tok\ren"},
+		},
+		{
+			name:    "custom header with carriage return",
+			headers: map[string]string{mdUserKey: "val\ruer"},
+		},
+		{
+			name:    "authorization with non-ASCII value",
+			headers: map[string]string{"authorization": "Bearer tøken"},
+		},
+		{
+			name:    "custom header key with space",
+			headers: map[string]string{"x bad": "v"},
+		},
+		{
+			name:    "custom header key with non-ASCII",
+			headers: map[string]string{"x-bäd": "v"},
+		},
+		{
+			name: "duplicate normalized key",
+			headers: map[string]string{
+				"authorization":   "tok-1",
+				" Authorization ": "tok-2",
+			},
+		},
+		{
+			name:    "empty key",
+			headers: map[string]string{"": "v"},
+		},
+		{
+			name:    "whitespace-only key",
+			headers: map[string]string{"   ": "v"},
+		},
 	}
-	if got := <-srv.seen; got.auth != "Bearer my token" {
-		t.Errorf("server saw authorization %q, want %q", got.auth, "Bearer my token")
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			srv := &fakeServer{streamID: "s", seen: make(chan observed, 1)}
+			conn := dialFake(t, srv)
+
+			_, err := conn.Open(context.Background(), transport.StreamParams{
+				TableName:       "c.s.t",
+				RecordType:      zerobuspb.RecordType_JSON,
+				HeadersProvider: &stubHeadersProvider{headers: tc.headers},
+			})
+			if err == nil {
+				t.Fatal("Open with invalid provider header: got nil error, want rejection")
+			}
+		})
 	}
 }
 
@@ -253,9 +374,9 @@ func TestStreamSendRecv(t *testing.T) {
 	defer cancel()
 
 	stream, err := conn.Open(ctx, transport.StreamParams{
-		TableName:  "c.s.t",
-		RecordType: zerobuspb.RecordType_JSON,
-		Token:      "tok",
+		TableName:       "c.s.t",
+		RecordType:      zerobuspb.RecordType_JSON,
+		HeadersProvider: authProvider("tok"),
 	})
 	if err != nil {
 		t.Fatalf("Open: %v", err)
@@ -287,9 +408,9 @@ func TestOpenProtoRequiresDescriptor(t *testing.T) {
 	conn := dialFake(t, srv)
 
 	_, err := conn.Open(context.Background(), transport.StreamParams{
-		TableName:  "c.s.t",
-		RecordType: zerobuspb.RecordType_PROTO, // no descriptor
-		Token:      "tok",
+		TableName:       "c.s.t",
+		RecordType:      zerobuspb.RecordType_PROTO, // no descriptor
+		HeadersProvider: authProvider("tok"),
 	})
 	if err == nil {
 		t.Fatal("Open with PROTO and no descriptor: got nil error, want failure")
@@ -301,9 +422,9 @@ func TestOpenRequiresTableName(t *testing.T) {
 	conn := dialFake(t, srv)
 
 	_, err := conn.Open(context.Background(), transport.StreamParams{
-		TableName:  "  ",
-		RecordType: zerobuspb.RecordType_JSON,
-		Token:      "tok",
+		TableName:       "  ",
+		RecordType:      zerobuspb.RecordType_JSON,
+		HeadersProvider: authProvider("tok"),
 	})
 	if err == nil {
 		t.Fatal("Open with empty table name: got nil error, want failure")
@@ -315,9 +436,9 @@ func TestOpenTrimsTableName(t *testing.T) {
 	conn := dialFake(t, srv)
 
 	_, err := conn.Open(context.Background(), transport.StreamParams{
-		TableName:  "  c.s.t  ",
-		RecordType: zerobuspb.RecordType_JSON,
-		Token:      "tok",
+		TableName:       "  c.s.t  ",
+		RecordType:      zerobuspb.RecordType_JSON,
+		HeadersProvider: authProvider("tok"),
 	})
 	if err != nil {
 		t.Fatalf("Open: %v", err)
@@ -332,9 +453,9 @@ func TestOpenRejectsUnsupportedRecordType(t *testing.T) {
 	conn := dialFake(t, srv)
 
 	_, err := conn.Open(context.Background(), transport.StreamParams{
-		TableName:  "c.s.t",
-		RecordType: zerobuspb.RecordType(999),
-		Token:      "tok",
+		TableName:       "c.s.t",
+		RecordType:      zerobuspb.RecordType(999),
+		HeadersProvider: authProvider("tok"),
 	})
 	if err == nil {
 		t.Fatal("Open with unsupported record type: got nil error, want failure")
@@ -346,22 +467,22 @@ func TestOpenRejectsUnexpectedResponse(t *testing.T) {
 	conn := dialFake(t, srv)
 
 	_, err := conn.Open(context.Background(), transport.StreamParams{
-		TableName:  "c.s.t",
-		RecordType: zerobuspb.RecordType_JSON,
-		Token:      "tok",
+		TableName:       "c.s.t",
+		RecordType:      zerobuspb.RecordType_JSON,
+		HeadersProvider: authProvider("tok"),
 	})
 	if err == nil {
 		t.Fatal("Open with non-create first response: got nil error, want failure")
 	}
 }
 
-func TestOpenOmitsEmptyToken(t *testing.T) {
+func TestOpenOmitsAuthWithoutProvider(t *testing.T) {
 	srv := &fakeServer{streamID: "s", seen: make(chan observed, 1)}
 	conn := dialFake(t, srv)
 
 	_, err := conn.Open(context.Background(), transport.StreamParams{
 		TableName:  "c.s.t",
-		RecordType: zerobuspb.RecordType_JSON, // no token set
+		RecordType: zerobuspb.RecordType_JSON, // no provider set
 	})
 	if err != nil {
 		t.Fatalf("Open: %v", err)
@@ -371,14 +492,324 @@ func TestOpenOmitsEmptyToken(t *testing.T) {
 	}
 }
 
+func TestOpenUsesHeadersProviderAndTableIsAuthoritative(t *testing.T) {
+	srv := &fakeServer{streamID: "s", seen: make(chan observed, 1)}
+	conn := dialFake(t, srv)
+
+	p := &stubHeadersProvider{
+		headers: map[string]string{
+			"authorization":                   "Bearer provider-token",
+			"x-databricks-zerobus-table-name": "wrong.table.name",
+			mdUserKey:                         "provider-md",
+		},
+	}
+	_, err := conn.Open(context.Background(), transport.StreamParams{
+		TableName:       "c.s.t",
+		RecordType:      zerobuspb.RecordType_JSON,
+		HeadersProvider: p,
+	})
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	got := <-srv.seen
+	if got.tableName != "c.s.t" {
+		t.Fatalf("server saw table %q, want %q", got.tableName, "c.s.t")
+	}
+	if got.auth != "Bearer provider-token" {
+		t.Fatalf("server saw auth %q, want %q", got.auth, "Bearer provider-token")
+	}
+	if got.userMD != "provider-md" {
+		t.Fatalf("server saw custom metadata %q, want %q", got.userMD, "provider-md")
+	}
+	if p.calls.Load() != 1 {
+		t.Fatalf("GetHeaders calls = %d, want 1", p.calls.Load())
+	}
+	last, _ := p.lastTable.Load().(string)
+	if last != "c.s.t" {
+		t.Fatalf("provider saw table %q, want %q", last, "c.s.t")
+	}
+}
+
+// TestOpenHeadersProviderNoAuthSendsNoAuthHeader verifies that a provider which
+// returns only non-auth headers opens the stream without an authorization header
+// rather than synthesizing one.
+func TestOpenHeadersProviderNoAuthSendsNoAuthHeader(t *testing.T) {
+	srv := &fakeServer{streamID: "s", seen: make(chan observed, 1)}
+	conn := dialFake(t, srv)
+
+	p := &stubHeadersProvider{
+		headers: map[string]string{mdUserKey: "provider-md"},
+	}
+	_, err := conn.Open(context.Background(), transport.StreamParams{
+		TableName:       "c.s.t",
+		RecordType:      zerobuspb.RecordType_JSON,
+		HeadersProvider: p,
+	})
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	got := <-srv.seen
+	if got.authCount != 0 {
+		t.Fatalf("server saw authorization %q (count %d), want none", got.auth, got.authCount)
+	}
+	if got.userMD != "provider-md" {
+		t.Fatalf("server saw custom metadata %q, want %q", got.userMD, "provider-md")
+	}
+}
+
+func TestOpenAuthRejectionPreservesStatusForLifecycle(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		code codes.Code
+	}{
+		{name: "Unauthenticated", code: codes.Unauthenticated},
+		{name: "PermissionDenied", code: codes.PermissionDenied},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			srv := &fakeServer{streamID: "s", seen: make(chan observed, 1), authRejectCode: tc.code}
+			conn := dialFake(t, srv)
+
+			p := &stubHeadersProvider{
+				headers: map[string]string{"authorization": "tok"},
+			}
+			_, err := conn.Open(context.Background(), transport.StreamParams{
+				TableName:       "c.s.t",
+				RecordType:      zerobuspb.RecordType_JSON,
+				HeadersProvider: p,
+			})
+			if err == nil {
+				t.Fatal("Open with server auth rejection: got nil error")
+			}
+			if got := status.Code(err); got != tc.code {
+				t.Fatalf("status code = %v, want %v", got, tc.code)
+			}
+			if p.invalidateCalls.Load() != 0 {
+				t.Fatalf("transport invalidated credentials %d time(s)", p.invalidateCalls.Load())
+			}
+		})
+	}
+}
+
+// TestOpenAuthRejectionStillInvalidatesWhenOpenDeadlineExpires verifies the
+// user-visible race: if Recv already captured an auth rejection but Open's ctx
+// expires before Recv returns it, Open still reports the rejection and
+// invalidates cached credentials.
+func TestOpenAuthRejectionStillInvalidatesWhenOpenDeadlineExpires(t *testing.T) {
+	srv := &fakeServer{streamID: "s", seen: make(chan observed, 1), authRejectCode: codes.Unauthenticated}
+	releaseRecv := make(chan struct{})
+	capturedRecv := make(chan struct{}, 1)
+	holdRecv := grpc.WithStreamInterceptor(func(
+		ctx context.Context,
+		desc *grpc.StreamDesc,
+		cc *grpc.ClientConn,
+		method string,
+		streamer grpc.Streamer,
+		opts ...grpc.CallOption,
+	) (grpc.ClientStream, error) {
+		cs, err := streamer(ctx, desc, cc, method, opts...)
+		if err != nil {
+			return nil, err
+		}
+		return &heldRecvErrorStream{
+			ClientStream: cs,
+			release:      releaseRecv,
+			captured:     capturedRecv,
+		}, nil
+	})
+	conn := dialFakeWithExtraDialOptions(t, srv, holdRecv)
+
+	p := &stubHeadersProvider{headers: map[string]string{"authorization": "tok"}}
+	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+	defer cancel()
+	go func() {
+		<-ctx.Done()
+		close(releaseRecv)
+	}()
+
+	_, err := conn.Open(ctx, transport.StreamParams{
+		TableName:       "c.s.t",
+		RecordType:      zerobuspb.RecordType_JSON,
+		HeadersProvider: p,
+	})
+	if err == nil {
+		t.Fatal("Open with held auth rejection: got nil error")
+	}
+	select {
+	case <-capturedRecv:
+	default:
+		t.Fatal("test setup failure: interceptor did not capture a Recv result before release")
+	}
+	if got := status.Code(err); got != codes.Unauthenticated {
+		t.Fatalf("Open error code = %v, want %v", got, codes.Unauthenticated)
+	}
+	if errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("Open error = %v, want auth rejection to replace DeadlineExceeded", err)
+	}
+	if p.invalidateCalls.Load() != 1 {
+		t.Fatalf("Invalidate calls = %d, want 1", p.invalidateCalls.Load())
+	}
+}
+
+// TestOpenNonAuthRejectionDoesNotInvalidate verifies that a non-auth failure
+// (e.g. a bad handshake, or a non-auth gRPC code) leaves the provider's cached
+// credentials intact: only Unauthenticated/PermissionDenied invalidate.
+func TestOpenNonAuthRejectionDoesNotInvalidate(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		srv  *fakeServer
+	}{
+		{
+			name: "Internal code",
+			srv:  &fakeServer{streamID: "s", seen: make(chan observed, 1), authRejectCode: codes.Internal},
+		},
+		{
+			name: "unexpected first response",
+			srv:  &fakeServer{streamID: "s", seen: make(chan observed, 1), badHandshake: true},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			conn := dialFake(t, tc.srv)
+
+			p := &stubHeadersProvider{headers: map[string]string{"authorization": "tok"}}
+			_, err := conn.Open(context.Background(), transport.StreamParams{
+				TableName:       "c.s.t",
+				RecordType:      zerobuspb.RecordType_JSON,
+				HeadersProvider: p,
+			})
+			if err == nil {
+				t.Fatal("Open against a non-auth failure: got nil error")
+			}
+			if p.invalidateCalls.Load() != 0 {
+				t.Fatalf("Invalidate calls = %d, want 0 for a non-auth failure", p.invalidateCalls.Load())
+			}
+		})
+	}
+}
+
+// errHeadersProvider returns a fixed error from GetHeaders, to assert Open
+// surfaces a provider failure wrapped rather than opening the stream.
+type errHeadersProvider struct{ err error }
+
+func (p *errHeadersProvider) GetHeaders(context.Context, string) (map[string]string, error) {
+	return nil, p.err
+}
+
+func (p *errHeadersProvider) Invalidate(context.Context, string) {}
+
+// TestOpenSurfacesHeadersProviderError verifies that when GetHeaders returns a
+// non-context error, Open fails with it wrapped rather than opening the stream.
+func TestOpenSurfacesHeadersProviderError(t *testing.T) {
+	srv := &fakeServer{streamID: "s", seen: make(chan observed, 1)}
+	conn := dialFake(t, srv)
+
+	sentinel := errors.New("mint failed")
+	_, err := conn.Open(context.Background(), transport.StreamParams{
+		TableName:       "c.s.t",
+		RecordType:      zerobuspb.RecordType_JSON,
+		HeadersProvider: &errHeadersProvider{err: sentinel},
+	})
+	if err == nil {
+		t.Fatal("Open with a failing headers provider: got nil error, want failure")
+	}
+	if !errors.Is(err, sentinel) {
+		t.Fatalf("Open error = %v, want it to wrap %v", err, sentinel)
+	}
+}
+
+// blockingHeadersProvider blocks in GetHeaders until the passed context is done,
+// then returns its error. It lets a test assert that Open bounds GetHeaders with
+// the open deadline rather than hanging on a stalled credential mint.
+type blockingHeadersProvider struct {
+	ctxErr chan error
+}
+
+func (p *blockingHeadersProvider) GetHeaders(ctx context.Context, _ string) (map[string]string, error) {
+	<-ctx.Done()
+	p.ctxErr <- ctx.Err()
+	return nil, ctx.Err()
+}
+
+func (p *blockingHeadersProvider) Invalidate(context.Context, string) {}
+
+// TestOpenBoundsGetHeadersWithDeadline verifies GetHeaders runs under the open
+// deadline: a provider that blocks is cancelled when the caller's ctx expires,
+// so Open fails promptly instead of hanging on a stalled credential mint.
+func TestOpenBoundsGetHeadersWithDeadline(t *testing.T) {
+	srv := &fakeServer{streamID: "s", seen: make(chan observed, 1)}
+	conn := dialFake(t, srv)
+
+	p := &blockingHeadersProvider{ctxErr: make(chan error, 1)}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+	defer cancel()
+
+	_, err := conn.Open(ctx, transport.StreamParams{
+		TableName:       "c.s.t",
+		RecordType:      zerobuspb.RecordType_JSON,
+		HeadersProvider: p,
+	})
+	if err == nil {
+		t.Fatal("Open with a blocking headers provider: got nil error, want deadline failure")
+	}
+	if gotErr := <-p.ctxErr; !errors.Is(gotErr, context.DeadlineExceeded) {
+		t.Fatalf("GetHeaders context error = %v, want DeadlineExceeded", gotErr)
+	}
+}
+
+// delayedHeadersProvider sleeps before returning headers unless ctx is done.
+type delayedHeadersProvider struct {
+	delay time.Duration
+}
+
+func (p *delayedHeadersProvider) GetHeaders(ctx context.Context, _ string) (map[string]string, error) {
+	timer := time.NewTimer(p.delay)
+	defer timer.Stop()
+	select {
+	case <-timer.C:
+		return map[string]string{"authorization": "tok"}, nil
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
+}
+
+func (p *delayedHeadersProvider) Invalidate(context.Context, string) {}
+
+// TestOpenNoDeadlineUsesIndependentHeaderAndHandshakeBudgets verifies that with
+// no caller deadline, Open applies separate default budgets to GetHeaders and to
+// the handshake: a slow (but successful) GetHeaders call does not consume the
+// handshake budget.
+func TestOpenNoDeadlineUsesIndependentHeaderAndHandshakeBudgets(t *testing.T) {
+	defer transport.SetDefaultHeadersTimeout(60 * time.Millisecond)()
+	defer transport.SetDefaultHandshakeTimeout(60 * time.Millisecond)()
+
+	srv := &fakeServer{streamID: "s", seen: make(chan observed, 1), hangHandshake: true}
+	conn := dialFake(t, srv)
+
+	start := time.Now()
+	_, err := conn.Open(context.Background(), transport.StreamParams{
+		TableName:       "c.s.t",
+		RecordType:      zerobuspb.RecordType_JSON,
+		HeadersProvider: &delayedHeadersProvider{delay: 40 * time.Millisecond},
+	})
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("Open with hanging handshake and no caller deadline: err = %v, want DeadlineExceeded", err)
+	}
+	elapsed := time.Since(start)
+	// With split budgets this should be roughly headers delay + handshake timeout.
+	// A single shared budget would fail much earlier.
+	if elapsed < 80*time.Millisecond {
+		t.Fatalf("Open returned too quickly (%v); expected separate header and handshake budgets", elapsed)
+	}
+}
+
 func TestStreamCloseAbortsRecv(t *testing.T) {
 	srv := &fakeServer{streamID: "s", seen: make(chan observed, 1)}
 	conn := dialFake(t, srv)
 
 	stream, err := conn.Open(context.Background(), transport.StreamParams{
-		TableName:  "c.s.t",
-		RecordType: zerobuspb.RecordType_JSON,
-		Token:      "tok",
+		TableName:       "c.s.t",
+		RecordType:      zerobuspb.RecordType_JSON,
+		HeadersProvider: authProvider("tok"),
 	})
 	if err != nil {
 		t.Fatalf("Open: %v", err)
@@ -408,9 +839,9 @@ func TestOpenReplacesInheritedMetadata(t *testing.T) {
 	)
 
 	_, err := conn.Open(ctx, transport.StreamParams{
-		TableName:  "c.s.t",
-		RecordType: zerobuspb.RecordType_JSON,
-		Token:      "fresh-token",
+		TableName:       "c.s.t",
+		RecordType:      zerobuspb.RecordType_JSON,
+		HeadersProvider: authProvider("Bearer fresh-token"),
 	})
 	if err != nil {
 		t.Fatalf("Open: %v", err)
@@ -428,9 +859,9 @@ func TestOpenReplacesInheritedMetadata(t *testing.T) {
 	}
 }
 
-// TestOpenReplacesInheritedAuthWhenTokenEmpty verifies that a stale inherited
-// authorization value is dropped, not forwarded, when no token is supplied.
-func TestOpenReplacesInheritedAuthWhenTokenEmpty(t *testing.T) {
+// TestOpenReplacesInheritedAuthWhenNoProvider verifies that a stale inherited
+// authorization value is dropped, not forwarded, when no HeadersProvider is set.
+func TestOpenReplacesInheritedAuthWhenNoProvider(t *testing.T) {
 	srv := &fakeServer{streamID: "s", seen: make(chan observed, 1)}
 	conn := dialFake(t, srv)
 
@@ -439,7 +870,7 @@ func TestOpenReplacesInheritedAuthWhenTokenEmpty(t *testing.T) {
 
 	_, err := conn.Open(ctx, transport.StreamParams{
 		TableName:  "c.s.t",
-		RecordType: zerobuspb.RecordType_JSON, // no token
+		RecordType: zerobuspb.RecordType_JSON, // no provider
 	})
 	if err != nil {
 		t.Fatalf("Open: %v", err)
@@ -459,17 +890,14 @@ func TestOpenHonorsCallerDeadline(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
 	defer cancel()
 
-	start := time.Now()
 	_, err := conn.Open(ctx, transport.StreamParams{
-		TableName:  "c.s.t",
-		RecordType: zerobuspb.RecordType_JSON,
-		Token:      "tok",
+		TableName:       "c.s.t",
+		RecordType:      zerobuspb.RecordType_JSON,
+		HeadersProvider: authProvider("tok"),
 	})
-	if err == nil {
-		t.Fatal("Open against a hanging handshake: got nil error, want deadline failure")
-	}
-	if elapsed := time.Since(start); elapsed > 5*time.Second {
-		t.Fatalf("Open took %v, expected it to fail near the 200ms deadline", elapsed)
+	// Assert on the returned deadline error, not wall-clock, so the test can't flake.
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("Open against a hanging handshake: err = %v, want DeadlineExceeded", err)
 	}
 }
 
@@ -486,18 +914,15 @@ func TestOpenAbortsOnCallerCancel(t *testing.T) {
 		cancel()
 	}()
 
-	start := time.Now()
 	_, err := conn.Open(ctx, transport.StreamParams{
-		TableName:  "c.s.t",
-		RecordType: zerobuspb.RecordType_JSON,
-		Token:      "tok",
+		TableName:       "c.s.t",
+		RecordType:      zerobuspb.RecordType_JSON,
+		HeadersProvider: authProvider("tok"),
 	})
-	if err == nil {
-		t.Fatal("Open with caller cancel mid-open: got nil error, want cancellation")
-	}
-	// Well under defaultHandshakeTimeout (30s): the cancel ended it, not the timeout.
-	if elapsed := time.Since(start); elapsed > 5*time.Second {
-		t.Fatalf("Open took %v, expected prompt abort on caller cancel", elapsed)
+	// Assert the cancel ended Open (not the 15s handshake timeout), from the
+	// returned error rather than wall-clock, so the test can't flake.
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("Open with caller cancel mid-open: err = %v, want Canceled", err)
 	}
 }
 
@@ -512,9 +937,9 @@ func TestOpenDeadlineDoesNotTearDownStream(t *testing.T) {
 	defer cancel()
 
 	stream, err := conn.Open(ctx, transport.StreamParams{
-		TableName:  "c.s.t",
-		RecordType: zerobuspb.RecordType_JSON,
-		Token:      "tok",
+		TableName:       "c.s.t",
+		RecordType:      zerobuspb.RecordType_JSON,
+		HeadersProvider: authProvider("tok"),
 	})
 	if err != nil {
 		t.Fatalf("Open: %v", err)
@@ -550,9 +975,9 @@ func TestStreamGracefulCloseDefaultsDeadline(t *testing.T) {
 	conn := dialFake(t, srv)
 
 	stream, err := conn.Open(context.Background(), transport.StreamParams{
-		TableName:  "c.s.t",
-		RecordType: zerobuspb.RecordType_JSON,
-		Token:      "tok",
+		TableName:       "c.s.t",
+		RecordType:      zerobuspb.RecordType_JSON,
+		HeadersProvider: authProvider("tok"),
 	})
 	if err != nil {
 		t.Fatalf("Open: %v", err)
@@ -574,9 +999,9 @@ func TestStreamGracefulClose(t *testing.T) {
 	conn := dialFake(t, srv)
 
 	stream, err := conn.Open(context.Background(), transport.StreamParams{
-		TableName:  "c.s.t",
-		RecordType: zerobuspb.RecordType_JSON,
-		Token:      "tok",
+		TableName:       "c.s.t",
+		RecordType:      zerobuspb.RecordType_JSON,
+		HeadersProvider: authProvider("tok"),
 	})
 	if err != nil {
 		t.Fatalf("Open: %v", err)
@@ -599,9 +1024,9 @@ func TestStreamGracefulCloseDrainsPending(t *testing.T) {
 	conn := dialFake(t, srv)
 
 	stream, err := conn.Open(context.Background(), transport.StreamParams{
-		TableName:  "c.s.t",
-		RecordType: zerobuspb.RecordType_JSON,
-		Token:      "tok",
+		TableName:       "c.s.t",
+		RecordType:      zerobuspb.RecordType_JSON,
+		HeadersProvider: authProvider("tok"),
 	})
 	if err != nil {
 		t.Fatalf("Open: %v", err)
@@ -653,9 +1078,9 @@ func TestStreamGracefulCloseHonorsDeadline(t *testing.T) {
 	conn := dialFake(t, srv)
 
 	stream, err := conn.Open(context.Background(), transport.StreamParams{
-		TableName:  "c.s.t",
-		RecordType: zerobuspb.RecordType_JSON,
-		Token:      "tok",
+		TableName:       "c.s.t",
+		RecordType:      zerobuspb.RecordType_JSON,
+		HeadersProvider: authProvider("tok"),
 	})
 	if err != nil {
 		t.Fatalf("Open: %v", err)

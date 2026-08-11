@@ -8,6 +8,7 @@
 #include <utility>
 #include <vector>
 
+#include "zerobus/ack_callback.hpp"
 #include "zerobus/headers_provider.hpp"
 #include "zerobus/record.hpp"
 
@@ -25,9 +26,13 @@ class Sdk;
 /// - `close()` flushes pending records and surfaces any error by throwing,
 ///   whereas the destructor swallows it.
 /// - Closing flushes synchronously and can block up to the stream's
-///   `flush_timeout_ms` (default 5 minutes) if the server is unresponsive. A
-///   `Stream` that falls out of scope therefore drags that blocking close into
-///   the destructor at an unpredictable point. Call `close()` at a controlled
+///   `flush_timeout_ms` (default 5 minutes) if the server is unresponsive, and
+///   then drains any registered `ack_callback` task per
+///   `StreamOptions::callback_wait_policy` (which may be unbounded). A `Stream`
+///   that falls out of scope therefore drags that blocking close into the
+///   destructor at an unpredictable point. With `CallbackWaitPolicy::forever()`
+///   the drain has no deadline — including during exception unwinding, where a
+///   wedged callback can deadlock the unwind. Call `close()` at a controlled
 ///   point in your code instead.
 ///
 /// Thread safety: not safe for concurrent use from multiple threads. Serialize
@@ -66,8 +71,9 @@ class Stream {
   /// crossing has a fixed cost that batching amortizes.
   ///
   /// @param records The protobuf-encoded records to ingest.
-  /// @return The logical offset of the last record in the batch, or -1 if
-  ///         @p records is empty (a no-op).
+  /// @return The single logical offset assigned to the whole batch, or -1 if
+  ///         @p records is empty (a no-op). Waiting on this one offset confirms
+  ///         the entire batch.
   /// @throws ZerobusException if the stream is closed or ingestion fails.
   std::int64_t ingest_proto_records(
       const std::vector<std::vector<std::uint8_t>>& records);
@@ -75,14 +81,16 @@ class Stream {
   /// Ingest a batch of JSON records, blocking until they are queued.
   ///
   /// @param records The records, each a UTF-8 JSON string.
-  /// @return The logical offset of the last record in the batch, or -1 if
-  ///         @p records is empty (a no-op).
+  /// @return The single logical offset assigned to the whole batch, or -1 if
+  ///         @p records is empty (a no-op). Waiting on this one offset confirms
+  ///         the entire batch.
   /// @throws ZerobusException if the stream is closed or ingestion fails.
   std::int64_t ingest_json_records(const std::vector<std::string>& records);
 
   /// Block until the record at @p offset has been acknowledged by the server.
   ///
-  /// @param offset A logical offset returned by an ingest call. Must be
+  /// @param offset A logical offset returned by an ingest call (for a batch,
+  ///        the single offset assigned to the whole batch). Must be
   ///        non-negative; the -1 returned by an empty ingest_*_records() batch
   ///        is rejected rather than forwarded to the server.
   /// @throws ZerobusException if @p offset is negative, the stream is closed,
@@ -107,8 +115,10 @@ class Stream {
   /// safe to call more than once.
   ///
   /// Blocks until the flush completes or the stream's `flush_timeout_ms`
-  /// elapses (default 5 minutes), so call it at a controlled point rather than
-  /// leaving it to the destructor.
+  /// elapses (default 5 minutes), then drains any registered `ack_callback`
+  /// task before returning, per `StreamOptions::callback_wait_policy`
+  /// (`forever()` can block `close()` on a wedged callback). Call it at a
+  /// controlled point rather than leaving it to the destructor.
   ///
   /// On success the stream becomes unusable. If the close fails it keeps the
   /// stream handle alive, so the caller can still recover buffered data via
@@ -124,13 +134,19 @@ class Stream {
 
  private:
   friend class Sdk;
-  Stream(CZerobusStream* handle, std::shared_ptr<HeadersProvider> provider)
-      : handle_(handle), provider_(std::move(provider)) {}
+  Stream(CZerobusStream* handle, std::shared_ptr<HeadersProvider> /*unused*/,
+         std::shared_ptr<AckCallback> ack_callback)
+      : handle_(handle), ack_callback_(std::move(ack_callback)) {}
 
   CZerobusStream* handle_;
-  // Kept alive for the stream's lifetime; the FFI callback holds a raw pointer
-  // into this object.
-  std::shared_ptr<HeadersProvider> provider_;
+  // The headers provider (if any) is owned by the FFI, not the Stream: the core
+  // frees it after any in-flight get_headers returns, so the Stream holds no
+  // reference to it (see Sdk::create_stream / headers_provider.hpp).
+  //
+  // Also raw-pointed-to by the core (ack user_data), but with a weaker bound: a
+  // callback can still run after close(), so dropping this at ~Stream() can
+  // free it mid-call (see AckCallback). May be null.
+  std::shared_ptr<AckCallback> ack_callback_;
 };
 
 }  // namespace zerobus

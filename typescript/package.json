@@ -4,6 +4,16 @@
   "description": "TypeScript/Node.js SDK for streaming data ingestion into Databricks Delta tables using Zerobus",
   "main": "index.js",
   "types": "index.d.ts",
+  "typesVersions": {
+    "*": {
+      "utils/descriptor": [
+        "utils/descriptor.d.ts"
+      ],
+      "utils/descriptor.js": [
+        "utils/descriptor.d.ts"
+      ]
+    }
+  },
   "keywords": [
     "databricks",
     "delta",
@@ -72,14 +82,13 @@
     "@databricks/zerobus-ingest-sdk-darwin-x64": "1.1.0",
     "@databricks/zerobus-ingest-sdk-darwin-arm64": "1.1.0"
   },
+  "dependencies": {
+    "protobufjs": "^8.7.1"
+  },
   "peerDependencies": {
-    "protobufjs": "^7.0.0",
     "apache-arrow": "^18.0.0"
   },
   "peerDependenciesMeta": {
-    "protobufjs": {
-      "optional": true
-    },
     "apache-arrow": {
       "optional": true
     }
@@ -89,12 +98,18 @@
     "@types/node": "^20.0.0",
     "apache-arrow": "^18.1.0",
     "dotenv": "^17.2.3",
-    "protobufjs": "^7.5.4",
-    "protobufjs-cli": "^2.0.0",
+    "protobufjs-cli": "^2.6.1",
     "tsx": "^4.21.0",
     "typescript": "^5.3.0"
   },
   "overrides": {
-    "glob": "^10.0.0"
+    "@protobufjs/utf8": "^1.1.1",
+    "brace-expansion": "^2.1.2",
+    "glob": "^10.0.0",
+    "lodash": "^4.18.0",
+    "markdown-it": "^14.2.0",
+    "minimatch": "^9.0.7",
+    "tmp": "^0.2.6",
+    "underscore": "^1.13.8"
   }
 }

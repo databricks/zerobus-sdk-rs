@@ -1,7 +1,7 @@
 # Zerobus C++ SDK
 
 A C++17 SDK for high-throughput ingestion into Databricks Zerobus. It is a thin,
-RAII wrapper over the [Zerobus C FFI](../rust/ffi) (which wraps the Rust core),
+RAII wrapper over the [Zerobus C FFI](https://github.com/databricks/zerobus-sdk/tree/main/rust/ffi) (which wraps the Rust core),
 so it shares the same gRPC streaming, OAuth, recovery, and ingestion engine as
 every other Zerobus SDK.
 
@@ -13,30 +13,53 @@ every other Zerobus SDK.
   Unity Catalog table metadata, with no `.proto` file or `protoc` required.
 - **Arrow Flight** ingestion (Beta) — stream Arrow record batches with optional
   LZ4/ZSTD compression.
+- **Async ack callback** — register an `AckCallback` to be notified of durable
+  acks and terminal errors on a background task, without blocking in
+  `wait_for_offset()` / `flush()`.
 
-> Status: `0.1.0` — initial development. The API may change before `1.0.0`.
+> Status: `0.1.1` — initial development. The API may change before `1.0.0`.
 
 **Prerequisites** (workspace setup, Delta table, service principal): See the
-[top-level README](../README.md#prerequisites).
+[examples README](examples/README.md#prerequisites).
 
 ## Requirements
 
 - A C++17 compiler (GCC, Clang, or MSVC)
 - CMake ≥ 3.16
-- A Rust toolchain (only when building the FFI library from source, which is the
-  default)
+- A Rust toolchain — only when building the FFI library from source (the default
+  for a source checkout). A release bundle ships the FFI prebuilt, so consuming
+  one needs **no** Rust toolchain.
 
 ## Building
+
+The SDK is distributed two ways, and the build differs slightly between them.
+
+### From a release bundle (no Rust toolchain)
+
+A [release](https://github.com/databricks/zerobus-sdk/releases) ships a
+per-platform bundle: the C++ source under `cpp/` plus the matching prebuilt Rust
+C FFI archive under `lib/`. Point CMake at the prebuilt archive so it does not
+try to build the FFI from source (the bundle has no Rust source or `Makefile`):
+
+```bash
+cmake -S cpp -B build \
+  -DZEROBUS_FFI_LIBRARY="$PWD/lib/libzerobus_ffi.a" \
+  -DZEROBUS_FFI_HEADER_DIR="$PWD/lib"
+cmake --build build -j
+```
+
+The bundle contains the SDK and the runnable [examples](examples/README.md), but
+not the test suite (`make`, `ctest`, and the sanitizer runs below apply to a
+source checkout only).
+
+### From a source checkout (builds the FFI with Rust)
 
 From `cpp/`:
 
 ```bash
-make build        # configure + build the SDK and tests
+make build        # configure + build the SDK, tests, and examples
 make test         # build + run the test suite
 ```
-
-(`make build` also builds an `examples/` directory once one is added; none
-ships yet.)
 
 Or drive CMake directly:
 
@@ -47,13 +70,35 @@ ctest --test-dir build --output-on-failure
 ```
 
 By default CMake builds the FFI static library from local Rust source
-(`cargo build --release` in `rust/ffi`). To link a prebuilt library instead:
+(`cargo build --release` in `rust/ffi`). To link a prebuilt library instead, use
+the `-DZEROBUS_FFI_LIBRARY=` / `-DZEROBUS_FFI_HEADER_DIR=` flags shown above.
+
+### Running the tests
+
+> The test suite ships only in a source checkout, not in a release bundle.
+
+`make test` runs the full suite (`ctest`). Every test is a dependency-free,
+network-free executable — the suite is hermetic and safe to run anywhere.
 
 ```bash
-cmake -S . -B build \
-  -DZEROBUS_FFI_LIBRARY=/path/to/libzerobus_ffi.a \
-  -DZEROBUS_FFI_HEADER_DIR=/path/to/dir/containing/zerobus.h
+make test                        # full suite
+make test SANITIZE=address       # under AddressSanitizer (use-after-free, double-free)
+make test SANITIZE=thread        # under ThreadSanitizer (data races, e.g. shared ProtoSchema)
 ```
+
+One test, `integration_test`, exercises the live
+create-stream → ingest → flush → close path against a real endpoint. It
+**skips (passes)** unless all of these environment variables are set, so it
+never affects a normal `make test` run:
+
+| Variable | Purpose |
+|----------|---------|
+| `ZEROBUS_SERVER_ENDPOINT` | Zerobus gRPC endpoint URL |
+| `DATABRICKS_WORKSPACE_URL` | Unity Catalog / workspace URL |
+| `ZEROBUS_TABLE_NAME` | Fully-qualified target table (`catalog.schema.table`) |
+| `DATABRICKS_CLIENT_ID` | OAuth service-principal client id |
+| `DATABRICKS_CLIENT_SECRET` | OAuth service-principal client secret |
+| `ZEROBUS_TEST_RECORD_JSON` | *(optional)* a JSON record matching the table schema; the default `{id, payload}` record likely won't match your table, so set this for a real run |
 
 ## Using the SDK in your project
 
@@ -120,8 +165,9 @@ stream.flush();                        // wait once for all pending acks
 ```
 
 For continuous/unbounded streams, call `flush()` every N records rather than per
-record. Prefer the batch APIs (`ingest_*_records`) in hot paths — each FFI
-crossing has a fixed cost that batching amortizes.
+record, or register an [async ack callback](#async-ack-callback) to track
+durability without blocking at all. Prefer the batch APIs (`ingest_*_records`)
+in hot paths — each FFI crossing has a fixed cost that batching amortizes.
 
 `wait_for_offset()` behaves the same way: acks are monotonic, so waiting on the
 *last* offset returned by a run of ingests confirms all prior ones too. Wait on
@@ -229,6 +275,46 @@ try {
 }
 ```
 
+### Async ack callback
+
+For a continuous stream, an `AckCallback` lets you track durability without
+blocking in `wait_for_offset()` / `flush()`. Register it via
+`StreamOptions::ack_callback` — either implement the interface or adapt a pair
+of lambdas with `AckCallback::from`:
+
+```cpp
+zerobus::StreamOptions options;
+options.ack_callback = zerobus::AckCallback::from(
+    [](std::int64_t offset) noexcept {
+      // Durable up to `offset` (acks are monotonic: offset N => all <= N acked).
+    },
+    [](std::int64_t offset, const std::string& msg) noexcept {
+      // The record at `offset` failed terminally.
+    });
+
+zerobus::Stream stream =
+    sdk.create_stream(table, client_id, client_secret, options);
+```
+
+Contract (see [`ack_callback.hpp`](include/zerobus/ack_callback.hpp) for the
+canonical version):
+
+- `on_ack` fires once per record in monotonic offset order; `on_error` fires per
+  unacked record on terminal failure (errors also still surface from
+  `ingest`/`flush`/`wait_for_offset()`).
+- Both methods are **`noexcept`** — an escaping exception crosses the C FFI
+  boundary, which is UB, so it calls `std::terminate`. Handle errors inside the
+  callback.
+- Callbacks run serialized on a background task, possibly on another thread.
+  Keep them light, synchronize any shared state, and **do not call back into the
+  owning `Stream`** (that is concurrent use of a non-thread-safe object).
+- `StreamOptions::callback_wait_policy` controls how long `close()` drains the
+  callback task — `CallbackWaitPolicy::use_default()` (finite FFI budget),
+  `duration(ms)`, or `forever()`. Only `forever()` guarantees no callback is
+  still running once `close()` returns; a callback that outruns a finite budget
+  can outlive `close()` and touch a freed `Stream`, so keep callbacks well under
+  the budget or keep them alive past the `Stream`.
+
 ## API overview
 
 | Type | Purpose |
@@ -238,6 +324,7 @@ try {
 | `zerobus::ArrowStream` | Arrow Flight ingestion stream (Beta) |
 | `zerobus::ProtoSchema` | UC table metadata → descriptor + JSON encoder |
 | `zerobus::HeadersProvider` | Custom authentication headers |
+| `zerobus::AckCallback` | Async ack/error notifications (`AckCallback::from` adapts lambdas) |
 | `zerobus::StreamOptions` / `zerobus::ArrowStreamOptions` | Stream configuration |
 | `zerobus::ZerobusException` | Thrown on any failure; `is_retryable()` |
 | `zerobus::UnackedRecord` | An unacknowledged record recovered from a failed stream |
@@ -275,7 +362,8 @@ the FFI defaults.
 | `flush_timeout_ms` | `std::uint64_t` | 300,000 | Time budget for `flush()` / `close()` (ms) |
 | `record_type` | `RecordType` | `RecordType::Proto` | Wire format; must match the stream's table (`Proto` or `Json`) |
 | `stream_paused_max_wait_time_ms` | `std::optional<std::uint64_t>` | `nullopt` | Max wait during a server-initiated pause before recovering (`nullopt` = full server duration, `0` = recover immediately, `>0` = min(this, server duration)) |
-| `callback_max_wait_time_ms` | `std::optional<std::uint64_t>` | `nullopt` | Max time to wait for a headers-provider callback to return (`nullopt` leaves the FFI default in place) |
+| `callback_wait_policy` | `CallbackWaitPolicy` | `use_default()` | How long `close()` drains the async ack-callback task: `use_default()` (finite FFI budget), `duration(ms)`, or `forever()` (block until callbacks finish). See [Async ack callback](#async-ack-callback) |
+| `ack_callback` | `std::shared_ptr<AckCallback>` | `nullptr` | Optional async ack/error callback; `nullptr` = none. See [Async ack callback](#async-ack-callback) |
 
 ### `ArrowStreamOptions` (Arrow Flight streams, Beta)
 
@@ -294,10 +382,15 @@ the FFI defaults.
 
 ## Examples
 
-Runnable examples will live under `examples/`, covering the three ingestion
-paths (JSON, dynamic proto, and static proto). Until they land, the
-[Quickstart](#quickstart) above demonstrates the JSON and dynamic-proto paths
-end to end.
+Runnable examples live under [`examples/`](examples/README.md), covering all
+three record formats — JSON and protobuf (dynamic schema from Unity Catalog),
+each with a single-record and a batch variant, plus Arrow Flight (Beta). Every
+example reads its connection settings from the environment
+(`ZEROBUS_SERVER_ENDPOINT`, `DATABRICKS_WORKSPACE_URL`, `ZEROBUS_TABLE_NAME`,
+`DATABRICKS_CLIENT_ID`, `DATABRICKS_CLIENT_SECRET`). They build as part of the
+top-level CMake build (`ZEROBUS_BUILD_EXAMPLES`, on by default) into
+`build/examples/`. See the [examples README](examples/README.md) for setup and
+per-format guides.
 
 ## A note on credentials
 
@@ -317,14 +410,16 @@ setup confusion:
 
 You do not hand-write the `.proto` for a real table — the monorepo ships a
 generator that emits it (plus a binary descriptor) from the live Unity Catalog
-schema, authenticated with the OAuth client credentials:
+schema, authenticated with the OAuth client credentials. It lives in the
+[source repo](https://github.com/databricks/zerobus-sdk/tree/main/rust/tools/generate_files)
+(not in a release bundle); from a checkout, relative to `cpp/`:
 
 ```bash
 cd ../rust/tools/generate_files
 cargo run -- \
   --uc-endpoint "https://<workspace>.cloud.databricks.com" \
-  --client-id "$ZEROBUS_CLIENT_ID" \
-  --client-secret "$ZEROBUS_CLIENT_SECRET" \
+  --client-id "$DATABRICKS_CLIENT_ID" \
+  --client-secret "$DATABRICKS_CLIENT_SECRET" \
   --table "catalog.schema.table" \
   --output-dir ./out \
   --output catalog.schema.table.proto
@@ -351,34 +446,39 @@ calling `close()` explicitly** rather than relying on the destructor:
   `flush_timeout_ms` (default 5 minutes) if the server is unresponsive. Letting
   a `Stream` fall out of scope drags that blocking close into the destructor at
   an unpredictable point, so close at a controlled point in your code.
+- If an [ack callback](#async-ack-callback) is registered, `close()` then drains
+  its task per `callback_wait_policy`. `CallbackWaitPolicy::forever()` makes that
+  drain unbounded — including during exception unwinding, where a wedged callback
+  can deadlock the unwind — which is another reason to `close()` explicitly
+  rather than in the destructor.
 
 ## Thread safety
 
 A `Stream` or `ArrowStream` is **not** safe for concurrent use — serialize
 access externally (the same contract as the Rust core). A single `Sdk` may
-create many streams. See [`CLAUDE.md`](CLAUDE.md) for the full memory-ownership
-and threading contract.
+create many streams. See [`CLAUDE.md`](https://github.com/databricks/zerobus-sdk/blob/main/cpp/CLAUDE.md)
+for the full memory-ownership and threading contract.
 
 ## HTTP proxy support
 
 Like the other SDKs, the C++ SDK honors the standard proxy environment variables
 (`grpc_proxy`/`https_proxy`/`http_proxy` and the matching `no_proxy` list) — the
 Rust core detects them automatically, so no code change is needed. See the
-[top-level README](../README.md#http-proxy-support) for the full precedence
-rules and behavior.
+[top-level README](https://github.com/databricks/zerobus-sdk/blob/main/README.md#http-proxy-support)
+for the full precedence rules and behavior.
 
 ## Community and Contributing
 
 This is an open source project. We welcome contributions, feedback, and bug
 reports.
 
-- **[Contributing Guide](CONTRIBUTING.md)**: C++-specific development setup and workflow.
-- **[General Contributing Guide](../CONTRIBUTING.md)**: Pull request process, commit requirements, and policies.
+- **[Contributing Guide](https://github.com/databricks/zerobus-sdk/blob/main/cpp/CONTRIBUTING.md)**: C++-specific development setup and workflow.
+- **[General Contributing Guide](https://github.com/databricks/zerobus-sdk/blob/main/CONTRIBUTING.md)**: Pull request process, commit requirements, and policies.
 - **[Changelog](CHANGELOG.md)**: See the history of changes in the SDK.
-- **[Security Policy](../SECURITY.md)**: Read about our security process and how to report vulnerabilities.
-- **[Developer Certificate of Origin (DCO)](../DCO)**: Understand the agreement for contributions.
+- **[Security Policy](https://github.com/databricks/zerobus-sdk/blob/main/SECURITY.md)**: Read about our security process and how to report vulnerabilities.
+- **[Developer Certificate of Origin (DCO)](https://github.com/databricks/zerobus-sdk/blob/main/DCO)**: Understand the agreement for contributions.
 - **[Open Source Attributions](NOTICE)**: See a list of the open source libraries we use.
 
 ## License
 
-Apache 2.0. See the [root LICENSE](../LICENSE).
+Apache 2.0. See the [LICENSE](LICENSE).

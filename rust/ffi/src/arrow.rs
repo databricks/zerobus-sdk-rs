@@ -1,8 +1,12 @@
 //! Arrow Flight FFI surface.
 
+use crate::arrow_c_data::{CArrowArray, CArrowSchema};
 use crate::common::*;
 use arrow_ipc::{reader::StreamReader, writer::StreamWriter, CompressionType};
 use bytes::Bytes;
+use databricks_zerobus_ingest_sdk::internal::arrow_c_data::{
+    import_c_data_record_batch, FFI_ArrowArray, FFI_ArrowSchema,
+};
 use databricks_zerobus_ingest_sdk::{
     HeadersProvider, RecordBatch, StreamBuilder, ZerobusArrowStream, ZerobusError, ZerobusResult,
 };
@@ -36,8 +40,10 @@ pub struct CArrowStreamConfigurationOptions {
     pub connection_timeout_ms: u64,
     /// -1 = None, 0 = LZ4_FRAME, 1 = ZSTD
     pub ipc_compression: i32,
-    /// Maximum time in milliseconds to wait during graceful stream close.
-    /// -1 = None (wait full server duration), 0 = immediate recovery, >0 = wait up to min(this, server_duration).
+    /// Maximum acknowledgment wait in milliseconds during graceful stream close.
+    /// -1 = use the available server grace period, 0 = no ACK wait, >0 = capped ACK wait.
+    /// Bounded transport cleanup still runs with 0; very short server grace periods get a
+    /// best-effort local cleanup window even if the server may already have hard-closed.
     pub stream_paused_max_wait_time_ms: i64,
 }
 
@@ -207,6 +213,12 @@ pub extern "C" fn zerobus_sdk_create_arrow_stream(
 /// Creates an Arrow Flight stream with a custom headers provider callback.
 ///
 /// `schema_ipc_bytes` must point to Arrow IPC stream bytes encoding only the schema.
+///
+/// Ownership of `user_data` / `free_user_data` follows
+/// `zerobus_sdk_create_stream_with_headers_provider` — once called the FFI owns
+/// `user_data` and invokes `free_user_data` exactly once on every path (on
+/// success after any in-flight `get_headers` returns; on failure before
+/// returning null). The caller must never free `user_data` itself.
 #[no_mangle]
 pub extern "C" fn zerobus_sdk_create_arrow_stream_with_headers_provider(
     sdk: *mut CZerobusSdk,
@@ -215,10 +227,24 @@ pub extern "C" fn zerobus_sdk_create_arrow_stream_with_headers_provider(
     schema_ipc_len: usize,
     headers_callback: HeadersProviderCallback,
     user_data: *mut std::ffi::c_void,
+    // Written inline (not via HeadersProviderFreeCallback) so cbindgen emits a
+    // nullable C function pointer instead of an opaque struct.
+    free_user_data: Option<extern "C" fn(user_data: *mut std::ffi::c_void)>,
     options: *const CArrowStreamConfigurationOptions,
     result: *mut CResult,
 ) -> *mut CArrowStream {
     ffi_guard(result, ptr::null_mut(), move || {
+        // INVARIANT: construct the provider Arc *before* any fallible work (see
+        // the proto path in stream.rs). It owns `user_data`, so its Drop invokes
+        // `free_user_data` exactly once on every path — the free-once contract
+        // the wrappers rely on. Moving this after an early-return would leak
+        // `user_data`, since the wrappers do not free on failure.
+        let headers_provider: Arc<dyn HeadersProvider> = Arc::new(CallbackHeadersProvider::new(
+            headers_callback,
+            user_data,
+            free_user_data,
+        ));
+
         let sdk_ref = match validate_sdk_ptr(sdk) {
             Ok(s) => s,
             Err(msg) => {
@@ -236,9 +262,6 @@ pub extern "C" fn zerobus_sdk_create_arrow_stream_with_headers_provider(
             let schema_bytes =
                 unsafe { std::slice::from_raw_parts(schema_ipc_bytes, schema_ipc_len) };
             let schema = ipc_bytes_to_schema(schema_bytes).map_err(|e| e.to_string())?;
-
-            let headers_provider: Arc<dyn HeadersProvider> =
-                Arc::new(CallbackHeadersProvider::new(headers_callback, user_data));
 
             let mut builder = sdk_ref
                 .stream_builder()
@@ -324,6 +347,85 @@ pub extern "C" fn zerobus_arrow_stream_ingest_batch(
                     unsafe {
                         *result = CResult::error(err);
                     }
+                }
+                -1
+            }
+        }
+    })
+}
+
+/// Ingests one canonical Arrow C Data Interface RecordBatch.
+///
+/// When both `array` and `schema` are non-null, this function consumes them on
+/// every success or error path. Their release callbacks are cleared before
+/// validation, and the imported buffers may remain owned by the stream until
+/// acknowledgment, recovery finalization, or stream destruction.
+///
+/// Every non-null pointer must address a valid, properly aligned canonical
+/// `ArrowArray` / `ArrowSchema` structure satisfying the Arrow C Data
+/// Interface. All referenced children, dictionaries, buffers, `private_data`,
+/// and release callbacks must remain valid for the lifetime required by the
+/// producer contract. After ownership transfer, the SDK may invoke release
+/// asynchronously on an internal runtime thread. Release callbacks must
+/// therefore be thread-safe and must not unwind or throw across the C ABI.
+///
+/// Malformed, dangling, or malicious structures are caller undefined behavior
+/// and cannot be safely validated by this function.
+#[no_mangle]
+pub extern "C" fn zerobus_arrow_stream_ingest_c_data(
+    stream: *mut CArrowStream,
+    array: *mut CArrowArray,
+    schema: *mut CArrowSchema,
+    result: *mut CResult,
+) -> i64 {
+    ffi_guard(result, -1, move || {
+        if array.is_null() || schema.is_null() {
+            write_error_result(
+                result,
+                "ArrowArray and ArrowSchema pointers are required",
+                false,
+            );
+            return -1;
+        }
+
+        let array = unsafe { FFI_ArrowArray::from_raw(array.cast::<FFI_ArrowArray>()) };
+        let schema = unsafe { FFI_ArrowSchema::from_raw(schema.cast::<FFI_ArrowSchema>()) };
+
+        if array.is_released() || schema.release.is_none() {
+            write_error_result(
+                result,
+                "Arrow C Data input has already been released",
+                false,
+            );
+            return -1;
+        }
+
+        let stream_ref = match validate_arrow_stream_ptr(stream) {
+            Ok(stream) => stream,
+            Err(message) => {
+                write_error_result(result, message, false);
+                return -1;
+            }
+        };
+
+        let batch = match unsafe { import_c_data_record_batch(array, schema) } {
+            Ok(batch) => batch,
+            Err(error) => {
+                if !result.is_null() {
+                    unsafe { *result = CResult::error(error) };
+                }
+                return -1;
+            }
+        };
+
+        match RUNTIME.block_on(stream_ref.ingest_batch(batch)) {
+            Ok(offset) => {
+                write_success_result(result);
+                offset
+            }
+            Err(error) => {
+                if !result.is_null() {
+                    unsafe { *result = CResult::error(error) };
                 }
                 -1
             }

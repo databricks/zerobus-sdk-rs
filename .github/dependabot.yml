@@ -21,6 +21,13 @@ updates:
     labels:
       - dependencies
 
+  - package-ecosystem: cargo
+    directory: /typescript
+    schedule:
+      interval: weekly
+    labels:
+      - dependencies
+
   - package-ecosystem: maven
     directory: /java
     schedule:
@@ -30,6 +37,13 @@ updates:
 
   - package-ecosystem: cargo
     directory: /rust
+    schedule:
+      interval: weekly
+    labels:
+      - dependencies
+
+  - package-ecosystem: cargo
+    directory: /python/rust
     schedule:
       interval: weekly
     labels:

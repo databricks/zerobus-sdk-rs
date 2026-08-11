@@ -15,7 +15,7 @@ use databricks_zerobus_ingest_sdk::{
 pub(crate) const SDK_IDENTIFIER_PREFIX: &str = "zerobus-sdk-py";
 
 /// Type of records to ingest into the stream
-#[pyclass]
+#[pyclass(from_py_object)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct RecordType {
     #[pyo3(get)]
@@ -60,7 +60,7 @@ impl Default for RecordType {
 }
 
 /// Table properties for the stream
-#[pyclass]
+#[pyclass(from_py_object)]
 #[derive(Debug, Clone)]
 pub struct TableProperties {
     #[pyo3(get)]
@@ -74,7 +74,7 @@ pub struct TableProperties {
 impl TableProperties {
     #[new]
     #[pyo3(signature = (table_name, descriptor_proto=None))]
-    fn new(table_name: String, descriptor_proto: Option<&PyAny>) -> PyResult<Self> {
+    fn new(table_name: String, descriptor_proto: Option<&Bound<'_, PyAny>>) -> PyResult<Self> {
         let rust_descriptor = if let Some(obj) = descriptor_proto {
             if obj.is_none() {
                 None
@@ -169,7 +169,7 @@ impl TableProperties {
 }
 
 /// Base class for record acknowledgment callbacks
-#[pyclass(subclass)]
+#[pyclass(subclass, skip_from_py_object)]
 #[derive(Clone)]
 pub struct AckCallback {
     _phantom: std::marker::PhantomData<()>,
@@ -179,7 +179,7 @@ pub struct AckCallback {
 impl AckCallback {
     #[new]
     #[pyo3(signature = (*_args, **_kwargs))]
-    fn new(_args: &PyTuple, _kwargs: Option<&PyDict>) -> Self {
+    fn new(_args: &Bound<'_, PyTuple>, _kwargs: Option<&Bound<'_, PyDict>>) -> Self {
         // Accept and ignore any arguments to allow subclasses to use __init__
         Self {
             _phantom: std::marker::PhantomData,
@@ -212,7 +212,7 @@ impl AckCallbackWrapper {
 
 impl RustAckCallback for AckCallbackWrapper {
     fn on_ack(&self, offset_id: OffsetId) {
-        Python::with_gil(|py| {
+        Python::attach(|py| {
             if let Err(e) = self.py_callback.call_method1(py, "on_ack", (offset_id,)) {
                 eprintln!("Error invoking Python AckCallback.on_ack: {:?}", e);
             }
@@ -220,7 +220,7 @@ impl RustAckCallback for AckCallbackWrapper {
     }
 
     fn on_error(&self, offset_id: OffsetId, error_message: &str) {
-        Python::with_gil(|py| {
+        Python::attach(|py| {
             if let Err(e) =
                 self.py_callback
                     .call_method1(py, "on_error", (offset_id, error_message))
@@ -232,8 +232,7 @@ impl RustAckCallback for AckCallbackWrapper {
 }
 
 /// Configuration options for the stream
-#[pyclass]
-#[derive(Clone)]
+#[pyclass(from_py_object)]
 pub struct StreamConfigurationOptions {
     #[pyo3(get, set)]
     pub max_inflight_records: i32,
@@ -267,6 +266,30 @@ pub struct StreamConfigurationOptions {
 
     #[pyo3(get, set)]
     pub ack_callback: Option<Py<AckCallback>>,
+}
+
+// `Py<T>` is not unconditionally `Clone` in PyO3 0.29 — cloning a `Py` handle
+// needs the interpreter attached to bump the refcount. Implement `Clone` by
+// hand via `clone_ref` so the refcount is incremented under an attached
+// interpreter, rather than enabling PyO3's `py-clone` feature (which panics at
+// runtime when the interpreter is detached — exactly the case in the async
+// stream-builder paths that clone these options).
+impl Clone for StreamConfigurationOptions {
+    fn clone(&self) -> Self {
+        Python::attach(|py| Self {
+            max_inflight_records: self.max_inflight_records,
+            recovery: self.recovery,
+            recovery_timeout_ms: self.recovery_timeout_ms,
+            recovery_backoff_ms: self.recovery_backoff_ms,
+            recovery_retries: self.recovery_retries,
+            server_lack_of_ack_timeout_ms: self.server_lack_of_ack_timeout_ms,
+            flush_timeout_ms: self.flush_timeout_ms,
+            record_type: self.record_type,
+            stream_paused_max_wait_time_ms: self.stream_paused_max_wait_time_ms,
+            callback_max_wait_time_ms: self.callback_max_wait_time_ms,
+            ack_callback: self.ack_callback.as_ref().map(|cb| cb.clone_ref(py)),
+        })
+    }
 }
 
 impl StreamConfigurationOptions {
@@ -342,12 +365,13 @@ impl Default for StreamConfigurationOptions {
 impl StreamConfigurationOptions {
     #[new]
     #[pyo3(signature = (**kwargs))]
-    fn new(kwargs: Option<&PyDict>) -> PyResult<Self> {
+    fn new(kwargs: Option<&Bound<'_, PyDict>>) -> PyResult<Self> {
         let mut options = Self::default();
 
         if let Some(kwargs) = kwargs {
-            for (key, value) in kwargs {
-                let key_str: &str = key.extract()?;
+            for (key, value) in kwargs.iter() {
+                let key_str: String = key.extract()?;
+                let key_str = key_str.as_str();
                 match key_str {
                     "max_inflight_records" => options.max_inflight_records = value.extract()?,
                     "recovery" => options.recovery = value.extract()?,
@@ -416,8 +440,8 @@ impl StreamConfigurationOptions {
 // =============================================================================
 
 /// Coerce a Python record payload into a Rust `EncodedRecord`.
-pub(crate) fn extract_record_payload(payload: &PyAny) -> PyResult<EncodedRecord> {
-    if let Ok(bytes) = payload.downcast::<PyBytes>() {
+pub(crate) fn extract_record_payload(payload: &Bound<'_, PyAny>) -> PyResult<EncodedRecord> {
+    if let Ok(bytes) = payload.cast::<PyBytes>() {
         Ok(EncodedRecord::Proto(bytes.as_bytes().to_vec()))
     } else if let Ok(json_str) = payload.extract::<String>() {
         Ok(EncodedRecord::Json(json_str))
@@ -428,22 +452,21 @@ pub(crate) fn extract_record_payload(payload: &PyAny) -> PyResult<EncodedRecord>
         let serialized_bytes: Vec<u8> = serialize_method.call0()?.extract()?;
         Ok(EncodedRecord::Proto(serialized_bytes))
     } else {
-        Python::with_gil(|py| {
-            let json_module = py.import("json")?;
-            let json_dumps = json_module.getattr("dumps")?;
-            let json_str: String = json_dumps.call1((payload,))?.extract()?;
-            Ok(EncodedRecord::Json(json_str))
-        })
+        let py = payload.py();
+        let json_module = py.import("json")?;
+        let json_dumps = json_module.getattr("dumps")?;
+        let json_str: String = json_dumps.call1((payload,))?.extract()?;
+        Ok(EncodedRecord::Json(json_str))
     }
 }
 
-pub(crate) fn extract_record_payloads(payloads: &PyAny) -> PyResult<Vec<EncodedRecord>> {
+pub(crate) fn extract_record_payloads(payloads: &Bound<'_, PyAny>) -> PyResult<Vec<EncodedRecord>> {
     let mut out = Vec::new();
 
-    if let Ok(list) = payloads.downcast::<PyList>() {
+    if let Ok(list) = payloads.cast::<PyList>() {
         out.reserve(list.len());
-        for item in list {
-            out.push(extract_record_payload(item)?);
+        for item in list.iter() {
+            out.push(extract_record_payload(&item)?);
         }
     } else if let Ok(bytes_list) = payloads.extract::<Vec<Vec<u8>>>() {
         for bytes in bytes_list {
@@ -462,10 +485,10 @@ pub(crate) fn extract_record_payloads(payloads: &PyAny) -> PyResult<Vec<EncodedR
     Ok(out)
 }
 
-pub(crate) fn encoded_record_to_pybytes(py: Python, record: EncodedRecord) -> PyObject {
+pub(crate) fn encoded_record_to_pybytes(py: Python, record: EncodedRecord) -> Py<PyAny> {
     match record {
-        EncodedRecord::Proto(bytes) => PyBytes::new(py, &bytes).into(),
-        EncodedRecord::Json(json_str) => PyBytes::new(py, json_str.as_bytes()).into(),
+        EncodedRecord::Proto(bytes) => PyBytes::new(py, &bytes).into_any().unbind(),
+        EncodedRecord::Json(json_str) => PyBytes::new(py, json_str.as_bytes()).into_any().unbind(),
     }
 }
 
@@ -489,7 +512,11 @@ pub(crate) fn apply_grpc_options<'a>(
         .stream_paused_max_wait_time_ms(opts.stream_paused_max_wait_time_ms.map(|v| v as u64))
         .callback_max_wait_time_ms(opts.callback_max_wait_time_ms.map(|v| v as u64));
 
-    if let Some(cb) = opts.ack_callback.clone() {
+    if let Some(cb) = opts
+        .ack_callback
+        .as_ref()
+        .map(|cb| Python::attach(|py| cb.clone_ref(py)))
+    {
         b = b.ack_callback(Arc::new(AckCallbackWrapper::new(cb)) as Arc<dyn RustAckCallback>);
     }
 

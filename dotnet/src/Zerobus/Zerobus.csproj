@@ -1,0 +1,129 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFrameworks>net8.0;net10.0</TargetFrameworks>
+    <RootNamespace>Databricks.Zerobus</RootNamespace>
+    <AssemblyName>Databricks.Zerobus</AssemblyName>
+    <PackageId>Databricks.Zerobus</PackageId>
+    <Version>0.1.0</Version>
+    <Authors>Databricks</Authors>
+    <Company>Databricks</Company>
+    <Description>High-performance .NET SDK for streaming data ingestion into Databricks Delta tables
+      using the Zerobus service.</Description>
+    <PackageTags>databricks;zerobus;streaming;ingestion;delta</PackageTags>
+    <PackageLicenseFile>LICENSE</PackageLicenseFile>
+    <RepositoryUrl>https://github.com/databricks/zerobus-sdk</RepositoryUrl>
+    <RepositoryType>git</RepositoryType>
+    <GenerateDocumentationFile>true</GenerateDocumentationFile>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <PackageReadmeFile>README.md</PackageReadmeFile>
+
+    <!-- Set to true to skip the automatic Rust build (e.g. in CI when libs are pre-built) -->
+    <SkipNativeBuild Condition="'$(SkipNativeBuild)' == ''">false</SkipNativeBuild>
+
+    <!-- SourceLink: Enable source debugging from NuGet packages -->
+    <PublishRepositoryUrl>true</PublishRepositoryUrl>
+    <EmbedUntrackedSources>true</EmbedUntrackedSources>
+    <!-- Symbols are embedded in the DLL; no separate .snupkg needed -->
+    <DebugType>embedded</DebugType>
+    <ContinuousIntegrationBuild Condition="'$(CI)' == 'true'">true</ContinuousIntegrationBuild>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <None Include="../../README.md" Pack="true" PackagePath="" />
+    <None Include="../../../LICENSE" Pack="true" PackagePath="" />
+  </ItemGroup>
+  
+  <ItemGroup>
+    <InternalsVisibleTo Include="$(AssemblyName).IntegrationTests" />
+    <InternalsVisibleTo Include="$(AssemblyName).Tests" />
+  </ItemGroup>
+  
+  <ItemGroup>
+    <PackageReference Include="Microsoft.SourceLink.GitHub" PrivateAssets="All" />
+  </ItemGroup>
+
+  <!--
+    Automatically build the native zerobus_ffi shared library before compiling.
+    This invokes dotnet/build_native.sh which runs cargo build and places the
+    .dylib / .so / .dll in the runtimes/<RID>/native/ directory.
+    Skip with:  dotnet build -p:SkipNativeBuild=true
+  -->
+  <!--
+    Only run for the first TFM to avoid duplicate cargo builds.
+    The script also has its own up-to-date check, so the second TFM invocation
+    would be a no-op anyway, but this keeps the build log cleaner.
+  -->
+  <Target Name="BuildNativeLibrary"
+    BeforeTargets="Build"
+    Condition="'$(SkipNativeBuild)' != 'true' AND '$(TargetFramework)' == 'net8.0'">
+    <Exec Command="bash &quot;$(MSBuildThisFileDirectory)../../build_native.sh&quot;"
+      ConsoleToMSBuild="true"
+      StandardOutputImportance="high" />
+  </Target>
+
+  <!--
+    Native library references:
+    Per https://learn.microsoft.com/en-us/nuget/create-packages/native-files-in-net-packages
+    <None Include ... Pack="true" PackagePath="runtimes/{rid}/native/" /> items place native
+    libraries in the correct runtime-specific package path.
+  -->
+  <ItemGroup>
+    <!-- Linux x64 -->
+    <None Include="runtimes/linux-x64/native/libzerobus_ffi.so"
+      CopyToOutputDirectory="PreserveNewest"
+      Link="runtimes/linux-x64/native/libzerobus_ffi.so"
+      Pack="true"
+      PackagePath="runtimes/linux-x64/native"
+      Condition="Exists('runtimes/linux-x64/native/libzerobus_ffi.so')" />
+
+    <!-- Linux arm64 -->
+    <None Include="runtimes/linux-arm64/native/libzerobus_ffi.so"
+      CopyToOutputDirectory="PreserveNewest"
+      Link="runtimes/linux-arm64/native/libzerobus_ffi.so"
+      Pack="true"
+      PackagePath="runtimes/linux-arm64/native"
+      Condition="Exists('runtimes/linux-arm64/native/libzerobus_ffi.so')" />
+
+    <!-- Linux musl x64 (Alpine) -->
+    <None Include="runtimes/linux-musl-x64/native/libzerobus_ffi.so"
+      CopyToOutputDirectory="PreserveNewest"
+      Link="runtimes/linux-musl-x64/native/libzerobus_ffi.so"
+      Pack="true"
+      PackagePath="runtimes/linux-musl-x64/native"
+      Condition="Exists('runtimes/linux-musl-x64/native/libzerobus_ffi.so')" />
+
+    <!-- Linux musl arm64 (Alpine) -->
+    <None Include="runtimes/linux-musl-arm64/native/libzerobus_ffi.so"
+      CopyToOutputDirectory="PreserveNewest"
+      Link="runtimes/linux-musl-arm64/native/libzerobus_ffi.so"
+      Pack="true"
+      PackagePath="runtimes/linux-musl-arm64/native"
+      Condition="Exists('runtimes/linux-musl-arm64/native/libzerobus_ffi.so')" />
+
+    <!-- macOS x64 -->
+    <None Include="runtimes/osx-x64/native/libzerobus_ffi.dylib"
+      CopyToOutputDirectory="PreserveNewest"
+      Link="runtimes/osx-x64/native/libzerobus_ffi.dylib"
+      Pack="true"
+      PackagePath="runtimes/osx-x64/native"
+      Condition="Exists('runtimes/osx-x64/native/libzerobus_ffi.dylib')" />
+
+    <!-- macOS arm64 -->
+    <None Include="runtimes/osx-arm64/native/libzerobus_ffi.dylib"
+      CopyToOutputDirectory="PreserveNewest"
+      Link="runtimes/osx-arm64/native/libzerobus_ffi.dylib"
+      Pack="true"
+      PackagePath="runtimes/osx-arm64/native"
+      Condition="Exists('runtimes/osx-arm64/native/libzerobus_ffi.dylib')" />
+
+    <!-- Windows x64 -->
+    <None Include="runtimes/win-x64/native/zerobus_ffi.dll"
+      CopyToOutputDirectory="PreserveNewest"
+      Link="runtimes/win-x64/native/zerobus_ffi.dll"
+      Pack="true"
+      PackagePath="runtimes/win-x64/native"
+      Condition="Exists('runtimes/win-x64/native/zerobus_ffi.dll')" />
+  </ItemGroup>
+
+</Project>

@@ -1,0 +1,79 @@
+syntax = "proto2";
+
+import "google/protobuf/duration.proto";
+
+package databricks.zerobus;
+
+option csharp_namespace = "Databricks.Zerobus.IntegrationTests.Protos";
+
+service Zerobus {
+  rpc EphemeralStream(stream EphemeralStreamRequest) returns (stream EphemeralStreamResponse);
+}
+
+enum RecordType {
+  RECORD_TYPE_UNSPECIFIED = 0;
+  PROTO = 1;
+  JSON = 2;
+}
+
+message JsonRecordBatch {
+  repeated string records = 1;
+}
+
+message ProtoEncodedRecordBatch {
+  repeated bytes records = 1;
+}
+
+message CreateIngestStreamRequest {
+  optional string table_name = 1;
+  reserved "stream_id";
+  reserved 2;
+  optional bytes descriptor_proto = 3;
+  optional RecordType record_type = 4;
+}
+
+message CreateIngestStreamResponse {
+  optional string stream_id = 1;
+  reserved "last_offset_id";
+  reserved 2;
+}
+
+message IngestRecordRequest {
+  optional int64 offset_id = 1;
+  oneof record {
+    bytes proto_encoded_record = 2;
+    string json_record = 3;
+  }
+}
+
+message IngestRecordBatchRequest {
+  optional int64 offset_id = 1;
+  oneof batch {
+    ProtoEncodedRecordBatch proto_encoded_batch = 2;
+    JsonRecordBatch json_batch = 3;
+  }
+}
+
+message EphemeralStreamRequest {
+  oneof payload {
+    CreateIngestStreamRequest create_stream = 1;
+    IngestRecordRequest ingest_record = 2;
+    IngestRecordBatchRequest ingest_record_batch = 3;
+  }
+}
+
+message IngestRecordResponse {
+  optional int64 durability_ack_up_to_offset = 1;
+}
+
+message CloseStreamSignal {
+  optional google.protobuf.Duration duration = 1;
+}
+
+message EphemeralStreamResponse {
+  oneof payload {
+    CreateIngestStreamResponse create_stream_response = 1;
+    IngestRecordResponse ingest_record_response = 2;
+    CloseStreamSignal close_stream_signal = 3;
+  }
+}

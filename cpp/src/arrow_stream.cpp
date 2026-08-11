@@ -58,10 +58,10 @@ ArrowStream::~ArrowStream() {
   }
 }
 
-// Move carries the handle and the headers-provider together, nulling the source
-// so the handle is closed/freed exactly once.
+// Move carries the handle, nulling the source so the handle is closed/freed
+// exactly once. The headers provider is owned by the FFI, not the ArrowStream.
 ArrowStream::ArrowStream(ArrowStream&& other) noexcept
-    : handle_(other.handle_), provider_(std::move(other.provider_)) {
+    : handle_(other.handle_) {
   other.handle_ = nullptr;
 }
 
@@ -74,7 +74,6 @@ ArrowStream& ArrowStream::operator=(ArrowStream&& other) noexcept {
       zerobus_arrow_stream_free(handle_);
     }
     handle_ = other.handle_;
-    provider_ = std::move(other.provider_);
     other.handle_ = nullptr;
   }
   return *this;

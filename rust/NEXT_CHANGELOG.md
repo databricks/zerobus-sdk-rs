@@ -1,6 +1,6 @@
 # NEXT CHANGELOG
 
-## Release v2.4.0
+## Release v2.7.0
 
 ### Major Changes
 
@@ -8,13 +8,32 @@
 
 ### Bug Fixes
 
-### Documentation
+- Arrow Flight acknowledgment deadlines are pending-relative: no timer runs
+  while a stream is idle. During normal stream operation, each batch receives
+  an absolute deadline when it becomes pending; responses and partial
+  acknowledgments do not extend it. Recovery refreshes the deadline when
+  the full replay completes and ACK processing can resume on the replacement
+  connection.
+- Arrow Flight rejects unrepresentable timeout values: stream creation returns
+  `InvalidArgument` when ACK or recovery deadlines exceed the platform
+  monotonic-clock range. Server-advertised graceful-rotation periods are capped
+  at one year.
+- Fixed Arrow Flight recovery sender lifetime: replacement senders are now published
+  only after pending replay succeeds, while initial supervisor handoff and failed or
+  cancelled replay promptly drop redundant senders instead of retaining incomplete
+  `DoPut` request channels until later teardown.
 
-- Reworked ingestion docs to lead with the high-throughput pattern (ingest in a loop, then `flush()` once) and explicitly warn against calling `wait_for_offset()` after every record. Updated the README, crate- and method-level doc comments (`ingest_record_offset`, `ingest_records_offset`, `wait_for_offset`, `flush`), and the `json`/`proto` single-record examples accordingly.
+### Documentation
 
 ### Internal Changes
 
-- Established `rust/sdk/zerobus_service.proto` as the single canonical gRPC schema, now referenced directly by the cgo Go SDK tests and the Java SDK build instead of their own duplicated (and drifted) copies. No schema or behavior change for the Rust core — the file stays where it was.
+- Added Arrow C Data `RecordBatch` conversion behind a disabled-by-default
+  wrapper-only SDK feature so current and future native bindings can share one
+  ownership implementation. No supported Rust SDK or Flight behavior changed.
+- Reorganized Arrow Flight under `stream/arrow/` with focused API, connection,
+  ACK, supervisor, and batch modules and no public API changes. Its tracing
+  target now follows the module path:
+  `databricks_zerobus_ingest_sdk::stream::arrow`.
 
 ### Breaking Changes
 

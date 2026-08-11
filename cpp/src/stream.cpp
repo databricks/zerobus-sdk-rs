@@ -118,10 +118,11 @@ Stream::~Stream() {
   }
 }
 
-// Move transfers both the handle and the headers-provider that must outlive it,
-// nulling the source handle so only one Stream ever closes/frees it.
+// Move transfers the handle plus the ack callback that outlives it, nulling the
+// source so only one Stream closes/frees it. The headers provider is owned by
+// the FFI, not the Stream, so there is nothing to move for it.
 Stream::Stream(Stream&& other) noexcept
-    : handle_(other.handle_), provider_(std::move(other.provider_)) {
+    : handle_(other.handle_), ack_callback_(std::move(other.ack_callback_)) {
   other.handle_ = nullptr;
 }
 
@@ -135,7 +136,7 @@ Stream& Stream::operator=(Stream&& other) noexcept {
       zerobus_stream_free(handle_);
     }
     handle_ = other.handle_;
-    provider_ = std::move(other.provider_);
+    ack_callback_ = std::move(other.ack_callback_);
     other.handle_ = nullptr;
   }
   return *this;

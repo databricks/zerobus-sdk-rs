@@ -157,9 +157,9 @@ Sdk& Sdk::operator=(Sdk&& other) noexcept {
 }
 
 // Create an OAuth-authenticated proto/JSON stream. The descriptor pointer is
-// null for a JSON stream (descriptor_ptr() maps an empty vector to null), and
-// the StreamOptions are converted to the C struct just for this call. The
-// resulting Stream owns no headers provider, hence the null second argument.
+// null for a JSON stream (descriptor_ptr() maps an empty vector to null). No
+// headers provider (null second arg); the third arg keeps the ack callback (if
+// any) alive for the raw user_data the core holds.
 Stream Sdk::create_stream(const TableProperties& table,
                           const std::string& client_id,
                           const std::string& client_secret,
@@ -176,14 +176,16 @@ Stream Sdk::create_stream(const TableProperties& table,
     guard.throw_if_error();
     throw ZerobusException("failed to create stream", false);
   }
-  return Stream(stream, nullptr);
+  // No headers provider; keep the ack callback (if any) alive on the Stream.
+  return Stream(stream, nullptr, options.ack_callback);
 }
 
-// Same as above but authenticated by a custom headers provider. We validate the
-// pointer here (the FFI would otherwise receive a null callback target), pass
-// the raw provider pointer as the trampoline's user_data, and hand the
-// shared_ptr to the Stream so the provider outlives every callback the core
-// makes through it.
+// Same as above but authenticated by a custom headers provider. Ownership of
+// the provider is handed to the FFI: it is passed as a heap-allocated
+// shared_ptr (the trampoline's user_data) which the FFI releases via
+// zerobus_cpp_headers_free only after any in-flight get_headers has returned.
+// This closes the recovery-vs-teardown use-after-free, so the Stream no longer
+// keeps its own provider shared_ptr.
 Stream Sdk::create_stream(const TableProperties& table,
                           std::shared_ptr<HeadersProvider> headers_provider,
                           const StreamOptions& options) {
@@ -192,16 +194,25 @@ Stream Sdk::create_stream(const TableProperties& table,
   }
   detail::ResultGuard guard;
   CStreamConfigurationOptions copts = detail::to_c(options);
+  // Validate the table name before allocating `owned` so a throw here can't
+  // leak it (argument evaluation order vs. the `new` is unspecified).
+  const char* c_table = detail::checked_c_str(table.table_name, "table_name");
+  // Heap-allocate the owning shared_ptr; the FFI takes ownership and frees it
+  // via zerobus_cpp_headers_free on every path (success or failure).
+  auto* owned =
+      new std::shared_ptr<HeadersProvider>(std::move(headers_provider));
   CZerobusStream* stream = zerobus_sdk_create_stream_with_headers_provider(
-      handle_, detail::checked_c_str(table.table_name, "table_name"),
-      descriptor_ptr(table.descriptor_proto), table.descriptor_proto.size(),
-      detail::zerobus_cpp_headers_trampoline, headers_provider.get(), &copts,
-      guard.ptr());
+      handle_, c_table, descriptor_ptr(table.descriptor_proto),
+      table.descriptor_proto.size(), detail::zerobus_cpp_headers_trampoline,
+      owned, detail::zerobus_cpp_headers_free, &copts, guard.ptr());
   if (stream == nullptr) {
+    // The FFI already freed `owned` via zerobus_cpp_headers_free on the failure
+    // path, so we must not delete it here.
     guard.throw_if_error();
     throw ZerobusException("failed to create stream", false);
   }
-  return Stream(stream, std::move(headers_provider));
+  // Provider ownership now lives in the FFI; keep only the ack callback alive.
+  return Stream(stream, nullptr, options.ack_callback);
 }
 
 // Create an OAuth-authenticated Arrow Flight stream (Beta). The schema IPC
@@ -232,10 +243,10 @@ ArrowStream Sdk::create_arrow_stream(
   return ArrowStream(stream, nullptr);
 }
 
-// Arrow Flight stream (Beta) authenticated by a custom headers provider. Both
-// the provider and the schema bytes are validated up front; as with the proto
-// path, the ArrowStream keeps the provider's shared_ptr alive for the
-// callback's lifetime.
+// Arrow Flight stream (Beta) authenticated by a custom headers provider. As
+// with the proto path, provider ownership is handed to the FFI (a heap
+// shared_ptr freed via zerobus_cpp_headers_free after any in-flight
+// get_headers returns), so the ArrowStream no longer keeps its own shared_ptr.
 ArrowStream Sdk::create_arrow_stream(
     const std::string& table_name,
     const std::vector<std::uint8_t>& schema_ipc_bytes,
@@ -249,17 +260,21 @@ ArrowStream Sdk::create_arrow_stream(
   }
   detail::ResultGuard guard;
   CArrowStreamConfigurationOptions copts = detail::to_c(options);
+  // Validate the table name before allocating `owned` (see the proto path).
+  const char* c_table = detail::checked_c_str(table_name, "table_name");
+  auto* owned =
+      new std::shared_ptr<HeadersProvider>(std::move(headers_provider));
   // Non-empty checked above, so data() is non-null.
   CArrowStream* stream = zerobus_sdk_create_arrow_stream_with_headers_provider(
-      handle_, detail::checked_c_str(table_name, "table_name"),
-      schema_ipc_bytes.data(), schema_ipc_bytes.size(),
-      detail::zerobus_cpp_headers_trampoline, headers_provider.get(), &copts,
-      guard.ptr());
+      handle_, c_table, schema_ipc_bytes.data(), schema_ipc_bytes.size(),
+      detail::zerobus_cpp_headers_trampoline, owned,
+      detail::zerobus_cpp_headers_free, &copts, guard.ptr());
   if (stream == nullptr) {
+    // The FFI already freed `owned` on the failure path; do not delete it here.
     guard.throw_if_error();
     throw ZerobusException("failed to create Arrow stream", false);
   }
-  return ArrowStream(stream, std::move(headers_provider));
+  return ArrowStream(stream, nullptr);
 }
 
 }  // namespace zerobus

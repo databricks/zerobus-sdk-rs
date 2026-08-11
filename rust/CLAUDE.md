@@ -32,7 +32,7 @@ This is a Cargo workspace. The workspace root is `rust/Cargo.toml`.
 - `headers_provider.rs` — `HeadersProvider` trait + OAuth implementation
 - `landing_zone.rs` — Batches records before sending over gRPC
 - `record_types.rs` — `EncodedRecord`, `ProtoMessage`, `JsonString`
-- `arrow_stream.rs` — Arrow Flight ingestion (Beta; behind `arrow-flight` feature flag)
+- `stream/arrow/` — Arrow Flight ingestion, ACK rotation, connection, and recovery modules (Beta; behind `arrow-flight`)
 
 ## Build commands
 
@@ -64,6 +64,9 @@ Any change to the Rust SDK's public API surface has cascading effects:
 ## Feature flags
 
 - `arrow-flight` — Arrow Flight support (Beta). API is stabilising but may still change before GA.
+- `internal-arrow-c-data` — Unsupported wrapper-only C Data importer shared by
+  the repository's native bindings. Disabled by default; external Rust users
+  must not depend on its API stability.
 - `zeroparser` — Zero-copy, single-pass protobuf parser driven by `prost_types::DescriptorProto`. Off by default; opt-in for downstream consumers. Source under `sdk/src/zeroparser/`; see its README for details.
 - `testing` — Test utilities.
 

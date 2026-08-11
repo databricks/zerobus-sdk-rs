@@ -7,7 +7,7 @@ name = "databricks-zerobus-ingest-sdk"
 dynamic = ["version"]
 description = "Databricks Zerobus Ingest SDK for Python"
 readme = "README.md"
-requires-python = ">=3.9"
+requires-python = ">=3.9,<3.15"
 keywords = ["zerobus", "databricks", "sdk"]
 license = {file = "LICENSE"}
 classifiers = [
@@ -20,6 +20,7 @@ classifiers = [
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
     "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
     "Operating System :: OS Independent",
 ]
 dependencies = [
@@ -29,7 +30,12 @@ dependencies = [
 
 [project.optional-dependencies]
 arrow = [
-    "pyarrow>=14.0.0,<20.0",
+    # pyarrow dropped CPython 3.9 before it added CPython 3.14, so no single
+    # version covers the range this SDK supports. 21.0.0 is the last release with
+    # 3.9 wheels; 22.0.0 is the first with 3.14 wheels. Keep the two branches
+    # split by marker, otherwise one end of the matrix cannot install.
+    "pyarrow>=14.0.0,<22.0; python_version < '3.14'",
+    "pyarrow>=22.0.0,<26.0; python_version >= '3.14'",
 ]
 dev = [
     # Build tools
@@ -47,7 +53,8 @@ dev = [
     "pytest-cov",
     "pytest-xdist>=3.6.1,<4.0",
     "pytest-asyncio>=0.21,<1.0",
-    "pyarrow>=14.0.0,<20.0",
+    "pyarrow>=14.0.0,<22.0; python_version < '3.14'",
+    "pyarrow>=22.0.0,<26.0; python_version >= '3.14'",
 ]
 
 [tool.maturin]
@@ -58,7 +65,7 @@ include = [{path = "NOTICE", format = "sdist"}]
 
 [tool.black]
 line-length = 120
-target-version = ['py39', 'py310', 'py311', 'py312', 'py313']
+target-version = ['py39', 'py310', 'py311', 'py312', 'py313', 'py314']
 
 [tool.isort]
 profile = "black"
