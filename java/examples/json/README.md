@@ -49,6 +49,24 @@ ZerobusJsonStream stream = sdk.streamBuilder()
     .join();
 ```
 
+For custom authentication, provide the authorization and table name headers:
+
+```java
+HeadersProvider provider = () -> {
+    Map<String, String> headers = new HashMap<>();
+    headers.put("authorization", "Bearer " + System.getenv("DATABRICKS_TOKEN"));
+    headers.put("x-databricks-zerobus-table-name", tableName);
+    return headers;
+};
+
+ZerobusJsonStream stream = sdk.streamBuilder()
+    .table(tableName)
+    .headersProvider(provider)
+    .json()
+    .build()
+    .join();
+```
+
 ### Single Record Ingestion
 
 ```java

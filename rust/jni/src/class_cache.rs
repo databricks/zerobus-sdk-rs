@@ -19,6 +19,8 @@ pub struct CachedClasses {
     pub zerobus_exception_class: GlobalRef,
     /// `com.databricks.zerobus.NonRetriableException`
     pub non_retriable_exception_class: GlobalRef,
+    /// `java.lang.Error`
+    pub error_class: GlobalRef,
     /// `java.lang.Long`
     pub long_class: GlobalRef,
     /// `java.util.concurrent.CompletableFuture`
@@ -40,6 +42,7 @@ pub fn init_class_cache(env: &mut JNIEnv) -> Result<(), String> {
             env,
             "com/databricks/zerobus/NonRetriableException",
         )?,
+        error_class: find_and_cache(env, "java/lang/Error")?,
         long_class: find_and_cache(env, "java/lang/Long")?,
         completable_future_class: find_and_cache(env, "java/util/concurrent/CompletableFuture")?,
         array_list_class: find_and_cache(env, "java/util/ArrayList")?,

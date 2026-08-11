@@ -30,10 +30,10 @@ public final class StreamBuilder {
 
   private String tableName;
 
-  // OAuth credentials. OAuth is the only authentication mechanism currently exposed by the
-  // builder.
+  // Authentication. OAuth credentials and a custom headers provider are mutually exclusive.
   private String clientId;
   private String clientSecret;
+  private HeadersProvider headersProvider;
 
   // Shared and gRPC configuration. A {@code null} value means "not set", so each record format
   // falls back to its own defaults (for example Arrow defaults to 4 recovery retries while gRPC
@@ -73,6 +73,20 @@ public final class StreamBuilder {
   public StreamBuilder oauth(String clientId, String clientSecret) {
     this.clientId = requireNonBlank(clientId, "clientId");
     this.clientSecret = requireNonBlank(clientSecret, "clientSecret");
+    this.headersProvider = null;
+    return this;
+  }
+
+  /**
+   * Authenticates with a custom headers provider.
+   *
+   * @param headersProvider the provider for authentication and request headers
+   * @return this builder for method chaining
+   */
+  public StreamBuilder headersProvider(HeadersProvider headersProvider) {
+    this.headersProvider = Objects.requireNonNull(headersProvider, "headersProvider");
+    this.clientId = null;
+    this.clientSecret = null;
     return this;
   }
 
@@ -217,8 +231,9 @@ public final class StreamBuilder {
     if (isBlank(tableName)) {
       throw new IllegalStateException("table name is required: call table()");
     }
-    if (isBlank(clientId) || isBlank(clientSecret)) {
-      throw new IllegalStateException("authentication is required: call oauth()");
+    if (headersProvider == null && (isBlank(clientId) || isBlank(clientSecret))) {
+      throw new IllegalStateException(
+          "authentication is required: call oauth() or headersProvider()");
     }
   }
 
@@ -311,7 +326,11 @@ public final class StreamBuilder {
     public CompletableFuture<ZerobusJsonStream> build() {
       base.validateRequired();
       return base.sdk.createJsonStreamInternal(
-          base.tableName, base.clientId, base.clientSecret, base.toStreamOptions());
+          base.tableName,
+          base.clientId,
+          base.clientSecret,
+          base.headersProvider,
+          base.toStreamOptions());
     }
   }
 
@@ -338,6 +357,7 @@ public final class StreamBuilder {
           descriptorProto,
           base.clientId,
           base.clientSecret,
+          base.headersProvider,
           base.toStreamOptions());
     }
   }
@@ -454,7 +474,12 @@ public final class StreamBuilder {
     public CompletableFuture<ZerobusArrowStream> build() {
       base.validateRequired();
       return base.sdk.createArrowStreamInternal(
-          base.tableName, schema, base.clientId, base.clientSecret, buildOptions());
+          base.tableName,
+          schema,
+          base.clientId,
+          base.clientSecret,
+          base.headersProvider,
+          buildOptions());
     }
   }
 }

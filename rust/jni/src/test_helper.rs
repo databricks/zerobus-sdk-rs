@@ -5,9 +5,13 @@
 //! classloader cannot see the SDK classes.
 
 use crate::class_cache::{as_jclass, get_class_cache};
+use crate::headers_provider::{get_headers_blocking, invalidate_blocking, JavaHeadersProvider};
 use crate::runtime::{get_jvm, get_runtime};
+use databricks_zerobus_ingest_sdk::{HeadersProvider, ZerobusError};
 use jni::objects::{JClass, JObject, JString};
 use jni::JNIEnv;
+use std::sync::Arc;
+use std::time::Duration;
 
 /// Test finding a class from a Tokio daemon thread using direct `find_class`.
 ///
@@ -160,4 +164,116 @@ pub extern "system" fn Java_com_databricks_zerobus_NativeTestHelper_nativeTestFi
         Ok(s) => s.into(),
         Err(_) => JObject::null(),
     }
+}
+
+#[no_mangle]
+pub extern "system" fn Java_com_databricks_zerobus_NativeTestHelper_nativeTestHeadersProviderCallbacks<
+    'local,
+>(
+    mut env: JNIEnv<'local>,
+    _class: JClass<'local>,
+    provider: JObject<'local>,
+) -> JObject<'local> {
+    let provider_ref = match env.new_global_ref(provider) {
+        Ok(provider_ref) => provider_ref,
+        Err(error) => return test_result(&mut env, format!("new_global_ref failed: {error}")),
+    };
+
+    let result = get_runtime().block_on(async {
+        tokio::task::spawn_blocking(move || {
+            let first = get_headers_blocking(provider_ref.clone());
+            if !first.is_err_and(|error| error.is_retryable()) {
+                return "first provider exception was not retryable".to_string();
+            }
+
+            let second = get_headers_blocking(provider_ref.clone());
+            if !second.is_ok_and(|headers| {
+                headers.get("authorization").map(String::as_str) == Some("Bearer token")
+            }) {
+                return "second provider call did not return headers".to_string();
+            }
+
+            invalidate_blocking(provider_ref.clone());
+
+            let third = get_headers_blocking(provider_ref.clone());
+            if !third.is_err_and(|error| !error.is_retryable()) {
+                return "NonRetriableException was retryable".to_string();
+            }
+
+            let fourth = get_headers_blocking(provider_ref.clone());
+            if !fourth.is_err_and(|error| !error.is_retryable()) {
+                return "Java Error was retryable".to_string();
+            }
+
+            let fifth = get_headers_blocking(provider_ref.clone());
+            if !fifth.is_err_and(|error| {
+                matches!(error, ZerobusError::InvalidArgument(message) if message.contains("java.lang.String"))
+            }) {
+                return "non-String map entry was not rejected clearly".to_string();
+            }
+
+            let sixth = get_headers_blocking(provider_ref.clone());
+            if !sixth.is_err_and(|error| {
+                matches!(error, ZerobusError::InvalidArgument(message) if message.contains("invalid gRPC metadata header name"))
+            }) {
+                return "invalid header name was not rejected clearly".to_string();
+            }
+
+            let seventh = get_headers_blocking(provider_ref);
+            if !seventh.is_err_and(|error| {
+                matches!(error, ZerobusError::InvalidArgument(message) if message.contains("maximum length"))
+            }) {
+                return "oversized header name was not rejected clearly".to_string();
+            }
+
+            "OK".to_string()
+        })
+        .await
+        .unwrap_or_else(|error| format!("callback task failed: {error}"))
+    });
+
+    test_result(&mut env, result)
+}
+
+#[no_mangle]
+pub extern "system" fn Java_com_databricks_zerobus_NativeTestHelper_nativeTestHeadersProviderSerialization<
+    'local,
+>(
+    mut env: JNIEnv<'local>,
+    _class: JClass<'local>,
+    provider: JObject<'local>,
+) -> JObject<'local> {
+    let provider_ref = match env.new_global_ref(provider) {
+        Ok(provider_ref) => provider_ref,
+        Err(error) => return test_result(&mut env, format!("new_global_ref failed: {error}")),
+    };
+
+    let result = get_runtime().block_on(async {
+        let provider = Arc::new(JavaHeadersProvider::new(provider_ref));
+        if tokio::time::timeout(Duration::from_millis(100), provider.get_headers())
+            .await
+            .is_ok()
+        {
+            return "first provider call did not time out".to_string();
+        }
+
+        match tokio::time::timeout(Duration::from_secs(2), provider.get_headers()).await {
+            Ok(Ok(headers))
+                if headers.get("authorization").map(String::as_str) == Some("Bearer token") =>
+            {
+                "OK".to_string()
+            }
+            Ok(Ok(_)) => "second provider call returned unexpected headers".to_string(),
+            Ok(Err(error)) => format!("second provider call failed: {error}"),
+            Err(_) => "second provider call timed out".to_string(),
+        }
+    });
+
+    test_result(&mut env, result)
+}
+
+fn test_result<'local>(env: &mut JNIEnv<'local>, result: String) -> JObject<'local> {
+    env.new_string(result)
+        .map(Into::into)
+        .unwrap_or_else(|_| JObject::null())
 }

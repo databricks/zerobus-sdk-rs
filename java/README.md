@@ -14,6 +14,7 @@ The Databricks Zerobus Ingest SDK for Java provides a high-performance client fo
   - [Protocol Buffers Examples](#protocol-buffers-examples)
   - [JSON Examples](#json-examples)
   - [Arrow Flight Examples (Beta)](#arrow-flight-examples-beta)
+- [Authentication](#authentication)
 - [API Styles](#api-styles)
   - [Offset-Based API (Recommended)](#offset-based-api-recommended)
   - [Future-Based API (Deprecated)](#future-based-api-deprecated)
@@ -36,6 +37,7 @@ The Databricks Zerobus Ingest SDK for Java provides a high-performance client fo
 - **Arrow Flight (Beta)**: Columnar ingestion of Apache Arrow `VectorSchemaRoot` batches
 - **Offset-based API**: Low-overhead alternative to CompletableFuture for high throughput
 - **OAuth 2.0 authentication**: Secure authentication with client credentials
+- **Custom authentication**: Supply request headers with `HeadersProvider`
 - **Framework compatible**: Works inside Spring Boot and other frameworks with isolated classloaders
 
 ## Architecture
@@ -691,6 +693,34 @@ stream.close();
 
 ---
 
+## Authentication
+
+OAuth client credentials are the default authentication mechanism. For personal access tokens,
+custom identity providers, or externally managed credentials, implement `HeadersProvider`:
+
+```java
+HeadersProvider provider = () -> {
+    Map<String, String> headers = new HashMap<>();
+    headers.put("authorization", "Bearer " + fetchToken());
+    headers.put("x-databricks-zerobus-table-name", tableName);
+    return headers;
+};
+
+ZerobusJsonStream stream = sdk.streamBuilder()
+    .table(tableName)
+    .headersProvider(provider)
+    .json()
+    .build()
+    .join();
+```
+
+The same provider works with the builder's `compiledProto()` and `arrow()` format selectors.
+Providers may override `invalidate()` to clear cached credentials after an authentication
+rejection. Implementations must be thread-safe because the SDK can invoke them from internal
+threads during creation and recovery.
+
+---
+
 ## API Styles
 
 The SDK provides two ingestion styles:
@@ -1110,11 +1140,12 @@ CompletableFuture<ZerobusArrowStream> recreateArrowStream(ZerobusArrowStream clo
 
 ### StreamBuilder
 
-Fluent builder for creating streams, returned by [`ZerobusSdk.streamBuilder()`](#zerobussdk). Set the table, OAuth credentials, and stream configuration, then select a record format to obtain a typed sub-builder whose `build()` returns the matching stream type.
+Fluent builder for creating streams, returned by [`ZerobusSdk.streamBuilder()`](#zerobussdk). Set the table, authentication, and stream configuration, then select a record format to obtain a typed sub-builder whose `build()` returns the matching stream type.
 
 ```java
 StreamBuilder table(String tableName)
 StreamBuilder oauth(String clientId, String clientSecret)
+StreamBuilder headersProvider(HeadersProvider headersProvider)
 StreamBuilder recovery(boolean recovery)
 StreamBuilder recoveryTimeoutMs(int ms)
 StreamBuilder recoveryBackoffMs(int ms)

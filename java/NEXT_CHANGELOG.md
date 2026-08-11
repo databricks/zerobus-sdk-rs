@@ -6,8 +6,9 @@
 
 ### New Features and Improvements
 
-### Bug Fixes
+- Added `HeadersProvider` support to `StreamBuilder` for custom authentication on JSON, Protocol Buffer, and Arrow streams, including stream recreation and credential invalidation callbacks.
 
+### Bug Fixes
 
 ### Documentation
 
@@ -18,3 +19,5 @@
 ### Deprecations
 
 ### API Changes
+
+- Added `HeadersProvider` and `StreamBuilder.headersProvider()` for custom authentication.

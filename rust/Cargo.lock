@@ -4071,6 +4071,7 @@ dependencies = [
  "arrow-array",
  "arrow-ipc",
  "arrow-schema",
+ "async-trait",
  "databricks-zerobus-ingest-sdk",
  "jni",
  "prost",
