@@ -1,4 +1,4 @@
-# Databricks.Zerobus — .NET SDK
+# Databricks.Zerobus.Ingest.Sdk — .NET SDK
 
 High-performance .NET SDK for streaming data ingestion into Databricks Delta tables using the Zerobus service. Built on the same Rust core as the Go SDK, exposed via P/Invoke (C FFI bindings).
 
@@ -43,7 +43,7 @@ stream.WaitForOffset(offset);
 ### NuGet (when published)
 
 ```bash
-dotnet add package Databricks.Zerobus
+dotnet add package Databricks.Zerobus.Ingest.Sdk
 ```
 
 ### From Source
@@ -439,7 +439,7 @@ dotnet/
 ## Architecture
 
 ```
-.NET SDK (Databricks.Zerobus)
+.NET SDK (Databricks.Zerobus.Ingest.Sdk)
     ↓ P/Invoke
 Rust FFI (zerobus-ffi / libzerobus_ffi)
     ↓
