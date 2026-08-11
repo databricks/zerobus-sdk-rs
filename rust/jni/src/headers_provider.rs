@@ -12,6 +12,7 @@ use std::sync::{Arc, Mutex, OnceLock};
 
 static HEADER_NAMES: OnceLock<Mutex<HashSet<&'static str>>> = OnceLock::new();
 const MAX_INTERNED_HEADER_NAMES: usize = 1024;
+const MAX_HEADER_NAME_LENGTH: usize = (1 << 16) - 1;
 
 struct LocalFrameError(ZerobusError);
 
@@ -201,6 +202,11 @@ fn intern_header_name(name: String) -> ZerobusResult<&'static str> {
 }
 
 fn normalize_header_name(mut name: String) -> ZerobusResult<String> {
+    if name.len() > MAX_HEADER_NAME_LENGTH {
+        return Err(provider_invalid_argument(format!(
+            "gRPC metadata header name exceeds the maximum length of {MAX_HEADER_NAME_LENGTH} bytes"
+        )));
+    }
     name.make_ascii_lowercase();
     if name.is_empty()
         || name.ends_with("-bin")
@@ -248,11 +254,15 @@ fn take_java_exception(env: &mut JNIEnv<'_>) -> Option<JavaException> {
     };
     let _ = env.exception_clear();
 
-    let non_retryable = env
+    let explicitly_non_retryable = env
         .is_instance_of(
             &throwable,
             as_jclass(&get_class_cache().non_retriable_exception_class),
         )
+        .unwrap_or(false);
+    let _ = env.exception_clear();
+    let fatal_error = env
+        .is_instance_of(&throwable, as_jclass(&get_class_cache().error_class))
         .unwrap_or(false);
     let _ = env.exception_clear();
     let message = extract_throwable_string(env, &throwable);
@@ -260,7 +270,7 @@ fn take_java_exception(env: &mut JNIEnv<'_>) -> Option<JavaException> {
 
     Some(JavaException {
         message,
-        non_retryable,
+        non_retryable: explicitly_non_retryable || fatal_error,
     })
 }
 

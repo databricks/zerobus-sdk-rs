@@ -3,6 +3,7 @@ package com.databricks.zerobus;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assumptions.assumeTrue;
 
+import java.util.Arrays;
 import java.util.Collections;
 import java.util.HashMap;
 import java.util.Map;
@@ -29,9 +30,13 @@ class HeadersProviderNativeTest {
               case 2:
                 throw new NonRetriableException("permanent failure");
               case 3:
+                throw new AssertionError("fatal failure");
+              case 4:
                 return nonStringMap();
-              default:
+              case 5:
                 return Collections.singletonMap("invalid header", "value");
+              default:
+                return Collections.singletonMap(oversizedHeaderName(), "value");
             }
           }
 
@@ -76,6 +81,12 @@ class HeadersProviderNativeTest {
     Map map = new HashMap();
     map.put(1, 2);
     return map;
+  }
+
+  private static String oversizedHeaderName() {
+    char[] name = new char[65536];
+    Arrays.fill(name, 'a');
+    return new String(name);
   }
 
   private static final class BrokenToStringException extends Exception {

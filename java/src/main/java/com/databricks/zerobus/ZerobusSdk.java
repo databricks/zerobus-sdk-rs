@@ -228,7 +228,7 @@ public class ZerobusSdk implements AutoCloseable {
     String effectiveClientSecret = headersProvider == null ? clientSecret : "";
 
     CompletableFuture<Long> handleFuture =
-        nativeCreateStream(
+        createNativeStream(
             nativeHandle,
             tableName,
             descriptorProtoBytes,
@@ -332,7 +332,7 @@ public class ZerobusSdk implements AutoCloseable {
     logger.debug("Creating JSON stream for table: {}", tableName);
 
     CompletableFuture<Long> handleFuture =
-        nativeCreateStream(
+        createNativeStream(
             nativeHandle,
             tableName,
             null,
@@ -387,7 +387,7 @@ public class ZerobusSdk implements AutoCloseable {
     byte[] descriptorProtoBytes = tableProperties.getDescriptorProto().toByteArray();
 
     CompletableFuture<Long> handleFuture =
-        nativeCreateStream(
+        createNativeStream(
             nativeHandle,
             tableProperties.getTableName(),
             descriptorProtoBytes,
@@ -504,7 +504,7 @@ public class ZerobusSdk implements AutoCloseable {
     }
 
     CompletableFuture<Long> handleFuture =
-        nativeCreateArrowStream(
+        createNativeArrowStream(
             nativeHandle,
             tableName,
             schemaIpc,
@@ -563,7 +563,7 @@ public class ZerobusSdk implements AutoCloseable {
 
     // Create new stream with same parameters
     CompletableFuture<Long> handleFuture =
-        nativeCreateStream(
+        createNativeStream(
             nativeHandle,
             closedStream.getTableName(),
             closedStream.getDescriptorProtoBytes(),
@@ -634,7 +634,7 @@ public class ZerobusSdk implements AutoCloseable {
 
     // Create new stream with same parameters
     CompletableFuture<Long> handleFuture =
-        nativeCreateStream(
+        createNativeStream(
             nativeHandle,
             closedStream.getTableName(),
             null,
@@ -698,7 +698,7 @@ public class ZerobusSdk implements AutoCloseable {
     }
 
     CompletableFuture<Long> handleFuture =
-        nativeCreateArrowStream(
+        createNativeArrowStream(
             nativeHandle,
             closedStream.getTableName(),
             closedStream.getSchemaIpc(),
@@ -768,7 +768,7 @@ public class ZerobusSdk implements AutoCloseable {
 
     // Create new stream with same parameters
     CompletableFuture<Long> handleFuture =
-        nativeCreateStream(
+        createNativeStream(
             nativeHandle,
             tableProperties.getTableName(),
             descriptorProtoBytes,
@@ -825,6 +825,46 @@ public class ZerobusSdk implements AutoCloseable {
     }
   }
 
+  private CompletableFuture<Long> createNativeStream(
+      long sdkHandle,
+      String tableName,
+      byte[] descriptorProto,
+      String clientId,
+      String clientSecret,
+      HeadersProvider headersProvider,
+      Object options,
+      boolean isJson) {
+    if (headersProvider == null) {
+      return nativeCreateStream(
+          sdkHandle, tableName, descriptorProto, clientId, clientSecret, options, isJson);
+    }
+    return nativeCreateStreamWithHeadersProvider(
+        sdkHandle,
+        tableName,
+        descriptorProto,
+        clientId,
+        clientSecret,
+        headersProvider,
+        options,
+        isJson);
+  }
+
+  private CompletableFuture<Long> createNativeArrowStream(
+      long sdkHandle,
+      String tableName,
+      byte[] arrowSchema,
+      String clientId,
+      String clientSecret,
+      HeadersProvider headersProvider,
+      Object options) {
+    if (headersProvider == null) {
+      return nativeCreateArrowStream(
+          sdkHandle, tableName, arrowSchema, clientId, clientSecret, options);
+    }
+    return nativeCreateArrowStreamWithHeadersProvider(
+        sdkHandle, tableName, arrowSchema, clientId, clientSecret, headersProvider, options);
+  }
+
   // Native methods implemented in Rust
 
   private static native long nativeCreate(
@@ -838,11 +878,28 @@ public class ZerobusSdk implements AutoCloseable {
       byte[] descriptorProto,
       String clientId,
       String clientSecret,
+      Object options,
+      boolean isJson);
+
+  private native CompletableFuture<Long> nativeCreateStreamWithHeadersProvider(
+      long sdkHandle,
+      String tableName,
+      byte[] descriptorProto,
+      String clientId,
+      String clientSecret,
       HeadersProvider headersProvider,
       Object options,
       boolean isJson);
 
   private native CompletableFuture<Long> nativeCreateArrowStream(
+      long sdkHandle,
+      String tableName,
+      byte[] arrowSchema,
+      String clientId,
+      String clientSecret,
+      Object options);
+
+  private native CompletableFuture<Long> nativeCreateArrowStreamWithHeadersProvider(
       long sdkHandle,
       String tableName,
       byte[] arrowSchema,

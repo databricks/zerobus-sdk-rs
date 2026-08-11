@@ -146,6 +146,34 @@ pub extern "system" fn Java_com_databricks_zerobus_ZerobusSdk_nativeDestroy<'loc
 /// ```
 #[no_mangle]
 pub extern "system" fn Java_com_databricks_zerobus_ZerobusSdk_nativeCreateStream<'local>(
+    env: JNIEnv<'local>,
+    _obj: JObject<'local>,
+    sdk_handle: jlong,
+    table_name: JString<'local>,
+    descriptor_proto: JByteArray<'local>,
+    client_id: JString<'local>,
+    client_secret: JString<'local>,
+    options: JObject<'local>,
+    is_json: jboolean,
+) -> JObject<'local> {
+    Java_com_databricks_zerobus_ZerobusSdk_nativeCreateStreamWithHeadersProvider(
+        env,
+        _obj,
+        sdk_handle,
+        table_name,
+        descriptor_proto,
+        client_id,
+        client_secret,
+        JObject::null(),
+        options,
+        is_json,
+    )
+}
+
+#[no_mangle]
+pub extern "system" fn Java_com_databricks_zerobus_ZerobusSdk_nativeCreateStreamWithHeadersProvider<
+    'local,
+>(
     mut env: JNIEnv<'local>,
     _obj: JObject<'local>,
     sdk_handle: jlong,
@@ -396,6 +424,32 @@ pub extern "system" fn Java_com_databricks_zerobus_ZerobusSdk_nativeRecreateStre
 /// ```
 #[no_mangle]
 pub extern "system" fn Java_com_databricks_zerobus_ZerobusSdk_nativeCreateArrowStream<'local>(
+    env: JNIEnv<'local>,
+    _obj: JObject<'local>,
+    sdk_handle: jlong,
+    table_name: JString<'local>,
+    arrow_schema: JByteArray<'local>,
+    client_id: JString<'local>,
+    client_secret: JString<'local>,
+    options: JObject<'local>,
+) -> JObject<'local> {
+    Java_com_databricks_zerobus_ZerobusSdk_nativeCreateArrowStreamWithHeadersProvider(
+        env,
+        _obj,
+        sdk_handle,
+        table_name,
+        arrow_schema,
+        client_id,
+        client_secret,
+        JObject::null(),
+        options,
+    )
+}
+
+#[no_mangle]
+pub extern "system" fn Java_com_databricks_zerobus_ZerobusSdk_nativeCreateArrowStreamWithHeadersProvider<
+    'local,
+>(
     mut env: JNIEnv<'local>,
     _obj: JObject<'local>,
     sdk_handle: jlong,

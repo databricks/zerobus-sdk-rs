@@ -201,17 +201,29 @@ pub extern "system" fn Java_com_databricks_zerobus_NativeTestHelper_nativeTestHe
             }
 
             let fourth = get_headers_blocking(provider_ref.clone());
-            if !fourth.is_err_and(|error| {
+            if !fourth.is_err_and(|error| !error.is_retryable()) {
+                return "Java Error was retryable".to_string();
+            }
+
+            let fifth = get_headers_blocking(provider_ref.clone());
+            if !fifth.is_err_and(|error| {
                 matches!(error, ZerobusError::InvalidArgument(message) if message.contains("java.lang.String"))
             }) {
                 return "non-String map entry was not rejected clearly".to_string();
             }
 
-            let fifth = get_headers_blocking(provider_ref);
-            if !fifth.is_err_and(|error| {
+            let sixth = get_headers_blocking(provider_ref.clone());
+            if !sixth.is_err_and(|error| {
                 matches!(error, ZerobusError::InvalidArgument(message) if message.contains("invalid gRPC metadata header name"))
             }) {
                 return "invalid header name was not rejected clearly".to_string();
+            }
+
+            let seventh = get_headers_blocking(provider_ref);
+            if !seventh.is_err_and(|error| {
+                matches!(error, ZerobusError::InvalidArgument(message) if message.contains("maximum length"))
+            }) {
+                return "oversized header name was not rejected clearly".to_string();
             }
 
             "OK".to_string()
