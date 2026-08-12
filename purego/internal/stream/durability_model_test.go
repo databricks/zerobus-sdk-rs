@@ -11,6 +11,11 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
+
+	"github.com/databricks/zerobus-sdk/purego/internal/transport"
 )
 
 // ---- fake record-count protocol --------------------------------------------
@@ -287,6 +292,20 @@ func (w *shortSuccessRowWire) SendWithReceipt(
 	return SubmissionReceipt{SubmittedUnits: w.reportRows}, nil
 }
 
+// authRejectingRowWire delivers a definitive server rejection from the Recv that
+// teardown unblocks, the way gRPC carries a status after Send has already failed.
+type authRejectingRowWire struct {
+	*partialRowWire
+}
+
+func (w *authRejectingRowWire) Recv() (*rowResponse, error) {
+	resp, err := w.partialRowWire.Recv()
+	if errors.Is(err, io.EOF) {
+		return nil, status.Error(codes.Unauthenticated, "expired credentials")
+	}
+	return resp, err
+}
+
 // rowOpener hands out pre-built connections in order.
 type rowOpener struct {
 	mu     sync.Mutex
@@ -334,9 +353,20 @@ func newRowStreamWithAcks(
 	acks AckModelHooks[*rowResponse],
 ) *CoreStream[*rowPayload, *rowResponse] {
 	t.Helper()
+	return newRowStreamWithParams(t, testParams(), cfg, opener, acks)
+}
+
+func newRowStreamWithParams(
+	t *testing.T,
+	params StreamParams,
+	cfg Config,
+	opener *rowOpener,
+	acks AckModelHooks[*rowResponse],
+) *CoreStream[*rowPayload, *rowResponse] {
+	t.Helper()
 	cs, err := NewCoreStreamWithHooks[*rowPayload, *rowResponse](
 		context.Background(),
-		testParams(),
+		params,
 		cfg,
 		opener.open,
 		rowEncoderHooks(),
@@ -989,6 +1019,51 @@ func TestHookProtocolImpossibleReceiptIsTerminal(t *testing.T) {
 				t.Errorf("second connection received %d sends, want 0", got)
 			}
 		})
+	}
+}
+
+// TestHookProtocolPrefixAckPreservesTerminalRecvStatus covers a prefix ACK that
+// ends the durability wait before the receiver is consulted. The rejection that
+// teardown then unblocks must still win over the send error.
+func TestHookProtocolPrefixAckPreservesTerminalRecvStatus(t *testing.T) {
+	wire := &authRejectingRowWire{
+		partialRowWire: &partialRowWire{
+			rowWire:    newRowWire(),
+			submitRows: 1,
+			// gRPC reports a server-side abort to Send as an opaque io.EOF.
+			failWith: io.EOF,
+		},
+	}
+	second := newRowWire()
+	opener := newRowOpener(wire, second)
+	provider := &countingHeadersProvider{}
+	params := testParams()
+	params.HeadersProvider = provider
+	cfg := rowConfig()
+	cfg.Recovery = RecoveryEnabled
+	cfg.RecoveryRetries = 3
+	cfg.RecoveryBackoff = time.Millisecond
+	cs := newRowStreamWithParams(t, params, cfg, opener, rowAckHooks())
+
+	if _, err := cs.IngestBatch(context.Background(), [][]byte{
+		[]byte("r0"), []byte("r1"),
+	}); err != nil {
+		t.Fatalf("IngestBatch: %v", err)
+	}
+	// End the wait on durable progress rather than a receiver exit.
+	wire.nextSend(t)
+	wire.ackRows(1)
+
+	waitCondition(t, cs.IsClosed, 5*time.Second)
+	err := cs.terminalErr()
+	if !transport.IsAuthRejection(err) {
+		t.Fatalf("terminal error = %v, want the server's rejection", err)
+	}
+	if got := provider.invalidations.Load(); got != 1 {
+		t.Errorf("Invalidate calls = %d, want 1", got)
+	}
+	if got := opener.count(); got != 1 {
+		t.Errorf("opened %d connections, want 1: the rejection was retried", got)
 	}
 }
 

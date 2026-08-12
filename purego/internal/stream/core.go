@@ -1083,6 +1083,20 @@ waitLoop:
 			<-senderExitCh
 		}
 		<-receiverDone
+		// The prefix-ACK exit can reach here without consulting the receiver,
+		// and Close unblocks a Recv holding the server's status. Only a
+		// definitive rejection wins; a retryable one is an artifact of the abort.
+		if !receiverReported {
+			select {
+			case receiverErr := <-receiverExitCh:
+				if receiverErr != nil &&
+					!errors.Is(receiverErr, context.Canceled) &&
+					!isRetryable(receiverErr) {
+					cause = receiverErr
+				}
+			default:
+			}
+		}
 	}
 	resetRecoveryBudget = cs.wm.current() > startAck ||
 		cs.durableProgress.Load() > startDurableProgress ||
