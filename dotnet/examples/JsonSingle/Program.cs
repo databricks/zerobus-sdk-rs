@@ -32,7 +32,6 @@ using var stream = sdk.CreateJsonStream(
     options);
 
 Console.WriteLine("Ingesting records...");
-var offsets = new List<long>();
 
 for (int i = 0; i < 5; i++)
 {
@@ -49,7 +48,6 @@ for (int i = 0; i < 5; i++)
     {
         long offset = stream.IngestRecord(jsonRecord);
         Console.WriteLine($"Ingested record {i} at offset {offset}");
-        offsets.Add(offset);
     }
     catch (ZerobusException ex) when (ex.IsRetryable)
     {
@@ -61,12 +59,8 @@ for (int i = 0; i < 5; i++)
     }
 }
 
-// Wait for specific offsets to be acknowledged.
+// Confirm every successfully queued record with one durability barrier.
 Console.WriteLine("Waiting for acknowledgments...");
-foreach (var offset in offsets)
-{
-    stream.WaitForOffset(offset);
-    Console.WriteLine($"Record at offset {offset} acknowledged");
-}
+stream.Flush();
 
 Console.WriteLine("All records successfully ingested and acknowledged!");

@@ -220,8 +220,7 @@ fn convert_js_to_record_payload(env: &Env, payload: Unknown) -> Result<RustRecor
 ///
 /// ```typescript
 /// const stream = await sdk.createStream(tableProps, clientId, clientSecret, options);
-/// const ackPromise = await stream.ingestRecord(Buffer.from([1, 2, 3]));
-/// const offset = await ackPromise;
+/// const offset = await stream.ingestRecord(Buffer.from([1, 2, 3]));
 /// await stream.close();
 /// ```
 #[napi]
@@ -970,7 +969,7 @@ impl ZerobusSdk {
     ///   "", // ignored
     ///   undefined,
     ///   {
-    ///     getHeadersCallback: async () => [
+    ///     getHeadersCallback: () => [
     ///       ["authorization", `Bearer ${myToken}`],
     ///       ["x-databricks-zerobus-table-name", tableName]
     ///     ]
@@ -1119,7 +1118,8 @@ impl ZerobusSdk {
     ///
     /// # Arguments
     ///
-    /// * `stream` - The failed or closed stream to recreate
+    /// * `stream` - The terminally failed stream to recreate. The TypeScript wrapper
+    ///   must not have been closed because `close()` releases its native handle.
     ///
     /// # Returns
     ///
@@ -1137,10 +1137,21 @@ impl ZerobusSdk {
     /// try {
     ///   await stream.ingestRecords(batch);
     /// } catch (error) {
-    ///   await stream.close();
     ///   // Recreate stream with all unacked batches re-ingested
-    ///   const newStream = await sdk.recreateStream(stream);
-    ///   // Continue ingesting with newStream
+    ///   try {
+    ///     const newStream = await sdk.recreateStream(stream);
+    ///     try {
+    ///       // Continue ingesting with newStream
+    ///     } finally {
+    ///       await newStream.close();
+    ///     }
+    ///   } finally {
+    ///     try {
+    ///       await stream.close();
+    ///     } catch (closeError) {
+    ///       console.error("Failed stream released:", closeError);
+    ///     }
+    ///   }
     /// }
     /// ```
     #[napi]

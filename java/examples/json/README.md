@@ -105,10 +105,10 @@ if (offset.isPresent()) {
 
 ```java
 // As JSON strings
-List<String> unacked = stream.getUnackedRecords();
+List<String> unackedJson = stream.getUnackedRecords();
 
 // As deserialized objects
-List<MyData> unacked = stream.getUnackedRecords(json -> gson.fromJson(json, MyData.class));
+List<MyData> unackedObjects = stream.getUnackedRecords(json -> gson.fromJson(json, MyData.class));
 ```
 
 ## Examples

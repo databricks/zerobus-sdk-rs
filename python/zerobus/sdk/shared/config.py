@@ -11,15 +11,16 @@ from zerobus._zerobus_core import AckCallback, StreamConfigurationOptions
 
 # Add module-level documentation
 AckCallback.__doc__ = """
-Base class for record acknowledgment callbacks.
+Base class for logical ingest submission acknowledgment callbacks.
 
-Subclass this in Python to create custom callbacks that are invoked
-when records are acknowledged by the server or encounter errors.
+Subclass this in Python to create custom callbacks that are invoked once per
+logical ingest submission. A batch submission produces one callback, not one
+callback per record in the batch.
 
 Example:
     >>> class MyCallback(AckCallback):
     ...     def on_ack(self, offset: int):
-    ...         print(f"Record acknowledged at offset {offset}")
+    ...         print(f"Submission acknowledged at offset {offset}")
     ...
     ...     def on_error(self, offset: int, error_message: str):
     ...         print(f"Error at offset {offset}: {error_message}")
@@ -28,16 +29,16 @@ Example:
 
 Methods:
     on_ack(offset: int) -> None:
-        Called when a record is successfully acknowledged by the server.
+        Called when a logical ingest submission is acknowledged by the server.
 
         Args:
-            offset: The offset of the acknowledged record
+            offset: The offset of the acknowledged submission
 
     on_error(offset: int, error_message: str) -> None:
-        Called when a record encounters an error.
+        Called when a logical ingest submission encounters an error.
 
         Args:
-            offset: The offset of the failed record
+            offset: The offset of the failed submission
             error_message: Description of the error
 """
 
@@ -47,8 +48,9 @@ Configuration options for stream behavior.
 All parameters are optional and will use defaults if not specified.
 
 Args:
-    record_type: Serialization format (RecordType.PROTO or RecordType.JSON).
-        Default: RecordType.PROTO
+    record_type: Retained for backward compatibility. The record format is inferred
+        from TableProperties: a descriptor selects Protobuf and no descriptor selects
+        JSON. Default: RecordType.PROTO
     max_inflight_records: Maximum number of records that can be sent to the
         server before waiting for acknowledgment. Default: 1000000
     recovery: Whether to enable automatic recovery of the stream in case of
@@ -75,18 +77,18 @@ Args:
         - None: Wait forever
         - x: Wait up to x milliseconds
         Default: 5000
-    ack_callback: Callback to be invoked when records are acknowledged or encounter
-        errors. Must be a class extending AckCallback. Default: None
+    ack_callback: Callback invoked once per logical ingest submission when it is
+        acknowledged or encounters an error. A batch submission produces one callback.
+        Must be a class extending AckCallback. Default: None
 
 Example:
-    >>> from zerobus.sdk.shared import StreamConfigurationOptions, RecordType, AckCallback
+    >>> from zerobus.sdk.shared import StreamConfigurationOptions, AckCallback
     >>>
     >>> class MyCallback(AckCallback):
     ...     def on_ack(self, offset: int):
     ...         print(f"Ack: {offset}")
     ...
     >>> options = StreamConfigurationOptions(
-    ...     record_type=RecordType.JSON,
     ...     max_inflight_records=10000,
     ...     recovery=True,
     ...     ack_callback=MyCallback()

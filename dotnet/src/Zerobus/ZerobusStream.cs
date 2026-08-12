@@ -67,12 +67,12 @@ public sealed class ZerobusStream : IDisposable, IAsyncDisposable
     /// </exception>
     /// <example>
     /// <code>
-    /// // JSON
-    /// long offset = stream.IngestRecord("{\"id\": 1, \"message\": \"Hello\"}");
+    /// // JSON stream
+    /// long jsonOffset = jsonStream.IngestRecord("{\"id\": 1, \"message\": \"Hello\"}");
     ///
-    /// // Protobuf
+    /// // Protobuf stream
     /// byte[] protoBytes = SerializeMyProto(myMessage);
-    /// long offset = stream.IngestRecord(protoBytes);
+    /// long protoOffset = protoStream.IngestRecord(protoBytes);
     /// </code>
     /// </example>
     public long IngestRecord(string payload)

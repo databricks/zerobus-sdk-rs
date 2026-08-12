@@ -28,6 +28,9 @@
 
 - Simplified the README quick start to install the published npm package first
   and moved clone/build instructions into a source-development path.
+- Corrected README, example, and JSDoc snippets for CommonJS async entry points,
+  generated Protobuf field names, variable declarations, stream recovery, and
+  custom-header callbacks.
 
 - Clarified the high-throughput ingestion pattern across the README, API reference, JSDoc
   doc comments (`ingestRecordOffset`, `ingestRecordsOffset`, `waitForOffset`, `flush`), and

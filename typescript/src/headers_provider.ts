@@ -42,24 +42,20 @@ export interface HeadersProvider {
  * );
  * ```
  *
- * **How to use custom authentication (PAT, etc.):**
+ * The native `createStream` adapter currently requires its callback to return
+ * header tuples synchronously. Pass a callback object directly:
  * ```typescript
- * class CustomHeadersProvider implements HeadersProvider {
- *     async getHeaders() {
- *         return [
- *             ["authorization", `Bearer ${myToken}`],
- *             ["x-databricks-zerobus-table-name", tableName]
- *         ];
- *     }
- * }
- *
- * const provider = new CustomHeadersProvider();
  * const stream = await sdk.createStream(
  *     tableProperties,
  *     '', // ignored
  *     '', // ignored
  *     options,
- *     { getHeadersCallback: provider.getHeaders.bind(provider) }
+ *     {
+ *         getHeadersCallback: () => [
+ *             ["authorization", `Bearer ${myToken}`],
+ *             ["x-databricks-zerobus-table-name", tableName]
+ *         ]
+ *     }
  * );
  * ```
  */

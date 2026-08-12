@@ -33,7 +33,7 @@ public class SingleRecordExample {
 
         System.out.println("=== Proto Single Record Example ===\n");
 
-        ZerobusSdk sdk = new ZerobusSdk(serverEndpoint, workspaceUrl);
+        try (ZerobusSdk sdk = new ZerobusSdk(serverEndpoint, workspaceUrl)) {
         ZerobusProtoStream stream = sdk.streamBuilder()
             .table(tableName)
             .oauth(clientId, clientSecret)
@@ -125,12 +125,11 @@ public class SingleRecordExample {
         System.out.println("\n--- Demonstrating recreateStream ---");
 
         // Recreate the stream (would re-ingest any unacked records if there were any)
-        ZerobusProtoStream newStream = sdk.recreateStream(stream).join();
+        try (ZerobusProtoStream newStream = sdk.recreateStream(stream).join()) {
         System.out.println("  New stream created successfully");
 
         // Ingest a few more records on the new stream
         int newRecords = 0;
-        try {
             for (int i = 0; i < 3; i++) {
                 AirQuality record = AirQuality.newBuilder()
                     .setDeviceName("proto-recreate-" + i)
@@ -142,12 +141,10 @@ public class SingleRecordExample {
             }
             newStream.flush();
             System.out.println("  " + newRecords + " new records ingested on recreated stream");
-        } finally {
-            newStream.close();
         }
 
         System.out.println("\n=== RecreateStream demo complete ===");
 
-        sdk.close();
+        }
     }
 }

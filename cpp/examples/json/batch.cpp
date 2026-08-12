@@ -74,10 +74,10 @@ std::string make_order_json(int id, const std::string& customer,
 // core calls get_headers() whenever it needs fresh headers (possibly from
 // another thread), and you return whatever the endpoint expects — at minimum an
 // "authorization" bearer token and "x-databricks-zerobus-table-name". Throwing
-// surfaces the message to the core as a headers-provider error. The provider
-// must outlive the Stream (which holds a shared_ptr to it). See
-// include/zerobus/headers_provider.hpp for the full contract. Used in the
-// commented-out create_stream() call below.
+// surfaces the message to the core as a headers-provider error. Provider
+// ownership is handed to the FFI, so the caller does not need to retain its own
+// shared_ptr after stream creation. See include/zerobus/headers_provider.hpp
+// for the full contract. Used in the commented-out create_stream() call below.
 class BearerTokenProvider : public zerobus::HeadersProvider {
  public:
   BearerTokenProvider(std::string table_name, std::string token)
@@ -183,7 +183,7 @@ int main() {
     stream.flush();
     stream.close();
     std::cout << "Stream closed successfully. Callback observed "
-              << acked.load() << " acknowledgements.\n";
+              << acked.load() << " logical submission acknowledgement(s).\n";
   } catch (const zerobus::ZerobusException& e) {
     std::cerr << "Zerobus error: " << e.what()
               << " (retryable=" << (e.is_retryable() ? "true" : "false")

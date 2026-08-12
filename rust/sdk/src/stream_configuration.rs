@@ -30,7 +30,8 @@ pub struct StreamConfigurationOptions {
     /// Maximum number of requests that can be sending or pending acknowledgement at any given time.
     ///
     /// This limit controls memory usage and backpressure. When this limit is reached,
-    /// `ingest_record()` and `ingest_records()` calls will block until acknowledgments free up space.
+    /// `ingest_record_offset()` and `ingest_records_offset()` calls will wait until
+    /// acknowledgments free up space.
     ///
     /// Default: 1,000,000
     pub max_inflight_requests: usize,
@@ -93,7 +94,7 @@ pub struct StreamConfigurationOptions {
     ///
     /// When the server sends a CloseStreamSignal indicating it will close the stream,
     /// the SDK can enter a "paused" state where it:
-    /// - Continues accepting and buffering new ingest_record() calls
+    /// - Continues accepting and buffering new ingest calls
     /// - Stops sending buffered records to the server
     /// - Continues processing acknowledgments for in-flight records
     /// - Waits for either all in-flight records to be acknowledged or the timeout to expire
@@ -161,7 +162,7 @@ pub struct StreamConfigurationOptions {
     /// Maximum total encoded record byte size allowed per ingest call.
     ///
     /// This is the sum of all record bytes passed to a single
-    /// `ingest_record()` / `ingest_records()` (and their `_offset` variants) call.
+    /// `ingest_record_offset()` or `ingest_records_offset()` call.
     /// Calls exceeding this limit fail fast with
     /// [`ZerobusError::InvalidArgument`](crate::ZerobusError::InvalidArgument)
     /// before any network I/O, matching the server-side limit.

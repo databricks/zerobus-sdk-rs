@@ -1,6 +1,7 @@
 # Zerobus SDK Examples
 
-This directory contains runnable example applications demonstrating both synchronous and asynchronous usage of the Zerobus Ingest SDK for Python, with examples for both both record type modes: **protobuf** and **JSON**.
+This directory contains runnable synchronous and asynchronous examples for Protobuf,
+JSON, and Arrow Flight ingestion with the Zerobus Ingest SDK for Python.
 
 For complete SDK documentation including installation, API reference, and configuration details, see the [main README](../README.md).
 
@@ -16,7 +17,7 @@ cd zerobus-sdk/python
 ### 2. Install Dependencies
 
 ```bash
-pip install -e .
+pip install -e ".[arrow]"
 ```
 
 The examples use a pre-generated protobuf file (`record_pb2.py`) based on the included `record.proto` schema.
@@ -43,10 +44,12 @@ export ZEROBUS_TABLE_NAME="catalog.schema.table"
 # Synchronous examples (blocking I/O)
 python examples/sync_example_proto.py     # Protobuf
 python examples/sync_example_json.py      # JSON
+python examples/sync_example_arrow.py     # Arrow Flight
 
 # Asynchronous examples (non-blocking I/O)
 python examples/async_example_proto.py    # Protobuf
 python examples/async_example_json.py     # JSON
+python examples/async_example_arrow.py    # Arrow Flight
 ```
 
 ## Examples Overview
@@ -62,7 +65,8 @@ Each example includes detailed comments explaining when to use each method and t
 
 ### Serialization Formats
 
-The SDK supports two serialization formats:
+The row-oriented examples cover two serialization formats. The Arrow Flight
+examples use `pyarrow.RecordBatch` data instead.
 
 #### Protocol Buffers
 **Files:** `sync_example_proto.py`, `async_example_proto.py`
@@ -75,7 +79,6 @@ More efficient over the wire. You can pass either:
 # Create protobuf record
 record = record_pb2.AirQuality(device_name="sensor-1", temp=25, humidity=60)
 table_properties = TableProperties(TABLE_NAME, record_pb2.AirQuality.DESCRIPTOR)
-options = StreamConfigurationOptions(record_type=RecordType.PROTO)
 
 # Recommended: Use ingest_record_offset() for better performance
 offset = stream.ingest_record_offset(record)
@@ -98,7 +101,6 @@ Good for getting started. No protobuf schema required. You can pass either:
 # Create JSON record
 record_dict = {"device_name": "sensor-1", "temp": 25, "humidity": 60}
 table_properties = TableProperties(TABLE_NAME)
-options = StreamConfigurationOptions(record_type=RecordType.JSON)
 
 # Recommended: Use ingest_record_offset() for better performance
 offset = stream.ingest_record_offset(record_dict)
@@ -173,8 +175,8 @@ Both APIs provide the same functionality and performance. The key differences ar
 
 | Format | Record Input | Configuration |
 |--------|-------------|---------------|
-| **Protobuf** (Default) | `Message` object or `bytes` | `TableProperties(table_name, descriptor)` |
-| **JSON** | `dict` or `str` (JSON string) | `TableProperties(table_name)` + `StreamConfigurationOptions(record_type=RecordType.JSON)` |
+| **Protobuf** | `Message` object or `bytes` | `TableProperties(table_name, descriptor_proto=descriptor)` |
+| **JSON** | `dict` or `str` (JSON string) | `TableProperties(table_name)` |
 
 ## Authentication
 
@@ -203,7 +205,7 @@ To use your own JSON structure:
    ```python
    json_record = json.dumps({"field1": "value1", "field2": 123})
    ```
-2. Configure `StreamConfigurationOptions` with `record_type=RecordType.JSON`
+2. Construct `TableProperties` without a Protobuf descriptor to select JSON
 3. Ensure your JSON structure matches the schema of your Databricks table
 
 Note: The SDK sends JSON strings directly without client-side schema validation.

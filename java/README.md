@@ -142,7 +142,7 @@ Add the SDK as a dependency in your `pom.xml`:
     <dependency>
         <groupId>com.databricks</groupId>
         <artifactId>zerobus-ingest-sdk</artifactId>
-        <version>0.2.0</version>
+        <version>1.3.0</version>
     </dependency>
 </dependencies>
 ```
@@ -151,7 +151,7 @@ Or with Gradle (`build.gradle`):
 
 ```groovy
 dependencies {
-    implementation 'com.databricks:zerobus-ingest-sdk:0.2.0'
+    implementation 'com.databricks:zerobus-ingest-sdk:1.3.0'
 }
 ```
 
@@ -164,7 +164,7 @@ dependencies {
     <dependency>
         <groupId>com.databricks</groupId>
         <artifactId>zerobus-ingest-sdk</artifactId>
-        <version>0.2.0</version>
+        <version>1.3.0</version>
     </dependency>
 
     <!-- Required dependencies -->
@@ -195,7 +195,7 @@ If you prefer the self-contained fat JAR with all dependencies included:
     <dependency>
         <groupId>com.databricks</groupId>
         <artifactId>zerobus-ingest-sdk</artifactId>
-        <version>0.2.0</version>
+        <version>1.3.0</version>
         <classifier>jar-with-dependencies</classifier>
     </dependency>
 </dependencies>
@@ -205,7 +205,7 @@ Or with Gradle:
 
 ```groovy
 dependencies {
-    implementation 'com.databricks:zerobus-ingest-sdk:0.2.0:jar-with-dependencies'
+    implementation 'com.databricks:zerobus-ingest-sdk:1.3.0:jar-with-dependencies'
 }
 ```
 
@@ -223,11 +223,11 @@ mvn clean package -Dzerobus.skipNativeLibCheck=true
 
 This generates two JAR files in the `target/` directory:
 
-- **Regular JAR**: `zerobus-ingest-sdk-0.2.0.jar` (~12MB, includes native libraries)
+- **Regular JAR**: `zerobus-ingest-sdk-1.3.0.jar` (~12MB, includes native libraries)
   - Contains only the SDK classes
   - Requires all dependencies on the classpath
 
-- **Fat JAR**: `zerobus-ingest-sdk-0.2.0-jar-with-dependencies.jar` (~19MB, includes native libraries + all dependencies)
+- **Fat JAR**: `zerobus-ingest-sdk-1.3.0-jar-with-dependencies.jar` (~19MB, includes native libraries + all dependencies)
   - Contains SDK classes plus all dependencies bundled
   - Self-contained, easier to deploy
 
@@ -275,7 +275,7 @@ Create `pom.xml`:
         <dependency>
             <groupId>com.databricks</groupId>
             <artifactId>zerobus-ingest-sdk</artifactId>
-            <version>0.2.0</version>
+            <version>1.3.0</version>
         </dependency>
 
         <!-- Required dependencies (see above for full list) -->
@@ -339,16 +339,16 @@ The proto generation tool requires the fat JAR (all dependencies included):
 
 ```bash
 # Download from Maven Central
-wget https://repo1.maven.org/maven2/com/databricks/zerobus-ingest-sdk/0.2.0/zerobus-ingest-sdk-0.2.0-jar-with-dependencies.jar
+wget https://repo1.maven.org/maven2/com/databricks/zerobus-ingest-sdk/1.3.0/zerobus-ingest-sdk-1.3.0-jar-with-dependencies.jar
 
 # Or if you built from source, it's in target/
-# cp target/zerobus-ingest-sdk-0.2.0-jar-with-dependencies.jar .
+# cp target/zerobus-ingest-sdk-1.3.0-jar-with-dependencies.jar .
 ```
 
 **Run the tool:**
 
 ```bash
-java -jar zerobus-ingest-sdk-0.2.0-jar-with-dependencies.jar \
+java -jar zerobus-ingest-sdk-1.3.0-jar-with-dependencies.jar \
   --uc-endpoint "https://dbc-a1b2c3d4-e5f6.cloud.databricks.com" \
   --client-id "your-service-principal-application-id" \
   --client-secret "your-service-principal-secret" \
@@ -449,20 +449,13 @@ public class ZerobusClient {
         String clientId = "your-service-principal-application-id";
         String clientSecret = "your-service-principal-secret";
 
-        // Initialize SDK
-        ZerobusSdk sdk = new ZerobusSdk(serverEndpoint, workspaceUrl);
-
-        // Create stream (recommended offset-based proto stream)
-        ZerobusProtoStream stream = sdk.streamBuilder()
-            .table(tableName)
-            .oauth(clientId, clientSecret)
-            .compiledProto(AirQuality.getDescriptor().toProto())
-            .build()
-            .join();
-
-        try {
-            long lastOffset = -1;
-
+        try (ZerobusSdk sdk = new ZerobusSdk(serverEndpoint, workspaceUrl);
+             ZerobusProtoStream stream = sdk.streamBuilder()
+                 .table(tableName)
+                 .oauth(clientId, clientSecret)
+                 .compiledProto(AirQuality.getDescriptor().toProto())
+                 .build()
+                 .join()) {
             // Ingest in a loop. ingestRecordOffset() returns as soon as the record is
             // queued; the SDK sends it and tracks its acknowledgment in the background.
             for (int i = 0; i < 100; i++) {
@@ -472,17 +465,13 @@ public class ZerobusClient {
                     .setHumidity(50 + (i % 40))
                     .build();
 
-                lastOffset = stream.ingestRecordOffset(record); // returns immediately
+                stream.ingestRecordOffset(record); // returns immediately
             }
 
-            // Confirm everything is durably committed. flush() does the same;
-            // waiting on the last offset works because acks are ordered.
-            stream.waitForOffset(lastOffset);
+            // Confirm everything is durably committed with one barrier.
+            stream.flush();
 
             System.out.println("Successfully ingested 100 records!");
-        } finally {
-            stream.close();
-            sdk.close();
         }
     }
 }
@@ -1566,17 +1555,18 @@ List<MyData> unacked = stream.getUnackedRecords(json -> gson.fromJson(json, MyDa
 
 ### AckCallback (Interface)
 
-Callback interface for acknowledgment notifications.
+Callback interface for acknowledgment notifications. The callback is invoked once per logical
+ingest submission, so a batch ingest call produces one callback rather than one per record.
 
 ```java
 void onAck(long offsetId)
 ```
-Called when records up to `offsetId` are acknowledged.
+Called when a logical ingest submission is acknowledged. Records up to `offsetId` are durable.
 
 ```java
 void onError(long offsetId, String errorMessage)
 ```
-Called when an error occurs for records at or after `offsetId`.
+Called when an error occurs for the logical ingest submission at `offsetId`.
 
 **Track durability progress without blocking.** Register an `AckCallback` to observe
 acknowledgments as they arrive on a background thread while you keep ingesting — a natural

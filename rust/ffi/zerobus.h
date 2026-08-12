@@ -149,7 +149,8 @@ typedef struct CStreamConfigurationOptions {
    * delivered asynchronously instead of only via wait_for_offset / flush.
    * Fired serialized on a background task, so keep them lightweight;
    * ack_user_data and shared state need their own sync.
-   * ack_on_ack: once per record, in order; monotonic (offset N => all <= N).
+   * ack_on_ack: once per logical ingest submission (one batch call produces
+   * one callback), in order; monotonic (offset N => all <= N).
    * ack_on_error: relays core error text as-is; may also surface from ingest / flush.
    * A synchronously running callback can outlive close() (abort only cancels
    * at an await), so keep both pointers and ack_user_data alive until the

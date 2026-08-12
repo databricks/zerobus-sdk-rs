@@ -42,36 +42,37 @@ class TableProperties:
 
 class AckCallback:
     """
-    Base class for record acknowledgment callbacks.
+    Base class for logical ingest submission acknowledgment callbacks.
 
     Subclass this in Python to create custom callbacks that are invoked
-    when records are acknowledged or encounter errors.
+    once per logical ingest submission. A batch submission produces one
+    callback, not one callback per record in the batch.
 
     Example:
         class MyCallback(AckCallback):
             def on_ack(self, offset: int):
-                print(f"Record acknowledged at offset {offset}")
+                print(f"Submission acknowledged at offset {offset}")
 
             def on_error(self, offset: int, error_message: str):
-                print(f"Record at offset {offset} failed: {error_message}")
+                print(f"Submission at offset {offset} failed: {error_message}")
     """
 
     def __init__(self) -> None: ...
     def on_ack(self, offset: int) -> None:
         """
-        Called when a record is acknowledged by the server.
+        Called when a logical ingest submission is acknowledged by the server.
 
         Args:
-            offset: The offset of the acknowledged record
+            offset: The offset of the acknowledged submission
         """
         ...
 
     def on_error(self, offset: int, error_message: str) -> None:
         """
-        Called when a record encounters an error.
+        Called when a logical ingest submission encounters an error.
 
         Args:
-            offset: The offset of the failed record
+            offset: The offset of the failed submission
             error_message: Description of the error
         """
         ...
@@ -114,7 +115,7 @@ class StreamConfigurationOptions:
     """Maximum time in milliseconds to wait for callbacks to finish after calling close() (default: 5000)"""
 
     ack_callback: Optional[AckCallback]
-    """Callback to be invoked when records are acknowledged (default: None)"""
+    """Callback invoked once per logical ingest submission (default: None)"""
 
     def __init__(
         self,
@@ -144,7 +145,7 @@ class StreamConfigurationOptions:
             record_type: Serialization format (default: RecordType.PROTO)
             stream_paused_max_wait_time_ms: Max wait time during graceful close in ms (default: None)
             callback_max_wait_time_ms: Max wait time for callbacks after close in ms (default: 5000)
-            ack_callback: Callback invoked on record acknowledgment (default: None)
+            ack_callback: Callback invoked once per logical ingest submission (default: None)
         """
         ...
 

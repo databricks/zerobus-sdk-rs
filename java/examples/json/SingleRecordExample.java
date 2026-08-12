@@ -34,7 +34,7 @@ public class SingleRecordExample {
 
         System.out.println("=== JSON Single Record Example ===\n");
 
-        ZerobusSdk sdk = new ZerobusSdk(serverEndpoint, workspaceUrl);
+        try (ZerobusSdk sdk = new ZerobusSdk(serverEndpoint, workspaceUrl)) {
         ZerobusJsonStream stream = sdk.streamBuilder()
                 .table(tableName)
                 .oauth(clientId, clientSecret)
@@ -120,12 +120,11 @@ public class SingleRecordExample {
         System.out.println("\n--- Demonstrating recreateStream ---");
 
         // Recreate the stream (would re-ingest any unacked records if there were any)
-        ZerobusJsonStream newStream = sdk.recreateStream(stream).join();
+        try (ZerobusJsonStream newStream = sdk.recreateStream(stream).join()) {
         System.out.println("  New stream created successfully");
 
         // Ingest a few more records on the new stream
         int newRecords = 0;
-        try {
             for (int i = 0; i < 3; i++) {
                 String json = String.format(
                     "{\"device_name\": \"json-recreate-%d\", \"temp\": %d, \"humidity\": %d}",
@@ -136,13 +135,11 @@ public class SingleRecordExample {
             }
             newStream.flush();
             System.out.println("  " + newRecords + " new records ingested on recreated stream");
-        } finally {
-            newStream.close();
         }
 
         System.out.println("\n=== RecreateStream demo complete ===");
 
-        sdk.close();
+        }
     }
 
     // Simple JSON parser for Map (in production, use Gson or Jackson)

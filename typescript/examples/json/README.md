@@ -67,13 +67,13 @@ Stream closed successfully
 ```typescript
 // 1. Auto-serializing: pass object directly
 const record = { device_name: 'sensor-001', temp: 22, humidity: 65 };
-const offset = await stream.ingestRecordOffset(record);
-await stream.waitForOffset(offset);
+const objectOffset = await stream.ingestRecordOffset(record);
+await stream.waitForOffset(objectOffset);
 
 // 2. Pre-serialized: pass JSON string
 const jsonString = JSON.stringify({ device_name: 'sensor-002', temp: 24, humidity: 70 });
-const offset = await stream.ingestRecordOffset(jsonString);
-await stream.waitForOffset(offset);
+const stringOffset = await stream.ingestRecordOffset(jsonString);
+await stream.waitForOffset(stringOffset);
 
 // 3. High-throughput: send many, wait once
 let lastOffset: bigint;
@@ -137,22 +137,22 @@ Stream closed successfully
 
 ```typescript
 // 1. Auto-serializing: array of objects
-const batch = [
+const objectBatch = [
     { device_name: 'sensor-001', temp: 22, humidity: 65 },
     { device_name: 'sensor-002', temp: 23, humidity: 67 },
     { device_name: 'sensor-003', temp: 24, humidity: 69 }
 ];
-const offset = await stream.ingestRecordsOffset(batch);
-if (offset !== null) {
-    await stream.waitForOffset(offset);
+const objectBatchOffset = await stream.ingestRecordsOffset(objectBatch);
+if (objectBatchOffset !== null) {
+    await stream.waitForOffset(objectBatchOffset);
 }
 
 // 2. Pre-serialized: array of JSON strings
-const batch = [
+const stringBatch = [
     JSON.stringify({ device_name: 'sensor-004', temp: 25, humidity: 71 }),
     JSON.stringify({ device_name: 'sensor-005', temp: 26, humidity: 73 })
 ];
-const offset = await stream.ingestRecordsOffset(batch);
+const stringBatchOffset = await stream.ingestRecordsOffset(stringBatch);
 ```
 
 **Batch semantics:**

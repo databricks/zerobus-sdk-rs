@@ -116,26 +116,26 @@ xdg-open htmlcov/index.html  # Linux
 
 Example docstring:
 ```python
-def ingest_record(self, record) -> RecordAcknowledgment:
+def ingest_record_offset(self, record) -> int:
     """
     Submits a single record for ingestion into the stream.
 
-    This method may block if the maximum number of in-flight records
-    has been reached.
+    This method returns after the record is queued. Call ``flush()`` after
+    queueing a group of records to confirm durability.
 
     Args:
         record: The Protobuf message object to be ingested.
 
     Returns:
-        RecordAcknowledgment: An object to wait on for the server's acknowledgment.
+        int: The logical offset assigned to the record.
 
     Raises:
         ZerobusException: If the stream is not in a valid state for ingestion.
 
     Example:
         >>> record = AirQuality(device_name="sensor-1", temp=25)
-        >>> ack = stream.ingest_record(record)
-        >>> ack.wait_for_ack()
+        >>> offset = stream.ingest_record_offset(record)
+        >>> stream.flush()
     """
 ```
 

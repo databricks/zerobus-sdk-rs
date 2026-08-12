@@ -105,9 +105,9 @@ async function main() {
 
         // 1. Auto-encoding: array of Message objects - SDK handles encoding
         const batch1 = [
-            AirQuality.create({ device_name: 'sensor-001', temp: 22, humidity: 65 }),
-            AirQuality.create({ device_name: 'sensor-002', temp: 23, humidity: 67 }),
-            AirQuality.create({ device_name: 'sensor-003', temp: 24, humidity: 69 })
+            AirQuality.create({ deviceName: 'sensor-001', temp: 22, humidity: 65 }),
+            AirQuality.create({ deviceName: 'sensor-002', temp: 23, humidity: 67 }),
+            AirQuality.create({ deviceName: 'sensor-003', temp: 24, humidity: 69 })
         ];
 
         const offset1 = await stream.ingestRecordsOffset(batch1);
@@ -119,9 +119,9 @@ async function main() {
 
         // 2. Pre-encoded: array of Buffers
         const batch2 = [
-            AirQuality.create({ device_name: 'sensor-004', temp: 25, humidity: 71 }),
-            AirQuality.create({ device_name: 'sensor-005', temp: 26, humidity: 73 }),
-            AirQuality.create({ device_name: 'sensor-006', temp: 27, humidity: 75 })
+            AirQuality.create({ deviceName: 'sensor-004', temp: 25, humidity: 71 }),
+            AirQuality.create({ deviceName: 'sensor-005', temp: 26, humidity: 73 }),
+            AirQuality.create({ deviceName: 'sensor-006', temp: 27, humidity: 75 })
         ].map(record => Buffer.from(AirQuality.encode(record).finish()));
 
         const offset2 = await stream.ingestRecordsOffset(batch2);
@@ -135,7 +135,7 @@ async function main() {
         console.log('\n[Large batch] Sending batch of 100 records...');
         const largeBatch = Array.from({ length: 100 }, (_, i) =>
             AirQuality.create({
-                device_name: `sensor-${i.toString().padStart(3, '0')}`,
+                deviceName: `sensor-${i.toString().padStart(3, '0')}`,
                 temp: 20 + (i % 15),
                 humidity: 50 + (i % 40)
             })
@@ -160,9 +160,9 @@ async function main() {
 
         // 1. Auto-encoding: array of Message objects
         const batch1 = [
-            AirQuality.create({ device_name: 'sensor-legacy-001', temp: 28, humidity: 77 }),
-            AirQuality.create({ device_name: 'sensor-legacy-002', temp: 29, humidity: 79 }),
-            AirQuality.create({ device_name: 'sensor-legacy-003', temp: 30, humidity: 81 })
+            AirQuality.create({ deviceName: 'sensor-legacy-001', temp: 28, humidity: 77 }),
+            AirQuality.create({ deviceName: 'sensor-legacy-002', temp: 29, humidity: 79 }),
+            AirQuality.create({ deviceName: 'sensor-legacy-003', temp: 30, humidity: 81 })
         ];
 
         const offset1 = await stream.ingestRecords(batch1);
@@ -172,9 +172,9 @@ async function main() {
 
         // 2. Pre-encoded: array of Buffers
         const batch2 = [
-            AirQuality.create({ device_name: 'sensor-legacy-004', temp: 31, humidity: 83 }),
-            AirQuality.create({ device_name: 'sensor-legacy-005', temp: 32, humidity: 85 }),
-            AirQuality.create({ device_name: 'sensor-legacy-006', temp: 33, humidity: 87 })
+            AirQuality.create({ deviceName: 'sensor-legacy-004', temp: 31, humidity: 83 }),
+            AirQuality.create({ deviceName: 'sensor-legacy-005', temp: 32, humidity: 85 }),
+            AirQuality.create({ deviceName: 'sensor-legacy-006', temp: 33, humidity: 87 })
         ].map(record => Buffer.from(AirQuality.encode(record).finish()));
 
         const offset2 = await stream.ingestRecords(batch2);

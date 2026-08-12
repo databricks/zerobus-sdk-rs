@@ -18,6 +18,9 @@
 
 ### Documentation
 
+- Corrected custom-header examples and clarified that acknowledgment callbacks
+  run once per logical ingest submission rather than once per record in a batch.
+
 ### Internal Changes
 
 ### Breaking Changes

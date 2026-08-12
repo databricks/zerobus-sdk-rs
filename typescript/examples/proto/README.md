@@ -108,17 +108,17 @@ const AirQuality = airQuality.examples.AirQuality;
 
 // 1. Auto-encoding: pass message directly
 const record = AirQuality.create({
-    device_name: 'sensor-001',
+    deviceName: 'sensor-001',
     temp: 22,
     humidity: 65
 });
-const offset = await stream.ingestRecordOffset(record);
-await stream.waitForOffset(offset);
+const messageOffset = await stream.ingestRecordOffset(record);
+await stream.waitForOffset(messageOffset);
 
 // 2. Pre-encoded: pass Buffer
 const buffer = Buffer.from(AirQuality.encode(record).finish());
-const offset = await stream.ingestRecordOffset(buffer);
-await stream.waitForOffset(offset);
+const bufferOffset = await stream.ingestRecordOffset(buffer);
+await stream.waitForOffset(bufferOffset);
 ```
 
 ## Batch Example
@@ -143,19 +143,19 @@ await stream.waitForOffset(offset);
 
 ```typescript
 // 1. Auto-encoding: array of messages
-const batch = [
-    AirQuality.create({ device_name: 'sensor-001', temp: 22, humidity: 65 }),
-    AirQuality.create({ device_name: 'sensor-002', temp: 23, humidity: 67 }),
-    AirQuality.create({ device_name: 'sensor-003', temp: 24, humidity: 69 })
+const messageBatch = [
+    AirQuality.create({ deviceName: 'sensor-001', temp: 22, humidity: 65 }),
+    AirQuality.create({ deviceName: 'sensor-002', temp: 23, humidity: 67 }),
+    AirQuality.create({ deviceName: 'sensor-003', temp: 24, humidity: 69 })
 ];
-const offset = await stream.ingestRecordsOffset(batch);
-if (offset !== null) {
-    await stream.waitForOffset(offset);
+const messageBatchOffset = await stream.ingestRecordsOffset(messageBatch);
+if (messageBatchOffset !== null) {
+    await stream.waitForOffset(messageBatchOffset);
 }
 
 // 2. Pre-encoded: array of Buffers
-const batch = records.map(r => Buffer.from(AirQuality.encode(r).finish()));
-const offset = await stream.ingestRecordsOffset(batch);
+const bufferBatch = records.map(r => Buffer.from(AirQuality.encode(r).finish()));
+const bufferBatchOffset = await stream.ingestRecordsOffset(bufferBatch);
 ```
 
 ## Adapting for Your Custom Table

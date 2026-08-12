@@ -36,6 +36,9 @@
 
 ### Documentation
 
+- Corrected README and rustdoc examples so their dependencies, feature flags,
+  imports, and mutable stream bindings compile as shown.
+
 ### Internal Changes
 
 - Added Arrow C Data `RecordBatch` conversion behind a disabled-by-default

@@ -10,6 +10,10 @@
 
 ### Documentation
 
+- Corrected README, example, and docstring snippets for record-format selection,
+  exception handling, recovery, iterator return values, custom headers, async
+  contexts, and durability-aware throughput measurement.
+
 ### Internal Changes
 
 ### Breaking Changes

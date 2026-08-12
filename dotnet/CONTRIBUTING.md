@@ -9,7 +9,7 @@ This document covers .NET-specific development setup and workflow.
 ### Prerequisites
 
 - Git
-- .NET SDK 8.0 or higher
+- .NET SDK 10.0 or higher (the projects target both .NET 8 and .NET 10)
 - Rust toolchain (`cargo`) - [Install Rust](https://rustup.rs/)
 - Bash shell (used by `build_native.sh`)
 

@@ -22,21 +22,23 @@ Example:
     ... )
     >>>
     >>> # Optimized API - returns offset directly
-    >>> offset = stream.ingest_record_offset(b"record_data")
+    >>> offset = stream.ingest_record_offset('{"value": "record_data"}')
     >>>
     >>> # Batch API - returns one offset for the batch
-    >>> offsets = stream.ingest_records_offset([b"record1", b"record2"])
+    >>> batch_offset = stream.ingest_records_offset([
+    ...     '{"value": "record1"}',
+    ...     '{"value": "record2"}',
+    ... ])
     >>>
     >>> # Fire-and-forget for maximum throughput
-    >>> stream.ingest_record_nowait(b"record_data")
-    >>> stream.ingest_records_nowait([b"record1", b"record2"])
+    >>> stream.ingest_record_nowait('{"value": "record3"}')
+    >>> stream.ingest_records_nowait([
+    ...     '{"value": "record4"}',
+    ...     '{"value": "record5"}',
+    ... ])
     >>>
     >>> stream.flush()  # Ensure all records are sent
     >>> stream.close()
-    >>>
-    >>> # Legacy API (deprecated) - returns acknowledgment object
-    >>> ack = stream.ingest_record(b"record_data")
-    >>> offset = ack.wait_for_ack(timeout_sec=30)
 """
 
 from typing import Iterator, Optional

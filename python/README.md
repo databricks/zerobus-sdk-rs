@@ -120,15 +120,14 @@ and JSON) does not need `pyarrow` at all.
 
 ```python
 from zerobus.sdk.sync import ZerobusSdk
-from zerobus.sdk.shared import RecordType, StreamConfigurationOptions, TableProperties
+from zerobus.sdk.shared import TableProperties
 
 server_endpoint = "https://1234567890123456.zerobus.us-west-2.cloud.databricks.com"
 workspace_url = "https://dbc-a1b2c3d4-e5f6.cloud.databricks.com"
 
 sdk = ZerobusSdk(server_endpoint, workspace_url)
 table_properties = TableProperties("main.default.air_quality")
-options = StreamConfigurationOptions(record_type=RecordType.JSON)
-stream = sdk.create_stream(client_id, client_secret, table_properties, options)
+stream = sdk.create_stream(client_id, client_secret, table_properties)
 
 try:
     for i in range(100):
@@ -147,7 +146,7 @@ finally:
 ```python
 import asyncio
 from zerobus.sdk.aio import ZerobusSdk
-from zerobus.sdk.shared import RecordType, StreamConfigurationOptions, TableProperties
+from zerobus.sdk.shared import TableProperties
 
 async def main():
     server_endpoint = "https://1234567890123456.zerobus.us-west-2.cloud.databricks.com"
@@ -155,8 +154,7 @@ async def main():
 
     sdk = ZerobusSdk(server_endpoint, workspace_url)
     table_properties = TableProperties("main.default.air_quality")
-    options = StreamConfigurationOptions(record_type=RecordType.JSON)
-    stream = await sdk.create_stream(client_id, client_secret, table_properties, options)
+    stream = await sdk.create_stream(client_id, client_secret, table_properties)
 
     try:
         for i in range(100):
@@ -294,7 +292,7 @@ See the [`examples/`](examples/) directory for complete runnable examples.
 Configure stream behavior by passing a `StreamConfigurationOptions` object to `create_stream()`:
 
 ```python
-from zerobus.sdk.shared import StreamConfigurationOptions, RecordType, AckCallback
+from zerobus.sdk.shared import AckCallback, StreamConfigurationOptions
 
 class MyCallback(AckCallback):
     def on_ack(self, offset: int):
@@ -304,7 +302,6 @@ class MyCallback(AckCallback):
         print(f"Error at offset {offset}: {error_message}")
 
 options = StreamConfigurationOptions(
-    record_type=RecordType.JSON,
     max_inflight_records=10000,
     recovery=True,
     ack_callback=MyCallback()
@@ -315,9 +312,13 @@ stream = sdk.create_stream(client_id, client_secret, table_properties, options)
 
 ### Available Options
 
+The record format is inferred from `TableProperties`: omitting `descriptor_proto` selects JSON,
+while providing a Protobuf descriptor selects Protobuf. `record_type` is retained for backward
+compatibility but does not select the format.
+
 | Option                           | Type            | Default            | Description                                                                                                          |
 | -------------------------------- | --------------- | ------------------ | -------------------------------------------------------------------------------------------------------------------- |
-| `record_type`                    | `RecordType`    | `RecordType.PROTO` | Serialization format: `PROTO` or `JSON`                                                                              |
+| `record_type`                    | `RecordType`    | `RecordType.PROTO` | Retained for backward compatibility; format comes from `TableProperties.descriptor_proto`                            |
 | `max_inflight_records`           | `int`           | `1000000`          | Maximum number of unacknowledged records                                                                             |
 | `recovery`                       | `bool`          | `True`             | Enable automatic stream recovery                                                                                     |
 | `recovery_timeout_ms`            | `int`           | `15000`            | Timeout for recovery operations (ms)                                                                                 |
@@ -327,56 +328,51 @@ stream = sdk.create_stream(client_id, client_secret, table_properties, options)
 | `server_lack_of_ack_timeout_ms`  | `int`           | `60000`            | Server acknowledgment timeout (ms)                                                                                   |
 | `stream_paused_max_wait_time_ms` | `Optional[int]` | `None`             | Max wait during graceful stream close. `None` = full server duration, `0` = immediate, `x` = min(x, server_duration) |
 | `callback_max_wait_time_ms`      | `Optional[int]` | `5000`             | Max wait for callbacks after `close()`. `None` = wait forever                                                        |
-| `ack_callback`                   | `AckCallback`   | `None`             | Callback invoked on record acknowledgment or error                                                                   |
+| `ack_callback`                   | `AckCallback`   | `None`             | Callback invoked once per logical ingest submission (one record call or one batch call)                              |
 
 ## Error Handling
 
-The SDK raises two types of exceptions:
-
-- `ZerobusException` - Retriable errors (network issues, temporary server errors)
-- `NonRetriableException` - Non-retriable errors (invalid credentials, missing table)
+SDK operation failures currently surface as `ZerobusException`. The
+`NonRetriableException` class is exported for compatibility, but the current native binding does
+not construct it. Do not use the Python exception class to decide whether an operation is safe to
+retry.
 
 ```python
-from zerobus.sdk.shared import ZerobusException, NonRetriableException
+from zerobus.sdk.shared import ZerobusException
 
 try:
     stream.ingest_record_offset(record)
-except NonRetriableException as e:
-    print(f"Fatal error: {e}")
-    raise
 except ZerobusException as e:
-    print(f"Retriable error: {e}")
+    print(f"Ingestion failed: {e}")
 ```
 
 ## Handling Stream Failures
 
-The SDK automatically handles retries for transient errors. Use `get_unacked_records()` only when a stream has **permanently failed** (non-retriable error or max retries exceeded):
+The SDK automatically handles retries for transient errors. Use `get_unacked_records()` only after
+the stream has permanently closed following a failure:
 
 ```python
-from zerobus.sdk.shared import NonRetriableException
+from zerobus.sdk.shared import ZerobusException
 
 try:
     for i in range(10000):
         stream.ingest_record_offset(record)
-    stream.flush()
-except NonRetriableException as e:
-    unacked = stream.get_unacked_records()  # Returns List[bytes]
+    stream.close()
+except ZerobusException as e:
+    unacked = list(stream.get_unacked_records())
     print(f"Stream failed: {e}. {len(unacked)} records unacknowledged.")
 
-    # Retry with a new stream
-    new_stream = sdk.create_stream(client_id, client_secret, table_properties, options)
-    for record_bytes in unacked:
-        new_stream.ingest_record_offset(record_bytes)  # Pass bytes directly
+    # Preserve the record format and original batch grouping while retrying.
+    new_stream = sdk.recreate_stream(stream)
     new_stream.flush()
     new_stream.close()
 ```
 
-Use `get_unacked_batches()` for batch-level retry:
+Use `get_unacked_batches()` to inspect the original batch grouping after the stream closes:
 
 ```python
-unacked_batches = stream.get_unacked_batches()  # Returns List[List[bytes]]
-for batch in unacked_batches:
-    new_stream.ingest_records_offset(batch)
+unacked_batches = list(stream.get_unacked_batches())
+print(f"{len(unacked_batches)} batches remain unacknowledged")
 ```
 
 **Decoding unacked records:**
@@ -403,17 +399,21 @@ throughput to one record per round-trip, so save it for confirming a specific re
 **Idiomatic flow:**
 
 ```python
-for record in records:
-    await stream.ingest_record_offset(record)   # queues immediately, no round-trip
-await stream.flush()                            # one wait for everything
+async def ingest_all(stream, records):
+    for record in records:
+        await stream.ingest_record_offset(record)   # queues immediately, no round-trip
+    await stream.flush()                            # one wait for everything
 ```
 
 **Confirming a specific record** (waiting on the last offset confirms all prior records):
 
 ```python
-for record in records:
-    offset = await stream.ingest_record_offset(record)
-await stream.wait_for_offset(offset)            # confirm the run before continuing
+async def ingest_and_confirm(stream, records):
+    offset = None
+    for record in records:
+        offset = await stream.ingest_record_offset(record)
+    if offset is not None:
+        await stream.wait_for_offset(offset)        # confirm the run before continuing
 ```
 
 ## API Reference
@@ -423,7 +423,11 @@ await stream.wait_for_offset(offset)            # confirm the run before continu
 Main entry point. Sync: `from zerobus.sdk.sync import ZerobusSdk` / Async: `from zerobus.sdk.aio import ZerobusSdk`
 
 ```python
-sdk = ZerobusSdk(server_endpoint: str, unity_catalog_endpoint: str, application_name: Optional[str] = None)
+sdk = ZerobusSdk(
+    host="https://<workspace>.zerobus.<region>.cloud.databricks.com",
+    unity_catalog_url="https://<workspace-host>",
+    application_name="my-app/1.0",
+)
 ```
 
 `application_name` is optional; when set it is appended to the `user-agent` header on gRPC requests to the Zerobus server (not on the OAuth token requests to the login service). It follows the `"<product>/<version>"` convention (e.g. `my-app/1.0`).
@@ -432,7 +436,8 @@ sdk = ZerobusSdk(server_endpoint: str, unity_catalog_endpoint: str, application_
 # Sync
 stream = sdk.create_stream(client_id, client_secret, table_properties, options=None, headers_provider=None)
 # Async
-stream = await sdk.create_stream(client_id, client_secret, table_properties, options=None, headers_provider=None)
+async def create_async_stream(sdk):
+    return await sdk.create_stream(client_id, client_secret, table_properties, options=None, headers_provider=None)
 ```
 
 ### `ZerobusStream`
@@ -467,9 +472,10 @@ offset = stream.ingest_record_offset(record)
 stream.wait_for_offset(offset)  # Block until durably written
 
 # Async
-offset = await stream.ingest_record_offset(record)
-# ... do other work ...
-await stream.wait_for_offset(offset)  # Block until durably written
+async def confirm_async(stream, record):
+    offset = await stream.ingest_record_offset(record)
+    # ... do other work ...
+    await stream.wait_for_offset(offset)  # Block until durably written
 ```
 
 Acks are ordered, so waiting on the last offset returned confirms all prior records too.
@@ -482,32 +488,33 @@ stream.flush()   # Wait for all pending records to be acknowledged
 stream.close()   # Flush and close gracefully (always call in finally)
 
 # Async
-await stream.flush()
-await stream.close()
+async def close_async(stream):
+    await stream.flush()
+    await stream.close()
 ```
 
 **Unacknowledged records:**
 
 ```python
 # Sync
-records = stream.get_unacked_records()   # List[bytes]
-batches = stream.get_unacked_batches()  # List[List[bytes]]
+records = stream.get_unacked_records()   # Iterator[bytes]
+batches = stream.get_unacked_batches()  # Iterator[List[bytes]]
 
 # Async
-records = await stream.get_unacked_records()
-batches = await stream.get_unacked_batches()
+async def get_unacked_async(stream):
+    records = await stream.get_unacked_records()
+    batches = await stream.get_unacked_batches()
+    return records, batches
 ```
 
 ### `TableProperties`
 
 ```python
-TableProperties(table_name: str, descriptor: Descriptor = None)
-
 # JSON mode
 TableProperties("catalog.schema.table")
 
 # Protobuf mode
-TableProperties("catalog.schema.table", MyMessage.DESCRIPTOR)
+TableProperties("catalog.schema.table", descriptor_proto=MyMessage.DESCRIPTOR)
 ```
 
 ### `StreamConfigurationOptions`
@@ -521,11 +528,11 @@ from zerobus.sdk.shared import AckCallback
 
 class MyCallback(AckCallback):
     def on_ack(self, offset: int) -> None:
-        # Called when a record is acknowledged by the server
+        # Called once for each acknowledged single-record or batch submission
         pass
 
     def on_error(self, offset: int, error_message: str) -> None:
-        # Called when a record encounters an error
+        # Called once when a single-record or batch submission encounters an error
         pass
 ```
 
@@ -535,16 +542,16 @@ For custom authentication (e.g. custom token providers), implement `HeadersProvi
 
 ### `RecordAcknowledgment` (Sync only, deprecated)
 
-```python
+```text
 ack.wait_for_ack(timeout_sec=None)  # Block until acknowledged
 ack.is_done() -> bool
-ack.add_done_callback(callback)
 ```
 
 ### Exceptions
 
-- `ZerobusException(message, cause=None)` - Retriable errors
-- `NonRetriableException(message, cause=None)` - Non-retriable errors (extends `ZerobusException`)
+- `ZerobusException(message, cause=None)` - Base exception raised by current SDK operations
+- `NonRetriableException(message, cause=None)` - Exported subclass reserved for non-retriable errors;
+  the current native binding does not construct it
 
 ## Debugging
 

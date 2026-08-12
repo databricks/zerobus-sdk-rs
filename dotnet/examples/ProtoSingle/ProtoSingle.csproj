@@ -9,4 +9,10 @@
     <ProjectReference Include="..\..\src\Zerobus\Zerobus.csproj" />
   </ItemGroup>
 
+  <ItemGroup>
+    <PackageReference Include="Google.Protobuf" />
+    <PackageReference Include="Grpc.Tools" PrivateAssets="All" />
+    <Protobuf Include="Protos\my_message.proto" GrpcServices="None" />
+  </ItemGroup>
+
 </Project>

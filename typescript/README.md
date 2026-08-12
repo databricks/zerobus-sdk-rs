@@ -108,6 +108,7 @@ JSON mode is the simplest way to get started. You don't need to define or compil
 ```typescript
 import { ZerobusSdk, RecordType } from '@databricks/zerobus-ingest-sdk';
 
+async function main(): Promise<void> {
 // Configuration
 // For AWS:
 const zerobusEndpoint = 'https://<workspace-id>.zerobus.<region>.cloud.databricks.com';
@@ -160,6 +161,12 @@ try {
 } finally {
     await stream.close();
 }
+
+}
+
+main().catch((error) => {
+  console.error('Fatal error:', error);
+});
 ```
 
 ### Option 2: Using Protocol Buffers (Default, Recommended)
@@ -275,6 +282,7 @@ import { ZerobusSdk, RecordType } from '@databricks/zerobus-ingest-sdk';
 import * as airQuality from './examples/generated/air_quality';
 import { loadDescriptorProto } from '@databricks/zerobus-ingest-sdk/utils/descriptor.js';
 
+async function main(): Promise<void> {
 // Configuration
 const zerobusEndpoint = 'https://<workspace-id>.zerobus.<region>.cloud.databricks.com';
 const workspaceUrl = 'https://<workspace-name>.cloud.databricks.com';
@@ -314,7 +322,7 @@ try {
     // Send all records
     for (let i = 0; i < 100; i++) {
         const record = AirQuality.create({
-            device_name: `sensor-${i}`,
+            deviceName: `sensor-${i}`,
             temp: 20 + i,
             humidity: 50 + i
         });
@@ -329,6 +337,12 @@ try {
 } finally {
     await stream.close();
 }
+
+}
+
+main().catch((error) => {
+  console.error('Fatal error:', error);
+});
 ```
 
 #### Type Mapping: Delta ↔ Protocol Buffers
@@ -493,7 +507,7 @@ For higher throughput, use batch ingestion to send multiple records with a singl
 
 ```typescript
 const records = Array.from({ length: 1000 }, (_, i) =>
-  AirQuality.create({ device_name: `sensor-${i}`, temp: 20 + i, humidity: 50 + i })
+  AirQuality.create({ deviceName: `sensor-${i}`, temp: 20 + i, humidity: 50 + i })
 );
 
 // Protobuf Type 1: Message objects (high-level) - SDK auto-serializes
@@ -576,7 +590,7 @@ const stream = await sdk.createStream(
   '', // client_secret (ignored when headers_provider is provided)
   options,
   {
-    getHeadersCallback: async () => [
+    getHeadersCallback: () => [
       ["authorization", `Bearer ${myToken}`],
       ["x-databricks-zerobus-table-name", tableName]
     ]
@@ -682,11 +696,7 @@ try {
 } catch (error) {
     console.error('Ingestion failed:', error);
 
-    // When stream fails, close it first
-    await stream.close();
-    console.log('Stream closed after error');
-
-    // Optional: Inspect what needs recovery (must be called on closed stream)
+    // Optional: Inspect what needs recovery after a terminal stream failure.
     const unackedBatches = await stream.getUnackedBatches();
     console.log(`Batches to recover: ${unackedBatches.length}`);
 
@@ -696,14 +706,24 @@ try {
     // 2. Creates a new stream with the same configuration
     // 3. Re-ingests all unacknowledged batches automatically
     // 4. Returns the new stream ready for continued use
-    const newStream = await sdk.recreateStream(stream);
-    console.log(`Stream recreated with ${unackedBatches.length} batches re-ingested`);
-
-    // Continue using newStream for further ingestion
     try {
-        // Continue ingesting...
+        const newStream = await sdk.recreateStream(stream);
+        console.log(`Stream recreated with ${unackedBatches.length} batches re-ingested`);
+
+        // Continue using newStream for further ingestion
+        try {
+            // Continue ingesting...
+        } finally {
+            await newStream.close();
+        }
     } finally {
-        await newStream.close();
+        // close() releases the failed wrapper's native handle even if it reports
+        // the terminal stream error again.
+        try {
+            await stream.close();
+        } catch (closeError) {
+            console.error('Failed stream released:', closeError);
+        }
     }
 }
 ```
@@ -766,7 +786,8 @@ This method is the **recommended approach** for recovering from stream failures.
 4. Returns the new stream ready for continued ingestion
 
 **Parameters:**
-- `stream` - The failed or closed stream to recreate
+- `stream` - The terminally failed stream to recreate. Do not call `stream.close()`
+  first because the TypeScript wrapper releases its native handle on close.
 
 **Returns:** Promise resolving to a new `ZerobusStream` with all unacknowledged batches re-ingested
 
@@ -775,14 +796,14 @@ This method is the **recommended approach** for recovering from stream failures.
 try {
   await stream.ingestRecords(batch);
 } catch (error) {
-  await stream.close();
   // Automatically recreate stream and recover all unacked batches
   const newStream = await sdk.recreateStream(stream);
   // Continue ingesting with newStream
 }
 ```
 
-**Note:** This method preserves batch structure and re-ingests batches atomically. For debugging, you can inspect what was recovered using `getUnackedBatches()` after closing the stream.
+**Note:** This method preserves batch structure and re-ingests batches atomically. For
+debugging, inspect `getUnackedBatches()` after a terminal failure and before closing the wrapper.
 
 ---
 
@@ -936,7 +957,8 @@ async getUnackedRecords(): Promise<Buffer[]>
 
 Returns unacknowledged record payloads as a flat array for inspection purposes.
 
-**Important:** Can only be called on **closed streams**. Call `stream.close()` first, or this will throw an error.
+**Important:** This can only be called after a terminal stream failure. Do not call
+`stream.close()` first: the TypeScript wrapper releases the underlying stream handle on close.
 
 **Returns:** Array of Buffer containing the raw record payloads
 
@@ -950,7 +972,8 @@ async getUnackedBatches(): Promise<Buffer[][]>
 
 Returns unacknowledged records grouped by their original batches for inspection purposes.
 
-**Important:** Can only be called on **closed streams**. Call `stream.close()` first, or this will throw an error.
+**Important:** This can only be called after a terminal stream failure. Do not call
+`stream.close()` first: the TypeScript wrapper releases the underlying stream handle on close.
 
 **Returns:** Array of arrays, where each inner array represents a batch of records as Buffers
 
@@ -963,15 +986,11 @@ try {
   await stream.ingestRecords(batch2);
   // ... error occurs
 } catch (error) {
-  await stream.close();
   const unackedBatches = await stream.getUnackedBatches();
   // unackedBatches[0] contains records from batch1 (if not acked)
   // unackedBatches[1] contains records from batch2 (if not acked)
 
-  // Re-ingest with new stream
-  for (const batch of unackedBatches) {
-    await newStream.ingestRecords(batch);
-  }
+  console.log(`Batches available for recovery: ${unackedBatches.length}`);
 }
 ```
 
@@ -994,10 +1013,10 @@ interface TableProperties {
 
 ```typescript
 // JSON mode
-const tableProperties = { tableName: 'main.default.air_quality' };
+const jsonTableProperties = { tableName: 'main.default.air_quality' };
 
 // Protocol Buffers mode
-const tableProperties = {
+const protoTableProperties = {
     tableName: 'main.default.air_quality',
     descriptorProto: descriptorBase64  // Required for protobuf
 };

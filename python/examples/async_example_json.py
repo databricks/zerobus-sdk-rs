@@ -5,7 +5,7 @@ This example demonstrates record ingestion using the asynchronous API with JSON 
 
 Record Type Mode: JSON
   - Records are sent as JSON-encoded strings
-  - Uses RecordType.JSON to specify JSON serialization
+  - Omitting a descriptor from TableProperties selects JSON serialization
   - Best for dynamic schemas or when working with JSON data
 
 Use Case: Best for applications already using asyncio, async web frameworks (FastAPI, aiohttp),
@@ -28,7 +28,6 @@ import time
 from zerobus.sdk.aio import ZerobusSdk
 from zerobus.sdk.shared import (
     AckCallback,
-    RecordType,
     StreamConfigurationOptions,
     TableProperties,
 )
@@ -85,8 +84,9 @@ class CustomHeadersProvider(HeadersProvider):
     for custom headers (e.g., custom metadata, existing token management, etc.).
     """
 
-    def __init__(self, custom_token: str):
+    def __init__(self, custom_token: str, table_name: str):
         self.custom_token = custom_token
+        self.table_name = table_name
 
     def get_headers(self):
         """
@@ -97,6 +97,7 @@ class CustomHeadersProvider(HeadersProvider):
         """
         return [
             ("authorization", f"Bearer {self.custom_token}"),
+            ("x-databricks-zerobus-table-name", self.table_name),
             ("x-custom-header", "custom-value"),
         ]
 
@@ -105,19 +106,20 @@ class MyAckCallback(AckCallback):
     """
     Example acknowledgment callback that logs progress.
 
-    The callback is invoked by the SDK whenever records are acknowledged by the server.
+    The callback is invoked once per logical ingest submission. A batch call produces
+    one callback, not one callback per record in the batch.
     """
 
     def __init__(self):
         super().__init__()
-        self.ack_count = 0
+        self.submission_count = 0
 
     def on_ack(self, offset):
-        """Called when records are acknowledged by the server."""
-        self.ack_count += 1
-        # Log every 100 acknowledgments
-        if self.ack_count % 100 == 0:
-            logger.info(f"  Acknowledged up to offset: {offset} (batch #{self.ack_count})")
+        """Called when a logical ingest submission is acknowledged by the server."""
+        self.submission_count += 1
+        # Log every 100 acknowledged submissions
+        if self.submission_count % 100 == 0:
+            logger.info(f"  Acknowledged up to offset: {offset} (submission #{self.submission_count})")
 
 
 async def main():
@@ -145,9 +147,8 @@ async def main():
         sdk = ZerobusSdk(SERVER_ENDPOINT, UNITY_CATALOG_ENDPOINT, application_name="my-app/1.0")
         logger.info("✓ SDK initialized")
 
-        # Step 2: Configure stream options with JSON record type and ack callback
+        # Step 2: Configure stream options with an ack callback
         options = StreamConfigurationOptions(
-            record_type=RecordType.JSON,
             max_inflight_records=10_000,  # Allow 10k records in flight
             recovery=True,  # Enable automatic recovery
             ack_callback=MyAckCallback(),  # Track acknowledgments
@@ -168,7 +169,7 @@ async def main():
 
         # Advanced: Custom headers provider (for special use cases only)
         # Uncomment to use custom headers instead of OAuth:
-        # custom_provider = CustomHeadersProvider(custom_token="your-custom-token")
+        # custom_provider = CustomHeadersProvider("your-custom-token", TABLE_NAME)
         # stream = await sdk.create_stream(
         #     CLIENT_ID, CLIENT_SECRET, table_properties, options,
         #     headers_provider=custom_provider
@@ -274,8 +275,7 @@ async def main():
             print(f"  Total time: {total_duration:.2f} seconds")
             print(f"  Throughput: {records_per_second:.2f} records/sec")
             print(f"  Average latency: {avg_latency_ms:.2f} ms/record")
-            print(f"  Stream state: {stream.get_state()}")
-            print(f"  Record type: JSON (explicit)")
+            print("  Record type: JSON")
             print("=" * 60)
 
         except Exception as e:

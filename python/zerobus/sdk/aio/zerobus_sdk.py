@@ -24,15 +24,21 @@ Example:
     ...     )
     ...
     ...     # Optimized async API - returns offset directly
-    ...     offset = await stream.ingest_record_offset(b"record_data")
+    ...     offset = await stream.ingest_record_offset('{"value": "record_data"}')
     ...     print(f"Queued at offset {offset}")
     ...
     ...     # Batch API - returns one offset for the batch
-    ...     batch_offset = await stream.ingest_records_offset([b"record1", b"record2"])
+    ...     batch_offset = await stream.ingest_records_offset([
+    ...         '{"value": "record1"}',
+    ...         '{"value": "record2"}',
+    ...     ])
     ...
     ...     # Fire-and-forget for maximum throughput
-    ...     stream.ingest_record_nowait(b"record_data")  # Not awaited!
-    ...     stream.ingest_records_nowait([b"record1", b"record2"])  # Not awaited!
+    ...     stream.ingest_record_nowait('{"value": "record3"}')  # Not awaited!
+    ...     stream.ingest_records_nowait([
+    ...         '{"value": "record4"}',
+    ...         '{"value": "record5"}',
+    ...     ])  # Not awaited!
     ...
     ...     await stream.flush()  # Ensure all records are sent
     ...     await stream.close()

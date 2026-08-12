@@ -10,6 +10,9 @@
 
 ### Documentation
 
+- Clarified that acknowledgment callbacks fire once per logical ingest
+  submission, so one batch ingest call produces one callback.
+
 ### Internal Changes
 
 ### Behavior Changes

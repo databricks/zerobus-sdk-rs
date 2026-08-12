@@ -88,10 +88,10 @@ if (offset.isPresent()) {
 
 ```java
 // As raw bytes
-List<byte[]> unacked = stream.getUnackedRecords();
+List<byte[]> unackedBytes = stream.getUnackedRecords();
 
 // As parsed messages
-List<AirQuality> unacked = stream.getUnackedRecords(AirQuality.parser());
+List<AirQuality> unackedMessages = stream.getUnackedRecords(AirQuality.parser());
 ```
 
 ## Examples

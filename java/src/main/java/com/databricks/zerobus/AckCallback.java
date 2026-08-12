@@ -7,6 +7,9 @@ package com.databricks.zerobus;
  * replaces the deprecated {@code Consumer<IngestRecordResponse>} callback with a more type-safe and
  * flexible API.
  *
+ * <p>A callback is invoked once per logical ingest submission. In particular, a batch ingest call
+ * produces one callback rather than one callback per record in the batch.
+ *
  * <p>Implementations should be thread-safe as callbacks may be invoked from multiple threads.
  * Callbacks should be lightweight to avoid blocking the internal processing threads.
  *
@@ -35,8 +38,7 @@ package com.databricks.zerobus;
 public interface AckCallback {
 
   /**
-   * Called when a record (or records up to this offset) has been durably acknowledged by the
-   * server.
+   * Called when a logical ingest submission has been durably acknowledged by the server.
    *
    * <p>The offset ID represents the durability acknowledgment up to and including this offset. All
    * records with offset IDs less than or equal to this value have been durably stored.
@@ -49,10 +51,10 @@ public interface AckCallback {
   void onAck(long offsetId);
 
   /**
-   * Called when an error occurs for a specific record or offset.
+   * Called when an error occurs for a logical ingest submission.
    *
-   * <p>This method is called when the SDK encounters an error that affects a specific offset. The
-   * error may be retryable or non-retryable depending on the nature of the failure.
+   * <p>This method is called when the SDK encounters an error that affects a specific submission
+   * offset. The error may be retryable or non-retryable depending on the nature of the failure.
    *
    * <p>This method should not throw exceptions. If an exception is thrown, it will be logged but
    * will not affect stream operation.

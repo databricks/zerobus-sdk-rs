@@ -130,7 +130,7 @@ Each `UnackedRecord` exposes `is_json()`, the raw `data()` bytes, and
 ```
 Batch of 3 records queued; batch offset ID: 0
 Batch acknowledged at offset ID: 0
-Stream closed successfully. Callback observed 3 acknowledgements.
+Stream closed successfully. Callback observed 1 logical submission acknowledgement.
 ```
 
 ### Code Highlights

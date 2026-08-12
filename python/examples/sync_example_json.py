@@ -5,7 +5,7 @@ This example demonstrates record ingestion using the synchronous API with JSON s
 
 Record Type Mode: JSON
   - Records are sent as JSON-encoded strings
-  - Uses RecordType.JSON to specify JSON serialization
+  - Omitting a descriptor from TableProperties selects JSON serialization
   - Best for dynamic schemas or when working with JSON data
 
 Authentication:
@@ -21,7 +21,7 @@ import logging
 import os
 import time
 
-from zerobus.sdk.shared import RecordType, StreamConfigurationOptions, TableProperties
+from zerobus.sdk.shared import StreamConfigurationOptions, TableProperties
 from zerobus.sdk.shared.headers_provider import HeadersProvider
 from zerobus.sdk.sync import ZerobusSdk
 
@@ -76,8 +76,9 @@ class CustomHeadersProvider(HeadersProvider):
     for custom headers (e.g., custom metadata, existing token management, etc.).
     """
 
-    def __init__(self, custom_token: str):
+    def __init__(self, custom_token: str, table_name: str):
         self.custom_token = custom_token
+        self.table_name = table_name
 
     def get_headers(self):
         """
@@ -88,6 +89,7 @@ class CustomHeadersProvider(HeadersProvider):
         """
         return [
             ("authorization", f"Bearer {self.custom_token}"),
+            ("x-databricks-zerobus-table-name", self.table_name),
             ("x-custom-header", "custom-value"),
         ]
 
@@ -122,9 +124,8 @@ def main():
         table_properties = TableProperties(TABLE_NAME)
         logger.info(f"✓ Table properties configured for: {TABLE_NAME} (JSON mode)")
 
-        # Step 3: Create stream configuration with JSON record type
+        # Step 3: Create stream configuration
         options = StreamConfigurationOptions(
-            record_type=RecordType.JSON,
             max_inflight_records=1000,
             recovery=True,
             recovery_timeout_ms=15000,
@@ -142,7 +143,7 @@ def main():
 
         # Advanced: Custom headers provider (for special use cases only)
         # Uncomment to use custom headers instead of OAuth:
-        # custom_provider = CustomHeadersProvider(custom_token="your-custom-token")
+        # custom_provider = CustomHeadersProvider("your-custom-token", TABLE_NAME)
         # stream = sdk.create_stream(
         #     CLIENT_ID, CLIENT_SECRET, table_properties, options,
         #     headers_provider=custom_provider
@@ -228,14 +229,14 @@ def main():
             # ack = stream.ingest_record(record_dict)  # Deprecated
             # offset = ack.wait_for_ack()  # Extra step needed
 
-            end_time = time.time()
-            duration_seconds = end_time - start_time
-            records_per_second = NUM_RECORDS / duration_seconds
-
             # Step 6: Flush and close the stream
             logger.info("\nFlushing stream...")
             stream.flush()
             logger.info("✓ Stream flushed")
+
+            end_time = time.time()
+            duration_seconds = end_time - start_time
+            records_per_second = NUM_RECORDS / duration_seconds
 
             stream.close()
             logger.info("✓ Stream closed")
@@ -248,7 +249,7 @@ def main():
             print(f"  Failed: {NUM_RECORDS - success_count}")
             print(f"  Duration: {duration_seconds:.2f} seconds")
             print(f"  Throughput: {records_per_second:.2f} records/sec")
-            print("  Record type: JSON (explicit)")
+            print("  Record type: JSON")
             print("=" * 60)
 
         except Exception as e:
