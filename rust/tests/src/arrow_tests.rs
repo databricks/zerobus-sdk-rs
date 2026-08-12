@@ -2,6 +2,7 @@ mod mock_arrow_flight;
 mod utils;
 
 mod arrow_flight_tests {
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Arc;
 
     use arrow_array::{Array, RecordBatch, StructArray};
@@ -9,7 +10,11 @@ mod arrow_flight_tests {
     use databricks_zerobus_ingest_sdk::internal::arrow_c_data::{
         import_c_data_record_batch, FFI_ArrowArray, FFI_ArrowSchema,
     };
-    use databricks_zerobus_ingest_sdk::{NoTlsConfig, ZerobusError, ZerobusSdk};
+    use databricks_zerobus_ingest_sdk::{
+        ConnectorFactory, NoTlsConfig, ProxyConnector, ZerobusError, ZerobusSdk,
+    };
+    use tokio::io::AsyncReadExt;
+    use tokio::net::TcpListener;
     use tracing::info;
 
     use crate::mock_arrow_flight::{start_mock_flight_server, MockFlightResponse};
@@ -21,6 +26,23 @@ mod arrow_flight_tests {
     };
 
     const TABLE_NAME: &str = "test_catalog.test_schema.test_table";
+
+    struct PausedTimeAutoAdvanceGuard(tokio::task::JoinHandle<()>);
+
+    impl PausedTimeAutoAdvanceGuard {
+        fn start() -> Self {
+            Self(tokio::spawn(std::future::poll_fn(|cx| {
+                cx.waker().wake_by_ref();
+                std::task::Poll::<()>::Pending
+            })))
+        }
+    }
+
+    impl Drop for PausedTimeAutoAdvanceGuard {
+        fn drop(&mut self) {
+            self.0.abort();
+        }
+    }
 
     /// Extracts the `id` (Int64) column values from a test batch, for asserting that a
     /// recovered/sliced batch contains the expected rows (not just the right row count).
@@ -146,7 +168,7 @@ mod arrow_flight_tests {
         }
 
         #[tokio::test(start_paused = true)]
-        async fn test_unrepresentable_recovery_timeout_is_rejected(
+        async fn test_unrepresentable_arrow_timeouts_are_rejected(
         ) -> Result<(), Box<dyn std::error::Error>> {
             setup_tracing();
 
@@ -160,56 +182,108 @@ mod arrow_flight_tests {
 
             advance_tokio_time_near_instant_limit().await;
 
-            let stream_result = sdk
-                .stream_builder()
-                .table(TABLE_NAME)
-                .headers_provider(Arc::new(TestHeadersProvider::default()))
-                .arrow(schema)
-                .recovery_timeout_ms(u64::MAX)
-                .build_arrow()
-                .await;
+            for option_name in [
+                "recovery_timeout_ms",
+                "server_lack_of_ack_timeout_ms",
+                "flush_timeout_ms",
+            ] {
+                let builder = sdk
+                    .stream_builder()
+                    .table(TABLE_NAME)
+                    .headers_provider(Arc::new(TestHeadersProvider::default()))
+                    .arrow(Arc::clone(&schema));
+                let stream_result = match option_name {
+                    "recovery_timeout_ms" => {
+                        builder.recovery_timeout_ms(u64::MAX).build_arrow().await
+                    }
+                    "server_lack_of_ack_timeout_ms" => {
+                        builder
+                            .server_lack_of_ack_timeout_ms(u64::MAX)
+                            .build_arrow()
+                            .await
+                    }
+                    "flush_timeout_ms" => builder.flush_timeout_ms(u64::MAX).build_arrow().await,
+                    _ => unreachable!(),
+                };
 
-            match stream_result {
-                Err(ZerobusError::InvalidArgument(message)) => {
-                    assert!(message.contains("recovery_timeout_ms"));
+                match stream_result {
+                    Err(ZerobusError::InvalidArgument(message)) => {
+                        assert!(message.contains(option_name));
+                    }
+                    Err(error) => panic!("unexpected stream creation error: {error}"),
+                    Ok(_) => panic!("unrepresentable {option_name} was accepted"),
                 }
-                Err(error) => panic!("unexpected stream creation error: {error}"),
-                Ok(_) => panic!("unrepresentable recovery timeout was accepted"),
             }
 
             Ok(())
         }
 
-        #[tokio::test(start_paused = true)]
-        async fn test_unrepresentable_ack_timeout_is_rejected(
+        #[tokio::test]
+        async fn test_unrepresentable_runtime_close_deadline_does_not_publish_close(
         ) -> Result<(), Box<dyn std::error::Error>> {
+            const FLUSH_TIMEOUT_MS: u64 = 32 * 365 * 24 * 60 * 60 * 1_000;
+
             setup_tracing();
 
-            let (_mock_server, server_url) = start_mock_flight_server().await?;
+            let (mock_server, server_url) = start_mock_flight_server().await?;
             let schema = create_test_arrow_schema();
+            mock_server
+                .inject_responses(
+                    TABLE_NAME,
+                    vec![MockFlightResponse::Error {
+                        status: Status::invalid_argument("permanent cleanup error"),
+                        delay_ms: 0,
+                    }],
+                )
+                .await;
+
             let sdk = ZerobusSdk::builder()
                 .endpoint(server_url)
                 .unity_catalog_url("https://mock-uc.com")
                 .tls_config(Arc::new(NoTlsConfig))
                 .build()?;
-
-            advance_tokio_time_near_instant_limit().await;
-
-            let stream_result = sdk
+            let mut stream = sdk
                 .stream_builder()
                 .table(TABLE_NAME)
                 .headers_provider(Arc::new(TestHeadersProvider::default()))
-                .arrow(schema)
-                .server_lack_of_ack_timeout_ms(u64::MAX)
+                .arrow(schema.clone())
+                .recovery(false)
+                .flush_timeout_ms(FLUSH_TIMEOUT_MS)
                 .build_arrow()
-                .await;
+                .await?;
 
-            match stream_result {
+            // Real tonic setup must finish before Tokio time is paused.
+            tokio::time::pause();
+            advance_tokio_time_near_instant_limit().await;
+
+            match stream.close().await {
                 Err(ZerobusError::InvalidArgument(message)) => {
-                    assert!(message.contains("server_lack_of_ack_timeout_ms"));
+                    assert!(message.contains("flush_timeout_ms"));
                 }
-                Err(error) => panic!("unexpected stream creation error: {error}"),
-                Ok(_) => panic!("unrepresentable ACK timeout was accepted"),
+                Err(error) => panic!("unexpected close error: {error}"),
+                Ok(()) => panic!("unrepresentable close deadline was accepted"),
+            }
+            assert!(!stream.is_closed());
+
+            // A successful ingest proves the failed deadline calculation did not publish close.
+            let batch = create_test_record_batch(schema, vec![1], vec![Some("still usable")]);
+            stream.ingest_batch(batch).await?;
+            run_with_paused_time_watchdog(async {
+                while !stream.is_closed() {
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await;
+
+            let error = run_with_paused_time_watchdog(stream.close())
+                .await
+                .expect_err("repeated close must observe the stored terminal error");
+            match error {
+                ZerobusError::StreamClosedError(status) => {
+                    assert_eq!(status.code(), tonic::Code::InvalidArgument);
+                    assert_eq!(status.message(), "permanent cleanup error");
+                }
+                other => panic!("expected the stored peer error, got {other:?}"),
             }
 
             Ok(())
@@ -1174,14 +1248,14 @@ mod arrow_flight_tests {
             assert!(!stream.is_closed());
             stream.close().await?;
             assert!(stream.is_closed());
+            assert_eq!(mock_server.get_request_half_close_count(), 1);
+            assert_eq!(mock_server.get_request_reset_count(), 0);
 
             Ok(())
         }
 
-        /// Cancelling close after supervisor/sender teardown must leave the stream in a
-        /// resumable Closing state: new ingests are rejected, retrieval remains disabled,
-        /// and resumed/repeated close calls return the original flush error without waiting
-        /// for flush_timeout again.
+        /// Cancelling the caller after close publication leaves supervisor-owned teardown
+        /// running. A repeated call waits for the same deadline and result.
         #[tokio::test]
         async fn test_cancelled_close_rejects_ingest_and_resumes_teardown(
         ) -> Result<(), Box<dyn std::error::Error>> {
@@ -1220,7 +1294,7 @@ mod arrow_flight_tests {
                 create_test_record_batch(schema.clone(), vec![1], vec![Some("pending")]);
             stream.ingest_batch(pending_batch).await?;
 
-            let (reached, _proceed) = stream.arm_close_finalize_barrier().await;
+            let (reached, proceed) = stream.arm_close_finalize_barrier().await;
             let mut close_future = Box::pin(stream.close());
             tokio::time::timeout(std::time::Duration::from_secs(5), async {
                 tokio::select! {
@@ -1248,6 +1322,7 @@ mod arrow_flight_tests {
                 "unacked retrieval is allowed only after Closed"
             );
 
+            proceed.notify_one();
             let resumed = tokio::time::timeout(std::time::Duration::from_secs(1), stream.close())
                 .await
                 .expect("resumed close must skip flush and finish promptly")
@@ -2455,22 +2530,19 @@ mod arrow_flight_tests {
         }
 
         #[tokio::test]
-        async fn test_close_propagates_flush_error() -> Result<(), Box<dyn std::error::Error>> {
+        async fn test_late_drain_ack_does_not_replace_close_timeout(
+        ) -> Result<(), Box<dyn std::error::Error>> {
             setup_tracing();
-            info!("Starting test_close_propagates_flush_error");
+            info!("Starting test_late_drain_ack_does_not_replace_close_timeout");
 
             let (mock_server, server_url) = start_mock_flight_server().await?;
             let schema = create_test_arrow_schema();
 
-            // Ack is delayed well past the flush timeout, so the flush performed by
-            // close() times out while the stream is still open (no server error, so the
-            // idempotent close guard does not short-circuit).
             mock_server
                 .inject_responses(
                     TABLE_NAME,
-                    vec![MockFlightResponse::BatchAck {
+                    vec![MockFlightResponse::BatchAckAfterRequestEof {
                         ack_up_to_offset: 0,
-                        delay_ms: 5000,
                         ack_up_to_records: 1,
                     }],
                 )
@@ -2494,16 +2566,25 @@ mod arrow_flight_tests {
             let batch = create_test_record_batch(schema, vec![1], vec![Some("unacked")]);
             let _offset = stream.ingest_batch(batch).await?;
 
-            let close_result = stream.close().await;
-            assert!(
-                close_result.is_err(),
-                "close() must propagate the error when its flush fails"
-            );
+            let error = stream
+                .close()
+                .await
+                .expect_err("the post-deadline ACK must not replace the selected timeout");
+            match error {
+                ZerobusError::StreamClosedError(status) => {
+                    assert_eq!(status.code(), tonic::Code::DeadlineExceeded);
+                    assert_eq!(status.message(), "Flush timed out");
+                }
+                other => panic!("expected a flush timeout, got {other:?}"),
+            }
 
-            // The stream is still torn down, and the unacked batch is recoverable.
             assert!(stream.is_closed());
-            let unacked = stream.get_unacked_batches().await?;
-            assert_eq!(unacked.len(), 1, "Should have 1 unacked batch");
+            assert!(
+                stream.get_unacked_batches().await?.is_empty(),
+                "the late ACK still advances the retained suffix"
+            );
+            assert_eq!(mock_server.get_request_half_close_count(), 1);
+            assert_eq!(mock_server.get_request_reset_count(), 0);
 
             Ok(())
         }
@@ -3040,7 +3121,7 @@ mod arrow_flight_tests {
 
         /// The supervisor must surface a non-retryable configuration error if a timeout
         /// that was representable at construction can no longer form a runtime deadline.
-        #[tokio::test(start_paused = true)]
+        #[tokio::test]
         async fn test_unrepresentable_runtime_recovery_deadline_is_rejected(
         ) -> Result<(), Box<dyn std::error::Error>> {
             const RECOVERY_TIMEOUT_MS: u64 = 32 * 365 * 24 * 60 * 60 * 1_000;
@@ -3076,6 +3157,8 @@ mod arrow_flight_tests {
                 .build_arrow()
                 .await?;
 
+            // Real tonic setup must finish before Tokio time is paused.
+            tokio::time::pause();
             advance_tokio_time_near_instant_limit().await;
 
             let batch = create_test_record_batch(schema, vec![1], vec![Some("replay")]);
@@ -3099,6 +3182,165 @@ mod arrow_flight_tests {
             Ok(())
         }
 
+        #[tokio::test]
+        async fn test_close_during_reconnect_setup_preserves_recovery_trigger(
+        ) -> Result<(), Box<dyn std::error::Error>> {
+            setup_tracing();
+
+            let (mock_server, server_url) = start_mock_flight_server().await?;
+            let schema = create_test_arrow_schema();
+            mock_server
+                .inject_responses(
+                    TABLE_NAME,
+                    vec![
+                        MockFlightResponse::Error {
+                            status: tonic::Status::unavailable("active transport failed"),
+                            delay_ms: 0,
+                        },
+                        MockFlightResponse::FailSetupAfter {
+                            status: tonic::Status::unavailable("replacement setup failed"),
+                            delay_ms: 60_000,
+                        },
+                    ],
+                )
+                .await;
+            let setup_armed = mock_server.delayed_setup_armed();
+
+            let sdk = ZerobusSdk::builder()
+                .endpoint(server_url)
+                .unity_catalog_url("https://mock-uc.com")
+                .tls_config(Arc::new(NoTlsConfig))
+                .build()?;
+            let mut stream = sdk
+                .stream_builder()
+                .table(TABLE_NAME)
+                .headers_provider(Arc::new(TestHeadersProvider::default()))
+                .arrow(schema.clone())
+                .recovery(true)
+                .recovery_backoff_ms(0)
+                .recovery_timeout_ms(120_000)
+                .recovery_retries(1)
+                .flush_timeout_ms(60_000)
+                .build_arrow()
+                .await?;
+
+            let batch = create_test_record_batch(schema, vec![1], vec![Some("pending")]);
+            stream.ingest_batch(batch).await?;
+            tokio::time::timeout(std::time::Duration::from_secs(5), setup_armed.notified())
+                .await
+                .expect("reconnect must enter replacement setup");
+
+            let error = tokio::time::timeout(std::time::Duration::from_secs(1), stream.close())
+                .await
+                .expect("close must cancel replacement setup")
+                .expect_err("close during recovery must preserve the recovery trigger");
+            assert!(
+                error.to_string().contains("active transport failed"),
+                "expected the active recovery trigger, got: {error}"
+            );
+            assert_eq!(stream.get_unacked_batches().await?.len(), 1);
+            Ok(())
+        }
+
+        #[tokio::test]
+        async fn test_close_during_reconnect_transport_handshake_preserves_trigger_and_suffix(
+        ) -> Result<(), Box<dyn std::error::Error>> {
+            setup_tracing();
+
+            let (mock_server, server_url) = start_mock_flight_server().await?;
+            let schema = create_test_arrow_schema();
+            mock_server
+                .inject_responses(
+                    TABLE_NAME,
+                    vec![MockFlightResponse::Error {
+                        status: tonic::Status::unavailable("active transport failed"),
+                        delay_ms: 0,
+                    }],
+                )
+                .await;
+
+            let listener = TcpListener::bind("127.0.0.1:0").await?;
+            let proxy_url = format!("http://{}", listener.local_addr()?);
+            let connect_received = Arc::new(tokio::sync::Notify::new());
+            let proxy_task = {
+                let connect_received = Arc::clone(&connect_received);
+                tokio::spawn(async move {
+                    let (mut socket, _) = listener.accept().await.expect("proxy must accept");
+                    let mut request = Vec::new();
+                    let mut buffer = [0_u8; 1024];
+                    while !request.ends_with(b"\r\n\r\n") {
+                        let read = socket
+                            .read(&mut buffer)
+                            .await
+                            .expect("read CONNECT request");
+                        assert!(read > 0, "proxy client closed before sending CONNECT");
+                        request.extend_from_slice(&buffer[..read]);
+                        assert!(request.len() <= 8 * 1024, "CONNECT request is too large");
+                    }
+                    assert!(request.starts_with(b"CONNECT "));
+                    connect_received.notify_one();
+                    std::future::pending::<()>().await;
+                })
+            };
+
+            let factory_calls = Arc::new(AtomicUsize::new(0));
+            let calls = Arc::clone(&factory_calls);
+            let connector_factory: ConnectorFactory = Arc::new(move |_| {
+                if calls.fetch_add(1, Ordering::SeqCst) == 0 {
+                    None
+                } else {
+                    Some(ProxyConnector::new(&proxy_url).expect("valid local proxy URL"))
+                }
+            });
+            let sdk = ZerobusSdk::builder()
+                .endpoint(server_url)
+                .unity_catalog_url("https://mock-uc.com")
+                .tls_config(Arc::new(NoTlsConfig))
+                .connector_factory(connector_factory)
+                .build()?;
+            let mut stream = sdk
+                .stream_builder()
+                .table(TABLE_NAME)
+                .headers_provider(Arc::new(TestHeadersProvider::default()))
+                .arrow(schema.clone())
+                .recovery(true)
+                .recovery_backoff_ms(0)
+                .recovery_timeout_ms(120_000)
+                .recovery_retries(1)
+                .flush_timeout_ms(60_000)
+                .build_arrow()
+                .await?;
+
+            let batch = create_test_record_batch(schema, vec![7, 8], vec![Some("a"), Some("b")]);
+            stream.ingest_batch(batch).await?;
+            tokio::time::timeout(
+                std::time::Duration::from_secs(5),
+                connect_received.notified(),
+            )
+            .await
+            .expect("reconnect must wait for the proxy CONNECT response");
+
+            let error = tokio::time::timeout(std::time::Duration::from_secs(1), stream.close())
+                .await
+                .expect("close must cancel the replacement transport handshake")
+                .expect_err("close during recovery must preserve the recovery trigger");
+            assert!(
+                error.to_string().contains("active transport failed"),
+                "expected the active recovery trigger, got: {error}"
+            );
+            let unacked: Vec<Vec<i64>> = stream
+                .get_unacked_batches()
+                .await?
+                .iter()
+                .map(batch_ids)
+                .collect();
+            assert_eq!(unacked, vec![vec![7, 8]]);
+
+            proxy_task.abort();
+            let _ = proxy_task.await;
+            Ok(())
+        }
+
         /// Time spent replaying a recovered backlog must not consume the batches' ACK
         /// budget before the replacement response processor can observe acknowledgments.
         #[tokio::test(start_paused = true)]
@@ -3109,8 +3351,10 @@ mod arrow_flight_tests {
             const ACK_DELAY_MS: u64 = 50;
 
             setup_tracing();
-
             let (mock_server, server_url) = start_mock_flight_server().await?;
+            // Real tonic setup under paused time needs a ready task to prevent Tokio from
+            // auto-advancing connection deadlines while kernel I/O is still pending.
+            let _auto_advance_guard = PausedTimeAutoAdvanceGuard::start();
             let schema = create_test_arrow_schema();
             mock_server
                 .inject_responses(
@@ -3178,11 +3422,8 @@ mod arrow_flight_tests {
             Ok(())
         }
 
-        /// close() during the reconnect rebuild window must slice with the pre-reconnect
-        /// watermark. A barrier parks reconnect after the new connection is established but
-        /// before pending ranges/watermark are rebuilt; close() then reaps the parked
-        /// supervisor and drains with the pre-reconnect watermark/ranges, so A is sliced to
-        /// its un-acked suffix (ids [2, 3]) and B is retained whole.
+        /// Close after replacement setup and READY preserves the active recovery trigger
+        /// and slices pending work with the pre-reconnect watermark.
         #[tokio::test]
         async fn test_close_during_reconnect_rebuild_window_slices_correctly(
         ) -> Result<(), Box<dyn std::error::Error>> {
@@ -3225,8 +3466,7 @@ mod arrow_flight_tests {
                 .recovery(true)
                 .recovery_backoff_ms(0)
                 .recovery_retries(5)
-                // Short flush timeout so close()'s flush returns quickly while parked.
-                .flush_timeout_ms(200)
+                .flush_timeout_ms(60_000)
                 .build_arrow()
                 .await?;
 
@@ -3258,8 +3498,14 @@ mod arrow_flight_tests {
                 .await
                 .expect("reconnect should reach the rebuild barrier");
 
-            // close() reaps the parked supervisor and drains with the pre-rebuild state.
-            let _ = stream.close().await;
+            let error = tokio::time::timeout(std::time::Duration::from_secs(1), stream.close())
+                .await
+                .expect("close must interrupt recovery after READY")
+                .expect_err("close during recovery must preserve the recovery trigger");
+            assert!(
+                error.to_string().contains("Connection lost"),
+                "expected the active recovery trigger, got: {error}"
+            );
 
             let unacked = stream.get_unacked_batches().await?;
             assert_eq!(unacked.len(), 2, "expected sliced A suffix + full B");
@@ -3270,6 +3516,82 @@ mod arrow_flight_tests {
             );
             assert_eq!(batch_ids(&unacked[1]), vec![4], "B fully retained");
 
+            Ok(())
+        }
+
+        #[tokio::test]
+        async fn test_close_after_partial_replay_preserves_trigger_and_suffix(
+        ) -> Result<(), Box<dyn std::error::Error>> {
+            setup_tracing();
+
+            let (mock_server, server_url) = start_mock_flight_server().await?;
+            let schema = create_test_arrow_schema();
+            mock_server
+                .inject_responses(
+                    TABLE_NAME,
+                    vec![
+                        MockFlightResponse::BatchAck {
+                            ack_up_to_offset: 0,
+                            delay_ms: 0,
+                            ack_up_to_records: 1,
+                        },
+                        MockFlightResponse::Error {
+                            status: tonic::Status::unavailable("active transport failed"),
+                            delay_ms: 0,
+                        },
+                    ],
+                )
+                .await;
+
+            let sdk = ZerobusSdk::builder()
+                .endpoint(server_url)
+                .unity_catalog_url("https://mock-uc.com")
+                .tls_config(Arc::new(NoTlsConfig))
+                .build()?;
+            let mut stream = sdk
+                .stream_builder()
+                .table(TABLE_NAME)
+                .headers_provider(Arc::new(TestHeadersProvider::default()))
+                .arrow(schema.clone())
+                .recovery(true)
+                .recovery_backoff_ms(0)
+                .recovery_retries(1)
+                .flush_timeout_ms(60_000)
+                .build_arrow()
+                .await?;
+
+            let ack_applied = stream.arm_ack_applied_notify().await;
+            let (replay_reached, _replay_proceed) = stream.arm_replay_send_barrier().await;
+            let first = create_test_record_batch(
+                schema.clone(),
+                vec![1, 2, 3],
+                vec![Some("a"), Some("b"), Some("c")],
+            );
+            stream.ingest_batch(first).await?;
+            tokio::time::timeout(std::time::Duration::from_secs(5), ack_applied.notified())
+                .await
+                .expect("partial ACK must be applied before recovery");
+            let second = create_test_record_batch(schema, vec![4], vec![Some("d")]);
+            stream.ingest_batch(second).await?;
+            tokio::time::timeout(std::time::Duration::from_secs(5), replay_reached.notified())
+                .await
+                .expect("recovery must hand off the first replay batch");
+
+            let error = tokio::time::timeout(std::time::Duration::from_secs(1), stream.close())
+                .await
+                .expect("close must interrupt partial replay")
+                .expect_err("close during recovery must preserve the recovery trigger");
+            assert!(
+                error.to_string().contains("active transport failed"),
+                "expected the active recovery trigger, got: {error}"
+            );
+            let unacked: Vec<Vec<i64>> = stream
+                .get_unacked_batches()
+                .await?
+                .iter()
+                .map(batch_ids)
+                .collect();
+            assert_eq!(unacked, vec![vec![2, 3], vec![4]]);
             Ok(())
         }
 
@@ -3459,76 +3781,93 @@ mod arrow_flight_tests {
             Ok(())
         }
 
-        /// close() while a reconnect is parked at the rebuild barrier must tear the stream
-        /// down and move pending batches to the failed set, without panicking or hanging
-        /// beyond the flush timeout.
         #[tokio::test]
-        async fn test_close_during_reconnect_window_moves_pending_to_failed(
+        async fn test_close_during_recovery_backoff_preserves_trigger_and_suffix(
         ) -> Result<(), Box<dyn std::error::Error>> {
             setup_tracing();
-            info!("Starting test_close_during_reconnect_window_moves_pending_to_failed");
 
             let (mock_server, server_url) = start_mock_flight_server().await?;
             let schema = create_test_arrow_schema();
-
-            // A retriable error triggers the reconnect we park at the rebuild barrier.
             mock_server
                 .inject_responses(
                     TABLE_NAME,
-                    vec![MockFlightResponse::Error {
-                        status: tonic::Status::unavailable("Connection lost"),
-                        delay_ms: 0,
-                    }],
+                    vec![
+                        MockFlightResponse::BatchAck {
+                            ack_up_to_offset: 0,
+                            delay_ms: 0,
+                            ack_up_to_records: 1,
+                        },
+                        MockFlightResponse::Error {
+                            status: tonic::Status::unavailable("active transport failed"),
+                            delay_ms: 0,
+                        },
+                    ],
                 )
                 .await;
 
             let sdk = ZerobusSdk::builder()
-                .endpoint(server_url.clone())
+                .endpoint(server_url)
                 .unity_catalog_url("https://mock-uc.com")
                 .tls_config(Arc::new(NoTlsConfig))
                 .build()?;
-
             let mut stream = sdk
                 .stream_builder()
                 .table(TABLE_NAME)
                 .headers_provider(Arc::new(TestHeadersProvider::default()))
                 .arrow(schema.clone())
                 .recovery(true)
-                .recovery_backoff_ms(0)
-                .recovery_retries(5)
-                .flush_timeout_ms(200)
+                .recovery_backoff_ms(60_000)
+                .recovery_retries(1)
+                .flush_timeout_ms(120_000)
                 .build_arrow()
                 .await?;
 
-            // Park the reconnect; do not release it — close() reaps it instead.
-            let (reached, _proceed) = stream.arm_reconnect_rebuild_barrier().await;
+            // Real tonic setup must finish before Tokio time is paused.
+            tokio::time::pause();
+            let ack_applied = stream.arm_ack_applied_notify().await;
+            let first = create_test_record_batch(
+                schema.clone(),
+                vec![1, 2, 3],
+                vec![Some("a"), Some("b"), Some("c")],
+            );
+            stream.ingest_batch(first).await?;
+            run_with_paused_time_watchdog(ack_applied.notified()).await;
 
-            let batch = create_test_record_batch(schema.clone(), vec![1], vec![Some("a")]);
-            stream.ingest_batch(batch).await?;
+            let second = create_test_record_batch(schema, vec![4], vec![Some("d")]);
+            stream.ingest_batch(second).await?;
 
-            tokio::time::timeout(std::time::Duration::from_secs(5), reached.notified())
+            // Keep paused time from advancing through the long backoff while the mock
+            // delivers the active error and the supervisor enters recovery.
+            let watchdog_started = std::time::Instant::now();
+            while mock_server.get_batch_count().await < 2 {
+                assert!(
+                    watchdog_started.elapsed() < std::time::Duration::from_secs(5),
+                    "active connection did not receive both batches"
+                );
+                tokio::task::yield_now().await;
+            }
+            for _ in 0..32 {
+                tokio::task::yield_now().await;
+            }
+
+            let close_error = run_with_paused_time_watchdog(stream.close())
                 .await
-                .expect("reconnect should reach the rebuild barrier");
-
-            // close() must return (its flush times out at 200ms) without hanging or
-            // panicking, reaping the parked supervisor along the way.
-            let close_result =
-                tokio::time::timeout(std::time::Duration::from_secs(5), stream.close())
-                    .await
-                    .expect("close() must not hang while a reconnect is parked");
+                .expect_err("close during backoff must preserve the recovery trigger");
             assert!(
-                close_result.is_err(),
-                "close() should surface the flush timeout"
+                close_error.to_string().contains("active transport failed"),
+                "expected the active recovery trigger, got: {close_error}"
             );
-
-            // The un-acked batch was moved to the failed set and is retrievable.
-            let unacked = stream.get_unacked_batches().await?;
+            let unacked: Vec<Vec<i64>> = stream
+                .get_unacked_batches()
+                .await?
+                .iter()
+                .map(batch_ids)
+                .collect();
             assert_eq!(
-                unacked.len(),
-                1,
-                "pending batch must be moved to the failed set"
+                unacked,
+                vec![vec![2, 3], vec![4]],
+                "close during backoff must retain only the exact unacknowledged suffix"
             );
-
             Ok(())
         }
 
@@ -3569,7 +3908,7 @@ mod arrow_flight_tests {
                 .tls_config(Arc::new(NoTlsConfig))
                 .build()?;
 
-            let stream = sdk
+            let mut stream = sdk
                 .stream_builder()
                 .table(TABLE_NAME)
                 .headers_provider(Arc::new(TestHeadersProvider::default()))
@@ -3591,6 +3930,20 @@ mod arrow_flight_tests {
 
             let result = stream.wait_for_offset(offset2).await;
             assert!(result.is_ok(), "Expected recovery to succeed: {:?}", result);
+
+            let half_closes_before = mock_server.get_request_half_close_count();
+            let resets_before = mock_server.get_request_reset_count();
+            stream.close().await?;
+            assert_eq!(
+                mock_server.get_request_half_close_count(),
+                half_closes_before + 1,
+                "close after sender commit must half-close the replacement exactly once"
+            );
+            assert_eq!(
+                mock_server.get_request_reset_count(),
+                resets_before,
+                "close after sender commit must not reset the replacement"
+            );
 
             Ok(())
         }
@@ -5393,6 +5746,19 @@ mod arrow_flight_tests {
             create_test_record_batch(schema, vec![1, 2, 3], vec![Some("a"), Some("b"), Some("c")])
         }
 
+        fn assert_rotation_error(error: ZerobusError) {
+            match error {
+                ZerobusError::StreamClosedError(status) => {
+                    assert_eq!(status.code(), tonic::Code::Unavailable);
+                    assert_eq!(
+                        status.message(),
+                        "Server requested graceful stream rotation"
+                    );
+                }
+                other => panic!("expected rotation error, got {other:?}"),
+            }
+        }
+
         #[tokio::test]
         async fn test_server_rotation_half_closes_before_reconnect(
         ) -> Result<(), Box<dyn std::error::Error>> {
@@ -5810,7 +6176,11 @@ mod arrow_flight_tests {
             assert_eq!(mock_server.get_request_half_close_count(), 1);
             assert_eq!(mock_server.get_request_reset_count(), 0);
 
-            stream.close().await?;
+            // The ACK is observable before rotation recovery commits. Cleanup may close
+            // the replacement or interrupt the still-active rotation.
+            if let Err(error) = stream.close().await {
+                assert_rotation_error(error);
+            }
             Ok(())
         }
 
@@ -5931,7 +6301,10 @@ mod arrow_flight_tests {
             );
             assert_eq!(mock_server.get_request_half_close_count(), 1);
             assert_eq!(mock_server.get_request_reset_count(), 0);
-            stream.close().await?;
+            // The post-EOF ACK is observable before rotation recovery commits.
+            if let Err(error) = stream.close().await {
+                assert_rotation_error(error);
+            }
             Ok(())
         }
 

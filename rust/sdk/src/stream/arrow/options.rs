@@ -85,6 +85,8 @@ pub struct ArrowStreamConfigurationOptions {
     /// Timeout in milliseconds for flush operations.
     ///
     /// If a `flush()` call cannot complete within this time, it will return a timeout error.
+    /// Values whose absolute deadline cannot be represented by the platform's
+    /// monotonic clock are rejected when the stream is built.
     ///
     /// Default: 300,000 (5 minutes)
     pub flush_timeout_ms: u64,
@@ -135,9 +137,10 @@ pub struct ArrowStreamConfigurationOptions {
     /// cleanup and terminates without reconnecting. Batches accepted while paused remain
     /// available through `get_unacked_batches()`.
     ///
-    /// The clean half-close guarantee applies to the active connection during normal
-    /// server rotation. Explicit close during recovery remains best-effort and may abort
-    /// an incomplete replacement request.
+    /// The clean half-close guarantee applies to the active connection. Explicit close
+    /// during an already-active rotation or recovery retains that attempt's trigger even if
+    /// the explicit close target is already acknowledged. Any uncommitted replacement request
+    /// is dropped best-effort.
     ///
     /// Default: `None` (use the available server grace period)
     pub stream_paused_max_wait_time_ms: Option<u64>,

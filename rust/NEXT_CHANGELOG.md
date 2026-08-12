@@ -18,9 +18,12 @@
   the full replay completes and ACK processing can resume on the replacement
   connection.
 - Arrow Flight rejects unrepresentable timeout values: stream creation returns
-  `InvalidArgument` when ACK or recovery deadlines exceed the platform
+  `InvalidArgument` when ACK, recovery, or flush deadlines exceed the platform
   monotonic-clock range. Server-advertised graceful-rotation periods are capped
   at one year.
+- Arrow Flight close is cancellation-safe and half-closes the active request before
+  bounded response draining. Close during recovery cancels the attempt, retains the
+  unacknowledged suffix, and returns the error that triggered recovery.
 - Fixed Arrow Flight recovery sender lifetime: replacement senders are now published
   only after pending replay succeeds, while initial supervisor handoff and failed or
   cancelled replay promptly drop redundant senders instead of retaining incomplete
