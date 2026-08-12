@@ -229,6 +229,27 @@ stream.ingest_proto_records(batch);
 stream.flush();
 ```
 
+If your encoded records already live somewhere other than a
+`std::vector<std::vector<std::uint8_t>>` — one contiguous arena, a ring buffer,
+your own record type — describe them with `ProtoRecordView` instead of copying
+each payload into that container first:
+
+```cpp
+// `arena` holds the encoded records back to back; `spans` records where each
+// one starts and how long it is.
+std::vector<zerobus::ProtoRecordView> views;
+for (const auto& span : spans) {
+  views.push_back({arena.data() + span.offset, span.size});
+}
+stream.ingest_proto_records(views.data(), views.size());
+stream.flush();
+```
+
+A `ProtoRecordView` borrows: the bytes it points at must stay valid until the
+ingest call returns (the core copies them before it does). Build the views only
+once the buffer they point into has stopped growing — a `push_back` that
+reallocates invalidates every pointer taken from it earlier.
+
 ### Arrow Flight ingestion (Beta)
 
 Stream Arrow record batches instead of proto/JSON records. Create the stream
@@ -328,6 +349,7 @@ canonical version):
 | `zerobus::StreamOptions` / `zerobus::ArrowStreamOptions` | Stream configuration |
 | `zerobus::ZerobusException` | Thrown on any failure; `is_retryable()` |
 | `zerobus::UnackedRecord` | An unacknowledged record recovered from a failed stream |
+| `zerobus::ProtoRecordView` | Non-owning `{data, size}` view of a proto record, for batch ingestion without copies |
 
 Key `Stream` methods: `ingest_proto_record`, `ingest_json_record`,
 `ingest_proto_records`, `ingest_json_records`, `wait_for_offset`, `flush`,

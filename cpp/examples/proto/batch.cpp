@@ -11,6 +11,9 @@
 // unit. The call returns a single logical offset assigned to the whole batch;
 // waiting on that one offset confirms the entire batch.
 //
+// Two ways to hand a batch over are shown: a vector of encoded records, and
+// ProtoRecordViews borrowing records that already live in a caller-owned arena.
+//
 // Configuration — every connection setting, plus the Unity Catalog table
 // metadata JSON, is read from the environment. Export these before running (see
 // ../README.md for what each one is and the full copy-pasteable block,
@@ -26,6 +29,7 @@
 //          TIMESTAMP)
 
 #include <chrono>
+#include <cstddef>
 #include <cstdint>
 #include <cstdlib>
 #include <iostream>
@@ -122,7 +126,46 @@ int main() {
       std::cout << "Batch acknowledged at offset ID: " << batch_offset << "\n";
     }
 
-    // 6. flush() drains anything still pending, then close at a controlled
+    // 6. A second batch, for records the SDK does not own.
+    //
+    //    encode_json() returns a vector per record, so the batch above was
+    //    already a natural vector-of-vectors. When your records live elsewhere
+    //    — here, packed into one arena — describe them with ProtoRecordView
+    //    instead of copying each payload into that container to pass it.
+    const std::vector<std::string> more_orders = {
+        make_order_json(4, "Dan Brown", "Laptop Stand", 1, 34.50, "pending",
+                        now),
+        make_order_json(5, "Erin Page", "HD Webcam", 2, 59.99, "pending", now),
+    };
+
+    // Where each encoded record starts in the arena, and how long it is.
+    struct Span {
+      std::size_t offset;
+      std::size_t size;
+    };
+    std::vector<std::uint8_t> arena;
+    std::vector<Span> spans;
+    for (const std::string& order : more_orders) {
+      const std::vector<std::uint8_t> encoded = schema.encode_json(order);
+      spans.push_back({arena.size(), encoded.size()});
+      arena.insert(arena.end(), encoded.begin(), encoded.end());
+    }
+
+    // Take the pointers only now the arena has stopped growing: a reallocating
+    // insert invalidates any taken earlier.
+    std::vector<zerobus::ProtoRecordView> views;
+    views.reserve(spans.size());
+    for (const Span& span : spans) {
+      views.push_back({arena.data() + span.offset, span.size});
+    }
+
+    // arena must outlive this call — the views only borrow it.
+    const std::int64_t arena_offset =
+        stream.ingest_proto_records(views.data(), views.size());
+    std::cout << "Arena batch of " << views.size()
+              << " records queued; batch offset ID: " << arena_offset << "\n";
+
+    // 7. flush() drains anything still pending, then close at a controlled
     //    point.
     stream.flush();
     stream.close();
