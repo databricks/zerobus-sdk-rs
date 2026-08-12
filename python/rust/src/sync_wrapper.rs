@@ -50,6 +50,7 @@ pub struct RecordAcknowledgment {
 impl RecordAcknowledgment {
     /// Wait for the acknowledgment and return the offset ID.
     /// This method can only be called once.
+    #[pyo3(signature = (_timeout_sec = None))]
     pub fn wait_for_ack(&mut self, py: Python, _timeout_sec: Option<f64>) -> PyResult<i64> {
         if self.done {
             return Err(PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
@@ -192,6 +193,7 @@ impl ZerobusStream {
     }
 
     /// Wait for a specific offset to be acknowledged
+    #[pyo3(signature = (offset, timeout_sec = None))]
     fn wait_for_offset(&self, py: Python, offset: i64, timeout_sec: Option<f64>) -> PyResult<()> {
         let _ = timeout_sec; // Timeout is handled internally by the Rust SDK
         let stream = self.inner.clone();
@@ -338,6 +340,7 @@ impl ZerobusSdk {
     }
 
     /// Create a new stream with OAuth authentication
+    #[pyo3(signature = (client_id, client_secret, table_properties, options = None))]
     fn create_stream(
         &self,
         py: Python,
@@ -369,6 +372,7 @@ impl ZerobusSdk {
     }
 
     /// Create a new stream with custom headers provider
+    #[pyo3(signature = (table_properties, headers_provider, options = None))]
     fn create_stream_with_headers_provider(
         &self,
         py: Python,

@@ -1,5 +1,15 @@
 # Version changelog
 
+## Release v1.6.1
+
+### Bug Fixes
+
+- Fix `ZerobusStream.wait_for_offset(offset)` raising `TypeError: missing 1 required positional argument: 'timeout_sec'` on the synchronous record stream (issue #726). The PyO3 0.20 → 0.29 upgrade dropped the implicit `None` default for `Option<T>` arguments, which silently made `timeout_sec` required. Restored the default via `#[pyo3(signature = ...)]`. The same fix restores optional arguments on `RecordAcknowledgment.wait_for_ack`, `ZerobusSdk.create_stream`, and `ZerobusSdk.create_stream_with_headers_provider`.
+
+### Documentation
+
+- Document `stream_paused_max_wait_time_ms` on `ArrowStreamConfigurationOptions` in the Arrow type stub so it matches the already-supported runtime option.
+
 ## Release v1.6.0
 
 ### New Features and Improvements
