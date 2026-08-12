@@ -19,8 +19,7 @@ class TestNativeBindingSignatures(unittest.TestCase):
         self.assertIs(
             params[param_name].default,
             None,
-            f"{fn.__qualname__} parameter '{param_name}' must default to None, "
-            f"got {params[param_name].default!r}",
+            f"{fn.__qualname__} parameter '{param_name}' must default to None, " f"got {params[param_name].default!r}",
         )
 
     def test_sync_wait_for_offset_timeout_optional(self):
@@ -35,25 +34,19 @@ class TestNativeBindingSignatures(unittest.TestCase):
             self.fail(f"wait_for_offset(offset) is not bindable: {exc}")
 
     def test_sync_wait_for_ack_timeout_optional(self):
-        self._assert_optional(
-            core.sync.RecordAcknowledgment.wait_for_ack, "_timeout_sec"
-        )
+        self._assert_optional(core.sync.RecordAcknowledgment.wait_for_ack, "_timeout_sec")
 
     def test_sync_create_stream_options_optional(self):
         self._assert_optional(core.sync.ZerobusSdk.create_stream, "options")
 
     def test_sync_create_stream_with_headers_provider_options_optional(self):
-        self._assert_optional(
-            core.sync.ZerobusSdk.create_stream_with_headers_provider, "options"
-        )
+        self._assert_optional(core.sync.ZerobusSdk.create_stream_with_headers_provider, "options")
 
     def test_async_create_stream_options_optional(self):
         self._assert_optional(core.aio.ZerobusSdk.create_stream, "options")
 
     def test_async_create_stream_with_headers_provider_options_optional(self):
-        self._assert_optional(
-            core.aio.ZerobusSdk.create_stream_with_headers_provider, "options"
-        )
+        self._assert_optional(core.aio.ZerobusSdk.create_stream_with_headers_provider, "options")
 
     def test_async_wait_for_offset_accepts_offset_only(self):
         sig = inspect.signature(core.aio.ZerobusStream.wait_for_offset)
