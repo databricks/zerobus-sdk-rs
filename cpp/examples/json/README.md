@@ -92,15 +92,23 @@ zerobus::Stream stream =
 transient disconnects. If a stream fails *terminally*, `flush()`/`close()`
 throws — and a failed `close()` keeps the handle alive so you can drain whatever
 was never acknowledged with `get_unacked_records()` and re-ingest it on a fresh
-stream. (After a *successful* `close()` the handle is freed, so that call would
-throw instead — recovery belongs on the failure path only.)
+stream. A flush timeout can leave the stream active; retrieval then throws, and
+those records cannot be recovered until the stream has actually closed. After a
+*successful* `close()` the handle is freed, so that call would throw instead —
+recovery belongs on the failure path only.
 
 ```cpp
 try {
   stream.flush();
   stream.close();
 } catch (const zerobus::ZerobusException& e) {
-  std::vector<zerobus::UnackedRecord> unacked = stream.get_unacked_records();
+  std::vector<zerobus::UnackedRecord> unacked;
+  try {
+    unacked = stream.get_unacked_records();
+  } catch (const zerobus::ZerobusException& retrieval) {
+    // Stream may still be active (for example a flush timeout).
+    throw;
+  }
   zerobus::Stream retry = open_stream(...);
   for (const auto& record : unacked) {
     retry.ingest_json_record(record.as_string());   // loop — no per-record wait
