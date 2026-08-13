@@ -41,6 +41,9 @@
 - Batch examples and primary rustdoc now queue all records and wait once with
   `flush()` or the last offset, and no longer refer to removed `ingest_record()`
   / `ingest_records()` methods.
+- Example READMEs and `get_unacked_*` rustdoc now name `ingest_record_offset()` /
+  `ingest_records_offset()`. The generate-files tool README quoting is valid shell.
+  Arrow example docs place schema validation at stream creation, not the first batch.
 
 ### Internal Changes
 

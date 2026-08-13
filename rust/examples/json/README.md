@@ -24,8 +24,8 @@ JSON examples are recommended for getting started - they're simpler and don't re
 - Great for quick prototyping
 
 **Available examples:**
-- **`single.rs`** - Ingest records one at a time using `ingest_record_offset()` / `ingest_record()`
-- **`batch.rs`** - Ingest multiple records at once using `ingest_records_offset()` / `ingest_records()`
+- **`single.rs`** - Ingest records one at a time using `ingest_record_offset()`
+- **`batch.rs`** - Ingest multiple records at once using `ingest_records_offset()`
 
 ## Three Ways to Pass Data
 

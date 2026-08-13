@@ -37,8 +37,8 @@ The examples are grouped by how the protobuf schema is obtained:
 - **`compiled/`** — the schema is known ahead of time and compiled into Rust structs.
   **No schema generation needed to run these** — the files under `compiled/output/`
   are already included.
-  - **`compiled/single.rs`** - Ingest records one at a time using `ingest_record_offset()` / `ingest_record()`
-  - **`compiled/batch.rs`** - Ingest multiple records at once using `ingest_records_offset()` / `ingest_records()`
+  - **`compiled/single.rs`** - Ingest records one at a time using `ingest_record_offset()`
+  - **`compiled/batch.rs`** - Ingest multiple records at once using `ingest_records_offset()`
 - **`dynamic/`** — the schema is known only at runtime (no compiled `.proto`), and records
   are built field-by-field with `DynamicRecord`.
   - **`dynamic/single.rs`** - Build the descriptor in code and ingest dynamic records one at a time
