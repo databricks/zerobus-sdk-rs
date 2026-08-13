@@ -9,7 +9,7 @@ This document covers Java-specific development setup and workflow.
 ### Prerequisites
 
 - Git
-- Java 8 or higher - [Download Java](https://adoptium.net/)
+- Java 11 or higher to build and test from source. Published JARs remain compatible with Java 8.
 - Maven 3.6 or higher - [Download Maven](https://maven.apache.org/download.cgi)
 - Protocol Buffers compiler (`protoc`) 33.0 - [Download protoc](https://github.com/protocolbuffers/protobuf/releases/tag/v33.0)
 

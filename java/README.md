@@ -68,7 +68,7 @@ The Java SDK uses JNI (Java Native Interface) to call a high-performance Rust im
 
 ### Runtime Requirements
 
-- **Java**: 8 or higher - [Download Java](https://adoptium.net/)
+- **Java**: 8 or higher to run a published JAR. Building and testing from source requires JDK 11 or higher.
 - **Databricks workspace** with Zerobus access enabled
 
 ### Supported Platforms
@@ -82,8 +82,8 @@ This SDK includes native libraries for the following platforms:
 | Linux (musl / Alpine) | x86_64  | Supported |
 | Linux (musl / Alpine) | aarch64 | Supported |
 | Windows  | x86_64       | Supported |
-| macOS    | x86_64       | Supported |
-| macOS    | aarch64 (Apple Silicon) | Supported |
+| macOS    | x86_64       | Source-build only; the published JNI artifacts currently include Linux and Windows |
+| macOS    | aarch64 (Apple Silicon) | Source-build only; the published JNI artifacts currently include Linux and Windows |
 
 Linux glibc builds support glibc 2.26 and newer, including Amazon Linux 2.
 On Linux, the libc flavor (glibc vs musl) is detected at runtime. To override detection, set
@@ -119,7 +119,7 @@ On Linux, the libc flavor (glibc vs musl) is detected at runtime. To override de
 
 ### Build Requirements (only for building from source)
 
-- **Java**: 8 or higher - [Download Java](https://adoptium.net/)
+- **Java**: 8 or higher to run a published JAR. Building and testing from source requires JDK 11 or higher.
 - **Maven**: 3.6 or higher - [Download Maven](https://maven.apache.org/download.cgi)
 - **Protocol Buffers Compiler** (`protoc`): 33.0 - [Download protoc](https://github.com/protocolbuffers/protobuf/releases/tag/v33.0) (for compiling your own `.proto` schemas)
 
@@ -793,16 +793,24 @@ try {
 
 **Migration:**
 ```java
-// Before (deprecated ZerobusStream):
-stream.ingestRecord(record).join();
+// Before (deprecated ZerobusStream): wait once after the loop
+CompletableFuture<Long> last = null;
+for (AirQuality record : records) {
+    last = stream.ingestRecord(record);
+}
+if (last != null) {
+    last.join();
+}
 
-// After (recommended ZerobusProtoStream):
-long offset = stream.ingestRecordOffset(record);
-stream.waitForOffset(offset);
+// After (recommended ZerobusProtoStream): queue, then flush once
+for (AirQuality record : records) {
+    stream.ingestRecordOffset(record);
+}
+stream.flush();
 
 // Batch ingestion:
-Optional<Long> batchOffset = stream.ingestRecordsOffset(batch);
-batchOffset.ifPresent(o -> { try { stream.waitForOffset(o); } catch (Exception e) { throw new RuntimeException(e); } });
+stream.ingestRecordsOffset(batch);
+stream.flush();
 ```
 
 ---
@@ -877,7 +885,7 @@ ZerobusJsonStream stream = sdk.streamBuilder()
 | `recovery` | true | Enable automatic stream recovery |
 | `recoveryTimeoutMs` | 15000 | Timeout for recovery operations (ms) |
 | `recoveryBackoffMs` | 2000 | Delay between recovery attempts (ms) |
-| `recoveryRetries` | 3 | Maximum number of recovery attempts |
+| `recoveryRetries` | 4 | Maximum number of recovery attempts |
 | `flushTimeoutMs` | 300000 | Timeout for flush operations (ms) |
 | `serverLackOfAckTimeoutMs` | 60000 | Server acknowledgment timeout (ms) |
 | `ackCallback` | None | Callback invoked on record acknowledgment |
@@ -1595,7 +1603,7 @@ ZerobusProtoStream stream = sdk.streamBuilder()
 for (AirQuality record : records) {
     stream.ingestRecordOffset(record);
 }
-stream.flush(); // drain remaining acks before close
+stream.flush(); // wait for durability; callbacks may still be running until close()
 ```
 
 Implementations must be thread-safe and lightweight (callbacks run on internal
@@ -1616,7 +1624,8 @@ processing threads).
     - `ingestRecordOffset()` + final `flush()` / `waitForOffset(lastOffset)` → High throughput (recommended)
     - `ingestRecordOffset()` + `waitForOffset()` per record → When a specific record must be confirmed before continuing
     - `ingestRecord().join()` → Deprecated; prefer the offset-based API
-11. **Recovery pattern**: Use `sdk.recreateStream(closedStream)` to automatically re-ingest unacknowledged records, or manually use `getUnackedBatches()` after stream close
+11. **Thread safety**: `ZerobusSdk` and streams are not thread-safe. Synchronize externally if more than one thread uses the same instance.
+12. **Recovery**: `recreateStream()` currently requires a closed stream, and a failed `close()` can drop unacked payloads before they are cached. Do not rely on it for production recovery until that is fixed. Prefer inspecting `getUnackedBatches()` only after a successful close.
 
 ## Community and Contributing
 
