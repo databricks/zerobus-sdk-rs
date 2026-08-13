@@ -6,13 +6,14 @@
 //
 // # Installation
 //
-// This package is a CGO wrapper around a Rust core. Tagged releases include
-// pre-built libraries, so consumers can install with:
+// This package is a CGO wrapper around a Rust core. Tagged releases and
+// checkouts that include lib/ archives do not need Rust. Consumers can install
+// with:
 //
 //	go get github.com/databricks/zerobus-sdk/go@v1.4.0
 //
 // Prerequisites for consumers: Go 1.21+, CGO enabled, a C compiler.
-// Rust and `go generate` are required only when building from source.
+// Rust and `go generate` are required only when rebuilding the FFI.
 //
 // # Quick Start
 //
@@ -98,7 +99,7 @@
 //
 // Errors are categorized as retryable or non-retryable:
 //
-//	ack, err := stream.IngestRecord(data)
+//	_, err := stream.IngestRecordOffset(data)
 //	if err != nil {
 //	    if zbErr, ok := err.(*zerobus.ZerobusError); ok {
 //	        if zbErr.Retryable() {

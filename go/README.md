@@ -93,7 +93,7 @@ Before using the SDK, you need a Databricks workspace URL, a Delta table, and a 
 go get github.com/databricks/zerobus-sdk/go@latest
 ```
 
-> Tagged releases (for example `v1.4.0`) include pre-built Rust libraries for Linux, macOS, and Windows. Consumers do not need Rust or `go generate`. Rust is required only when you build from `@main`, a commit hash, or a local checkout.
+> Tagged releases and checkouts that include `go/lib/` archives (including `@main` and commit hashes) do not need Rust or `go generate`. Rebuild the FFI only when you change `rust/ffi` or the archive for your platform is missing.
 
 **In your code:**
 
@@ -127,8 +127,9 @@ func main() {
 # Clone the repository
 git clone https://github.com/databricks/zerobus-sdk.git
 cd zerobus-sdk/go
-go generate  # Builds Rust FFI
-make build   # Builds everything
+# Archives under lib/ are committed. Rebuild the FFI only if you change rust/ffi:
+# go generate
+make build
 ```
 
 See [Building from Source](#building-from-source) for more build options and [Community and Contributing](#community-and-contributing) for contribution guidelines.
@@ -963,7 +964,7 @@ The test suite includes:
 9. **Use Protocol Buffers for Production** - More efficient than JSON for high-volume scenarios
 10. **Secure Credentials** - Never hardcode secrets; use environment variables or secret managers
 11. **Test Recovery** - Simulate failures to verify your error handling logic
-12. **Concurrent ingestion** - One stream can be used from multiple goroutines. Create separate streams when you want independent tables, credentials, or failure isolation.
+12. **Concurrent ingestion** - One stream can be used from multiple goroutines for ingest. Wait for those workers to finish before `Close()`, `Flush()`, or recreating the stream; concurrent Close/ingest can race native-handle destruction. Create separate streams when you want independent tables, credentials, or failure isolation.
 
 ## Migration Guide
 

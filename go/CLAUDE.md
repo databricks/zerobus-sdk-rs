@@ -49,7 +49,7 @@ Run from `go/`:
 
 - `make build` — Build Rust FFI lib + Go SDK
 - `make build-rust` — Build only Rust FFI layer
-- `make build-go` — Build only Go SDK (requires pre-built FFI lib)
+- `make build-go` — Build Rust FFI (via `build-rust`) then the Go SDK
 - `make test` — Run tests
 - `make lint` — go vet + cargo clippy
 - `make fmt` — gofmt + cargo fmt
