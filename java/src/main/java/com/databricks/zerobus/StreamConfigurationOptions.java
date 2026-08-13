@@ -290,7 +290,6 @@ public class StreamConfigurationOptions {
      *
      * @param recoveryBackoffMs the recovery backoff delay in milliseconds
      * @return this builder for method chaining
-     * @throws IllegalArgumentException if recoveryBackoffMs is less than 0
      */
     public StreamConfigurationOptionsBuilder setRecoveryBackoffMs(int recoveryBackoffMs) {
       this.recoveryBackoffMs = recoveryBackoffMs;

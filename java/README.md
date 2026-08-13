@@ -364,11 +364,6 @@ Running the generation tool will create `src/main/proto/record.proto`:
 ```protobuf
 syntax = "proto2";
 
-package com.example;
-
-option java_package = "com.example.proto";
-option java_outer_classname = "Record";
-
 message AirQuality {
     optional string device_name = 1;
     optional int32 temp = 2;
@@ -376,7 +371,9 @@ message AirQuality {
 }
 ```
 
-After generating the proto file, compile it as shown above:
+The tool writes a proto2 message only. It does not emit `package`, `java_package`,
+or `java_outer_classname`. Add those yourself if you need a Java package, then
+compile as shown above:
 ```bash
 protoc --java_out=src/main/java src/main/proto/record.proto
 ```
