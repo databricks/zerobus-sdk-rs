@@ -94,7 +94,8 @@ stream.close();
 - **All-or-nothing per `RecordBatch`** — a batch is acknowledged as a unit.
 - **Single acknowledgment** — one offset ID for the whole `RecordBatch`.
 - **Schema validation** — the `RecordBatch` schema must match the schema
-  configured on the stream. The server validates on the first batch and fails
+  configured on the stream. The server validates that schema when the stream is
+  created, from the schema IPC bytes passed to `create_arrow_stream`, and fails
   fast with a descriptive error on a mismatch.
 
 ## IPC Compression
