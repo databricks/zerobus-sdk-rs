@@ -141,8 +141,14 @@ int main() {
     } catch (const zerobus::ZerobusException& e) {
       std::cerr << "Stream failed: " << e.what() << "\n";
 
-      std::vector<zerobus::UnackedRecord> unacked =
-          stream.get_unacked_records();
+      std::vector<zerobus::UnackedRecord> unacked;
+      try {
+        unacked = stream.get_unacked_records();
+      } catch (const zerobus::ZerobusException& retrieval) {
+        std::cerr << "Could not inspect unacked records (stream may still be active): "
+                  << retrieval.what() << "\n";
+        return 1;
+      }
       std::cout << "Recovering " << unacked.size()
                 << " unacknowledged records on a fresh stream.\n";
 

@@ -38,6 +38,9 @@
 
 - Corrected README and rustdoc examples so their dependencies, feature flags,
   imports, and mutable stream bindings compile as shown.
+- Batch examples and primary rustdoc now queue all records and wait once with
+  `flush()` or the last offset, and no longer refer to removed `ingest_record()`
+  / `ingest_records()` methods.
 
 ### Internal Changes
 

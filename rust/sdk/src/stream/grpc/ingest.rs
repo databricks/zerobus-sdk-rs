@@ -16,9 +16,8 @@ use crate::{EncodedBatch, EncodedRecord, OffsetId, ZerobusError, ZerobusResult};
 impl ZerobusStream {
     /// Ingests a single record and returns its logical offset directly.
     ///
-    /// This is an alternative to `ingest_record()` that returns the logical offset directly
-    /// as an integer (after queuing) instead of wrapping it in a Future. Use `wait_for_offset()`
-    /// to explicitly wait for server acknowledgment of this offset when needed.
+    /// Returns the logical offset after the record is queued. Use `wait_for_offset()`
+    /// or `flush()` to wait for server acknowledgment.
     ///
     /// # Arguments
     ///
@@ -65,9 +64,8 @@ impl ZerobusStream {
 
     /// Ingests a batch of records and returns the logical offset directly.
     ///
-    /// This is an alternative to `ingest_records()` that returns the logical offset directly
-    /// (after queuing) instead of wrapping it in a Future. Use `wait_for_offset()` to explicitly
-    /// wait for server acknowledgment when needed.
+    /// Returns the logical offset after the batch is queued. Use `wait_for_offset()`
+    /// or `flush()` to wait for server acknowledgment.
     ///
     /// # Arguments
     ///

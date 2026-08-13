@@ -98,7 +98,7 @@ When making FFI-related changes:
 
 1. Update Rust code in `../rust/ffi/src/`
 2. Update exported C API in `../rust/ffi/zerobus.h` if needed
-3. Update .NET interop bindings in `src/Zerobus/Interop/`
+3. Update .NET interop bindings in `src/Zerobus/Native/`
 4. Rebuild native artifacts:
 	```bash
 	./build_native.sh

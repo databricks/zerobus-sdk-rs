@@ -98,12 +98,7 @@ async fn ingest_with_offset_api(stream: &mut ZerobusStream) -> Result<(), Box<dy
 
     if let Some(offset_id) = stream.ingest_records_offset(batch).await? {
         println!(
-            "[Auto-serializing] Batch of 3 records sent with offset ID: {}",
-            offset_id
-        );
-        stream.wait_for_offset(offset_id).await?;
-        println!(
-            "[Auto-serializing] Batch acknowledged with offset ID: {}",
+            "[Auto-serializing] Batch of 3 records queued with offset ID: {}",
             offset_id
         );
     }
@@ -153,12 +148,7 @@ async fn ingest_with_offset_api(stream: &mut ZerobusStream) -> Result<(), Box<dy
 
     if let Some(offset_id) = stream.ingest_records_offset(batch).await? {
         println!(
-            "[Pre-serialized] Batch of 3 records sent with offset ID: {}",
-            offset_id
-        );
-        stream.wait_for_offset(offset_id).await?;
-        println!(
-            "[Pre-serialized] Batch acknowledged with offset ID: {}",
+            "[Pre-serialized] Batch of 3 records queued with offset ID: {}",
             offset_id
         );
     }
@@ -208,15 +198,12 @@ async fn ingest_with_offset_api(stream: &mut ZerobusStream) -> Result<(), Box<dy
 
     if let Some(offset_id) = stream.ingest_records_offset(batch).await? {
         println!(
-            "[Backward-compatible] Batch of 3 records sent with offset ID: {}",
-            offset_id
-        );
-        stream.wait_for_offset(offset_id).await?;
-        println!(
-            "[Backward-compatible] Batch acknowledged with offset ID: {}",
+            "[Backward-compatible] Batch of 3 records queued with offset ID: {}",
             offset_id
         );
     }
 
+    stream.flush().await?;
+    println!("All offset-API batches acknowledged");
     Ok(())
 }

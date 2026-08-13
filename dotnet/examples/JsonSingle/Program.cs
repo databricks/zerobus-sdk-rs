@@ -32,6 +32,7 @@ using var stream = sdk.CreateJsonStream(
     options);
 
 Console.WriteLine("Ingesting records...");
+int failed = 0;
 
 for (int i = 0; i < 5; i++)
 {
@@ -47,20 +48,33 @@ for (int i = 0; i < 5; i++)
     try
     {
         long offset = stream.IngestRecord(jsonRecord);
-        Console.WriteLine($"Ingested record {i} at offset {offset}");
+        Console.WriteLine($"Queued record {i} at offset {offset}");
     }
     catch (ZerobusException ex) when (ex.IsRetryable)
     {
+        failed++;
         Console.WriteLine($"Failed to ingest record {i} (retryable): {ex.RawMessage}");
     }
     catch (ZerobusException ex)
     {
+        failed++;
         Console.WriteLine($"Failed to ingest record {i}: {ex.RawMessage}");
     }
 }
 
-// Confirm every successfully queued record with one durability barrier.
+if (failed == 5)
+{
+    throw new InvalidOperationException("No records were queued");
+}
+
 Console.WriteLine("Waiting for acknowledgments...");
 stream.Flush();
 
-Console.WriteLine("All records successfully ingested and acknowledged!");
+if (failed > 0)
+{
+    Console.WriteLine($"{5 - failed} records flushed; {failed} ingest calls failed.");
+}
+else
+{
+    Console.WriteLine("All records successfully ingested and acknowledged!");
+}

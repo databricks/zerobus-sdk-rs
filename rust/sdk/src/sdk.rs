@@ -42,11 +42,9 @@ pub const DEFAULT_SDK_IDENTIFIER: &str = concat!("zerobus-sdk-rs/", env!("CARGO_
 ///     .build()
 ///     .await?;
 ///
-/// // Ingest a single record
+/// // Queue records, then confirm durability once
 /// let offset_id = stream.ingest_record_offset(ProtoMessage(row)).await?;
-///
-/// // Wait for acknowledgment
-/// stream.wait_for_offset(offset_id).await?;
+/// stream.flush().await?;
 /// ```
 #[non_exhaustive]
 pub struct ZerobusSdk {

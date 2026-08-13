@@ -69,10 +69,12 @@ public sealed class ZerobusStream : IDisposable, IAsyncDisposable
     /// <code>
     /// // JSON stream
     /// long jsonOffset = jsonStream.IngestRecord("{\"id\": 1, \"message\": \"Hello\"}");
+    /// jsonStream.Flush();
     ///
     /// // Protobuf stream
     /// byte[] protoBytes = SerializeMyProto(myMessage);
     /// long protoOffset = protoStream.IngestRecord(protoBytes);
+    /// protoStream.Flush();
     /// </code>
     /// </example>
     public long IngestRecord(string payload)
@@ -127,6 +129,7 @@ public sealed class ZerobusStream : IDisposable, IAsyncDisposable
     ///     "{\"device\": \"sensor-002\", \"temp\": 21}",
     /// ];
     /// long batchOffset = stream.IngestRecords(records);
+    /// stream.Flush();
     /// </code>
     /// </example>
     public long IngestRecords(string[] records)
@@ -239,10 +242,17 @@ public sealed class ZerobusStream : IDisposable, IAsyncDisposable
     /// }
     /// catch (ZerobusException)
     /// {
-    ///     var unacked = stream.GetUnackedRecords();
-    ///     Console.WriteLine($"Failed to acknowledge {unacked.Length} records");
-    ///     foreach (var payload in unacked)
-    ///         Console.WriteLine($"{payload.Length} bytes");
+    ///     // A flush timeout can leave the stream active. GetUnackedRecords
+    ///     // requires a closed or failed stream.
+    ///     try
+    ///     {
+    ///         var unacked = stream.GetUnackedRecords();
+    ///         Console.WriteLine($"Failed to acknowledge {unacked.Length} records");
+    ///     }
+    ///     catch (ZerobusException retrieval)
+    ///     {
+    ///         Console.WriteLine($"Could not inspect unacked records: {retrieval.Message}");
+    ///     }
     /// }
     /// </code>
     /// </example>

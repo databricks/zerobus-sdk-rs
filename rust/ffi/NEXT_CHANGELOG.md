@@ -12,6 +12,8 @@
 
 - Clarified that acknowledgment callbacks fire once per logical ingest
   submission, so one batch ingest call produces one callback.
+- Documented flush, close/free, SDK free, and error-string cleanup in the
+  copyable C lifecycle example.
 
 ### Internal Changes
 
