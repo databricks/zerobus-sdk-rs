@@ -204,7 +204,12 @@ cd zerobus-sdk/java
 mvn clean package -Dzerobus.skipNativeLibCheck=true
 ```
 
-This generates two JAR files in the `target/` directory:
+`-Dzerobus.skipNativeLibCheck=true` compiles the Java sources without staging JNI
+libraries. The JARs in `target/` do not include native libraries and cannot ingest
+until you either install a published artifact from Maven Central, or stage the JNI
+libraries under `src/main/resources/native/` and run Maven without that flag.
+
+A release build (natives staged, no skip flag) generates two JAR files in `target/`:
 
 - **Regular JAR**: `zerobus-ingest-sdk-1.3.0.jar` (~12MB, includes native libraries)
   - Contains only the SDK classes
@@ -213,10 +218,6 @@ This generates two JAR files in the `target/` directory:
 - **Fat JAR**: `zerobus-ingest-sdk-1.3.0-jar-with-dependencies.jar` (~19MB, includes native libraries + all dependencies)
   - Contains SDK classes plus all dependencies bundled
   - Self-contained, easier to deploy
-
-The skip flag is for local Java-only builds. Release builds must stage the JNI
-libraries under `src/main/resources/native/` and run Maven without that flag so
-the packaged JAR includes native libraries.
 
 **Which JAR to use?**
 - **Regular JAR**: When using Maven/Gradle (recommended)
@@ -1401,7 +1402,7 @@ Builder for creating `StreamConfigurationOptions`.
 ```java
 StreamConfigurationOptionsBuilder setMaxInflightRecords(int maxInflightRecords)
 ```
-Sets the maximum number of unacknowledged records (default: 50000).
+Sets the maximum number of unacknowledged records (default: 1000000).
 
 ```java
 StreamConfigurationOptionsBuilder setRecovery(boolean recovery)
@@ -1421,7 +1422,7 @@ Sets the delay between recovery attempts in milliseconds (default: 2000).
 ```java
 StreamConfigurationOptionsBuilder setRecoveryRetries(int recoveryRetries)
 ```
-Sets the maximum number of recovery attempts (default: 3).
+Sets the maximum number of recovery attempts (default: 4).
 
 ```java
 StreamConfigurationOptionsBuilder setFlushTimeoutMs(int flushTimeoutMs)

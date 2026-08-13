@@ -141,9 +141,15 @@ export DATABRICKS_CLIENT_SECRET="your-client-secret"
 
 ### 4. Build the SDK
 
+The example `java` commands below load JNI libraries from the packaged SDK.
+`-Dzerobus.skipNativeLibCheck=true` compiles Java sources only and those commands
+will fail at native load. Either install the published artifact from Maven Central,
+or stage JNI libraries under `src/main/resources/native/` and package without the
+skip flag:
+
 ```bash
 cd ..  # Go to SDK root
-mvn package -DskipTests -Dzerobus.skipNativeLibCheck=true
+mvn package -DskipTests
 ```
 
 ## Running Examples
