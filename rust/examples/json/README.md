@@ -133,47 +133,28 @@ Stream closed successfully
 ```rust
 use databricks_zerobus_ingest_sdk::{JsonValue, JsonString};
 
-// 1. Auto-serializing: Vec of wrapped structs
-let batch: Vec<JsonValue<Order>> = vec![
+let batch1: Vec<JsonValue<Order>> = vec![
     JsonValue(Order { id: 1, /* ... */ }),
     JsonValue(Order { id: 2, /* ... */ }),
     JsonValue(Order { id: 3, /* ... */ }),
 ];
-if let Some(offset) = stream.ingest_records_offset(batch).await? {
-    stream.wait_for_offset(offset).await?;
-}
+stream.ingest_records_offset(batch1).await?;
 
-// 2. Pre-serialized: Vec of wrapped strings
-let batch: Vec<JsonString> = vec![
-    JsonString(r#"{
-        "id": 4
-    }"#.to_string()),
-    JsonString(r#"{
-        "id": 5
-    }"#.to_string()),
-    JsonString(r#"{
-        "id": 6
-    }"#.to_string()),
+let batch2: Vec<JsonString> = vec![
+    JsonString(r#"{ "id": 4 }"#.to_string()),
+    JsonString(r#"{ "id": 5 }"#.to_string()),
+    JsonString(r#"{ "id": 6 }"#.to_string()),
 ];
-if let Some(offset) = stream.ingest_records_offset(batch).await? {
-    stream.wait_for_offset(offset).await?;
-}
+stream.ingest_records_offset(batch2).await?;
 
-// 3. Backward-compatible: Vec of raw strings
-let batch: Vec<String> = vec![
-    r#"{
-        "id": 7
-    }"#.to_string(),
-    r#"{
-        "id": 8
-    }"#.to_string(),
-    r#"{
-        "id": 9
-    }"#.to_string(),
+let batch3: Vec<String> = vec![
+    r#"{ "id": 7 }"#.to_string(),
+    r#"{ "id": 8 }"#.to_string(),
+    r#"{ "id": 9 }"#.to_string(),
 ];
-if let Some(offset) = stream.ingest_records_offset(batch).await? {
-    stream.wait_for_offset(offset).await?;
-}
+stream.ingest_records_offset(batch3).await?;
+
+stream.flush().await?;
 ```
 
 **Batch semantics:**

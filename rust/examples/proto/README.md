@@ -158,35 +158,28 @@ Stream closed successfully
 use databricks_zerobus_ingest_sdk::{ProtoMessage, ProtoBytes};
 use prost::Message;
 
-// 1. Auto-encoding: Vec of wrapped messages
-let batch: Vec<ProtoMessage<TableOrders>> = vec![
+let batch1: Vec<ProtoMessage<TableOrders>> = vec![
     ProtoMessage(TableOrders { id: Some(1), /* ... */ }),
     ProtoMessage(TableOrders { id: Some(2), /* ... */ }),
     ProtoMessage(TableOrders { id: Some(3), /* ... */ }),
 ];
-if let Some(offset) = stream.ingest_records_offset(batch).await? {
-    stream.wait_for_offset(offset).await?;
-}
+stream.ingest_records_offset(batch1).await?;
 
-// 2. Pre-encoded: Vec of wrapped bytes
-let batch: Vec<ProtoBytes> = vec![
+let batch2: Vec<ProtoBytes> = vec![
     ProtoBytes(TableOrders { id: Some(4), /* ... */ }.encode_to_vec()),
     ProtoBytes(TableOrders { id: Some(5), /* ... */ }.encode_to_vec()),
     ProtoBytes(TableOrders { id: Some(6), /* ... */ }.encode_to_vec()),
 ];
-if let Some(offset) = stream.ingest_records_offset(batch).await? {
-    stream.wait_for_offset(offset).await?;
-}
+stream.ingest_records_offset(batch2).await?;
 
-// 3. Backward-compatible: Vec of raw bytes
-let batch: Vec<Vec<u8>> = vec![
+let batch3: Vec<Vec<u8>> = vec![
     TableOrders { id: Some(7), /* ... */ }.encode_to_vec(),
     TableOrders { id: Some(8), /* ... */ }.encode_to_vec(),
     TableOrders { id: Some(9), /* ... */ }.encode_to_vec(),
 ];
-if let Some(offset) = stream.ingest_records_offset(batch).await? {
-    stream.wait_for_offset(offset).await?;
-}
+stream.ingest_records_offset(batch3).await?;
+
+stream.flush().await?;
 ```
 
 **Batch semantics:**
