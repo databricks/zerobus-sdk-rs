@@ -631,7 +631,8 @@ bool zerobus_stream_ingest_json_record_async(struct CZerobusStream *stream,
 
 /**
  * Ingest a batch of protobuf records
- * Returns the offset of the last record in the batch, or -1 on error
+ * Returns the logical offset of the batch submission, or -1 on error.
+ * The core assigns one offset to the entire batch, not one per record.
  * Returns -2 if batch is empty
  */
 int64_t zerobus_stream_ingest_proto_records(struct CZerobusStream *stream,
@@ -641,7 +642,8 @@ int64_t zerobus_stream_ingest_proto_records(struct CZerobusStream *stream,
                                             struct CResult *result);
 
 /**
- * Ingest a batch of protobuf records on a background task and report the last offset via callback.
+ * Ingest a batch of protobuf records on a background task and report the batch
+ * submission offset via callback.
  */
 bool zerobus_stream_ingest_proto_records_async(struct CZerobusStream *stream,
                                                const uint8_t *const *records,
@@ -653,7 +655,8 @@ bool zerobus_stream_ingest_proto_records_async(struct CZerobusStream *stream,
 
 /**
  * Ingest a batch of JSON records
- * Returns the offset of the last record in the batch, or -1 on error
+ * Returns the logical offset of the batch submission, or -1 on error.
+ * The core assigns one offset to the entire batch, not one per record.
  * Returns -2 if batch is empty
  */
 int64_t zerobus_stream_ingest_json_records(struct CZerobusStream *stream,
@@ -662,7 +665,8 @@ int64_t zerobus_stream_ingest_json_records(struct CZerobusStream *stream,
                                            struct CResult *result);
 
 /**
- * Ingest a batch of JSON records on a background task and report the last offset via callback.
+ * Ingest a batch of JSON records on a background task and report the batch
+ * submission offset via callback.
  */
 bool zerobus_stream_ingest_json_records_async(struct CZerobusStream *stream,
                                               const char *const *json_records,
