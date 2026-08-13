@@ -888,14 +888,7 @@ impl AckProcessor {
             let event = if response_deferred_send_failure && self.request_send_failure.is_pending()
             {
                 response_deferred_send_failure = false;
-                // The one-tie already consumed a ready item. Prefer a buffered
-                // terminal status or EOF over local send failure, but do not poll
-                // another non-progress Ok.
-                match response_stream.next().now_or_never() {
-                    Some(Some(Err(error))) => AckEvent::Response(Some(Err(error))),
-                    Some(None) => AckEvent::Response(None),
-                    _ => AckEvent::RequestSendFailed,
-                }
+                AckEvent::RequestSendFailed
             } else if let Some(response) = priority_response {
                 AckEvent::Response(response)
             } else {
@@ -944,8 +937,7 @@ impl AckProcessor {
             };
 
             // A ready response wins one tie so its ACK or terminal status is observed.
-            // A no-progress winner cannot postpone send failure past one buffered
-            // terminal status or EOF.
+            // The next loop forces send failure without polling another response.
             if matches!(event, AckEvent::Response(_)) && self.request_send_failure.is_pending() {
                 response_deferred_send_failure = true;
             }
@@ -1437,10 +1429,9 @@ mod tests {
         }
     }
 
-    /// A terminal peer status buffered behind one no-progress ACK must not be
-    /// rewritten as the local send-failure error.
+    /// After the one response-first tie, a later terminal status is not polled.
     #[tokio::test]
-    async fn terminal_status_behind_no_progress_ack_wins_reported_send_failure() {
+    async fn later_terminal_status_does_not_replace_reported_send_failure() {
         let no_progress = PutResult {
             app_metadata: serde_json::to_vec(&FlightAckMetadata {
                 ack_up_to_offset: -1,
@@ -1465,13 +1456,12 @@ mod tests {
         let error = processor
             .process(Box::pin(response_stream), request_body)
             .await
-            .expect_err("the buffered server rejection must be returned");
+            .expect_err("the reported request-send failure must trigger recovery");
 
-        assert!(!error.is_retryable());
+        assert!(error.is_retryable());
         match error {
             ZerobusError::StreamClosedError(status) => {
-                assert_eq!(status.code(), tonic::Code::PermissionDenied);
-                assert_eq!(status.message(), "permanent server rejection");
+                assert_eq!(status.code(), tonic::Code::Unavailable);
             }
             other => panic!("expected a stream-closed error, got {other:?}"),
         }
