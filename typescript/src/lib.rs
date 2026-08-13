@@ -50,7 +50,7 @@ pub enum RecordType {
 #[napi(object)]
 pub struct StreamConfigurationOptions {
     /// Maximum number of unacknowledged requests that can be in flight.
-    /// Default: 10,000
+    /// Default: 1,000,000
     pub max_inflight_requests: Option<u32>,
 
     /// Enable automatic stream recovery on transient failures.

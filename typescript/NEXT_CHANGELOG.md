@@ -36,6 +36,7 @@
 - Documented that omitted `descriptorProto` does not select JSON, that the
   inherited inflight default is 1,000,000, and that `close()` is still required
   to flush. README `main().catch` handlers now set a non-zero exit code.
+- Binding rustdoc for `maxInflightRequests` now matches that 1,000,000 default.
 
 - Clarified the high-throughput ingestion pattern across the README, API reference, JSDoc
   doc comments (`ingestRecordOffset`, `ingestRecordsOffset`, `waitForOffset`, `flush`), and
