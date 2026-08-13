@@ -133,6 +133,10 @@ impl RequestSendFailure {
         self.pending.swap(false, Ordering::AcqRel)
     }
 
+    fn is_pending(&self) -> bool {
+        self.pending.load(Ordering::Acquire)
+    }
+
     fn clear(&self) {
         self.pending.store(false, Ordering::Release);
     }
@@ -788,6 +792,7 @@ impl AckProcessor {
         let mut connection = ConnectionState::Active;
         let mut expiry_tie_winner: Option<PendingBatchIdentity> = None;
         let mut close_after_priority_response = None;
+        let mut response_deferred_send_failure = false;
         let request_control = self.request_control(request_body);
         let acknowledgments = self.ack_progress();
 
@@ -880,9 +885,21 @@ impl AckProcessor {
                 ConnectionState::Waiting(WaitState::Close(request)) => Some(*request),
                 _ => None,
             };
-            let event = if let Some(response) = priority_response {
+            let event = if response_deferred_send_failure && self.request_send_failure.is_pending()
+            {
+                response_deferred_send_failure = false;
+                // The one-tie already consumed a ready item. Prefer a buffered
+                // terminal status or EOF over local send failure, but do not poll
+                // another non-progress Ok.
+                match response_stream.next().now_or_never() {
+                    Some(Some(Err(error))) => AckEvent::Response(Some(Err(error))),
+                    Some(None) => AckEvent::Response(None),
+                    _ => AckEvent::RequestSendFailed,
+                }
+            } else if let Some(response) = priority_response {
                 AckEvent::Response(response)
             } else {
+                response_deferred_send_failure = false;
                 match &connection {
                     ConnectionState::Active => match self.oldest_ack_deadline(ack_timeout).await? {
                         Some(pending_deadline) => {
@@ -925,6 +942,13 @@ impl AckProcessor {
                     ConnectionState::Draining(_) => unreachable!(),
                 }
             };
+
+            // A ready response wins one tie so its ACK or terminal status is observed.
+            // A no-progress winner cannot postpone send failure past one buffered
+            // terminal status or EOF.
+            if matches!(event, AckEvent::Response(_)) && self.request_send_failure.is_pending() {
+                response_deferred_send_failure = true;
+            }
 
             match event {
                 AckEvent::PendingBatchAvailable => continue,
@@ -1410,6 +1434,89 @@ mod tests {
                 assert_eq!(status.message(), "permanent server rejection");
             }
             other => panic!("expected a stream-closed error, got {other:?}"),
+        }
+    }
+
+    /// A terminal peer status buffered behind one no-progress ACK must not be
+    /// rewritten as the local send-failure error.
+    #[tokio::test]
+    async fn terminal_status_behind_no_progress_ack_wins_reported_send_failure() {
+        let no_progress = PutResult {
+            app_metadata: serde_json::to_vec(&FlightAckMetadata {
+                ack_up_to_offset: -1,
+                ack_up_to_records: 0,
+                close_stream_duration_ms: None,
+            })
+            .unwrap()
+            .into(),
+        };
+        let response_stream = iter([
+            Ok(no_progress),
+            Err(tonic::Status::permission_denied("permanent server rejection").into()),
+        ]);
+        let (processor, request_body, _last_ack_rx) = ack_processor(
+            Arc::new(Mutex::new(Vec::new())),
+            Arc::new(AtomicU64::new(0)),
+            Arc::new(AtomicU64::new(0)),
+            false,
+        );
+        processor.request_send_failure.report();
+
+        let error = processor
+            .process(Box::pin(response_stream), request_body)
+            .await
+            .expect_err("the buffered server rejection must be returned");
+
+        assert!(!error.is_retryable());
+        match error {
+            ZerobusError::StreamClosedError(status) => {
+                assert_eq!(status.code(), tonic::Code::PermissionDenied);
+                assert_eq!(status.message(), "permanent server rejection");
+            }
+            other => panic!("expected a stream-closed error, got {other:?}"),
+        }
+    }
+
+    /// At most one ready nonterminal response may defer a reported request-send failure.
+    #[tokio::test]
+    async fn continuously_ready_nonprogress_responses_do_not_starve_send_failure() {
+        let valid_no_progress = PutResult {
+            app_metadata: serde_json::to_vec(&FlightAckMetadata {
+                ack_up_to_offset: -1,
+                ack_up_to_records: 0,
+                close_stream_duration_ms: None,
+            })
+            .unwrap()
+            .into(),
+        };
+        let malformed = PutResult {
+            app_metadata: b"not ack metadata".to_vec().into(),
+        };
+
+        for response in [valid_no_progress, malformed] {
+            let response_stream = repeat_with(move || Ok(response.clone()));
+            let (processor, request_body, _last_ack_rx) = ack_processor(
+                Arc::new(Mutex::new(Vec::new())),
+                Arc::new(AtomicU64::new(0)),
+                Arc::new(AtomicU64::new(0)),
+                false,
+            );
+            processor.request_send_failure.report();
+
+            let error = tokio::time::timeout(
+                Duration::from_millis(100),
+                processor.process(Box::pin(response_stream), request_body),
+            )
+            .await
+            .expect("ready responses must not starve request-send failure")
+            .expect_err("the reported request-send failure must trigger recovery");
+
+            match error {
+                ZerobusError::StreamClosedError(status) => {
+                    assert_eq!(status.code(), tonic::Code::Unavailable);
+                }
+                other => panic!("expected a stream-closed error, got {other:?}"),
+            }
         }
     }
 
