@@ -11,9 +11,9 @@ The tool is **packaged within the Zerobus SDK JAR**, so users can run it directl
 ## Features
 
 - Fetches table schema directly from Unity Catalog
-- Supports all standard Delta data types
+- Supports scalar Delta types plus ARRAY and MAP
 - Generates proto2 format files
-- Handles complex types (arrays and maps)
+- Handles ARRAY and MAP columns (STRUCT / nested messages are not generated)
 - Uses OAuth 2.0 client credentials authentication
 - No external dependencies beyond Java standard library
 - Packaged in SDK JAR for easy distribution
@@ -51,7 +51,7 @@ If you have downloaded the SDK JAR without the source code:
 
 ```bash
 # Using the shaded JAR (includes all dependencies)
-java -cp databricks-zerobus-ingest-sdk-0.1.0-jar-with-dependencies.jar \
+java -cp zerobus-ingest-sdk-1.3.0-jar-with-dependencies.jar \
   com.databricks.zerobus.tools.GenerateProto \
   --uc-endpoint "https://your-workspace.cloud.databricks.com" \
   --client-id "your-client-id" \
@@ -65,7 +65,7 @@ Or, if the JAR has a Main-Class manifest entry (which it does):
 
 ```bash
 # Even simpler - just use -jar flag
-java -jar databricks-zerobus-ingest-sdk-0.1.0-jar-with-dependencies.jar \
+java -jar zerobus-ingest-sdk-1.3.0-jar-with-dependencies.jar \
   --uc-endpoint "https://your-workspace.cloud.databricks.com" \
   --client-id "your-client-id" \
   --client-secret "your-client-secret" \
@@ -103,6 +103,8 @@ The tool automatically maps Delta/Unity Catalog types to Protocol Buffer types:
 | `ARRAY<type>` | `repeated type` |
 | `MAP<key_type, value_type>` | `map<key_type, value_type>` |
 
+`STRUCT` columns are not generated. The tool throws `Unsupported column type` for them; map those fields by hand if needed.
+
 ## Examples
 
 ### Basic Usage
@@ -111,7 +113,7 @@ Generate a proto file for a simple table:
 
 **From the SDK JAR:**
 ```bash
-java -jar databricks-zerobus-ingest-sdk-0.1.0-jar-with-dependencies.jar \
+java -jar zerobus-ingest-sdk-1.3.0-jar-with-dependencies.jar \
   --uc-endpoint "https://myworkspace.cloud.databricks.com" \
   --client-id "abc123" \
   --client-secret "secret123" \
@@ -147,7 +149,7 @@ message users {
 Specify a custom message name:
 
 ```bash
-java -jar databricks-zerobus-ingest-sdk-0.1.0-jar-with-dependencies.jar \
+java -jar zerobus-ingest-sdk-1.3.0-jar-with-dependencies.jar \
   --uc-endpoint "https://myworkspace.cloud.databricks.com" \
   --client-id "abc123" \
   --client-secret "secret123" \
@@ -161,7 +163,7 @@ java -jar databricks-zerobus-ingest-sdk-0.1.0-jar-with-dependencies.jar \
 The tool handles complex types like arrays and maps:
 
 ```bash
-java -jar databricks-zerobus-ingest-sdk-0.1.0-jar-with-dependencies.jar \
+java -jar zerobus-ingest-sdk-1.3.0-jar-with-dependencies.jar \
   --uc-endpoint "https://myworkspace.cloud.databricks.com" \
   --client-id "abc123" \
   --client-secret "secret123" \
@@ -236,14 +238,14 @@ If you encounter unsupported type errors:
 
 ## Distribution
 
-The tool is distributed as part of the Zerobus SDK JAR. When you download or build the SDK, the `GenerateProto` tool is automatically included in the shaded JAR file (`databricks-zerobus-ingest-sdk-*-jar-with-dependencies.jar`).
+The tool is distributed as part of the Zerobus SDK JAR. When you download or build the SDK, the `GenerateProto` tool is automatically included in the shaded JAR file (`zerobus-ingest-sdk-*-jar-with-dependencies.jar`).
 
 Users can run the tool directly from the JAR without needing access to the source code:
 
 ```bash
 # Download the SDK JAR (or build it with mvn package -Dzerobus.skipNativeLibCheck=true)
 # Then simply run:
-java -jar databricks-zerobus-ingest-sdk-0.1.0-jar-with-dependencies.jar \
+java -jar zerobus-ingest-sdk-1.3.0-jar-with-dependencies.jar \
   --uc-endpoint "..." \
   --client-id "..." \
   --client-secret "..." \

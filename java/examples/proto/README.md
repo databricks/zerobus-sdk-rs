@@ -15,7 +15,10 @@ This directory contains examples for ingesting data using `ZerobusProtoStream`.
 ```bash
 cd examples
 
-# Compile (AirQualityProto.java is pre-generated)
+# Generate AirQualityProto.java from the proto schema (not checked in)
+protoc --java_out=proto proto/air_quality.proto
+
+# Compile
 javac -d . -cp "../target/classes:$(cd .. && mvn dependency:build-classpath -q -DincludeScope=runtime -Dmdep.outputFile=/dev/stdout)" \
   proto/com/databricks/zerobus/examples/proto/AirQualityProto.java \
   proto/SingleRecordExample.java \
@@ -42,12 +45,14 @@ java -cp ".:../target/classes:$(cd .. && mvn dependency:build-classpath -q -Dinc
 ### Creating a Proto Stream
 
 ```java
-ZerobusProtoStream stream = sdk.streamBuilder()
-    .table(tableName)
-    .oauth(clientId, clientSecret)
-    .compiledProto(AirQuality.getDescriptor().toProto())
-    .build()
-    .join();
+try (ZerobusProtoStream stream = sdk.streamBuilder()
+        .table(tableName)
+        .oauth(clientId, clientSecret)
+        .compiledProto(AirQuality.getDescriptor().toProto())
+        .build()
+        .join()) {
+    // ingest...
+}
 ```
 
 ### Single Record Ingestion

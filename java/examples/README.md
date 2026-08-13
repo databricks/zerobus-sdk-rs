@@ -19,7 +19,7 @@ examples/
 ├── README.md              (this file)
 ├── proto/                 (Protocol Buffer examples - ZerobusProtoStream)
 │   ├── README.md
-│   ├── AirQualityProto.java  (generated proto)
+│   ├── air_quality.proto     (compile with protoc --java_out=proto)
 │   ├── SingleRecordExample.java
 │   └── BatchIngestionExample.java
 ├── json/                  (JSON examples - ZerobusJsonStream)
@@ -51,35 +51,33 @@ Each example demonstrates: single ingestion + wait, batch ingestion + wait for l
 ### ZerobusProtoStream (Recommended for Protocol Buffers)
 
 ```java
-ZerobusProtoStream stream = sdk.streamBuilder()
-    .table(tableName)
-    .oauth(clientId, clientSecret)
-    .compiledProto(MyProto.getDescriptor().toProto())
-    .build()
-    .join();
-
-// Method-level generics - flexible typing
-stream.ingestRecordOffset(myProtoMessage);        // Message
-stream.ingestRecordOffset(preEncodedBytes);       // byte[]
-stream.ingestRecordsOffset(listOfMessages);       // batch
-stream.ingestRecordsOffset(listOfByteArrays);     // batch
+try (ZerobusProtoStream stream = sdk.streamBuilder()
+        .table(tableName)
+        .oauth(clientId, clientSecret)
+        .compiledProto(MyProto.getDescriptor().toProto())
+        .build()
+        .join()) {
+    stream.ingestRecordOffset(myProtoMessage);        // Message
+    stream.ingestRecordOffset(preEncodedBytes);       // byte[]
+    stream.ingestRecordsOffset(listOfMessages);       // batch
+    stream.ingestRecordsOffset(listOfByteArrays);     // batch
+}
 ```
 
 ### ZerobusJsonStream (Recommended for JSON)
 
 ```java
-ZerobusJsonStream stream = sdk.streamBuilder()
-    .table(tableName)
-    .oauth(clientId, clientSecret)
-    .json()
-    .build()
-    .join();
-
-// Method-level generics - flexible typing
-stream.ingestRecordOffset(object, gson::toJson);  // Object + serializer
-stream.ingestRecordOffset(jsonString);            // String
-stream.ingestRecordsOffset(objects, gson::toJson);// batch
-stream.ingestRecordsOffset(jsonStrings);          // batch
+try (ZerobusJsonStream stream = sdk.streamBuilder()
+        .table(tableName)
+        .oauth(clientId, clientSecret)
+        .json()
+        .build()
+        .join()) {
+    stream.ingestRecordOffset(object, gson::toJson);  // Object + serializer
+    stream.ingestRecordOffset(jsonString);            // String
+    stream.ingestRecordsOffset(objects, gson::toJson);// batch
+    stream.ingestRecordsOffset(jsonStrings);          // batch
+}
 ```
 
 ### ZerobusArrowStream (Beta - Arrow Flight)
@@ -90,17 +88,16 @@ Schema schema = new Schema(Arrays.asList(
     Field.nullable("temp", new ArrowType.Int(32, true))
 ));
 
-ZerobusArrowStream stream = sdk.streamBuilder()
-    .table(tableName)
-    .oauth(clientId, clientSecret)
-    .arrow(schema)
-    .build()
-    .join();
-
-// Columnar batch ingestion
-Optional<Long> offset = stream.ingestBatch(vectorSchemaRoot);
-if (offset.isPresent()) {
-    stream.waitForOffset(offset.get());
+try (ZerobusArrowStream stream = sdk.streamBuilder()
+        .table(tableName)
+        .oauth(clientId, clientSecret)
+        .arrow(schema)
+        .build()
+        .join()) {
+    Optional<Long> offset = stream.ingestBatch(vectorSchemaRoot);
+    if (offset.isPresent()) {
+        stream.waitForOffset(offset.get());
+    }
 }
 ```
 
@@ -156,6 +153,9 @@ mvn package -DskipTests -Dzerobus.skipNativeLibCheck=true
 ```bash
 cd examples
 
+# Generate AirQualityProto.java from the proto schema (not checked in)
+protoc --java_out=proto proto/air_quality.proto
+
 # Compile examples
 javac -d . -cp "../target/classes:$(cd .. && mvn dependency:build-classpath -q -DincludeScope=runtime -Dmdep.outputFile=/dev/stdout)" \
   proto/com/databricks/zerobus/examples/proto/AirQualityProto.java \
@@ -195,7 +195,10 @@ java -cp ".:../target/classes:$(cd .. && mvn dependency:build-classpath -q -Dinc
 ```bash
 cd examples
 
-# Compile (requires proto for AirQuality)
+# Generate AirQualityProto.java if you have not already (not checked in)
+protoc --java_out=proto proto/air_quality.proto
+
+# Compile
 javac -d . -cp "../target/classes:$(cd .. && mvn dependency:build-classpath -q -DincludeScope=runtime -Dmdep.outputFile=/dev/stdout)" \
   proto/com/databricks/zerobus/examples/proto/AirQualityProto.java \
   legacy/LegacyStreamExample.java

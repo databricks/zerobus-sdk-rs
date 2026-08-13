@@ -16,7 +16,10 @@ This directory contains examples using the deprecated `ZerobusStream<T>` class.
 ```bash
 cd examples
 
-# Compile (requires AirQualityProto from proto folder)
+# Generate AirQualityProto.java from the proto schema (not checked in)
+protoc --java_out=proto proto/air_quality.proto
+
+# Compile
 javac -d . -cp "../target/classes:$(cd .. && mvn dependency:build-classpath -q -DincludeScope=runtime -Dmdep.outputFile=/dev/stdout)" \
   proto/com/databricks/zerobus/examples/proto/AirQualityProto.java \
   legacy/LegacyStreamExample.java
@@ -74,21 +77,22 @@ stream.ingestRecord(record).join();
 ### After (ZerobusProtoStream)
 
 ```java
-ZerobusProtoStream stream = sdk.streamBuilder()
-    .table(tableName)
-    .oauth(clientId, clientSecret)
-    .compiledProto(AirQuality.getDescriptor().toProto())
-    .build()
-    .join();
+try (ZerobusProtoStream stream = sdk.streamBuilder()
+        .table(tableName)
+        .oauth(clientId, clientSecret)
+        .compiledProto(AirQuality.getDescriptor().toProto())
+        .build()
+        .join()) {
+    for (AirQuality record : records) {
+        stream.ingestRecordOffset(record);
+    }
+    stream.flush();
 
-// Non-blocking, returns offset
-long offset = stream.ingestRecordOffset(record);
-
-// Wait when needed
-stream.waitForOffset(offset);
-
-// Batch support
-Optional<Long> batchOffset = stream.ingestRecordsOffset(records);
+    Optional<Long> batchOffset = stream.ingestRecordsOffset(records);
+    if (batchOffset.isPresent()) {
+        stream.waitForOffset(batchOffset.get());
+    }
+}
 ```
 
 ## Why Migrate?

@@ -89,12 +89,14 @@ Schema schema = new Schema(Arrays.asList(
     Field.nullable("humidity", new ArrowType.Int(64, true))
 ));
 
-ZerobusArrowStream stream = sdk.streamBuilder()
-    .table(tableName)
-    .oauth(clientId, clientSecret)
-    .arrow(schema)
-    .build()
-    .join();
+try (ZerobusArrowStream stream = sdk.streamBuilder()
+        .table(tableName)
+        .oauth(clientId, clientSecret)
+        .arrow(schema)
+        .build()
+        .join()) {
+    // ingest...
+}
 ```
 
 ### Ingesting Batches
@@ -118,18 +120,20 @@ Set shared and Arrow-specific options directly on the builder. Arrow-specific kn
 calling `.arrow(...)`:
 
 ```java
-ZerobusArrowStream stream = sdk.streamBuilder()
-    .table(tableName)
-    .oauth(clientId, clientSecret)
-    .flushTimeoutMs(600000)
-    .recovery(true)
-    .recoveryRetries(5)
-    .arrow(schema)
-    .maxInflightBatches(2000)
-    .ipcCompression(IPCCompressionType.ZSTD)
-    .streamPausedMaxWaitTimeMs(5000)
-    .build()
-    .join();
+try (ZerobusArrowStream stream = sdk.streamBuilder()
+        .table(tableName)
+        .oauth(clientId, clientSecret)
+        .flushTimeoutMs(600000)
+        .recovery(true)
+        .recoveryRetries(5)
+        .arrow(schema)
+        .maxInflightBatches(2000)
+        .ipcCompression(IPCCompressionType.ZSTD)
+        .streamPausedMaxWaitTimeMs(5000)
+        .build()
+        .join()) {
+    // ingest...
+}
 ```
 
 ### Recovering Unacknowledged Batches
