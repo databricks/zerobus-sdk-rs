@@ -251,7 +251,7 @@ try:
             temp=20 + (i % 15),
             humidity=50 + (i % 40)
         )
-        stream.ingest_record_nowait(record)
+        stream.ingest_record_offset(record)
     stream.flush()
 finally:
     stream.close()
@@ -277,7 +277,7 @@ async def main():
                 temp=20 + (i % 15),
                 humidity=50 + (i % 40)
             )
-            stream.ingest_record_nowait(record)
+            await stream.ingest_record_offset(record)
         await stream.flush()
     finally:
         await stream.close()
@@ -328,7 +328,7 @@ compatibility but does not select the format.
 | `server_lack_of_ack_timeout_ms`  | `int`           | `60000`            | Server acknowledgment timeout (ms)                                                                                   |
 | `stream_paused_max_wait_time_ms` | `Optional[int]` | `None`             | Max wait during graceful stream close. `None` = full server duration, `0` = immediate, `x` = min(x, server_duration) |
 | `callback_max_wait_time_ms`      | `Optional[int]` | `5000`             | Max wait for callbacks after `close()`. `None` = wait forever                                                        |
-| `ack_callback`                   | `AckCallback`   | `None`             | Callback invoked once per logical ingest submission (one record call or one batch call)                              |
+| `ack_callback`                   | `AckCallback`   | `None`             | Callback invoked once per successfully queued ingest submission that later acknowledges or fails                     |
 
 ## Error Handling
 
@@ -348,8 +348,11 @@ except ZerobusException as e:
 
 ## Handling Stream Failures
 
-The SDK automatically handles retries for transient errors. Use `get_unacked_records()` only after
-the stream has permanently closed following a failure:
+The SDK automatically handles retries for transient errors. Enqueue, flush, and close
+failures all surface as `ZerobusException`. An enqueue failure can leave the stream
+active, and both `get_unacked_records()` and `recreate_stream()` require a closed
+stream. Close first, then inspect or recreate. `recreate_stream()` re-queues records
+that were already accepted; it does not retry a payload that failed to enqueue.
 
 ```python
 from zerobus.sdk.shared import ZerobusException
@@ -357,15 +360,24 @@ from zerobus.sdk.shared import ZerobusException
 try:
     for i in range(10000):
         stream.ingest_record_offset(record)
-    stream.close()
+    stream.flush()
 except ZerobusException as e:
-    unacked = list(stream.get_unacked_records())
-    print(f"Stream failed: {e}. {len(unacked)} records unacknowledged.")
+    print(f"Ingestion failed: {e}")
+    try:
+        stream.close()
+    except ZerobusException:
+        pass
 
-    # Preserve the record format and original batch grouping while retrying.
+    unacked = list(stream.get_unacked_records())
+    print(f"{len(unacked)} previously queued records were unacknowledged.")
+
     new_stream = sdk.recreate_stream(stream)
-    new_stream.flush()
-    new_stream.close()
+    try:
+        new_stream.flush()
+    finally:
+        new_stream.close()
+else:
+    stream.close()
 ```
 
 Use `get_unacked_batches()` to inspect the original batch grouping after the stream closes:
@@ -382,26 +394,33 @@ print(f"{len(unacked_batches)} batches remain unacknowledged")
 
 ## Performance Tips
 
-The idiomatic flow is to ingest in a loop and `flush()` once — ingest calls queue
-immediately and the SDK acknowledges records in the background, so a single `flush()`
-confirms everything queued so far. The ack watermark is monotonic, so if you want a
-durability checkpoint mid-stream, waiting on the last offset returned confirms every
-prior record. In async code, an [`AckCallback`](#ackcallback) tracks durability without
-blocking. Calling `wait_for_offset()` after every record in a tight loop limits
+The reliable bulk path is `ingest_records_offset()` plus one `flush()`. That call
+amortizes the Python-to-Rust crossing and returns an offset after the batch is queued.
+For single records, use `ingest_record_offset()` in a loop and `flush()` once. Ingest
+calls queue immediately and the SDK acknowledges records in the background, so a single
+`flush()` confirms everything queued so far. The ack watermark is monotonic, so if you
+want a durability checkpoint mid-stream, waiting on the last offset returned confirms
+every prior record. In async code, an [`AckCallback`](#ackcallback) tracks durability
+without blocking. Calling `wait_for_offset()` after every record in a tight loop limits
 throughput to one record per round-trip, so save it for confirming a specific record.
 
-| Method                   | Throughput  | Use case                                                                                                             |
-| ------------------------ | ----------- | -------------------------------------------------------------------------------------------------------------------- |
-| `ingest_record_nowait()` | **Highest** | Fire-and-forget: no offset returned; maximum throughput when you do not need per-record ack tracking in the hot path |
-| `ingest_record_offset()` | Medium      | Recommended for most apps: returns an offset after queueing. Ingest in a loop, then `flush()` once                   |
-| `ingest_record()`        | Low         | **Deprecated** — prefer offset-based APIs                                                                            |
+`ingest_record_nowait()` and `ingest_records_nowait()` spawn detached tasks and discard
+enqueue errors. `flush()` can complete before those tasks allocate offsets, so they are
+not a safe durability path. Prefer the offset APIs.
 
-**Idiomatic flow:**
+| Method                     | Throughput | Use case                                                                                          |
+| -------------------------- | ---------- | ------------------------------------------------------------------------------------------------- |
+| `ingest_records_offset()`  | Highest    | Recommended bulk path: queue a batch, then `flush()` once                                         |
+| `ingest_record_offset()`   | Medium     | Recommended for single records: ingest in a loop, then `flush()` once                             |
+| `ingest_record()`          | Low        | Deprecated; prefer offset-based APIs                                                              |
+| `ingest_record_nowait()`   | Unsafe     | Detached fire-and-forget; enqueue errors can be lost and are not synchronized with `flush()`      |
+| `ingest_records_nowait()`  | Unsafe     | Detached batch fire-and-forget; same durability caveats as `ingest_record_nowait()`               |
+
+Idiomatic flow:
 
 ```python
 async def ingest_all(stream, records):
-    for record in records:
-        await stream.ingest_record_offset(record)   # queues immediately, no round-trip
+    await stream.ingest_records_offset(records)     # queues the batch, no round-trip
     await stream.flush()                            # one wait for everything
 ```
 
@@ -444,18 +463,18 @@ async def create_async_stream(sdk):
 
 **Single record ingestion:**
 
-| Method                         | Sync                     | Async                | Notes                               |
-| ------------------------------ | ------------------------ | -------------------- | ----------------------------------- |
-| `ingest_record_nowait(record)` | `→ None`                 | `→ None` (not async) | Fire-and-forget, highest throughput |
-| `ingest_record_offset(record)` | `→ int`                  | `await → int`        | Returns offset after queueing       |
-| `ingest_record(record)`        | `→ RecordAcknowledgment` | `await → Awaitable`  | **Deprecated** since v0.3.0         |
+| Method                         | Sync                     | Async                | Notes                                                                 |
+| ------------------------------ | ------------------------ | -------------------- | --------------------------------------------------------------------- |
+| `ingest_record_offset(record)` | `→ int`                  | `await → int`        | Recommended for single records; returns offset after queueing         |
+| `ingest_record(record)`        | `→ RecordAcknowledgment` | `await → Awaitable`  | Deprecated since v0.3.0                                               |
+| `ingest_record_nowait(record)` | `→ None`                 | `→ None` (not async) | Detached fire-and-forget; enqueue errors are not synchronized with `flush()` |
 
 **Batch ingestion:**
 
-| Method                           | Sync     | Async                | Notes                |
-| -------------------------------- | -------- | -------------------- | -------------------- |
-| `ingest_records_nowait(records)` | `→ None` | `→ None` (not async) | Fire-and-forget      |
-| `ingest_records_offset(records)` | `→ int`  | `await → int`        | Returns final offset |
+| Method                           | Sync     | Async                | Notes                                                                 |
+| -------------------------------- | -------- | -------------------- | --------------------------------------------------------------------- |
+| `ingest_records_offset(records)` | `→ int`  | `await → int`        | Recommended bulk path; returns the batch's final offset               |
+| `ingest_records_nowait(records)` | `→ None` | `→ None` (not async) | Detached fire-and-forget; same durability caveats as `ingest_record_nowait()` |
 
 **Accepted record types:**
 

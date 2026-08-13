@@ -220,31 +220,11 @@ async def main():
                     logger.info(f"  Batch {batch_num + 1}: {len(batch)} records, offset: {batch_offset}")
                     success_count += len(batch)
 
-            # ========================================================================
-            # Method 3: ingest_record_nowait() - Fire-and-forget for max throughput
-            # Best for high-throughput scenarios with callback-based ack tracking
-            # ========================================================================
-            logger.info("\n3. Using ingest_record_nowait() - fire-and-forget")
-            remaining = NUM_RECORDS - success_count
-            if remaining > 0:
-                for i in range(min(100, remaining)):
-                    idx = success_count + i
-                    record_dict = create_sample_json_record(idx)
-                    stream.ingest_record_nowait(record_dict)
-
-                logger.info(f"  Queued {min(100, remaining)} records (tracking via callback)")
-                success_count += min(100, remaining)
-
-            # ========================================================================
-            # Method 4: ingest_records_nowait() - Batch fire-and-forget
-            # Best for maximum throughput with batch efficiency
-            # ========================================================================
-            logger.info("\n4. Using ingest_records_nowait() - batch fire-and-forget")
             remaining = NUM_RECORDS - success_count
             if remaining > 0:
                 batch = [create_sample_json_record(success_count + i) for i in range(remaining)]
-                stream.ingest_records_nowait(batch)
-                logger.info(f"  Queued {len(batch)} records in batch (tracking via callback)")
+                batch_offset = await stream.ingest_records_offset(batch)
+                logger.info(f"  Remaining {len(batch)} records, offset: {batch_offset}")
                 success_count += len(batch)
 
             submit_end_time = time.time()

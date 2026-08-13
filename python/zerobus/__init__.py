@@ -10,7 +10,7 @@ Example (Sync):
     >>> # Define a custom callback
     >>> class MyCallback(AckCallback):
     ...     def on_ack(self, offset):
-    ...         print(f"Record acknowledged at offset {offset}")
+    ...         print(f"Submission acknowledged at offset {offset}")
     >>>
     >>> sdk = ZerobusSdk(
     ...     host="https://your-shard-id.zerobus.region.cloud.databricks.com",

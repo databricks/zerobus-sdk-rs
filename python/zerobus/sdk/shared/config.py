@@ -14,8 +14,10 @@ AckCallback.__doc__ = """
 Base class for logical ingest submission acknowledgment callbacks.
 
 Subclass this in Python to create custom callbacks that are invoked once per
-logical ingest submission. A batch submission produces one callback, not one
-callback per record in the batch.
+successfully queued logical ingest submission that later acknowledges or fails.
+A batch that is accepted by the stream produces one callback, not one callback
+per record in the batch. Pre-queue validation, size, type, and closed-stream
+failures raise immediately and do not generate a callback.
 
 Example:
     >>> class MyCallback(AckCallback):
@@ -77,9 +79,10 @@ Args:
         - None: Wait forever
         - x: Wait up to x milliseconds
         Default: 5000
-    ack_callback: Callback invoked once per logical ingest submission when it is
-        acknowledged or encounters an error. A batch submission produces one callback.
-        Must be a class extending AckCallback. Default: None
+    ack_callback: Callback invoked once per successfully queued logical ingest
+        submission when it later acknowledges or fails. A batch that is accepted
+        by the stream produces one callback. Pre-queue failures do not generate a
+        callback. Must be a class extending AckCallback. Default: None
 
 Example:
     >>> from zerobus.sdk.shared import StreamConfigurationOptions, AckCallback

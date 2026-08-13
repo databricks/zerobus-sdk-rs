@@ -33,13 +33,6 @@ Example:
     ...         '{"value": "record2"}',
     ...     ])
     ...
-    ...     # Fire-and-forget for maximum throughput
-    ...     stream.ingest_record_nowait('{"value": "record3"}')  # Not awaited!
-    ...     stream.ingest_records_nowait([
-    ...         '{"value": "record4"}',
-    ...         '{"value": "record5"}',
-    ...     ])  # Not awaited!
-    ...
     ...     await stream.flush()  # Ensure all records are sent
     ...     await stream.close()
     >>>
@@ -117,9 +110,9 @@ class ZerobusStream:
     def ingest_record_nowait(self, payload: Any):
         """Submit record without waiting (fire-and-forget).
 
-        Highest-throughput single-record API: returns no offset and is not awaited.
-        Use when you do not need per-record offsets; track durability with an
-        ``AckCallback`` and ``await flush()`` before close.
+        Spawns a detached task and discards enqueue errors. ``flush()`` can complete
+        before the task allocates an offset, so this is not a safe durability path.
+        Prefer ``ingest_record_offset()`` or ``ingest_records_offset()``.
         """
         return self._inner.ingest_record_nowait(payload)
 
@@ -128,7 +121,11 @@ class ZerobusStream:
         return await self._inner.ingest_records_offset(payloads)
 
     def ingest_records_nowait(self, payloads):
-        """Submit batch of records without waiting."""
+        """Submit batch of records without waiting.
+
+        Same detached-task caveats as ``ingest_record_nowait()``. Prefer
+        ``ingest_records_offset()``.
+        """
         return self._inner.ingest_records_nowait(payloads)
 
     async def wait_for_offset(self, offset: int):

@@ -45,8 +45,11 @@ class AckCallback:
     Base class for logical ingest submission acknowledgment callbacks.
 
     Subclass this in Python to create custom callbacks that are invoked
-    once per logical ingest submission. A batch submission produces one
-    callback, not one callback per record in the batch.
+    once per successfully queued logical ingest submission that later
+    acknowledges or fails. A batch that is accepted by the stream produces
+    one callback, not one callback per record in the batch. Pre-queue
+    validation, size, type, and closed-stream failures raise immediately
+    and do not generate a callback.
 
     Example:
         class MyCallback(AckCallback):
@@ -115,7 +118,7 @@ class StreamConfigurationOptions:
     """Maximum time in milliseconds to wait for callbacks to finish after calling close() (default: 5000)"""
 
     ack_callback: Optional[AckCallback]
-    """Callback invoked once per logical ingest submission (default: None)"""
+    """Callback invoked once per successfully queued ingest submission that later acknowledges or fails (default: None)"""
 
     def __init__(
         self,
@@ -145,7 +148,7 @@ class StreamConfigurationOptions:
             record_type: Serialization format (default: RecordType.PROTO)
             stream_paused_max_wait_time_ms: Max wait time during graceful close in ms (default: None)
             callback_max_wait_time_ms: Max wait time for callbacks after close in ms (default: 5000)
-            ack_callback: Callback invoked once per logical ingest submission (default: None)
+            ack_callback: Callback invoked once per successfully queued ingest submission that later acknowledges or fails (default: None)
         """
         ...
 

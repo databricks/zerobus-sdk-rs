@@ -195,30 +195,11 @@ def main():
                     logger.info(f"  Batch {batch_num + 1}: {len(batch)} records, offset: {batch_offset}")
                     success_count += len(batch)
 
-            # ========================================================================
-            # Method 3: ingest_record_nowait() - Maximum throughput (fire-and-forget)
-            # Use when you don't need individual offsets and want maximum speed
-            # ========================================================================
-            logger.info("\n3. Using ingest_record_nowait() - fire-and-forget")
-            remaining = NUM_RECORDS - success_count
-            if remaining > 0:
-                for i in range(min(10, remaining)):
-                    idx = success_count + i
-                    record_dict = create_sample_json_record(idx)
-                    stream.ingest_record_nowait(record_dict)
-                logger.info(f"  Queued {min(10, remaining)} records (no wait for ack)")
-                success_count += min(10, remaining)
-
-            # ========================================================================
-            # Method 4: ingest_records_nowait() - Batch fire-and-forget
-            # Combines batch efficiency with fire-and-forget speed
-            # ========================================================================
-            logger.info("\n4. Using ingest_records_nowait() - batch fire-and-forget")
             remaining = NUM_RECORDS - success_count
             if remaining > 0:
                 batch = [create_sample_json_record(success_count + i) for i in range(remaining)]
-                stream.ingest_records_nowait(batch)
-                logger.info(f"  Queued {len(batch)} records in batch (no wait for ack)")
+                batch_offset = stream.ingest_records_offset(batch)
+                logger.info(f"  Remaining {len(batch)} records, offset: {batch_offset}")
                 success_count += len(batch)
 
             # ========================================================================
