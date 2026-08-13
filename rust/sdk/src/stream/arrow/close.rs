@@ -162,6 +162,7 @@ pub(super) struct CloseFinalizer {
     ingest_mutex: Arc<Mutex<()>>,
     batch_tx: BatchSender,
     is_paused: Arc<AtomicBool>,
+    admission_closed: Arc<AtomicBool>,
     is_closed: Arc<AtomicBool>,
     pending_batches: Arc<Mutex<Vec<PendingBatch>>>,
     failed_batches: Arc<Mutex<Vec<RecordBatch>>>,
@@ -178,6 +179,7 @@ impl CloseFinalizer {
             ingest_mutex: Arc::clone(&stream.ingest_mutex),
             batch_tx: Arc::clone(&stream.batch_tx),
             is_paused: Arc::clone(&stream.is_paused),
+            admission_closed: Arc::clone(&stream.admission_closed),
             is_closed: Arc::clone(&stream.is_closed),
             pending_batches: Arc::clone(&stream.pending_batches),
             failed_batches: Arc::clone(&stream.failed_batches),
@@ -194,6 +196,9 @@ impl CloseFinalizer {
             if let CloseState::Finalized(existing) = self.close.state() {
                 return existing;
             }
+            // `is_closed` remains false until the retained-batch snapshot is complete.
+            // Release: empty flush loads this flag without ingest_mutex.
+            self.admission_closed.store(true, Ordering::Release);
             self.is_paused.store(true, Ordering::Relaxed);
             *self.batch_tx.lock().await = None;
         }

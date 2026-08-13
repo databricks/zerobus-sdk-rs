@@ -8,7 +8,7 @@ use std::sync::Arc;
 
 use arrow_flight::error::FlightError;
 use tokio::sync::{mpsc, watch, Mutex};
-use tokio::task::{spawn, JoinHandle};
+use tokio::task::{spawn, AbortHandle, JoinError, JoinHandle};
 use tokio::time::{sleep, sleep_until, timeout_at, Duration, Instant};
 use tracing::{debug, error, info, warn};
 
@@ -79,12 +79,38 @@ impl Supervisor {
         }
     }
 
-    pub(super) fn spawn(
-        self,
-        initial_connection: FlightConnection,
-    ) -> JoinHandle<ZerobusResult<()>> {
+    pub(super) fn spawn(self, initial_connection: FlightConnection) -> AbortHandle {
         let (response_stream, request_body) = initial_connection.into_supervisor_io();
-        spawn(self.run(response_stream, request_body))
+        let close = self.close.clone();
+        let finalizer = self.close_finalizer.clone();
+        let worker = spawn(self.run(response_stream, request_body));
+        let abort_handle = worker.abort_handle();
+        // The detached reaper owns the JoinHandle so cancelling a close caller cannot
+        // lose observation of an abnormal supervisor exit.
+        spawn(async move {
+            let joined = worker.await;
+            if matches!(close.state(), CloseState::Finalized(_)) {
+                return;
+            }
+            let outcome = Self::unfinalized_exit_outcome(joined);
+            let _ = finalizer.finish(outcome).await;
+        });
+        abort_handle
+    }
+
+    fn unfinalized_exit_outcome(joined: Result<ZerobusResult<()>, JoinError>) -> ZerobusResult<()> {
+        match joined {
+            Ok(Err(error)) => Err(error),
+            Ok(Ok(())) => Err(ZerobusError::InvalidStateError(
+                "Supervisor exited successfully before close finalization".to_string(),
+            )),
+            Err(error) if error.is_cancelled() => Err(ZerobusError::InvalidStateError(
+                "Supervisor task was cancelled before close finalization".to_string(),
+            )),
+            Err(_) => Err(ZerobusError::InvalidStateError(
+                "Supervisor task panicked before close finalization".to_string(),
+            )),
+        }
     }
 
     fn spawn_headers_invalidation(&self, deadline: Instant) -> JoinHandle<bool> {
@@ -165,8 +191,8 @@ impl Supervisor {
             }
 
             let mut active_was_drained = false;
-            let result = if let Some(error) = pending_error.take() {
-                Err(error)
+            let active_error = if let Some(error) = pending_error.take() {
+                error
             } else {
                 let active_response = response_stream
                     .as_mut()
@@ -182,7 +208,7 @@ impl Supervisor {
                     Ok(AckProcessOutcome::Stopped) => return self.finalized_result(),
                     Ok(AckProcessOutcome::Recovery { error, drained }) => {
                         active_was_drained = drained;
-                        Err(error)
+                        error
                     }
                     Ok(AckProcessOutcome::Close { request, outcome }) => {
                         debug_assert_eq!(self.close.request(), Some(request));
@@ -191,14 +217,12 @@ impl Supervisor {
                         }
                         return self.finish(outcome).await;
                     }
-                    Err(error) => Err(error),
+                    Err(error) => error,
                 }
             };
 
-            if let Err(error) = &result {
-                if !reconnect_auth_retry {
-                    self.spawn_detached_auth_invalidation(error);
-                }
+            if !reconnect_auth_retry {
+                self.spawn_detached_auth_invalidation(&active_error);
             }
 
             if let Some(close_request) = self.close.request() {
@@ -206,7 +230,7 @@ impl Supervisor {
                     if let (Some(active_response), Some(active_request)) =
                         (response_stream.as_mut(), request_body.as_ref())
                     {
-                        let selected = result.clone();
+                        let selected = Err(active_error.clone());
                         match self
                             .ack_processor
                             .close_active_connection(
@@ -231,12 +255,11 @@ impl Supervisor {
                         }
                     }
                 }
-                return self.finish(result).await;
+                return self.finish(Err(active_error)).await;
             }
 
-            match result {
-                Ok(()) => return self.finish(Ok(())).await,
-                Err(ref error)
+            match active_error {
+                error
                     if (error.is_retryable() || reconnect_auth_retry) && self.options.recovery =>
                 {
                     reconnect_auth_retry = false;
@@ -354,7 +377,7 @@ impl Supervisor {
                         }
                     }
                 }
-                Err(error) => {
+                error => {
                     error!(target: super::LOG_TARGET, "Supervisor: Non-retriable error, closing stream: {}", error);
                     return self.finish(Err(error)).await;
                 }
@@ -580,6 +603,7 @@ mod tests {
     use arrow_flight::error::FlightError;
     use arrow_schema::{DataType, Field, Schema as ArrowSchema};
     use tokio::sync::{mpsc, Mutex, Semaphore};
+    use tokio::task::JoinHandle;
     use tokio::time::{timeout, Duration, Instant};
 
     use super::super::close::{CloseCoordinator, CloseFinalizer, CloseRequest, CloseState};
@@ -631,6 +655,31 @@ mod tests {
             ));
         }
         assert!(Supervisor::result_from_close_state(CloseState::Finalized(Ok(()))).is_ok());
+    }
+
+    #[test]
+    fn reaper_preserves_worker_error_and_rejects_unfinalized_success() {
+        let returned = ZerobusError::ConnectionTimeout("worker error".to_string());
+        assert!(matches!(
+            Supervisor::unfinalized_exit_outcome(Ok(Err(returned))),
+            Err(ZerobusError::ConnectionTimeout(message)) if message == "worker error"
+        ));
+        assert!(matches!(
+            Supervisor::unfinalized_exit_outcome(Ok(Ok(()))),
+            Err(ZerobusError::InvalidStateError(_))
+        ));
+    }
+
+    #[tokio::test]
+    async fn panicked_supervisor_exit_is_an_invariant_error() {
+        let worker: JoinHandle<crate::ZerobusResult<()>> =
+            tokio::spawn(async { panic!("supervisor test panic") });
+        let joined = worker.await;
+
+        assert!(matches!(
+            Supervisor::unfinalized_exit_outcome(joined),
+            Err(ZerobusError::InvalidStateError(_))
+        ));
     }
 
     #[tokio::test]

@@ -20,7 +20,7 @@ use std::sync::Arc;
 use arrow_flight::error::FlightError;
 use bytes::Bytes;
 use tokio::sync::{mpsc, watch, Mutex, Notify, Semaphore};
-use tokio::task::JoinHandle;
+use tokio::task::AbortHandle;
 use tokio::time::{timeout, Duration, Instant};
 use tokio_retry::strategy::FixedInterval;
 use tokio_retry::RetryIf;
@@ -172,10 +172,12 @@ pub struct ZerobusArrowStream {
     _last_ack_rx: watch::Receiver<Option<OffsetId>>,
     /// True once the stream is terminally closed and unacknowledged batches may be retrieved.
     is_closed: Arc<AtomicBool>,
+    /// Rejects new ingests as soon as terminal finalization owns admission.
+    admission_closed: Arc<AtomicBool>,
     /// Coordinates one resumable explicit-close request with the recovery supervisor.
     close: CloseCoordinator,
-    /// Handle to the supervisor task that processes acknowledgments and recovery.
-    receiver_task: Arc<Mutex<Option<JoinHandle<ZerobusResult<()>>>>>,
+    /// Abort handle for the supervisor worker; its detached reaper remains independent.
+    supervisor_abort: Arc<Mutex<Option<AbortHandle>>>,
     /// Accepted batches not yet fully acknowledged; retained for replay or retrieval.
     pending_batches: Arc<Mutex<Vec<PendingBatch>>>,
     /// Wakes the ACK processor when a batch is submitted after an idle period.
@@ -264,13 +266,14 @@ impl ZerobusArrowStream {
 
         let (last_ack_tx, _last_ack_rx) = watch::channel(None);
         let is_closed = Arc::new(AtomicBool::new(false));
+        let admission_closed = Arc::new(AtomicBool::new(false));
         let pending_batches = Arc::new(Mutex::new(Vec::new()));
         let pending_notify = Arc::new(Notify::new());
         let request_send_failure = Arc::new(acks::RequestSendFailure::default());
         let failed_batches = Arc::new(Mutex::new(Vec::new()));
         let recovery_attempts = Arc::new(AtomicU32::new(0));
         let batch_tx = Arc::new(Mutex::new(None));
-        let receiver_task = Arc::new(Mutex::new(None));
+        let supervisor_abort = Arc::new(Mutex::new(None));
         let cumulative_records_assigned = Arc::new(AtomicU64::new(0));
         let submitted_records = Arc::new(AtomicU64::new(0));
         let last_acked_records = Arc::new(AtomicU64::new(0));
@@ -289,8 +292,9 @@ impl ZerobusArrowStream {
             last_ack_tx,
             _last_ack_rx,
             is_closed,
+            admission_closed,
             close,
-            receiver_task,
+            supervisor_abort,
             pending_batches,
             pending_notify,
             request_send_failure,
@@ -371,8 +375,8 @@ impl ZerobusArrowStream {
         let task = Supervisor::new(&stream).spawn(connection);
 
         {
-            let mut receiver_task = stream.receiver_task.lock().await;
-            *receiver_task = Some(task);
+            let mut supervisor_abort = stream.supervisor_abort.lock().await;
+            *supervisor_abort = Some(task);
         }
 
         info!(
@@ -423,7 +427,10 @@ impl ZerobusArrowStream {
     /// ```
     #[instrument(level = "debug", skip_all, fields(table_name = %self.table_properties.table_name))]
     pub async fn ingest_batch(&self, batch: RecordBatch) -> ZerobusResult<OffsetId> {
-        if self.is_closed.load(Ordering::Relaxed) || self.close.has_started() {
+        if self.admission_closed.load(Ordering::Acquire)
+            || self.is_closed.load(Ordering::Relaxed)
+            || self.close.has_started()
+        {
             return Err(ZerobusError::StreamClosedError(tonic::Status::internal(
                 "Stream is closing or closed",
             )));
@@ -461,7 +468,10 @@ impl ZerobusArrowStream {
         let _guard = self.ingest_mutex.lock().await;
 
         // May have closed while we blocked on the permit; returning drops it.
-        if self.is_closed.load(Ordering::Relaxed) || self.close.has_started() {
+        if self.admission_closed.load(Ordering::Acquire)
+            || self.is_closed.load(Ordering::Relaxed)
+            || self.close.has_started()
+        {
             return Err(ZerobusError::StreamClosedError(tonic::Status::internal(
                 "Stream is closing or closed",
             )));
@@ -571,7 +581,10 @@ impl ZerobusArrowStream {
     /// marker after `finish()`) is allowed after that batch.
     #[instrument(level = "debug", skip_all, fields(table_name = %self.table_properties.table_name))]
     pub async fn ingest_ipc_batch(&self, ipc_bytes: Bytes) -> ZerobusResult<OffsetId> {
-        if self.is_closed.load(Ordering::Relaxed) || self.close.has_started() {
+        if self.admission_closed.load(Ordering::Acquire)
+            || self.is_closed.load(Ordering::Relaxed)
+            || self.close.has_started()
+        {
             return Err(ZerobusError::StreamClosedError(tonic::Status::internal(
                 "Stream is closing or closed",
             )));
@@ -673,6 +686,24 @@ impl ZerobusArrowStream {
         })?
     }
 
+    /// Waits through the short interval where terminal finalization owns admission but
+    /// has not published `CloseState::Finalized` yet.
+    async fn wait_for_terminal_outcome(&self) -> ZerobusResult<()> {
+        let mut close_rx = self.close.subscribe();
+
+        loop {
+            if let CloseState::Finalized(result) = close_rx.borrow_and_update().clone() {
+                return result;
+            }
+
+            if close_rx.changed().await.is_err() {
+                return Err(ZerobusError::StreamClosedError(tonic::Status::internal(
+                    "Close coordinator stopped unexpectedly",
+                )));
+            }
+        }
+    }
+
     /// Flushes all currently pending batches and waits for their acknowledgments.
     ///
     /// Snapshots the highest assigned offset when it begins and waits through that offset.
@@ -710,6 +741,11 @@ impl ZerobusArrowStream {
         let target_offset = match self.offset_generator.last() {
             Some(offset) => offset,
             None => {
+                if self.admission_closed.load(Ordering::Acquire)
+                    && matches!(self.close.state(), CloseState::Open)
+                {
+                    return self.wait_for_terminal_outcome().await;
+                }
                 // Nothing was ingested: report closure if closed, otherwise nothing to do.
                 // Prefer the real terminal error over a generic closed message.
                 if self.is_closed.load(Ordering::Relaxed) || self.close.has_started() {
@@ -825,17 +861,35 @@ impl ZerobusArrowStream {
                 CloseState::Open => {
                     // This mutex makes the target snapshot and request publication atomic
                     // with ingest admission and replacement-sender publication.
-                    let _guard = self.ingest_mutex.lock().await;
-                    let deadline = configured_deadline(
-                        Instant::now(),
-                        Duration::from_millis(self.options.flush_timeout_ms),
-                        "flush_timeout_ms",
-                    )?;
-                    let request = CloseRequest {
-                        target_offset: self.offset_generator.last(),
-                        deadline,
-                    };
-                    self.close.publish(request);
+                    let guard = self.ingest_mutex.lock().await;
+                    match self.close.state() {
+                        CloseState::Open if !self.admission_closed.load(Ordering::Acquire) => {
+                            let deadline = configured_deadline(
+                                Instant::now(),
+                                Duration::from_millis(self.options.flush_timeout_ms),
+                                "flush_timeout_ms",
+                            )?;
+                            let request = CloseRequest {
+                                target_offset: self.offset_generator.last(),
+                                deadline,
+                            };
+                            self.close.publish(request);
+                        }
+                        CloseState::Open => {
+                            // Terminal finalization owns admission but publishes its result
+                            // only after the retained-batch snapshot is complete.
+                            drop(guard);
+                            if close_rx.changed().await.is_err() {
+                                return Err(ZerobusError::StreamClosedError(
+                                    tonic::Status::internal(
+                                        "Close coordinator stopped unexpectedly",
+                                    ),
+                                ));
+                            }
+                        }
+                        CloseState::Requested(_) => {}
+                        CloseState::Finalized(result) => return result,
+                    }
                 }
                 CloseState::Requested(_) => {
                     if close_rx.changed().await.is_err() {
@@ -983,6 +1037,15 @@ impl ZerobusArrowStream {
         Self::arm_test_barrier(&self.test_hooks.close_finalize).await
     }
 
+    /// Test-only: aborts the supervisor worker while leaving its finalizer reaper running.
+    #[cfg(feature = "test-hooks")]
+    #[doc(hidden)]
+    pub async fn abort_supervisor_for_test(&self) {
+        if let Some(handle) = self.supervisor_abort.lock().await.as_ref() {
+            handle.abort();
+        }
+    }
+
     /// Returns the table name for this stream.
     pub fn table_name(&self) -> &str {
         &self.table_properties.table_name
@@ -1005,10 +1068,11 @@ impl ZerobusArrowStream {
 
 impl Drop for ZerobusArrowStream {
     fn drop(&mut self) {
+        self.admission_closed.store(true, Ordering::Release);
         self.is_closed.store(true, Ordering::Relaxed);
         // Best-effort abort the supervisor. Drop does not preserve pending batches for
         // retrieval; call close() or let recovery reach terminal finalization first.
-        if let Ok(mut guard) = self.receiver_task.try_lock() {
+        if let Ok(mut guard) = self.supervisor_abort.try_lock() {
             if let Some(handle) = guard.take() {
                 handle.abort();
             }

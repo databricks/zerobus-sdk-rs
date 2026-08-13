@@ -265,19 +265,20 @@ mod arrow_flight_tests {
             }
             assert!(!stream.is_closed());
 
-            // A successful ingest proves the failed deadline calculation did not publish close.
+            let (reached, proceed) = stream.arm_close_finalize_barrier().await;
             let batch = create_test_record_batch(schema, vec![1], vec![Some("still usable")]);
             stream.ingest_batch(batch).await?;
-            run_with_paused_time_watchdog(async {
-                while !stream.is_closed() {
-                    tokio::task::yield_now().await;
-                }
-            })
-            .await;
+            run_with_paused_time_watchdog(reached.notified()).await;
 
-            let error = run_with_paused_time_watchdog(stream.close())
+            let mut close_future = Box::pin(stream.close());
+            assert!(
+                futures::poll!(close_future.as_mut()).is_pending(),
+                "an unrepresentable deadline must not mask in-progress terminal finalization"
+            );
+            proceed.notify_one();
+            let error = run_with_paused_time_watchdog(close_future)
                 .await
-                .expect_err("repeated close must observe the stored terminal error");
+                .expect_err("close must observe the stored terminal error");
             match error {
                 ZerobusError::StreamClosedError(status) => {
                     assert_eq!(status.code(), tonic::Code::InvalidArgument);
@@ -1347,6 +1348,73 @@ mod arrow_flight_tests {
 
             Ok(())
         }
+
+        #[tokio::test]
+        async fn test_supervisor_abort_after_close_request_finalizes_exact_suffix(
+        ) -> Result<(), Box<dyn std::error::Error>> {
+            setup_tracing();
+
+            let (mock_server, server_url) = start_mock_flight_server().await?;
+            let schema = create_test_arrow_schema();
+            mock_server
+                .inject_responses(
+                    TABLE_NAME,
+                    vec![MockFlightResponse::BatchAck {
+                        ack_up_to_offset: 0,
+                        delay_ms: 0,
+                        ack_up_to_records: 1,
+                    }],
+                )
+                .await;
+
+            let sdk = ZerobusSdk::builder()
+                .endpoint(server_url)
+                .unity_catalog_url("https://mock-uc.com")
+                .tls_config(Arc::new(NoTlsConfig))
+                .build()?;
+            let mut stream = sdk
+                .stream_builder()
+                .table(TABLE_NAME)
+                .headers_provider(Arc::new(TestHeadersProvider::default()))
+                .arrow(schema.clone())
+                .flush_timeout_ms(60_000)
+                .build_arrow()
+                .await?;
+
+            let ack_applied = stream.arm_ack_applied_notify().await;
+            let batch = create_test_record_batch(
+                schema,
+                vec![1, 2, 3],
+                vec![Some("a"), Some("b"), Some("c")],
+            );
+            stream.ingest_batch(batch).await?;
+            tokio::time::timeout(std::time::Duration::from_secs(5), ack_applied.notified())
+                .await
+                .expect("partial ACK must be applied before close");
+
+            let mut close_future = Box::pin(stream.close());
+            assert!(
+                futures::poll!(close_future.as_mut()).is_pending(),
+                "close must publish its request before waiting"
+            );
+            drop(close_future);
+            stream.abort_supervisor_for_test().await;
+
+            let error = tokio::time::timeout(std::time::Duration::from_secs(1), stream.close())
+                .await
+                .expect("the supervisor reaper must finalize an aborted worker")
+                .expect_err("aborted supervisor must produce an invariant error");
+            assert!(matches!(error, ZerobusError::InvalidStateError(_)));
+            let unacked: Vec<Vec<i64>> = stream
+                .get_unacked_batches()
+                .await?
+                .iter()
+                .map(batch_ids)
+                .collect();
+            assert_eq!(unacked, vec![vec![2, 3]]);
+
+            Ok(())
+        }
     }
 
     mod error_handling_tests {
@@ -1392,6 +1460,118 @@ mod arrow_flight_tests {
 
             let result = stream.wait_for_offset(offset).await;
             assert!(result.is_err(), "Expected error from server");
+
+            Ok(())
+        }
+
+        #[tokio::test]
+        async fn test_terminal_finalization_rejects_new_ingest_before_snapshot_publish(
+        ) -> Result<(), Box<dyn std::error::Error>> {
+            setup_tracing();
+
+            let (mock_server, server_url) = start_mock_flight_server().await?;
+            let schema = create_test_arrow_schema();
+            mock_server
+                .inject_responses(
+                    TABLE_NAME,
+                    vec![MockFlightResponse::Error {
+                        status: Status::invalid_argument("terminal peer error"),
+                        delay_ms: 0,
+                    }],
+                )
+                .await;
+
+            let sdk = ZerobusSdk::builder()
+                .endpoint(server_url)
+                .unity_catalog_url("https://mock-uc.com")
+                .tls_config(Arc::new(NoTlsConfig))
+                .build()?;
+            let mut stream = sdk
+                .stream_builder()
+                .table(TABLE_NAME)
+                .headers_provider(Arc::new(TestHeadersProvider::default()))
+                .arrow(schema.clone())
+                .recovery(false)
+                .build_arrow()
+                .await?;
+
+            let (reached, proceed) = stream.arm_close_finalize_barrier().await;
+            let first = create_test_record_batch(
+                schema.clone(),
+                vec![1],
+                vec![Some("accepted before failure")],
+            );
+            stream.ingest_batch(first).await?;
+            tokio::time::timeout(std::time::Duration::from_secs(5), reached.notified())
+                .await
+                .expect("terminal finalization must reach the snapshot barrier");
+            assert!(!stream.is_closed(), "the snapshot is not yet published");
+
+            let late = create_test_record_batch(schema, vec![2], vec![Some("too late")]);
+            assert!(
+                stream.ingest_batch(late).await.is_err(),
+                "terminal finalization must close admission before publishing is_closed"
+            );
+
+            proceed.notify_one();
+            let error = stream
+                .close()
+                .await
+                .expect_err("close must return the terminal peer error");
+            match error {
+                ZerobusError::StreamClosedError(status) => {
+                    assert_eq!(status.code(), tonic::Code::InvalidArgument);
+                }
+                other => panic!("expected terminal stream error, got {other:?}"),
+            }
+            assert_eq!(stream.get_unacked_batches().await?.len(), 1);
+
+            Ok(())
+        }
+
+        #[tokio::test]
+        async fn test_empty_flush_waits_for_terminal_outcome_during_finalization(
+        ) -> Result<(), Box<dyn std::error::Error>> {
+            setup_tracing();
+
+            let (_mock_server, server_url) = start_mock_flight_server().await?;
+            let sdk = ZerobusSdk::builder()
+                .endpoint(server_url)
+                .unity_catalog_url("https://mock-uc.com")
+                .tls_config(Arc::new(NoTlsConfig))
+                .build()?;
+            let mut stream = sdk
+                .stream_builder()
+                .table(TABLE_NAME)
+                .headers_provider(Arc::new(TestHeadersProvider::default()))
+                .arrow(create_test_arrow_schema())
+                .build_arrow()
+                .await?;
+
+            let (reached, proceed) = stream.arm_close_finalize_barrier().await;
+            stream.abort_supervisor_for_test().await;
+            tokio::time::timeout(std::time::Duration::from_secs(5), reached.notified())
+                .await
+                .expect("abnormal-exit finalization must reach the barrier");
+
+            let mut flush = Box::pin(stream.flush());
+            assert!(
+                futures::poll!(flush.as_mut()).is_pending(),
+                "empty flush must wait while terminal outcome publication is pending"
+            );
+            proceed.notify_one();
+            let error = tokio::time::timeout(std::time::Duration::from_secs(1), flush)
+                .await
+                .expect("empty flush must complete after outcome publication")
+                .expect_err("empty flush must return the supervisor exit error");
+            assert!(matches!(error, ZerobusError::InvalidStateError(_)));
+
+            let close_error =
+                tokio::time::timeout(std::time::Duration::from_secs(1), stream.close())
+                    .await
+                    .expect("terminal finalization must complete")
+                    .expect_err("close must return the same supervisor exit error");
+            assert!(matches!(close_error, ZerobusError::InvalidStateError(_)));
 
             Ok(())
         }
@@ -3868,6 +4048,97 @@ mod arrow_flight_tests {
                 vec![vec![2, 3], vec![4]],
                 "close during backoff must retain only the exact unacknowledged suffix"
             );
+            Ok(())
+        }
+
+        #[tokio::test]
+        async fn test_close_during_second_recovery_attempt_preserves_latest_trigger(
+        ) -> Result<(), Box<dyn std::error::Error>> {
+            setup_tracing();
+
+            let (mock_server, server_url) = start_mock_flight_server().await?;
+            let schema = create_test_arrow_schema();
+            mock_server
+                .inject_responses(
+                    TABLE_NAME,
+                    vec![
+                        MockFlightResponse::BatchAck {
+                            ack_up_to_offset: 0,
+                            delay_ms: 0,
+                            ack_up_to_records: 1,
+                        },
+                        MockFlightResponse::Error {
+                            status: tonic::Status::unavailable("active transport failed"),
+                            delay_ms: 0,
+                        },
+                        MockFlightResponse::FailSetup {
+                            status: tonic::Status::unavailable("first reconnect failed"),
+                        },
+                        MockFlightResponse::FailSetupAfter {
+                            status: tonic::Status::unavailable("second reconnect failed"),
+                            delay_ms: 60_000,
+                        },
+                    ],
+                )
+                .await;
+
+            let delayed_setup_armed = mock_server.delayed_setup_armed();
+            let sdk = ZerobusSdk::builder()
+                .endpoint(server_url)
+                .unity_catalog_url("https://mock-uc.com")
+                .tls_config(Arc::new(NoTlsConfig))
+                .build()?;
+            let mut stream = sdk
+                .stream_builder()
+                .table(TABLE_NAME)
+                .headers_provider(Arc::new(TestHeadersProvider::default()))
+                .arrow(schema.clone())
+                .recovery(true)
+                .recovery_backoff_ms(0)
+                .recovery_timeout_ms(120_000)
+                .recovery_retries(3)
+                .flush_timeout_ms(60_000)
+                .build_arrow()
+                .await?;
+
+            let ack_applied = stream.arm_ack_applied_notify().await;
+            let first = create_test_record_batch(
+                schema.clone(),
+                vec![1, 2, 3],
+                vec![Some("a"), Some("b"), Some("c")],
+            );
+            stream.ingest_batch(first).await?;
+            tokio::time::timeout(std::time::Duration::from_secs(5), ack_applied.notified())
+                .await
+                .expect("partial ACK must be applied before recovery");
+            let second = create_test_record_batch(schema, vec![4], vec![Some("d")]);
+            stream.ingest_batch(second).await?;
+            tokio::time::timeout(
+                std::time::Duration::from_secs(5),
+                delayed_setup_armed.notified(),
+            )
+            .await
+            .expect("the second recovery attempt must enter setup");
+
+            let error = tokio::time::timeout(std::time::Duration::from_secs(1), stream.close())
+                .await
+                .expect("close must interrupt the second recovery attempt")
+                .expect_err("close during recovery must preserve its current trigger");
+            match error {
+                ZerobusError::CreateStreamError(status) => {
+                    assert_eq!(status.code(), tonic::Code::Unavailable);
+                    assert_eq!(status.message(), "first reconnect failed");
+                }
+                other => panic!("expected the first attempt's reconnect error, got: {other:?}"),
+            }
+            let unacked: Vec<Vec<i64>> = stream
+                .get_unacked_batches()
+                .await?
+                .iter()
+                .map(batch_ids)
+                .collect();
+            assert_eq!(unacked, vec![vec![2, 3], vec![4]]);
+
             Ok(())
         }
 

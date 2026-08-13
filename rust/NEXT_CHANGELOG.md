@@ -22,8 +22,12 @@
   monotonic-clock range. Server-advertised graceful-rotation periods are capped
   at one year.
 - Arrow Flight close is cancellation-safe and half-closes the active request before
-  bounded response draining. Close during recovery cancels the attempt, retains the
-  unacknowledged suffix, and returns the error that triggered recovery.
+  bounded response draining. ACK success is decided when the durable watermark is
+  applied relative to the original flush deadline. Close during recovery cancels the
+  attempt, retains the unacknowledged suffix, and returns the error that triggered the
+  current attempt. Close during an existing recovery or server-requested rotation keeps
+  that trigger even if every record is durable, so an error can coexist with an empty
+  unacknowledged-batch set.
 - Fixed Arrow Flight recovery sender lifetime: replacement senders are now published
   only after pending replay succeeds, while initial supervisor handoff and failed or
   cancelled replay promptly drop redundant senders instead of retaining incomplete
