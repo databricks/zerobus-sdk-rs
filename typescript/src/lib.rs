@@ -103,7 +103,8 @@ pub struct TableProperties {
     pub table_name: String,
 
     /// Optional Protocol Buffer descriptor as a base64-encoded string.
-    /// If not provided, JSON encoding will be used.
+    /// Omitting this does not select JSON. The stream defaults to Protocol Buffers
+    /// unless `record_type` is set to JSON.
     pub descriptor_proto: Option<String>,
 }
 
@@ -1135,13 +1136,13 @@ impl ZerobusSdk {
     ///
     /// ```typescript
     /// try {
-    ///   await stream.ingestRecords(batch);
+    ///   await stream.ingestRecordsOffset(batch);
+    ///   await stream.flush();
     /// } catch (error) {
-    ///   // Recreate stream with all unacked batches re-ingested
     ///   try {
     ///     const newStream = await sdk.recreateStream(stream);
     ///     try {
-    ///       // Continue ingesting with newStream
+    ///       await newStream.flush();
     ///     } finally {
     ///       await newStream.close();
     ///     }

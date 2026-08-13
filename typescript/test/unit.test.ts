@@ -118,33 +118,27 @@ describe('ZerobusSdk', () => {
 
 describe('HeadersProvider', () => {
     it('should accept custom headers provider implementation', () => {
-        class TestHeadersProvider implements HeadersProvider {
-            async getHeaders(): Promise<Array<[string, string]>> {
-                return [
-                    ['authorization', 'Bearer test-token'],
-                    ['x-databricks-zerobus-table-name', 'catalog.schema.table'],
-                ];
-            }
-        }
+        const provider: HeadersProvider = {
+            getHeadersCallback: () => [
+                ['authorization', 'Bearer test-token'],
+                ['x-databricks-zerobus-table-name', 'catalog.schema.table'],
+            ],
+        };
 
-        const provider = new TestHeadersProvider();
         assert.ok(provider);
-        assert.ok(typeof provider.getHeaders === 'function');
+        assert.ok(typeof provider.getHeadersCallback === 'function');
     });
 
-    it('should return correct header format', async () => {
-        class TestHeadersProvider implements HeadersProvider {
-            async getHeaders(): Promise<Array<[string, string]>> {
-                return [
-                    ['authorization', 'Bearer test-token'],
-                    ['x-databricks-zerobus-table-name', 'test-table'],
-                    ['x-custom-header', 'custom-value'],
-                ];
-            }
-        }
+    it('should return correct header format', () => {
+        const provider: HeadersProvider = {
+            getHeadersCallback: () => [
+                ['authorization', 'Bearer test-token'],
+                ['x-databricks-zerobus-table-name', 'test-table'],
+                ['x-custom-header', 'custom-value'],
+            ],
+        };
 
-        const provider = new TestHeadersProvider();
-        const headers = await provider.getHeaders();
+        const headers = provider.getHeadersCallback();
 
         assert.strictEqual(headers.length, 3);
         assert.deepStrictEqual(headers[0], ['authorization', 'Bearer test-token']);

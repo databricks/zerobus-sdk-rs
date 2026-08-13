@@ -106,19 +106,14 @@ const tableProperties: TableProperties = {
 ```typescript
 const AirQuality = airQuality.examples.AirQuality;
 
-// 1. Auto-encoding: pass message directly
-const record = AirQuality.create({
-    deviceName: 'sensor-001',
-    temp: 22,
-    humidity: 65
-});
-const messageOffset = await stream.ingestRecordOffset(record);
-await stream.waitForOffset(messageOffset);
-
-// 2. Pre-encoded: pass Buffer
-const buffer = Buffer.from(AirQuality.encode(record).finish());
-const bufferOffset = await stream.ingestRecordOffset(buffer);
-await stream.waitForOffset(bufferOffset);
+const records = [
+    AirQuality.create({ deviceName: 'sensor-001', temp: 22, humidity: 65 }),
+    AirQuality.create({ deviceName: 'sensor-002', temp: 24, humidity: 70 })
+];
+for (const record of records) {
+    await stream.ingestRecordOffset(record);
+}
+await stream.flush();
 ```
 
 ## Batch Example
@@ -149,13 +144,8 @@ const messageBatch = [
     AirQuality.create({ deviceName: 'sensor-003', temp: 24, humidity: 69 })
 ];
 const messageBatchOffset = await stream.ingestRecordsOffset(messageBatch);
-if (messageBatchOffset !== null) {
-    await stream.waitForOffset(messageBatchOffset);
-}
-
-// 2. Pre-encoded: array of Buffers
-const bufferBatch = records.map(r => Buffer.from(AirQuality.encode(r).finish()));
 const bufferBatchOffset = await stream.ingestRecordsOffset(bufferBatch);
+await stream.flush();
 ```
 
 ## Adapting for Your Custom Table

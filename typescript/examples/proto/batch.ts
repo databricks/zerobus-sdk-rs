@@ -112,9 +112,7 @@ async function main() {
 
         const offset1 = await stream.ingestRecordsOffset(batch1);
         if (offset1 !== null) {
-            console.log(`[Auto-encoding] Batch of 3 records sent with offset ID: ${offset1}`);
-            await stream.waitForOffset(offset1);
-            console.log(`[Auto-encoding] Batch acknowledged with offset ID: ${offset1}`);
+            console.log(`[Auto-encoding] Batch of 3 records queued with offset ID: ${offset1}`);
         }
 
         // 2. Pre-encoded: array of Buffers
@@ -126,13 +124,11 @@ async function main() {
 
         const offset2 = await stream.ingestRecordsOffset(batch2);
         if (offset2 !== null) {
-            console.log(`[Pre-encoded] Batch of 3 records sent with offset ID: ${offset2}`);
-            await stream.waitForOffset(offset2);
-            console.log(`[Pre-encoded] Batch acknowledged with offset ID: ${offset2}`);
+            console.log(`[Pre-encoded] Batch of 3 records queued with offset ID: ${offset2}`);
         }
 
         // 3. Large batch example
-        console.log('\n[Large batch] Sending batch of 100 records...');
+        console.log('\n[Large batch] Queueing batch of 100 records...');
         const largeBatch = Array.from({ length: 100 }, (_, i) =>
             AirQuality.create({
                 deviceName: `sensor-${i.toString().padStart(3, '0')}`,
@@ -143,9 +139,11 @@ async function main() {
 
         const offset3 = await stream.ingestRecordsOffset(largeBatch);
         if (offset3 !== null) {
-            await stream.waitForOffset(offset3);
-            console.log(`[Large batch] 100 records acknowledged with offset ID: ${offset3}`);
+            console.log(`[Large batch] 100 records queued with offset ID: ${offset3}`);
         }
+
+        await stream.flush();
+        console.log('All offset-API batches acknowledged');
 
         // 4. Empty batch returns null
         const emptyOffset = await stream.ingestRecordsOffset([]);

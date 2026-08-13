@@ -65,22 +65,16 @@ Stream closed successfully
 **Offset-based API (Recommended):**
 
 ```typescript
-// 1. Auto-serializing: pass object directly
-const record = { device_name: 'sensor-001', temp: 22, humidity: 65 };
-const objectOffset = await stream.ingestRecordOffset(record);
-await stream.waitForOffset(objectOffset);
-
-// 2. Pre-serialized: pass JSON string
-const jsonString = JSON.stringify({ device_name: 'sensor-002', temp: 24, humidity: 70 });
-const stringOffset = await stream.ingestRecordOffset(jsonString);
-await stream.waitForOffset(stringOffset);
-
-// 3. High-throughput: send many, wait once
-let lastOffset: bigint;
+// Queue records, then wait once. Immediate waitForOffset after a single ingest
+// is valid for low-volume strict confirmation, not the default bulk pattern.
+const records = [
+    { device_name: 'sensor-001', temp: 22, humidity: 65 },
+    { device_name: 'sensor-002', temp: 24, humidity: 70 }
+];
 for (const record of records) {
-    lastOffset = await stream.ingestRecordOffset(record);
+    await stream.ingestRecordOffset(record);
 }
-await stream.waitForOffset(lastOffset);
+await stream.flush();
 ```
 
 **Future-based API (Deprecated):**
