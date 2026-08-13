@@ -1,6 +1,6 @@
 module zerobus-examples/json-single
 
-go 1.25.3
+go 1.21
 
 require github.com/databricks/zerobus-sdk/go v0.1.0
 
