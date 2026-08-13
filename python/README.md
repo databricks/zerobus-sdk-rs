@@ -349,10 +349,11 @@ except ZerobusException as e:
 ## Handling Stream Failures
 
 The SDK automatically handles retries for transient errors. Enqueue, flush, and close
-failures all surface as `ZerobusException`. An enqueue failure can leave the stream
-active, and both `get_unacked_records()` and `recreate_stream()` require a closed
-stream. Close first, then inspect or recreate. `recreate_stream()` re-queues records
-that were already accepted; it does not retry a payload that failed to enqueue.
+failures all surface as `ZerobusException`. `get_unacked_records()` and
+`recreate_stream()` succeed only after the stream has already closed, which a terminal
+failure does. An enqueue failure leaves the stream active, so those calls fail; raise
+the original error and keep the stream. `recreate_stream()` re-queues records that were
+already accepted; it does not retry a payload that failed to enqueue.
 
 ```python
 from zerobus.sdk.shared import ZerobusException
@@ -364,18 +365,18 @@ try:
 except ZerobusException as e:
     print(f"Ingestion failed: {e}")
     try:
-        stream.close()
+        unacked = list(stream.get_unacked_records())
     except ZerobusException:
-        pass
-
-    unacked = list(stream.get_unacked_records())
+        raise
     print(f"{len(unacked)} previously queued records were unacknowledged.")
-
-    new_stream = sdk.recreate_stream(stream)
     try:
-        new_stream.flush()
-    finally:
-        new_stream.close()
+        new_stream = sdk.recreate_stream(stream)
+        try:
+            new_stream.flush()
+        finally:
+            new_stream.close()
+    except ZerobusException:
+        raise e
 else:
     stream.close()
 ```
