@@ -169,21 +169,38 @@ public class ZerobusArrowStream implements AutoCloseable {
   public void close() throws ZerobusException {
     long handle = nativeHandle;
     if (handle != 0) {
-      // Close the stream first (flushes pending batches)
-      nativeClose(handle);
-
-      // Cache unacked batches before destroying the handle (for recreateArrowStream)
+      ZerobusException closeFailure = null;
       try {
-        cachedUnackedBatches = nativeGetUnackedBatches(handle);
-      } catch (Exception e) {
-        logger.warn("Failed to cache unacked batches: {}", e.getMessage());
-        cachedUnackedBatches = new ArrayList<>();
+        // Close the stream first (flushes pending batches).
+        nativeClose(handle);
+      } catch (ZerobusException e) {
+        // Preserve any unacknowledged batches even when close reports a flush failure.
+        closeFailure = e;
       }
 
-      // Now destroy the handle
+      // Cache unacked batches before destroying the handle (for recreateArrowStream)
+      List<byte[]> unackedBatches;
+      try {
+        unackedBatches = nativeGetUnackedBatches(handle);
+      } catch (ZerobusException cacheFailure) {
+        // Retain the native handle so callers can retry recovery instead of reporting an empty
+        // result and silently losing data.
+        if (closeFailure != null) {
+          closeFailure.addSuppressed(cacheFailure);
+          throw closeFailure;
+        }
+        throw cacheFailure;
+      }
+      cachedUnackedBatches = unackedBatches;
+
+      // Recovery data is safely owned by Java; the native stream can now be destroyed.
       nativeHandle = 0;
       nativeDestroy(handle);
       logger.info("Arrow stream closed");
+
+      if (closeFailure != null) {
+        throw closeFailure;
+      }
     }
   }
 
@@ -321,12 +338,12 @@ public class ZerobusArrowStream implements AutoCloseable {
 
   private native void nativeFlush(long handle);
 
-  private native void nativeClose(long handle);
+  private native void nativeClose(long handle) throws ZerobusException;
 
   private native boolean nativeIsClosed(long handle);
 
   private native String nativeGetTableName(long handle);
 
   @SuppressWarnings("unchecked")
-  private native List<byte[]> nativeGetUnackedBatches(long handle);
+  private native List<byte[]> nativeGetUnackedBatches(long handle) throws ZerobusException;
 }

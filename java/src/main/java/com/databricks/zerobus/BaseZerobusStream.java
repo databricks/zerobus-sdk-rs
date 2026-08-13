@@ -102,23 +102,42 @@ abstract class BaseZerobusStream implements AutoCloseable {
   public void close() throws ZerobusException {
     long handle = nativeHandle;
     if (handle != 0) {
-      // Close the stream first (flushes pending records)
-      nativeClose(handle);
-
-      // Cache unacked records before destroying the handle (for recreateStream)
+      ZerobusException closeFailure = null;
       try {
-        cachedUnackedRecords = nativeGetUnackedRecords(handle);
-        cachedUnackedBatches = nativeGetUnackedBatches(handle);
-      } catch (Exception e) {
-        logger.warn("Failed to cache unacked records: {}", e.getMessage());
-        cachedUnackedRecords = new ArrayList<>();
-        cachedUnackedBatches = new ArrayList<>();
+        // Close the stream first (flushes pending records).
+        nativeClose(handle);
+      } catch (ZerobusException e) {
+        // Closing marks the Rust stream closed even when flushing fails. Keep going so its
+        // unacknowledged records can be recovered before the native handle is destroyed.
+        closeFailure = e;
       }
 
-      // Now destroy the handle
+      // Cache unacked records before destroying the handle (for recreateStream)
+      List<byte[]> unackedRecords;
+      List<EncodedBatch> unackedBatches;
+      try {
+        unackedRecords = nativeGetUnackedRecords(handle);
+        unackedBatches = nativeGetUnackedBatches(handle);
+      } catch (ZerobusException cacheFailure) {
+        // Retain the native handle so callers can retry recovery instead of reporting an empty
+        // result and silently losing data.
+        if (closeFailure != null) {
+          closeFailure.addSuppressed(cacheFailure);
+          throw closeFailure;
+        }
+        throw cacheFailure;
+      }
+      cachedUnackedRecords = unackedRecords;
+      cachedUnackedBatches = unackedBatches;
+
+      // Recovery data is safely owned by Java; the native stream can now be destroyed.
       nativeHandle = 0;
       nativeDestroy(handle);
       logger.info("Stream closed");
+
+      if (closeFailure != null) {
+        throw closeFailure;
+      }
     }
   }
 
@@ -203,11 +222,11 @@ abstract class BaseZerobusStream implements AutoCloseable {
 
   private native void nativeFlush(long handle);
 
-  private native void nativeClose(long handle);
+  private native void nativeClose(long handle) throws ZerobusException;
 
   private native boolean nativeIsClosed(long handle);
 
-  protected native List<byte[]> nativeGetUnackedRecords(long handle);
+  protected native List<byte[]> nativeGetUnackedRecords(long handle) throws ZerobusException;
 
-  protected native List<EncodedBatch> nativeGetUnackedBatches(long handle);
+  protected native List<EncodedBatch> nativeGetUnackedBatches(long handle) throws ZerobusException;
 }

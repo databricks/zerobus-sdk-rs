@@ -48,6 +48,16 @@ impl NativeArrowStreamHandle {
     }
 }
 
+async fn close_native_stream(
+    stream_handle: &NativeArrowStreamHandle,
+) -> databricks_zerobus_ingest_sdk::ZerobusResult<()> {
+    let mut guard = stream_handle.stream.lock().await;
+    if let Some(stream) = guard.as_mut() {
+        stream.close().await?;
+    }
+    Ok(())
+}
+
 /// Destroy an Arrow stream handle.
 ///
 /// # JNI Signature
@@ -228,13 +238,7 @@ pub extern "system" fn Java_com_databricks_zerobus_ZerobusArrowStream_nativeClos
     let stream_handle = unsafe { NativeArrowStreamHandle::borrow_from_raw(handle) };
 
     // Block on the async operation
-    let result = block_on(async {
-        let mut guard = stream_handle.stream.lock().await;
-        if let Some(mut stream) = guard.take() {
-            stream.close().await?;
-        }
-        Ok::<_, databricks_zerobus_ingest_sdk::ZerobusError>(())
-    });
+    let result = block_on(close_native_stream(stream_handle));
 
     if let Err(e) = result {
         throw_from_zerobus_error(&mut env, &e);
@@ -411,3 +415,7 @@ pub extern "system" fn Java_com_databricks_zerobus_ZerobusArrowStream_nativeGetU
 
     list
 }
+
+#[cfg(test)]
+#[path = "arrow_stream/tests.rs"]
+mod tests;

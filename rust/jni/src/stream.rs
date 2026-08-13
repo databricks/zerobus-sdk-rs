@@ -392,7 +392,7 @@ pub extern "system" fn Java_com_databricks_zerobus_BaseZerobusStream_nativeClose
     // Block on the async operation
     let result = block_on(async {
         let mut guard = stream_handle.stream.lock().await;
-        if let Some(mut stream) = guard.take() {
+        if let Some(stream) = guard.as_mut() {
             stream.close().await?;
         }
         Ok::<_, databricks_zerobus_ingest_sdk::ZerobusError>(())

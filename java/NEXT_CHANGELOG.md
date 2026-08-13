@@ -10,6 +10,9 @@
 
 ### Bug Fixes
 
+- Fixed proto, JSON, and Arrow stream recovery losing unacknowledged data during `close()`. Closed
+  native streams now remain available until Java has cached their recovery records or batches.
+
 ### Documentation
 
 ### Internal Changes
