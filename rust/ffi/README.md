@@ -92,35 +92,56 @@ CResult r = {0};
 
 /* init: fetch GET /api/2.1/unity-catalog/tables/{name} and pass its JSON body */
 CZerobusProtoSchema *schema = zerobus_proto_schema_from_uc_json(uc_table_json, &r);
-/* on error schema == NULL; read r.error_message then zerobus_free_error_message(r.error_message) */
-
-uintptr_t dlen;
-const uint8_t *desc = zerobus_proto_schema_descriptor_bytes(schema, &dlen);
-CZerobusStream *stream = zerobus_sdk_create_stream(sdk, table_name, desc, dlen,
-                                                   client_id, client_secret, &opts, &r);
-
-/* encode, ingest, flush, close, and free every C allocation */
-uint8_t *buf; uintptr_t len;
-if (!zerobus_proto_schema_encode_json(schema, record_json, &buf, &len, &r)) {
-    /* handle r.error_message, then zerobus_free_error_message(r.error_message) */
+if (schema == NULL) {
+    zerobus_free_error_message(r.error_message);
+    return;
 }
+
+uintptr_t dlen = 0;
+const uint8_t *desc = zerobus_proto_schema_descriptor_bytes(schema, &dlen);
+if (desc == NULL) {
+    zerobus_proto_schema_free(schema);
+    return;
+}
+
+r = (CResult){0};
+CZerobusStream *stream = zerobus_sdk_create_stream(
+    sdk, table_name, desc, dlen, client_id, client_secret, &opts, &r);
+if (stream == NULL) {
+    zerobus_free_error_message(r.error_message);
+    zerobus_proto_schema_free(schema);
+    return;
+}
+
+uint8_t *buf = NULL;
+uintptr_t len = 0;
+r = (CResult){0};
+if (!zerobus_proto_schema_encode_json(schema, record_json, &buf, &len, &r)) {
+    zerobus_free_error_message(r.error_message);
+    zerobus_stream_free(stream);
+    zerobus_proto_schema_free(schema);
+    return;
+}
+
 const uint8_t *records[] = { buf };
 const uintptr_t record_lens[] = { len };
-CResult ingest = {0};
-zerobus_stream_ingest_proto_records(stream, records, record_lens, 1, &ingest);
+r = (CResult){0};
+if (zerobus_stream_ingest_proto_records(stream, records, record_lens, 1, &r) < 0) {
+    zerobus_free_error_message(r.error_message);
+    zerobus_free_proto_bytes(buf, len);
+    zerobus_stream_free(stream);
+    zerobus_proto_schema_free(schema);
+    return;
+}
 zerobus_free_proto_bytes(buf, len);
-if (ingest.error_message) {
-    zerobus_free_error_message(ingest.error_message);
+
+r = (CResult){0};
+if (!zerobus_stream_flush(stream, &r)) {
+    zerobus_free_error_message(r.error_message);
 }
-CResult flush = {0};
-zerobus_stream_flush(stream, &flush);
-if (flush.error_message) {
-    zerobus_free_error_message(flush.error_message);
-}
-CResult close_r = {0};
-zerobus_stream_close(stream, &close_r);
-if (close_r.error_message) {
-    zerobus_free_error_message(close_r.error_message);
+r = (CResult){0};
+if (!zerobus_stream_close(stream, &r)) {
+    zerobus_free_error_message(r.error_message);
 }
 zerobus_stream_free(stream);
 zerobus_sdk_free(sdk);
