@@ -49,7 +49,10 @@ class AckCallback:
     acknowledges or fails. A batch that is accepted by the stream produces
     one callback, not one callback per record in the batch. Pre-queue
     validation, size, type, and closed-stream failures raise immediately
-    and do not generate a callback.
+    and do not generate a callback. ``close()`` waits at most
+    ``callback_max_wait_time_ms`` (default 5000) for in-flight callbacks,
+    so a callback per queued submission is not guaranteed if that budget
+    expires.
 
     Example:
         class MyCallback(AckCallback):

@@ -556,6 +556,10 @@ class MyCallback(AckCallback):
         pass
 ```
 
+`close()` waits at most `callback_max_wait_time_ms` (default 5000 ms) for
+in-flight callbacks. A callback per queued submission is not guaranteed if that
+budget expires.
+
 ### `HeadersProvider`
 
 For custom authentication (e.g. custom token providers), implement `HeadersProvider` and pass it to `create_stream()`. Must include both `authorization` and `x-databricks-zerobus-table-name` headers. See [`examples/`](examples/) for implementation details.

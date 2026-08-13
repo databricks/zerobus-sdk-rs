@@ -82,9 +82,11 @@ table_properties = TableProperties(TABLE_NAME, record_pb2.AirQuality.DESCRIPTOR)
 
 # Recommended: ingest_record_offset() then flush() once
 offset = stream.ingest_record_offset(record)
+stream.flush()
 
 # Preferred bulk path: ingest_records_offset() then flush() once
 # batch_offset = stream.ingest_records_offset([record])
+# stream.flush()
 
 # Option 2: Pass pre-serialized bytes (client controls serialization)
 # offset = stream.ingest_record_offset(record.SerializeToString())
@@ -104,9 +106,11 @@ table_properties = TableProperties(TABLE_NAME)
 
 # Recommended: ingest_record_offset() then flush() once
 offset = stream.ingest_record_offset(record_dict)
+stream.flush()
 
 # Preferred bulk path: ingest_records_offset() then flush() once
 # batch_offset = stream.ingest_records_offset([record_dict])
+# stream.flush()
 
 # Option 2: Pass pre-serialized JSON string (client controls serialization)
 # offset = stream.ingest_record_offset(json.dumps(record_dict))
