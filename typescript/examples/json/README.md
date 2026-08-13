@@ -110,13 +110,12 @@ JSON Batch Ingestion Example
 Stream created
 
 === Offset-based API (Recommended) ===
-[Auto-serializing] Batch of 3 records sent with offset ID: 0
-[Auto-serializing] Batch acknowledged with offset ID: 0
-[Pre-serialized] Batch of 3 records sent with offset ID: 1
-[Pre-serialized] Batch acknowledged with offset ID: 1
+[Auto-serializing] Batch of 3 records queued with offset ID: 0
+[Pre-serialized] Batch of 3 records queued with offset ID: 1
 
-[Large batch] Sending batch of 100 records...
-[Large batch] 100 records acknowledged with offset ID: 2
+[Large batch] Queueing batch of 100 records...
+[Large batch] 100 records queued with offset ID: 2
+All offset-API batches acknowledged
 [Empty batch] Returns: null
 
 === Future-based API (Deprecated) ===
@@ -137,9 +136,6 @@ const objectBatch = [
     { device_name: 'sensor-003', temp: 24, humidity: 69 }
 ];
 const objectBatchOffset = await stream.ingestRecordsOffset(objectBatch);
-if (objectBatchOffset !== null) {
-    await stream.waitForOffset(objectBatchOffset);
-}
 
 // 2. Pre-serialized: array of JSON strings
 const stringBatch = [
@@ -147,6 +143,8 @@ const stringBatch = [
     JSON.stringify({ device_name: 'sensor-005', temp: 26, humidity: 73 })
 ];
 const stringBatchOffset = await stream.ingestRecordsOffset(stringBatch);
+
+await stream.flush();
 ```
 
 **Batch semantics:**

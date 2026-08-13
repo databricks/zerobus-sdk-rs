@@ -688,7 +688,7 @@ const descriptorBase64 = loadDescriptorProto({
 
 ## Error Handling
 
-The SDK includes automatic recovery for transient failures (enabled by default with `recovery: true`). For permanent failures, use `recreateStream()` to automatically recover all unacknowledged batches. Always use try/finally blocks to ensure streams are properly closed:
+The SDK includes automatic recovery for transient failures (enabled by default with `recovery: true`). `getUnackedBatches()` and `recreateStream()` succeed only after a terminal native-stream failure, which already closes the stream. An enqueue failure leaves the wrapper active, so those calls reject; rethrow the original error. Do not call `stream.close()` before `recreateStream()`, because close releases the native handle.
 
 ```typescript
 let replacement;
@@ -698,16 +698,14 @@ try {
     console.log(`Success: offset ${offset}`);
 } catch (error) {
     console.error('Ingestion failed:', error);
-
-    // Recreate only after a terminal stream failure. Enqueue errors leave the
-    // wrapper active, and close() releases the native handle needed by recreateStream().
     try {
         const unackedBatches = await stream.getUnackedBatches();
         console.log(`Batches to recover: ${unackedBatches.length}`);
         replacement = await sdk.recreateStream(stream);
         await replacement.flush();
     } catch (recoveryError) {
-        console.error('Recovery skipped or failed:', recoveryError);
+        console.error('Stream was not terminal or recovery failed:', recoveryError);
+        throw error;
     } finally {
         if (replacement) {
             await replacement.close();
@@ -788,11 +786,12 @@ This method is the **recommended approach** for recovering from stream failures.
 **Example:**
 ```typescript
 try {
-  await stream.ingestRecords(batch);
+  await stream.ingestRecordsOffset(batch);
+  await stream.flush();
 } catch (error) {
-  // Automatically recreate stream and recover all unacked batches
+  // recreateStream() rejects unless the native stream already failed closed.
   const newStream = await sdk.recreateStream(stream);
-  // Continue ingesting with newStream
+  await newStream.flush();
 }
 ```
 
