@@ -72,7 +72,8 @@ stream.Flush();
 
 if (failed > 0)
 {
-    Console.WriteLine($"{5 - failed} records flushed; {failed} ingest calls failed.");
+    throw new InvalidOperationException(
+        $"{5 - failed} records flushed; {failed} ingest calls failed.");
 }
 else
 {
