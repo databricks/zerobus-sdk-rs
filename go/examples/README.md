@@ -129,6 +129,12 @@ message := &pb.AirQuality{
 }
 data, _ := proto.Marshal(message)
 offset, err := stream.IngestRecordOffset(data)
+if err != nil {
+    log.Fatal(err)
+}
+if err := stream.Flush(); err != nil {
+    log.Fatal(err)
+}
 ```
 
 ### Batch Ingestion
