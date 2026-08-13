@@ -28,11 +28,19 @@ import (
 )
 
 // ackObserver counts acknowledgements from callback hooks.
-type ackObserver struct{ acked atomic.Int64 }
+type ackObserver struct {
+	acked  atomic.Int64
+	offset atomic.Int64
+	failed atomic.Bool
+}
 
-func (o *ackObserver) OnAck(offset int64) { o.acked.Add(1) }
+func (o *ackObserver) OnAck(offset int64) {
+	o.offset.Store(offset)
+	o.acked.Add(1)
+}
 
 func (o *ackObserver) OnError(offset int64, err error) {
+	o.failed.Store(true)
 	log.Printf("record at offset %d failed: %v", offset, err)
 }
 
@@ -79,8 +87,17 @@ func main() {
 	// A batch produces one callback event, not one per record. Callback delivery
 	// can still be running when Close() returns, so wait for it before exit.
 	deadline := time.Now().Add(5 * time.Second)
-	for obs.acked.Load() < 1 && time.Now().Before(deadline) {
+	for obs.acked.Load() < 1 && !obs.failed.Load() && time.Now().Before(deadline) {
 		time.Sleep(10 * time.Millisecond)
+	}
+	if obs.failed.Load() {
+		log.Fatal("batch callback reported an error")
+	}
+	if obs.acked.Load() < 1 {
+		log.Fatal("timed out waiting for batch callback")
+	}
+	if got := obs.offset.Load(); got != batchOffset {
+		log.Fatalf("callback offset %d != batch offset %d", got, batchOffset)
 	}
 
 	if err := stream.Close(); err != nil {
