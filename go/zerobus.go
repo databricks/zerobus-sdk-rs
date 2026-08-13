@@ -6,12 +6,13 @@
 //
 // # Installation
 //
-// This package requires a one-time build step to compile the Rust FFI layer:
+// This package is a CGO wrapper around a Rust core. Tagged releases include
+// pre-built libraries, so consumers can install with:
 //
-//	go get github.com/databricks/zerobus-sdk/go
-//	go generate github.com/databricks/zerobus-sdk/go
+//	go get github.com/databricks/zerobus-sdk/go@v1.4.0
 //
-// Prerequisites: Go 1.19+, Rust 1.70+, CGO enabled
+// Prerequisites for consumers: Go 1.21+, CGO enabled, a C compiler.
+// Rust and `go generate` are required only when building from source.
 //
 // # Quick Start
 //
@@ -721,8 +722,8 @@ func (st *ZerobusStream) WaitForOffset(offset int64) error {
 
 // GetUnackedRecords retrieves all records that have not yet been acknowledged by the server.
 //
-// IMPORTANT: This method should only be called AFTER the stream has closed or failed.
-// Calling it on an active stream will return an error.
+// IMPORTANT: Call this on a failed stream before Close(). Close() nils the
+// handle and frees native resources, so a later GetUnackedRecords() call fails.
 //
 // Use this method to:
 //   - Retrieve unacknowledged records after stream failure for retry logic
@@ -737,15 +738,15 @@ func (st *ZerobusStream) WaitForOffset(offset int64) error {
 //
 // Example:
 //
-//	if err := stream.Close(); err != nil {
-//	    // Stream failed, check for unacked records
+//	if err := stream.Flush(); err != nil {
 //	    unacked, err := stream.GetUnackedRecords()
 //	    if err != nil {
-//	        log.Fatal(err)
+//	        log.Printf("could not inspect unacked records: %v", err)
+//	    } else {
+//	        log.Printf("Failed to acknowledge %d records", len(unacked))
 //	    }
-//	    log.Printf("Failed to acknowledge %d records", len(unacked))
-//	    // Retry with a new stream
 //	}
+//	_ = stream.Close()
 func (st *ZerobusStream) GetUnackedRecords() ([]interface{}, error) {
 	if st.ptr == nil {
 		return nil, &ZerobusError{Message: "Stream has been closed", IsRetryable: false}

@@ -63,10 +63,23 @@ func main() {
 		log.Printf("Record %d queued with offset ID: %d", i+1, offset)
 	}
 
-	// 4. Flush once, then close. On failure, recover unacked records.
+	// 4. Flush once, then close. A flush timeout can leave the stream active, so
+	// only recover when unacked retrieval succeeds.
 	if err := stream.Flush(); err != nil {
-		log.Printf("stream failed: %v", err)
-		recoverUnacked(sdk, cfg, stream)
+		log.Printf("flush failed: %v", err)
+		unacked, unackedErr := stream.GetUnackedRecords()
+		if unackedErr != nil {
+			log.Printf("stream still active or unacked retrieval failed: %v", unackedErr)
+			if closeErr := stream.Close(); closeErr != nil {
+				log.Printf("close: %v", closeErr)
+			}
+			return
+		}
+		if len(unacked) == 0 {
+			_ = stream.Close()
+			return
+		}
+		recoverUnacked(sdk, cfg, stream, unacked)
 		return
 	}
 	if err := stream.Close(); err != nil {
@@ -75,16 +88,10 @@ func main() {
 	log.Println("All records acknowledged. Stream closed successfully.")
 }
 
-// recoverUnacked re-ingests records from a failed stream on a new stream.
-func recoverUnacked(sdk *zerobus.SDK, cfg config.Settings, failed *zerobus.Stream) {
-	unacked, err := failed.GetUnackedRecords()
-	if err != nil {
-		log.Fatalf("get unacked records: %v", err)
-	}
+// recoverUnacked re-ingests previously retrieved records on a new stream.
+func recoverUnacked(sdk *zerobus.SDK, cfg config.Settings, failed *zerobus.Stream, unacked [][]byte) {
+	defer failed.Close()
 	log.Printf("Recovering %d unacknowledged records on a fresh stream.", len(unacked))
-	if len(unacked) == 0 {
-		return
-	}
 	retry, err := openStream(sdk, cfg)
 	if err != nil {
 		log.Fatalf("reopen stream: %v", err)

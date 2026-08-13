@@ -93,7 +93,7 @@ Before using the SDK, you need a Databricks workspace URL, a Delta table, and a 
 go get github.com/databricks/zerobus-sdk/go@latest
 ```
 
-> **Note:** Tagged releases (e.g., `v1.0.0`) come with pre-built Rust libraries for Linux, macOS, and Windows. If you use `@main` or a commit hash, you will need to have Rust installed and run `go generate` to build the library yourself.
+> Tagged releases (for example `v1.4.0`) include pre-built Rust libraries for Linux, macOS, and Windows. Consumers do not need Rust or `go generate`. Rust is required only when you build from `@main`, a commit hash, or a local checkout.
 
 **In your code:**
 
@@ -113,7 +113,7 @@ func main() {
 }
 ```
 
-> **Note:** After the initial `go generate` step, regular `go build` works normally. The Rust library is statically linked into your binary.
+> After `go get` of a tagged release, `go build` works normally. The pre-built Rust library is statically linked into your binary.
 
 ### Development Setup
 
@@ -142,7 +142,7 @@ The SDK supports two serialization formats and two ingestion methods:
 - **Protocol Buffers** (Recommended for production): Type-safe approach with schema validation at compile time
 
 **Ingestion Methods:**
-- **Single-record** (`IngestRecordOffset`): Ingest records one at a time with per-record acknowledgment
+- **Single-record** (`IngestRecordOffset`): Queue records one at a time. The returned offset is an admission handle, not a durability confirmation. Call `Flush()` once to wait for server acknowledgments.
 - **Batch** (`IngestRecordsOffset`): Ingest multiple records at once with all-or-nothing semantics for higher throughput
 
 See [`examples/README.md`](examples/README.md) for detailed setup instructions and examples for all combinations.
@@ -593,9 +593,11 @@ for i := 0; i < 100; i++ {
 wg.Wait()
 close(errCh)
 
-// Check for errors
 for err := range errCh {
     log.Printf("Ingestion error: %v", err)
+}
+if err := stream.Flush(); err != nil {
+    log.Fatal(err)
 }
 ```
 
@@ -710,17 +712,19 @@ if err := stream.Close(); err != nil {
 }
 ```
 
-If the stream fails, retrieve unacknowledged records:
+If Flush or ingest fails, inspect unacked records before Close(). Close() nils the stream handle and frees native resources, so GetUnackedRecords() cannot be called afterward.
 
 ```go
-if err := stream.Close(); err != nil {
-    // Stream failed, get unacked records
-    unacked, err := stream.GetUnackedRecords()
-    if err != nil {
-        log.Fatal(err)
+if err := stream.Flush(); err != nil {
+    unacked, unackedErr := stream.GetUnackedRecords()
+    if unackedErr != nil {
+        log.Printf("could not inspect unacked records: %v", unackedErr)
+    } else {
+        log.Printf("Failed to ack %d records", len(unacked))
     }
-    log.Printf("Failed to ack %d records", len(unacked))
-    // Retry with a new stream
+}
+if err := stream.Close(); err != nil {
+    log.Printf("close: %v", err)
 }
 ```
 
@@ -886,12 +890,12 @@ stream, err := sdk.CreateArrowStreamWithHeadersProvider(
 
 ### Unacked Batches
 
-If the stream fails, retrieve unacknowledged batches to retry on a new stream:
+If Flush fails, inspect unacked batches before Close(). Close() frees the handle.
 
 ```go
-if err := stream.Close(); err != nil {
+if err := stream.Flush(); err != nil {
     unacked, _ := stream.GetUnackedBatches()
-    // re-ingest unacked on a new stream
+    // re-ingest unacked on a new stream, then Close() the failed stream
 }
 ```
 
@@ -959,7 +963,7 @@ The test suite includes:
 9. **Use Protocol Buffers for Production** - More efficient than JSON for high-volume scenarios
 10. **Secure Credentials** - Never hardcode secrets; use environment variables or secret managers
 11. **Test Recovery** - Simulate failures to verify your error handling logic
-12. **One Stream Per Goroutine** - Don't share streams across goroutines; create separate streams for concurrent ingestion
+12. **Concurrent ingestion** - One stream can be used from multiple goroutines. Create separate streams when you want independent tables, credentials, or failure isolation.
 
 ## Migration Guide
 
@@ -1223,7 +1227,7 @@ func (st *ZerobusStream) GetUnackedRecords() ([]interface{}, error)
 
 Returns a snapshot of all records that have been sent to the server but not yet confirmed as durably written.
 
-**IMPORTANT:** This method should **only be called after the stream has closed or failed**. Calling it on an active stream will return an error.
+**IMPORTANT:** Call this on a failed stream before `Close()`. `Close()` nils the handle and frees native resources, so a later `GetUnackedRecords()` call fails with "Stream has been closed". An active stream also returns an error.
 
 **What you get:**
 - A copy of all pending records still waiting for server acknowledgment
@@ -1231,27 +1235,23 @@ Returns a snapshot of all records that have been sent to the server but not yet 
 - Each element is either `string` (JSON) or `[]byte` (protobuf)
 
 **When to use:**
-- After stream failure to retrieve unacknowledged records for retry
-- After `Close()` fails to see which records weren't durably written
-- For implementing custom retry logic after stream errors
+- After a terminal Flush or ingest failure, before `Close()`
+- Not after `Close()`, which releases the stream handle
 
 **Note:** This creates a memory snapshot of pending data. For large numbers of unacked records, this can temporarily increase memory usage.
 
 **Example:**
 ```go
-// Try to close the stream
-if err := stream.Close(); err != nil {
-    // Stream failed to close, check for unacked records
+if err := stream.Flush(); err != nil {
     unacked, err := stream.GetUnackedRecords()
     if err != nil {
-        log.Fatal(err)
+        log.Printf("could not inspect unacked records: %v", err)
+    } else {
+        log.Printf("%d records failed to be acknowledged", len(unacked))
     }
-    log.Printf("%d records failed to be acknowledged", len(unacked))
-
-    // Retry with a new stream
-    for _, record := range unacked {
-        newStream.IngestRecordOffset(record)
-    }
+}
+if closeErr := stream.Close(); closeErr != nil {
+    log.Printf("close: %v", closeErr)
 }
 ```
 
@@ -1269,7 +1269,7 @@ ack, err := stream.IngestRecord(`{"id": 1}`)
 if err != nil {
     log.Fatal(err)
 }
-offset, err := ack.Await()  // Returns immediately with cached offset
+offset, err := ack.Await()  // Blocks until the server acknowledges
 ```
 
 ```go
@@ -1322,15 +1322,15 @@ Represents an acknowledgment for an ingested record. The offset is available imm
 func (ack *RecordAck) Await() (int64, error)
 ```
 
-Returns the offset for the ingested record. Returns immediately since the offset is already available.
+Returns the offset after waiting for server durability via `WaitForOffset()`. This is not immediate. Use `Offset()` when you only need the queued offset without waiting.
 
 **Example:**
 ```go
-ack, _ := stream.IngestRecord(data)  // Deprecated
-offset, err := ack.Await()
+ack, err := stream.IngestRecord(data)  // Deprecated
 if err != nil {
-    log.Printf("Record failed: %v", err)
+    log.Fatal(err)
 }
+offset, err := ack.Await()  // Blocks until the server acknowledges
 ```
 
 **Prefer the new API:**
@@ -1483,7 +1483,7 @@ make build
 # Build only Rust FFI
 make build-rust
 
-# Build only Go SDK
+# Build the Go package. This target also builds the Rust FFI first.
 make build-go
 
 # Build examples

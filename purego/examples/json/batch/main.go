@@ -20,6 +20,7 @@ import (
 	"context"
 	"log"
 	"sync/atomic"
+	"time"
 
 	"github.com/databricks/zerobus-sdk/purego/examples/config"
 	"github.com/databricks/zerobus-sdk/purego/examples/internal/exampleutil"
@@ -71,20 +72,19 @@ func main() {
 	}
 	log.Printf("Batch of %d records queued; batch offset ID: %d", len(batch), batchOffset)
 
-	// Confirm the batch.
-	if batchOffset >= 0 {
-		if err := stream.WaitForOffset(batchOffset); err != nil {
-			log.Fatalf("wait for offset %d: %v", batchOffset, err)
-		}
-		log.Printf("Batch acknowledged at offset ID: %d", batchOffset)
-	}
-
-	// Flush pending records, then close.
 	if err := stream.Flush(); err != nil {
 		log.Fatalf("flush: %v", err)
 	}
+
+	// A batch produces one callback event, not one per record. Callback delivery
+	// can still be running when Close() returns, so wait for it before exit.
+	deadline := time.Now().Add(5 * time.Second)
+	for obs.acked.Load() < 1 && time.Now().Before(deadline) {
+		time.Sleep(10 * time.Millisecond)
+	}
+
 	if err := stream.Close(); err != nil {
 		log.Fatalf("close: %v", err)
 	}
-	log.Printf("Stream closed successfully. Callback observed %d acknowledgements.", obs.acked.Load())
+	log.Printf("Stream closed. Callback observed %d acknowledgements (expected 1 for the batch).", obs.acked.Load())
 }

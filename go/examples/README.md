@@ -111,6 +111,12 @@ go run main.go
 ```go
 jsonRecord := `{"device_name": "sensor-001", "temp": 20, "humidity": 60}`
 offset, err := stream.IngestRecordOffset(jsonRecord)
+if err != nil {
+    log.Fatal(err)
+}
+if err := stream.Flush(); err != nil {
+    log.Fatal(err)
+}
 ```
 
 **Protocol Buffers:**
@@ -135,6 +141,12 @@ records := []interface{}{
     `{"device_name": "sensor-002", "temp": 21, "humidity": 61}`,
 }
 batchOffset, err := stream.IngestRecordsOffset(records)
+if err != nil {
+    log.Fatal(err)
+}
+if err := stream.Flush(); err != nil {
+    log.Fatal(err)
+}
 ```
 
 **Protocol Buffers:**
@@ -147,6 +159,12 @@ for i := 0; i < 5; i++ {
     records = append(records, data)
 }
 batchOffset, err := stream.IngestRecordsOffset(records)
+if err != nil {
+    log.Fatal(err)
+}
+if err := stream.Flush(); err != nil {
+    log.Fatal(err)
+}
 ```
 
 ### Fire-and-Forget Ingestion

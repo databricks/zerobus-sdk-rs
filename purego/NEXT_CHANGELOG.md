@@ -8,6 +8,9 @@
 
 ### Documentation
 
+- Flush recovery no longer treats every flush error as terminal. Batch examples
+  expect one callback per batch and wait for that callback before exit.
+
 ### Internal Changes
 
 ### Breaking Changes
