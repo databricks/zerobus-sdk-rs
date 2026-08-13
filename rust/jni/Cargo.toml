@@ -31,3 +31,14 @@ arrow-ipc = { workspace = true, features = ["lz4", "zstd"] }
 [features]
 default = []
 test-helpers = []
+
+[dev-dependencies]
+arrow-flight.workspace = true
+databricks-zerobus-ingest-sdk = { path = "../sdk", features = ["arrow-flight", "testing"] }
+futures.workspace = true
+rcgen = "0.13"
+serde.workspace = true
+serde_json.workspace = true
+tokio = { workspace = true, features = ["macros", "net", "rt-multi-thread", "sync", "time"] }
+tokio-stream = { workspace = true, features = ["net"] }
+tonic = { workspace = true, features = ["transport"] }

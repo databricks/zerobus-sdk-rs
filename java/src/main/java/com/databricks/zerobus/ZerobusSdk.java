@@ -1,6 +1,8 @@
 package com.databricks.zerobus;
 
 import com.google.protobuf.Message;
+import java.nio.charset.StandardCharsets;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.CompletableFuture;
 import org.apache.arrow.vector.types.pojo.Schema;
@@ -554,7 +556,7 @@ public class ZerobusSdk implements AutoCloseable {
     // Get unacked batches from the closed stream
     List<EncodedBatch> unackedBatches;
     try {
-      unackedBatches = closedStream.getUnackedBatches();
+      unackedBatches = closedStream.cacheAndReleaseUnackedBatches();
     } catch (ZerobusException e) {
       CompletableFuture<ZerobusProtoStream> failed = new CompletableFuture<>();
       failed.completeExceptionally(e);
@@ -589,13 +591,19 @@ public class ZerobusSdk implements AutoCloseable {
                   closedStream.getHeadersProvider());
 
           // Re-ingest unacked records
+          boolean replaySucceeded = false;
           try {
             for (EncodedBatch batch : unackedBatches) {
               newStream.ingestRecordsOffset(batch.getRecords());
             }
             newStream.flush();
+            replaySucceeded = true;
           } catch (ZerobusException e) {
             throw new RuntimeException("Failed to re-ingest unacked records", e);
+          } finally {
+            if (!replaySucceeded) {
+              newStream.discardFailedRecreation();
+            }
           }
 
           return newStream;
@@ -625,7 +633,11 @@ public class ZerobusSdk implements AutoCloseable {
     // Get unacked records from the closed stream
     List<String> unackedRecords;
     try {
-      unackedRecords = closedStream.getUnackedRecords();
+      List<byte[]> encodedRecords = closedStream.cacheAndReleaseUnackedRecords();
+      unackedRecords = new ArrayList<>(encodedRecords.size());
+      for (byte[] record : encodedRecords) {
+        unackedRecords.add(new String(record, StandardCharsets.UTF_8));
+      }
     } catch (ZerobusException e) {
       CompletableFuture<ZerobusJsonStream> failed = new CompletableFuture<>();
       failed.completeExceptionally(e);
@@ -659,13 +671,19 @@ public class ZerobusSdk implements AutoCloseable {
                   closedStream.getHeadersProvider());
 
           // Re-ingest unacked records
+          boolean replaySucceeded = false;
           try {
             for (String json : unackedRecords) {
               newStream.ingestRecordOffset(json);
             }
             newStream.flush();
+            replaySucceeded = true;
           } catch (ZerobusException e) {
             throw new RuntimeException("Failed to re-ingest unacked records", e);
+          } finally {
+            if (!replaySucceeded) {
+              newStream.discardFailedRecreation();
+            }
           }
 
           return newStream;
@@ -690,7 +708,7 @@ public class ZerobusSdk implements AutoCloseable {
 
     List<byte[]> unackedBatches;
     try {
-      unackedBatches = closedStream.getUnackedBatches();
+      unackedBatches = closedStream.cacheAndReleaseUnackedBatches();
     } catch (ZerobusException e) {
       CompletableFuture<ZerobusArrowStream> failed = new CompletableFuture<>();
       failed.completeExceptionally(e);
@@ -722,13 +740,19 @@ public class ZerobusSdk implements AutoCloseable {
                   closedStream.getClientSecret(),
                   closedStream.getHeadersProvider());
 
+          boolean replaySucceeded = false;
           try {
             for (byte[] batchIpc : unackedBatches) {
               newStream.ingestBatchIpc(batchIpc);
             }
             newStream.flush();
+            replaySucceeded = true;
           } catch (ZerobusException e) {
             throw new RuntimeException("Failed to re-ingest unacked Arrow batches", e);
+          } finally {
+            if (!replaySucceeded) {
+              newStream.discardFailedRecreation();
+            }
           }
 
           return newStream;
@@ -792,13 +816,19 @@ public class ZerobusSdk implements AutoCloseable {
                   closedStream.getClientSecret());
 
           // Re-ingest unacked records as raw bytes
+          boolean replaySucceeded = false;
           try {
             for (byte[] record : unackedRecords) {
               newStream.nativeIngestRecordOffset(newStream.nativeHandle, record, false);
             }
             newStream.flush();
+            replaySucceeded = true;
           } catch (ZerobusException e) {
             throw new RuntimeException("Failed to re-ingest unacked records", e);
+          } finally {
+            if (!replaySucceeded) {
+              newStream.discardFailedRecreation();
+            }
           }
 
           return newStream;
