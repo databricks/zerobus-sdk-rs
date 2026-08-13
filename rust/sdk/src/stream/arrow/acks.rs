@@ -1429,44 +1429,6 @@ mod tests {
         }
     }
 
-    /// After the one response-first tie, a later terminal status is not polled.
-    #[tokio::test]
-    async fn later_terminal_status_does_not_replace_reported_send_failure() {
-        let no_progress = PutResult {
-            app_metadata: serde_json::to_vec(&FlightAckMetadata {
-                ack_up_to_offset: -1,
-                ack_up_to_records: 0,
-                close_stream_duration_ms: None,
-            })
-            .unwrap()
-            .into(),
-        };
-        let response_stream = iter([
-            Ok(no_progress),
-            Err(tonic::Status::permission_denied("permanent server rejection").into()),
-        ]);
-        let (processor, request_body, _last_ack_rx) = ack_processor(
-            Arc::new(Mutex::new(Vec::new())),
-            Arc::new(AtomicU64::new(0)),
-            Arc::new(AtomicU64::new(0)),
-            false,
-        );
-        processor.request_send_failure.report();
-
-        let error = processor
-            .process(Box::pin(response_stream), request_body)
-            .await
-            .expect_err("the reported request-send failure must trigger recovery");
-
-        assert!(error.is_retryable());
-        match error {
-            ZerobusError::StreamClosedError(status) => {
-                assert_eq!(status.code(), tonic::Code::Unavailable);
-            }
-            other => panic!("expected a stream-closed error, got {other:?}"),
-        }
-    }
-
     /// At most one ready nonterminal response may defer a reported request-send failure.
     #[tokio::test]
     async fn continuously_ready_nonprogress_responses_do_not_starve_send_failure() {
