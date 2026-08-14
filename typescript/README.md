@@ -705,7 +705,10 @@ try {
         await replacement.flush();
     } catch (recoveryError) {
         console.error('Stream was not terminal or recovery failed:', recoveryError);
-        throw error;
+        throw new AggregateError(
+            [error, recoveryError],
+            'ingestion and recovery both failed',
+        );
     } finally {
         if (replacement) {
             await replacement.close();

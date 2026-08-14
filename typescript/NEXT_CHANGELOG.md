@@ -31,8 +31,6 @@
 - Corrected README, example, and JSDoc snippets for CommonJS async entry points,
   generated Protobuf field names, variable declarations, stream recovery, and
   custom-header callbacks.
-- Documented the `HeadersProvider` shape that `createStream()` actually accepts
-  (`getHeadersCallback` returning header tuples synchronously).
 - Documented that omitted `descriptorProto` does not select JSON, that the
   inherited inflight default is 1,000,000, and that `close()` is still required
   to flush. README `main().catch` handlers now set a non-zero exit code.
@@ -58,3 +56,7 @@
 ### Deprecations
 
 ### API Changes
+
+- `HeadersProvider` is the shape `createStream()` actually accepts:
+  `getHeadersCallback` returning header tuples synchronously. Classes with
+  async `getHeaders()` are not compatible.
