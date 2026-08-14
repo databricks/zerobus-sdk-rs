@@ -119,12 +119,11 @@ let stream = sdk
 
 **Expected output:**
 ```
-[Auto-serializing] Batch of 3 records sent with offset ID: 0
-[Auto-serializing] Batch acknowledged with offset ID: 0
-[Pre-serialized] Batch of 3 records sent with offset ID: 1
-[Pre-serialized] Batch acknowledged with offset ID: 1
-[Backward-compatible] Batch of 3 records sent with offset ID: 2
-[Backward-compatible] Batch acknowledged with offset ID: 2
+=== Offset-based API (Recommended) ===
+[Auto-serializing] Batch of 3 records queued with offset ID: 0
+[Pre-serialized] Batch of 3 records queued with offset ID: 1
+[Backward-compatible] Batch of 3 records queued with offset ID: 2
+All offset-API batches acknowledged
 Stream closed successfully
 ```
 

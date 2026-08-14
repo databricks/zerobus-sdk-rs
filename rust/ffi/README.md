@@ -135,17 +135,23 @@ if (zerobus_stream_ingest_proto_records(stream, records, record_lens, 1, &r) < 0
 }
 zerobus_free_proto_bytes(buf, len);
 
+int failed = 0;
 r = (CResult){0};
 if (!zerobus_stream_flush(stream, &r)) {
     zerobus_free_error_message(r.error_message);
+    failed = 1;
 }
 r = (CResult){0};
 if (!zerobus_stream_close(stream, &r)) {
     zerobus_free_error_message(r.error_message);
+    failed = 1;
 }
 zerobus_stream_free(stream);
 zerobus_sdk_free(sdk);
 zerobus_proto_schema_free(schema);
+if (failed) {
+    return;
+}
 ```
 
 Encoding contract: record object keys are matched to column names; unknown keys
