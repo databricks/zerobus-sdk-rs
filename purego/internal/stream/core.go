@@ -689,11 +689,11 @@ func (cs *CoreStream[Req, Resp]) WaitForOffset(ctx context.Context, offset int64
 }
 
 // GetUnackedBatches returns records that were ingested but never acknowledged,
-// grouped as they were submitted: one entry per Ingest or IngestBatch call, in
-// offset order. The grouping is the unit the server acks atomically, so a caller
-// replaying after a failure can resubmit each group as one batch and reproduce
-// the original durability boundaries. Recovering a partial batch requires
-// knowing which records shared an offset, which a flat list cannot express.
+// grouped by the call that submitted them: one entry per Ingest or IngestBatch,
+// in offset order. Each entry is safe to resubmit as one batch, which a flat list
+// cannot express. For proto and JSON an entry is exactly what its call
+// submitted; a protocol that can acknowledge part of an item returns only that
+// item's unacknowledged suffix.
 //
 // The result is a fresh copy on every call: the unacked set is consolidated into
 // retained storage once, and each call decodes a clone. A diagnostic read
@@ -1015,10 +1015,11 @@ waitLoop:
 		}
 	case errors.As(cause, &ps):
 		// A server-requested rotation is orderly: park the sender, half-close
-		// requests, and drain responses to EOF before reconnecting. This lets the
-		// service finish late acknowledgments and observe END_STREAM instead of
-		// an abrupt cancellation. gracefulTeardown still hard-aborts if the
-		// shared drain budget expires.
+		// requests, and drain responses to EOF before reconnecting, so the
+		// service finishes late acknowledgments and observes END_STREAM. An
+		// outstanding Send also finishes, keeping an ack already received for it.
+		// The receiver's wait for that Send and gracefulTeardown are each bounded
+		// by the drain budget, so a stuck Send cannot hold rotation open.
 		cs.gracefulTeardown(
 			stream, senderExited, senderExitCh, receiverDone,
 		)

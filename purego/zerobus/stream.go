@@ -82,7 +82,9 @@ func (s *Stream) GetUnackedRecords() ([][]byte, error) {
 	return recs, wrapErr("GetUnackedRecords", err)
 }
 
-// GetUnackedBatches returns unacknowledged records grouped by ingest call.
+// GetUnackedBatches returns unacknowledged records grouped for replay: one group
+// per ingest call, minus any prefix already made durable.
+// Call only after stream close or terminal failure.
 func (s *Stream) GetUnackedBatches() ([][][]byte, error) {
 	batches, err := s.core.GetUnackedBatches()
 	return batches, wrapErr("GetUnackedBatches", err)
