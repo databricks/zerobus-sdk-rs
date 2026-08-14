@@ -427,13 +427,8 @@ impl ZerobusArrowStream {
     /// ```
     #[instrument(level = "debug", skip_all, fields(table_name = %self.table_properties.table_name))]
     pub async fn ingest_batch(&self, batch: RecordBatch) -> ZerobusResult<OffsetId> {
-        if self.admission_closed.load(Ordering::Acquire)
-            || self.is_closed.load(Ordering::Relaxed)
-            || self.close.has_started()
-        {
-            return Err(ZerobusError::StreamClosedError(tonic::Status::internal(
-                "Stream is closing or closed",
-            )));
+        if self.is_ingest_admission_closed() {
+            return Err(Self::stream_closing_or_closed_error());
         }
 
         if batch.schema() != self.table_properties.schema {
@@ -468,13 +463,8 @@ impl ZerobusArrowStream {
         let _guard = self.ingest_mutex.lock().await;
 
         // May have closed while we blocked on the permit; returning drops it.
-        if self.admission_closed.load(Ordering::Acquire)
-            || self.is_closed.load(Ordering::Relaxed)
-            || self.close.has_started()
-        {
-            return Err(ZerobusError::StreamClosedError(tonic::Status::internal(
-                "Stream is closing or closed",
-            )));
+        if self.is_ingest_admission_closed() {
+            return Err(Self::stream_closing_or_closed_error());
         }
 
         let offset_id = self.offset_generator.next();
@@ -513,12 +503,9 @@ impl ZerobusArrowStream {
                 // close teardown, and recovery detaches under ingest_mutex. Retain this
                 // fallback for unsupported concurrent close/ingest across foreign
                 // boundaries, preferring a known terminal cause.
-                if let Some(server_error) = self.server_error_rx.borrow().clone() {
-                    return Err(server_error);
-                }
-                return Err(ZerobusError::StreamClosedError(tonic::Status::internal(
-                    "Stream sender is closed",
-                )));
+                return Err(Self::terminal_error_or(&self.server_error_rx, || {
+                    "Stream sender is closed".to_string()
+                }));
             }
         };
 
@@ -544,12 +531,9 @@ impl ZerobusArrowStream {
                     self.server_error_rx.clone().changed(),
                 )
                 .await;
-                if let Some(server_error) = self.server_error_rx.borrow().clone() {
-                    return Err(server_error);
-                }
-                return Err(ZerobusError::StreamClosedError(tonic::Status::internal(
-                    "Failed to send batch",
-                )));
+                return Err(Self::terminal_error_or(&self.server_error_rx, || {
+                    "Failed to send batch".to_string()
+                }));
             }
         };
 
@@ -581,13 +565,8 @@ impl ZerobusArrowStream {
     /// marker after `finish()`) is allowed after that batch.
     #[instrument(level = "debug", skip_all, fields(table_name = %self.table_properties.table_name))]
     pub async fn ingest_ipc_batch(&self, ipc_bytes: Bytes) -> ZerobusResult<OffsetId> {
-        if self.admission_closed.load(Ordering::Acquire)
-            || self.is_closed.load(Ordering::Relaxed)
-            || self.close.has_started()
-        {
-            return Err(ZerobusError::StreamClosedError(tonic::Status::internal(
-                "Stream is closing or closed",
-            )));
+        if self.is_ingest_admission_closed() {
+            return Err(Self::stream_closing_or_closed_error());
         }
 
         // Deserialise IPC bytes into a RecordBatch.
@@ -648,15 +627,12 @@ impl ZerobusArrowStream {
                             return Ok(());
                         }
                     }
-                    if let Some(server_error) = error_rx.borrow().clone() {
-                        return Err(server_error);
-                    }
-                    return Err(ZerobusError::StreamClosedError(tonic::Status::internal(
+                    return Err(Self::terminal_error_or(&error_rx, || {
                         format!(
                             "Stream closing or closed during {}",
                             operation_name.to_lowercase()
-                        ),
-                    )));
+                        )
+                    }));
                 }
 
                 // Neither arm returns directly. After either watch changes, loop so the
@@ -697,9 +673,7 @@ impl ZerobusArrowStream {
             }
 
             if close_rx.changed().await.is_err() {
-                return Err(ZerobusError::StreamClosedError(tonic::Status::internal(
-                    "Close coordinator stopped unexpectedly",
-                )));
+                return Err(Self::close_coordinator_stopped_error());
             }
         }
     }
@@ -749,12 +723,9 @@ impl ZerobusArrowStream {
                 // Nothing was ingested: report closure if closed, otherwise nothing to do.
                 // Prefer the real terminal error over a generic closed message.
                 if self.is_closed.load(Ordering::Relaxed) || self.close.has_started() {
-                    if let Some(server_error) = self.server_error_rx.borrow().clone() {
-                        return Err(server_error);
-                    }
-                    return Err(ZerobusError::StreamClosedError(tonic::Status::internal(
-                        "Cannot flush: stream is closing or closed",
-                    )));
+                    return Err(Self::terminal_error_or(&self.server_error_rx, || {
+                        "Cannot flush: stream is closing or closed".to_string()
+                    }));
                 }
                 debug!("No batches to flush");
                 return Ok(());
@@ -880,11 +851,7 @@ impl ZerobusArrowStream {
                             // only after the retained-batch snapshot is complete.
                             drop(guard);
                             if close_rx.changed().await.is_err() {
-                                return Err(ZerobusError::StreamClosedError(
-                                    tonic::Status::internal(
-                                        "Close coordinator stopped unexpectedly",
-                                    ),
-                                ));
+                                return Err(Self::close_coordinator_stopped_error());
                             }
                         }
                         CloseState::Requested(_) => {}
@@ -893,9 +860,7 @@ impl ZerobusArrowStream {
                 }
                 CloseState::Requested(_) => {
                     if close_rx.changed().await.is_err() {
-                        return Err(ZerobusError::StreamClosedError(tonic::Status::internal(
-                            "Close coordinator stopped unexpectedly",
-                        )));
+                        return Err(Self::close_coordinator_stopped_error());
                     }
                 }
                 CloseState::Finalized(result) => return result,
@@ -1063,6 +1028,32 @@ impl ZerobusArrowStream {
 
     pub(crate) fn headers_provider(&self) -> Arc<dyn HeadersProvider> {
         Arc::clone(&self.headers_provider)
+    }
+
+    fn is_ingest_admission_closed(&self) -> bool {
+        self.admission_closed.load(Ordering::Acquire)
+            || self.is_closed.load(Ordering::Relaxed)
+            || self.close.has_started()
+    }
+
+    fn stream_closing_or_closed_error() -> ZerobusError {
+        ZerobusError::StreamClosedError(tonic::Status::internal("Stream is closing or closed"))
+    }
+
+    fn close_coordinator_stopped_error() -> ZerobusError {
+        ZerobusError::StreamClosedError(tonic::Status::internal(
+            "Close coordinator stopped unexpectedly",
+        ))
+    }
+
+    fn terminal_error_or(
+        error_rx: &watch::Receiver<Option<ZerobusError>>,
+        fallback_message: impl FnOnce() -> String,
+    ) -> ZerobusError {
+        let terminal_error = error_rx.borrow().clone();
+        terminal_error.unwrap_or_else(|| {
+            ZerobusError::StreamClosedError(tonic::Status::internal(fallback_message()))
+        })
     }
 }
 

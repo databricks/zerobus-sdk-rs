@@ -3297,7 +3297,60 @@ mod arrow_flight_tests {
     }
 
     mod recovery_tests {
+        use databricks_zerobus_ingest_sdk::ZerobusArrowStream;
+
         use super::*;
+
+        fn partial_ack_then_unavailable(message: &'static str) -> Vec<MockFlightResponse> {
+            vec![
+                MockFlightResponse::BatchAck {
+                    ack_up_to_offset: 0,
+                    delay_ms: 0,
+                    ack_up_to_records: 1,
+                },
+                MockFlightResponse::Error {
+                    status: tonic::Status::unavailable(message),
+                    delay_ms: 0,
+                },
+            ]
+        }
+
+        async fn close_expecting_error_containing(
+            stream: &mut ZerobusArrowStream,
+            timeout: std::time::Duration,
+            completion_message: &str,
+            close_error_message: &str,
+            expected: &str,
+        ) {
+            let error = tokio::time::timeout(timeout, stream.close())
+                .await
+                .expect(completion_message)
+                .expect_err(close_error_message);
+            assert!(
+                error.to_string().contains(expected),
+                "expected the active recovery trigger, got: {error}"
+            );
+        }
+
+        async fn assert_unacked_ids(
+            stream: &ZerobusArrowStream,
+            expected: &[&[i64]],
+            assertion_message: Option<&str>,
+        ) -> Result<(), Box<dyn std::error::Error>> {
+            let actual: Vec<Vec<i64>> = stream
+                .get_unacked_batches()
+                .await?
+                .iter()
+                .map(batch_ids)
+                .collect();
+            let expected: Vec<Vec<i64>> = expected.iter().map(|ids| ids.to_vec()).collect();
+            if let Some(assertion_message) = assertion_message {
+                assert_eq!(actual, expected, "{assertion_message}");
+            } else {
+                assert_eq!(actual, expected);
+            }
+            Ok(())
+        }
 
         /// The supervisor must surface a non-retryable configuration error if a timeout
         /// that was representable at construction can no longer form a runtime deadline.
@@ -3410,14 +3463,14 @@ mod arrow_flight_tests {
                 .await
                 .expect("reconnect must enter replacement setup");
 
-            let error = tokio::time::timeout(std::time::Duration::from_secs(1), stream.close())
-                .await
-                .expect("close must cancel replacement setup")
-                .expect_err("close during recovery must preserve the recovery trigger");
-            assert!(
-                error.to_string().contains("active transport failed"),
-                "expected the active recovery trigger, got: {error}"
-            );
+            close_expecting_error_containing(
+                &mut stream,
+                std::time::Duration::from_secs(1),
+                "close must cancel replacement setup",
+                "close during recovery must preserve the recovery trigger",
+                "active transport failed",
+            )
+            .await;
             assert_eq!(stream.get_unacked_batches().await?.len(), 1);
             Ok(())
         }
@@ -3500,21 +3553,15 @@ mod arrow_flight_tests {
             .await
             .expect("reconnect must wait for the proxy CONNECT response");
 
-            let error = tokio::time::timeout(std::time::Duration::from_secs(1), stream.close())
-                .await
-                .expect("close must cancel the replacement transport handshake")
-                .expect_err("close during recovery must preserve the recovery trigger");
-            assert!(
-                error.to_string().contains("active transport failed"),
-                "expected the active recovery trigger, got: {error}"
-            );
-            let unacked: Vec<Vec<i64>> = stream
-                .get_unacked_batches()
-                .await?
-                .iter()
-                .map(batch_ids)
-                .collect();
-            assert_eq!(unacked, vec![vec![7, 8]]);
+            close_expecting_error_containing(
+                &mut stream,
+                std::time::Duration::from_secs(1),
+                "close must cancel the replacement transport handshake",
+                "close during recovery must preserve the recovery trigger",
+                "active transport failed",
+            )
+            .await;
+            assert_unacked_ids(&stream, &[&[7, 8]], None).await?;
 
             proxy_task.abort();
             let _ = proxy_task.await;
@@ -3616,20 +3663,7 @@ mod arrow_flight_tests {
             // Partially ack A (1 of 3 records), then a retriable error on B triggers the
             // reconnect we park at the rebuild barrier.
             mock_server
-                .inject_responses(
-                    TABLE_NAME,
-                    vec![
-                        MockFlightResponse::BatchAck {
-                            ack_up_to_offset: 0,
-                            delay_ms: 0,
-                            ack_up_to_records: 1,
-                        },
-                        MockFlightResponse::Error {
-                            status: tonic::Status::unavailable("Connection lost"),
-                            delay_ms: 0,
-                        },
-                    ],
-                )
+                .inject_responses(TABLE_NAME, partial_ack_then_unavailable("Connection lost"))
                 .await;
 
             let sdk = ZerobusSdk::builder()
@@ -3678,14 +3712,14 @@ mod arrow_flight_tests {
                 .await
                 .expect("reconnect should reach the rebuild barrier");
 
-            let error = tokio::time::timeout(std::time::Duration::from_secs(1), stream.close())
-                .await
-                .expect("close must interrupt recovery after READY")
-                .expect_err("close during recovery must preserve the recovery trigger");
-            assert!(
-                error.to_string().contains("Connection lost"),
-                "expected the active recovery trigger, got: {error}"
-            );
+            close_expecting_error_containing(
+                &mut stream,
+                std::time::Duration::from_secs(1),
+                "close must interrupt recovery after READY",
+                "close during recovery must preserve the recovery trigger",
+                "Connection lost",
+            )
+            .await;
 
             let unacked = stream.get_unacked_batches().await?;
             assert_eq!(unacked.len(), 2, "expected sliced A suffix + full B");
@@ -3709,17 +3743,7 @@ mod arrow_flight_tests {
             mock_server
                 .inject_responses(
                     TABLE_NAME,
-                    vec![
-                        MockFlightResponse::BatchAck {
-                            ack_up_to_offset: 0,
-                            delay_ms: 0,
-                            ack_up_to_records: 1,
-                        },
-                        MockFlightResponse::Error {
-                            status: tonic::Status::unavailable("active transport failed"),
-                            delay_ms: 0,
-                        },
-                    ],
+                    partial_ack_then_unavailable("active transport failed"),
                 )
                 .await;
 
@@ -3757,21 +3781,15 @@ mod arrow_flight_tests {
                 .await
                 .expect("recovery must hand off the first replay batch");
 
-            let error = tokio::time::timeout(std::time::Duration::from_secs(1), stream.close())
-                .await
-                .expect("close must interrupt partial replay")
-                .expect_err("close during recovery must preserve the recovery trigger");
-            assert!(
-                error.to_string().contains("active transport failed"),
-                "expected the active recovery trigger, got: {error}"
-            );
-            let unacked: Vec<Vec<i64>> = stream
-                .get_unacked_batches()
-                .await?
-                .iter()
-                .map(batch_ids)
-                .collect();
-            assert_eq!(unacked, vec![vec![2, 3], vec![4]]);
+            close_expecting_error_containing(
+                &mut stream,
+                std::time::Duration::from_secs(1),
+                "close must interrupt partial replay",
+                "close during recovery must preserve the recovery trigger",
+                "active transport failed",
+            )
+            .await;
+            assert_unacked_ids(&stream, &[&[2, 3], &[4]], None).await?;
             Ok(())
         }
 
@@ -3874,20 +3892,7 @@ mod arrow_flight_tests {
             // alone would instead reconnect via the slow ack timeout and let the scripted
             // error fire on a later connection.
             mock_server
-                .inject_responses(
-                    TABLE_NAME,
-                    vec![
-                        MockFlightResponse::BatchAck {
-                            ack_up_to_offset: 0,
-                            delay_ms: 0,
-                            ack_up_to_records: 1,
-                        },
-                        MockFlightResponse::Error {
-                            status: tonic::Status::unavailable("Connection lost"),
-                            delay_ms: 0,
-                        },
-                    ],
-                )
+                .inject_responses(TABLE_NAME, partial_ack_then_unavailable("Connection lost"))
                 .await;
 
             let sdk = ZerobusSdk::builder()
@@ -3971,17 +3976,7 @@ mod arrow_flight_tests {
             mock_server
                 .inject_responses(
                     TABLE_NAME,
-                    vec![
-                        MockFlightResponse::BatchAck {
-                            ack_up_to_offset: 0,
-                            delay_ms: 0,
-                            ack_up_to_records: 1,
-                        },
-                        MockFlightResponse::Error {
-                            status: tonic::Status::unavailable("active transport failed"),
-                            delay_ms: 0,
-                        },
-                    ],
+                    partial_ack_then_unavailable("active transport failed"),
                 )
                 .await;
 
@@ -4037,17 +4032,12 @@ mod arrow_flight_tests {
                 close_error.to_string().contains("active transport failed"),
                 "expected the active recovery trigger, got: {close_error}"
             );
-            let unacked: Vec<Vec<i64>> = stream
-                .get_unacked_batches()
-                .await?
-                .iter()
-                .map(batch_ids)
-                .collect();
-            assert_eq!(
-                unacked,
-                vec![vec![2, 3], vec![4]],
-                "close during backoff must retain only the exact unacknowledged suffix"
-            );
+            assert_unacked_ids(
+                &stream,
+                &[&[2, 3], &[4]],
+                Some("close during backoff must retain only the exact unacknowledged suffix"),
+            )
+            .await?;
             Ok(())
         }
 
@@ -4058,29 +4048,17 @@ mod arrow_flight_tests {
 
             let (mock_server, server_url) = start_mock_flight_server().await?;
             let schema = create_test_arrow_schema();
-            mock_server
-                .inject_responses(
-                    TABLE_NAME,
-                    vec![
-                        MockFlightResponse::BatchAck {
-                            ack_up_to_offset: 0,
-                            delay_ms: 0,
-                            ack_up_to_records: 1,
-                        },
-                        MockFlightResponse::Error {
-                            status: tonic::Status::unavailable("active transport failed"),
-                            delay_ms: 0,
-                        },
-                        MockFlightResponse::FailSetup {
-                            status: tonic::Status::unavailable("first reconnect failed"),
-                        },
-                        MockFlightResponse::FailSetupAfter {
-                            status: tonic::Status::unavailable("second reconnect failed"),
-                            delay_ms: 60_000,
-                        },
-                    ],
-                )
-                .await;
+            let mut responses = partial_ack_then_unavailable("active transport failed");
+            responses.extend([
+                MockFlightResponse::FailSetup {
+                    status: tonic::Status::unavailable("first reconnect failed"),
+                },
+                MockFlightResponse::FailSetupAfter {
+                    status: tonic::Status::unavailable("second reconnect failed"),
+                    delay_ms: 60_000,
+                },
+            ]);
+            mock_server.inject_responses(TABLE_NAME, responses).await;
 
             let delayed_setup_armed = mock_server.delayed_setup_armed();
             let sdk = ZerobusSdk::builder()
@@ -4131,13 +4109,7 @@ mod arrow_flight_tests {
                 }
                 other => panic!("expected the first attempt's reconnect error, got: {other:?}"),
             }
-            let unacked: Vec<Vec<i64>> = stream
-                .get_unacked_batches()
-                .await?
-                .iter()
-                .map(batch_ids)
-                .collect();
-            assert_eq!(unacked, vec![vec![2, 3], vec![4]]);
+            assert_unacked_ids(&stream, &[&[2, 3], &[4]], None).await?;
 
             Ok(())
         }
