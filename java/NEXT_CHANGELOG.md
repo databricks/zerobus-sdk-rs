@@ -18,8 +18,7 @@
 - Documented that published JARs support Java 8 while source builds need JDK 11,
   that macOS JNI artifacts are not in the current release set, that
   `recoveryRetries` defaults to 4, and that `flush()` waits for durability rather
-  than callback completion. `recreateStream()` is no longer presented as a safe
-  production recovery path.
+  than callback completion.
 - Maven Central snippets no longer tell users to redeclare compile-scope
   transitives (`protobuf-java`, `slf4j-api`). Stream-builder examples use
   try-with-resources. GenerateProto docs no longer claim STRUCT support, JAR

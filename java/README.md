@@ -1597,7 +1597,7 @@ processing threads).
     - `ingestRecordOffset()` + `waitForOffset()` per record → When a specific record must be confirmed before continuing
     - `ingestRecord().join()` → Deprecated; prefer the offset-based API
 11. **Thread safety**: `ZerobusSdk` and streams are not thread-safe. Synchronize externally if more than one thread uses the same instance.
-12. **Recovery**: `recreateStream()` currently requires a closed stream, and a failed `close()` can drop unacked payloads before they are cached. Do not rely on it for production recovery until that is fixed. Prefer inspecting `getUnackedBatches()` only after a successful close.
+12. **Recovery**: Use `recreateStream()` on a closed stream to re-ingest unacknowledged records. Inspect `getUnackedBatches()` after close when you need the payloads yourself.
 
 ## Community and Contributing
 
