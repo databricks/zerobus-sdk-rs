@@ -63,16 +63,14 @@ func main() {
 		log.Printf("Record %d queued with offset ID: %d", i+1, offset)
 	}
 
-	// 4. Flush once, then close. A flush timeout can leave the stream active, so
-	// close first and then retrieve unacked records for replay.
+	// 4. Flush once, then close. A flush timeout leaves the stream active, so
+	// GetUnackedRecords() fails and Close() would wait another FlushTimeout.
+	// Leave teardown to sdk.Close(), which terminates without a second flush wait.
 	if err := stream.Flush(); err != nil {
 		log.Printf("flush failed: %v", err)
-		if closeErr := stream.Close(); closeErr != nil {
-			log.Printf("close: %v", closeErr)
-		}
 		unacked, unackedErr := stream.GetUnackedRecords()
 		if unackedErr != nil {
-			log.Fatalf("unacked retrieval failed: %v", unackedErr)
+			log.Fatalf("unacked retrieval failed (stream may still be active): %v", unackedErr)
 		}
 		if len(unacked) == 0 {
 			return

@@ -93,8 +93,11 @@ func main() {
 	if obs.failed.Load() {
 		log.Fatal("batch callback reported an error")
 	}
-	if obs.acked.Load() < 1 {
-		log.Fatal("timed out waiting for batch callback")
+	if got := obs.acked.Load(); got != 1 {
+		if got < 1 {
+			log.Fatal("timed out waiting for batch callback")
+		}
+		log.Fatalf("callback observed %d acknowledgements, want 1", got)
 	}
 	if got := obs.offset.Load(); got != batchOffset {
 		log.Fatalf("callback offset %d != batch offset %d", got, batchOffset)
