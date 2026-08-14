@@ -4069,15 +4069,22 @@ name = "zerobus-jni"
 version = "1.3.0"
 dependencies = [
  "arrow-array",
+ "arrow-flight",
  "arrow-ipc",
  "arrow-schema",
  "async-trait",
  "databricks-zerobus-ingest-sdk",
+ "futures",
  "jni",
  "prost",
  "prost-types",
+ "rcgen",
+ "serde",
+ "serde_json",
  "thiserror 1.0.69",
  "tokio",
+ "tokio-stream",
+ "tonic",
  "tracing",
 ]
 

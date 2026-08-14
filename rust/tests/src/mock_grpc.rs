@@ -3,11 +3,6 @@ use std::pin::Pin;
 use std::sync::Arc;
 use std::time::Duration;
 
-pub mod databricks {
-    pub mod zerobus {
-        tonic::include_proto!("databricks.zerobus");
-    }
-}
 use databricks::zerobus::{
     ephemeral_stream_request::Payload as RequestPayload,
     ephemeral_stream_response::Payload as ResponsePayload,
@@ -15,6 +10,7 @@ use databricks::zerobus::{
     CloseStreamSignal, CreateIngestStreamResponse, EphemeralStreamRequest, EphemeralStreamResponse,
     IngestRecordResponse,
 };
+use databricks_zerobus_ingest_sdk::databricks;
 use prost_types::Duration as ProtobufDuration;
 use rcgen::{generate_simple_self_signed, CertifiedKey};
 use tokio::sync::{mpsc, Mutex, Notify, Semaphore};
