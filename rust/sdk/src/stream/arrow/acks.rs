@@ -69,6 +69,61 @@ struct CloseDrain {
     selected: Option<ZerobusResult<()>>,
 }
 
+impl CloseDrain {
+    fn new(request: CloseRequest, selected: Option<ZerobusResult<()>>) -> Self {
+        Self { request, selected }
+    }
+
+    fn selected(request: CloseRequest, outcome: ZerobusResult<()>) -> Self {
+        Self::new(request, Some(outcome))
+    }
+
+    fn empty_target(request: CloseRequest) -> Self {
+        Self::new(request, None)
+    }
+
+    fn flush_timeout(request: CloseRequest) -> Self {
+        Self::selected(request, Err(CloseCoordinator::flush_timeout_error()))
+    }
+
+    fn rotation_interrupted(request: CloseRequest) -> Self {
+        Self::selected(request, Err(AckProcessor::rotation_error()))
+    }
+}
+
+impl DrainState {
+    fn explicit_close(deadline: Instant, response_finished: bool, close: CloseDrain) -> Self {
+        Self {
+            deadline,
+            response_finished,
+            terminal_error: None,
+            close: Some(close),
+        }
+    }
+
+    fn rotation_drain(
+        deadline: Instant,
+        response_finished: bool,
+        terminal_error: Option<ZerobusError>,
+    ) -> Self {
+        Self {
+            deadline,
+            response_finished,
+            terminal_error,
+            close: None,
+        }
+    }
+
+    fn close_during_rotation(deadline: Instant, close: CloseDrain) -> Self {
+        Self {
+            deadline,
+            response_finished: false,
+            terminal_error: None,
+            close: Some(close),
+        }
+    }
+}
+
 pub(super) enum AckProcessOutcome {
     Stopped,
     Recovery {
@@ -94,6 +149,26 @@ enum ConnectionState {
     Active,
     Waiting(WaitState),
     Draining(DrainState),
+}
+
+/// Connection context for mapping a terminal event into transport drain.
+enum TerminalDrainTarget {
+    Active,
+    Rotation {
+        deadline: Instant,
+    },
+    Close {
+        request: CloseRequest,
+        deadline: Instant,
+    },
+}
+
+/// Terminal condition observed before transport drain begins.
+enum TerminalEvent {
+    RequestSendFailed,
+    AckApplyFailed,
+    ResponseError,
+    ResponseEof,
 }
 
 /// Deadlines for the ACK-wait and transport-drain phases of rotation.
@@ -421,6 +496,26 @@ impl AckProcessor {
         })
     }
 
+    fn acknowledged_close_outcome(&self) -> ZerobusResult<()> {
+        if self.close.target_reached_timely() {
+            Ok(())
+        } else {
+            Err(CloseCoordinator::flush_timeout_error())
+        }
+    }
+
+    fn drain_for_acknowledged_close(
+        request: CloseRequest,
+        outcome: ZerobusResult<()>,
+        deadline: Instant,
+    ) -> ConnectionState {
+        ConnectionState::Draining(DrainState::explicit_close(
+            deadline,
+            false,
+            CloseDrain::selected(request, outcome),
+        ))
+    }
+
     fn begin_close(
         &self,
         connection: &ConnectionState,
@@ -428,46 +523,64 @@ impl AckProcessor {
     ) -> ConnectionState {
         match connection {
             ConnectionState::Active if self.close_target_is_acknowledged(close_request) => {
-                let outcome = if self.close.target_reached_timely() {
-                    Ok(())
-                } else {
-                    Err(CloseCoordinator::flush_timeout_error())
-                };
-                ConnectionState::Draining(DrainState {
-                    deadline: Self::explicit_close_drain_deadline(),
-                    response_finished: false,
-                    terminal_error: None,
-                    close: Some(CloseDrain {
-                        request: close_request,
-                        selected: Some(outcome),
-                    }),
-                })
+                let outcome = self.acknowledged_close_outcome();
+                let deadline = Self::explicit_close_drain_deadline();
+                Self::drain_for_acknowledged_close(close_request, outcome, deadline)
             }
             ConnectionState::Active if close_request.target_offset.is_none() => {
-                ConnectionState::Draining(DrainState {
-                    deadline: Self::explicit_close_drain_deadline(),
-                    response_finished: false,
-                    terminal_error: None,
-                    close: Some(CloseDrain {
-                        request: close_request,
-                        selected: None,
-                    }),
-                })
+                let deadline = Self::explicit_close_drain_deadline();
+                ConnectionState::Draining(DrainState::explicit_close(
+                    deadline,
+                    false,
+                    CloseDrain::empty_target(close_request),
+                ))
             }
             ConnectionState::Active => ConnectionState::Waiting(WaitState::Close(close_request)),
             ConnectionState::Waiting(WaitState::Rotation { deadlines, .. }) => {
-                ConnectionState::Draining(DrainState {
-                    deadline: Self::bounded_rotation_drain_deadline(deadlines.drain),
-                    response_finished: false,
-                    terminal_error: None,
-                    close: Some(CloseDrain {
-                        request: close_request,
-                        selected: Some(Err(Self::rotation_error())),
-                    }),
-                })
+                let deadline = Self::bounded_rotation_drain_deadline(deadlines.drain);
+                ConnectionState::Draining(DrainState::close_during_rotation(
+                    deadline,
+                    CloseDrain::rotation_interrupted(close_request),
+                ))
             }
             ConnectionState::Waiting(WaitState::Close(_)) | ConnectionState::Draining(_) => {
                 unreachable!()
+            }
+        }
+    }
+
+    fn drain_from_waiting(
+        target: TerminalDrainTarget,
+        event: TerminalEvent,
+        error: ZerobusError,
+    ) -> ZerobusResult<ConnectionState> {
+        match target {
+            TerminalDrainTarget::Active => Err(error),
+            TerminalDrainTarget::Rotation { deadline } => {
+                let (response_finished, terminal_error) = match event {
+                    TerminalEvent::RequestSendFailed | TerminalEvent::AckApplyFailed => {
+                        (false, Some(error))
+                    }
+                    TerminalEvent::ResponseError => (true, Some(error)),
+                    // Rotation already has its trigger; EOF only marks the response complete.
+                    TerminalEvent::ResponseEof => (true, None),
+                };
+                Ok(ConnectionState::Draining(DrainState::rotation_drain(
+                    deadline,
+                    response_finished,
+                    terminal_error,
+                )))
+            }
+            TerminalDrainTarget::Close { request, deadline } => {
+                let response_finished = matches!(
+                    event,
+                    TerminalEvent::ResponseError | TerminalEvent::ResponseEof
+                );
+                Ok(ConnectionState::Draining(DrainState::explicit_close(
+                    deadline,
+                    response_finished,
+                    CloseDrain::selected(request, Err(error)),
+                )))
             }
         }
     }
@@ -520,10 +633,7 @@ impl AckProcessor {
             // A continuously ready response must not starve close publication.
             if observe_close {
                 if let Some(close_request) = self.close.request() {
-                    close = Some(CloseDrain {
-                        request: close_request,
-                        selected: Some(Err(Self::rotation_error())),
-                    });
+                    close = Some(CloseDrain::rotation_interrupted(close_request));
                     observe_close = false;
                 }
             }
@@ -571,10 +681,7 @@ impl AckProcessor {
                 published = self.close.wait_for_request(close_rx), if observe_close => {
                     match published {
                         Some(request) => {
-                            close = Some(CloseDrain {
-                                request,
-                                selected: Some(Err(Self::rotation_error())),
-                            });
+                            close = Some(CloseDrain::rotation_interrupted(request));
                             observe_close = false;
                         }
                         None => return Ok(AckProcessOutcome::Stopped),
@@ -744,12 +851,11 @@ impl AckProcessor {
             self.ack_progress(),
             close_rx,
             false,
-            DrainState {
-                deadline: Self::explicit_close_drain_deadline(),
-                response_finished: false,
-                terminal_error: None,
-                close: Some(CloseDrain { request, selected }),
-            },
+            DrainState::explicit_close(
+                Self::explicit_close_drain_deadline(),
+                false,
+                CloseDrain::new(request, selected),
+            ),
         )
         .await
     }
@@ -835,15 +941,12 @@ impl AckProcessor {
 
             if let ConnectionState::Waiting(WaitState::Close(close_request)) = &connection {
                 if Instant::now() >= close_request.deadline {
-                    connection = ConnectionState::Draining(DrainState {
-                        deadline: Self::explicit_close_drain_deadline(),
-                        response_finished: false,
-                        terminal_error: None,
-                        close: Some(CloseDrain {
-                            request: *close_request,
-                            selected: Some(Err(CloseCoordinator::flush_timeout_error())),
-                        }),
-                    });
+                    let deadline = Self::explicit_close_drain_deadline();
+                    connection = ConnectionState::Draining(DrainState::explicit_close(
+                        deadline,
+                        false,
+                        CloseDrain::flush_timeout(*close_request),
+                    ));
                     continue;
                 }
             }
@@ -856,12 +959,10 @@ impl AckProcessor {
                 if self.last_acked_records.load(Ordering::Acquire) >= *target_records
                     || Instant::now() >= deadlines.ack
                 {
-                    connection = ConnectionState::Draining(DrainState {
-                        deadline: Self::bounded_rotation_drain_deadline(deadlines.drain),
-                        response_finished: false,
-                        terminal_error: None,
-                        close: None,
-                    });
+                    let deadline = Self::bounded_rotation_drain_deadline(deadlines.drain);
+                    connection = ConnectionState::Draining(DrainState::rotation_drain(
+                        deadline, false, None,
+                    ));
                     continue;
                 }
             }
@@ -955,44 +1056,35 @@ impl AckProcessor {
                 AckEvent::CloseDeadline => {
                     let close_request =
                         close_wait.expect("close deadline requires a close request");
-                    connection = ConnectionState::Draining(DrainState {
-                        deadline: Self::explicit_close_drain_deadline(),
-                        response_finished: false,
-                        terminal_error: None,
-                        close: Some(CloseDrain {
-                            request: close_request,
-                            selected: Some(Err(CloseCoordinator::flush_timeout_error())),
-                        }),
-                    });
+                    let deadline = Self::explicit_close_drain_deadline();
+                    connection = ConnectionState::Draining(DrainState::explicit_close(
+                        deadline,
+                        false,
+                        CloseDrain::flush_timeout(close_request),
+                    ));
                 }
                 AckEvent::RequestSendFailed => {
                     if !self.request_send_failure.take() {
                         continue;
                     }
                     let error = Self::request_send_error();
-                    connection = match &connection {
+                    let target = match &connection {
                         ConnectionState::Waiting(WaitState::Rotation { deadlines, .. }) => {
-                            ConnectionState::Draining(DrainState {
+                            TerminalDrainTarget::Rotation {
                                 deadline: Self::bounded_rotation_drain_deadline(deadlines.drain),
-                                response_finished: false,
-                                terminal_error: Some(error),
-                                close: None,
-                            })
+                            }
                         }
-                        ConnectionState::Waiting(WaitState::Close(close_request)) => {
-                            ConnectionState::Draining(DrainState {
+                        ConnectionState::Waiting(WaitState::Close(request)) => {
+                            TerminalDrainTarget::Close {
+                                request: *request,
                                 deadline: Self::explicit_close_drain_deadline(),
-                                response_finished: false,
-                                terminal_error: None,
-                                close: Some(CloseDrain {
-                                    request: *close_request,
-                                    selected: Some(Err(error)),
-                                }),
-                            })
+                            }
                         }
-                        ConnectionState::Active => return Err(error),
+                        ConnectionState::Active => TerminalDrainTarget::Active,
                         ConnectionState::Draining(_) => unreachable!(),
                     };
+                    connection =
+                        Self::drain_from_waiting(target, TerminalEvent::RequestSendFailed, error)?;
                 }
                 AckEvent::AckDeadline(expected) => {
                     if let Some(pending_count) =
@@ -1038,111 +1130,89 @@ impl AckProcessor {
 
                     if ack.ack_up_to_records > 0 {
                         if let Err(error) = acknowledgments.apply(&ack).await {
-                            connection = match &connection {
+                            let target = match &connection {
                                 ConnectionState::Waiting(WaitState::Rotation {
                                     deadlines, ..
-                                }) => ConnectionState::Draining(DrainState {
+                                }) => TerminalDrainTarget::Rotation {
                                     deadline: Self::bounded_rotation_drain_deadline(
                                         deadlines.drain,
                                     ),
-                                    response_finished: false,
-                                    terminal_error: Some(error),
-                                    close: None,
-                                }),
-                                ConnectionState::Waiting(WaitState::Close(close_request)) => {
-                                    ConnectionState::Draining(DrainState {
+                                },
+                                ConnectionState::Waiting(WaitState::Close(request)) => {
+                                    TerminalDrainTarget::Close {
+                                        request: *request,
                                         deadline: Self::explicit_close_drain_deadline(),
-                                        response_finished: false,
-                                        terminal_error: None,
-                                        close: Some(CloseDrain {
-                                            request: *close_request,
-                                            selected: Some(Err(error)),
-                                        }),
-                                    })
+                                    }
                                 }
-                                ConnectionState::Active => return Err(error),
+                                ConnectionState::Active => TerminalDrainTarget::Active,
                                 ConnectionState::Draining(_) => unreachable!(),
                             };
+                            connection = Self::drain_from_waiting(
+                                target,
+                                TerminalEvent::AckApplyFailed,
+                                error,
+                            )?;
                             continue;
                         }
                     }
 
                     if let ConnectionState::Waiting(WaitState::Close(close_request)) = &connection {
                         if self.close_target_is_acknowledged(*close_request) {
-                            let outcome = if self.close.target_reached_timely() {
-                                Ok(())
-                            } else {
-                                Err(CloseCoordinator::flush_timeout_error())
-                            };
-                            connection = ConnectionState::Draining(DrainState {
-                                deadline: Self::explicit_close_drain_deadline(),
-                                response_finished: false,
-                                terminal_error: None,
-                                close: Some(CloseDrain {
-                                    request: *close_request,
-                                    selected: Some(outcome),
-                                }),
-                            });
+                            let outcome = self.acknowledged_close_outcome();
+                            let deadline = Self::explicit_close_drain_deadline();
+                            connection = Self::drain_for_acknowledged_close(
+                                *close_request,
+                                outcome,
+                                deadline,
+                            );
                         }
                     }
                 }
                 AckEvent::Response(Some(Err(error))) => {
                     let status: tonic::Status = error.into();
                     let error = ZerobusError::StreamClosedError(status);
-                    connection = match &connection {
+                    if matches!(&connection, ConnectionState::Active) {
+                        let _ = self.server_error_tx.send(Some(error.clone()));
+                    }
+                    let target = match &connection {
                         ConnectionState::Waiting(WaitState::Rotation { deadlines, .. }) => {
-                            ConnectionState::Draining(DrainState {
+                            TerminalDrainTarget::Rotation {
                                 deadline: Self::bounded_rotation_drain_deadline(deadlines.drain),
-                                response_finished: true,
-                                terminal_error: Some(error),
-                                close: None,
-                            })
+                            }
                         }
-                        ConnectionState::Waiting(WaitState::Close(close_request)) => {
-                            ConnectionState::Draining(DrainState {
+                        ConnectionState::Waiting(WaitState::Close(request)) => {
+                            TerminalDrainTarget::Close {
+                                request: *request,
                                 deadline: Self::explicit_close_drain_deadline(),
-                                response_finished: true,
-                                terminal_error: None,
-                                close: Some(CloseDrain {
-                                    request: *close_request,
-                                    selected: Some(Err(error)),
-                                }),
-                            })
+                            }
                         }
-                        ConnectionState::Active => {
-                            let _ = self.server_error_tx.send(Some(error.clone()));
-                            return Err(error);
-                        }
+                        ConnectionState::Active => TerminalDrainTarget::Active,
                         ConnectionState::Draining(_) => unreachable!(),
                     };
+                    connection =
+                        Self::drain_from_waiting(target, TerminalEvent::ResponseError, error)?;
                 }
                 AckEvent::Response(None) => {
                     let error = ZerobusError::StreamClosedError(tonic::Status::unknown(
                         "Server closed the stream",
                     ));
-                    connection = match &connection {
+                    let target = match &connection {
                         ConnectionState::Waiting(WaitState::Rotation { deadlines, .. }) => {
-                            ConnectionState::Draining(DrainState {
+                            TerminalDrainTarget::Rotation {
                                 deadline: Self::bounded_rotation_drain_deadline(deadlines.drain),
-                                response_finished: true,
-                                terminal_error: None,
-                                close: None,
-                            })
+                            }
                         }
-                        ConnectionState::Waiting(WaitState::Close(close_request)) => {
-                            ConnectionState::Draining(DrainState {
+                        ConnectionState::Waiting(WaitState::Close(request)) => {
+                            TerminalDrainTarget::Close {
+                                request: *request,
                                 deadline: Self::explicit_close_drain_deadline(),
-                                response_finished: true,
-                                terminal_error: None,
-                                close: Some(CloseDrain {
-                                    request: *close_request,
-                                    selected: Some(Err(error)),
-                                }),
-                            })
+                            }
                         }
-                        ConnectionState::Active => return Err(error),
+                        ConnectionState::Active => TerminalDrainTarget::Active,
                         ConnectionState::Draining(_) => unreachable!(),
                     };
+                    connection =
+                        Self::drain_from_waiting(target, TerminalEvent::ResponseEof, error)?;
                 }
             }
         }
