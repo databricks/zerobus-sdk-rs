@@ -136,7 +136,7 @@ int main() {
           (void)offset;
         },
         [](std::int64_t offset, const std::string& msg) noexcept {
-          std::cerr << "record at offset " << offset << " failed: " << msg
+          std::cerr << "batch at offset " << offset << " failed: " << msg
                     << "\n";
         });
     options.callback_wait_policy = zerobus::CallbackWaitPolicy::forever();

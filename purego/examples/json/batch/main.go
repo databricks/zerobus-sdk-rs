@@ -1,7 +1,7 @@
 // Batch JSON ingestion example.
 //
-// Uses IngestRecordsOffset and waits on the batch offset.
-// Also demonstrates async acks with WithAckCallback.
+// Uses IngestRecordsOffset, flushes once, then waits for the batch's single
+// ack callback.
 //
 // Set these environment variables before running:
 //
@@ -41,7 +41,7 @@ func (o *ackObserver) OnAck(offset int64) {
 
 func (o *ackObserver) OnError(offset int64, err error) {
 	o.failed.Store(true)
-	log.Printf("record at offset %d failed: %v", offset, err)
+	log.Printf("batch at offset %d failed: %v", offset, err)
 }
 
 func main() {
