@@ -51,7 +51,7 @@ If you have downloaded the SDK JAR without the source code:
 
 ```bash
 # Using the shaded JAR (includes all dependencies)
-java -cp zerobus-ingest-sdk-1.3.0-jar-with-dependencies.jar \
+java -cp zerobus-ingest-sdk-1.4.0-jar-with-dependencies.jar \
   com.databricks.zerobus.tools.GenerateProto \
   --uc-endpoint "https://your-workspace.cloud.databricks.com" \
   --client-id "your-client-id" \
@@ -65,7 +65,7 @@ Or, if the JAR has a Main-Class manifest entry (which it does):
 
 ```bash
 # Even simpler - just use -jar flag
-java -jar zerobus-ingest-sdk-1.3.0-jar-with-dependencies.jar \
+java -jar zerobus-ingest-sdk-1.4.0-jar-with-dependencies.jar \
   --uc-endpoint "https://your-workspace.cloud.databricks.com" \
   --client-id "your-client-id" \
   --client-secret "your-client-secret" \
@@ -113,7 +113,7 @@ Generate a proto file for a simple table:
 
 **From the SDK JAR:**
 ```bash
-java -jar zerobus-ingest-sdk-1.3.0-jar-with-dependencies.jar \
+java -jar zerobus-ingest-sdk-1.4.0-jar-with-dependencies.jar \
   --uc-endpoint "https://myworkspace.cloud.databricks.com" \
   --client-id "abc123" \
   --client-secret "secret123" \
@@ -149,7 +149,7 @@ message users {
 Specify a custom message name:
 
 ```bash
-java -jar zerobus-ingest-sdk-1.3.0-jar-with-dependencies.jar \
+java -jar zerobus-ingest-sdk-1.4.0-jar-with-dependencies.jar \
   --uc-endpoint "https://myworkspace.cloud.databricks.com" \
   --client-id "abc123" \
   --client-secret "secret123" \
@@ -163,7 +163,7 @@ java -jar zerobus-ingest-sdk-1.3.0-jar-with-dependencies.jar \
 The tool handles complex types like arrays and maps:
 
 ```bash
-java -jar zerobus-ingest-sdk-1.3.0-jar-with-dependencies.jar \
+java -jar zerobus-ingest-sdk-1.4.0-jar-with-dependencies.jar \
   --uc-endpoint "https://myworkspace.cloud.databricks.com" \
   --client-id "abc123" \
   --client-secret "secret123" \
@@ -245,7 +245,7 @@ Users can run the tool directly from the JAR without needing access to the sourc
 ```bash
 # Download the SDK JAR (or build it with mvn package -Dzerobus.skipNativeLibCheck=true)
 # Then simply run:
-java -jar zerobus-ingest-sdk-1.3.0-jar-with-dependencies.jar \
+java -jar zerobus-ingest-sdk-1.4.0-jar-with-dependencies.jar \
   --uc-endpoint "..." \
   --client-id "..." \
   --client-secret "..." \

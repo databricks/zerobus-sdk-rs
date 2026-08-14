@@ -41,10 +41,10 @@ examples/
 | `proto/BatchIngestionExample` | `ZerobusProtoStream` | Batch ingestion |
 | `json/SingleRecordExample` | `ZerobusJsonStream` | Single record ingestion (Object + String) |
 | `json/BatchIngestionExample` | `ZerobusJsonStream` | Batch ingestion |
-| `arrow/ArrowIngestionExample` | `ZerobusArrowStream` | Three streams demonstrating each IPC compression codec (NONE, LZ4_FRAME, ZSTD); 10 batches per stream, waitForOffset + flush + close (Beta) |
+| `arrow/ArrowIngestionExample` | `ZerobusArrowStream` | Three streams demonstrating each IPC compression codec (NONE, LZ4_FRAME, ZSTD); 10 batches per stream, then flush + close (Beta) |
 | `legacy/LegacyStreamExample` | `ZerobusStream` | Legacy Future-based API |
 
-Each example demonstrates: single ingestion + wait, batch ingestion + wait for last, and recreateStream.
+Each example demonstrates: queue then flush, batch ingestion, and recreateStream.
 
 ## Stream Classes
 
@@ -94,10 +94,8 @@ try (ZerobusArrowStream stream = sdk.streamBuilder()
         .arrow(schema)
         .build()
         .join()) {
-    Optional<Long> offset = stream.ingestBatch(vectorSchemaRoot);
-    if (offset.isPresent()) {
-        stream.waitForOffset(offset.get());
-    }
+    stream.ingestBatch(vectorSchemaRoot);
+    stream.flush();
 }
 ```
 

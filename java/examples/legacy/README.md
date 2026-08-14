@@ -88,10 +88,8 @@ try (ZerobusProtoStream stream = sdk.streamBuilder()
     }
     stream.flush();
 
-    Optional<Long> batchOffset = stream.ingestRecordsOffset(records);
-    if (batchOffset.isPresent()) {
-        stream.waitForOffset(batchOffset.get());
-    }
+    stream.ingestRecordsOffset(records);
+    stream.flush();
 }
 ```
 

@@ -8,8 +8,10 @@
 
 ### Documentation
 
-- Flush recovery no longer treats every flush error as terminal. Batch examples
-  expect one callback per batch and wait for that callback before exit.
+- Flush recovery no longer treats every flush error as terminal. The JSON single
+  example closes the failed stream before `GetUnackedRecords()` and then replays.
+  Batch examples expect one callback per batch and wait for that callback before
+  exit.
 
 ### Internal Changes
 

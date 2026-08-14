@@ -791,7 +791,11 @@ try {
 } catch (error) {
   // recreateStream() rejects unless the native stream already failed closed.
   const newStream = await sdk.recreateStream(stream);
-  await newStream.flush();
+  try {
+    await newStream.flush();
+  } finally {
+    await newStream.close();
+  }
 }
 ```
 

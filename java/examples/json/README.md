@@ -75,15 +75,15 @@ try (ZerobusJsonStream stream = sdk.streamBuilder()
 
 ```java
 // Method 1: Raw JSON string
-long offset = stream.ingestRecordOffset("{\"device_name\": \"sensor-1\", \"temp\": 25}");
+stream.ingestRecordOffset("{\"device_name\": \"sensor-1\", \"temp\": 25}");
 
 // Method 2: Object with serializer (Gson, Jackson, or custom)
 Map<String, Object> data = new HashMap<>();
 data.put("device_name", "sensor-1");
 data.put("temp", 25);
-offset = stream.ingestRecordOffset(data, gson::toJson);
+stream.ingestRecordOffset(data, gson::toJson);
 
-stream.waitForOffset(offset);
+stream.flush();
 ```
 
 ### Batch Ingestion
@@ -94,15 +94,13 @@ List<String> jsonBatch = Arrays.asList(
     "{\"device_name\": \"s1\", \"temp\": 20}",
     "{\"device_name\": \"s2\", \"temp\": 21}"
 );
-Optional<Long> offset = stream.ingestRecordsOffset(jsonBatch);
+stream.ingestRecordsOffset(jsonBatch);
 
 // Method 2: List of objects with serializer
 List<Map<String, Object>> objectBatch = ...;
-offset = stream.ingestRecordsOffset(objectBatch, gson::toJson);
+stream.ingestRecordsOffset(objectBatch, gson::toJson);
 
-if (offset.isPresent()) {
-    stream.waitForOffset(offset.get());
-}
+stream.flush();
 ```
 
 ### Getting Unacknowledged Records
@@ -120,11 +118,11 @@ List<MyData> unackedObjects = stream.getUnackedRecords(json -> gson.fromJson(jso
 ### SingleRecordExample
 
 Demonstrates both single-record ingestion methods plus recreateStream:
-1. **Object with serializer** - 11 records (1 + 10)
-2. **String directly** - 11 records (1 + 10)
+1. **Object with serializer** - 10 records, then flush
+2. **String directly** - 10 records, then flush
 3. **RecreateStream demo** - 3 records
 
-**Total: 25 records**
+**Total: 23 records**
 
 ### BatchIngestionExample
 

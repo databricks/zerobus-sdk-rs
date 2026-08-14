@@ -64,19 +64,17 @@ func main() {
 	}
 
 	// 4. Flush once, then close. A flush timeout can leave the stream active, so
-	// only recover when unacked retrieval succeeds.
+	// close first and then retrieve unacked records for replay.
 	if err := stream.Flush(); err != nil {
 		log.Printf("flush failed: %v", err)
+		if closeErr := stream.Close(); closeErr != nil {
+			log.Printf("close: %v", closeErr)
+		}
 		unacked, unackedErr := stream.GetUnackedRecords()
 		if unackedErr != nil {
-			log.Printf("stream still active or unacked retrieval failed: %v", unackedErr)
-			if closeErr := stream.Close(); closeErr != nil {
-				log.Printf("close: %v", closeErr)
-			}
-			return
+			log.Fatalf("unacked retrieval failed: %v", unackedErr)
 		}
 		if len(unacked) == 0 {
-			_ = stream.Close()
 			return
 		}
 		recoverUnacked(sdk, cfg, stream, unacked)

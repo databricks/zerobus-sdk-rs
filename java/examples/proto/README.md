@@ -64,13 +64,13 @@ AirQuality record = AirQuality.newBuilder()
     .setTemp(25)
     .setHumidity(65)
     .build();
-long offset = stream.ingestRecordOffset(record);
+stream.ingestRecordOffset(record);
 
 // Method 2: Pre-encoded bytes
 byte[] encodedBytes = record.toByteArray();
-offset = stream.ingestRecordOffset(encodedBytes);
+stream.ingestRecordOffset(encodedBytes);
 
-stream.waitForOffset(offset);
+stream.flush();
 ```
 
 ### Batch Ingestion
@@ -78,15 +78,13 @@ stream.waitForOffset(offset);
 ```java
 // Method 1: List of messages
 List<AirQuality> messages = Arrays.asList(record1, record2, record3);
-Optional<Long> offset = stream.ingestRecordsOffset(messages);
+stream.ingestRecordsOffset(messages);
 
 // Method 2: List of pre-encoded bytes
 List<byte[]> encodedRecords = Arrays.asList(bytes1, bytes2, bytes3);
-offset = stream.ingestRecordsOffset(encodedRecords);
+stream.ingestRecordsOffset(encodedRecords);
 
-if (offset.isPresent()) {
-    stream.waitForOffset(offset.get());
-}
+stream.flush();
 ```
 
 ### Getting Unacknowledged Records
@@ -104,11 +102,11 @@ List<AirQuality> unackedMessages = stream.getUnackedRecords(AirQuality.parser())
 ### SingleRecordExample
 
 Demonstrates both single-record ingestion methods plus recreateStream:
-1. **Message directly** - 11 records (1 + 10)
-2. **Pre-encoded bytes** - 11 records (1 + 10)
+1. **Message directly** - 10 records, then flush
+2. **Pre-encoded bytes** - 10 records, then flush
 3. **RecreateStream demo** - 3 records
 
-**Total: 25 records**
+**Total: 23 records**
 
 ### BatchIngestionExample
 

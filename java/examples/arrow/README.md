@@ -106,10 +106,8 @@ try (VectorSchemaRoot batch = VectorSchemaRoot.create(schema, allocator)) {
     // Populate the batch...
     batch.setRowCount(rowCount);
 
-    Optional<Long> offset = stream.ingestBatch(batch);
-    if (offset.isPresent()) {
-        stream.waitForOffset(offset.get());
-    }
+    stream.ingestBatch(batch);
+    stream.flush();
 }
 ```
 

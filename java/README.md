@@ -146,7 +146,7 @@ Add the SDK as a dependency in your `pom.xml`:
     <dependency>
         <groupId>com.databricks</groupId>
         <artifactId>zerobus-ingest-sdk</artifactId>
-        <version>1.3.0</version>
+        <version>1.4.0</version>
     </dependency>
 </dependencies>
 ```
@@ -155,7 +155,7 @@ Or with Gradle (`build.gradle`):
 
 ```groovy
 dependencies {
-    implementation 'com.databricks:zerobus-ingest-sdk:1.3.0'
+    implementation 'com.databricks:zerobus-ingest-sdk:1.4.0'
 }
 ```
 
@@ -178,7 +178,7 @@ If you prefer the self-contained fat JAR with all dependencies included:
     <dependency>
         <groupId>com.databricks</groupId>
         <artifactId>zerobus-ingest-sdk</artifactId>
-        <version>1.3.0</version>
+        <version>1.4.0</version>
         <classifier>jar-with-dependencies</classifier>
     </dependency>
 </dependencies>
@@ -188,7 +188,7 @@ Or with Gradle:
 
 ```groovy
 dependencies {
-    implementation 'com.databricks:zerobus-ingest-sdk:1.3.0:jar-with-dependencies'
+    implementation 'com.databricks:zerobus-ingest-sdk:1.4.0:jar-with-dependencies'
 }
 ```
 
@@ -211,11 +211,11 @@ libraries under `src/main/resources/native/` and run Maven without that flag.
 
 A release build (natives staged, no skip flag) generates two JAR files in `target/`:
 
-- **Regular JAR**: `zerobus-ingest-sdk-1.3.0.jar` (~12MB, includes native libraries)
+- **Regular JAR**: `zerobus-ingest-sdk-1.4.0.jar` (~12MB, includes native libraries)
   - Contains only the SDK classes
   - Requires all dependencies on the classpath
 
-- **Fat JAR**: `zerobus-ingest-sdk-1.3.0-jar-with-dependencies.jar` (~19MB, includes native libraries + all dependencies)
+- **Fat JAR**: `zerobus-ingest-sdk-1.4.0-jar-with-dependencies.jar` (~19MB, includes native libraries + all dependencies)
   - Contains SDK classes plus all dependencies bundled
   - Self-contained, easier to deploy
 
@@ -259,7 +259,7 @@ Create `pom.xml`:
         <dependency>
             <groupId>com.databricks</groupId>
             <artifactId>zerobus-ingest-sdk</artifactId>
-            <version>1.3.0</version>
+            <version>1.4.0</version>
         </dependency>
 
         <!-- SLF4J implementation (the SDK depends on slf4j-api only) -->
@@ -322,16 +322,16 @@ The proto generation tool requires the fat JAR (all dependencies included):
 
 ```bash
 # Download from Maven Central
-wget https://repo1.maven.org/maven2/com/databricks/zerobus-ingest-sdk/1.3.0/zerobus-ingest-sdk-1.3.0-jar-with-dependencies.jar
+wget https://repo1.maven.org/maven2/com/databricks/zerobus-ingest-sdk/1.4.0/zerobus-ingest-sdk-1.4.0-jar-with-dependencies.jar
 
 # Or if you built from source, it's in target/
-# cp target/zerobus-ingest-sdk-1.3.0-jar-with-dependencies.jar .
+# cp target/zerobus-ingest-sdk-1.4.0-jar-with-dependencies.jar .
 ```
 
 **Run the tool:**
 
 ```bash
-java -jar zerobus-ingest-sdk-1.3.0-jar-with-dependencies.jar \
+java -jar zerobus-ingest-sdk-1.4.0-jar-with-dependencies.jar \
   --uc-endpoint "https://dbc-a1b2c3d4-e5f6.cloud.databricks.com" \
   --client-id "your-service-principal-application-id" \
   --client-secret "your-service-principal-secret" \

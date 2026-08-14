@@ -10,7 +10,7 @@
 
 ### Documentation
 
-- Updated dependency snippets to version 1.3.0 and corrected README and example
+- Updated dependency snippets to version 1.4.0 and corrected README and example
   code for stream cleanup, recreation, unique local variables, and a single
   durability barrier after queued ingestion. Clarified that acknowledgment
   callbacks fire once per logical ingest submission, including one callback per
@@ -22,8 +22,11 @@
 - Maven Central snippets no longer tell users to redeclare compile-scope
   transitives (`protobuf-java`, `slf4j-api`). Stream-builder examples use
   try-with-resources. GenerateProto docs no longer claim STRUCT support, JAR
-  examples use `zerobus-ingest-sdk` 1.3.0, and proto examples generate
+  examples use `zerobus-ingest-sdk` 1.4.0, and proto examples generate
   `AirQualityProto.java` with `protoc` instead of treating it as checked in.
+  Example README snippets and the JSON/proto `SingleRecordExample` programs
+  queue records or batches and call `flush()` once instead of
+  `waitForOffset()` after a single ingest.
 
 ### Internal Changes
 
