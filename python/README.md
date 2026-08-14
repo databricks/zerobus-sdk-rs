@@ -367,7 +367,7 @@ except ZerobusException as e:
     try:
         unacked = list(stream.get_unacked_records())
     except ZerobusException:
-        raise
+        raise e
     print(f"{len(unacked)} previously queued records were unacknowledged.")
     try:
         new_stream = sdk.recreate_stream(stream)

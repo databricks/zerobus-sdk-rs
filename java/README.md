@@ -1574,12 +1574,13 @@ try (ZerobusProtoStream stream = sdk.streamBuilder()
     for (AirQuality record : records) {
         stream.ingestRecordOffset(record);
     }
-    stream.flush(); // wait for durability; callbacks may still be running until close()
+    stream.flush(); // wait for durability; callbacks may still be running
 }
 ```
 
 Implementations must be thread-safe and lightweight (callbacks run on internal
-processing threads).
+processing threads). `close()` waits at most five seconds for in-flight
+callbacks; remaining callbacks may still be pending when it returns.
 
 ## Best Practices
 
