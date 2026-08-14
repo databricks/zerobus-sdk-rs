@@ -813,9 +813,12 @@ impl AckProcessor {
                     observe_close = false;
                     if matches!(connection, ConnectionState::Active)
                         && close_request.target_offset.is_none()
+                        && !(response_deferred_send_failure
+                            && self.request_send_failure.is_pending())
                     {
                         // Give a terminal response that predates an empty close one poll.
                         // A pending or nonterminal response cannot postpone close again.
+                        // Skip if the send-failure one-tie already consumed a response.
                         priority_response = response_stream.next().now_or_never();
                         if priority_response.is_some() {
                             close_after_priority_response = Some(close_request);
@@ -1150,6 +1153,7 @@ impl AckProcessor {
 mod tests {
     use std::sync::atomic::{AtomicU64, Ordering};
     use std::sync::Arc;
+    use std::task::Poll;
 
     use arrow_array::Int32Array;
     use arrow_flight::error::FlightError;
@@ -1427,6 +1431,120 @@ mod tests {
             }
             other => panic!("expected a stream-closed error, got {other:?}"),
         }
+    }
+
+    /// After the one response-first tie, a later terminal status is not polled.
+    #[tokio::test]
+    async fn later_terminal_status_does_not_replace_reported_send_failure() {
+        let no_progress = PutResult {
+            app_metadata: serde_json::to_vec(&FlightAckMetadata {
+                ack_up_to_offset: -1,
+                ack_up_to_records: 0,
+                close_stream_duration_ms: None,
+            })
+            .unwrap()
+            .into(),
+        };
+        let response_stream = iter([
+            Ok(no_progress),
+            Err(tonic::Status::permission_denied("permanent server rejection").into()),
+        ]);
+        let (processor, request_body, _last_ack_rx) = ack_processor(
+            Arc::new(Mutex::new(Vec::new())),
+            Arc::new(AtomicU64::new(0)),
+            Arc::new(AtomicU64::new(0)),
+            false,
+        );
+        processor.request_send_failure.report();
+
+        let error = processor
+            .process(Box::pin(response_stream), request_body)
+            .await
+            .expect_err("the reported request-send failure must trigger recovery");
+
+        assert!(error.is_retryable());
+        match error {
+            ZerobusError::StreamClosedError(status) => {
+                assert_eq!(status.code(), tonic::Code::Unavailable);
+            }
+            other => panic!("expected a stream-closed error, got {other:?}"),
+        }
+    }
+
+    /// Empty-close's one-shot peek must not consume a later item after send-failure
+    /// has already used its response-first tie.
+    #[tokio::test]
+    async fn deferred_send_failure_skips_empty_close_peek() {
+        let no_progress = PutResult {
+            app_metadata: serde_json::to_vec(&FlightAckMetadata {
+                ack_up_to_offset: -1,
+                ack_up_to_records: 0,
+                close_stream_duration_ms: None,
+            })
+            .unwrap()
+            .into(),
+        };
+        let (processor, request_body, _last_ack_rx) = ack_processor(
+            Arc::new(Mutex::new(Vec::new())),
+            Arc::new(AtomicU64::new(0)),
+            Arc::new(AtomicU64::new(0)),
+            false,
+        );
+        processor.request_send_failure.report();
+
+        let taken = Arc::new(AtomicU64::new(0));
+        let taken_for_stream = Arc::clone(&taken);
+        let close = processor.close.clone();
+        let request = CloseRequest {
+            target_offset: None,
+            deadline: Instant::now() + Duration::from_secs(1),
+        };
+        let mut items = vec![
+            Ok(no_progress),
+            Err(tonic::Status::permission_denied("permanent server rejection").into()),
+        ]
+        .into_iter();
+        let mut response_stream: FlightResponseStream =
+            Box::pin(futures::stream::poll_fn(move |_cx| {
+                let n = taken_for_stream.fetch_add(1, Ordering::SeqCst) + 1;
+                if n == 1 {
+                    close.publish(request);
+                }
+                Poll::Ready(items.next())
+            }));
+        let mut close_rx = processor.close.subscribe();
+
+        let result = processor
+            .process_active(&mut response_stream, &request_body, &mut close_rx, true)
+            .await;
+        match result {
+            Ok(AckProcessOutcome::Close {
+                request:
+                    CloseRequest {
+                        target_offset: None,
+                        ..
+                    },
+                outcome: Err(error),
+            }) => {
+                assert!(!error.is_retryable());
+                match error {
+                    ZerobusError::StreamClosedError(status) => {
+                        assert_eq!(status.code(), tonic::Code::PermissionDenied);
+                    }
+                    other => panic!("expected drained peer status, got {other:?}"),
+                }
+            }
+            Err(ZerobusError::StreamClosedError(status))
+                if status.code() == tonic::Code::Unavailable =>
+            {
+                panic!("empty-close peek discarded the buffered peer status");
+            }
+            _ => panic!("expected empty close to surface the buffered peer status"),
+        }
+        assert!(
+            taken.load(Ordering::SeqCst) >= 2,
+            "drain must observe the buffered peer status instead of dropping it"
+        );
     }
 
     /// At most one ready nonterminal response may defer a reported request-send failure.

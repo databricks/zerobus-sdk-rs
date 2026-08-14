@@ -27,7 +27,8 @@
   attempt, retains the unacknowledged suffix, and returns the error that triggered the
   current attempt. Close during an existing recovery or server-requested rotation keeps
   that trigger even if every record is durable, so an error can coexist with an empty
-  unacknowledged-batch set.
+  unacknowledged-batch set. After a request-send failure, one ready response may still
+  be applied; later stream items are not discarded in order to start recovery.
 - Fixed Arrow Flight recovery sender lifetime: replacement senders are now published
   only after pending replay succeeds, while initial supervisor handoff and failed or
   cancelled replay promptly drop redundant senders instead of retaining incomplete
