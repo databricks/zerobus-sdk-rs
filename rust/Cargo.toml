@@ -57,10 +57,10 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
 # Arrow
 # arrow-flight is vendored locally with a slice-aware batch-split fix (arrow-rs#9388 / #5352).
-arrow-flight = { path = "third_party/arrow-flight", version = "59.1", default-features = false }
-arrow-array = { version = "59.1", default-features = false }
-arrow-schema = { version = "59.1", default-features = false }
-arrow-ipc = { version = "59.1", default-features = false }
+arrow-flight = { path = "third_party/arrow-flight", version = "59.2", default-features = false }
+arrow-array = { version = "59.2", default-features = false }
+arrow-schema = { version = "59.2", default-features = false }
+arrow-ipc = { version = "59.2", default-features = false }
 
 # Misc
 futures = "0.3"

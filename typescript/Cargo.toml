@@ -32,9 +32,9 @@ async-trait = "0.1"
 # `Bytes` is the input type for the Rust SDK's `ingest_ipc_batch` entry.
 bytes = "1"
 
-arrow-array = { version = "59.1", optional = true }
-arrow-schema = { version = "59.1", optional = true }
-arrow-ipc = { version = "59.1", features = ["lz4", "zstd"], optional = true }
+arrow-array = { version = "59.2", optional = true }
+arrow-schema = { version = "59.2", optional = true }
+arrow-ipc = { version = "59.2", features = ["lz4", "zstd"], optional = true }
 
 [build-dependencies]
 napi-build = "2"
