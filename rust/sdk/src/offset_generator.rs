@@ -65,11 +65,8 @@ impl OffsetIdGenerator {
 
     /// Repositions the generator so the next call to `next()` returns `next_value`.
     ///
-    /// Used by the Arrow Flight stream recovery path: when the SDK reconnects and
-    /// replays N pending batches with wire offsets `0..N-1`, the in-memory generator
-    /// must be set so that subsequent fresh batches pick up at `N` rather than the
-    /// pre-recovery monotonic counter — otherwise the server rejects the next batch
-    /// with a non-sequential-offset error.
+    /// This may move the sequence backward; callers must synchronize it with any
+    /// related state and concurrent calls to `next()` or `last()`.
     pub fn set_next(&self, next_value: OffsetId) {
         self.last_offset_id.store(next_value - 1, Ordering::SeqCst);
     }

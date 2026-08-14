@@ -8,6 +8,12 @@
 
 ### Bug Fixes
 
+- Arrow Flight now rolls back logical offsets and record ranges when an enqueue
+  fails with recovery disabled. `ingest_batch()` waits for terminal finalization
+  and returns the request-stream error; `flush()` and `close()` no longer wait on
+  the withdrawn offset. An already-acknowledged flush target still succeeds, while
+  `close()` preserves the terminal error and retained batches are immediately available.
+
 ### Documentation
 
 - Corrected README and rustdoc examples so their dependencies, feature flags,
