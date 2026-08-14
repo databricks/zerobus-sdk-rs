@@ -3,6 +3,12 @@ run-name: "Build Python SDK ${{ github.ref_name }}"
 
 on:
   workflow_dispatch:
+    inputs:
+      macos-binaries-release:
+        description: "Optional GitHub Release tag holding laptop-built *macosx*.whl files. Leave empty to skip macOS."
+        required: false
+        type: string
+        default: ""
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -168,4 +174,47 @@ jobs:
         with:
           name: wheels-sdist
           path: dist
+          if-no-files-found: error
+
+  import-macos:
+    if: inputs.macos-binaries-release != ''
+    runs-on:
+      group: databricks-protected-runner-group
+      labels: linux-ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Download macOS wheels from release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REF: ${{ inputs.macos-binaries-release }}
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          gh release download "$REF" \
+            --repo "${{ github.repository }}" \
+            --pattern '*macosx*.whl' \
+            --dir dist/
+          version="${REF##*/v}"
+          version="${version#python/v}"
+          arm64="dist/databricks_zerobus_ingest_sdk-${version}-cp39-abi3-macosx_11_0_arm64.whl"
+          x86_64="dist/databricks_zerobus_ingest_sdk-${version}-cp39-abi3-macosx_10_12_x86_64.whl"
+          # Version tag may be a staging tag; accept any two macosx wheels if the
+          # conventional names are absent.
+          if [[ ! -f "$arm64" || ! -f "$x86_64" ]]; then
+            shopt -s nullglob
+            wheels=(dist/*macosx*.whl)
+            if [[ "${#wheels[@]}" -lt 2 ]]; then
+              echo "ERROR: expected two macOS wheels in $REF"
+              ls -lh dist/ || true
+              exit 1
+            fi
+          fi
+          ls -lh dist/*macosx*.whl
+
+      - name: Upload macOS wheels
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: wheels-macos
+          path: dist/*macosx*.whl
           if-no-files-found: error

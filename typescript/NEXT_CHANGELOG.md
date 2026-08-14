@@ -38,6 +38,8 @@
 
 ### Internal Changes
 
+- The TypeScript release workflow can optionally import laptop-built darwin `.node`
+  binaries from a GitHub Release when CI has no macOS runners.
 - Updated TypeScript SDK development dependencies and the NAPI Cargo lockfile to
   resolve Dependabot security alerts without changing the public SDK API.
 - Updated the wrapped Rust SDK dependency from v2.0.1 to v2.6.0 and aligned

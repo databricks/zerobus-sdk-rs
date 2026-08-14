@@ -3,8 +3,53 @@ run-name: "Build JNI ${{ github.ref_name }}"
 
 on:
   workflow_dispatch:
+    inputs:
+      macos-binaries-release:
+        description: "Optional GitHub Release tag holding laptop-built libzerobus_jni-osx-*.dylib files. Leave empty to skip macOS."
+        required: false
+        type: string
+        default: ""
 
 jobs:
+  import-macos:
+    if: inputs.macos-binaries-release != ''
+    runs-on:
+      group: databricks-protected-runner-group
+      labels: linux-ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Download macOS dylibs from release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REF: ${{ inputs.macos-binaries-release }}
+        run: |
+          set -euo pipefail
+          for arch in x86_64 aarch64; do
+            mkdir -p "jni-osx-$arch"
+            gh release download "$REF" \
+              --repo "${{ github.repository }}" \
+              --pattern "libzerobus_jni-osx-$arch.dylib" \
+              --dir "jni-osx-$arch"
+            test -f "jni-osx-$arch/libzerobus_jni-osx-$arch.dylib"
+            mv "jni-osx-$arch/libzerobus_jni-osx-$arch.dylib" \
+               "jni-osx-$arch/libzerobus_jni.dylib"
+          done
+
+      - name: Upload osx-x86_64
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: jni-osx-x86_64
+          path: jni-osx-x86_64/libzerobus_jni.dylib
+          if-no-files-found: error
+
+      - name: Upload osx-aarch64
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: jni-osx-aarch64
+          path: jni-osx-aarch64/libzerobus_jni.dylib
+          if-no-files-found: error
+
   build-jni:
     strategy:
       fail-fast: false

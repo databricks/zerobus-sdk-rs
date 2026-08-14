@@ -8,6 +8,11 @@ on:
         description: "Run ID of the release-jni.yml build containing JNI artifacts."
         required: true
         type: string
+      macos-binaries-release:
+        description: "Optional GitHub Release tag holding laptop-built libzerobus_jni-osx-*.dylib files. Leave empty to skip extra macOS import (jni-osx-* artifacts from the JNI run are still packed)."
+        required: false
+        type: string
+        default: ""
 
 jobs:
   build-jar:
@@ -45,6 +50,25 @@ jobs:
             cp "$dir"/* src/main/resources/native/"$platform"/
           done
 
+      - name: Import macOS dylibs from release
+        if: inputs.macos-binaries-release != ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REF: ${{ inputs.macos-binaries-release }}
+        working-directory: java
+        run: |
+          set -euo pipefail
+          for arch in x86_64 aarch64; do
+            dest="src/main/resources/native/osx-$arch"
+            mkdir -p "$dest"
+            gh release download "$REF" \
+              --repo "${{ github.repository }}" \
+              --pattern "libzerobus_jni-osx-$arch.dylib" \
+              --dir "$dest"
+            test -f "$dest/libzerobus_jni-osx-$arch.dylib"
+            mv "$dest/libzerobus_jni-osx-$arch.dylib" "$dest/libzerobus_jni.dylib"
+          done
+
       - name: Set up Java
         uses: actions/setup-java@c1e323688fd81a25caa38c78aa6df2d33d3e20d9 # v4
         with:
@@ -69,6 +93,12 @@ jobs:
             native/linux-musl-aarch64/libzerobus_jni.so
             native/windows-x86_64/zerobus_jni.dll
           )
+          if [[ -f src/main/resources/native/osx-x86_64/libzerobus_jni.dylib ]]; then
+            required_entries+=(
+              native/osx-x86_64/libzerobus_jni.dylib
+              native/osx-aarch64/libzerobus_jni.dylib
+            )
+          fi
 
           shopt -s nullglob
           jars=(target/zerobus-ingest-sdk-*.jar)
