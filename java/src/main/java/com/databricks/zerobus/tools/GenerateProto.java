@@ -19,8 +19,8 @@ import java.util.regex.Pattern;
  * Generate proto2 file from Unity Catalog table schema.
  *
  * <p>This tool fetches table schema from Unity Catalog and generates a corresponding proto2
- * definition file. It supports scalar Delta types plus ARRAY and MAP, and maps
- * them to Protocol Buffer types. STRUCT columns are not generated.
+ * definition file. It supports scalar Delta types plus ARRAY and MAP, and maps them to Protocol
+ * Buffer types. STRUCT columns are not generated.
  *
  * <p>Usage: java GenerateProto --uc-endpoint &lt;endpoint&gt; --client-id &lt;id&gt;
  * --client-secret &lt;secret&gt; --table &lt;catalog.schema.table&gt; --output &lt;output.proto&gt;

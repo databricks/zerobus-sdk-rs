@@ -145,7 +145,8 @@ int main() {
       try {
         unacked = stream.get_unacked_records();
       } catch (const zerobus::ZerobusException& retrieval) {
-        std::cerr << "Could not inspect unacked records (stream may still be active): "
+        std::cerr << "Could not inspect unacked records (stream may still be "
+                     "active): "
                   << retrieval.what() << "\n";
         return 1;
       }
