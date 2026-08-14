@@ -20,7 +20,7 @@ use std::sync::Arc;
 use arrow_flight::error::FlightError;
 use bytes::Bytes;
 use tokio::sync::{mpsc, watch, Mutex, Notify, Semaphore};
-use tokio::task::JoinHandle;
+use tokio::task::AbortHandle;
 use tokio::time::{timeout, Duration, Instant};
 use tokio_retry::strategy::FixedInterval;
 use tokio_retry::RetryIf;
@@ -30,6 +30,7 @@ pub use arrow_array::RecordBatch;
 pub use arrow_schema::{DataType, Field, Schema as ArrowSchema, TimeUnit};
 
 use self::batch::{materialize_ipc, PendingBatch};
+use self::close::{CloseCoordinator, CloseFinalizer, CloseRequest, CloseState};
 pub use self::options::ArrowStreamConfigurationOptions;
 use self::supervisor::Supervisor;
 use crate::errors::{should_retry_initial_connection, ZerobusError};
@@ -44,6 +45,7 @@ pub(crate) mod c_data;
 
 mod acks;
 mod batch;
+mod close;
 mod connection;
 mod metadata;
 mod options;
@@ -67,54 +69,27 @@ pub(super) fn configured_deadline(
     })
 }
 
-/// Test-only barrier used to pause `reconnect` at a precise point — the new connection
-/// is established but pending ranges are not yet rebuilt — so a test can schedule a
-/// concurrent ingest or `close()`.
 #[cfg(feature = "test-hooks")]
-type ReconnectRebuildGate = Arc<Mutex<Option<ReconnectRebuildBarrier>>>;
+type TestBarrierGate = Mutex<Option<TestBarrier>>;
 
-/// Paired notifications for [`ReconnectRebuildGate`]: `reached` fires when reconnect
-/// hits the barrier; `proceed` releases it (or a test aborts via `close()` instead).
 #[cfg(feature = "test-hooks")]
 #[derive(Clone)]
-struct ReconnectRebuildBarrier {
+struct TestBarrier {
     reached: Arc<Notify>,
     proceed: Arc<Notify>,
 }
 
-/// Test-only barrier used to pause recovery after its first replay send, before the
-/// remaining backlog is sent and pending ACK timestamps are refreshed.
 #[cfg(feature = "test-hooks")]
-type ReplaySendGate = Arc<Mutex<Option<ReplaySendBarrier>>>;
+type TestNotifyGate = Mutex<Option<Arc<Notify>>>;
 
 #[cfg(feature = "test-hooks")]
-#[derive(Clone)]
-struct ReplaySendBarrier {
-    reached: Arc<Notify>,
-    proceed: Arc<Notify>,
-}
-
-/// Test-only gate: when armed, the ACK processor fires the notify right after applying a
-/// non-empty ack (i.e. after storing `last_acked_records`), letting a test confirm a
-/// partial ack has landed before it proceeds.
-#[cfg(feature = "test-hooks")]
-type AckAppliedGate = Arc<Mutex<Option<Arc<Notify>>>>;
-
-/// Test-only gate: when armed, the ACK processor fires the notify immediately before
-/// waiting without any pending-work deadline.
-#[cfg(feature = "test-hooks")]
-type AckIdleGate = Arc<Mutex<Option<Arc<Notify>>>>;
-
-/// Test-only barrier that parks `close()` after the supervisor and sender are gone but
-/// before pending batches are finalized, allowing cancellation-safe teardown tests.
-#[cfg(feature = "test-hooks")]
-type CloseFinalizeGate = Arc<Mutex<Option<CloseFinalizeBarrier>>>;
-
-#[cfg(feature = "test-hooks")]
-#[derive(Clone)]
-struct CloseFinalizeBarrier {
-    reached: Arc<Notify>,
-    proceed: Arc<Notify>,
+#[derive(Default)]
+struct TestHooks {
+    reconnect_rebuild: TestBarrierGate,
+    replay_send: TestBarrierGate,
+    ack_applied: TestNotifyGate,
+    ack_idle: TestNotifyGate,
+    close_finalize: TestBarrierGate,
 }
 
 /// Properties for an Arrow Flight ingestion table.
@@ -197,13 +172,12 @@ pub struct ZerobusArrowStream {
     _last_ack_rx: watch::Receiver<Option<OffsetId>>,
     /// True once the stream is terminally closed and unacknowledged batches may be retrieved.
     is_closed: Arc<AtomicBool>,
-    /// Separates resumable teardown from final closure so retries skip flushing while
-    /// new ingests remain rejected.
-    close_teardown_started: AtomicBool,
-    /// Retains the first flush failure so resumed close calls return the same outcome.
-    close_flush_error: Mutex<Option<ZerobusError>>,
-    /// Handle to the supervisor task that processes acknowledgments and recovery.
-    receiver_task: Arc<Mutex<Option<JoinHandle<ZerobusResult<()>>>>>,
+    /// Rejects new ingests as soon as terminal finalization owns admission.
+    admission_closed: Arc<AtomicBool>,
+    /// Coordinates one resumable explicit-close request with the recovery supervisor.
+    close: CloseCoordinator,
+    /// Abort handle for the supervisor worker; its detached reaper remains independent.
+    supervisor_abort: Arc<Mutex<Option<AbortHandle>>>,
     /// Accepted batches not yet fully acknowledged; retained for replay or retrieval.
     pending_batches: Arc<Mutex<Vec<PendingBatch>>>,
     /// Wakes the ACK processor when a batch is submitted after an idle period.
@@ -245,21 +219,8 @@ pub struct ZerobusArrowStream {
     /// Either `"zerobus-sdk-rs/<version>"` or `"zerobus-sdk-rs/<version> <application_name>"`.
     /// Re-applied to each fresh Channel built during recovery.
     sdk_identifier: Arc<str>,
-    /// Test seam (see [`ReconnectRebuildGate`]); compiled only under `test-hooks`.
     #[cfg(feature = "test-hooks")]
-    reconnect_rebuild_gate: ReconnectRebuildGate,
-    /// Test seam (see [`ReplaySendGate`]); compiled only under `test-hooks`.
-    #[cfg(feature = "test-hooks")]
-    replay_send_gate: ReplaySendGate,
-    /// Test seam (see [`AckAppliedGate`]); compiled only under `test-hooks`.
-    #[cfg(feature = "test-hooks")]
-    ack_applied_gate: AckAppliedGate,
-    /// Test seam (see [`AckIdleGate`]); compiled only under `test-hooks`.
-    #[cfg(feature = "test-hooks")]
-    ack_idle_gate: AckIdleGate,
-    /// Test seam (see [`CloseFinalizeGate`]); compiled only under `test-hooks`.
-    #[cfg(feature = "test-hooks")]
-    close_finalize_gate: CloseFinalizeGate,
+    test_hooks: Arc<TestHooks>,
 }
 
 impl ZerobusArrowStream {
@@ -297,16 +258,22 @@ impl ZerobusArrowStream {
             Duration::from_millis(options.server_lack_of_ack_timeout_ms),
             "server_lack_of_ack_timeout_ms",
         )?;
+        configured_deadline(
+            validation_started_at,
+            Duration::from_millis(options.flush_timeout_ms),
+            "flush_timeout_ms",
+        )?;
 
         let (last_ack_tx, _last_ack_rx) = watch::channel(None);
         let is_closed = Arc::new(AtomicBool::new(false));
+        let admission_closed = Arc::new(AtomicBool::new(false));
         let pending_batches = Arc::new(Mutex::new(Vec::new()));
         let pending_notify = Arc::new(Notify::new());
         let request_send_failure = Arc::new(acks::RequestSendFailure::default());
         let failed_batches = Arc::new(Mutex::new(Vec::new()));
         let recovery_attempts = Arc::new(AtomicU32::new(0));
         let batch_tx = Arc::new(Mutex::new(None));
-        let receiver_task = Arc::new(Mutex::new(None));
+        let supervisor_abort = Arc::new(Mutex::new(None));
         let cumulative_records_assigned = Arc::new(AtomicU64::new(0));
         let submitted_records = Arc::new(AtomicU64::new(0));
         let last_acked_records = Arc::new(AtomicU64::new(0));
@@ -315,6 +282,7 @@ impl ZerobusArrowStream {
         let inflight = Arc::new(Semaphore::new(options.max_inflight_batches));
 
         let (server_error_tx, server_error_rx) = watch::channel(None);
+        let close = CloseCoordinator::new();
 
         let stream = Self {
             table_properties,
@@ -324,9 +292,9 @@ impl ZerobusArrowStream {
             last_ack_tx,
             _last_ack_rx,
             is_closed,
-            close_teardown_started: AtomicBool::new(false),
-            close_flush_error: Mutex::new(None),
-            receiver_task,
+            admission_closed,
+            close,
+            supervisor_abort,
             pending_batches,
             pending_notify,
             request_send_failure,
@@ -346,15 +314,7 @@ impl ZerobusArrowStream {
             is_paused,
             sdk_identifier,
             #[cfg(feature = "test-hooks")]
-            reconnect_rebuild_gate: Arc::new(Mutex::new(None)),
-            #[cfg(feature = "test-hooks")]
-            replay_send_gate: Arc::new(Mutex::new(None)),
-            #[cfg(feature = "test-hooks")]
-            ack_applied_gate: Arc::new(Mutex::new(None)),
-            #[cfg(feature = "test-hooks")]
-            ack_idle_gate: Arc::new(Mutex::new(None)),
-            #[cfg(feature = "test-hooks")]
-            close_finalize_gate: Arc::new(Mutex::new(None)),
+            test_hooks: Arc::new(TestHooks::default()),
         };
 
         // Initialize the connection with retry logic.
@@ -415,8 +375,8 @@ impl ZerobusArrowStream {
         let task = Supervisor::new(&stream).spawn(connection);
 
         {
-            let mut receiver_task = stream.receiver_task.lock().await;
-            *receiver_task = Some(task);
+            let mut supervisor_abort = stream.supervisor_abort.lock().await;
+            *supervisor_abort = Some(task);
         }
 
         info!(
@@ -467,8 +427,9 @@ impl ZerobusArrowStream {
     /// ```
     #[instrument(level = "debug", skip_all, fields(table_name = %self.table_properties.table_name))]
     pub async fn ingest_batch(&self, batch: RecordBatch) -> ZerobusResult<OffsetId> {
-        if self.is_closed.load(Ordering::Relaxed)
-            || self.close_teardown_started.load(Ordering::Acquire)
+        if self.admission_closed.load(Ordering::Acquire)
+            || self.is_closed.load(Ordering::Relaxed)
+            || self.close.has_started()
         {
             return Err(ZerobusError::StreamClosedError(tonic::Status::internal(
                 "Stream is closing or closed",
@@ -507,8 +468,9 @@ impl ZerobusArrowStream {
         let _guard = self.ingest_mutex.lock().await;
 
         // May have closed while we blocked on the permit; returning drops it.
-        if self.is_closed.load(Ordering::Relaxed)
-            || self.close_teardown_started.load(Ordering::Acquire)
+        if self.admission_closed.load(Ordering::Acquire)
+            || self.is_closed.load(Ordering::Relaxed)
+            || self.close.has_started()
         {
             return Err(ZerobusError::StreamClosedError(tonic::Status::internal(
                 "Stream is closing or closed",
@@ -619,8 +581,9 @@ impl ZerobusArrowStream {
     /// marker after `finish()`) is allowed after that batch.
     #[instrument(level = "debug", skip_all, fields(table_name = %self.table_properties.table_name))]
     pub async fn ingest_ipc_batch(&self, ipc_bytes: Bytes) -> ZerobusResult<OffsetId> {
-        if self.is_closed.load(Ordering::Relaxed)
-            || self.close_teardown_started.load(Ordering::Acquire)
+        if self.admission_closed.load(Ordering::Acquire)
+            || self.is_closed.load(Ordering::Relaxed)
+            || self.close.has_started()
         {
             return Err(ZerobusError::StreamClosedError(tonic::Status::internal(
                 "Stream is closing or closed",
@@ -679,9 +642,7 @@ impl ZerobusArrowStream {
                 // state. Re-read first because the watermark can be published between the
                 // read above and observing that state. Otherwise prefer the real terminal
                 // error over a generic one.
-                if self.is_closed.load(Ordering::Relaxed)
-                    || self.close_teardown_started.load(Ordering::Acquire)
-                {
+                if self.is_closed.load(Ordering::Relaxed) || self.close.has_started() {
                     if let Some(ack_offset) = *offset_rx.borrow_and_update() {
                         if ack_offset >= offset_to_wait {
                             return Ok(());
@@ -725,6 +686,24 @@ impl ZerobusArrowStream {
         })?
     }
 
+    /// Waits through the short interval where terminal finalization owns admission but
+    /// has not published `CloseState::Finalized` yet.
+    async fn wait_for_terminal_outcome(&self) -> ZerobusResult<()> {
+        let mut close_rx = self.close.subscribe();
+
+        loop {
+            if let CloseState::Finalized(result) = close_rx.borrow_and_update().clone() {
+                return result;
+            }
+
+            if close_rx.changed().await.is_err() {
+                return Err(ZerobusError::StreamClosedError(tonic::Status::internal(
+                    "Close coordinator stopped unexpectedly",
+                )));
+            }
+        }
+    }
+
     /// Flushes all currently pending batches and waits for their acknowledgments.
     ///
     /// Snapshots the highest assigned offset when it begins and waits through that offset.
@@ -762,11 +741,14 @@ impl ZerobusArrowStream {
         let target_offset = match self.offset_generator.last() {
             Some(offset) => offset,
             None => {
+                if self.admission_closed.load(Ordering::Acquire)
+                    && matches!(self.close.state(), CloseState::Open)
+                {
+                    return self.wait_for_terminal_outcome().await;
+                }
                 // Nothing was ingested: report closure if closed, otherwise nothing to do.
                 // Prefer the real terminal error over a generic closed message.
-                if self.is_closed.load(Ordering::Relaxed)
-                    || self.close_teardown_started.load(Ordering::Acquire)
-                {
+                if self.is_closed.load(Ordering::Relaxed) || self.close.has_started() {
                     if let Some(server_error) = self.server_error_rx.borrow().clone() {
                         return Err(server_error);
                     }
@@ -829,8 +811,12 @@ impl ZerobusArrowStream {
     /// Flushes pending work, stops background I/O, and retains unacknowledged batches for
     /// retrieval.
     ///
-    /// While the stream is active, the first call attempts one flush before teardown. If
-    /// teardown is interrupted, a later call resumes it without flushing again.
+    /// The first call publishes one close request. While the active transport remains
+    /// usable, the supervisor continues ACK processing through the original flush deadline,
+    /// then owns transport cleanup and finalization. Close does not start or continue
+    /// recovery: a transport failure or an already-running recovery is interrupted, and
+    /// unacknowledged batches are retained for retrieval. Repeated calls await the same
+    /// request and result. An uncommitted replacement transport is dropped best-effort.
     ///
     /// # Returns
     ///
@@ -838,15 +824,18 @@ impl ZerobusArrowStream {
     ///
     /// # Errors
     ///
-    /// Returns the initial flush error or a background terminal error. Teardown still
-    /// completes; use `get_unacked_batches()` to retrieve unacknowledged batches.
+    /// Returns a background terminal error or a timeout if the close target is not
+    /// acknowledged by the flush deadline. During ordinary active-connection close, a
+    /// timely target acknowledgment takes precedence. If close interrupts an already-active
+    /// server rotation or an uncommitted recovery attempt, it instead returns that attempt's
+    /// trigger even when the close target is durable. Teardown still completes; use
+    /// `get_unacked_batches()` to retrieve unacknowledged batches.
     ///
     /// # Cancellation safety
     ///
-    /// Cancelling before teardown begins does not itself close the stream, although an
-    /// independent terminal failure may do so. Once teardown starts, further ingests are
-    /// rejected; call `close()` again to resume incomplete teardown without repeating a
-    /// completed flush.
+    /// Once the close request is published, further ingests are rejected. Cancelling the
+    /// future does not cancel that request: call `close()` again to await the same original
+    /// deadline and final outcome.
     ///
     /// # Examples
     ///
@@ -860,91 +849,58 @@ impl ZerobusArrowStream {
     /// ```
     #[instrument(level = "debug", skip_all, fields(table_name = %self.table_properties.table_name))]
     pub async fn close(&mut self) -> ZerobusResult<()> {
-        let close_teardown_started = self.close_teardown_started.load(Ordering::Acquire);
-        if self.is_closed.load(Ordering::Relaxed) && !close_teardown_started {
-            // Already closed. If the supervisor closed it on a terminal failure, surface
-            // that error rather than reporting success — otherwise the common
-            // ingest-then-close() pattern would hide failed batches (retrievable via
-            // get_unacked_batches()). A clean prior close() has no stored error.
-            if let Some(server_error) = self.server_error_rx.borrow().clone() {
-                return Err(server_error);
-            }
-            if let Some(close_error) = self.close_flush_error.lock().await.clone() {
-                return Err(close_error);
-            }
-            return Ok(());
-        }
-
         info!(
             table_name = %self.table_properties.table_name,
             "Closing Arrow Flight stream"
         );
+        let mut close_rx = self.close.subscribe();
 
-        // Retain a completed flush result before publishing teardown so retries after
-        // teardown starts skip another flush and return the same outcome.
-        let flush_result = if close_teardown_started {
-            match self.close_flush_error.lock().await.clone() {
-                Some(error) => Err(error),
-                None => Ok(()),
-            }
-        } else {
-            let result = self.flush().await;
-            *self.close_flush_error.lock().await = result.as_ref().err().cloned();
-            self.close_teardown_started.store(true, Ordering::Release);
-            result
-        };
-        if let Err(e) = &flush_result {
-            warn!(
-                "Flush failed during close: {}. Draining pending batches to the failed set.",
-                e
-            );
-        }
-
-        // Reap the supervisor (abort + await) BEFORE clearing the sender, so an in-flight
-        // reconnect can't reinstall batch_tx after we clear it, and no ACK processing /
-        // reconnect mutates pending_batches or last_acked_records while we drain. Join in
-        // place and only clear receiver_task once the join completes, so a close()
-        // cancelled during the await doesn't drop the handle — a retry re-joins it.
-        {
-            let mut task = self.receiver_task.lock().await;
-            if let Some(handle) = task.as_mut() {
-                handle.abort();
-                let _ = handle.await;
-            }
-            *task = None;
-        }
-
-        // Detach the sender now that nothing can reinstall it.
-        {
-            let mut tx = self.batch_tx.lock().await;
-            *tx = None;
-        }
-
-        // Test seam: cancel close after teardown became irreversible but before finalization.
-        #[cfg(feature = "test-hooks")]
-        {
-            let barrier = self.close_finalize_gate.lock().await.take();
-            if let Some(barrier) = barrier {
-                barrier.reached.notify_one();
-                barrier.proceed.notified().await;
+        loop {
+            let state = { close_rx.borrow_and_update().clone() };
+            match state {
+                CloseState::Open => {
+                    // This mutex makes the target snapshot and request publication atomic
+                    // with ingest admission and replacement-sender publication.
+                    let guard = self.ingest_mutex.lock().await;
+                    match self.close.state() {
+                        CloseState::Open if !self.admission_closed.load(Ordering::Acquire) => {
+                            let deadline = configured_deadline(
+                                Instant::now(),
+                                Duration::from_millis(self.options.flush_timeout_ms),
+                                "flush_timeout_ms",
+                            )?;
+                            let request = CloseRequest {
+                                target_offset: self.offset_generator.last(),
+                                deadline,
+                            };
+                            self.close.publish(request);
+                        }
+                        CloseState::Open => {
+                            // Terminal finalization owns admission but publishes its result
+                            // only after the retained-batch snapshot is complete.
+                            drop(guard);
+                            if close_rx.changed().await.is_err() {
+                                return Err(ZerobusError::StreamClosedError(
+                                    tonic::Status::internal(
+                                        "Close coordinator stopped unexpectedly",
+                                    ),
+                                ));
+                            }
+                        }
+                        CloseState::Requested(_) => {}
+                        CloseState::Finalized(result) => return result,
+                    }
+                }
+                CloseState::Requested(_) => {
+                    if close_rx.changed().await.is_err() {
+                        return Err(ZerobusError::StreamClosedError(tonic::Status::internal(
+                            "Close coordinator stopped unexpectedly",
+                        )));
+                    }
+                }
+                CloseState::Finalized(result) => return result,
             }
         }
-
-        // Finalize under ingest_mutex so the pending drain is serialized with
-        // ingest_batch. Keep close_teardown_started set while finalization is in flight,
-        // then clear it immediately afterward; cancellation before completion remains
-        // resumable even if closure was already published.
-        Supervisor::finalize_closed(
-            &self.ingest_mutex,
-            &self.is_closed,
-            &self.pending_batches,
-            &self.failed_batches,
-            &self.last_acked_records,
-        )
-        .await;
-        self.close_teardown_started.store(false, Ordering::Release);
-
-        flush_result
     }
 
     /// Returns the un-acknowledged batches after the stream has been closed, for manual
@@ -958,8 +914,8 @@ impl ZerobusArrowStream {
     ///
     /// # Errors
     ///
-    /// * `InvalidStateError` - If closure has not been finalized, including after
-    ///   interrupted teardown; call `close()` again first.
+    /// * `InvalidStateError` - If closure has not been finalized; call `close()` first,
+    ///   or call it again to await a previously requested close.
     ///
     /// # Examples
     ///
@@ -995,7 +951,7 @@ impl ZerobusArrowStream {
         // failed set, then return the consolidated snapshot. move_pending_to_failed locks
         // failed first, so this serializes with a concurrent terminal drain and repeated
         // calls are idempotent (pending is already empty on the second call).
-        Supervisor::move_pending_to_failed(
+        CloseFinalizer::move_pending_to_failed(
             &self.pending_batches,
             &self.failed_batches,
             &self.last_acked_records,
@@ -1004,42 +960,45 @@ impl ZerobusArrowStream {
         Ok(self.failed_batches.lock().await.clone())
     }
 
-    /// Returns true once terminal finalization publishes closure. Interrupted teardown
-    /// remains false until finalization begins; cancellation during finalization may leave
-    /// this true while `close_teardown_started` marks teardown as resumable.
+    /// Returns true once supervisor-owned terminal finalization publishes closure.
     pub fn is_closed(&self) -> bool {
         self.is_closed.load(Ordering::Relaxed)
     }
 
-    /// Test-only: arms the reconnect rebuild barrier. The next `reconnect` pauses after
-    /// establishing the connection but before rebuilding pending ranges/watermark,
-    /// firing the returned `reached` notify, then waits on `proceed`. A test either
-    /// releases `proceed` to let recovery finish, or drives a concurrent `close()`
-    /// (which reaps the paused supervisor) without releasing it.
     #[cfg(feature = "test-hooks")]
-    #[doc(hidden)]
-    pub async fn arm_reconnect_rebuild_barrier(&self) -> (Arc<Notify>, Arc<Notify>) {
+    async fn arm_test_barrier(gate: &TestBarrierGate) -> (Arc<Notify>, Arc<Notify>) {
         let reached = Arc::new(Notify::new());
         let proceed = Arc::new(Notify::new());
-        *self.reconnect_rebuild_gate.lock().await = Some(ReconnectRebuildBarrier {
+        *gate.lock().await = Some(TestBarrier {
             reached: Arc::clone(&reached),
             proceed: Arc::clone(&proceed),
         });
         (reached, proceed)
     }
 
-    /// Test-only: pauses the next recovery after its first replay send and before the
-    /// remaining backlog is sent or its pending ACK timestamps are refreshed.
+    #[cfg(feature = "test-hooks")]
+    async fn arm_test_notify(gate: &TestNotifyGate) -> Arc<Notify> {
+        let notify = Arc::new(Notify::new());
+        *gate.lock().await = Some(Arc::clone(&notify));
+        notify
+    }
+
+    /// Test-only: arms the reconnect rebuild barrier. The next `reconnect` pauses after
+    /// establishing the connection but before rebuilding pending ranges/watermark,
+    /// firing the returned `reached` notify, then waits on `proceed`. Cancellation drops
+    /// the uncommitted replacement transport best-effort.
+    #[cfg(feature = "test-hooks")]
+    #[doc(hidden)]
+    pub async fn arm_reconnect_rebuild_barrier(&self) -> (Arc<Notify>, Arc<Notify>) {
+        Self::arm_test_barrier(&self.test_hooks.reconnect_rebuild).await
+    }
+
+    /// Test-only: pauses the next recovery after its first replay handoff and before the
+    /// remaining backlog or sender publication can be committed.
     #[cfg(feature = "test-hooks")]
     #[doc(hidden)]
     pub async fn arm_replay_send_barrier(&self) -> (Arc<Notify>, Arc<Notify>) {
-        let reached = Arc::new(Notify::new());
-        let proceed = Arc::new(Notify::new());
-        *self.replay_send_gate.lock().await = Some(ReplaySendBarrier {
-            reached: Arc::clone(&reached),
-            proceed: Arc::clone(&proceed),
-        });
-        (reached, proceed)
+        Self::arm_test_barrier(&self.test_hooks.replay_send).await
     }
 
     /// Test-only: arms a notify that fires each time the ACK processor applies a non-empty
@@ -1048,9 +1007,7 @@ impl ZerobusArrowStream {
     #[cfg(feature = "test-hooks")]
     #[doc(hidden)]
     pub async fn arm_ack_applied_notify(&self) -> Arc<Notify> {
-        let notify = Arc::new(Notify::new());
-        *self.ack_applied_gate.lock().await = Some(Arc::clone(&notify));
-        notify
+        Self::arm_test_notify(&self.test_hooks.ack_applied).await
     }
 
     /// Test-only: arms a one-shot notification for the next time the ACK processor
@@ -1058,9 +1015,7 @@ impl ZerobusArrowStream {
     #[cfg(feature = "test-hooks")]
     #[doc(hidden)]
     pub async fn arm_ack_idle_notify(&self) -> Arc<Notify> {
-        let notify = Arc::new(Notify::new());
-        *self.ack_idle_gate.lock().await = Some(Arc::clone(&notify));
-        notify
+        Self::arm_test_notify(&self.test_hooks.ack_idle).await
     }
 
     /// Test-only: replaces the active batch sender with a sender whose receiver is
@@ -1074,18 +1029,21 @@ impl ZerobusArrowStream {
         *self.batch_tx.lock().await = Some(closed_tx);
     }
 
-    /// Test-only: parks the next `close()` after supervisor/sender teardown but before
-    /// finalization. Dropping the close future at that point simulates cancellation.
+    /// Test-only: parks close finalization after choosing the local outcome and before
+    /// moving pending batches into the final failed-batch snapshot.
     #[cfg(feature = "test-hooks")]
     #[doc(hidden)]
     pub async fn arm_close_finalize_barrier(&self) -> (Arc<Notify>, Arc<Notify>) {
-        let reached = Arc::new(Notify::new());
-        let proceed = Arc::new(Notify::new());
-        *self.close_finalize_gate.lock().await = Some(CloseFinalizeBarrier {
-            reached: Arc::clone(&reached),
-            proceed: Arc::clone(&proceed),
-        });
-        (reached, proceed)
+        Self::arm_test_barrier(&self.test_hooks.close_finalize).await
+    }
+
+    /// Test-only: aborts the supervisor worker while leaving its finalizer reaper running.
+    #[cfg(feature = "test-hooks")]
+    #[doc(hidden)]
+    pub async fn abort_supervisor_for_test(&self) {
+        if let Some(handle) = self.supervisor_abort.lock().await.as_ref() {
+            handle.abort();
+        }
     }
 
     /// Returns the table name for this stream.
@@ -1110,10 +1068,11 @@ impl ZerobusArrowStream {
 
 impl Drop for ZerobusArrowStream {
     fn drop(&mut self) {
+        self.admission_closed.store(true, Ordering::Release);
         self.is_closed.store(true, Ordering::Relaxed);
         // Best-effort abort the supervisor. Drop does not preserve pending batches for
         // retrieval; call close() or let recovery reach terminal finalization first.
-        if let Ok(mut guard) = self.receiver_task.try_lock() {
+        if let Ok(mut guard) = self.supervisor_abort.try_lock() {
             if let Some(handle) = guard.take() {
                 handle.abort();
             }
