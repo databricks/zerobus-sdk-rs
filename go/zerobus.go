@@ -740,7 +740,7 @@ func (st *ZerobusStream) WaitForOffset(offset int64) error {
 //
 // Use this method to:
 //   - Retrieve unacknowledged records after stream failure for retry logic
-//   - Inspect payloads that were not durably written after a failed Flush()
+//   - Inspect payloads that were queued but not acked, before Close()
 //   - Implement custom retry strategies after stream errors
 //
 // Returns a slice where each element is either:

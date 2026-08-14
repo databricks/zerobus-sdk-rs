@@ -41,10 +41,10 @@ stream.Flush();
 
 ## Installation
 
-### NuGet
+### NuGet (when published)
 
 ```bash
-dotnet add package Databricks.Zerobus --version 0.5.1
+dotnet add package Databricks.Zerobus.Ingest.Sdk
 ```
 
 ### From Source
