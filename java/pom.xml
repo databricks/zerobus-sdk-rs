@@ -4,7 +4,7 @@
   <modelVersion>4.0.0</modelVersion>
   <groupId>com.databricks</groupId>
   <artifactId>zerobus-ingest-sdk</artifactId>
-  <version>1.3.0</version>
+  <version>1.4.0</version>
   <packaging>jar</packaging>
   <name>Zerobus Ingest SDK for Java</name>
   <description>Databricks Zerobus Ingest SDK for Java - Direct ingestion to Delta tables via native Rust SDK</description>
