@@ -154,4 +154,6 @@ let batch = RecordBatch::try_new(
 
 **3. Update table name and credentials** in the constants at the top of `main.rs`.
 
-> **Tip.** When in doubt about the Arrow type for a given Delta column type, the SDK validates the schema on the first batch — a mismatch fails fast with a descriptive error.
+> **Tip.** When in doubt about the Arrow type for a given Delta column type, the SDK
+> validates the schema when the stream is created. A mismatch fails fast with a
+> descriptive error.

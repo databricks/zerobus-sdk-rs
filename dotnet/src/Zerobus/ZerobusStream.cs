@@ -62,17 +62,17 @@ public sealed class ZerobusStream : IDisposable, IAsyncDisposable
     /// <returns>The offset of the ingested record.</returns>
     /// <exception cref="ZerobusException">Thrown if ingestion fails.</exception>
     /// <exception cref="ObjectDisposedException">Thrown if the stream has been disposed.</exception>
-    /// <exception cref="ArgumentException">
-    /// Thrown if the payload type is not <c>string</c> or <c>byte[]</c>.
-    /// </exception>
+    /// <exception cref="ArgumentNullException">Thrown if <paramref name="payload"/> is null.</exception>
     /// <example>
     /// <code>
-    /// // JSON
-    /// long offset = stream.IngestRecord("{\"id\": 1, \"message\": \"Hello\"}");
+    /// // JSON stream
+    /// long jsonOffset = jsonStream.IngestRecord("{\"id\": 1, \"message\": \"Hello\"}");
+    /// jsonStream.Flush();
     ///
-    /// // Protobuf
+    /// // Protobuf stream
     /// byte[] protoBytes = SerializeMyProto(myMessage);
-    /// long offset = stream.IngestRecord(protoBytes);
+    /// long protoOffset = protoStream.IngestRecord(protoBytes);
+    /// protoStream.Flush();
     /// </code>
     /// </example>
     public long IngestRecord(string payload)
@@ -127,6 +127,7 @@ public sealed class ZerobusStream : IDisposable, IAsyncDisposable
     ///     "{\"device\": \"sensor-002\", \"temp\": 21}",
     /// ];
     /// long batchOffset = stream.IngestRecords(records);
+    /// stream.Flush();
     /// </code>
     /// </example>
     public long IngestRecords(string[] records)
@@ -239,10 +240,17 @@ public sealed class ZerobusStream : IDisposable, IAsyncDisposable
     /// }
     /// catch (ZerobusException)
     /// {
-    ///     var unacked = stream.GetUnackedRecords();
-    ///     Console.WriteLine($"Failed to acknowledge {unacked.Length} records");
-    ///     foreach (var payload in unacked)
-    ///         Console.WriteLine($"{payload.Length} bytes");
+    ///     // A flush timeout can leave the stream active. GetUnackedRecords
+    ///     // requires a closed or failed stream.
+    ///     try
+    ///     {
+    ///         var unacked = stream.GetUnackedRecords();
+    ///         Console.WriteLine($"Failed to acknowledge {unacked.Length} records");
+    ///     }
+    ///     catch (ZerobusException retrieval)
+    ///     {
+    ///         Console.WriteLine($"Could not inspect unacked records: {retrieval.Message}");
+    ///     }
     /// }
     /// </code>
     /// </example>

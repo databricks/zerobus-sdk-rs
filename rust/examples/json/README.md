@@ -24,8 +24,8 @@ JSON examples are recommended for getting started - they're simpler and don't re
 - Great for quick prototyping
 
 **Available examples:**
-- **`single.rs`** - Ingest records one at a time using `ingest_record_offset()` / `ingest_record()`
-- **`batch.rs`** - Ingest multiple records at once using `ingest_records_offset()` / `ingest_records()`
+- **`single.rs`** - Ingest records one at a time using `ingest_record_offset()`
+- **`batch.rs`** - Ingest multiple records at once using `ingest_records_offset()`
 
 ## Three Ways to Pass Data
 
@@ -55,12 +55,11 @@ The SDK supports three approaches for passing JSON data:
 
 **Expected output:**
 ```
-[Auto-serializing] Record sent with offset ID: 0
-[Auto-serializing] Record acknowledged with offset ID: 0
-[Pre-serialized] Record sent with offset ID: 1
-[Pre-serialized] Record acknowledged with offset ID: 1
-[Backward-compatible] Record sent with offset ID: 2
-[Backward-compatible] Record acknowledged with offset ID: 2
+=== Offset-based API (Recommended) ===
+[Auto-serializing] Record queued with offset ID: 0
+[Pre-serialized] Record queued with offset ID: 1
+[Backward-compatible] Record queued with offset ID: 2
+All records acknowledged
 Stream closed successfully
 ```
 
@@ -119,12 +118,11 @@ let stream = sdk
 
 **Expected output:**
 ```
-[Auto-serializing] Batch of 3 records sent with offset ID: 0
-[Auto-serializing] Batch acknowledged with offset ID: 0
-[Pre-serialized] Batch of 3 records sent with offset ID: 1
-[Pre-serialized] Batch acknowledged with offset ID: 1
-[Backward-compatible] Batch of 3 records sent with offset ID: 2
-[Backward-compatible] Batch acknowledged with offset ID: 2
+=== Offset-based API (Recommended) ===
+[Auto-serializing] Batch of 3 records queued with offset ID: 0
+[Pre-serialized] Batch of 3 records queued with offset ID: 1
+[Backward-compatible] Batch of 3 records queued with offset ID: 2
+All offset-API batches acknowledged
 Stream closed successfully
 ```
 
@@ -133,47 +131,28 @@ Stream closed successfully
 ```rust
 use databricks_zerobus_ingest_sdk::{JsonValue, JsonString};
 
-// 1. Auto-serializing: Vec of wrapped structs
-let batch: Vec<JsonValue<Order>> = vec![
+let batch1: Vec<JsonValue<Order>> = vec![
     JsonValue(Order { id: 1, /* ... */ }),
     JsonValue(Order { id: 2, /* ... */ }),
     JsonValue(Order { id: 3, /* ... */ }),
 ];
-if let Some(offset) = stream.ingest_records_offset(batch).await? {
-    stream.wait_for_offset(offset).await?;
-}
+stream.ingest_records_offset(batch1).await?;
 
-// 2. Pre-serialized: Vec of wrapped strings
-let batch: Vec<JsonString> = vec![
-    JsonString(r#"{
-        "id": 4
-    }"#.to_string()),
-    JsonString(r#"{
-        "id": 5
-    }"#.to_string()),
-    JsonString(r#"{
-        "id": 6
-    }"#.to_string()),
+let batch2: Vec<JsonString> = vec![
+    JsonString(r#"{ "id": 4 }"#.to_string()),
+    JsonString(r#"{ "id": 5 }"#.to_string()),
+    JsonString(r#"{ "id": 6 }"#.to_string()),
 ];
-if let Some(offset) = stream.ingest_records_offset(batch).await? {
-    stream.wait_for_offset(offset).await?;
-}
+stream.ingest_records_offset(batch2).await?;
 
-// 3. Backward-compatible: Vec of raw strings
-let batch: Vec<String> = vec![
-    r#"{
-        "id": 7
-    }"#.to_string(),
-    r#"{
-        "id": 8
-    }"#.to_string(),
-    r#"{
-        "id": 9
-    }"#.to_string(),
+let batch3: Vec<String> = vec![
+    r#"{ "id": 7 }"#.to_string(),
+    r#"{ "id": 8 }"#.to_string(),
+    r#"{ "id": 9 }"#.to_string(),
 ];
-if let Some(offset) = stream.ingest_records_offset(batch).await? {
-    stream.wait_for_offset(offset).await?;
-}
+stream.ingest_records_offset(batch3).await?;
+
+stream.flush().await?;
 ```
 
 **Batch semantics:**
@@ -206,4 +185,4 @@ let json = r#"{
 }"#.to_string();
 ```
 
-**3. Update table name and credentials** in the constants at the top of `main.rs`.
+**3. Update table name and credentials** in the constants at the top of `single.rs` or `batch.rs`.

@@ -21,6 +21,13 @@
 
 ### Documentation
 
+- Corrected installation and source-build prerequisites, separated JSON and
+  Protobuf stream examples, added a runnable generated-message example, and
+  replaced per-record waits with one final flush in bulk-ingestion examples.
+- Documented that `GetUnackedRecords()` can fail while the stream is still
+  active after a flush timeout, and stopped reporting success after ingest
+  failures. Pointed CONTRIBUTING at `src/Zerobus/Native/`.
+
 ### Internal Changes
 
 - Made the .NET release workflow build-only, consistent with the other SDKs. It now packs the NuGet package and uploads it as an artifact; publishing and the GitHub Release happen downstream.

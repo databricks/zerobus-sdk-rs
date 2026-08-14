@@ -147,16 +147,17 @@ public class ZerobusSdk implements AutoCloseable {
    * <p>Example usage:
    *
    * <pre>{@code
-   * ZerobusProtoStream stream = sdk.streamBuilder()
-   *     .table("catalog.schema.table")
-   *     .oauth(clientId, clientSecret)
-   *     .compiledProto(MyProto.getDescriptor().toProto())
-   *     .build()
-   *     .join();
-   *
-   * long offset = stream.ingestRecordOffset(myProtoMessage);
-   * stream.waitForOffset(offset);
-   * stream.close();
+   * try (ZerobusProtoStream stream = sdk.streamBuilder()
+   *         .table("catalog.schema.table")
+   *         .oauth(clientId, clientSecret)
+   *         .compiledProto(MyProto.getDescriptor().toProto())
+   *         .build()
+   *         .join()) {
+   *     for (MyProto record : records) {
+   *         stream.ingestRecordOffset(record);
+   *     }
+   *     stream.flush();
+   * }
    * }</pre>
    *
    * @param tableName The fully qualified table name (catalog.schema.table).
@@ -264,22 +265,23 @@ public class ZerobusSdk implements AutoCloseable {
    * <p>Example usage:
    *
    * <pre>{@code
-   * ZerobusJsonStream stream = sdk.streamBuilder()
-   *     .table("catalog.schema.table")
-   *     .oauth(clientId, clientSecret)
-   *     .json()
-   *     .build()
-   *     .join();
+   * try (ZerobusJsonStream stream = sdk.streamBuilder()
+   *         .table("catalog.schema.table")
+   *         .oauth(clientId, clientSecret)
+   *         .json()
+   *         .build()
+   *         .join()) {
+   *     // Main: Ingest objects with a serializer
+   *     Gson gson = new Gson();
+   *     for (MyData record : records) {
+   *         stream.ingestRecordOffset(record, gson::toJson);
+   *     }
+   *     stream.flush();
    *
-   * // Main: Ingest objects with a serializer
-   * Gson gson = new Gson();
-   * long offset = stream.ingestRecordOffset(myObject, gson::toJson);
-   * stream.waitForOffset(offset);
-   *
-   * // Or: Ingest raw JSON strings
-   * stream.ingestRecordOffset("{\"field\": \"value\"}");
-   *
-   * stream.close();
+   *     // Or: Ingest raw JSON strings
+   *     stream.ingestRecordOffset("{\"field\": \"value\"}");
+   *     stream.flush();
+   * }
    * }</pre>
    *
    * @param tableName The fully qualified table name (catalog.schema.table).

@@ -1039,7 +1039,8 @@ pub extern "C" fn zerobus_stream_ingest_json_record_async(
 }
 
 /// Ingest a batch of protobuf records
-/// Returns the offset of the last record in the batch, or -1 on error
+/// Returns the logical offset of the batch submission, or -1 on error.
+/// The core assigns one offset to the entire batch, not one per record.
 /// Returns -2 if batch is empty
 #[no_mangle]
 pub extern "C" fn zerobus_stream_ingest_proto_records(
@@ -1111,7 +1112,8 @@ pub extern "C" fn zerobus_stream_ingest_proto_records(
     })
 }
 
-/// Ingest a batch of protobuf records on a background task and report the last offset via callback.
+/// Ingest a batch of protobuf records on a background task and report the batch
+/// submission offset via callback.
 #[no_mangle]
 pub extern "C" fn zerobus_stream_ingest_proto_records_async(
     stream: *mut CZerobusStream,
@@ -1189,7 +1191,8 @@ pub extern "C" fn zerobus_stream_ingest_proto_records_async(
 }
 
 /// Ingest a batch of JSON records
-/// Returns the offset of the last record in the batch, or -1 on error
+/// Returns the logical offset of the batch submission, or -1 on error.
+/// The core assigns one offset to the entire batch, not one per record.
 /// Returns -2 if batch is empty
 #[no_mangle]
 pub extern "C" fn zerobus_stream_ingest_json_records(
@@ -1259,7 +1262,8 @@ pub extern "C" fn zerobus_stream_ingest_json_records(
     })
 }
 
-/// Ingest a batch of JSON records on a background task and report the last offset via callback.
+/// Ingest a batch of JSON records on a background task and report the batch
+/// submission offset via callback.
 #[no_mangle]
 pub extern "C" fn zerobus_stream_ingest_json_records_async(
     stream: *mut CZerobusStream,

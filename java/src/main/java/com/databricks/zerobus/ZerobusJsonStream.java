@@ -13,26 +13,27 @@ import java.util.Optional;
  * <p>Create instances using {@link ZerobusSdk#streamBuilder()}:
  *
  * <pre>{@code
- * ZerobusJsonStream stream = sdk.streamBuilder()
- *     .table("catalog.schema.table")
- *     .oauth(clientId, clientSecret)
- *     .json()
- *     .build()
- *     .join();
+ * try (ZerobusJsonStream stream = sdk.streamBuilder()
+ *         .table("catalog.schema.table")
+ *         .oauth(clientId, clientSecret)
+ *         .json()
+ *         .build()
+ *         .join()) {
+ *     // Main: Ingest objects with a serializer
+ *     Gson gson = new Gson();
+ *     for (MyData record : records) {
+ *         stream.ingestRecordOffset(record, gson::toJson);
+ *     }
+ *     stream.flush();
  *
- * // Main: Ingest objects with a serializer
- * Gson gson = new Gson();
- * long offset = stream.ingestRecordOffset(myObject, gson::toJson);
- * stream.waitForOffset(offset);
+ *     // Alt: Ingest raw JSON strings
+ *     stream.ingestRecordOffset("{\"field\": \"value\"}");
+ *     stream.flush();
  *
- * // Alt: Ingest raw JSON strings
- * stream.ingestRecordOffset("{\"field\": \"value\"}");
- *
- * // Batch ingestion
- * List<MyData> records = ...;
- * Optional<Long> batchOffset = stream.ingestRecordsOffset(records, gson::toJson);
- *
- * stream.close();
+ *     // Batch ingestion
+ *     stream.ingestRecordsOffset(records, gson::toJson);
+ *     stream.flush();
+ * }
  * }</pre>
  *
  * @see ZerobusSdk#streamBuilder()

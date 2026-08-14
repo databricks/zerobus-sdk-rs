@@ -28,6 +28,14 @@
 
 - Simplified the README quick start to install the published npm package first
   and moved clone/build instructions into a source-development path.
+- Corrected README, example, and JSDoc snippets for CommonJS async entry points,
+  generated Protobuf field names, variable declarations, stream recovery, and
+  custom-header callbacks.
+- Documented that omitted `descriptorProto` does not select JSON, that the
+  inherited inflight default is 1,000,000, and that `close()` is still required
+  to flush. README `main().catch` handlers now set a non-zero exit code.
+  The short `recreateStream()` example closes the replacement stream in `finally`.
+- Binding rustdoc for `maxInflightRequests` now matches that 1,000,000 default.
 
 - Clarified the high-throughput ingestion pattern across the README, API reference, JSDoc
   doc comments (`ingestRecordOffset`, `ingestRecordsOffset`, `waitForOffset`, `flush`), and
@@ -48,3 +56,7 @@
 ### Deprecations
 
 ### API Changes
+
+- `HeadersProvider` is the shape `createStream()` actually accepts:
+  `getHeadersCallback` returning header tuples synchronously. Classes with
+  async `getHeaders()` are not compatible.

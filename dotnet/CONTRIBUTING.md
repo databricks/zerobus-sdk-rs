@@ -9,7 +9,7 @@ This document covers .NET-specific development setup and workflow.
 ### Prerequisites
 
 - Git
-- .NET SDK 8.0 or higher
+- .NET SDK 10.0 or higher (the projects target both .NET 8 and .NET 10)
 - Rust toolchain (`cargo`) - [Install Rust](https://rustup.rs/)
 - Bash shell (used by `build_native.sh`)
 
@@ -98,7 +98,7 @@ When making FFI-related changes:
 
 1. Update Rust code in `../rust/ffi/src/`
 2. Update exported C API in `../rust/ffi/zerobus.h` if needed
-3. Update .NET interop bindings in `src/Zerobus/Interop/`
+3. Update .NET interop bindings in `src/Zerobus/Native/`
 4. Rebuild native artifacts:
 	```bash
 	./build_native.sh

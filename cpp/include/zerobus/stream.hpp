@@ -105,7 +105,8 @@ class Stream {
   /// Return all unacknowledged records from a closed or failed stream, for the
   /// caller to re-ingest on a fresh stream. Remains callable after a failed
   /// `close()` (which keeps the handle alive precisely so recovery is
-  /// possible).
+  /// possible). Calling on an active stream (e.g. after a flush timeout before
+  /// the stream has closed) throws ZerobusException.
   ///
   /// @return The records that were ingested but not acknowledged.
   /// @throws ZerobusException if the records cannot be retrieved.

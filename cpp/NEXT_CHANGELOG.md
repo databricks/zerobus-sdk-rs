@@ -18,6 +18,13 @@
 
 ### Documentation
 
+- Corrected custom-header examples and clarified that acknowledgment callbacks
+  run once per logical ingest submission rather than once per record in a batch.
+- Recovery after a flush timeout now treats unacked retrieval failure as an
+  active stream rather than assuming the stream is terminal.
+- Arrow Flight schema validation is documented at stream creation (the schema IPC
+  bytes passed to `create_arrow_stream`), not on the first ingested batch.
+
 ### Internal Changes
 
 ### Breaking Changes

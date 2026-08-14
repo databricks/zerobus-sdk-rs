@@ -6,7 +6,7 @@ help:
 	@echo "Available targets:"
 	@echo "  make build          - Build both Rust FFI and Go SDK"
 	@echo "  make build-rust     - Build only the Rust FFI layer"
-	@echo "  make build-go       - Build only the Go SDK"
+	@echo "  make build-go       - Build Rust FFI, then the Go SDK"
 	@echo "  make clean          - Remove build artifacts"
 	@echo "  make fmt            - Format all code (Go and Rust)"
 	@echo "  make fmt-go         - Format Go code"

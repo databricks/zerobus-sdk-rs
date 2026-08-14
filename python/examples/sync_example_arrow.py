@@ -152,14 +152,14 @@ def main():
             stream.wait_for_offset(offset)
             logger.info(f"  Offset {offset} acknowledged")
 
-            end_time = time.time()
-            duration_seconds = end_time - start_time
-            rows_per_second = total_rows / duration_seconds
-
             # Step 5: Flush and close the stream
             logger.info("\nFlushing stream...")
             stream.flush()
             logger.info("Stream flushed")
+
+            end_time = time.time()
+            duration_seconds = end_time - start_time
+            rows_per_second = total_rows / duration_seconds
 
             stream.close()
             logger.info("Stream closed")

@@ -33,7 +33,7 @@ public class SingleRecordExample {
 
         System.out.println("=== Proto Single Record Example ===\n");
 
-        ZerobusSdk sdk = new ZerobusSdk(serverEndpoint, workspaceUrl);
+        try (ZerobusSdk sdk = new ZerobusSdk(serverEndpoint, workspaceUrl)) {
         ZerobusProtoStream stream = sdk.streamBuilder()
             .table(tableName)
             .oauth(clientId, clientSecret)
@@ -47,56 +47,32 @@ public class SingleRecordExample {
             // === Auto-encoded: Message objects ===
             System.out.println("Auto-encoded (Message):");
 
-            AirQuality record1 = AirQuality.newBuilder()
-                .setDeviceName("proto-main-single")
-                .setTemp(20)
-                .setHumidity(50)
-                .build();
-            long offset = stream.ingestRecordOffset(record1);
-            stream.waitForOffset(offset);
-            totalRecords++;
-            System.out.println("  1 record ingested and acknowledged (offset: " + offset + ")");
-
-            // Idiomatic flow: ingest in a loop, then confirm durability once on the last
-            // offset. Acks are ordered, so waiting on the last offset confirms every prior
-            // record.
-            long lastOffset = -1;
             for (int i = 0; i < 10; i++) {
                 AirQuality record = AirQuality.newBuilder()
                     .setDeviceName("proto-main-loop-" + i)
-                    .setTemp(21 + i)
-                    .setHumidity(51 + i)
+                    .setTemp(20 + i)
+                    .setHumidity(50 + i)
                     .build();
-                lastOffset = stream.ingestRecordOffset(record); // returns immediately
+                stream.ingestRecordOffset(record);
                 totalRecords++;
             }
-            stream.waitForOffset(lastOffset); // confirm durability once
-            System.out.println("  10 records ingested, last acknowledged (offset: " + lastOffset + ")");
+            stream.flush();
+            System.out.println("  10 records queued and flushed");
 
             // === Pre-encoded: byte arrays ===
             System.out.println("\nPre-encoded (byte[]):");
 
-            AirQuality record2 = AirQuality.newBuilder()
-                .setDeviceName("proto-alt-single")
-                .setTemp(30)
-                .setHumidity(60)
-                .build();
-            offset = stream.ingestRecordOffset(record2.toByteArray());
-            stream.waitForOffset(offset);
-            totalRecords++;
-            System.out.println("  1 record ingested and acknowledged (offset: " + offset + ")");
-
             for (int i = 0; i < 10; i++) {
                 AirQuality record = AirQuality.newBuilder()
                     .setDeviceName("proto-alt-loop-" + i)
-                    .setTemp(31 + i)
-                    .setHumidity(61 + i)
+                    .setTemp(30 + i)
+                    .setHumidity(60 + i)
                     .build();
-                lastOffset = stream.ingestRecordOffset(record.toByteArray());
+                stream.ingestRecordOffset(record.toByteArray());
                 totalRecords++;
             }
-            stream.waitForOffset(lastOffset);
-            System.out.println("  10 records ingested, last acknowledged (offset: " + lastOffset + ")");
+            stream.flush();
+            System.out.println("  10 records queued and flushed");
 
             System.out.println("\n=== Complete: " + totalRecords + " records ingested ===");
 
@@ -125,29 +101,26 @@ public class SingleRecordExample {
         System.out.println("\n--- Demonstrating recreateStream ---");
 
         // Recreate the stream (would re-ingest any unacked records if there were any)
-        ZerobusProtoStream newStream = sdk.recreateStream(stream).join();
+        try (ZerobusProtoStream newStream = sdk.recreateStream(stream).join()) {
         System.out.println("  New stream created successfully");
 
         // Ingest a few more records on the new stream
         int newRecords = 0;
-        try {
             for (int i = 0; i < 3; i++) {
                 AirQuality record = AirQuality.newBuilder()
                     .setDeviceName("proto-recreate-" + i)
                     .setTemp(40 + i)
                     .setHumidity(70 + i)
                     .build();
-                long newOffset = newStream.ingestRecordOffset(record);
+                newStream.ingestRecordOffset(record);
                 newRecords++;
             }
             newStream.flush();
             System.out.println("  " + newRecords + " new records ingested on recreated stream");
-        } finally {
-            newStream.close();
         }
 
         System.out.println("\n=== RecreateStream demo complete ===");
 
-        sdk.close();
+        }
     }
 }

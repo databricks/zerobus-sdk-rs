@@ -256,7 +256,8 @@ Arrow Flight is **Beta** — the API may change.
 class MyProvider : public zerobus::HeadersProvider {
  public:
   std::map<std::string, std::string> get_headers() override {
-    return {{"Authorization", "Bearer " + current_token()}};
+    return {{"authorization", "Bearer " + current_token()},
+            {"x-databricks-zerobus-table-name", "main.analytics.events"}};
   }
 };
 
@@ -289,7 +290,7 @@ options.ack_callback = zerobus::AckCallback::from(
       // Durable up to `offset` (acks are monotonic: offset N => all <= N acked).
     },
     [](std::int64_t offset, const std::string& msg) noexcept {
-      // The record at `offset` failed terminally.
+      // The logical submission at `offset` failed terminally.
     });
 
 zerobus::Stream stream =
@@ -299,8 +300,8 @@ zerobus::Stream stream =
 Contract (see [`ack_callback.hpp`](include/zerobus/ack_callback.hpp) for the
 canonical version):
 
-- `on_ack` fires once per record in monotonic offset order; `on_error` fires per
-  unacked record on terminal failure (errors also still surface from
+- `on_ack` fires once per logical ingest submission in monotonic offset order;
+  `on_error` fires per unacked submission on terminal failure (errors also still surface from
   `ingest`/`flush`/`wait_for_offset()`).
 - Both methods are **`noexcept`** — an escaping exception crosses the C FFI
   boundary, which is UB, so it calls `std::terminate`. Handle errors inside the

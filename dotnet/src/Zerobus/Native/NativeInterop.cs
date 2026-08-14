@@ -484,7 +484,7 @@ internal static class NativeInterop
     }
 
     /// <summary>
-    /// Ingests a batch of protobuf records and returns the last offset.
+    /// Ingests a batch of protobuf records and returns the batch offset (or -1 if empty).
     /// </summary>
     public static unsafe long StreamIngestProtoRecords(IntPtr streamPtr, byte[][] records)
     {
@@ -544,7 +544,7 @@ internal static class NativeInterop
     }
 
     /// <summary>
-    /// Ingests a batch of protobuf records asynchronously and returns the last offset.
+    /// Ingests a batch of protobuf records asynchronously and returns the batch offset (or -1 if empty).
     /// </summary>
     public static Task<long> StreamIngestProtoRecordsAsync(
         IntPtr streamPtr,
@@ -622,7 +622,7 @@ internal static class NativeInterop
     }
 
     /// <summary>
-    /// Ingests a batch of JSON records and returns the last offset.
+    /// Ingests a batch of JSON records and returns the batch offset (or -1 if empty).
     /// </summary>
     public static unsafe long StreamIngestJsonRecords(IntPtr streamPtr, string[] records)
     {
@@ -680,7 +680,7 @@ internal static class NativeInterop
     }
 
     /// <summary>
-    /// Ingests a batch of JSON records asynchronously and returns the last offset.
+    /// Ingests a batch of JSON records asynchronously and returns the batch offset (or -1 if empty).
     /// </summary>
     public static Task<long> StreamIngestJsonRecordsAsync(
         IntPtr streamPtr,

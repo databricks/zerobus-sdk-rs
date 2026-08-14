@@ -108,12 +108,13 @@ JSON mode is the simplest way to get started. You don't need to define or compil
 ```typescript
 import { ZerobusSdk, RecordType } from '@databricks/zerobus-ingest-sdk';
 
+async function main(): Promise<void> {
 // Configuration
 // For AWS:
 const zerobusEndpoint = 'https://<workspace-id>.zerobus.<region>.cloud.databricks.com';
 const workspaceUrl = 'https://<workspace-name>.cloud.databricks.com';
 // For Azure:
-// const zerobusEndpoint = '<workspace-id>.zerobus.<region>.azuredatabricks.net';
+// const zerobusEndpoint = 'https://<workspace-id>.zerobus.<region>.azuredatabricks.net';
 // const workspaceUrl = 'https://<workspace-name>.azuredatabricks.net';
 
 const tableName = 'main.default.air_quality';
@@ -160,6 +161,13 @@ try {
 } finally {
     await stream.close();
 }
+
+}
+
+main().catch((error) => {
+  console.error('Fatal error:', error);
+  process.exitCode = 1;
+});
 ```
 
 ### Option 2: Using Protocol Buffers (Default, Recommended)
@@ -275,6 +283,7 @@ import { ZerobusSdk, RecordType } from '@databricks/zerobus-ingest-sdk';
 import * as airQuality from './examples/generated/air_quality';
 import { loadDescriptorProto } from '@databricks/zerobus-ingest-sdk/utils/descriptor.js';
 
+async function main(): Promise<void> {
 // Configuration
 const zerobusEndpoint = 'https://<workspace-id>.zerobus.<region>.cloud.databricks.com';
 const workspaceUrl = 'https://<workspace-name>.cloud.databricks.com';
@@ -314,7 +323,7 @@ try {
     // Send all records
     for (let i = 0; i < 100; i++) {
         const record = AirQuality.create({
-            device_name: `sensor-${i}`,
+            deviceName: `sensor-${i}`,
             temp: 20 + i,
             humidity: 50 + i
         });
@@ -329,6 +338,13 @@ try {
 } finally {
     await stream.close();
 }
+
+}
+
+main().catch((error) => {
+  console.error('Fatal error:', error);
+  process.exitCode = 1;
+});
 ```
 
 #### Type Mapping: Delta ↔ Protocol Buffers
@@ -493,7 +509,7 @@ For higher throughput, use batch ingestion to send multiple records with a singl
 
 ```typescript
 const records = Array.from({ length: 1000 }, (_, i) =>
-  AirQuality.create({ device_name: `sensor-${i}`, temp: 20 + i, humidity: 50 + i })
+  AirQuality.create({ deviceName: `sensor-${i}`, temp: 20 + i, humidity: 50 + i })
 );
 
 // Protobuf Type 1: Message objects (high-level) - SDK auto-serializes
@@ -576,7 +592,7 @@ const stream = await sdk.createStream(
   '', // client_secret (ignored when headers_provider is provided)
   options,
   {
-    getHeadersCallback: async () => [
+    getHeadersCallback: () => [
       ["authorization", `Bearer ${myToken}`],
       ["x-databricks-zerobus-table-name", tableName]
     ]
@@ -597,7 +613,7 @@ const stream = await sdk.createStream(
 | Option | Default | Description |
 |--------|---------|-------------|
 | `recordType` | `RecordType.Proto` | Serialization format: `RecordType.Json` or `RecordType.Proto` |
-| `maxInflightRequests` | 10,000 | Maximum number of unacknowledged requests |
+| `maxInflightRequests` | 1,000,000 | Maximum number of unacknowledged requests |
 | `recovery` | true | Enable automatic stream recovery |
 | `recoveryTimeoutMs` | 15,000 | Timeout for recovery operations (ms) |
 | `recoveryBackoffMs` | 2,000 | Delay between recovery attempts (ms) |
@@ -672,38 +688,37 @@ const descriptorBase64 = loadDescriptorProto({
 
 ## Error Handling
 
-The SDK includes automatic recovery for transient failures (enabled by default with `recovery: true`). For permanent failures, use `recreateStream()` to automatically recover all unacknowledged batches. Always use try/finally blocks to ensure streams are properly closed:
+The SDK includes automatic recovery for transient failures (enabled by default with `recovery: true`). `getUnackedBatches()` and `recreateStream()` succeed only after a terminal native-stream failure, which already closes the stream. An enqueue failure leaves the wrapper active, so those calls reject; rethrow the original error. Do not call `stream.close()` before `recreateStream()`, because close releases the native handle.
 
 ```typescript
+let replacement;
 try {
     const offset = await stream.ingestRecordOffset(record);
-    await stream.waitForOffset(offset);
+    await stream.flush();
     console.log(`Success: offset ${offset}`);
 } catch (error) {
     console.error('Ingestion failed:', error);
-
-    // When stream fails, close it first
-    await stream.close();
-    console.log('Stream closed after error');
-
-    // Optional: Inspect what needs recovery (must be called on closed stream)
-    const unackedBatches = await stream.getUnackedBatches();
-    console.log(`Batches to recover: ${unackedBatches.length}`);
-
-    // Recommended recovery approach: Use recreateStream()
-    // This method:
-    // 1. Gets all unacknowledged batches from the failed stream
-    // 2. Creates a new stream with the same configuration
-    // 3. Re-ingests all unacknowledged batches automatically
-    // 4. Returns the new stream ready for continued use
-    const newStream = await sdk.recreateStream(stream);
-    console.log(`Stream recreated with ${unackedBatches.length} batches re-ingested`);
-
-    // Continue using newStream for further ingestion
     try {
-        // Continue ingesting...
+        const unackedBatches = await stream.getUnackedBatches();
+        console.log(`Batches to recover: ${unackedBatches.length}`);
+        replacement = await sdk.recreateStream(stream);
+        await replacement.flush();
+    } catch (recoveryError) {
+        console.error('Stream was not terminal or recovery failed:', recoveryError);
+        throw new AggregateError(
+            [error, recoveryError],
+            'ingestion and recovery both failed',
+        );
     } finally {
-        await newStream.close();
+        if (replacement) {
+            await replacement.close();
+        }
+    }
+} finally {
+    try {
+        await stream.close();
+    } catch (closeError) {
+        console.error('Failed stream released:', closeError);
     }
 }
 ```
@@ -766,23 +781,29 @@ This method is the **recommended approach** for recovering from stream failures.
 4. Returns the new stream ready for continued ingestion
 
 **Parameters:**
-- `stream` - The failed or closed stream to recreate
+- `stream` - The terminally failed stream to recreate. Do not call `stream.close()`
+  first because the TypeScript wrapper releases its native handle on close.
 
 **Returns:** Promise resolving to a new `ZerobusStream` with all unacknowledged batches re-ingested
 
 **Example:**
 ```typescript
 try {
-  await stream.ingestRecords(batch);
+  await stream.ingestRecordsOffset(batch);
+  await stream.flush();
 } catch (error) {
-  await stream.close();
-  // Automatically recreate stream and recover all unacked batches
+  // recreateStream() rejects unless the native stream already failed closed.
   const newStream = await sdk.recreateStream(stream);
-  // Continue ingesting with newStream
+  try {
+    await newStream.flush();
+  } finally {
+    await newStream.close();
+  }
 }
 ```
 
-**Note:** This method preserves batch structure and re-ingests batches atomically. For debugging, you can inspect what was recovered using `getUnackedBatches()` after closing the stream.
+**Note:** This method preserves batch structure and re-ingests batches atomically. For
+debugging, inspect `getUnackedBatches()` after a terminal failure and before closing the wrapper.
 
 ---
 
@@ -936,7 +957,8 @@ async getUnackedRecords(): Promise<Buffer[]>
 
 Returns unacknowledged record payloads as a flat array for inspection purposes.
 
-**Important:** Can only be called on **closed streams**. Call `stream.close()` first, or this will throw an error.
+**Important:** This can only be called after a terminal stream failure. Do not call
+`stream.close()` first: the TypeScript wrapper releases the underlying stream handle on close.
 
 **Returns:** Array of Buffer containing the raw record payloads
 
@@ -950,7 +972,8 @@ async getUnackedBatches(): Promise<Buffer[][]>
 
 Returns unacknowledged records grouped by their original batches for inspection purposes.
 
-**Important:** Can only be called on **closed streams**. Call `stream.close()` first, or this will throw an error.
+**Important:** This can only be called after a terminal stream failure. Do not call
+`stream.close()` first: the TypeScript wrapper releases the underlying stream handle on close.
 
 **Returns:** Array of arrays, where each inner array represents a batch of records as Buffers
 
@@ -963,15 +986,11 @@ try {
   await stream.ingestRecords(batch2);
   // ... error occurs
 } catch (error) {
-  await stream.close();
   const unackedBatches = await stream.getUnackedBatches();
   // unackedBatches[0] contains records from batch1 (if not acked)
   // unackedBatches[1] contains records from batch2 (if not acked)
 
-  // Re-ingest with new stream
-  for (const batch of unackedBatches) {
-    await newStream.ingestRecords(batch);
-  }
+  console.log(`Batches available for recovery: ${unackedBatches.length}`);
 }
 ```
 
@@ -994,10 +1013,10 @@ interface TableProperties {
 
 ```typescript
 // JSON mode
-const tableProperties = { tableName: 'main.default.air_quality' };
+const jsonTableProperties = { tableName: 'main.default.air_quality' };
 
 // Protocol Buffers mode
-const tableProperties = {
+const protoTableProperties = {
     tableName: 'main.default.air_quality',
     descriptorProto: descriptorBase64  // Required for protobuf
 };
@@ -1014,7 +1033,7 @@ Configuration options for stream behavior.
 ```typescript
 interface StreamConfigurationOptions {
     recordType?: RecordType;              // RecordType.Json or RecordType.Proto. Default: RecordType.Proto
-    maxInflightRequests?: number;         // Default: 10,000
+    maxInflightRequests?: number;         // Default: 1,000,000
     recovery?: boolean;                   // Default: true
     recoveryTimeoutMs?: number;           // Default: 15,000
     recoveryBackoffMs?: number;           // Default: 2,000
@@ -1034,7 +1053,7 @@ enum RecordType {
 
 1. **Reuse SDK instances**: Create one `ZerobusSdk` instance per application
 2. **Stream lifecycle**: Always close streams in a `finally` block to ensure all records are flushed
-3. **Batch size**: Adjust `maxInflightRequests` based on your throughput requirements (default: 10,000)
+3. **Batch size**: Adjust `maxInflightRequests` based on your throughput requirements (default: 1,000,000)
 4. **Error handling**: The stream handles errors internally with automatic retry. Only use `recreateStream()` for persistent failures after internal retries are exhausted.
 5. **Use Protocol Buffers for production**: Protocol Buffers (the default) provides better performance and schema validation. Use JSON only when you need schema flexibility or for quick prototyping.
 6. **Store credentials securely**: Use environment variables, never hardcode credentials
@@ -1086,7 +1105,7 @@ This SDK wraps the high-performance [Rust Zerobus SDK](https://github.com/databr
 **Benefits:**
 - **Native performance** - Rust implementation for high-throughput ingestion
 - **Native async/await support** - Rust futures become JavaScript Promises
-- **Automatic memory management** - No manual cleanup required
+- **Automatic memory management** for native objects. You still must `await stream.close()` to flush and release the stream.
 - **Type safety** - Compile-time checks on both sides
 
 ## Community and Contributing

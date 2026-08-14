@@ -1,69 +1,57 @@
 /**
- * Interface for providing custom headers to Zerobus streams.
+ * Custom headers provider accepted by `createStream()`.
  *
- * Implement this interface to use custom authentication beyond OAuth,
- * such as Personal Access Tokens (PAT) or custom auth tokens.
+ * The native adapter invokes `getHeadersCallback` synchronously once during
+ * stream creation and stores the returned tuples. Returning a Promise, or
+ * passing a class with async `getHeaders()`, is not supported and can terminate
+ * the process. Token refresh is not currently wired through this callback.
  */
 export interface HeadersProvider {
     /**
-     * Returns headers as array of [name, value] tuples.
+     * Returns headers as an array of [name, value] tuples.
      *
      * Required headers:
      * - ["authorization", "Bearer <token>"]
      * - ["x-databricks-zerobus-table-name", "<table_name>"]
-     *
-     * @returns Promise resolving to array of header name-value pairs
      */
-    getHeaders(): Promise<Array<[string, string]>>;
+    getHeadersCallback: () => Array<[string, string]>;
 }
 
 /**
  * OAuth 2.0 Client Credentials headers provider.
  *
- * **IMPORTANT: DO NOT instantiate this class directly.**
+ * Do not instantiate this class or pass it to `createStream()`.
  *
  * OAuth authentication is handled automatically by the Rust SDK when you call
- * `createStream()` with clientId and clientSecret parameters (without providing
- * a headers_provider).
+ * `createStream()` with clientId and clientSecret and omit the headers provider.
  *
- * This class exists for:
- * 1. Documentation purposes - showing the HeadersProvider pattern
- * 2. API consistency with other Zerobus SDKs (Python, Java, Rust)
- *
- * **How to use OAuth authentication:**
+ * How to use OAuth authentication:
  * ```typescript
- * // OAuth is the default - just pass clientId and clientSecret
  * const stream = await sdk.createStream(
  *     tableProperties,
- *     clientId,      // OAuth client ID
- *     clientSecret,  // OAuth client secret
+ *     clientId,
+ *     clientSecret,
  *     options
- *     // No headers_provider parameter = OAuth authentication
  * );
  * ```
  *
- * **How to use custom authentication (PAT, etc.):**
+ * How to use custom authentication (PAT or a static token):
  * ```typescript
- * class CustomHeadersProvider implements HeadersProvider {
- *     async getHeaders() {
- *         return [
- *             ["authorization", `Bearer ${myToken}`],
- *             ["x-databricks-zerobus-table-name", tableName]
- *         ];
- *     }
- * }
- *
- * const provider = new CustomHeadersProvider();
  * const stream = await sdk.createStream(
  *     tableProperties,
- *     '', // ignored
- *     '', // ignored
+ *     '',
+ *     '',
  *     options,
- *     { getHeadersCallback: provider.getHeaders.bind(provider) }
+ *     {
+ *         getHeadersCallback: () => [
+ *             ["authorization", `Bearer ${myToken}`],
+ *             ["x-databricks-zerobus-table-name", tableName]
+ *         ]
+ *     }
  * );
  * ```
  */
-export class OAuthHeadersProvider implements HeadersProvider {
+export class OAuthHeadersProvider {
     constructor(
         private clientId: string,
         private clientSecret: string,
@@ -75,8 +63,8 @@ export class OAuthHeadersProvider implements HeadersProvider {
         throw new Error(
             'OAuthHeadersProvider should not be instantiated directly. ' +
             'OAuth authentication is handled internally by the Rust SDK. ' +
-            'To use OAuth: call createStream(tableProperties, clientId, clientSecret, options) without the headers_provider parameter. ' +
-            'To use custom authentication: implement the HeadersProvider interface.'
+            'To use OAuth: call createStream(tableProperties, clientId, clientSecret, options) without a headers provider. ' +
+            'To use custom authentication: pass { getHeadersCallback: () => [...] } as the headers provider.'
         );
     }
 }

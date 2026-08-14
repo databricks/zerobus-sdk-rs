@@ -5,7 +5,7 @@
     "lib": ["ES2020"],
     "declaration": true,
     "outDir": "./dist",
-    "rootDir": "./examples",
+    "rootDir": ".",
     "strict": true,
     "esModuleInterop": true,
     "skipLibCheck": true,
@@ -14,6 +14,6 @@
     "resolveJsonModule": true,
     "allowSyntheticDefaultImports": true
   },
-  "include": ["examples/**/*"],
+  "include": ["examples/**/*", "src/**/*", "test/**/*", "utils/**/*"],
   "exclude": ["node_modules", "target", "dist"]
 }

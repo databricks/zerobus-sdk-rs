@@ -73,8 +73,9 @@ std::int64_t now_micros() {
 // type. This mirrors the canonical Arrow schema the Databricks Arrow Flight
 // server derives from a Delta table: Delta STRING -> large_utf8, INT -> int32,
 // DOUBLE -> float64, TIMESTAMP -> timestamp(microsecond, "UTC"). The server
-// validates the record-batch schema on the first batch and fails fast with a
-// descriptive error on a mismatch.
+// validates the schema when the stream is created, from the schema IPC bytes
+// passed to create_arrow_stream, and fails fast with a descriptive error on a
+// mismatch.
 std::shared_ptr<arrow::Schema> orders_schema() {
   auto utc_micros = arrow::timestamp(arrow::TimeUnit::MICRO, "UTC");
   return arrow::schema({

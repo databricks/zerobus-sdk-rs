@@ -1,7 +1,7 @@
 // Batch JSON ingestion example.
 //
-// Uses IngestRecordsOffset and waits on the batch offset.
-// Also demonstrates async acks with WithAckCallback.
+// Uses IngestRecordsOffset, flushes once, then waits for the batch's single
+// ack callback.
 //
 // Set these environment variables before running:
 //
@@ -20,6 +20,7 @@ import (
 	"context"
 	"log"
 	"sync/atomic"
+	"time"
 
 	"github.com/databricks/zerobus-sdk/purego/examples/config"
 	"github.com/databricks/zerobus-sdk/purego/examples/internal/exampleutil"
@@ -27,12 +28,20 @@ import (
 )
 
 // ackObserver counts acknowledgements from callback hooks.
-type ackObserver struct{ acked atomic.Int64 }
+type ackObserver struct {
+	acked  atomic.Int64
+	offset atomic.Int64
+	failed atomic.Bool
+}
 
-func (o *ackObserver) OnAck(offset int64) { o.acked.Add(1) }
+func (o *ackObserver) OnAck(offset int64) {
+	o.offset.Store(offset)
+	o.acked.Add(1)
+}
 
 func (o *ackObserver) OnError(offset int64, err error) {
-	log.Printf("record at offset %d failed: %v", offset, err)
+	o.failed.Store(true)
+	log.Printf("batch at offset %d failed: %v", offset, err)
 }
 
 func main() {
@@ -71,20 +80,31 @@ func main() {
 	}
 	log.Printf("Batch of %d records queued; batch offset ID: %d", len(batch), batchOffset)
 
-	// Confirm the batch.
-	if batchOffset >= 0 {
-		if err := stream.WaitForOffset(batchOffset); err != nil {
-			log.Fatalf("wait for offset %d: %v", batchOffset, err)
-		}
-		log.Printf("Batch acknowledged at offset ID: %d", batchOffset)
-	}
-
-	// Flush pending records, then close.
 	if err := stream.Flush(); err != nil {
 		log.Fatalf("flush: %v", err)
 	}
+
+	// A batch produces one callback event, not one per record. Callback delivery
+	// can still be running when Close() returns, so wait for it before exit.
+	deadline := time.Now().Add(5 * time.Second)
+	for obs.acked.Load() < 1 && !obs.failed.Load() && time.Now().Before(deadline) {
+		time.Sleep(10 * time.Millisecond)
+	}
+	if obs.failed.Load() {
+		log.Fatal("batch callback reported an error")
+	}
+	if got := obs.acked.Load(); got != 1 {
+		if got < 1 {
+			log.Fatal("timed out waiting for batch callback")
+		}
+		log.Fatalf("callback observed %d acknowledgements, want 1", got)
+	}
+	if got := obs.offset.Load(); got != batchOffset {
+		log.Fatalf("callback offset %d != batch offset %d", got, batchOffset)
+	}
+
 	if err := stream.Close(); err != nil {
 		log.Fatalf("close: %v", err)
 	}
-	log.Printf("Stream closed successfully. Callback observed %d acknowledgements.", obs.acked.Load())
+	log.Printf("Stream closed. Callback observed %d acknowledgements (expected 1 for the batch).", obs.acked.Load())
 }

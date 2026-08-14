@@ -10,7 +10,7 @@ Example (Sync):
     >>> # Define a custom callback
     >>> class MyCallback(AckCallback):
     ...     def on_ack(self, offset):
-    ...         print(f"Record acknowledged at offset {offset}")
+    ...         print(f"Submission acknowledged at offset {offset}")
     >>>
     >>> sdk = ZerobusSdk(
     ...     host="https://your-shard-id.zerobus.region.cloud.databricks.com",
@@ -20,13 +20,13 @@ Example (Sync):
     >>>
     >>> props = TableProperties("catalog.schema.table")
     >>> stream = sdk.create_stream(
-    ...     table_properties=props,
     ...     client_id="your-client-id",
-    ...     client_secret="your-client-secret"
+    ...     client_secret="your-client-secret",
+    ...     table_properties=props
     ... )
     >>>
     >>> # New optimized API
-    >>> offset = stream.ingest_record_offset(b"data")
+    >>> offset = stream.ingest_record_offset('{"value": "data"}')
     >>> stream.flush()
     >>> stream.close()
 
@@ -35,9 +35,18 @@ Example (Async):
     >>> from zerobus.sdk.aio import ZerobusSdk, TableProperties
     >>>
     >>> async def main():
-    ...     sdk = ZerobusSdk(host, unity_catalog_url, application_name="my-app/1.0")
-    ...     stream = await sdk.create_stream(props, client_id, client_secret)
-    ...     offset = await stream.ingest_record_offset(b"data")
+    ...     sdk = ZerobusSdk(
+    ...         host="https://your-shard-id.zerobus.region.cloud.databricks.com",
+    ...         unity_catalog_url="https://your-workspace.cloud.databricks.com",
+    ...         application_name="my-app/1.0",
+    ...     )
+    ...     props = TableProperties("catalog.schema.table")
+    ...     stream = await sdk.create_stream(
+    ...         client_id="your-client-id",
+    ...         client_secret="your-client-secret",
+    ...         table_properties=props,
+    ...     )
+    ...     offset = await stream.ingest_record_offset('{"value": "data"}')
     ...     await stream.flush()
     ...     await stream.close()
     >>>

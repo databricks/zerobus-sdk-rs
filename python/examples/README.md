@@ -1,6 +1,7 @@
 # Zerobus SDK Examples
 
-This directory contains runnable example applications demonstrating both synchronous and asynchronous usage of the Zerobus Ingest SDK for Python, with examples for both both record type modes: **protobuf** and **JSON**.
+This directory contains runnable synchronous and asynchronous examples for Protobuf,
+JSON, and Arrow Flight ingestion with the Zerobus Ingest SDK for Python.
 
 For complete SDK documentation including installation, API reference, and configuration details, see the [main README](../README.md).
 
@@ -16,7 +17,7 @@ cd zerobus-sdk/python
 ### 2. Install Dependencies
 
 ```bash
-pip install -e .
+pip install -e ".[arrow]"
 ```
 
 The examples use a pre-generated protobuf file (`record_pb2.py`) based on the included `record.proto` schema.
@@ -43,26 +44,29 @@ export ZEROBUS_TABLE_NAME="catalog.schema.table"
 # Synchronous examples (blocking I/O)
 python examples/sync_example_proto.py     # Protobuf
 python examples/sync_example_json.py      # JSON
+python examples/sync_example_arrow.py     # Arrow Flight
 
 # Asynchronous examples (non-blocking I/O)
 python examples/async_example_proto.py    # Protobuf
 python examples/async_example_json.py     # JSON
+python examples/async_example_arrow.py    # Arrow Flight
 ```
 
 ## Examples Overview
 
-All examples demonstrate multiple ingestion methods:
+All examples demonstrate the recommended offset APIs:
 
-1. **`ingest_record_offset()`** - Single record with offset tracking
-2. **`ingest_records_offset()`** - Batch ingestion with offset tracking
-3. **`ingest_record_nowait()`** - Fire-and-forget single record
-4. **`ingest_records_nowait()`** - Fire-and-forget batch (highest throughput)
+1. `ingest_record_offset()` - Single record with offset tracking
+2. `ingest_records_offset()` - Batch ingestion with offset tracking (preferred bulk path)
 
-Each example includes detailed comments explaining when to use each method and their performance characteristics.
+Queue records or batches, then call `flush()` once to confirm durability. The nowait APIs
+are not shown because they spawn detached tasks and are not safely synchronized with
+`flush()`.
 
 ### Serialization Formats
 
-The SDK supports two serialization formats:
+The row-oriented examples cover two serialization formats. The Arrow Flight
+examples use `pyarrow.RecordBatch` data instead.
 
 #### Protocol Buffers
 **Files:** `sync_example_proto.py`, `async_example_proto.py`
@@ -75,13 +79,14 @@ More efficient over the wire. You can pass either:
 # Create protobuf record
 record = record_pb2.AirQuality(device_name="sensor-1", temp=25, humidity=60)
 table_properties = TableProperties(TABLE_NAME, record_pb2.AirQuality.DESCRIPTOR)
-options = StreamConfigurationOptions(record_type=RecordType.PROTO)
 
-# Recommended: Use ingest_record_offset() for better performance
+# Recommended: ingest_record_offset() then flush() once
 offset = stream.ingest_record_offset(record)
+stream.flush()
 
-# Or fire-and-forget for maximum throughput
-stream.ingest_record_nowait(record)
+# Preferred bulk path: ingest_records_offset() then flush() once
+# batch_offset = stream.ingest_records_offset([record])
+# stream.flush()
 
 # Option 2: Pass pre-serialized bytes (client controls serialization)
 # offset = stream.ingest_record_offset(record.SerializeToString())
@@ -98,13 +103,14 @@ Good for getting started. No protobuf schema required. You can pass either:
 # Create JSON record
 record_dict = {"device_name": "sensor-1", "temp": 25, "humidity": 60}
 table_properties = TableProperties(TABLE_NAME)
-options = StreamConfigurationOptions(record_type=RecordType.JSON)
 
-# Recommended: Use ingest_record_offset() for better performance
+# Recommended: ingest_record_offset() then flush() once
 offset = stream.ingest_record_offset(record_dict)
+stream.flush()
 
-# Or fire-and-forget for maximum throughput
-stream.ingest_record_nowait(record_dict)
+# Preferred bulk path: ingest_records_offset() then flush() once
+# batch_offset = stream.ingest_records_offset([record_dict])
+# stream.flush()
 
 # Option 2: Pass pre-serialized JSON string (client controls serialization)
 # offset = stream.ingest_record_offset(json.dumps(record_dict))
@@ -148,7 +154,7 @@ Both APIs provide the same functionality and performance. The key differences ar
 | Import | `from zerobus.sdk.sync import ZerobusSdk` | `from zerobus.sdk.aio import ZerobusSdk` |
 | Stream creation | `stream = sdk.create_stream(...)` | `stream = await sdk.create_stream(...)` |
 | Record ingestion (with offset) | `offset = stream.ingest_record_offset(record)` | `offset = await stream.ingest_record_offset(record)` |
-| Record ingestion (fire-and-forget) | `stream.ingest_record_nowait(record)` | `stream.ingest_record_nowait(record)` |
+| Batch ingestion (with offset) | `offset = stream.ingest_records_offset(records)` | `offset = await stream.ingest_records_offset(records)` |
 | Flush | `stream.flush()` | `await stream.flush()` |
 | Close | `stream.close()` | `await stream.close()` |
 | Execution context | Standard Python | Requires asyncio event loop |
@@ -156,25 +162,23 @@ Both APIs provide the same functionality and performance. The key differences ar
 
 **Performance:** Both APIs offer equivalent throughput and durability. Choose based on your application's architecture, not performance needs.
 
-**Recommended Methods:**
+Recommended methods:
 
-**Single Record Ingestion:**
-- `ingest_record_offset()` - Returns offset immediately, use when you need to track offsets
-- `ingest_record_nowait()` - Fire-and-forget, best for maximum throughput
+- `ingest_records_offset()` - Preferred bulk path: queue a batch, then `flush()` once
+- `ingest_record_offset()` - Single records: ingest in a loop, then `flush()` once
 
-**Batch Ingestion:**
-- `ingest_records_offset()` - Batch multiple records, returns final offset
-- `ingest_records_nowait()` - Fire-and-forget batch ingestion, most efficient for bulk data
+Deprecated:
 
-**Deprecated:**
-- `ingest_record()` - Use `ingest_record_offset()` instead (2-40x slower)
+- `ingest_record()` - Use `ingest_record_offset()` instead
+
+The nowait APIs spawn detached tasks and are not safely synchronized with `flush()`.
 
 ### Serialization Format Comparison
 
 | Format | Record Input | Configuration |
 |--------|-------------|---------------|
-| **Protobuf** (Default) | `Message` object or `bytes` | `TableProperties(table_name, descriptor)` |
-| **JSON** | `dict` or `str` (JSON string) | `TableProperties(table_name)` + `StreamConfigurationOptions(record_type=RecordType.JSON)` |
+| **Protobuf** | `Message` object or `bytes` | `TableProperties(table_name, descriptor_proto=descriptor)` |
+| **JSON** | `dict` or `str` (JSON string) | `TableProperties(table_name)` |
 
 ## Authentication
 
@@ -203,7 +207,7 @@ To use your own JSON structure:
    ```python
    json_record = json.dumps({"field1": "value1", "field2": 123})
    ```
-2. Configure `StreamConfigurationOptions` with `record_type=RecordType.JSON`
+2. Construct `TableProperties` without a Protobuf descriptor to select JSON
 3. Ensure your JSON structure matches the schema of your Databricks table
 
 Note: The SDK sends JSON strings directly without client-side schema validation.

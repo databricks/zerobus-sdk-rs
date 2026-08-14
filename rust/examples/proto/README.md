@@ -19,7 +19,7 @@ This directory contains examples demonstrating Protocol Buffers-based data inges
   - [Dynamic Batch](#dynamic-batch)
 - [Adapting for Your Custom Table](#adapting-for-your-custom-table)
   - [Generate Schema Files](#generate-schema-files)
-  - [Update main.rs](#update-mainrs)
+  - [Update Example Files](#update-example-files)
 
 ## Overview
 
@@ -37,8 +37,8 @@ The examples are grouped by how the protobuf schema is obtained:
 - **`compiled/`** — the schema is known ahead of time and compiled into Rust structs.
   **No schema generation needed to run these** — the files under `compiled/output/`
   are already included.
-  - **`compiled/single.rs`** - Ingest records one at a time using `ingest_record_offset()` / `ingest_record()`
-  - **`compiled/batch.rs`** - Ingest multiple records at once using `ingest_records_offset()` / `ingest_records()`
+  - **`compiled/single.rs`** - Ingest records one at a time using `ingest_record_offset()`
+  - **`compiled/batch.rs`** - Ingest multiple records at once using `ingest_records_offset()`
 - **`dynamic/`** — the schema is known only at runtime (no compiled `.proto`), and records
   are built field-by-field with `DynamicRecord`.
   - **`dynamic/single.rs`** - Build the descriptor in code and ingest dynamic records one at a time
@@ -72,12 +72,11 @@ The SDK supports three approaches for passing Protocol Buffers data:
 
 **Expected output:**
 ```
-[Auto-encoding] Record sent with offset ID: 0
-[Auto-encoding] Record acknowledged with offset ID: 0
-[Pre-encoded] Record sent with offset ID: 1
-[Pre-encoded] Record acknowledged with offset ID: 1
-[Backward-compatible] Record sent with offset ID: 2
-[Backward-compatible] Record acknowledged with offset ID: 2
+=== Offset-based API (Recommended) ===
+[Auto-encoding] Record queued with offset ID: 0
+[Pre-encoded] Record queued with offset ID: 1
+[Backward-compatible] Record queued with offset ID: 2
+All records acknowledged
 Stream closed successfully
 ```
 
@@ -143,12 +142,11 @@ let stream = sdk
 
 **Expected output:**
 ```
-[Auto-encoding] Batch of 3 records sent with offset ID: 0
-[Auto-encoding] Batch acknowledged with offset ID: 0
-[Pre-encoded] Batch of 3 records sent with offset ID: 1
-[Pre-encoded] Batch acknowledged with offset ID: 1
-[Backward-compatible] Batch of 3 records sent with offset ID: 2
-[Backward-compatible] Batch acknowledged with offset ID: 2
+=== Offset-based API (Recommended) ===
+[Auto-encoding] Batch of 3 records queued with offset ID: 0
+[Pre-encoded] Batch of 3 records queued with offset ID: 1
+[Backward-compatible] Batch of 3 records queued with offset ID: 2
+All offset-API batches acknowledged
 Stream closed successfully
 ```
 
@@ -158,35 +156,28 @@ Stream closed successfully
 use databricks_zerobus_ingest_sdk::{ProtoMessage, ProtoBytes};
 use prost::Message;
 
-// 1. Auto-encoding: Vec of wrapped messages
-let batch: Vec<ProtoMessage<TableOrders>> = vec![
+let batch1: Vec<ProtoMessage<TableOrders>> = vec![
     ProtoMessage(TableOrders { id: Some(1), /* ... */ }),
     ProtoMessage(TableOrders { id: Some(2), /* ... */ }),
     ProtoMessage(TableOrders { id: Some(3), /* ... */ }),
 ];
-if let Some(offset) = stream.ingest_records_offset(batch).await? {
-    stream.wait_for_offset(offset).await?;
-}
+stream.ingest_records_offset(batch1).await?;
 
-// 2. Pre-encoded: Vec of wrapped bytes
-let batch: Vec<ProtoBytes> = vec![
+let batch2: Vec<ProtoBytes> = vec![
     ProtoBytes(TableOrders { id: Some(4), /* ... */ }.encode_to_vec()),
     ProtoBytes(TableOrders { id: Some(5), /* ... */ }.encode_to_vec()),
     ProtoBytes(TableOrders { id: Some(6), /* ... */ }.encode_to_vec()),
 ];
-if let Some(offset) = stream.ingest_records_offset(batch).await? {
-    stream.wait_for_offset(offset).await?;
-}
+stream.ingest_records_offset(batch2).await?;
 
-// 3. Backward-compatible: Vec of raw bytes
-let batch: Vec<Vec<u8>> = vec![
+let batch3: Vec<Vec<u8>> = vec![
     TableOrders { id: Some(7), /* ... */ }.encode_to_vec(),
     TableOrders { id: Some(8), /* ... */ }.encode_to_vec(),
     TableOrders { id: Some(9), /* ... */ }.encode_to_vec(),
 ];
-if let Some(offset) = stream.ingest_records_offset(batch).await? {
-    stream.wait_for_offset(offset).await?;
-}
+stream.ingest_records_offset(batch3).await?;
+
+stream.flush().await?;
 ```
 
 **Batch semantics:**
@@ -306,7 +297,7 @@ This generates:
 - `output/<your_table>.rs` - Rust structs with serialization code
 - `output/<your_table>.descriptor` - Binary descriptor for runtime validation
 
-### Update main.rs
+### Update Example Files
 
 **1. Update the module and use statements:**
 
@@ -362,4 +353,4 @@ ProtoMessage(TableInventory {
 })
 ```
 
-**4. Update table name and credentials** in the constants at the top of `main.rs`.
+**4. Update table name and credentials** in the constants at the top of `single.rs` or `batch.rs`.

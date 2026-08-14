@@ -4,8 +4,8 @@ High-performance .NET SDK for streaming data ingestion into Databricks Delta tab
 
 ## Requirements
 
-- **.NET 8** or **.NET 10**
-- **Rust toolchain** (for building the native `zerobus_ffi` library from source)
+- Consumers: .NET 8 or .NET 10
+- Building from source: .NET 10 SDK and a Rust toolchain
 
 ## Quick Start
 
@@ -31,11 +31,12 @@ using var stream = sdk.CreateJsonStream(
     clientSecret,
     options);
 
-// 4. Ingest records.
-long offset = stream.IngestRecord("""{"id": 1, "message": "Hello"}""");
-
-// 5. Wait for acknowledgment.
-stream.WaitForOffset(offset);
+// 4. Queue records, then confirm the whole run with one flush.
+for (int id = 1; id <= 100; id++)
+{
+    stream.IngestRecord($$"""{"id": {{id}}, "message": "Hello"}""");
+}
+stream.Flush();
 ```
 
 ## Installation
@@ -187,13 +188,26 @@ If you use this untyped API, JSON streams must set `RecordType.Json` and use the
 Proto streams must provide `DescriptorProto` and use the byte-oriented overloads.
 
 ```csharp
-// JSON
-long offset = stream.IngestRecord("""{"field": "value"}""");
+// JSON stream
+var jsonOptions = options with { RecordType = RecordType.Json };
+using var jsonStream = sdk.CreateStream(
+    new TableProperties("catalog.schema.json_table"),
+    clientId,
+    clientSecret,
+    jsonOptions);
+long jsonOffset = jsonStream.IngestRecord("""{"field": "value"}""");
+jsonStream.WaitForOffset(jsonOffset);
 
-// Protobuf
+// Protobuf stream
+var protoOptions = options with { RecordType = RecordType.Proto };
 byte[] protoBytes = myMessage.ToByteArray();
-long offset = stream.IngestRecord(protoBytes);
-stream.WaitForOffset(offset);
+using var protoStream = sdk.CreateStream(
+    new TableProperties("catalog.schema.proto_table", descriptorProto),
+    clientId,
+    clientSecret,
+    protoOptions);
+long protoOffset = protoStream.IngestRecord(protoBytes);
+protoStream.WaitForOffset(protoOffset);
 ```
 
 #### `IngestRecords`
@@ -205,8 +219,8 @@ string[] records = [
     """{"device": "sensor-001", "temp": 20}""",
     """{"device": "sensor-002", "temp": 21}""",
 ];
-long lastOffset = stream.IngestRecords(records);
-stream.WaitForOffset(lastOffset);
+long batchOffset = stream.IngestRecords(records);
+stream.WaitForOffset(batchOffset);
 ```
 
 #### `WaitForOffset` (sync)
@@ -227,14 +241,26 @@ stream.Flush();
 
 #### `GetUnackedRecords`
 
-Retrieves unacknowledged records after stream failure (call after close/failure only).
+Retrieves unacknowledged records after stream failure (call after close/failure only). A flush timeout can leave the stream active, in which case `GetUnackedRecords()` throws until the stream closes.
 
 ```csharp
-ReadOnlyMemory<byte>[] unacked = stream.GetUnackedRecords();
-foreach (var payload in unacked)
+try
 {
-    // Decode as UTF-8 if you know this stream ingests JSON.
-    Console.WriteLine($"record bytes: {payload.Length}");
+    stream.Flush();
+}
+catch (ZerobusException)
+{
+    // A flush timeout can leave the stream active. GetUnackedRecords
+    // requires a closed or failed stream.
+    try
+    {
+        var unacked = stream.GetUnackedRecords();
+        Console.WriteLine($"Failed to acknowledge {unacked.Length} records");
+    }
+    catch (ZerobusException retrieval)
+    {
+        Console.WriteLine($"Could not inspect unacked records (stream may still be active): {retrieval.Message}");
+    }
 }
 ```
 

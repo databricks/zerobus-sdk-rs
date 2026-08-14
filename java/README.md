@@ -68,7 +68,7 @@ The Java SDK uses JNI (Java Native Interface) to call a high-performance Rust im
 
 ### Runtime Requirements
 
-- **Java**: 8 or higher - [Download Java](https://adoptium.net/)
+- **Java**: 8 or higher to run a published JAR. Building and testing from source requires JDK 11 or higher.
 - **Databricks workspace** with Zerobus access enabled
 
 ### Supported Platforms
@@ -82,8 +82,8 @@ This SDK includes native libraries for the following platforms:
 | Linux (musl / Alpine) | x86_64  | Supported |
 | Linux (musl / Alpine) | aarch64 | Supported |
 | Windows  | x86_64       | Supported |
-| macOS    | x86_64       | Supported |
-| macOS    | aarch64 (Apple Silicon) | Supported |
+| macOS    | x86_64       | Source-build only; the published JNI artifacts currently include Linux and Windows |
+| macOS    | aarch64 (Apple Silicon) | Source-build only; the published JNI artifacts currently include Linux and Windows |
 
 Linux glibc builds support glibc 2.26 and newer, including Amazon Linux 2.
 On Linux, the libc flavor (glibc vs musl) is detected at runtime. To override detection, set
@@ -91,10 +91,14 @@ On Linux, the libc flavor (glibc vs musl) is detected at runtime. To override de
 
 ### Dependencies
 
-**When using the fat JAR** (recommended for most users):
+**When using Maven or Gradle** (regular JAR, recommended):
+- `protobuf-java` and `slf4j-api` are pulled transitively from the published POM. Do not redeclare them unless you need a different version.
+- Add an SLF4J implementation such as [`slf4j-simple` 2.0.17](https://mvnrepository.com/artifact/org.slf4j/slf4j-simple/2.0.17) or [`logback-classic` 1.4.14](https://mvnrepository.com/artifact/ch.qos.logback/logback-classic/1.4.14). The SDK depends on the SLF4J API only.
+
+**When using the fat JAR** (standalone scripts or CLI tools without a build system):
 - No additional dependencies required - all dependencies are bundled
 
-**When using the regular JAR**:
+**When using the regular JAR as a file on the classpath** (without Maven or Gradle):
 - [`protobuf-java` 4.33.0](https://mvnrepository.com/artifact/com.google.protobuf/protobuf-java/4.33.0)
 - [`slf4j-api` 2.0.17](https://mvnrepository.com/artifact/org.slf4j/slf4j-api/2.0.17)
 - An SLF4J implementation such as [`slf4j-simple` 2.0.17](https://mvnrepository.com/artifact/org.slf4j/slf4j-simple/2.0.17) or [`logback-classic` 1.4.14](https://mvnrepository.com/artifact/ch.qos.logback/logback-classic/1.4.14)
@@ -119,7 +123,7 @@ On Linux, the libc flavor (glibc vs musl) is detected at runtime. To override de
 
 ### Build Requirements (only for building from source)
 
-- **Java**: 8 or higher - [Download Java](https://adoptium.net/)
+- **Java**: 8 or higher to run a published JAR. Building and testing from source requires JDK 11 or higher.
 - **Maven**: 3.6 or higher - [Download Maven](https://maven.apache.org/download.cgi)
 - **Protocol Buffers Compiler** (`protoc`): 33.0 - [Download protoc](https://github.com/protocolbuffers/protobuf/releases/tag/v33.0) (for compiling your own `.proto` schemas)
 
@@ -142,7 +146,7 @@ Add the SDK as a dependency in your `pom.xml`:
     <dependency>
         <groupId>com.databricks</groupId>
         <artifactId>zerobus-ingest-sdk</artifactId>
-        <version>0.2.0</version>
+        <version>1.4.0</version>
     </dependency>
 </dependencies>
 ```
@@ -151,39 +155,18 @@ Or with Gradle (`build.gradle`):
 
 ```groovy
 dependencies {
-    implementation 'com.databricks:zerobus-ingest-sdk:0.2.0'
+    implementation 'com.databricks:zerobus-ingest-sdk:1.4.0'
 }
 ```
 
-**Important**: You must also add the required dependencies manually, as they are not automatically included:
+Add an SLF4J implementation (the SDK depends on `slf4j-api` only):
 
 ```xml
-<!-- Add these dependencies in addition to the SDK -->
-<dependencies>
-    <!-- Zerobus SDK -->
-    <dependency>
-        <groupId>com.databricks</groupId>
-        <artifactId>zerobus-ingest-sdk</artifactId>
-        <version>0.2.0</version>
-    </dependency>
-
-    <!-- Required dependencies -->
-    <dependency>
-        <groupId>com.google.protobuf</groupId>
-        <artifactId>protobuf-java</artifactId>
-        <version>4.33.0</version>
-    </dependency>
-    <dependency>
-        <groupId>org.slf4j</groupId>
-        <artifactId>slf4j-api</artifactId>
-        <version>2.0.17</version>
-    </dependency>
-    <dependency>
-        <groupId>org.slf4j</groupId>
-        <artifactId>slf4j-simple</artifactId>
-        <version>2.0.17</version>
-    </dependency>
-</dependencies>
+<dependency>
+    <groupId>org.slf4j</groupId>
+    <artifactId>slf4j-simple</artifactId>
+    <version>2.0.17</version>
+</dependency>
 ```
 
 **Fat JAR (with all dependencies bundled):**
@@ -195,7 +178,7 @@ If you prefer the self-contained fat JAR with all dependencies included:
     <dependency>
         <groupId>com.databricks</groupId>
         <artifactId>zerobus-ingest-sdk</artifactId>
-        <version>0.2.0</version>
+        <version>1.4.0</version>
         <classifier>jar-with-dependencies</classifier>
     </dependency>
 </dependencies>
@@ -205,7 +188,7 @@ Or with Gradle:
 
 ```groovy
 dependencies {
-    implementation 'com.databricks:zerobus-ingest-sdk:0.2.0:jar-with-dependencies'
+    implementation 'com.databricks:zerobus-ingest-sdk:1.4.0:jar-with-dependencies'
 }
 ```
 
@@ -221,19 +204,20 @@ cd zerobus-sdk/java
 mvn clean package -Dzerobus.skipNativeLibCheck=true
 ```
 
-This generates two JAR files in the `target/` directory:
+`-Dzerobus.skipNativeLibCheck=true` compiles the Java sources without staging JNI
+libraries. The JARs in `target/` do not include native libraries and cannot ingest
+until you either install a published artifact from Maven Central, or stage the JNI
+libraries under `src/main/resources/native/` and run Maven without that flag.
 
-- **Regular JAR**: `zerobus-ingest-sdk-0.2.0.jar` (~12MB, includes native libraries)
+A release build (natives staged, no skip flag) generates two JAR files in `target/`:
+
+- **Regular JAR**: `zerobus-ingest-sdk-1.4.0.jar` (~12MB, includes native libraries)
   - Contains only the SDK classes
   - Requires all dependencies on the classpath
 
-- **Fat JAR**: `zerobus-ingest-sdk-0.2.0-jar-with-dependencies.jar` (~19MB, includes native libraries + all dependencies)
+- **Fat JAR**: `zerobus-ingest-sdk-1.4.0-jar-with-dependencies.jar` (~19MB, includes native libraries + all dependencies)
   - Contains SDK classes plus all dependencies bundled
   - Self-contained, easier to deploy
-
-The skip flag is for local Java-only builds. Release builds must stage the JNI
-libraries under `src/main/resources/native/` and run Maven without that flag so
-the packaged JAR includes native libraries.
 
 **Which JAR to use?**
 - **Regular JAR**: When using Maven/Gradle (recommended)
@@ -275,16 +259,15 @@ Create `pom.xml`:
         <dependency>
             <groupId>com.databricks</groupId>
             <artifactId>zerobus-ingest-sdk</artifactId>
-            <version>0.2.0</version>
+            <version>1.4.0</version>
         </dependency>
 
-        <!-- Required dependencies (see above for full list) -->
+        <!-- SLF4J implementation (the SDK depends on slf4j-api only) -->
         <dependency>
-            <groupId>com.google.protobuf</groupId>
-            <artifactId>protobuf-java</artifactId>
-            <version>4.33.0</version>
+            <groupId>org.slf4j</groupId>
+            <artifactId>slf4j-simple</artifactId>
+            <version>2.0.17</version>
         </dependency>
-        <!-- Add other dependencies from the list above -->
     </dependencies>
 </project>
 ```
@@ -339,16 +322,16 @@ The proto generation tool requires the fat JAR (all dependencies included):
 
 ```bash
 # Download from Maven Central
-wget https://repo1.maven.org/maven2/com/databricks/zerobus-ingest-sdk/0.2.0/zerobus-ingest-sdk-0.2.0-jar-with-dependencies.jar
+wget https://repo1.maven.org/maven2/com/databricks/zerobus-ingest-sdk/1.4.0/zerobus-ingest-sdk-1.4.0-jar-with-dependencies.jar
 
 # Or if you built from source, it's in target/
-# cp target/zerobus-ingest-sdk-0.2.0-jar-with-dependencies.jar .
+# cp target/zerobus-ingest-sdk-1.4.0-jar-with-dependencies.jar .
 ```
 
 **Run the tool:**
 
 ```bash
-java -jar zerobus-ingest-sdk-0.2.0-jar-with-dependencies.jar \
+java -jar zerobus-ingest-sdk-1.4.0-jar-with-dependencies.jar \
   --uc-endpoint "https://dbc-a1b2c3d4-e5f6.cloud.databricks.com" \
   --client-id "your-service-principal-application-id" \
   --client-secret "your-service-principal-secret" \
@@ -381,11 +364,6 @@ Running the generation tool will create `src/main/proto/record.proto`:
 ```protobuf
 syntax = "proto2";
 
-package com.example;
-
-option java_package = "com.example.proto";
-option java_outer_classname = "Record";
-
 message AirQuality {
     optional string device_name = 1;
     optional int32 temp = 2;
@@ -393,7 +371,9 @@ message AirQuality {
 }
 ```
 
-After generating the proto file, compile it as shown above:
+The tool writes a proto2 message only. It does not emit `package`, `java_package`,
+or `java_outer_classname`. Add those yourself if you need a Java package, then
+compile as shown above:
 ```bash
 protoc --java_out=src/main/java src/main/proto/record.proto
 ```
@@ -415,12 +395,13 @@ The tool automatically maps Unity Catalog types to proto2 types:
 | TIMESTAMP | int64 |
 | ARRAY\<type\> | repeated type |
 | MAP\<key, value\> | map\<key, value\> |
-| STRUCT\<fields\> | nested message |
+
+`STRUCT` columns are not generated. Map those fields by hand if needed.
 
 **Benefits:**
 - No manual schema creation required
 - Ensures schema consistency between your table and protobuf definitions
-- Automatically handles complex types (arrays, maps, structs)
+- Automatically handles ARRAY and MAP columns (`STRUCT` is not generated)
 - Reduces errors from manual type mapping
 - No need to clone the repository - runs directly from the SDK JAR
 
@@ -449,20 +430,13 @@ public class ZerobusClient {
         String clientId = "your-service-principal-application-id";
         String clientSecret = "your-service-principal-secret";
 
-        // Initialize SDK
-        ZerobusSdk sdk = new ZerobusSdk(serverEndpoint, workspaceUrl);
-
-        // Create stream (recommended offset-based proto stream)
-        ZerobusProtoStream stream = sdk.streamBuilder()
-            .table(tableName)
-            .oauth(clientId, clientSecret)
-            .compiledProto(AirQuality.getDescriptor().toProto())
-            .build()
-            .join();
-
-        try {
-            long lastOffset = -1;
-
+        try (ZerobusSdk sdk = new ZerobusSdk(serverEndpoint, workspaceUrl);
+             ZerobusProtoStream stream = sdk.streamBuilder()
+                 .table(tableName)
+                 .oauth(clientId, clientSecret)
+                 .compiledProto(AirQuality.getDescriptor().toProto())
+                 .build()
+                 .join()) {
             // Ingest in a loop. ingestRecordOffset() returns as soon as the record is
             // queued; the SDK sends it and tracks its acknowledgment in the background.
             for (int i = 0; i < 100; i++) {
@@ -472,17 +446,13 @@ public class ZerobusClient {
                     .setHumidity(50 + (i % 40))
                     .build();
 
-                lastOffset = stream.ingestRecordOffset(record); // returns immediately
+                stream.ingestRecordOffset(record); // returns immediately
             }
 
-            // Confirm everything is durably committed. flush() does the same;
-            // waiting on the last offset works because acks are ordered.
-            stream.waitForOffset(lastOffset);
+            // Confirm everything is durably committed with one barrier.
+            stream.flush();
 
             System.out.println("Successfully ingested 100 records!");
-        } finally {
-            stream.close();
-            sdk.close();
         }
     }
 }
@@ -576,29 +546,35 @@ API for all stream types and mirrors the Rust SDK's `stream_builder()`:
 
 ```java
 // Protocol Buffer
-ZerobusProtoStream protoStream = sdk.streamBuilder()
-    .table("catalog.schema.table")
-    .oauth(clientId, clientSecret)
-    .compiledProto(MyProto.getDescriptor().toProto())
-    .build()
-    .join();
+try (ZerobusProtoStream protoStream = sdk.streamBuilder()
+        .table("catalog.schema.table")
+        .oauth(clientId, clientSecret)
+        .compiledProto(MyProto.getDescriptor().toProto())
+        .build()
+        .join()) {
+    // ingest...
+}
 
 // JSON
-ZerobusJsonStream jsonStream = sdk.streamBuilder()
-    .table("catalog.schema.table")
-    .oauth(clientId, clientSecret)
-    .json()
-    .build()
-    .join();
+try (ZerobusJsonStream jsonStream = sdk.streamBuilder()
+        .table("catalog.schema.table")
+        .oauth(clientId, clientSecret)
+        .json()
+        .build()
+        .join()) {
+    // ingest...
+}
 
 // Arrow Flight (Beta)
-ZerobusArrowStream arrowStream = sdk.streamBuilder()
-    .table("catalog.schema.table")
-    .oauth(clientId, clientSecret)
-    .arrow(schema)
-    .ipcCompression(IPCCompressionType.ZSTD)
-    .build()
-    .join();
+try (ZerobusArrowStream arrowStream = sdk.streamBuilder()
+        .table("catalog.schema.table")
+        .oauth(clientId, clientSecret)
+        .arrow(schema)
+        .ipcCompression(IPCCompressionType.ZSTD)
+        .build()
+        .join()) {
+    // ingest...
+}
 ```
 
 Stream configuration is set directly on the builder (for example `.maxInflightRecords(50000)`,
@@ -614,14 +590,22 @@ Best for production systems with type safety and schema validation:
 
 ```bash
 # Single record ingestion
-cd examples/proto
-protoc --java_out=. air_quality.proto
-javac -d . -cp "../../target/zerobus-ingest-sdk-*-jar-with-dependencies.jar:." *.java
-java -cp "../../target/zerobus-ingest-sdk-*-jar-with-dependencies.jar:." \
+cd examples
+SDK_JAR=$(ls ../target/zerobus-ingest-sdk-*-jar-with-dependencies.jar | head -n 1)
+
+# Generate proto class and compile examples
+protoc --java_out=proto proto/air_quality.proto
+javac -d . -cp "$SDK_JAR" \
+  proto/com/databricks/zerobus/examples/proto/AirQualityProto.java \
+  proto/SingleRecordExample.java \
+  proto/BatchIngestionExample.java
+
+# Run single record example
+java -cp ".:$SDK_JAR" \
   com.databricks.zerobus.examples.proto.SingleRecordExample
 
-# Batch ingestion
-java -cp "../../target/zerobus-ingest-sdk-*-jar-with-dependencies.jar:." \
+# Run batch example
+java -cp ".:$SDK_JAR" \
   com.databricks.zerobus.examples.proto.BatchIngestionExample
 ```
 
@@ -630,23 +614,27 @@ java -cp "../../target/zerobus-ingest-sdk-*-jar-with-dependencies.jar:." \
 Best for rapid prototyping and flexible schemas. No Protocol Buffer types required:
 
 ```bash
-cd examples/json
-javac -d . -cp "../../target/zerobus-ingest-sdk-*-jar-with-dependencies.jar:." *.java
-java -cp "../../target/zerobus-ingest-sdk-*-jar-with-dependencies.jar:." \
+cd examples
+SDK_JAR=$(ls ../target/zerobus-ingest-sdk-*-jar-with-dependencies.jar | head -n 1)
+javac -d . -cp "$SDK_JAR" \
+  json/SingleRecordExample.java \
+  json/BatchIngestionExample.java
+java -cp ".:$SDK_JAR" \
   com.databricks.zerobus.examples.json.SingleRecordExample
 ```
 
 **Clean JSON API** - use the stream builder for a simplified experience:
 
 ```java
-// No proto types or configuration needed!
-ZerobusJsonStream stream = sdk.streamBuilder()
-    .table(tableName)
-    .oauth(clientId, clientSecret)
-    .json()
-    .build()
-    .join();
-stream.ingestRecordOffset("{\"field\": \"value\"}");
+try (ZerobusJsonStream stream = sdk.streamBuilder()
+        .table(tableName)
+        .oauth(clientId, clientSecret)
+        .json()
+        .build()
+        .join()) {
+    stream.ingestRecordOffset("{\"field\": \"value\"}");
+    stream.flush();
+}
 ```
 
 See [`examples/README.md`](https://github.com/databricks/zerobus-sdk/blob/main/java/examples/README.md) for detailed documentation.
@@ -672,21 +660,17 @@ Schema schema = new Schema(Arrays.asList(
     Field.nullable("device_name", ArrowType.LargeUtf8.INSTANCE),
     Field.nullable("temp", new ArrowType.Int(32, true))));
 
-ZerobusArrowStream stream = sdk.streamBuilder()
-    .table(tableName)
-    .oauth(clientId, clientSecret)
-    .arrow(schema)
-    .build()
-    .join();
-
-try (VectorSchemaRoot batch = VectorSchemaRoot.create(schema, allocator)) {
+try (ZerobusArrowStream stream = sdk.streamBuilder()
+        .table(tableName)
+        .oauth(clientId, clientSecret)
+        .arrow(schema)
+        .build()
+        .join();
+     VectorSchemaRoot batch = VectorSchemaRoot.create(schema, allocator)) {
     // populate batch...
-    Optional<Long> offset = stream.ingestBatch(batch);
-    if (offset.isPresent()) {
-        stream.waitForOffset(offset.get());
-    }
+    stream.ingestBatch(batch);
+    stream.flush();
 }
-stream.close();
 ```
 
 > **Beta.** Arrow Flight ingestion is in Beta. The API is stabilising but may still change before reaching GA.
@@ -706,12 +690,14 @@ HeadersProvider provider = () -> {
     return headers;
 };
 
-ZerobusJsonStream stream = sdk.streamBuilder()
-    .table(tableName)
-    .headersProvider(provider)
-    .json()
-    .build()
-    .join();
+try (ZerobusJsonStream stream = sdk.streamBuilder()
+        .table(tableName)
+        .headersProvider(provider)
+        .json()
+        .build()
+        .join()) {
+    // ingest...
+}
 ```
 
 The same provider works with the builder's `compiledProto()` and `arrow()` format selectors.
@@ -743,14 +729,12 @@ Use `ZerobusProtoStream` or `ZerobusJsonStream` for all new code. They use offse
 > [Acknowledgments and throughput](#acknowledgments-and-throughput) for the full picture.
 
 ```java
-ZerobusProtoStream stream = sdk.streamBuilder()
-    .table(tableName)
-    .oauth(clientId, clientSecret)
-    .compiledProto(AirQuality.getDescriptor().toProto())
-    .build()
-    .join();
-
-try {
+try (ZerobusProtoStream stream = sdk.streamBuilder()
+        .table(tableName)
+        .oauth(clientId, clientSecret)
+        .compiledProto(AirQuality.getDescriptor().toProto())
+        .build()
+        .join()) {
     long lastOffset = -1;
 
     // Ingest in a loop
@@ -767,9 +751,6 @@ try {
 
     // Confirm all records are acknowledged
     stream.waitForOffset(lastOffset);
-} finally {
-    stream.close();
-    sdk.close();
 }
 ```
 
@@ -804,16 +785,24 @@ try {
 
 **Migration:**
 ```java
-// Before (deprecated ZerobusStream):
-stream.ingestRecord(record).join();
+// Before (deprecated ZerobusStream): wait once after the loop
+CompletableFuture<Void> last = null;
+for (AirQuality record : records) {
+    last = stream.ingestRecord(record);
+}
+if (last != null) {
+    last.join();
+}
 
-// After (recommended ZerobusProtoStream):
-long offset = stream.ingestRecordOffset(record);
-stream.waitForOffset(offset);
+// After (recommended ZerobusProtoStream): queue, then flush once
+for (AirQuality record : records) {
+    stream.ingestRecordOffset(record);
+}
+stream.flush();
 
 // Batch ingestion:
-Optional<Long> batchOffset = stream.ingestRecordsOffset(batch);
-batchOffset.ifPresent(o -> { try { stream.waitForOffset(o); } catch (Exception e) { throw new RuntimeException(e); } });
+stream.ingestRecordsOffset(batch);
+stream.flush();
 ```
 
 ---
@@ -831,51 +820,41 @@ batchOffset.ifPresent(o -> { try { stream.waitForOffset(o); } catch (Exception e
 Use the stream builder for a clean API that doesn't require Protocol Buffer types:
 
 ```java
-// Create JSON stream - no proto types needed!
-ZerobusJsonStream stream = sdk.streamBuilder()
-    .table("catalog.schema.table")
-    .oauth(clientId, clientSecret)
-    .json()
-    .build()
-    .join();
+try (ZerobusJsonStream stream = sdk.streamBuilder()
+        .table("catalog.schema.table")
+        .oauth(clientId, clientSecret)
+        .json()
+        .build()
+        .join()) {
+    stream.ingestRecordOffset("{\"device_name\": \"sensor-1\", \"temp\": 25}");
 
-try {
-    // Ingest JSON string directly
-    long offset = stream.ingestRecordOffset("{\"device_name\": \"sensor-1\", \"temp\": 25}");
-    stream.waitForOffset(offset);
-
-    // Or use objects with a serializer (Gson, Jackson, etc.)
     Gson gson = new Gson();
     Map<String, Object> data = new HashMap<>();
     data.put("device_name", "sensor-2");
     data.put("temp", 26);
-    offset = stream.ingestRecordOffset(data, gson::toJson);
+    stream.ingestRecordOffset(data, gson::toJson);
 
-    // Batch ingestion
     List<String> batch = Arrays.asList(
         "{\"device_name\": \"sensor-1\", \"temp\": 25}",
         "{\"device_name\": \"sensor-2\", \"temp\": 26}"
     );
-    Optional<Long> batchOffset = stream.ingestRecordsOffset(batch);
-    if (batchOffset.isPresent()) {
-        stream.waitForOffset(batchOffset.get());
-    }
-} finally {
-    stream.close();
-    sdk.close();
+    stream.ingestRecordsOffset(batch);
+    stream.flush();
 }
 ```
 
 With custom configuration set directly on the builder:
 
 ```java
-ZerobusJsonStream stream = sdk.streamBuilder()
-    .table(tableName)
-    .oauth(clientId, clientSecret)
-    .maxInflightRecords(50000)
-    .json()
-    .build()
-    .join();
+try (ZerobusJsonStream stream = sdk.streamBuilder()
+        .table(tableName)
+        .oauth(clientId, clientSecret)
+        .maxInflightRecords(50000)
+        .json()
+        .build()
+        .join()) {
+    // ingest...
+}
 ```
 
 ## Configuration
@@ -888,7 +867,7 @@ ZerobusJsonStream stream = sdk.streamBuilder()
 | `recovery` | true | Enable automatic stream recovery |
 | `recoveryTimeoutMs` | 15000 | Timeout for recovery operations (ms) |
 | `recoveryBackoffMs` | 2000 | Delay between recovery attempts (ms) |
-| `recoveryRetries` | 3 | Maximum number of recovery attempts |
+| `recoveryRetries` | 4 | Maximum number of recovery attempts |
 | `flushTimeoutMs` | 300000 | Timeout for flush operations (ms) |
 | `serverLackOfAckTimeoutMs` | 60000 | Server acknowledgment timeout (ms) |
 | `ackCallback` | None | Callback invoked on record acknowledgment |
@@ -1030,7 +1009,7 @@ The SDK throws two types of exceptions:
 
 ```java
 try {
-    stream.ingestRecord(record);
+    stream.ingestRecordOffset(record);
 } catch (NonRetriableException e) {
     // Fatal error - do not retry
     logger.error("Non-retriable error: " + e.getMessage());
@@ -1429,7 +1408,7 @@ Builder for creating `StreamConfigurationOptions`.
 ```java
 StreamConfigurationOptionsBuilder setMaxInflightRecords(int maxInflightRecords)
 ```
-Sets the maximum number of unacknowledged records (default: 50000).
+Sets the maximum number of unacknowledged records (default: 1000000).
 
 ```java
 StreamConfigurationOptionsBuilder setRecovery(boolean recovery)
@@ -1449,7 +1428,7 @@ Sets the delay between recovery attempts in milliseconds (default: 2000).
 ```java
 StreamConfigurationOptionsBuilder setRecoveryRetries(int recoveryRetries)
 ```
-Sets the maximum number of recovery attempts (default: 3).
+Sets the maximum number of recovery attempts (default: 4).
 
 ```java
 StreamConfigurationOptionsBuilder setFlushTimeoutMs(int flushTimeoutMs)
@@ -1566,17 +1545,18 @@ List<MyData> unacked = stream.getUnackedRecords(json -> gson.fromJson(json, MyDa
 
 ### AckCallback (Interface)
 
-Callback interface for acknowledgment notifications.
+Callback interface for acknowledgment notifications. The callback is invoked once per logical
+ingest submission, so a batch ingest call produces one callback rather than one per record.
 
 ```java
 void onAck(long offsetId)
 ```
-Called when records up to `offsetId` are acknowledged.
+Called when a logical ingest submission is acknowledged. Records up to `offsetId` are durable.
 
 ```java
 void onError(long offsetId, String errorMessage)
 ```
-Called when an error occurs for records at or after `offsetId`.
+Called when an error occurs for the logical ingest submission at `offsetId`.
 
 **Track durability progress without blocking.** Register an `AckCallback` to observe
 acknowledgments as they arrive on a background thread while you keep ingesting — a natural
@@ -1593,28 +1573,28 @@ AckCallback callback = new AckCallback() {
     }
 };
 
-ZerobusProtoStream stream = sdk.streamBuilder()
-    .table(tableName)
-    .oauth(clientId, clientSecret)
-    .ackCallback(callback)
-    .compiledProto(descriptor)
-    .build()
-    .join();
-
-// Ingest without blocking; the callback fires as acks arrive.
-for (AirQuality record : records) {
-    stream.ingestRecordOffset(record);
+try (ZerobusProtoStream stream = sdk.streamBuilder()
+        .table(tableName)
+        .oauth(clientId, clientSecret)
+        .ackCallback(callback)
+        .compiledProto(descriptor)
+        .build()
+        .join()) {
+    for (AirQuality record : records) {
+        stream.ingestRecordOffset(record);
+    }
+    stream.flush(); // wait for durability; callbacks may still be running
 }
-stream.flush(); // drain remaining acks before close
 ```
 
 Implementations must be thread-safe and lightweight (callbacks run on internal
-processing threads).
+processing threads). `close()` waits at most five seconds for in-flight
+callbacks; remaining callbacks may still be pending when it returns.
 
 ## Best Practices
 
 1. **Reuse SDK instances**: Create one `ZerobusSdk` instance per application
-2. **Stream lifecycle**: Always close streams in a `finally` block or use try-with-resources
+2. **Stream lifecycle**: Wrap the SDK and each stream in try-with-resources. Streams hold native resources that the garbage collector does not release.
 3. **Use offset-based API for high throughput**: `ingestRecordOffset()` avoids `CompletableFuture` overhead
 4. **Ingest in a loop, then `flush()`**: Confirm durability once after a batch with `flush()` (or `waitForOffset()` on the last offset, since acks are ordered). Use per-record waits only when a specific record must be confirmed before continuing.
 5. **Batch records when possible**: Use `ingestRecordsOffset()` for multiple records
@@ -1626,7 +1606,8 @@ processing threads).
     - `ingestRecordOffset()` + final `flush()` / `waitForOffset(lastOffset)` → High throughput (recommended)
     - `ingestRecordOffset()` + `waitForOffset()` per record → When a specific record must be confirmed before continuing
     - `ingestRecord().join()` → Deprecated; prefer the offset-based API
-11. **Recovery pattern**: Use `sdk.recreateStream(closedStream)` to automatically re-ingest unacknowledged records, or manually use `getUnackedBatches()` after stream close
+11. **Thread safety**: `ZerobusSdk` and streams are not thread-safe. Synchronize externally if more than one thread uses the same instance.
+12. **Recovery**: Use `recreateStream()` on a closed stream to re-ingest unacknowledged records. Inspect `getUnackedBatches()` after close when you need the payloads yourself.
 
 ## Community and Contributing
 

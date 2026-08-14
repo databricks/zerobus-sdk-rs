@@ -17,7 +17,7 @@ This document covers TypeScript-specific development setup and workflow.
 1. **Clone the repository:**
    ```bash
    git clone https://github.com/databricks/zerobus-sdk.git
-   cd zerobus-sdk/ts
+   cd zerobus-sdk/typescript
    ```
 
 2. **Install dependencies:**

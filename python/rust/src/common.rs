@@ -168,7 +168,10 @@ impl TableProperties {
     }
 }
 
-/// Base class for record acknowledgment callbacks
+/// Base class for logical ingest submission acknowledgment callbacks.
+///
+/// A batch ingest is one logical submission and produces one callback, not one
+/// callback per record in the batch.
 #[pyclass(subclass, skip_from_py_object)]
 #[derive(Clone)]
 pub struct AckCallback {
@@ -186,13 +189,13 @@ impl AckCallback {
         }
     }
 
-    /// Called when a record is acknowledged by the server.
+    /// Called when a logical ingest submission is acknowledged by the server.
     fn on_ack(&self, py: Python, offset: i64) -> PyResult<()> {
         let _ = (py, offset);
         Ok(())
     }
 
-    /// Called when a record encounters an error during ingestion.
+    /// Called when a logical ingest submission encounters an error during ingestion.
     fn on_error(&self, py: Python, offset: i64, error_message: &str) -> PyResult<()> {
         let _ = (py, offset, error_message);
         Ok(())

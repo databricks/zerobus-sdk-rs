@@ -42,11 +42,11 @@ string[] batchRecords =
     """{"device_name": "sensor-005", "temp": 24, "humidity": 64}""",
 ];
 
-long lastOffset = stream.IngestRecords(batchRecords);
-Console.WriteLine($"Batch of {batchRecords.Length} records ingested, last offset: {lastOffset}");
+long batchOffset = stream.IngestRecords(batchRecords);
+Console.WriteLine($"Batch of {batchRecords.Length} records ingested, batch offset: {batchOffset}");
 
-// Wait for the last offset to ensure the entire batch is acknowledged.
-stream.WaitForOffset(lastOffset);
+// Wait for the batch offset to ensure the entire batch is acknowledged.
+stream.WaitForOffset(batchOffset);
 Console.WriteLine("Batch acknowledged!");
 
 Console.WriteLine("All operations completed successfully!");

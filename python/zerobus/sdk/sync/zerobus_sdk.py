@@ -16,27 +16,22 @@ Example:
     >>>
     >>> props = TableProperties("catalog.schema.table")
     >>> stream = sdk.create_stream(
-    ...     table_properties=props,
     ...     client_id="your-client-id",
-    ...     client_secret="your-client-secret"
+    ...     client_secret="your-client-secret",
+    ...     table_properties=props
     ... )
     >>>
     >>> # Optimized API - returns offset directly
-    >>> offset = stream.ingest_record_offset(b"record_data")
+    >>> offset = stream.ingest_record_offset('{"value": "record_data"}')
     >>>
     >>> # Batch API - returns one offset for the batch
-    >>> offsets = stream.ingest_records_offset([b"record1", b"record2"])
-    >>>
-    >>> # Fire-and-forget for maximum throughput
-    >>> stream.ingest_record_nowait(b"record_data")
-    >>> stream.ingest_records_nowait([b"record1", b"record2"])
+    >>> batch_offset = stream.ingest_records_offset([
+    ...     '{"value": "record1"}',
+    ...     '{"value": "record2"}',
+    ... ])
     >>>
     >>> stream.flush()  # Ensure all records are sent
     >>> stream.close()
-    >>>
-    >>> # Legacy API (deprecated) - returns acknowledgment object
-    >>> ack = stream.ingest_record(b"record_data")
-    >>> offset = ack.wait_for_ack(timeout_sec=30)
 """
 
 from typing import Iterator, Optional
@@ -77,9 +72,9 @@ class ZerobusStream:
     def ingest_record_nowait(self, payload):
         """Submit record without waiting (fire-and-forget).
 
-        Highest-throughput single-record API: returns no offset. Use when you do not
-        need per-record offsets; track durability with an ``AckCallback`` and call
-        ``flush()`` before close.
+        Spawns a detached task and discards enqueue errors. ``flush()`` can complete
+        before the task allocates an offset, so this is not a safe durability path.
+        Prefer ``ingest_record_offset()`` or ``ingest_records_offset()``.
         """
         return self._inner.ingest_record_nowait(payload)
 
@@ -88,7 +83,11 @@ class ZerobusStream:
         return self._inner.ingest_records_offset(payloads)
 
     def ingest_records_nowait(self, payloads):
-        """Submit batch of records without waiting."""
+        """Submit batch of records without waiting.
+
+        Same detached-task caveats as ``ingest_record_nowait()``. Prefer
+        ``ingest_records_offset()``.
+        """
         return self._inner.ingest_records_nowait(payloads)
 
     def wait_for_offset(self, offset: int):
@@ -122,7 +121,7 @@ class ZerobusStream:
         records = self._inner.get_unacked_records()
         return iter(records)
 
-    def get_unacked_batches(self) -> Iterator[list]:
+    def get_unacked_batches(self) -> Iterator[list[bytes]]:
         """
         Get iterator of unacknowledged batches.
 
@@ -155,7 +154,7 @@ class ZerobusArrowStream:
         >>> stream = sdk.create_arrow_stream("catalog.schema.table", schema, client_id, client_secret)
         >>> batch = pa.record_batch({"temp": [22, 23]}, schema=schema)
         >>> offset = stream.ingest_batch(batch)
-        >>> stream.wait_for_offset(offset)
+        >>> stream.flush()
         >>> stream.close()
     """
 

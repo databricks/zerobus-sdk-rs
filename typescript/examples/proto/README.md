@@ -106,19 +106,14 @@ const tableProperties: TableProperties = {
 ```typescript
 const AirQuality = airQuality.examples.AirQuality;
 
-// 1. Auto-encoding: pass message directly
-const record = AirQuality.create({
-    device_name: 'sensor-001',
-    temp: 22,
-    humidity: 65
-});
-const offset = await stream.ingestRecordOffset(record);
-await stream.waitForOffset(offset);
-
-// 2. Pre-encoded: pass Buffer
-const buffer = Buffer.from(AirQuality.encode(record).finish());
-const offset = await stream.ingestRecordOffset(buffer);
-await stream.waitForOffset(offset);
+const records = [
+    AirQuality.create({ deviceName: 'sensor-001', temp: 22, humidity: 65 }),
+    AirQuality.create({ deviceName: 'sensor-002', temp: 24, humidity: 70 })
+];
+for (const record of records) {
+    await stream.ingestRecordOffset(record);
+}
+await stream.flush();
 ```
 
 ## Batch Example
@@ -143,19 +138,22 @@ await stream.waitForOffset(offset);
 
 ```typescript
 // 1. Auto-encoding: array of messages
-const batch = [
-    AirQuality.create({ device_name: 'sensor-001', temp: 22, humidity: 65 }),
-    AirQuality.create({ device_name: 'sensor-002', temp: 23, humidity: 67 }),
-    AirQuality.create({ device_name: 'sensor-003', temp: 24, humidity: 69 })
+const messageBatch = [
+    AirQuality.create({ deviceName: 'sensor-001', temp: 22, humidity: 65 }),
+    AirQuality.create({ deviceName: 'sensor-002', temp: 23, humidity: 67 }),
+    AirQuality.create({ deviceName: 'sensor-003', temp: 24, humidity: 69 })
 ];
-const offset = await stream.ingestRecordsOffset(batch);
-if (offset !== null) {
-    await stream.waitForOffset(offset);
-}
+const messageBatchOffset = await stream.ingestRecordsOffset(messageBatch);
 
 // 2. Pre-encoded: array of Buffers
-const batch = records.map(r => Buffer.from(AirQuality.encode(r).finish()));
-const offset = await stream.ingestRecordsOffset(batch);
+const bufferBatch = [
+    AirQuality.create({ deviceName: 'sensor-004', temp: 25, humidity: 71 }),
+    AirQuality.create({ deviceName: 'sensor-005', temp: 26, humidity: 73 }),
+    AirQuality.create({ deviceName: 'sensor-006', temp: 27, humidity: 75 })
+].map(record => Buffer.from(AirQuality.encode(record).finish()));
+const bufferBatchOffset = await stream.ingestRecordsOffset(bufferBatch);
+
+await stream.flush();
 ```
 
 ## Adapting for Your Custom Table

@@ -58,11 +58,14 @@ Add the SDK to your `Cargo.toml`:
 
 ```bash
 cargo add databricks-zerobus-ingest-sdk
+cargo add async-trait tonic
 cargo add prost prost-types
 cargo add tokio --features macros,rt-multi-thread
 ```
 **Why these dependencies?**
 - **`databricks-zerobus-ingest-sdk`** - The SDK itself
+- **`async-trait`** - Required when implementing the async `HeadersProvider` trait
+- **`tonic`** - Provides `transport::Endpoint` for custom `TlsConfig` implementations
 - **`prost`** and **`prost-types`** - Required for encoding your data to Protocol Buffers and loading schema descriptors
 - **`tokio`** - Async runtime required for running async functions (the SDK is fully async)
 
@@ -437,6 +440,10 @@ let sdk = ZerobusSdk::builder()
 
 By default, the SDK uses `SecureTlsConfig` which enables TLS with the operating system's trusted CA certificates. For testing against a local `http://` server, use `NoTlsConfig` (requires the `testing` feature):
 
+```bash
+cargo add databricks-zerobus-ingest-sdk --features testing
+```
+
 ```rust
 use databricks_zerobus_ingest_sdk::{ZerobusSdk, NoTlsConfig};
 use std::sync::Arc;
@@ -543,7 +550,7 @@ let mut stream = sdk
 When the table's schema is known only at runtime — for example a descriptor fetched from Unity Catalog or built in code with `schema::descriptor_from_uc_columns` — there is no compiled `prost::Message` type. Resolve the descriptor with `message_descriptor`, pass it to `.dynamic_proto(descriptor)`, and fill records field-by-field with `DynamicRecord`:
 
 ```rust
-use databricks_zerobus_ingest_sdk::{message_descriptor, DynamicRecord, ProtoBytes};
+use databricks_zerobus_ingest_sdk::{message_descriptor, ProtoBytes};
 use databricks_zerobus_ingest_sdk::schema::{descriptor_from_uc_columns, UcColumn};
 
 // Build the descriptor at runtime (a column's proto field number is `position + 1`).
@@ -560,7 +567,6 @@ let mut stream = sdk
 // Fill records field-by-field; `set()` validates the field name and type (the
 // value must match the field's proto type, e.g. a BIGINT column takes an i64).
 // `encode()` then checks proto2 required fields before producing the bytes.
-use databricks_zerobus_ingest_sdk::ProtoBytes;
 for i in 0..100_000i64 {
     let mut record = stream.new_record()?; // bound to the stream's schema
     record.set("id", i)?.set("customer_name", "Alice Smith")?;
@@ -992,7 +998,7 @@ match stream.ingest_record_offset(payload).await {
 
 ### Complete Working Examples
 
-The `examples/` directory contains four working examples covering different serialization formats and ingestion patterns:
+The `examples/` directory contains working examples covering different serialization formats and ingestion patterns:
 
 | Example | Serialization | Ingestion | Run with |
 |---------|--------------|-----------|----------|

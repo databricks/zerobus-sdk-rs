@@ -88,7 +88,7 @@ Available make targets:
 
 - `make build` - Build both Rust FFI and Go SDK
 - `make build-rust` - Build only the Rust FFI layer
-- `make build-go` - Build only the Go SDK
+- `make build-go` - Build the Go SDK. This target depends on `build-rust`.
 - `make clean` - Remove build artifacts
 - `make fmt` - Format all code (Go and Rust)
 - `make lint` - Run linters on all code
