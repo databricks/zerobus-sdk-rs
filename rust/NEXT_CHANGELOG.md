@@ -38,6 +38,8 @@
 
 ### Internal Changes
 
+- Updated Arrow crates and the vendored `arrow-flight` fork from `59.1` to
+  `59.2` while retaining the slice-aware batch-splitting patch.
 - Added Arrow C Data `RecordBatch` conversion behind a disabled-by-default
   wrapper-only SDK feature so current and future native bindings can share one
   ownership implementation. No supported Rust SDK or Flight behavior changed.
