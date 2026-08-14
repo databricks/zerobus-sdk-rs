@@ -533,6 +533,9 @@ func (st *ZerobusStream) IngestRecordOffset(payload interface{}) (int64, error) 
 //	if err != nil {
 //	    log.Fatal(err)
 //	}
+//	if err := stream.Flush(); err != nil {
+//	    log.Fatal(err)
+//	}
 func (st *ZerobusStream) IngestRecordNowait(payload interface{}) error {
 	if st.ptr == nil {
 		return &ZerobusError{Message: "Stream has been closed", IsRetryable: false}
@@ -569,6 +572,12 @@ func (st *ZerobusStream) IngestRecordNowait(payload interface{}) error {
 //	    `{"field": "value1"}`,
 //	    `{"field": "value2"}`,
 //	})
+//	if err != nil {
+//	    log.Fatal(err)
+//	}
+//	if err := stream.Flush(); err != nil {
+//	    log.Fatal(err)
+//	}
 func (st *ZerobusStream) IngestRecordsNowait(records []interface{}) error {
 	if st.ptr == nil {
 		return &ZerobusError{Message: "Stream has been closed", IsRetryable: false}
@@ -638,6 +647,9 @@ func (st *ZerobusStream) IngestRecordsNowait(records []interface{}) error {
 //	}
 //	batchOffset, err := stream.IngestRecordsOffset(records)
 //	if err != nil {
+//	    log.Fatal(err)
+//	}
+//	if err := stream.Flush(); err != nil {
 //	    log.Fatal(err)
 //	}
 //	log.Printf("Batch ingested with offset: %d", batchOffset)
@@ -728,7 +740,7 @@ func (st *ZerobusStream) WaitForOffset(offset int64) error {
 //
 // Use this method to:
 //   - Retrieve unacknowledged records after stream failure for retry logic
-//   - Check which records weren't durably written after Close() fails
+//   - Inspect payloads that were not durably written after a failed Flush()
 //   - Implement custom retry strategies after stream errors
 //
 // Returns a slice where each element is either:

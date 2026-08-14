@@ -399,7 +399,13 @@ func example(sdk *zerobus.ZerobusSdk, tableProps zerobus.TableProperties) error 
     }
     defer stream.Close()
 
-    offset, _ := stream.IngestRecordOffset(`{"data": "value"}`)
+    offset, err := stream.IngestRecordOffset(`{"data": "value"}`)
+    if err != nil {
+        return err
+    }
+    if err := stream.Flush(); err != nil {
+        return err
+    }
     log.Printf("Ingested at offset: %d", offset)
     return nil
 }
@@ -1028,6 +1034,9 @@ for i := 0; i < 100; i++ {
     }(myRecord)
 }
 wg.Wait()
+if err := stream.Flush(); err != nil {
+    log.Fatal(err)
+}
 ```
 
 ## API Reference
