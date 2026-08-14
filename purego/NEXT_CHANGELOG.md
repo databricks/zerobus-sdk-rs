@@ -32,6 +32,19 @@
   and encoder, ack-model, and opener seams let a protocol instantiate the core
   over its own payload type. Proto and JSON behavior is unchanged, and nothing is
   exposed through a public API yet.
+- Add `internal/arrowproto`, the Arrow IPC payload and Flight frame encoder for
+  the upcoming Arrow ingestion path. It fills the stream core's encoder seam with
+  the two hooks that are trivial for proto and JSON but not for Arrow: row counts
+  as durability units, and real row-range slicing so a partially acknowledged
+  batch replays only its unacknowledged suffix. Frames are chunked to 2 MiB based
+  on measured protobuf size. Nothing is exposed through a public API yet.
+- Charge Arrow payloads against the buffered-bytes limit before decoding them.
+  Compressed Arrow IPC input is inspected for its declared uncompressed buffer
+  sizes, so a highly compressible payload cannot pass admission and then expand
+  past the limit while Arrow materializes it.
+- Add `github.com/apache/arrow-go/v18` and `github.com/google/flatbuffers`
+  dependencies. arrow-go requires `google.golang.org/grpc` v1.82.0, which raises
+  this module's grpc minimum from v1.81.1.
 
 ### Breaking Changes
 
