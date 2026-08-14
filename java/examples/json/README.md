@@ -14,9 +14,10 @@ This directory contains examples for ingesting data using `ZerobusJsonStream`.
 
 ```bash
 cd examples
+SDK_JAR=$(ls ../target/zerobus-ingest-sdk-*-jar-with-dependencies.jar | head -n 1)
 
 # Compile
-javac -d . -cp "../target/classes:$(cd .. && mvn dependency:build-classpath -q -DincludeScope=runtime -Dmdep.outputFile=/dev/stdout)" \
+javac -d . -cp "$SDK_JAR" \
   json/SingleRecordExample.java \
   json/BatchIngestionExample.java
 
@@ -28,11 +29,11 @@ export DATABRICKS_CLIENT_ID="your-client-id"
 export DATABRICKS_CLIENT_SECRET="your-client-secret"
 
 # Run single record example
-java -cp ".:../target/classes:$(cd .. && mvn dependency:build-classpath -q -DincludeScope=runtime -Dmdep.outputFile=/dev/stdout)" \
+java -cp ".:$SDK_JAR" \
   com.databricks.zerobus.examples.json.SingleRecordExample
 
 # Run batch example
-java -cp ".:../target/classes:$(cd .. && mvn dependency:build-classpath -q -DincludeScope=runtime -Dmdep.outputFile=/dev/stdout)" \
+java -cp ".:$SDK_JAR" \
   com.databricks.zerobus.examples.json.BatchIngestionExample
 ```
 

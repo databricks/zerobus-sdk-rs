@@ -52,10 +52,9 @@ Pass both opens to your application JVM whenever you use `ZerobusArrowStream`:
 
 ```bash
 cd examples
-
-# Compile (requires Arrow JARs on classpath)
+SDK_JAR=$(ls ../target/zerobus-ingest-sdk-*-jar-with-dependencies.jar | head -n 1)
 ARROW_CP=$(echo ../target/arrow-deps/*.jar | tr ' ' ':')
-javac -d . -cp "../target/classes:$ARROW_CP" \
+javac -d . -cp "$SDK_JAR:$ARROW_CP" \
   arrow/ArrowIngestionExample.java
 
 # Set environment variables
@@ -68,7 +67,7 @@ export DATABRICKS_CLIENT_SECRET="your-client-secret"
 # Run
 java --add-opens=java.base/java.nio=ALL-UNNAMED \
      --add-opens=java.base/java.nio=org.apache.arrow.memory.core \
-     -cp ".:../target/zerobus-ingest-sdk-*-jar-with-dependencies.jar:$ARROW_CP" \
+     -cp ".:$SDK_JAR:$ARROW_CP" \
      com.databricks.zerobus.examples.arrow.ArrowIngestionExample
 ```
 

@@ -43,8 +43,8 @@ public interface AckCallback {
    * <p>The offset ID represents the durability acknowledgment up to and including this offset. All
    * records with offset IDs less than or equal to this value have been durably stored.
    *
-   * <p>This method should not throw exceptions. If an exception is thrown, it will be logged but
-   * will not affect stream operation.
+   * <p>This method must not throw. JNI does not clear a pending Java exception from the callback,
+   * so a thrown exception can poison later callback operations.
    *
    * @param offsetId the offset ID that has been acknowledged
    */
@@ -56,8 +56,8 @@ public interface AckCallback {
    * <p>This method is called when the SDK encounters an error that affects a specific submission
    * offset. The error may be retryable or non-retryable depending on the nature of the failure.
    *
-   * <p>This method should not throw exceptions. If an exception is thrown, it will be logged but
-   * will not affect stream operation.
+   * <p>This method must not throw. JNI does not clear a pending Java exception from the callback,
+   * so a thrown exception can poison later callback operations.
    *
    * @param offsetId the offset ID that encountered an error
    * @param errorMessage a description of the error that occurred

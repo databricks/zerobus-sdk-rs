@@ -61,6 +61,7 @@ try (ZerobusProtoStream stream = sdk.streamBuilder()
     stream.ingestRecordOffset(preEncodedBytes);       // byte[]
     stream.ingestRecordsOffset(listOfMessages);       // batch
     stream.ingestRecordsOffset(listOfByteArrays);     // batch
+    stream.flush();
 }
 ```
 
@@ -77,6 +78,7 @@ try (ZerobusJsonStream stream = sdk.streamBuilder()
     stream.ingestRecordOffset(jsonString);            // String
     stream.ingestRecordsOffset(objects, gson::toJson);// batch
     stream.ingestRecordsOffset(jsonStrings);          // batch
+    stream.flush();
 }
 ```
 
@@ -139,15 +141,22 @@ export DATABRICKS_CLIENT_SECRET="your-client-secret"
 
 ### 4. Build the SDK
 
-The example `java` commands below load JNI libraries from the packaged SDK.
-`-Dzerobus.skipNativeLibCheck=true` compiles Java sources only and those commands
-will fail at native load. Either install the published artifact from Maven Central,
-or stage JNI libraries under `src/main/resources/native/` and package without the
-skip flag:
+The example `java` commands below load JNI from the packaged fat JAR, not from
+`target/classes`. `-Dzerobus.skipNativeLibCheck=true` compiles Java sources only
+and those commands will fail at native load. Either install the published
+artifact from Maven Central, or stage JNI libraries under
+`src/main/resources/native/` and package without the skip flag:
 
 ```bash
 cd ..  # Go to SDK root
+# Stage JNI under src/main/resources/native/, then:
 mvn package -DskipTests
+```
+
+Set `SDK_JAR` to that packaged artifact before compiling or running:
+
+```bash
+SDK_JAR=$(ls ../target/zerobus-ingest-sdk-*-jar-with-dependencies.jar | head -n 1)
 ```
 
 ## Running Examples
@@ -156,22 +165,23 @@ mvn package -DskipTests
 
 ```bash
 cd examples
+SDK_JAR=$(ls ../target/zerobus-ingest-sdk-*-jar-with-dependencies.jar | head -n 1)
 
 # Generate AirQualityProto.java from the proto schema (not checked in)
 protoc --java_out=proto proto/air_quality.proto
 
 # Compile examples
-javac -d . -cp "../target/classes:$(cd .. && mvn dependency:build-classpath -q -DincludeScope=runtime -Dmdep.outputFile=/dev/stdout)" \
+javac -d . -cp "$SDK_JAR" \
   proto/com/databricks/zerobus/examples/proto/AirQualityProto.java \
   proto/SingleRecordExample.java \
   proto/BatchIngestionExample.java
 
 # Run single record example
-java -cp ".:../target/classes:$(cd .. && mvn dependency:build-classpath -q -DincludeScope=runtime -Dmdep.outputFile=/dev/stdout)" \
+java -cp ".:$SDK_JAR" \
   com.databricks.zerobus.examples.proto.SingleRecordExample
 
 # Run batch example
-java -cp ".:../target/classes:$(cd .. && mvn dependency:build-classpath -q -DincludeScope=runtime -Dmdep.outputFile=/dev/stdout)" \
+java -cp ".:$SDK_JAR" \
   com.databricks.zerobus.examples.proto.BatchIngestionExample
 ```
 
@@ -179,18 +189,19 @@ java -cp ".:../target/classes:$(cd .. && mvn dependency:build-classpath -q -Dinc
 
 ```bash
 cd examples
+SDK_JAR=$(ls ../target/zerobus-ingest-sdk-*-jar-with-dependencies.jar | head -n 1)
 
 # Compile examples
-javac -d . -cp "../target/classes:$(cd .. && mvn dependency:build-classpath -q -DincludeScope=runtime -Dmdep.outputFile=/dev/stdout)" \
+javac -d . -cp "$SDK_JAR" \
   json/SingleRecordExample.java \
   json/BatchIngestionExample.java
 
 # Run single record example
-java -cp ".:../target/classes:$(cd .. && mvn dependency:build-classpath -q -DincludeScope=runtime -Dmdep.outputFile=/dev/stdout)" \
+java -cp ".:$SDK_JAR" \
   com.databricks.zerobus.examples.json.SingleRecordExample
 
 # Run batch example
-java -cp ".:../target/classes:$(cd .. && mvn dependency:build-classpath -q -DincludeScope=runtime -Dmdep.outputFile=/dev/stdout)" \
+java -cp ".:$SDK_JAR" \
   com.databricks.zerobus.examples.json.BatchIngestionExample
 ```
 
@@ -198,17 +209,18 @@ java -cp ".:../target/classes:$(cd .. && mvn dependency:build-classpath -q -Dinc
 
 ```bash
 cd examples
+SDK_JAR=$(ls ../target/zerobus-ingest-sdk-*-jar-with-dependencies.jar | head -n 1)
 
 # Generate AirQualityProto.java if you have not already (not checked in)
 protoc --java_out=proto proto/air_quality.proto
 
 # Compile
-javac -d . -cp "../target/classes:$(cd .. && mvn dependency:build-classpath -q -DincludeScope=runtime -Dmdep.outputFile=/dev/stdout)" \
+javac -d . -cp "$SDK_JAR" \
   proto/com/databricks/zerobus/examples/proto/AirQualityProto.java \
   legacy/LegacyStreamExample.java
 
 # Run legacy example
-java -cp ".:../target/classes:$(cd .. && mvn dependency:build-classpath -q -DincludeScope=runtime -Dmdep.outputFile=/dev/stdout)" \
+java -cp ".:$SDK_JAR" \
   com.databricks.zerobus.examples.legacy.LegacyStreamExample
 ```
 

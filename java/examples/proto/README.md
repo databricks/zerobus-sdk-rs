@@ -14,12 +14,13 @@ This directory contains examples for ingesting data using `ZerobusProtoStream`.
 
 ```bash
 cd examples
+SDK_JAR=$(ls ../target/zerobus-ingest-sdk-*-jar-with-dependencies.jar | head -n 1)
 
 # Generate AirQualityProto.java from the proto schema (not checked in)
 protoc --java_out=proto proto/air_quality.proto
 
 # Compile
-javac -d . -cp "../target/classes:$(cd .. && mvn dependency:build-classpath -q -DincludeScope=runtime -Dmdep.outputFile=/dev/stdout)" \
+javac -d . -cp "$SDK_JAR" \
   proto/com/databricks/zerobus/examples/proto/AirQualityProto.java \
   proto/SingleRecordExample.java \
   proto/BatchIngestionExample.java
@@ -32,11 +33,11 @@ export DATABRICKS_CLIENT_ID="your-client-id"
 export DATABRICKS_CLIENT_SECRET="your-client-secret"
 
 # Run single record example
-java -cp ".:../target/classes:$(cd .. && mvn dependency:build-classpath -q -DincludeScope=runtime -Dmdep.outputFile=/dev/stdout)" \
+java -cp ".:$SDK_JAR" \
   com.databricks.zerobus.examples.proto.SingleRecordExample
 
 # Run batch example
-java -cp ".:../target/classes:$(cd .. && mvn dependency:build-classpath -q -DincludeScope=runtime -Dmdep.outputFile=/dev/stdout)" \
+java -cp ".:$SDK_JAR" \
   com.databricks.zerobus.examples.proto.BatchIngestionExample
 ```
 
