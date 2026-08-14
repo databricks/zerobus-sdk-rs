@@ -590,14 +590,22 @@ Best for production systems with type safety and schema validation:
 
 ```bash
 # Single record ingestion
-cd examples/proto
-protoc --java_out=. air_quality.proto
-javac -d . -cp "../../target/zerobus-ingest-sdk-*-jar-with-dependencies.jar:." *.java
-java -cp "../../target/zerobus-ingest-sdk-*-jar-with-dependencies.jar:." \
+cd examples
+SDK_JAR=$(ls ../target/zerobus-ingest-sdk-*-jar-with-dependencies.jar | head -n 1)
+
+# Generate proto class and compile examples
+protoc --java_out=proto proto/air_quality.proto
+javac -d . -cp "$SDK_JAR" \
+  proto/com/databricks/zerobus/examples/proto/AirQualityProto.java \
+  proto/SingleRecordExample.java \
+  proto/BatchIngestionExample.java
+
+# Run single record example
+java -cp ".:$SDK_JAR" \
   com.databricks.zerobus.examples.proto.SingleRecordExample
 
-# Batch ingestion
-java -cp "../../target/zerobus-ingest-sdk-*-jar-with-dependencies.jar:." \
+# Run batch example
+java -cp ".:$SDK_JAR" \
   com.databricks.zerobus.examples.proto.BatchIngestionExample
 ```
 
@@ -606,9 +614,12 @@ java -cp "../../target/zerobus-ingest-sdk-*-jar-with-dependencies.jar:." \
 Best for rapid prototyping and flexible schemas. No Protocol Buffer types required:
 
 ```bash
-cd examples/json
-javac -d . -cp "../../target/zerobus-ingest-sdk-*-jar-with-dependencies.jar:." *.java
-java -cp "../../target/zerobus-ingest-sdk-*-jar-with-dependencies.jar:." \
+cd examples
+SDK_JAR=$(ls ../target/zerobus-ingest-sdk-*-jar-with-dependencies.jar | head -n 1)
+javac -d . -cp "$SDK_JAR" \
+  json/SingleRecordExample.java \
+  json/BatchIngestionExample.java
+java -cp ".:$SDK_JAR" \
   com.databricks.zerobus.examples.json.SingleRecordExample
 ```
 
@@ -622,6 +633,7 @@ try (ZerobusJsonStream stream = sdk.streamBuilder()
         .build()
         .join()) {
     stream.ingestRecordOffset("{\"field\": \"value\"}");
+    stream.flush();
 }
 ```
 
@@ -656,10 +668,7 @@ try (ZerobusArrowStream stream = sdk.streamBuilder()
         .join();
      VectorSchemaRoot batch = VectorSchemaRoot.create(schema, allocator)) {
     // populate batch...
-    Optional<Long> offset = stream.ingestBatch(batch);
-    if (offset.isPresent()) {
-        stream.waitForOffset(offset.get());
-    }
+    stream.ingestBatch(batch);
     stream.flush();
 }
 ```
@@ -777,7 +786,7 @@ try {
 **Migration:**
 ```java
 // Before (deprecated ZerobusStream): wait once after the loop
-CompletableFuture<Long> last = null;
+CompletableFuture<Void> last = null;
 for (AirQuality record : records) {
     last = stream.ingestRecord(record);
 }
@@ -1000,7 +1009,7 @@ The SDK throws two types of exceptions:
 
 ```java
 try {
-    stream.ingestRecord(record);
+    stream.ingestRecordOffset(record);
 } catch (NonRetriableException e) {
     // Fatal error - do not retry
     logger.error("Non-retriable error: " + e.getMessage());

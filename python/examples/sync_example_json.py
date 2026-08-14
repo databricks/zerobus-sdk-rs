@@ -95,7 +95,7 @@ class CustomHeadersProvider(HeadersProvider):
 
 
 def main():
-    print("Starting synchronous ingestion example (Explicit JSON Mode)...")
+    print("Starting synchronous ingestion example (JSON)...")
     print("=" * 60)
 
     # Check if credentials are configured

@@ -63,22 +63,22 @@ pub(super) const STREAM_TEARDOWN_DRAIN_TIMEOUT_MS: u64 = 500;
 /// # Lifecycle
 ///
 /// 1. Create a stream via `ZerobusSdk::stream_builder()`
-/// 2. Ingest records with `ingest_record_offset()` and `wait_for_offset()` for acknowledgments
-/// 3. Optionally call `flush()` to ensure all records are persisted
+/// 2. Ingest records in a loop with `ingest_record_offset()`
+/// 3. Call `flush()` to confirm all queued records are acknowledged
 /// 4. Close the stream with `close()` to release resources
 ///
 /// # Examples
 ///
 /// ```no_run
 /// # use databricks_zerobus_ingest_sdk::*;
-/// # async fn example(mut stream: ZerobusStream, data: Vec<u8>) -> Result<(), ZerobusError> {
-/// // Ingest a single record
-/// let offset = stream.ingest_record_offset(data).await?;
-/// println!("Record sent with offset: {}", offset);
+/// # async fn example(mut stream: ZerobusStream, records: Vec<Vec<u8>>) -> Result<(), ZerobusError> {
+/// // Ingest records in a loop (queue only)
+/// for data in records {
+///     stream.ingest_record_offset(data).await?;
+/// }
 ///
-/// // Wait for acknowledgment
-/// stream.wait_for_offset(offset).await?;
-/// println!("Record acknowledged at offset: {}", offset);
+/// // Confirm all queued records at once
+/// stream.flush().await?;
 ///
 /// // Close the stream gracefully
 /// stream.close().await?;

@@ -19,7 +19,7 @@ This directory contains examples demonstrating Protocol Buffers-based data inges
   - [Dynamic Batch](#dynamic-batch)
 - [Adapting for Your Custom Table](#adapting-for-your-custom-table)
   - [Generate Schema Files](#generate-schema-files)
-  - [Update main.rs](#update-mainrs)
+  - [Update Example Files](#update-example-files)
 
 ## Overview
 
@@ -72,12 +72,11 @@ The SDK supports three approaches for passing Protocol Buffers data:
 
 **Expected output:**
 ```
-[Auto-encoding] Record sent with offset ID: 0
-[Auto-encoding] Record acknowledged with offset ID: 0
-[Pre-encoded] Record sent with offset ID: 1
-[Pre-encoded] Record acknowledged with offset ID: 1
-[Backward-compatible] Record sent with offset ID: 2
-[Backward-compatible] Record acknowledged with offset ID: 2
+=== Offset-based API (Recommended) ===
+[Auto-encoding] Record queued with offset ID: 0
+[Pre-encoded] Record queued with offset ID: 1
+[Backward-compatible] Record queued with offset ID: 2
+All records acknowledged
 Stream closed successfully
 ```
 
@@ -298,7 +297,7 @@ This generates:
 - `output/<your_table>.rs` - Rust structs with serialization code
 - `output/<your_table>.descriptor` - Binary descriptor for runtime validation
 
-### Update main.rs
+### Update Example Files
 
 **1. Update the module and use statements:**
 
@@ -354,4 +353,4 @@ ProtoMessage(TableInventory {
 })
 ```
 
-**4. Update table name and credentials** in the constants at the top of `main.rs`.
+**4. Update table name and credentials** in the constants at the top of `single.rs` or `batch.rs`.

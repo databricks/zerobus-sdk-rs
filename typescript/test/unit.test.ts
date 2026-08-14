@@ -11,7 +11,7 @@ import { execFileSync } from 'node:child_process';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
-import { ZerobusSdk, RecordType, TableProperties, StreamConfigurationOptions, JsAckCallback } from '../index';
+import { ZerobusSdk, RecordType, TableProperties, StreamConfigurationOptions } from '../index';
 import { HeadersProvider } from '../src/headers_provider';
 import { loadDescriptorProto } from '../utils/descriptor.js';
 
@@ -75,23 +75,19 @@ describe('ZerobusSdk', () => {
             assert.strictEqual(options.recordType, RecordType.Proto);
         });
 
-        it('should accept new v0.4.0 configuration options', () => {
+        it('should accept streamPausedMaxWaitTimeMs configuration option', () => {
             const options: StreamConfigurationOptions = {
                 recordType: RecordType.Json,
                 maxInflightRequests: 100,
-                callbackMaxWaitTimeMs: 5000,      // New in v0.4.0
-                streamPausedMaxWaitTimeMs: 3000,  // New in v0.4.0
+                streamPausedMaxWaitTimeMs: 3000,
             };
-            assert.strictEqual(options.callbackMaxWaitTimeMs, 5000);
             assert.strictEqual(options.streamPausedMaxWaitTimeMs, 3000);
         });
 
-        it('should allow undefined for new callback timeout options', () => {
+        it('should allow undefined for streamPausedMaxWaitTimeMs', () => {
             const options: StreamConfigurationOptions = {
                 recordType: RecordType.Json,
-                // callbackMaxWaitTimeMs and streamPausedMaxWaitTimeMs are optional
             };
-            assert.strictEqual(options.callbackMaxWaitTimeMs, undefined);
             assert.strictEqual(options.streamPausedMaxWaitTimeMs, undefined);
         });
     });
@@ -429,49 +425,6 @@ describe('Batch operations', () => {
     it('should handle empty batch', () => {
         const emptyBatch: any[] = [];
         assert.strictEqual(emptyBatch.length, 0);
-    });
-});
-
-describe('AckCallback (v0.4.0)', () => {
-    it('should accept ack callback with onAck function', () => {
-        let ackCount = 0;
-        const callback: JsAckCallback = {
-            onAck: (offsetId: string) => {
-                ackCount++;
-            }
-        };
-        assert.ok(callback.onAck);
-        assert.strictEqual(typeof callback.onAck, 'function');
-    });
-
-    it('should accept ack callback with onError function', () => {
-        let errorCount = 0;
-        const callback: JsAckCallback = {
-            onError: (offsetId: string, errorMsg: string) => {
-                errorCount++;
-            }
-        };
-        assert.ok(callback.onError);
-        assert.strictEqual(typeof callback.onError, 'function');
-    });
-
-    it('should accept ack callback with both onAck and onError', () => {
-        const callback: JsAckCallback = {
-            onAck: (offsetId: string) => {
-                console.log(`Ack: ${offsetId}`);
-            },
-            onError: (offsetId: string, errorMsg: string) => {
-                console.error(`Error: ${offsetId} - ${errorMsg}`);
-            }
-        };
-        assert.ok(callback.onAck);
-        assert.ok(callback.onError);
-    });
-
-    it('should accept empty ack callback', () => {
-        const callback: JsAckCallback = {};
-        assert.strictEqual(callback.onAck, undefined);
-        assert.strictEqual(callback.onError, undefined);
     });
 });
 

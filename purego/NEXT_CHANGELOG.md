@@ -9,8 +9,9 @@
 ### Documentation
 
 - Flush recovery no longer treats every flush error as terminal. The JSON single
-  example closes the failed stream before `GetUnackedRecords()` and then replays.
-  Batch examples expect one callback per batch and wait for that callback before
+  example retrieves unacknowledged records on flush failure before teardown and
+  replays them on a fresh stream. The JSON batch example demonstrates that a
+  batch produces a single ack callback event and waits for that callback before
   exit.
 
 ### Internal Changes

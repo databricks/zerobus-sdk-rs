@@ -16,9 +16,9 @@ Example:
     >>>
     >>> props = TableProperties("catalog.schema.table")
     >>> stream = sdk.create_stream(
-    ...     table_properties=props,
     ...     client_id="your-client-id",
-    ...     client_secret="your-client-secret"
+    ...     client_secret="your-client-secret",
+    ...     table_properties=props
     ... )
     >>>
     >>> # Optimized API - returns offset directly
@@ -121,7 +121,7 @@ class ZerobusStream:
         records = self._inner.get_unacked_records()
         return iter(records)
 
-    def get_unacked_batches(self) -> Iterator[list]:
+    def get_unacked_batches(self) -> Iterator[list[bytes]]:
         """
         Get iterator of unacknowledged batches.
 
@@ -154,7 +154,7 @@ class ZerobusArrowStream:
         >>> stream = sdk.create_arrow_stream("catalog.schema.table", schema, client_id, client_secret)
         >>> batch = pa.record_batch({"temp": [22, 23]}, schema=schema)
         >>> offset = stream.ingest_batch(batch)
-        >>> stream.wait_for_offset(offset)
+        >>> stream.flush()
         >>> stream.close()
     """
 

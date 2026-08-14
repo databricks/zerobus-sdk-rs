@@ -20,9 +20,9 @@ Example (Sync):
     >>>
     >>> props = TableProperties("catalog.schema.table")
     >>> stream = sdk.create_stream(
-    ...     table_properties=props,
     ...     client_id="your-client-id",
-    ...     client_secret="your-client-secret"
+    ...     client_secret="your-client-secret",
+    ...     table_properties=props
     ... )
     >>>
     >>> # New optimized API

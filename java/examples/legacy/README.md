@@ -108,7 +108,7 @@ try (ZerobusProtoStream stream = sdk.streamBuilder()
 
 Demonstrates the Future-based API plus recreateStream:
 - Creates stream with `TableProperties`
-- Ingests 11 records using `ingestRecord().join()` (1 + 10)
+- Ingests 11 records using future-based API: 1 single record joined, then 10 records in a loop joining only the last future
 - Demonstrates `getUnackedRecords()` (returns empty due to type erasure)
 - Demonstrates `recreateStream()` with 3 additional records
 

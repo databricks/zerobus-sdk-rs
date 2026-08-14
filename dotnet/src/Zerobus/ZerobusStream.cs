@@ -62,9 +62,7 @@ public sealed class ZerobusStream : IDisposable, IAsyncDisposable
     /// <returns>The offset of the ingested record.</returns>
     /// <exception cref="ZerobusException">Thrown if ingestion fails.</exception>
     /// <exception cref="ObjectDisposedException">Thrown if the stream has been disposed.</exception>
-    /// <exception cref="ArgumentException">
-    /// Thrown if the payload type is not <c>string</c> or <c>byte[]</c>.
-    /// </exception>
+    /// <exception cref="ArgumentNullException">Thrown if <paramref name="payload"/> is null.</exception>
     /// <example>
     /// <code>
     /// // JSON stream

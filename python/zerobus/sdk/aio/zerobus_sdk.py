@@ -18,9 +18,9 @@ Example:
     ...
     ...     props = TableProperties("catalog.schema.table")
     ...     stream = await sdk.create_stream(
-    ...         table_properties=props,
     ...         client_id="your-client-id",
-    ...         client_secret="your-client-secret"
+    ...         client_secret="your-client-secret",
+    ...         table_properties=props
     ...     )
     ...
     ...     # Optimized async API - returns offset directly
@@ -64,8 +64,7 @@ class ZerobusStream:
         self._inner = rust_stream
 
     async def ingest_record(self, payload: Any):
-        """
-        Ingest a single record and return a future for acknowledgment.
+        """Ingest a single record (deprecated - use ingest_record_offset).
 
         This method uses a two-stage await pattern for optimal performance:
         - First await (this method): Submits the record and returns quickly with a future

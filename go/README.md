@@ -224,11 +224,6 @@ if err != nil {
     log.Fatal(err)
 }
 
-descriptor := &descriptorpb.DescriptorProto{}
-if err := proto.Unmarshal(descriptorBytes, descriptor); err != nil {
-    log.Fatal(err)
-}
-
 // 2. Create stream for Proto records
 options := zerobus.DefaultStreamConfigurationOptions()
 options.RecordType = zerobus.RecordTypeProto
@@ -309,7 +304,7 @@ go/
 ### Key Components
 
 - **Root directory** - The main Go SDK library
-- **`zerobus-ffi/`** - Rust FFI wrapper for high-performance ingestion
+- **`lib/`** - Pre-built static FFI libraries for supported platforms
 - **`examples/`** - Complete working examples demonstrating SDK usage
 - **`Makefile`** - Standard make targets for building, testing, and linting
 
@@ -626,8 +621,7 @@ for partition := 0; partition < 4; partition++ {
 
         for i := p * 25000; i < (p+1)*25000; i++ {
             data := fmt.Sprintf(`{"id": %d}`, i)
-            offset, err := stream.IngestRecordOffset(data)
-            if err != nil {
+            if _, err := stream.IngestRecordOffset(data); err != nil {
                 log.Printf("Failed to ingest: %v", err)
                 continue
             }
@@ -1219,9 +1213,12 @@ Unlike `Flush()` which waits for all pending records, this waits only for a spec
 **Example:**
 ```go
 // Send multiple records
-offset1, _ := stream.IngestRecordOffset(`{"id": 1}`)
-offset2, _ := stream.IngestRecordOffset(`{"id": 2}`)
-offset3, _ := stream.IngestRecordOffset(`{"id": 3}`)
+_, _ = stream.IngestRecordOffset(`{"id": 1}`)
+_, _ = stream.IngestRecordOffset(`{"id": 2}`)
+offset3, err := stream.IngestRecordOffset(`{"id": 3}`)
+if err != nil {
+    log.Fatal(err)
+}
 
 // Only wait for confirmation that record 3 is durable
 // (records 1 and 2 will also be durable since offsets are sequential)
@@ -1297,7 +1294,9 @@ Waits for the server to acknowledge all records that have been sent. This ensure
 ```go
 // Send many records
 for i := 0; i < 1000; i++ {
-    stream.IngestRecordOffset(data)
+    if _, err := stream.IngestRecordOffset(data); err != nil {
+        log.Fatalf("Ingest failed: %v", err)
+    }
 }
 
 // Wait for all of them to be confirmed
@@ -1449,7 +1448,7 @@ Flushes and closes the stream.
 func (s *ZerobusArrowStream) GetUnackedBatches() ([][]byte, error)
 ```
 
-Returns unacknowledged batches as Arrow IPC bytes. Call only after stream failure.
+Returns unacknowledged batches as Arrow IPC bytes. Call on a failed stream before `Close()`.
 
 ### `ArrowStreamConfigurationOptions` (Beta)
 

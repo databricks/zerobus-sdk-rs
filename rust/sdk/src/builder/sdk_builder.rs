@@ -66,8 +66,8 @@ impl ZerobusSdkBuilder {
 
     /// Sets the Unity Catalog endpoint URL.
     ///
-    /// This is only required when using OAuth authentication via `create_stream()`.
-    /// When using `create_stream_with_headers_provider()` with a custom headers
+    /// This is only required when using OAuth authentication via `StreamBuilder::oauth()`.
+    /// When using `StreamBuilder::headers_provider()` with a custom headers
     /// provider, this can be omitted.
     ///
     /// # Arguments

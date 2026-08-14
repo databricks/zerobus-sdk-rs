@@ -19,7 +19,7 @@ Example (Sync):
     ... )
     >>> batch = pa.record_batch({"device_name": ["s1"], "temp": [22]}, schema=schema)
     >>> offset = stream.ingest_batch(batch)
-    >>> stream.wait_for_offset(offset)
+    >>> stream.flush()
     >>> stream.close()
 """
 

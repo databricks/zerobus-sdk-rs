@@ -998,7 +998,7 @@ match stream.ingest_record_offset(payload).await {
 
 ### Complete Working Examples
 
-The `examples/` directory contains four working examples covering different serialization formats and ingestion patterns:
+The `examples/` directory contains working examples covering different serialization formats and ingestion patterns:
 
 | Example | Serialization | Ingestion | Run with |
 |---------|--------------|-----------|----------|

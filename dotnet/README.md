@@ -219,8 +219,8 @@ string[] records = [
     """{"device": "sensor-001", "temp": 20}""",
     """{"device": "sensor-002", "temp": 21}""",
 ];
-long lastOffset = stream.IngestRecords(records);
-stream.WaitForOffset(lastOffset);
+long batchOffset = stream.IngestRecords(records);
+stream.WaitForOffset(batchOffset);
 ```
 
 #### `WaitForOffset` (sync)
@@ -241,14 +241,26 @@ stream.Flush();
 
 #### `GetUnackedRecords`
 
-Retrieves unacknowledged records after stream failure (call after close/failure only).
+Retrieves unacknowledged records after stream failure (call after close/failure only). A flush timeout can leave the stream active, in which case `GetUnackedRecords()` throws until the stream closes.
 
 ```csharp
-ReadOnlyMemory<byte>[] unacked = stream.GetUnackedRecords();
-foreach (var payload in unacked)
+try
 {
-    // Decode as UTF-8 if you know this stream ingests JSON.
-    Console.WriteLine($"record bytes: {payload.Length}");
+    stream.Flush();
+}
+catch (ZerobusException)
+{
+    // A flush timeout can leave the stream active. GetUnackedRecords
+    // requires a closed or failed stream.
+    try
+    {
+        var unacked = stream.GetUnackedRecords();
+        Console.WriteLine($"Failed to acknowledge {unacked.Length} records");
+    }
+    catch (ZerobusException retrieval)
+    {
+        Console.WriteLine($"Could not inspect unacked records (stream may still be active): {retrieval.Message}");
+    }
 }
 ```
 

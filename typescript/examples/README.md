@@ -88,7 +88,7 @@ const sdk = new ZerobusSdk(SERVER_ENDPOINT, DATABRICKS_WORKSPACE_URL);
 **JSON:**
 ```typescript
 const tableProperties: TableProperties = {
-    tableName: TABLE_NAME
+    tableName: TABLE_NAME,
     // No descriptor needed for JSON
 };
 ```

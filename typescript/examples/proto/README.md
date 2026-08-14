@@ -144,7 +144,15 @@ const messageBatch = [
     AirQuality.create({ deviceName: 'sensor-003', temp: 24, humidity: 69 })
 ];
 const messageBatchOffset = await stream.ingestRecordsOffset(messageBatch);
+
+// 2. Pre-encoded: array of Buffers
+const bufferBatch = [
+    AirQuality.create({ deviceName: 'sensor-004', temp: 25, humidity: 71 }),
+    AirQuality.create({ deviceName: 'sensor-005', temp: 26, humidity: 73 }),
+    AirQuality.create({ deviceName: 'sensor-006', temp: 27, humidity: 75 })
+].map(record => Buffer.from(AirQuality.encode(record).finish()));
 const bufferBatchOffset = await stream.ingestRecordsOffset(bufferBatch);
+
 await stream.flush();
 ```
 

@@ -123,7 +123,7 @@ class MyAckCallback(AckCallback):
 
 
 async def main():
-    print("Starting asynchronous ingestion example (Explicit JSON Mode)...")
+    print("Starting asynchronous ingestion example (JSON)...")
     print("=" * 60)
 
     # Check if credentials are configured

@@ -207,11 +207,15 @@ After generating the `.proto` file:
    ```
 3. Use the generated Java classes with the Zerobus SDK:
    ```java
-   TableProperties<YourMessage> tableProperties =
-       new TableProperties<>("catalog.schema.table", YourMessage.getDefaultInstance());
-
-   ZerobusStream<YourMessage> stream = sdk.createStream(
-       tableProperties, clientId, clientSecret).join();
+   try (ZerobusProtoStream stream = sdk.streamBuilder()
+           .table("catalog.schema.table")
+           .oauth(clientId, clientSecret)
+           .compiledProto(YourMessage.getDescriptor().toProto())
+           .build()
+           .join()) {
+       stream.ingestRecordOffset(record);
+       stream.flush();
+   }
    ```
 
 ## Troubleshooting

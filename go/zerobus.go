@@ -783,7 +783,9 @@ func (st *ZerobusStream) GetUnackedRecords() ([]interface{}, error) {
 // Example:
 //
 //	for _, r := range records {
-//	    stream.IngestRecordOffset(r)
+//	    if _, err := stream.IngestRecordOffset(r); err != nil {
+//	        log.Printf("Ingest failed: %v", err)
+//	    }
 //	}
 //	if err := stream.Flush(); err != nil {
 //	    log.Printf("Flush failed: %v", err)

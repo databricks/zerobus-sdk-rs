@@ -173,7 +173,7 @@ stream.ingestRecordOffset(myObject, obj -> {
 
 | Use Case | Recommended |
 |----------|-------------|
-| Rapid prototyping | SON |
+| Rapid prototyping | JSON |
 | Data already in JSON format | JSON |
 | Schema changes frequently | JSON |
 | Production with stable schema | Proto |

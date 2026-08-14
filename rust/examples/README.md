@@ -205,7 +205,7 @@ stream.flush().await?;
 **Single-record:**
 ```rust
 for record in records {
-    let offset = stream.ingest_record_offset(record).await?;
+    stream.ingest_record_offset(record).await?;
 }
 stream.flush().await?;
 ```

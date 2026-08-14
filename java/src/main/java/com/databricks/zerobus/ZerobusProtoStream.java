@@ -16,25 +16,26 @@ import java.util.Optional;
  * <p>Create instances using {@link ZerobusSdk#streamBuilder()}:
  *
  * <pre>{@code
- * ZerobusProtoStream stream = sdk.streamBuilder()
- *     .table("catalog.schema.table")
- *     .oauth(clientId, clientSecret)
- *     .compiledProto(MyProto.getDescriptor().toProto())
- *     .build()
- *     .join();
+ * try (ZerobusProtoStream stream = sdk.streamBuilder()
+ *         .table("catalog.schema.table")
+ *         .oauth(clientId, clientSecret)
+ *         .compiledProto(MyProto.getDescriptor().toProto())
+ *         .build()
+ *         .join()) {
+ *     // Ingest proto messages
+ *     for (MyProto record : records) {
+ *         stream.ingestRecordOffset(record);
+ *     }
+ *     stream.flush();
  *
- * // Ingest proto messages
- * long offset = stream.ingestRecordOffset(myProtoMessage);
- * stream.waitForOffset(offset);
+ *     // Or ingest pre-encoded bytes
+ *     stream.ingestRecordOffset(protoBytes);
+ *     stream.flush();
  *
- * // Or ingest pre-encoded bytes
- * stream.ingestRecordOffset(protoBytes);
- *
- * // Batch ingestion
- * List<MyProto> records = ...;
- * Optional<Long> batchOffset = stream.ingestRecordsOffset(records);
- *
- * stream.close();
+ *     // Batch ingestion
+ *     stream.ingestRecordsOffset(records);
+ *     stream.flush();
+ * }
  * }</pre>
  *
  * @see ZerobusSdk#streamBuilder()

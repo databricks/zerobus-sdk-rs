@@ -32,19 +32,17 @@ import org.slf4j.LoggerFactory;
  *     Field.nullable("age", new ArrowType.Int(32, true))
  * ));
  *
- * ZerobusArrowStream stream = sdk.streamBuilder()
- *     .table("catalog.schema.table")
- *     .oauth(clientId, clientSecret)
- *     .arrow(schema)
- *     .build()
- *     .join();
- *
- * // Create and populate a VectorSchemaRoot, then ingest
- * Optional<Long> offset = stream.ingestBatch(batch);
- * if (offset.isPresent()) {
- *     stream.waitForOffset(offset.get());
+ * try (ZerobusArrowStream stream = sdk.streamBuilder()
+ *         .table("catalog.schema.table")
+ *         .oauth(clientId, clientSecret)
+ *         .arrow(schema)
+ *         .build()
+ *         .join();
+ *      VectorSchemaRoot batch = VectorSchemaRoot.create(schema, allocator)) {
+ *     // Create and populate a VectorSchemaRoot, then ingest
+ *     stream.ingestBatch(batch);
+ *     stream.flush();
  * }
- * stream.close();
  * }</pre>
  *
  * <h3>Resource Management</h3>

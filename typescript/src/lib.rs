@@ -221,7 +221,8 @@ fn convert_js_to_record_payload(env: &Env, payload: Unknown) -> Result<RustRecor
 ///
 /// ```typescript
 /// const stream = await sdk.createStream(tableProps, clientId, clientSecret, options);
-/// const offset = await stream.ingestRecord(Buffer.from([1, 2, 3]));
+/// const offset = await stream.ingestRecordOffset(Buffer.from([1, 2, 3]));
+/// await stream.flush();
 /// await stream.close();
 /// ```
 #[napi]
@@ -673,15 +674,12 @@ impl ZerobusStream {
     ///
     /// ```typescript
     /// try {
-    ///   await stream.ingestRecords(batch1);
-    ///   await stream.ingestRecords(batch2);
+    ///   await stream.ingestRecordsOffset(batch1);
+    ///   await stream.ingestRecordsOffset(batch2);
+    ///   await stream.flush();
     /// } catch (error) {
     ///   const unackedBatches = await stream.getUnackedBatches();
-    ///
-    ///   // Re-ingest with new stream
-    ///   for (const batch of unackedBatches) {
-    ///     await newStream.ingestRecords(batch);
-    ///   }
+    ///   console.log(`Batches available for recovery: ${unackedBatches.length}`);
     /// }
     /// ```
     #[napi]
@@ -714,10 +712,10 @@ impl ZerobusStream {
 /// JavaScript headers provider callback wrapper.
 ///
 /// Allows TypeScript code to provide custom authentication headers
-/// by implementing a getHeaders() function.
+/// by implementing a getHeadersCallback() function.
 #[napi(object)]
 pub struct JsHeadersProvider {
-    /// JavaScript function: () => Promise<Array<[string, string]>>
+    /// JavaScript function: () => Array<[string, string]>
     pub get_headers_callback: JsFunction,
 }
 
@@ -1739,7 +1737,8 @@ impl ZerobusSdk {
     ///
     /// # Arguments
     ///
-    /// * `stream` - The failed or closed Arrow stream to recreate
+    /// * `stream` - The terminally failed Arrow stream to recreate. The TypeScript wrapper
+    ///   must not have been closed because `close()` releases its native handle.
     ///
     /// # Returns
     ///

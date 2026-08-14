@@ -114,7 +114,7 @@ async function main(): Promise<void> {
 const zerobusEndpoint = 'https://<workspace-id>.zerobus.<region>.cloud.databricks.com';
 const workspaceUrl = 'https://<workspace-name>.cloud.databricks.com';
 // For Azure:
-// const zerobusEndpoint = '<workspace-id>.zerobus.<region>.azuredatabricks.net';
+// const zerobusEndpoint = 'https://<workspace-id>.zerobus.<region>.azuredatabricks.net';
 // const workspaceUrl = 'https://<workspace-name>.azuredatabricks.net';
 
 const tableName = 'main.default.air_quality';

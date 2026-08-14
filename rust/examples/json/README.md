@@ -55,12 +55,11 @@ The SDK supports three approaches for passing JSON data:
 
 **Expected output:**
 ```
-[Auto-serializing] Record sent with offset ID: 0
-[Auto-serializing] Record acknowledged with offset ID: 0
-[Pre-serialized] Record sent with offset ID: 1
-[Pre-serialized] Record acknowledged with offset ID: 1
-[Backward-compatible] Record sent with offset ID: 2
-[Backward-compatible] Record acknowledged with offset ID: 2
+=== Offset-based API (Recommended) ===
+[Auto-serializing] Record queued with offset ID: 0
+[Pre-serialized] Record queued with offset ID: 1
+[Backward-compatible] Record queued with offset ID: 2
+All records acknowledged
 Stream closed successfully
 ```
 
@@ -186,4 +185,4 @@ let json = r#"{
 }"#.to_string();
 ```
 
-**3. Update table name and credentials** in the constants at the top of `main.rs`.
+**3. Update table name and credentials** in the constants at the top of `single.rs` or `batch.rs`.
