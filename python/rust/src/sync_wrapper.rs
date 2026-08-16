@@ -11,7 +11,7 @@ use databricks_zerobus_ingest_sdk::{
 
 use crate::arrow;
 use crate::arrow::{ArrowStreamConfigurationOptions, ZerobusArrowStream};
-use crate::auth::HeadersProviderWrapper;
+use crate::auth::{make_idp_token_supplier, HeadersProviderWrapper};
 use crate::common::{
     apply_grpc_options, encoded_record_to_pybytes, extract_record_payload, extract_record_payloads,
     map_error, StreamConfigurationOptions, TableProperties, SDK_IDENTIFIER_PREFIX,
@@ -391,6 +391,47 @@ impl ZerobusSdk {
             runtime.block_on(async move {
                 let sdk_guard = sdk.read().await;
                 let builder = sdk_guard.stream_builder().headers_provider(provider);
+                let builder = apply_table_and_format(builder, &table_properties);
+                let builder = apply_grpc_options(builder, &opts)?;
+                builder.build().await.map_err(map_error)
+            })
+        })?;
+
+        Ok(ZerobusStream {
+            inner: Arc::new(RwLock::new(stream)),
+            runtime: runtime_for_stream,
+        })
+    }
+
+    /// Create a new stream with external-IdP federation (RFC 8693 token
+    /// exchange). `idp_token_supplier` is a callback returning the current
+    /// external IdP token. `databricks_client_id` is `Some` for workload
+    /// identity federation and `None` for account-level federation.
+    #[pyo3(signature = (table_properties, idp_token_supplier, databricks_client_id = None, options = None))]
+    fn create_stream_federated(
+        &self,
+        py: Python,
+        table_properties: TableProperties,
+        idp_token_supplier: Py<PyAny>,
+        databricks_client_id: Option<String>,
+        options: Option<StreamConfigurationOptions>,
+    ) -> PyResult<ZerobusStream> {
+        let opts = options.unwrap_or_default();
+        opts.validate()?;
+        let supplier = make_idp_token_supplier(idp_token_supplier);
+        let sdk = self.inner.clone();
+        let runtime = self.runtime.clone();
+        let runtime_for_stream = self.runtime.clone();
+
+        let stream = py.detach(|| {
+            runtime.block_on(async move {
+                let sdk_guard = sdk.read().await;
+                let builder = match databricks_client_id {
+                    Some(client_id) => sdk_guard
+                        .stream_builder()
+                        .federated_with_client_id(supplier, client_id),
+                    None => sdk_guard.stream_builder().federated(supplier),
+                };
                 let builder = apply_table_and_format(builder, &table_properties);
                 let builder = apply_grpc_options(builder, &opts)?;
                 builder.build().await.map_err(map_error)

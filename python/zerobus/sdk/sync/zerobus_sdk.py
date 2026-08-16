@@ -304,27 +304,43 @@ class ZerobusSdk:
 
     def create_stream(
         self,
-        client_id: str,
-        client_secret: str,
-        table_properties,
+        client_id: str = None,
+        client_secret: str = None,
+        table_properties=None,
         options=None,
         headers_provider=None,
+        auth=None,
     ):
         """
-        Create a stream with OAuth authentication or custom headers provider.
+        Create a stream with OAuth, external-IdP federation, or a custom headers provider.
+
+        Exactly one authentication method is used, in this precedence:
+        ``auth`` (federation) > ``headers_provider`` > ``client_id``/``client_secret``.
 
         Args:
-            client_id: OAuth client ID
-            client_secret: OAuth client secret
-            table_properties: Table configuration
-            options: Optional stream configuration
-            headers_provider: Optional custom headers provider (if set, overrides OAuth)
+            client_id: OAuth client ID (client-credentials auth).
+            client_secret: OAuth client secret (client-credentials auth).
+            table_properties: Table configuration (required).
+            options: Optional stream configuration.
+            headers_provider: Optional custom headers provider (if set, overrides OAuth).
+            auth: Optional :class:`~zerobus.sdk.shared.auth.FederatedToken` for
+                external-IdP (e.g. Entra ID) federation. When set, ``client_id``
+                and ``client_secret`` are not required.
         """
-        if headers_provider is not None:
+        if table_properties is None:
+            raise ValueError("table_properties is required")
+        if auth is not None:
+            # External-IdP federation (RFC 8693 token exchange).
+            rust_stream = self._inner.create_stream_federated(
+                table_properties, auth.idp_token_supplier, auth.databricks_client_id, options
+            )
+        elif headers_provider is not None:
             # Use custom headers provider (ignores client_id/client_secret)
             rust_stream = self._inner.create_stream_with_headers_provider(table_properties, headers_provider, options)
         else:
             # Use OAuth authentication
+            if client_id is None or client_secret is None:
+                raise ValueError("client_id and client_secret are required unless auth= or headers_provider= is given")
             rust_stream = self._inner.create_stream(client_id, client_secret, table_properties, options)
         return ZerobusStream(rust_stream)
 

@@ -1,6 +1,6 @@
 """Type stubs for _zerobus_core Rust module."""
 
-from typing import Any, List, Optional, Tuple, Union
+from typing import Any, Awaitable, Callable, List, Optional, Tuple, Union
 
 from typing_extensions import Self
 
@@ -375,6 +375,28 @@ class sync:
             """
             ...
 
+        def create_stream_federated(
+            self,
+            table_properties: TableProperties,
+            idp_token_supplier: Callable[[], Union[str, Awaitable[str]]],
+            databricks_client_id: Optional[str] = None,
+            options: Optional[StreamConfigurationOptions] = None,
+        ) -> "ZerobusStream":
+            """
+            Create a new stream with external-IdP federation (RFC 8693 token exchange).
+
+            Args:
+                table_properties: Table properties
+                idp_token_supplier: Callback returning the current external IdP token
+                databricks_client_id: Service principal client_id for workload
+                    identity federation, or None for account-level federation
+                options: Optional configuration options
+
+            Returns:
+                A new ZerobusStream
+            """
+            ...
+
         def recreate_stream(self, old_stream: "ZerobusStream") -> "ZerobusStream":
             """
             Recreate a closed stream with the same configuration.
@@ -521,6 +543,29 @@ class aio:
             Args:
                 table_properties: Table properties
                 headers_provider: Custom headers provider
+                options: Optional configuration options
+
+            Returns:
+                A new ZerobusStream
+            """
+            ...
+
+        async def create_stream_federated(
+            self,
+            table_properties: TableProperties,
+            idp_token_supplier: Callable[[], Union[str, Awaitable[str]]],
+            databricks_client_id: Optional[str] = None,
+            options: Optional[StreamConfigurationOptions] = None,
+        ) -> "ZerobusStream":
+            """
+            Create a new stream with external-IdP federation (RFC 8693 token exchange).
+
+            Args:
+                table_properties: Table properties
+                idp_token_supplier: Callback (sync or async) returning the current
+                    external IdP token
+                databricks_client_id: Service principal client_id for workload
+                    identity federation, or None for account-level federation
                 options: Optional configuration options
 
             Returns:
