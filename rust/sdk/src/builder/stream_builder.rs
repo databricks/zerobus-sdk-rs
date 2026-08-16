@@ -25,7 +25,9 @@ use crate::callbacks::AckCallback;
 use crate::databricks::zerobus::RecordType;
 #[cfg(feature = "testing")]
 use crate::headers_provider::NoAuthHeadersProvider;
-use crate::headers_provider::{HeadersProvider, OAuthHeadersProvider};
+use crate::headers_provider::{
+    FederatedTokenProvider, HeadersProvider, IdpTokenSupplier, OAuthHeadersProvider,
+};
 use crate::stream_configuration::StreamConfigurationOptions;
 use crate::{
     MessageDescriptor, TableProperties, ZerobusError, ZerobusResult, ZerobusSdk, ZerobusStream,
@@ -41,6 +43,13 @@ enum AuthConfig {
     OAuth {
         client_id: String,
         client_secret: String,
+    },
+    /// External-IdP federation via RFC 8693 token exchange. `client_id` is
+    /// `Some` for workload identity federation and `None` for account-level
+    /// federation.
+    Federated {
+        idp_token_supplier: IdpTokenSupplier,
+        client_id: Option<String>,
     },
     HeadersProvider(Arc<dyn HeadersProvider>),
     #[cfg(feature = "testing")]
@@ -109,6 +118,7 @@ impl fmt::Debug for StreamBuilder<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let auth_kind = match &self.auth {
             Some(AuthConfig::OAuth { .. }) => "OAuth",
+            Some(AuthConfig::Federated { .. }) => "Federated",
             Some(AuthConfig::HeadersProvider(_)) => "HeadersProvider",
             #[cfg(feature = "testing")]
             Some(AuthConfig::NoAuth) => "NoAuth",
@@ -166,6 +176,44 @@ impl<'a> StreamBuilder<'a> {
         self.auth = Some(AuthConfig::OAuth {
             client_id: client_id.into(),
             client_secret: client_secret.into(),
+        });
+        self
+    }
+
+    /// Authenticate with account-level external-IdP federation (RFC 8693 token
+    /// exchange), with no Databricks-managed service principal.
+    ///
+    /// The `idp_token_supplier` is an async callback that returns the current
+    /// external IdP token (e.g. an Entra ID JWT). The SDK exchanges it for a
+    /// Zerobus-scoped Databricks token; the token's subject is resolved to an
+    /// identity synced into Databricks via Automatic Identity Management (SCIM).
+    /// Use [`federated_with_client_id`](Self::federated_with_client_id) for
+    /// workload identity federation (a service principal with a client_id and
+    /// no secret).
+    pub fn federated(mut self, idp_token_supplier: IdpTokenSupplier) -> Self {
+        self.auth = Some(AuthConfig::Federated {
+            idp_token_supplier,
+            client_id: None,
+        });
+        self
+    }
+
+    /// Authenticate with workload identity federation (RFC 8693 token exchange)
+    /// for a Databricks service principal that has a `client_id` and no secret,
+    /// with a federation policy attached.
+    ///
+    /// The `idp_token_supplier` returns the current external IdP token; the
+    /// exchange request names the service principal via `client_id`. Use
+    /// [`federated`](Self::federated) for account-level federation (no service
+    /// principal).
+    pub fn federated_with_client_id(
+        mut self,
+        idp_token_supplier: IdpTokenSupplier,
+        client_id: impl Into<String>,
+    ) -> Self {
+        self.auth = Some(AuthConfig::Federated {
+            idp_token_supplier,
+            client_id: Some(client_id.into()),
         });
         self
     }
@@ -396,6 +444,17 @@ impl<'a> StreamBuilder<'a> {
             }) => Ok(Arc::new(OAuthHeadersProvider::with_cache(
                 client_id.clone(),
                 client_secret.clone(),
+                self.table_name.clone(),
+                self.sdk.workspace_id.clone(),
+                self.sdk.unity_catalog_url.clone(),
+                Arc::clone(&self.sdk.token_cache),
+            ))),
+            Some(AuthConfig::Federated {
+                idp_token_supplier,
+                client_id,
+            }) => Ok(Arc::new(FederatedTokenProvider::with_cache(
+                client_id.clone(),
+                Arc::clone(idp_token_supplier),
                 self.table_name.clone(),
                 self.sdk.workspace_id.clone(),
                 self.sdk.unity_catalog_url.clone(),

@@ -6,6 +6,18 @@
 
 ### New Features and Improvements
 
+- Added first-class external-IdP token federation (`FederatedTokenProvider`,
+  `IdpTokenSupplier`) alongside the existing OAuth client-credentials path. It
+  exchanges an external IdP token (for example an Entra ID token) for a
+  Zerobus-scoped Databricks token via the RFC 8693 token-exchange grant, caches
+  and refreshes it through the existing `TokenCache`, and supports both
+  account-level federation (no `client_id`, identity synced via Automatic
+  Identity Management) and workload identity federation (a service principal
+  `client_id` with no secret). Opt in via `StreamBuilder::federated(...)` or
+  `StreamBuilder::federated_with_client_id(...)`. The client-credentials and
+  token-exchange grants now share one request-shaping path, keeping them at
+  parity. Existing `oauth(...)` and `headers_provider(...)` paths are unchanged.
+
 ### Bug Fixes
 
 ### Documentation
