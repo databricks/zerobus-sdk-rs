@@ -11,6 +11,10 @@
   request still being sent is allowed to finish, so an acknowledgment already
   received for it makes the record durable instead of replaying the record on
   the new connection. Teardown stays bounded by the drain budget.
+- `ColumnsFromDescriptor` returns the set of column names a serialized protobuf
+  descriptor declares, so callers can inspect a table's columns without parsing
+  the descriptor themselves. It accepts the bytes returned by
+  `FetchProtoDescriptorFromUC` or passed to `WithProto`.
 
 ### Bug Fixes
 
@@ -21,6 +25,8 @@
   replays them on a fresh stream. The JSON batch example demonstrates that a
   batch produces a single ack callback event and waits for that callback before
   exit.
+- Corrected the README's dynamic JSON rules: a payload carrying a field the
+  descriptor does not declare fails conversion; unknown fields are not ignored.
 
 ### Internal Changes
 
