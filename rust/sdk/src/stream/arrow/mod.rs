@@ -549,9 +549,11 @@ impl ZerobusArrowStream {
                 self.request_send_failure.report();
                 return match self.wait_for_terminal_outcome().await {
                     Err(error) => Err(error),
-                    Ok(()) => Err(ZerobusError::StreamClosedError(tonic::Status::internal(
-                        "Failed to send batch",
-                    ))),
+                    // A clean outcome is unreachable after this path claims terminal
+                    // admission, but preserve any published cause defensively.
+                    Ok(()) => Err(Self::terminal_error_or(&self.server_error_rx, || {
+                        "Failed to send batch".to_string()
+                    })),
                 };
             }
         };
