@@ -24,6 +24,10 @@
 - Example READMEs and `get_unacked_*` rustdoc now name `ingest_record_offset()` /
   `ingest_records_offset()`. The generate-files tool README quoting is valid shell.
   Arrow example docs place schema validation at stream creation, not the first batch.
+- Updated the Arrow example to use application-sized batches and queue them before
+  one `flush()`, clarified logical versus wire offsets and partial acknowledgments,
+  and added an Arrow Flight architecture guide covering lifecycle, recovery, close,
+  and concurrency invariants.
 
 ### Internal Changes
 
