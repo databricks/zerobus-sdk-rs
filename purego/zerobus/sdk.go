@@ -1,57 +1,5 @@
-// Package zerobus is a pure-Go client for Zerobus ingestion.
-//
-// # Quick start
-//
-//	sdk, err := zerobus.New(
-//	    "https://your-workspace.zerobus.region.cloud.databricks.com",
-//	    "https://your-workspace.cloud.databricks.com",
-//	)
-//	if err != nil {
-//	    log.Fatal(err)
-//	}
-//	defer sdk.Close()
-//
-//	stream, err := sdk.CreateStream(ctx, "catalog.schema.table",
-//	    clientID, clientSecret, zerobus.WithJSON())
-//	if err != nil {
-//	    log.Fatal(err)
-//	}
-//	defer stream.Close()
-//
-// # Ingesting data
-//
-// Ingestion is asynchronous. Queue records in a loop and call Flush once.
-//
-//	for _, rec := range records {
-//	    if _, err := stream.IngestRecordOffset(rec); err != nil {
-//	        log.Fatal(err)
-//	    }
-//	}
-//	if err := stream.Flush(); err != nil { // wait once for all pending acks
-//	    log.Fatal(err)
-//	}
-//
-// For continuous streams call Flush periodically (every N records) or register
-// an ack callback with WithAckCallback. Reserve per-record WaitForOffset for
-// genuinely low-volume cases where each record must be confirmed before
-// continuing.
-//
-// Stream creation is asynchronous by default: CreateStream returns after local
-// validation while first-open runs in the background. Pass WithWaitForReady to
-// make CreateStream block until first-open succeeds or fails terminally.
-//
-// # Proto descriptors from Unity Catalog
-//
-// FetchProtoDescriptorFromUC builds a descriptor from a Unity Catalog table
-// schema. It is a plain remote call with no caching, so fetch the descriptor
-// once and reuse the bytes for every stream on that table; fetch again only
-// after the table schema changes.
-//
-// # Authentication
-//
-// CreateStream uses the Unity Catalog OAuth 2.0 client-credentials flow. For
-// custom authentication, implement HeadersProvider and use
-// CreateStreamWithProvider.
+// Package zerobus is a pure-Go client for Zerobus ingestion. Create an SDK with
+// New and a stream with CreateStream.
 package zerobus
 
 import (
@@ -68,6 +16,7 @@ import (
 
 	"google.golang.org/grpc"
 	"google.golang.org/protobuf/proto"
+	"google.golang.org/protobuf/types/descriptorpb"
 
 	"github.com/databricks/zerobus-sdk/purego/internal/auth"
 	"github.com/databricks/zerobus-sdk/purego/internal/dynamicproto"
@@ -251,24 +200,8 @@ func (s *SDK) CreateStreamWithProvider(
 }
 
 // FetchProtoDescriptorFromUC returns a protobuf descriptor built from a Unity
-// Catalog table schema.
-//
-// Every call performs a fresh Unity Catalog request; the SDK does not cache the
-// result. Fetch the descriptor once and reuse the returned bytes for every
-// stream on that table:
-//
-//	descriptor, err := sdk.FetchProtoDescriptorFromUC(ctx, table, clientID, clientSecret)
-//	if err != nil {
-//	    log.Fatal(err)
-//	}
-//	for range streamCount {
-//	    stream, err := sdk.CreateStream(ctx, table, clientID, clientSecret,
-//	        zerobus.WithProto(descriptor))
-//	    // ...
-//	}
-//
-// Calling it per stream, or worse per record, adds a Unity Catalog round-trip
-// to the hot path. Fetch again only when the table schema changes.
+// Catalog table schema. Every call performs a fresh Unity Catalog request; the
+// SDK does not cache the result.
 func (s *SDK) FetchProtoDescriptorFromUC(
 	ctx context.Context,
 	tableName, clientID, clientSecret string,
@@ -291,6 +224,18 @@ func (s *SDK) FetchProtoDescriptorFromUC(
 		}
 	}
 	return descBytes, nil
+}
+
+// ColumnsFromDescriptor returns the column names declared by a serialized
+// protobuf descriptor, such as the bytes from FetchProtoDescriptorFromUC or
+// WithProto. Only top-level fields are columns; the fields of a nested message
+// belong to that column's value.
+func ColumnsFromDescriptor(raw []byte) (map[string]struct{}, error) {
+	columns, err := columnsFromDescriptor(raw)
+	if err != nil {
+		return nil, &Error{Op: "ColumnsFromDescriptor", cause: err, retryable: false}
+	}
+	return columns, nil
 }
 
 func (s *SDK) createStream(
@@ -416,6 +361,23 @@ func (s *SDK) fetchProtoDescriptor(
 		return nil, fmt.Errorf("serialize descriptor: %w", err)
 	}
 	return descBytes, nil
+}
+
+func columnsFromDescriptor(raw []byte) (map[string]struct{}, error) {
+	var descriptor descriptorpb.DescriptorProto
+	if err := proto.Unmarshal(raw, &descriptor); err != nil {
+		return nil, fmt.Errorf("parse descriptor: %w", err)
+	}
+	columns := make(map[string]struct{}, len(descriptor.GetField()))
+	for _, field := range descriptor.GetField() {
+		if name := field.GetName(); name != "" {
+			columns[name] = struct{}{}
+		}
+	}
+	if len(columns) == 0 {
+		return nil, errors.New("table schema descriptor has no columns")
+	}
+	return columns, nil
 }
 
 func dynamicSchemaErrorRetryable(err error) bool {

@@ -135,6 +135,22 @@ if err := stream.Flush(); err != nil { // wait once at the end
 
 See `examples/dynamic/single/main.go` for a complete example.
 
+`ColumnsFromDescriptor` reports which columns a descriptor declares, without
+parsing the protobuf yourself:
+
+```go
+columns, err := zerobus.ColumnsFromDescriptor(descriptor)
+if err != nil {
+    log.Fatal(err)
+}
+if _, ok := columns["event_id"]; !ok {
+    log.Fatal("table has no event_id column")
+}
+```
+
+Only top-level fields are columns; the fields of a nested `STRUCT` belong to
+that column's value.
+
 To skip JSON conversion while retaining UC schema discovery, build dynamic
 protobuf messages from the stream descriptor:
 
@@ -172,7 +188,8 @@ Dynamic JSON follows protobuf JSON value rules:
 - `BIGINT` values above 2^53 should be strings to avoid JSON-number precision
   loss.
 - `STRUCT`, `ARRAY`, and `MAP` use JSON objects, arrays, and objects.
-- Unknown JSON fields are ignored.
+- Unknown JSON fields are rejected; conversion fails the ingest call rather
+  than dropping them.
 
 ## Error handling
 

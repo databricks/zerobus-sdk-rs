@@ -99,6 +99,17 @@ func ExampleStream_proto() {
 	}
 }
 
+// Check which columns a descriptor declares before ingesting into the table.
+func ExampleColumnsFromDescriptor() {
+	columns, err := zerobus.ColumnsFromDescriptor(descriptorProto())
+	if err != nil {
+		log.Fatal(err)
+	}
+	if _, ok := columns["event_id"]; !ok {
+		log.Fatal("table has no event_id column")
+	}
+}
+
 // logAckCallback logs each acknowledged offset and any per-record error.
 type logAckCallback struct{}
 
