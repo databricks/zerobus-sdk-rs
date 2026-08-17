@@ -1,13 +1,5 @@
-// Package zerobus is a pure-Go client for Zerobus ingestion.
-//
-// Create an SDK with New and a stream with CreateStream. Ingestion is
-// asynchronous: IngestRecordOffset returns as soon as the record is queued, so
-// queue in a loop and call Flush once at the end. Waiting on every record
-// instead costs a server round-trip apiece. For continuous streams, flush
-// periodically or register an ack callback with WithAckCallback.
-//
-// See the README for authentication, record types, error handling, and
-// recovery.
+// Package zerobus is a pure-Go client for Zerobus ingestion. Create an SDK with
+// New and a stream with CreateStream.
 package zerobus
 
 import (
