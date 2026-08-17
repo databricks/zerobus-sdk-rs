@@ -14,7 +14,7 @@ crate-type = ["cdylib"]
 # NAPI-RS for Node.js bindings. `napi6` enables `BigInt::get_i64()` for the
 # lossless bigint → i64 path used by `waitForOffset`.
 napi = { version = "2", features = ["async", "tokio_rt", "serde-json", "napi6"] }
-napi-derive = "2"
+napi-derive = "3"
 
 databricks-zerobus-ingest-sdk = "2.6.0"
 
