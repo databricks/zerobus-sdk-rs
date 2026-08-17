@@ -27,9 +27,10 @@
 //! ```
 //!
 //! Columns map per [`crate::schema`] (note `DATE`/`TIMESTAMP` become integers,
-//! not `google.protobuf.Timestamp`). The descriptor is a snapshot: if the table
-//! changes afterwards the server rejects stream creation with
-//! [`ZerobusError::InvalidSchema`], so re-fetch and rebuild.
+//! not `google.protobuf.Timestamp`). The descriptor is a snapshot. Compatible
+//! schema evolution may be accepted; incompatible changes fail stream creation
+//! with [`ZerobusError::CreateStreamError`], so re-fetch the descriptor before
+//! rebuilding the stream.
 
 use std::time::Duration;
 
@@ -42,6 +43,12 @@ use crate::{ZerobusError, ZerobusResult};
 
 /// Deadline for a single fetch (token mint plus schema read).
 const FETCH_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// Maximum allowed response size in bytes for Unity Catalog HTTP responses (8 MiB).
+const MAX_RESPONSE_BYTES: usize = 8 * 1024 * 1024;
+
+/// Maximum response body bytes to capture in error messages on non-success HTTP status.
+const MAX_ERROR_SNIPPET_BYTES: usize = 4096;
 
 /// Fetch `table_name`'s schema from Unity Catalog and resolve it to a
 /// [`MessageDescriptor`] for [`dynamic_proto`](crate::StreamBuilder::dynamic_proto).
@@ -93,31 +100,32 @@ pub async fn fetch_table_schema(
     let client = reqwest::Client::builder()
         .timeout(FETCH_TIMEOUT)
         .build()
-        .map_err(|e| fetch_error(format!("failed to build HTTP client: {e}")))?;
+        .map_err(|e| ZerobusError::SchemaFetchError {
+            message: format!("failed to build HTTP client: {e}"),
+            retryable: false,
+        })?;
 
     debug!(table = %table_name, "fetching UC table schema");
     let token = mint_metadata_token(&client, &base, client_id, client_secret).await?;
 
     // `join_path` percent-encodes the segment, so the table name can't alter the path.
     let url = join_path(&base, ["api", "2.1", "unity-catalog", "tables", table_name]);
-    let body = client
+    let req = client
         .get(url)
         .bearer_auth(&token)
-        .header(reqwest::header::ACCEPT, "application/json")
-        .send()
-        .await
-        .and_then(reqwest::Response::error_for_status)
-        .map_err(|e| fetch_error(format!("schema request failed: {e}")))?
-        .bytes()
-        .await
-        .map_err(|e| fetch_error(format!("reading schema response failed: {e}")))?;
+        .header(reqwest::header::ACCEPT, "application/json");
+    let body = read_bounded_response(req, "schema").await?;
 
-    let schema: UcTableSchema = serde_json::from_slice(&body)
-        .map_err(|e| fetch_error(format!("could not parse Unity Catalog response: {e}")))?;
+    let schema: UcTableSchema =
+        serde_json::from_slice(&body).map_err(|e| ZerobusError::SchemaFetchError {
+            message: format!("could not parse Unity Catalog response: {e}"),
+            retryable: false,
+        })?;
     if schema.columns.is_empty() {
-        return Err(fetch_error(format!(
-            "Unity Catalog returned no columns for table '{table_name}'"
-        )));
+        return Err(ZerobusError::SchemaFetchError {
+            message: format!("Unity Catalog returned no columns for table '{table_name}'"),
+            retryable: false,
+        });
     }
     Ok(schema)
 }
@@ -136,35 +144,124 @@ async fn mint_metadata_token(
     let url = join_path(base, ["oidc", "v1", "token"]);
     let params = [("grant_type", "client_credentials"), ("scope", "all-apis")];
 
-    let body = client
+    let req = client
         .post(url)
         .basic_auth(client_id, Some(client_secret))
-        .form(&params)
-        .send()
-        .await
-        .and_then(reqwest::Response::error_for_status)
-        .map_err(|e| fetch_error(format!("token request failed: {e}")))?
-        .bytes()
-        .await
-        .map_err(|e| fetch_error(format!("reading token response failed: {e}")))?;
+        .form(&params);
+    let body = read_bounded_response(req, "token").await?;
 
-    let body: serde_json::Value = serde_json::from_slice(&body)
-        .map_err(|e| fetch_error(format!("could not parse token response: {e}")))?;
+    let body: serde_json::Value =
+        serde_json::from_slice(&body).map_err(|e| ZerobusError::SchemaFetchError {
+            message: format!("could not parse token response: {e}"),
+            retryable: false,
+        })?;
     let token = body["access_token"]
         .as_str()
-        .ok_or_else(|| fetch_error("token response has no access_token".to_string()))?;
+        .ok_or_else(|| ZerobusError::SchemaFetchError {
+            message: "token response has no access_token".to_string(),
+            retryable: false,
+        })?;
 
     // Reject a token that can't be a header value here, not opaquely on the next request.
     if token.is_empty() || !token.bytes().all(|b| b >= 0x20 && b != 0x7f) {
-        return Err(fetch_error(
-            "token response contains an unusable access_token".to_string(),
-        ));
+        return Err(ZerobusError::SchemaFetchError {
+            message: "token response contains an unusable access_token".to_string(),
+            retryable: false,
+        });
     }
     Ok(token.to_string())
 }
 
-fn fetch_error(message: String) -> ZerobusError {
-    ZerobusError::SchemaFetchError(message)
+/// Send a request and stream the response body with size limits and error classification.
+async fn read_bounded_response(
+    request: reqwest::RequestBuilder,
+    operation: &str,
+) -> ZerobusResult<Vec<u8>> {
+    let response = request.send().await.map_err(|e| {
+        let retryable = is_reqwest_error_retryable(&e);
+        ZerobusError::SchemaFetchError {
+            message: format!("{operation} request failed: {e}"),
+            retryable,
+        }
+    })?;
+
+    let status = response.status();
+    if !status.is_success() {
+        let retryable =
+            status.is_server_error() || status == reqwest::StatusCode::TOO_MANY_REQUESTS;
+        let err_body = read_error_snippet(response, MAX_ERROR_SNIPPET_BYTES).await;
+        let body_str = String::from_utf8_lossy(&err_body);
+        let trimmed = body_str.trim();
+        let message = if trimmed.is_empty() {
+            format!("{operation} request failed with status {status}")
+        } else {
+            format!("{operation} request failed with status {status}: {trimmed}")
+        };
+        return Err(ZerobusError::SchemaFetchError { message, retryable });
+    }
+
+    if let Some(content_length) = response.content_length() {
+        if content_length > MAX_RESPONSE_BYTES as u64 {
+            return Err(ZerobusError::SchemaFetchError {
+                message: format!(
+                    "{operation} response exceeded the size limit of {MAX_RESPONSE_BYTES} bytes (Content-Length: {content_length})"
+                ),
+                retryable: false,
+            });
+        }
+    }
+
+    read_body_chunks(response, MAX_RESPONSE_BYTES, operation).await
+}
+
+async fn read_body_chunks(
+    mut response: reqwest::Response,
+    limit: usize,
+    operation: &str,
+) -> ZerobusResult<Vec<u8>> {
+    let mut body = Vec::new();
+    while let Some(chunk) = response.chunk().await.map_err(|e| {
+        let retryable = is_reqwest_error_retryable(&e);
+        ZerobusError::SchemaFetchError {
+            message: format!("reading {operation} response failed: {e}"),
+            retryable,
+        }
+    })? {
+        if body.len().saturating_add(chunk.len()) > limit {
+            return Err(ZerobusError::SchemaFetchError {
+                message: format!("{operation} response exceeded the size limit of {limit} bytes"),
+                retryable: false,
+            });
+        }
+        body.extend_from_slice(&chunk);
+    }
+    Ok(body)
+}
+
+async fn read_error_snippet(mut response: reqwest::Response, limit: usize) -> Vec<u8> {
+    let mut body = Vec::new();
+    while let Ok(Some(chunk)) = response.chunk().await {
+        let remaining = limit.saturating_sub(body.len());
+        if remaining == 0 {
+            break;
+        }
+        let to_take = chunk.len().min(remaining);
+        body.extend_from_slice(&chunk[..to_take]);
+        if body.len() >= limit {
+            break;
+        }
+    }
+    body
+}
+
+fn is_reqwest_error_retryable(error: &reqwest::Error) -> bool {
+    if error.is_timeout() || error.is_connect() {
+        return true;
+    }
+    if let Some(status) = error.status() {
+        return status.is_server_error() || status == reqwest::StatusCode::TOO_MANY_REQUESTS;
+    }
+    !error.is_builder() && !error.is_redirect()
 }
 
 /// Parse the workspace URL, defaulting a missing scheme to `https` (matching
@@ -183,12 +280,13 @@ fn normalize_endpoint(unity_catalog_url: &str) -> ZerobusResult<reqwest::Url> {
         format!("https://{trimmed}")
     };
 
-    let url = reqwest::Url::parse(&candidate)
-        .map_err(|e| ZerobusError::InvalidUCEndpointError(format!("{unity_catalog_url}: {e}")))?;
+    let url = reqwest::Url::parse(&candidate).map_err(|e| {
+        ZerobusError::InvalidUCEndpointError(format!("invalid Unity Catalog URL: {e}"))
+    })?;
     if !matches!(url.scheme(), "http" | "https") || !url.has_host() {
-        return Err(ZerobusError::InvalidUCEndpointError(format!(
-            "{unity_catalog_url}: expected an http or https URL with a host"
-        )));
+        return Err(ZerobusError::InvalidUCEndpointError(
+            "invalid Unity Catalog URL: expected an http or https URL with a host".to_string(),
+        ));
     }
     // Reject embedded credentials so a secret can't leak into a quoted-URL error.
     if !url.username().is_empty() || url.password().is_some() {
@@ -272,6 +370,18 @@ mod tests {
                 "expected {bad:?} to be rejected"
             );
         }
+    }
+
+    #[test]
+    fn normalize_endpoint_does_not_leak_credentials_on_parse_error() {
+        let bad = "https://user:secret-pass@/no-host";
+        let err = normalize_endpoint(bad).unwrap_err();
+        let msg = err.to_string();
+        assert!(!msg.contains("user"), "must not leak username in: {msg}");
+        assert!(
+            !msg.contains("secret-pass"),
+            "must not leak password in: {msg}"
+        );
     }
 
     #[test]

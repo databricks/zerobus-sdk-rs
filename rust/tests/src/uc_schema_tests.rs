@@ -22,7 +22,8 @@ struct MockUc {
 }
 
 /// Start a mock replying to the schema route with `schema_status` and `schema_body`.
-async fn start_mock(schema_status: u16, schema_body: &'static str) -> MockUc {
+async fn start_mock(schema_status: u16, schema_body: impl Into<String>) -> MockUc {
+    let schema_body: Arc<str> = Arc::from(schema_body.into());
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let url = format!("http://{}", listener.local_addr().unwrap());
     let requests = Arc::new(Mutex::new(Recorded::new()));
@@ -37,9 +38,8 @@ async fn start_mock(schema_status: u16, schema_body: &'static str) -> MockUc {
             };
             let Ok((mut sock, _)) = sock else { break };
             let recorded = Arc::clone(&recorded);
+            let schema_body = Arc::clone(&schema_body);
             tokio::spawn(async move {
-                // The head is enough; the token request's small body follows the
-                // client's Content-Length but we don't assert on it.
                 let mut buf = vec![0u8; 4096];
                 let n = sock.read(&mut buf).await.unwrap_or(0);
                 let head = String::from_utf8_lossy(&buf[..n]);
@@ -53,9 +53,12 @@ async fn start_mock(schema_status: u16, schema_body: &'static str) -> MockUc {
                 recorded.lock().unwrap().push((target.clone(), auth));
 
                 let (status, body) = if target.contains("/oidc/") {
-                    (200, r#"{"access_token":"tok-123","expires_in":3600}"#)
+                    (
+                        200,
+                        r#"{"access_token":"tok-123","expires_in":3600}"#.to_string(),
+                    )
                 } else {
-                    (schema_status, schema_body)
+                    (schema_status, schema_body.to_string())
                 };
                 let resp = format!(
                     "HTTP/1.1 {status} X\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
@@ -88,6 +91,16 @@ fn table_json() -> &'static str {
     ]}"#
 }
 
+fn table_json_with_padding(padding_len: usize) -> String {
+    let padding = "x".repeat(padding_len);
+    format!(
+        r#"{{"name":"orders","catalog_name":"main","schema_name":"sales","padding":"{padding}","columns":[
+        {{"name":"id","type_name":"BIGINT","type_text":"bigint","type_json":"","nullable":false,"position":0}},
+        {{"name":"customer","type_name":"STRING","type_text":"string","type_json":"","nullable":true,"position":1}}
+    ]}}"#
+    )
+}
+
 #[tokio::test]
 async fn fetches_descriptor_and_sends_expected_requests() {
     let mock = start_mock(200, table_json()).await;
@@ -115,13 +128,87 @@ async fn fetches_descriptor_and_sends_expected_requests() {
 }
 
 #[tokio::test]
-async fn schema_request_failure_is_schema_fetch_error() {
+async fn schema_request_404_is_non_retryable_schema_fetch_error() {
     let mock = start_mock(404, "table not found").await;
 
-    match fetch_message_descriptor(&mock.url, TABLE, "cid", "csec").await {
-        Err(ZerobusError::SchemaFetchError(msg)) => assert!(msg.contains("404"), "got: {msg}"),
+    let err = fetch_message_descriptor(&mock.url, TABLE, "cid", "csec")
+        .await
+        .unwrap_err();
+    match &err {
+        ZerobusError::SchemaFetchError {
+            message, retryable, ..
+        } => {
+            assert!(message.contains("404"), "got: {message}");
+            assert!(message.contains("table not found"), "got: {message}");
+            assert!(!retryable);
+        }
         other => panic!("expected SchemaFetchError, got {other:?}"),
     }
+    assert!(!err.is_retryable());
+}
+
+#[tokio::test]
+async fn schema_request_503_is_retryable_schema_fetch_error() {
+    let mock = start_mock(503, "service unavailable").await;
+
+    let err = fetch_message_descriptor(&mock.url, TABLE, "cid", "csec")
+        .await
+        .unwrap_err();
+    match &err {
+        ZerobusError::SchemaFetchError {
+            message, retryable, ..
+        } => {
+            assert!(message.contains("503"), "got: {message}");
+            assert!(message.contains("service unavailable"), "got: {message}");
+            assert!(*retryable);
+        }
+        other => panic!("expected SchemaFetchError, got {other:?}"),
+    }
+    assert!(err.is_retryable());
+}
+
+#[tokio::test]
+async fn schema_request_429_is_retryable_schema_fetch_error() {
+    let mock = start_mock(429, "rate limit exceeded").await;
+
+    let err = fetch_message_descriptor(&mock.url, TABLE, "cid", "csec")
+        .await
+        .unwrap_err();
+    match &err {
+        ZerobusError::SchemaFetchError {
+            message, retryable, ..
+        } => {
+            assert!(message.contains("429"), "got: {message}");
+            assert!(message.contains("rate limit exceeded"), "got: {message}");
+            assert!(*retryable);
+        }
+        other => panic!("expected SchemaFetchError, got {other:?}"),
+    }
+    assert!(err.is_retryable());
+}
+
+#[tokio::test]
+async fn oversized_schema_response_is_rejected() {
+    // 8 MiB + 1 byte body
+    let oversized_body = table_json_with_padding(8 * 1024 * 1024 + 1);
+    let mock = start_mock(200, oversized_body).await;
+
+    let err = fetch_message_descriptor(&mock.url, TABLE, "cid", "csec")
+        .await
+        .unwrap_err();
+    match &err {
+        ZerobusError::SchemaFetchError {
+            message, retryable, ..
+        } => {
+            assert!(
+                message.contains("size limit") || message.contains("exceeded"),
+                "got: {message}"
+            );
+            assert!(!retryable);
+        }
+        other => panic!("expected SchemaFetchError, got {other:?}"),
+    }
+    assert!(!err.is_retryable());
 }
 
 #[tokio::test]
@@ -136,4 +223,25 @@ async fn invalid_table_name_fails_before_any_request() {
         mock.requests.lock().unwrap().is_empty(),
         "must not hit the network"
     );
+}
+
+#[tokio::test]
+async fn empty_columns_returns_non_retryable_schema_fetch_error() {
+    let empty_schema =
+        r#"{"name":"orders","catalog_name":"main","schema_name":"sales","columns":[]}"#;
+    let mock = start_mock(200, empty_schema).await;
+
+    let err = fetch_message_descriptor(&mock.url, TABLE, "cid", "csec")
+        .await
+        .unwrap_err();
+    match &err {
+        ZerobusError::SchemaFetchError {
+            message, retryable, ..
+        } => {
+            assert!(message.contains("no columns"), "got: {message}");
+            assert!(!retryable);
+        }
+        other => panic!("expected SchemaFetchError, got {other:?}"),
+    }
+    assert!(!err.is_retryable());
 }

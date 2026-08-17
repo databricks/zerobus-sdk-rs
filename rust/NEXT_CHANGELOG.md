@@ -47,4 +47,4 @@
 
 - Added `ZerobusSdk::fetch_message_descriptor()`, the `uc_schema` module
   (`fetch_message_descriptor`, `fetch_table_schema`), and the
-  `ZerobusError::SchemaFetchError` variant. All additive.
+  `ZerobusError::SchemaFetchError { message, retryable }` variant. All additive.
