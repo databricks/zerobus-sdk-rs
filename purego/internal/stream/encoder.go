@@ -54,6 +54,10 @@ type encoder[Req any] interface {
 	// request-object overhead so aggregate backpressure cannot be bypassed by
 	// batches of tiny or empty records.
 	retainedSize(rawBytes, recordCount int) int64
+	// actualRetainedSize reports what msg retains now that it exists, replacing
+	// the pre-encode estimate. An encoding whose output size is not a function
+	// of its input size returns the true figure here; the rest return estimate.
+	actualRetainedSize(msg Req, estimate int64) int64
 }
 
 const encodedRequestOverhead = int64(512)
@@ -135,6 +139,10 @@ func (protoEncoder) retainedSize(rawBytes, recordCount int) int64 {
 	return ephemeralRetainedSize(rawBytes, recordCount)
 }
 
+func (protoEncoder) actualRetainedSize(_ encodedMsg, estimate int64) int64 {
+	return estimate
+}
+
 // jsonEncoder builds EphemeralStream payloads for JSON-encoded records, single
 // and batched.
 type jsonEncoder struct{}
@@ -201,6 +209,10 @@ func (jsonEncoder) retainedSize(rawBytes, recordCount int) int64 {
 	return ephemeralRetainedSize(rawBytes, recordCount)
 }
 
+func (jsonEncoder) actualRetainedSize(_ encodedMsg, estimate int64) int64 {
+	return estimate
+}
+
 func stampEphemeralOffset(msg encodedMsg, offset int64) {
 	if msg == nil {
 		return
@@ -246,6 +258,10 @@ type EncoderHooks[Req any] struct {
 	Decode       func(msg Req) [][]byte
 	MaxWireSize  func(msg Req) int
 	RetainedSize func(rawBytes, recordCount int) int64
+	// ActualRetainedSize is optional. Set it when RetainedSize cannot predict the
+	// encoded size from the input size, so the reservation is reconciled against
+	// what the payload really holds instead of the estimate.
+	ActualRetainedSize func(msg Req) int64
 }
 
 type hookEncoder[Req any] struct {
@@ -282,6 +298,13 @@ func (e hookEncoder[Req]) maxWireSize(msg Req) int {
 
 func (e hookEncoder[Req]) retainedSize(rawBytes, recordCount int) int64 {
 	return e.hooks.RetainedSize(rawBytes, recordCount)
+}
+
+func (e hookEncoder[Req]) actualRetainedSize(msg Req, estimate int64) int64 {
+	if e.hooks.ActualRetainedSize == nil {
+		return estimate
+	}
+	return e.hooks.ActualRetainedSize(msg)
 }
 
 // extractEphemeralRecords recovers the raw record bytes from an EphemeralStream

@@ -563,7 +563,12 @@ func (cs *CoreStream[Req, Resp]) enqueuePayload(
 ) (int64, error) {
 	return cs.enqueuePayloadReserved(ctx, weight, func() (Req, uint64, int64, error) {
 		payload, err := build()
-		return payload, explicitUnits, weight, err
+		if err != nil {
+			return payload, explicitUnits, weight, err
+		}
+		// weight was derived from the input bytes. An encoding that expands or
+		// compresses its input must be charged for what it actually holds.
+		return payload, explicitUnits, cs.enc.actualRetainedSize(payload, weight), nil
 	})
 }
 
