@@ -4,6 +4,7 @@ use crate::ZerobusResult;
 use async_trait::async_trait;
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::time::Duration;
 
 /// A trait for providing custom headers for gRPC requests.
 ///
@@ -68,6 +69,9 @@ pub struct OAuthHeadersProvider {
     workspace_id: String,
     unity_catalog_url: String,
     token_cache: Arc<TokenCache>,
+    /// How long a proactive refresh may run before it's treated as failed and the
+    /// cached token is served; `None` leaves it unbounded.
+    refresh_timeout: Option<Duration>,
 }
 
 impl OAuthHeadersProvider {
@@ -92,6 +96,7 @@ impl OAuthHeadersProvider {
             workspace_id,
             unity_catalog_url,
             Arc::new(TokenCache::new(true, DEFAULT_REFRESH_BUFFER)),
+            None,
         )
     }
 
@@ -106,6 +111,7 @@ impl OAuthHeadersProvider {
         workspace_id: String,
         unity_catalog_url: String,
         token_cache: Arc<TokenCache>,
+        refresh_timeout: Option<Duration>,
     ) -> Self {
         Self {
             client_id,
@@ -114,6 +120,7 @@ impl OAuthHeadersProvider {
             workspace_id,
             unity_catalog_url,
             token_cache,
+            refresh_timeout,
         }
     }
 }
@@ -121,24 +128,39 @@ impl OAuthHeadersProvider {
 #[async_trait]
 impl HeadersProvider for OAuthHeadersProvider {
     async fn get_headers(&self) -> ZerobusResult<HashMap<&'static str, String>> {
-        let token = self
-            .token_cache
-            .get_or_fetch(
+        let fetch = |reason| {
+            DefaultTokenFactory::fetch_token(
+                &self.unity_catalog_url,
+                &self.table_name,
                 &self.client_id,
                 &self.client_secret,
-                &self.table_name,
-                |reason| {
-                    DefaultTokenFactory::fetch_token(
-                        &self.unity_catalog_url,
-                        &self.table_name,
+                &self.workspace_id,
+                reason,
+            )
+        };
+        let token = match self.refresh_timeout {
+            Some(refresh_timeout) => {
+                self.token_cache
+                    .get_or_fetch_within(
                         &self.client_id,
                         &self.client_secret,
-                        &self.workspace_id,
-                        reason,
+                        &self.table_name,
+                        refresh_timeout,
+                        fetch,
                     )
-                },
-            )
-            .await?;
+                    .await?
+            }
+            None => {
+                self.token_cache
+                    .get_or_fetch(
+                        &self.client_id,
+                        &self.client_secret,
+                        &self.table_name,
+                        fetch,
+                    )
+                    .await?
+            }
+        };
         let mut headers = HashMap::new();
         headers.insert("authorization", format!("Bearer {}", token));
         headers.insert("x-databricks-zerobus-table-name", self.table_name.clone());
