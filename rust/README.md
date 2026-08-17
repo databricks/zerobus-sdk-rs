@@ -49,7 +49,7 @@ The Zerobus Rust SDK provides a robust, async-first interface for ingesting larg
 - **Flexible Configuration** - Fine-tune timeouts, retries, and recovery behavior
 - **Graceful Stream Management** - Proper flushing and acknowledgment tracking
 - **Acknowledgment Callbacks** - Receive notifications when records are acknowledged or encounter errors
-- **Arrow Flight Ingestion** *(Beta, opt-in)* — Stream Apache Arrow `RecordBatch` data directly to Zerobus over the Arrow Flight protocol on the same gRPC connection. Enable with `features = ["arrow-flight"]`; see [`examples/arrow/`](https://github.com/databricks/zerobus-sdk/tree/main/rust/examples/arrow).
+- **Arrow Flight Ingestion** *(Beta, opt-in)* — Stream Apache Arrow `RecordBatch` data directly to Zerobus using Arrow Flight's gRPC transport. Enable with `features = ["arrow-flight"]`; see [`examples/arrow/`](https://github.com/databricks/zerobus-sdk/tree/main/rust/examples/arrow).
 - **Zeroparser** *(opt-in)* — Zero-copy, single-pass protobuf parser for runtime-known schemas. Enable with `features = ["zeroparser"]`; see [`sdk/src/zeroparser/README.md`](https://github.com/databricks/zerobus-sdk/blob/main/rust/sdk/src/zeroparser/README.md).
 
 ## Installation
@@ -133,7 +133,9 @@ zerobus_rust_sdk/
 │   │   │       ├── supervisor.rs       # Recovery, replay, and finalization
 │   │   │       ├── batch.rs            # Pending batches and IPC helpers
 │   │   │       ├── metadata.rs         # Flight request/ack metadata
-│   │   │       └── options.rs          # Arrow Flight stream options
+│   │   │       ├── options.rs          # Arrow Flight stream options
+│   │   │       ├── close.rs            # Close coordination and terminal finalization
+│   │   │       └── README.md           # Arrow Flight internal architecture
 │   │   ├── multiplexed_stream.rs       # Multiplexed stream implementation
 │   │   ├── default_token_factory.rs    # OAuth 2.0 token handling
 │   │   ├── token_cache.rs              # OAuth token caching
@@ -245,7 +247,10 @@ zerobus_rust_sdk/
 
 ## How It Works
 
-### Architecture Overview
+### JSON / Protocol Buffers Architecture Overview
+
+The following diagram describes the standard JSON/protobuf stream. Arrow Flight uses a
+separate Flight request/response exchange and lifecycle state machine.
 
 ```
 +-----------------+
@@ -287,13 +292,37 @@ zerobus_rust_sdk/
 +-----------------------+
 ```
 
-### Data Flow
+### JSON / Protocol Buffers Data Flow
 
 1. **Ingestion** - Your app calls `stream.ingest_record_offset(data)` or `stream.ingest_records_offset(batch)`
 2. **Buffering** - Records are placed in the landing zone with logical offsets
 3. **Sending** - Sender task sends records over gRPC with physical offsets
 4. **Acknowledgment** - Receiver task gets server ack; callers wait via `stream.wait_for_offset(offset)`
 5. **Recovery** - If connection fails, supervisor reconnects and resends unacked records
+
+### Arrow Flight Lifecycle *(Beta)*
+
+Arrow Flight uses a dedicated DoPut request/response exchange:
+
+```text
+ingest_batch -> Flight encoder -> DoPut -> ack_up_to_records
+```
+
+1. Build the stream with `.arrow(schema).build_arrow()`.
+2. Queue application-sized `RecordBatch`es with `ingest_batch()`.
+3. Call `flush()` once at a durability boundary.
+4. Call `close()` to half-close and drain the active Flight exchange.
+
+Each input `RecordBatch` receives one logical SDK offset even if Flight splits it
+into several wire messages. Durability is tracked through the cumulative
+`ack_up_to_records` watermark. Arrow Flight does not support `ack_callback`.
+
+Recovery reconnects and replays only unacknowledged batch suffixes. After a failed
+`close()`, call `get_unacked_batches()` to inspect the retained work; the returned
+set can be empty when every record was already durable.
+
+For state ownership, replay, rotation, and concurrency invariants, see the
+[Arrow Flight maintainer architecture guide](https://github.com/databricks/zerobus-sdk/blob/main/rust/sdk/src/stream/arrow/README.md).
 
 ### Authentication Flow
 
@@ -811,13 +840,42 @@ Also accepts `0` or `no`.
 | `ack_callback` | `Option<Arc<dyn AckCallback>>` | `None` | **gRPC JSON/proto streams only.** Optional callback for acknowledgment notifications. Not supported for Arrow Flight streams. |
 | `callback_max_wait_time_ms` | `Option<u64>` | `Some(5_000)` | **gRPC JSON/proto streams only.** Maximum time to wait for callback processing to complete after closing the stream (`None` = wait indefinitely, `Some(x)` = wait up to `x` ms) |
 
+### ArrowStreamConfigurationOptions
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `max_inflight_batches` | `usize` | 1,000 | Maximum accepted batches awaiting acknowledgment; bounds memory and applies backpressure |
+| `recovery` | `bool` | true | Reconnect and replay unacknowledged batch suffixes after retryable failures |
+| `recovery_timeout_ms` | `u64` | 15,000 | Timeout for one recovery attempt (ms) |
+| `recovery_backoff_ms` | `u64` | 2,000 | Delay between recovery attempts (ms) |
+| `recovery_retries` | `u32` | 4 | Maximum recovery attempts |
+| `server_lack_of_ack_timeout_ms` | `u64` | 60,000 | Maximum pending lifetime for the oldest submitted batch on an active connection |
+| `flush_timeout_ms` | `u64` | 300,000 | Timeout for `flush()`, `wait_for_offset()`, and the explicit-close acknowledgment wait |
+| `connection_timeout_ms` | `u64` | 30,000 | Timeout for Flight connection establishment |
+| `ipc_compression` | `Option<CompressionType>` | `None` | Optional `LZ4_FRAME` or `ZSTD` Arrow IPC compression |
+| `stream_paused_max_wait_time_ms` | `Option<u64>` | `None` | ACK-wait cap during server rotation; `None` uses the available server grace, while `Some(0)` skips ACK waiting but not bounded transport cleanup |
+
+```rust
+let stream = sdk
+    .stream_builder()
+    .table("catalog.schema.orders")
+    .oauth(client_id, client_secret)
+    .arrow(schema)
+    .max_inflight_batches(1_000)
+    .connection_timeout_ms(30_000)
+    .ipc_compression(Some(arrow_ipc::CompressionType::ZSTD))
+    .build_arrow()
+    .await?;
+```
+
 For Arrow Flight streams *(Beta)*, `server_lack_of_ack_timeout_ms` is an
 absolute limit on how long the oldest batch may remain pending during normal
 stream operation, not an inactivity timeout. No timer runs while the stream is
-idle. A batch's deadline starts when it becomes pending; responses and partial
-acknowledgments do not pause or extend it. Replayed batches receive a fresh
-deadline after the full replay completes and acknowledgment processing can
-resume on the recovered connection. Configure this timeout together with
+idle or while a batch is buffered but not submitted. For the oldest submitted
+pending batch, the deadline is based on when it became pending; responses and
+partial acknowledgments do not pause or extend it. Replayed batches receive a
+fresh deadline after the full replay completes and acknowledgment processing
+can resume on the recovered connection. Configure this timeout together with
 `max_inflight_batches` so the server can acknowledge a full allowed backlog
 within the timeout.
 
@@ -828,7 +886,10 @@ capped at one year. If `ack_callback` was configured on the builder,
 `build_arrow()` returns `ZerobusError::InvalidArgument` instead of silently
 ignoring the callback.
 
-**Example:**
+For internal lifecycle, offset, recovery, and concurrency details, see the
+[Arrow Flight maintainer architecture guide](https://github.com/databricks/zerobus-sdk/blob/main/rust/sdk/src/stream/arrow/README.md).
+
+**JSON / protobuf example:**
 
 ```rust
 let stream = sdk

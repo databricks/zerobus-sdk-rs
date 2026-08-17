@@ -103,9 +103,9 @@ async fn main() -> Result<(), Box<dyn Error>> {
         .build_arrow()
         .await?;
 
-    const NUM_BATCHES: usize = 100;
-    const ROWS_PER_BATCH: usize = 3;
-    const WAIT_EVERY: usize = 10;
+    // Use application-sized batches to amortize Arrow encoding and Flight RPC overhead.
+    const NUM_BATCHES: usize = 10;
+    const ROWS_PER_BATCH: usize = 10_000;
 
     let now = chrono::Utc::now().timestamp_micros();
 
@@ -124,16 +124,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
             .collect();
 
         let batch = build_orders_batch(&schema, &orders);
-        let offset_id = stream.ingest_batch(batch).await?;
-
-        if (i + 1) % WAIT_EVERY == 0 {
-            stream.wait_for_offset(offset_id).await?;
-            println!(
-                "Acknowledged through batch {} (offset ID {})",
-                i + 1,
-                offset_id
-            );
-        }
+        stream.ingest_batch(batch).await?;
     }
 
     stream.flush().await?;
