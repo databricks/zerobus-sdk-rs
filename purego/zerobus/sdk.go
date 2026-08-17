@@ -1,5 +1,4 @@
-// Package zerobus is a pure-Go client for Zerobus ingestion. It speaks gRPC
-// directly, so it needs no cgo and no prebuilt native libraries.
+// Package zerobus is a pure-Go client for Zerobus ingestion.
 //
 // Create an SDK with New and a stream with CreateStream. Ingestion is
 // asynchronous: IngestRecordOffset returns as soon as the record is queued, so
