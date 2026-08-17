@@ -89,6 +89,7 @@ struct TestHooks {
     replay_send: TestBarrierGate,
     ack_applied: TestNotifyGate,
     ack_idle: TestNotifyGate,
+    failed_enqueue: TestBarrierGate,
     close_finalize: TestBarrierGate,
 }
 
@@ -172,7 +173,7 @@ pub struct ZerobusArrowStream {
     _last_ack_rx: watch::Receiver<Option<OffsetId>>,
     /// True once the stream is terminally closed and unacknowledged batches may be retrieved.
     is_closed: Arc<AtomicBool>,
-    /// Rejects new ingests as soon as terminal finalization owns admission.
+    /// Rejects new ingests once terminal finalization or a failed enqueue owns admission.
     admission_closed: Arc<AtomicBool>,
     /// Coordinates one resumable explicit-close request with the recovery supervisor.
     close: CloseCoordinator,
@@ -408,6 +409,8 @@ impl ZerobusArrowStream {
     /// # Errors
     ///
     /// * `StreamClosedError` - If the stream is closing or closed
+    /// * The terminal request-stream error if enqueueing fails with recovery disabled;
+    ///   the call waits for terminal finalization before returning that error
     /// * `InvalidArgument` - If the batch schema doesn't match the stream schema, or the
     ///   batch has zero rows (an empty batch carries no data to send or acknowledge)
     ///
@@ -526,14 +529,32 @@ impl ZerobusArrowStream {
                     let mut pending = self.pending_batches.lock().await;
                     pending.retain(|pending_batch| pending_batch.offset_id() != offset_id);
                 }
-                let _ = timeout(
-                    Duration::from_millis(100),
-                    self.server_error_rx.clone().changed(),
-                )
-                .await;
-                return Err(Self::terminal_error_or(&self.server_error_rx, || {
-                    "Failed to send batch".to_string()
-                }));
+                // Withdraw the logical assignment before waking terminal finalization.
+                self.cumulative_records_assigned
+                    .store(start_record, Ordering::Relaxed);
+                self.offset_generator.set_next(offset_id);
+                // Claim terminal admission while close is still excluded by ingest_mutex,
+                // so the request-send failure cannot be replaced by a successful close.
+                self.admission_closed.store(true, Ordering::Release);
+                #[cfg(feature = "test-hooks")]
+                {
+                    let barrier = self.test_hooks.failed_enqueue.lock().await.take();
+                    if let Some(barrier) = barrier {
+                        barrier.reached.notify_one();
+                        barrier.proceed.notified().await;
+                    }
+                }
+                // Finalization must reacquire ingest_mutex before publishing its outcome.
+                drop(_guard);
+                self.request_send_failure.report();
+                return match self.wait_for_terminal_outcome().await {
+                    Err(error) => Err(error),
+                    // A clean outcome is unreachable after this path claims terminal
+                    // admission, but preserve any published cause defensively.
+                    Ok(()) => Err(Self::terminal_error_or(&self.server_error_rx, || {
+                        "Failed to send batch".to_string()
+                    })),
+                };
             }
         };
 
@@ -662,8 +683,7 @@ impl ZerobusArrowStream {
         })?
     }
 
-    /// Waits through the short interval where terminal finalization owns admission but
-    /// has not published `CloseState::Finalized` yet.
+    /// Waits after terminal admission is claimed but before finalization publishes its result.
     async fn wait_for_terminal_outcome(&self) -> ZerobusResult<()> {
         let mut close_rx = self.close.subscribe();
 
@@ -712,7 +732,13 @@ impl ZerobusArrowStream {
     /// ```
     #[instrument(level = "debug", skip_all, fields(table_name = %self.table_properties.table_name))]
     pub async fn flush(&self) -> ZerobusResult<()> {
-        let target_offset = match self.offset_generator.last() {
+        // Serialize the snapshot with enqueue assignment and rollback so a concurrent
+        // failed enqueue cannot leave this flush waiting on its withdrawn offset.
+        let target_offset = {
+            let _guard = self.ingest_mutex.lock().await;
+            self.offset_generator.last()
+        };
+        let target_offset = match target_offset {
             Some(offset) => offset,
             None => {
                 if self.admission_closed.load(Ordering::Acquire)
@@ -820,6 +846,10 @@ impl ZerobusArrowStream {
     /// ```
     #[instrument(level = "debug", skip_all, fields(table_name = %self.table_properties.table_name))]
     pub async fn close(&mut self) -> ZerobusResult<()> {
+        self.close_internal().await
+    }
+
+    async fn close_internal(&self) -> ZerobusResult<()> {
         info!(
             table_name = %self.table_properties.table_name,
             "Closing Arrow Flight stream"
@@ -847,8 +877,8 @@ impl ZerobusArrowStream {
                             self.close.publish(request);
                         }
                         CloseState::Open => {
-                            // Terminal finalization owns admission but publishes its result
-                            // only after the retained-batch snapshot is complete.
+                            // A failed enqueue or terminal finalization owns admission; both
+                            // complete by publishing one shared terminal result.
                             drop(guard);
                             if close_rx.changed().await.is_err() {
                                 return Err(Self::close_coordinator_stopped_error());
@@ -992,6 +1022,29 @@ impl ZerobusArrowStream {
         let (closed_tx, closed_rx) = mpsc::channel(1);
         drop(closed_rx);
         *self.batch_tx.lock().await = Some(closed_tx);
+    }
+
+    /// Test-only: parks a recovery-disabled failed enqueue after it claims terminal
+    /// admission and before it releases `ingest_mutex` or wakes the supervisor.
+    #[cfg(feature = "test-hooks")]
+    #[doc(hidden)]
+    pub async fn arm_failed_enqueue_barrier(&self) -> (Arc<Notify>, Arc<Notify>) {
+        Self::arm_test_barrier(&self.test_hooks.failed_enqueue).await
+    }
+
+    /// Test-only: reports whether terminal admission has been claimed.
+    #[cfg(feature = "test-hooks")]
+    #[doc(hidden)]
+    pub fn admission_closed_for_test(&self) -> bool {
+        self.admission_closed.load(Ordering::Acquire)
+    }
+
+    /// Test-only: runs the close state machine through a shared reference so tests can
+    /// exercise foreign-wrapper concurrency without creating aliased Rust references.
+    #[cfg(feature = "test-hooks")]
+    #[doc(hidden)]
+    pub async fn close_concurrently_for_test(&self) -> ZerobusResult<()> {
+        self.close_internal().await
     }
 
     /// Test-only: parks close finalization after choosing the local outcome and before

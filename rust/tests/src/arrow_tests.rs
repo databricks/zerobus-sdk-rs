@@ -2631,6 +2631,180 @@ mod arrow_flight_tests {
         }
 
         #[tokio::test]
+        async fn test_closed_request_sender_without_recovery_finalizes_promptly(
+        ) -> Result<(), Box<dyn std::error::Error>> {
+            setup_tracing();
+
+            let (mock_server, server_url) = start_mock_flight_server().await?;
+            let schema = create_test_arrow_schema();
+            mock_server
+                .inject_responses(
+                    TABLE_NAME,
+                    vec![
+                        MockFlightResponse::BatchAck {
+                            ack_up_to_offset: 0,
+                            delay_ms: 0,
+                            ack_up_to_records: 1,
+                        },
+                        MockFlightResponse::HoldResponseAfterRequestEof,
+                    ],
+                )
+                .await;
+
+            let sdk = ZerobusSdk::builder()
+                .endpoint(server_url)
+                .unity_catalog_url("https://mock-uc.com")
+                .tls_config(Arc::new(NoTlsConfig))
+                .build()?;
+            let stream = sdk
+                .stream_builder()
+                .table(TABLE_NAME)
+                .headers_provider(Arc::new(TestHeadersProvider::default()))
+                .arrow(schema.clone())
+                .flush_timeout_ms(60_000)
+                .recovery(false)
+                .build_arrow()
+                .await?;
+
+            let durable_batch =
+                create_test_record_batch(schema.clone(), vec![1], vec![Some("durable")]);
+            let durable_offset = stream.ingest_batch(durable_batch).await?;
+            stream.wait_for_offset(durable_offset).await?;
+
+            let (failed_enqueue_reached, failed_enqueue_proceed) =
+                stream.arm_failed_enqueue_barrier().await;
+            let (finalize_reached, finalize_proceed) = stream.arm_close_finalize_barrier().await;
+            stream.replace_batch_sender_with_closed_channel().await;
+            let batch = create_test_record_batch(schema, vec![2], vec![Some("withdrawn")]);
+            let mut ingest = Box::pin(stream.ingest_batch(batch));
+            tokio::select! {
+                _ = failed_enqueue_reached.notified() => {}
+                result = &mut ingest => {
+                    panic!("ingest completed before claiming terminal admission: {result:?}")
+                }
+            }
+            assert!(
+                stream.admission_closed_for_test(),
+                "failed enqueue must claim admission before close can publish success"
+            );
+            let mut close = Box::pin(stream.close_concurrently_for_test());
+            // Queue close on ingest_mutex while the failed enqueue still owns it.
+            assert!(
+                futures::poll!(close.as_mut()).is_pending(),
+                "concurrent close must wait for the failed enqueue to release ingest_mutex"
+            );
+            failed_enqueue_proceed.notify_one();
+
+            tokio::select! {
+                _ = finalize_reached.notified() => {}
+                result = &mut ingest => {
+                    panic!("ingest completed before terminal finalization: {result:?}")
+                }
+                result = &mut close => {
+                    panic!("close completed before terminal finalization: {result:?}")
+                }
+            }
+            assert!(
+                futures::poll!(ingest.as_mut()).is_pending(),
+                "ingest must wait for terminal finalization, not early error publication"
+            );
+            assert!(
+                futures::poll!(close.as_mut()).is_pending(),
+                "close must wait for the same terminal finalization"
+            );
+
+            finalize_proceed.notify_one();
+            let ingest_error = tokio::time::timeout(std::time::Duration::from_secs(1), ingest)
+                .await
+                .expect("request send failure must finish after terminal finalization")
+                .expect_err("closed request sender must reject the batch");
+            assert!(
+                ingest_error
+                    .to_string()
+                    .contains("Flight request stream closed while sending"),
+                "expected ingest to preserve the request-send failure, got: {ingest_error}"
+            );
+
+            let error = tokio::time::timeout(std::time::Duration::from_secs(1), close)
+                .await
+                .expect("concurrent close must finish after terminal finalization")
+                .expect_err("close must preserve the request-send failure");
+            assert!(
+                error
+                    .to_string()
+                    .contains("Flight request stream closed while sending"),
+                "expected the request-send failure, got: {error}"
+            );
+
+            tokio::time::timeout(std::time::Duration::from_secs(1), stream.flush())
+                .await
+                .expect("flush must not wait on the withdrawn offset")
+                .expect("flush target must roll back to the acknowledged batch");
+            assert!(stream.get_unacked_batches().await?.is_empty());
+            Ok(())
+        }
+
+        #[tokio::test]
+        async fn test_first_failed_enqueue_leaves_no_flush_target(
+        ) -> Result<(), Box<dyn std::error::Error>> {
+            setup_tracing();
+
+            let (mock_server, server_url) = start_mock_flight_server().await?;
+            let schema = create_test_arrow_schema();
+            mock_server
+                .inject_responses(
+                    TABLE_NAME,
+                    vec![MockFlightResponse::HoldResponseAfterRequestEof],
+                )
+                .await;
+
+            let sdk = ZerobusSdk::builder()
+                .endpoint(server_url)
+                .unity_catalog_url("https://mock-uc.com")
+                .tls_config(Arc::new(NoTlsConfig))
+                .build()?;
+            let stream = sdk
+                .stream_builder()
+                .table(TABLE_NAME)
+                .headers_provider(Arc::new(TestHeadersProvider::default()))
+                .arrow(schema.clone())
+                .flush_timeout_ms(60_000)
+                .recovery(false)
+                .build_arrow()
+                .await?;
+
+            stream.replace_batch_sender_with_closed_channel().await;
+            let batch = create_test_record_batch(schema, vec![1], vec![Some("withdrawn")]);
+            let ingest_error = tokio::time::timeout(
+                std::time::Duration::from_secs(1),
+                stream.ingest_batch(batch),
+            )
+            .await
+            .expect("first failed enqueue must finalize promptly")
+            .expect_err("closed request sender must reject the first batch");
+            assert!(
+                ingest_error
+                    .to_string()
+                    .contains("Flight request stream closed while sending"),
+                "expected ingest to preserve the request-send failure, got: {ingest_error}"
+            );
+
+            let flush_error =
+                tokio::time::timeout(std::time::Duration::from_secs(1), stream.flush())
+                    .await
+                    .expect("empty-target flush must observe terminal finalization")
+                    .expect_err("flush must preserve the request-send failure");
+            assert!(
+                flush_error
+                    .to_string()
+                    .contains("Flight request stream closed while sending"),
+                "expected flush to preserve the request-send failure, got: {flush_error}"
+            );
+            assert!(stream.get_unacked_batches().await?.is_empty());
+            Ok(())
+        }
+
+        #[tokio::test]
         async fn test_flush_timeout() -> Result<(), Box<dyn std::error::Error>> {
             setup_tracing();
             info!("Starting test_flush_timeout");
