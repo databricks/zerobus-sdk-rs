@@ -209,12 +209,8 @@ func (s *SDK) CreateStreamWithProvider(
 }
 
 // FetchProtoDescriptorFromUC returns a protobuf descriptor built from a Unity
-// Catalog table schema.
-//
-// Every call performs a fresh Unity Catalog request; the SDK does not cache the
-// result. Fetch once per table and reuse the bytes for every stream on it —
-// calling this per stream, or worse per record, puts a UC round-trip on the
-// ingestion path. Fetch again only when the table schema changes.
+// Catalog table schema. Every call performs a fresh Unity Catalog request; the
+// SDK does not cache the result.
 func (s *SDK) FetchProtoDescriptorFromUC(
 	ctx context.Context,
 	tableName, clientID, clientSecret string,
