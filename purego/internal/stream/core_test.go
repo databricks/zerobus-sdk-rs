@@ -1122,6 +1122,64 @@ func TestCoreStreamRejectsAckWhenSendFails(t *testing.T) {
 	}
 }
 
+// TestCoreStreamRecoversAfterAckDuringFailedSend covers a server that
+// acknowledges a record while the client's Send for it is still outstanding and
+// then aborts the stream. The unusable acknowledgment must be discarded and the
+// retryable send failure must drive recovery: the core does not know how much of
+// that Send reached the server, which is not a server protocol violation.
+func TestCoreStreamRecoversAfterAckDuringFailedSend(t *testing.T) {
+	blocked := newControlledSendRPC()
+	replay := newFakeRPC()
+	opener := &mixedOpener{streams: []wireStream[encodedMsg, ephemeralResp]{
+		transport.NewFakeStreamForTesting(blocked),
+		transport.NewFakeStreamForTesting(replay),
+	}}
+
+	cfg := testConfig()
+	cfg.RecoveryRetries = 2
+	cs := newCoreForTest(testParams(), cfg, opener, nil)
+	t.Cleanup(func() { cs.Terminate() })
+
+	offset, err := cs.Ingest(context.Background(), []byte(`{}`))
+	if err != nil {
+		t.Fatalf("Ingest: %v", err)
+	}
+	<-blocked.started
+	blocked.ack(offset)
+	blocked.result <- errors.New("send failed")
+
+	// The record was never confirmed submitted, so it must be replayed rather
+	// than the stream dying with a non-retryable protocol error.
+	waitCondition(t, func() bool { return len(replay.sends) > 0 }, 3*time.Second)
+	replay.ack(0)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	if err := cs.WaitForOffset(ctx, offset); err != nil {
+		t.Fatalf("WaitForOffset after recovery: %v (terminal=%v)", err, cs.terminalErr())
+	}
+}
+
+// mixedOpener hands out pre-built connections of differing fake types in order.
+type mixedOpener struct {
+	mu      sync.Mutex
+	streams []wireStream[encodedMsg, ephemeralResp]
+	idx     int
+}
+
+func (o *mixedOpener) Open(
+	context.Context, transport.StreamParams,
+) (wireStream[encodedMsg, ephemeralResp], error) {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	if o.idx >= len(o.streams) {
+		return nil, fmt.Errorf("mixedOpener: no connection left")
+	}
+	stream := o.streams[o.idx]
+	o.idx++
+	return stream, nil
+}
+
 // TestCoreStreamMalformedAckTearsDownAndRecovers verifies that an
 // uninterpretable server response (an ack missing its offset) tears the stream
 // down instead of being silently ignored, and the supervisor reconnects.
@@ -1326,6 +1384,18 @@ func TestIsRetryable(t *testing.T) {
 		{name: "closed", err: errClosed, want: false},
 		{name: "classified retryable", err: fmt.Errorf("wrapped: %w", &classifiedError{retryable: true}), want: true},
 		{name: "classified terminal", err: &classifiedError{retryable: false}, want: false},
+		// An acknowledgment the submitted ranges cannot support is a protocol
+		// violation: reconnecting would replay into the same disagreement.
+		{
+			name: "invalid acknowledgment",
+			err:  &invalidAcknowledgment{cause: errors.New("ack of 9 units")},
+			want: false,
+		},
+		{
+			name: "invalid acknowledgment when wrapped",
+			err:  fmt.Errorf("recv: %w", &invalidAcknowledgment{cause: errors.New("bad ack")}),
+			want: false,
+		},
 		{name: "open budget", err: &openBudgetExceeded{cause: context.DeadlineExceeded}, want: true},
 		{name: "context deadline", err: context.DeadlineExceeded, want: false},
 		{name: "ordinary transport", err: errors.New("connection reset"), want: true},
@@ -2477,6 +2547,103 @@ func TestCoreStreamPauseOwnsConcurrentSendFailure(t *testing.T) {
 	if err := cs.terminalErr(); err == nil ||
 		!strings.Contains(err.Error(), "server requested pause and recovery is disabled") {
 		t.Fatalf("terminal error = %v, want recovery-disabled pause", err)
+	}
+}
+
+// Rotation waits for an outstanding Send instead of aborting it, so an ack that
+// arrived while it was active still becomes durable and the record is not
+// replayed.
+func TestCoreStreamPauseAwaitsSlowSendAndKeepsAck(t *testing.T) {
+	fo := &controlledThenPlainOpener{first: newControlledSendRPC(), second: newFakeRPC()}
+	cfg := testConfig()
+	// A generous budget so only the Send's timing decides the outcome.
+	cfg.DrainTimeout = 2 * time.Second
+	cfg.StreamPausedMaxWait = durationPtr(100 * time.Millisecond)
+	cs := newCoreForTest(testParams(), cfg, fo, nil)
+	t.Cleanup(func() { cs.Close() })
+
+	offset, err := cs.Ingest(context.Background(), []byte(`{}`))
+	if err != nil {
+		t.Fatalf("Ingest: %v", err)
+	}
+	select {
+	case <-fo.first.started:
+	case <-time.After(time.Second):
+		t.Fatal("Send did not start")
+	}
+	// Rotation and the ack both arrive while the Send is outstanding, so the ack
+	// stays buffered until the Send reports what it submitted.
+	fo.first.closeSignalWithDuration(100 * time.Millisecond)
+	fo.first.ack(offset)
+	select {
+	case <-fo.first.pauseRead:
+	case <-time.After(time.Second):
+		t.Fatal("pause response was not read")
+	}
+	// Outlast the pause deadline, then let the Send succeed.
+	time.Sleep(150 * time.Millisecond)
+	fo.first.result <- nil
+
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	if err := cs.WaitForOffset(ctx, offset); err != nil {
+		t.Fatalf("ack buffered during rotation was not applied: %v", err)
+	}
+	select {
+	case <-fo.first.closeSent:
+	case <-time.After(time.Second):
+		t.Fatal("rotation did not half-close the request stream")
+	}
+	waitCondition(t, func() bool { return fo.openCount() == 2 }, time.Second)
+	time.Sleep(50 * time.Millisecond)
+	if got := len(fo.second.sends); got != 0 {
+		t.Fatalf("replayed %d acknowledged records after rotation", got)
+	}
+}
+
+// A Send that never returns cannot hold rotation open: teardown falls back to a
+// bounded abort and the record is replayed.
+func TestCoreStreamPauseStuckSendStaysBounded(t *testing.T) {
+	tests := []struct {
+		name   string
+		before func(*controlledSendRPC)
+	}{
+		{name: "no buffered ack", before: func(*controlledSendRPC) {}},
+		// A buffered ack makes the receiver pay the drain budget before
+		// aborting; the ack is then unusable and the record replays.
+		{name: "ack buffered mid send", before: func(rpc *controlledSendRPC) { rpc.ack(0) }},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			fo := &controlledThenPlainOpener{
+				first:  newControlledSendRPC(),
+				second: newFakeRPC(),
+			}
+			cfg := testConfig()
+			cfg.DrainTimeout = 100 * time.Millisecond
+			cfg.StreamPausedMaxWait = durationPtr(0)
+			cs := newCoreForTest(testParams(), cfg, fo, nil)
+			t.Cleanup(func() { cs.Close() })
+
+			if _, err := cs.Ingest(context.Background(), []byte(`{}`)); err != nil {
+				t.Fatalf("Ingest: %v", err)
+			}
+			select {
+			case <-fo.first.started:
+			case <-time.After(time.Second):
+				t.Fatal("Send did not start")
+			}
+			tc.before(fo.first)
+			// The Send is never released, so only the drain budget ends rotation.
+			fo.first.closeSignalWithDuration(time.Hour)
+
+			select {
+			case <-fo.first.aborted:
+			case <-time.After(2 * time.Second):
+				t.Fatal("stuck Send was not aborted after the drain budget")
+			}
+			waitCondition(t, func() bool { return len(fo.second.sends) == 1 }, 2*time.Second)
+		})
 	}
 }
 

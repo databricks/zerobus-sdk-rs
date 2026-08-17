@@ -2,6 +2,7 @@ package stream
 
 import (
 	"context"
+	"fmt"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -130,6 +131,36 @@ func TestBufferByteBackpressureAndRelease(t *testing.T) {
 	}
 }
 
+func TestBufferReservationReconciliationNeverOvercommits(t *testing.T) {
+	b := newBuffer[string](3, 10)
+	if err := b.reserve(context.Background(), 3); err != nil {
+		t.Fatalf("reserve: %v", err)
+	}
+	if err := b.reconcileReservation(3, 7); err != nil {
+		t.Fatalf("grow available reservation: %v", err)
+	}
+	if items, usedBytes := b.usage(); items != 1 || usedBytes != 7 {
+		t.Fatalf("grown usage = (%d,%d), want (1,7)", items, usedBytes)
+	}
+	if err := b.appendUnits(0, "first", 1, 7); err != nil {
+		t.Fatalf("append grown reservation: %v", err)
+	}
+
+	if err := b.reserve(context.Background(), 3); err != nil {
+		t.Fatalf("reserve remaining bytes: %v", err)
+	}
+	if err := b.reconcileReservation(3, 4); err == nil {
+		t.Fatal("underestimated reservation overcommitted byte limit")
+	}
+	if items, usedBytes := b.usage(); items != 2 || usedBytes != 10 {
+		t.Fatalf("usage after rejected growth = (%d,%d), want (2,10)", items, usedBytes)
+	}
+	b.release(3)
+	if items, usedBytes := b.usage(); items != 1 || usedBytes != 7 {
+		t.Fatalf("usage after rollback = (%d,%d), want (1,7)", items, usedBytes)
+	}
+}
+
 func TestBufferCapacityWaitersAreFIFO(t *testing.T) {
 	b := newBuffer[encodedMsg](3, 3)
 	if err := b.reserve(context.Background(), 3); err != nil {
@@ -207,6 +238,86 @@ func TestBufferRecoveryDoesNotDoubleChargeBytes(t *testing.T) {
 	b.requeue()
 	if items, bytes := b.usage(); items != 1 || bytes != 7 {
 		t.Fatalf("usage after requeue = (%d, %d), want (1, 7)", items, bytes)
+	}
+}
+
+func TestBufferRecoverySlicesOutsideMutex(t *testing.T) {
+	b := newBuffer[string](3, 30)
+	if err := b.reserve(context.Background(), 10); err != nil {
+		t.Fatalf("reserve first: %v", err)
+	}
+	if err := b.appendUnits(0, "full", 5, 10); err != nil {
+		t.Fatalf("append first: %v", err)
+	}
+	if _, err := b.next(context.Background()); err != nil {
+		t.Fatalf("next first: %v", err)
+	}
+	if _, _, err := b.acknowledge(AckResolution{
+		FullyAcknowledgedOffset: -1,
+		PartialOffset:           0,
+		PartialUnits:            2,
+		AcknowledgedUnits:       2,
+	}); err != nil {
+		t.Fatalf("partial acknowledge: %v", err)
+	}
+
+	sliceStarted := make(chan struct{})
+	releaseSlice := make(chan struct{})
+	requeueDone := make(chan error, 1)
+	go func() {
+		requeueDone <- b.requeueWithSlicer(func(
+			payload string,
+			acknowledgedPrefix uint64,
+		) (string, error) {
+			close(sliceStarted)
+			<-releaseSlice
+			if payload != "full" || acknowledgedPrefix != 2 {
+				return "", fmt.Errorf(
+					"slice input = (%q,%d), want (full,2)",
+					payload,
+					acknowledgedPrefix,
+				)
+			}
+			return "suffix", nil
+		})
+	}()
+	<-sliceStarted
+
+	// Queue admission must not wait for the decode/slice/re-encode transform.
+	admitted := make(chan error, 1)
+	go func() {
+		if err := b.reserve(context.Background(), 10); err != nil {
+			admitted <- err
+			return
+		}
+		admitted <- b.appendUnits(1, "later", 1, 10)
+	}()
+	select {
+	case err := <-admitted:
+		if err != nil {
+			t.Fatalf("concurrent admission: %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("concurrent admission blocked behind recovery slicer")
+	}
+
+	close(releaseSlice)
+	if err := <-requeueDone; err != nil {
+		t.Fatalf("requeueWithSlicer: %v", err)
+	}
+	first, err := b.next(context.Background())
+	if err != nil {
+		t.Fatalf("next sliced: %v", err)
+	}
+	if first.payload != "suffix" || first.units != 3 || first.ackedUnits != 0 {
+		t.Fatalf("sliced item = %+v", first)
+	}
+	second, err := b.next(context.Background())
+	if err != nil {
+		t.Fatalf("next concurrent: %v", err)
+	}
+	if second.payload != "later" || second.offset != 1 {
+		t.Fatalf("concurrently admitted item = %+v", second)
 	}
 }
 

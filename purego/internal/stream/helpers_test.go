@@ -88,12 +88,14 @@ func (f *fakeRPC) ack(offset int64) {
 
 type controlledSendRPC struct {
 	*fakeRPC
-	started   chan struct{}
-	result    chan error
-	aborted   chan struct{}
-	pauseRead chan struct{}
-	startOnce sync.Once
-	abortOnce sync.Once
+	started       chan struct{}
+	result        chan error
+	aborted       chan struct{}
+	pauseRead     chan struct{}
+	closeSent     chan struct{}
+	startOnce     sync.Once
+	abortOnce     sync.Once
+	closeSendOnce sync.Once
 }
 
 func newControlledSendRPC() *controlledSendRPC {
@@ -103,7 +105,14 @@ func newControlledSendRPC() *controlledSendRPC {
 		result:    make(chan error, 1),
 		aborted:   make(chan struct{}),
 		pauseRead: make(chan struct{}, 1),
+		closeSent: make(chan struct{}),
 	}
+}
+
+// CloseSend records the half-close, distinguishing END_STREAM from Abort.
+func (f *controlledSendRPC) CloseSend() error {
+	f.closeSendOnce.Do(func() { close(f.closeSent) })
+	return f.fakeRPC.CloseSend()
 }
 
 func (f *controlledSendRPC) Send(req *zerobuspb.EphemeralStreamRequest) error {
@@ -141,6 +150,34 @@ type controlledSendOpener struct{ rpc *controlledSendRPC }
 
 func (o *controlledSendOpener) Open(_ context.Context, _ transport.StreamParams) (wireStream[encodedMsg, ephemeralResp], error) {
 	return transport.NewFakeStreamForTesting(o.rpc), nil
+}
+
+// controlledThenPlainOpener serves a connection whose Send the test controls,
+// then a plain one so a test can see what recovery replays.
+type controlledThenPlainOpener struct {
+	mu     sync.Mutex
+	first  *controlledSendRPC
+	second *fakeRPC
+	opens  int
+}
+
+func (o *controlledThenPlainOpener) Open(_ context.Context, _ transport.StreamParams) (wireStream[encodedMsg, ephemeralResp], error) {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	o.opens++
+	switch o.opens {
+	case 1:
+		return transport.NewFakeStreamForTesting(o.first), nil
+	case 2:
+		return transport.NewFakeStreamForTesting(o.second), nil
+	}
+	return nil, fmt.Errorf("controlledThenPlainOpener: no more RPCs")
+}
+
+func (o *controlledThenPlainOpener) openCount() int {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	return o.opens
 }
 
 // blockedSendTerminalRPC keeps Send blocked until Abort while allowing Recv to
@@ -665,7 +702,7 @@ type blockingAckModel struct {
 	once    sync.Once
 }
 
-func (m *blockingAckModel) classify(resp ephemeralResp) (respKind, int64, pauseSignal) {
+func (m *blockingAckModel) classify(resp ephemeralResp) responseClassification {
 	m.once.Do(func() { close(m.entered) })
 	<-m.release
 	return (offsetAckModel{}).classify(resp)
