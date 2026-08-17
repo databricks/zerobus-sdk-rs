@@ -196,9 +196,6 @@ func (p *Protocol) EncodeRecordBatch(batch arrow.RecordBatch) (*Payload, error) 
 // reserializes it, hydrating dictionary state into a standalone stream rather
 // than depending on the caller's frames.
 func (p *Protocol) EncodeIPC(data []byte) (*Payload, error) {
-	if _, err := preflightIPCExpansion(data); err != nil {
-		return nil, err
-	}
 	batch, err := p.decodeOne(data)
 	if err != nil {
 		return nil, err
@@ -318,6 +315,15 @@ func (p *Protocol) Slice(payload *Payload, acknowledgedPrefix uint64) (*Payload,
 		return nil, fmt.Errorf("arrow protocol: decode payload for slicing: %w", err)
 	}
 	defer batch.Release()
+	// The prefix was checked against the header count, so a decoded batch that
+	// disagrees would make NewSlice panic on an out-of-range bound.
+	if uint64(batch.NumRows()) != payload.rows {
+		return nil, fmt.Errorf(
+			"arrow protocol: payload row count changed: header=%d decoded=%d",
+			payload.rows,
+			batch.NumRows(),
+		)
+	}
 
 	suffix := batch.NewSlice(int64(acknowledgedPrefix), batch.NumRows())
 	defer suffix.Release()
@@ -374,6 +380,12 @@ func (p *Protocol) EncoderHooks() stream.EncoderHooks[*Payload] {
 		},
 		RetainedSize: func(rawBytes, recordCount int) int64 {
 			return payloadOverheadBytes + int64(rawBytes) + int64(recordCount)*8
+		},
+		// Canonicalizing re-serializes with this protocol's compression, so the
+		// input length says nothing about what the payload retains: compressed
+		// input expands, uncompressed input may shrink. Charge the real figure.
+		ActualRetainedSize: func(payload *Payload) int64 {
+			return payload.RetainedSize()
 		},
 	}
 }
@@ -507,6 +519,22 @@ func (p *Protocol) payloadFromCanonicalIPC(
 	if len(data) == 0 || rows == 0 || len(chunkRows) == 0 {
 		return nil, fmt.Errorf("arrow protocol: canonical IPC payload is empty")
 	}
+	// A plan that does not cover exactly the rows the payload reports would
+	// otherwise surface as a short submission mid-send, long after encoding.
+	var planned int64
+	for _, rowCount := range chunkRows {
+		if rowCount <= 0 || planned > math.MaxInt64-rowCount {
+			return nil, fmt.Errorf("arrow protocol: invalid Flight chunk plan")
+		}
+		planned += rowCount
+	}
+	if uint64(planned) != rows {
+		return nil, fmt.Errorf(
+			"arrow protocol: Flight chunk plan covers %d of %d rows",
+			planned,
+			rows,
+		)
+	}
 	// data is the serializer's own buffer, which nothing else aliases, so the
 	// payload can adopt it without a second full copy.
 	return &Payload{ipcBytes: data, rows: rows, chunkRows: chunkRows}, nil
@@ -530,52 +558,151 @@ func exactSchemaEqual(left, right *arrow.Schema) bool {
 		left.Metadata().Equal(right.Metadata())
 }
 
+// totalRecordBufferSize sums the bytes a batch's columns hold. A slice shares
+// its parent's buffers, so a buffer's own length reports the parent's whole
+// extent: charging that would reject a ten-row slice of a million-row batch.
+// Layouts with a derivable per-row extent are charged for their own rows only;
+// the rest fall back to whole buffers, an over-estimate that reconciliation
+// corrects once the payload exists.
 func totalRecordBufferSize(batch arrow.RecordBatch) int64 {
 	seen := make(map[*memory.Buffer]struct{})
-	var totalData func(arrow.ArrayData) int64
-	totalData = func(data arrow.ArrayData) int64 {
-		if data == nil {
-			return 0
-		}
-		if concrete, ok := data.(*array.Data); ok && concrete == nil {
-			return 0
-		}
-		var total int64
-		for _, buffer := range data.Buffers() {
-			if buffer == nil {
-				continue
-			}
-			if _, exists := seen[buffer]; exists {
-				continue
-			}
-			seen[buffer] = struct{}{}
-			if size, err := addInt64Saturating(total, int64(buffer.Len())); err != nil {
-				return math.MaxInt64
-			} else {
-				total = size
-			}
-		}
-		for _, child := range data.Children() {
-			if size, err := addInt64Saturating(total, totalData(child)); err != nil {
-				return math.MaxInt64
-			} else {
-				total = size
-			}
-		}
-		if size, err := addInt64Saturating(total, totalData(data.Dictionary())); err != nil {
-			return math.MaxInt64
-		} else {
-			total = size
-		}
-		return total
-	}
 	var total int64
 	for _, column := range batch.Columns() {
-		if size, err := addInt64Saturating(total, totalData(column.Data())); err != nil {
+		size, err := addInt64Saturating(total, arrayDataSize(column.Data(), seen))
+		if err != nil {
 			return math.MaxInt64
-		} else {
-			total = size
 		}
+		total = size
+	}
+	return total
+}
+
+func arrayDataSize(data arrow.ArrayData, seen map[*memory.Buffer]struct{}) int64 {
+	if data == nil {
+		return 0
+	}
+	if concrete, ok := data.(*array.Data); ok && concrete == nil {
+		return 0
+	}
+	total := ownedBufferSize(data, seen)
+	for _, child := range data.Children() {
+		size, err := addInt64Saturating(total, arrayDataSize(child, seen))
+		if err != nil {
+			return math.MaxInt64
+		}
+		total = size
+	}
+	// A dictionary is shared whole rather than sliced per row, so it is charged
+	// in full through the same recursion.
+	size, err := addInt64Saturating(total, arrayDataSize(data.Dictionary(), seen))
+	if err != nil {
+		return math.MaxInt64
+	}
+	return size
+}
+
+// ownedBufferSize charges one array node for the rows it actually covers.
+func ownedBufferSize(data arrow.ArrayData, seen map[*memory.Buffer]struct{}) int64 {
+	rows := int64(data.Len())
+	buffers := data.Buffers()
+	if rows < 0 {
+		return wholeBufferSize(buffers, seen)
+	}
+	var validityBytes int64
+	if len(buffers) > 0 && buffers[0] != nil {
+		validityBytes = bitmapBytes(rows)
+	}
+	switch dataType := data.DataType().(type) {
+	case *arrow.StringType, *arrow.BinaryType:
+		if valueBytes, ok := variableWidthValueBytes(data, rows, false); ok {
+			return validityBytes + (rows+1)*4 + valueBytes
+		}
+	case *arrow.LargeStringType, *arrow.LargeBinaryType:
+		if valueBytes, ok := variableWidthValueBytes(data, rows, true); ok {
+			return validityBytes + (rows+1)*8 + valueBytes
+		}
+	case arrow.FixedWidthDataType:
+		// A wider layout would put row data in a buffer this arithmetic does not
+		// know about, so only the canonical validity+values shape is derived.
+		if len(buffers) <= 2 {
+			return validityBytes + fixedWidthValueBytes(rows, dataType.BitWidth())
+		}
+	}
+	return wholeBufferSize(buffers, seen)
+}
+
+// variableWidthValueBytes reads the offsets buffer to size exactly the values
+// this array's rows reference.
+func variableWidthValueBytes(
+	data arrow.ArrayData,
+	rows int64,
+	large bool,
+) (int64, bool) {
+	buffers := data.Buffers()
+	if len(buffers) != 3 || buffers[1] == nil {
+		return 0, false
+	}
+	start := int64(data.Offset())
+	end := start + rows
+	if start < 0 || end < start {
+		return 0, false
+	}
+	var first, last int64
+	if large {
+		offsets := arrow.Int64Traits.CastFromBytes(buffers[1].Bytes())
+		if int64(len(offsets)) <= end {
+			return 0, false
+		}
+		first, last = offsets[start], offsets[end]
+	} else {
+		offsets := arrow.Int32Traits.CastFromBytes(buffers[1].Bytes())
+		if int64(len(offsets)) <= end {
+			return 0, false
+		}
+		first, last = int64(offsets[start]), int64(offsets[end])
+	}
+	if first < 0 || last < first {
+		return 0, false
+	}
+	return last - first, true
+}
+
+func fixedWidthValueBytes(rows int64, bitWidth int) int64 {
+	if bitWidth <= 0 {
+		return 0
+	}
+	if bitWidth < 8 {
+		return bitmapBytes(rows)
+	}
+	width := int64(bitWidth / 8)
+	if rows > math.MaxInt64/width {
+		return math.MaxInt64
+	}
+	return rows * width
+}
+
+func bitmapBytes(rows int64) int64 {
+	return (rows + 7) / 8
+}
+
+func wholeBufferSize(
+	buffers []*memory.Buffer,
+	seen map[*memory.Buffer]struct{},
+) int64 {
+	var total int64
+	for _, buffer := range buffers {
+		if buffer == nil {
+			continue
+		}
+		if _, exists := seen[buffer]; exists {
+			continue
+		}
+		seen[buffer] = struct{}{}
+		size, err := addInt64Saturating(total, int64(buffer.Len()))
+		if err != nil {
+			return math.MaxInt64
+		}
+		total = size
 	}
 	return total
 }
@@ -643,6 +770,11 @@ func cloneSchemaThroughIPC(
 func (p *Protocol) decodeOne(data []byte) (arrow.RecordBatch, error) {
 	if len(data) == 0 {
 		return nil, fmt.Errorf("arrow protocol: IPC input is empty")
+	}
+	// Cross-check declared message and buffer sizes against the input before
+	// Arrow allocates against them: every decode entry point runs through here.
+	if _, err := preflightIPCExpansion(data); err != nil {
+		return nil, err
 	}
 	source := bytes.NewReader(data)
 	reader, err := ipc.NewReader(
@@ -789,7 +921,6 @@ type chunkSearch struct {
 }
 
 type chunkMeasurement struct {
-	maxBytes    int
 	recordBytes int
 }
 
@@ -843,7 +974,7 @@ func (p *Protocol) findChunkRows(
 		return measured, err
 	}
 	fits := func(measured chunkMeasurement) bool {
-		return measured.maxBytes <= TargetFlightDataBytes
+		return measured.recordBytes <= TargetFlightDataBytes
 	}
 
 	measured, err := measure(estimated)
@@ -984,17 +1115,24 @@ func (p *Protocol) measureChunk(
 			sizer.recordFrames,
 		)
 	}
-	return chunkMeasurement{
-		maxBytes:    sizer.maxBytes,
-		recordBytes: sizer.recordBytes,
-	}, nil
+	// Slicing rows never shrinks a dictionary, so an oversized one is a property
+	// of the batch. Report it here rather than letting the row search bottom out
+	// at one row and blame the row.
+	if sizer.dictionaryBytes > TargetFlightDataBytes {
+		return chunkMeasurement{}, fmt.Errorf(
+			"arrow protocol: dictionary FlightData is %d bytes, exceeds %d-byte target",
+			sizer.dictionaryBytes,
+			TargetFlightDataBytes,
+		)
+	}
+	return chunkMeasurement{recordBytes: sizer.recordBytes}, nil
 }
 
 type flightDataSizer struct {
-	skipSchema   bool
-	maxBytes     int
-	recordBytes  int
-	recordFrames int
+	skipSchema      bool
+	recordBytes     int
+	recordFrames    int
+	dictionaryBytes int
 }
 
 func (s *flightDataSizer) Send(frame *flight.FlightData) error {
@@ -1011,12 +1149,14 @@ func (s *flightDataSizer) Send(frame *flight.FlightData) error {
 	}
 	frame.AppMetadata = []byte(`{"offset_id":9223372036854775807}`)
 	size := proto.Size(frame)
-	if size > s.maxBytes {
-		s.maxBytes = size
-	}
+	// The record frame alone decides the row count. A dictionary rides in its own
+	// frame, and the live writer emits it once per connection rather than once
+	// per chunk, so folding it in here would shrink every chunk for nothing.
 	if messageType == ipc.MessageRecordBatch {
 		s.recordFrames++
 		s.recordBytes = size
+	} else if size > s.dictionaryBytes {
+		s.dictionaryBytes = size
 	}
 	return nil
 }

@@ -92,6 +92,11 @@ func (m *FlightAckMetadata) UnmarshalJSON(data []byte) error {
 			return decodeRequiredJSONNumber(raw, &parsed.AckUpToRecords)
 		},
 		"close_stream_duration_ms": func(raw json.RawMessage) error {
+			// An explicit null is how many encoders write an absent optional, so
+			// it must not fail an otherwise valid acknowledgment.
+			if isJSONNull(raw) {
+				return nil
+			}
 			var duration uint64
 			if err := decodeRequiredJSONNumber(raw, &duration); err != nil {
 				return err
@@ -184,8 +189,12 @@ func decodeStrictJSONObject(
 	return seen, nil
 }
 
+func isJSONNull(raw json.RawMessage) bool {
+	return bytes.Equal(bytes.TrimSpace(raw), []byte("null"))
+}
+
 func decodeRequiredJSONNumber[T int64 | uint64](raw json.RawMessage, dst *T) error {
-	if bytes.Equal(bytes.TrimSpace(raw), []byte("null")) {
+	if isJSONNull(raw) {
 		return fmt.Errorf("must not be null")
 	}
 	if err := json.Unmarshal(raw, dst); err != nil {

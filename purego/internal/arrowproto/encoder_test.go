@@ -7,6 +7,7 @@ import (
 	"errors"
 	"io"
 	"math"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -1056,6 +1057,305 @@ func TestSchemaSeparateAndOffsetsCanRestartPerConnection(t *testing.T) {
 		if metadata.OffsetID != 0 {
 			t.Fatalf("connection %d first offset = %d", connection, metadata.OffsetID)
 		}
+	}
+}
+
+// TestIngestChargesMaterializedSizeNotCompressedInput covers the []byte hook
+// path, whose admission estimate can only be derived from the input length.
+// Canonicalizing decompresses, so charging the input would admit a payload that
+// retains orders of magnitude more than the byte limit allows.
+func TestIngestChargesMaterializedSizeNotCompressedInput(t *testing.T) {
+	const (
+		rows       = 4_096
+		valueBytes = 2_048
+		memoryCap  = 4 * 1024 * 1024
+	)
+	schema, record := binaryBatch(t, memory.DefaultAllocator, rows, valueBytes)
+	defer record.Release()
+	input := serializeRecordsWithOptions(
+		t,
+		schema,
+		[]ipc.Option{ipc.WithZstd()},
+		record,
+	)
+
+	protocol, err := New(schema, Options{})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	hooks := protocol.EncoderHooks()
+	if estimate := hooks.RetainedSize(len(input), 1); estimate > memoryCap {
+		t.Fatalf(
+			"compressed input estimate = %d, want under the %d-byte cap",
+			estimate,
+			memoryCap,
+		)
+	}
+	payload, err := protocol.EncodeIPC(input)
+	if err != nil {
+		t.Fatalf("EncodeIPC: %v", err)
+	}
+	if payload.RetainedSize() <= memoryCap {
+		t.Fatalf(
+			"materialized payload = %d bytes, want above the %d-byte cap",
+			payload.RetainedSize(),
+			memoryCap,
+		)
+	}
+	if hooks.ActualRetainedSize == nil {
+		t.Fatal("Arrow hooks report no actual retained size, so the estimate stands")
+	}
+	if got := hooks.ActualRetainedSize(payload); got != payload.RetainedSize() {
+		t.Fatalf("ActualRetainedSize = %d, want %d", got, payload.RetainedSize())
+	}
+
+	cfg := stream.DefaultConfig()
+	cfg.MaxBufferedPayloadBytes = memoryCap
+	cfg.Recovery = stream.RecoveryDisabled
+	cfg.RecoveryTimeout = time.Hour
+	open := stream.OpenFunc[*Payload, *flight.PutResult](func(
+		ctx context.Context,
+		_ stream.StreamParams,
+	) (stream.WireStream[*Payload, *flight.PutResult], error) {
+		<-ctx.Done()
+		return nil, ctx.Err()
+	})
+	core, err := stream.NewCoreStreamWithHooks(
+		context.Background(),
+		stream.StreamParams{},
+		cfg,
+		open,
+		hooks,
+		unreachableAckModel(t),
+		nil,
+	)
+	if err != nil {
+		t.Fatalf("NewCoreStreamWithHooks: %v", err)
+	}
+	t.Cleanup(func() { _ = core.Terminate() })
+
+	offset, err := core.Ingest(context.Background(), input)
+	if offset != -1 || !errors.Is(err, stream.ErrPayloadTooLarge) {
+		t.Fatalf(
+			"Ingest of compressed payload = (%d,%v), want (-1, ErrPayloadTooLarge)",
+			offset,
+			err,
+		)
+	}
+}
+
+// TestTypedAdmissionChargesSliceNotParentBuffers covers a small slice of a large
+// batch. A slice shares the parent's buffers, so charging a buffer's own length
+// would reject a payload that is a few kilobytes on the wire.
+func TestTypedAdmissionChargesSliceNotParentBuffers(t *testing.T) {
+	const (
+		rows       = 20_000
+		valueBytes = 512
+		sliceRows  = 10
+	)
+	schema, record := binaryBatch(t, memory.DefaultAllocator, rows, valueBytes)
+	defer record.Release()
+	protocol, err := New(schema, Options{})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	slice := record.NewSlice(rows-sliceRows, rows)
+	defer slice.Release()
+	estimate, err := protocol.EstimateRecordBatchRetainedSize(slice)
+	if err != nil {
+		t.Fatalf("EstimateRecordBatchRetainedSize: %v", err)
+	}
+	payload, err := protocol.EncodeRecordBatch(slice)
+	if err != nil {
+		t.Fatalf("EncodeRecordBatch: %v", err)
+	}
+	if estimate < payload.RetainedSize() {
+		t.Fatalf(
+			"slice estimate %d under-reserves its %d-byte payload",
+			estimate,
+			payload.RetainedSize(),
+		)
+	}
+	if estimate > 64*payload.RetainedSize() {
+		t.Fatalf(
+			"slice estimate %d is disproportionate to its %d-byte payload",
+			estimate,
+			payload.RetainedSize(),
+		)
+	}
+	parentEstimate, err := protocol.EstimateRecordBatchRetainedSize(record)
+	if err != nil {
+		t.Fatalf("EstimateRecordBatchRetainedSize(parent): %v", err)
+	}
+	if estimate > parentEstimate/100 {
+		t.Fatalf(
+			"slice estimate %d tracks the %d-byte parent rather than its own rows",
+			estimate,
+			parentEstimate,
+		)
+	}
+}
+
+// TestAdmissionCoversMaterializedPayloadAcrossLayouts pins the direction that
+// matters for the byte limit: a reservation may be generous, never short. Each
+// layout reaches a different branch of the per-row sizing, and a slice exercises
+// the branch that cannot read its extent off a buffer length.
+func TestAdmissionCoversMaterializedPayloadAcrossLayouts(t *testing.T) {
+	allocator := memory.DefaultAllocator
+	fixedSchema := idSchema(nil)
+	fixedRecord := idBatch(t, allocator, fixedSchema, []int32{1, 2, 3, 4, 5, 6})
+	defer fixedRecord.Release()
+	variableSchema, variableRecord := binaryBatch(t, allocator, 1_000, 64)
+	defer variableRecord.Release()
+	dictionarySchema, dictionaryRecord := dictionaryBatch(t, allocator)
+	defer dictionaryRecord.Release()
+
+	for _, test := range []struct {
+		name   string
+		schema *arrow.Schema
+		record arrow.RecordBatch
+	}{
+		{name: "fixed width", schema: fixedSchema, record: fixedRecord},
+		{name: "variable width", schema: variableSchema, record: variableRecord},
+		{name: "dictionary", schema: dictionarySchema, record: dictionaryRecord},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			protocol, err := New(test.schema, Options{})
+			if err != nil {
+				t.Fatalf("New: %v", err)
+			}
+			rows := test.record.NumRows()
+			for _, span := range []struct {
+				name       string
+				start, end int64
+			}{
+				{name: "whole", start: 0, end: rows},
+				{name: "suffix", start: rows / 2, end: rows},
+			} {
+				t.Run(span.name, func(t *testing.T) {
+					batch := test.record.NewSlice(span.start, span.end)
+					defer batch.Release()
+					estimate, err := protocol.EstimateRecordBatchRetainedSize(batch)
+					if err != nil {
+						t.Fatalf("EstimateRecordBatchRetainedSize: %v", err)
+					}
+					payload, err := protocol.EncodeRecordBatch(batch)
+					if err != nil {
+						t.Fatalf("EncodeRecordBatch: %v", err)
+					}
+					if estimate < payload.RetainedSize() {
+						t.Fatalf(
+							"estimate %d under-reserves its %d-byte payload",
+							estimate,
+							payload.RetainedSize(),
+						)
+					}
+				})
+			}
+		})
+	}
+}
+
+// TestSliceRejectsPayloadWhoseRowCountDrifted keeps a corrupted invariant on the
+// error path. Slicing against a bound past the decoded batch panics, and that
+// panic would escape through recovery into the caller's goroutine.
+func TestSliceRejectsPayloadWhoseRowCountDrifted(t *testing.T) {
+	schema := idSchema(nil)
+	protocol, err := New(schema, Options{})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	record := idBatch(t, memory.DefaultAllocator, schema, []int32{1, 2, 3, 4})
+	defer record.Release()
+	payload, err := protocol.EncodeRecordBatch(record)
+	if err != nil {
+		t.Fatalf("EncodeRecordBatch: %v", err)
+	}
+
+	drifted := &Payload{
+		ipcBytes:  payload.ipcBytes,
+		rows:      64,
+		chunkRows: []int64{64},
+	}
+	_, err = protocol.Slice(drifted, 32)
+	if err == nil || !strings.Contains(err.Error(), "row count changed") {
+		t.Fatalf("Slice of a drifted payload = %v, want a row-count error", err)
+	}
+}
+
+// TestCanonicalPayloadRejectsIncompleteChunkPlan fails a plan at encode time.
+// Left alone it surfaces as a short submission mid-send, which recovery has to
+// reconcile against a payload that can never cover its rows.
+func TestCanonicalPayloadRejectsIncompleteChunkPlan(t *testing.T) {
+	protocol, err := New(idSchema(nil), Options{})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	_, err = protocol.payloadFromCanonicalIPC([]byte("ipc"), 10, []int64{4, 5})
+	if err == nil || !strings.Contains(err.Error(), "covers 9 of 10 rows") {
+		t.Fatalf("payloadFromCanonicalIPC with a short plan = %v", err)
+	}
+	_, err = protocol.payloadFromCanonicalIPC([]byte("ipc"), 10, []int64{4, -5})
+	if err == nil || !strings.Contains(err.Error(), "invalid Flight chunk plan") {
+		t.Fatalf("payloadFromCanonicalIPC with a negative chunk = %v", err)
+	}
+}
+
+// TestDecodeRejectsDeclaredSizeBeyondInput covers the decode entry points that
+// do not go through EncodeIPC. Arrow allocates against a declared length before
+// reading it, so the cross-check has to run for every decode.
+func TestDecodeRejectsDeclaredSizeBeyondInput(t *testing.T) {
+	protocol, err := New(idSchema(nil), Options{})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	data := make([]byte, 12)
+	binary.LittleEndian.PutUint32(data[0:4], 0xffffffff)
+	binary.LittleEndian.PutUint32(data[4:8], 1<<26)
+	_, err = protocol.DecodeIPCRecordBatch(data)
+	if err == nil || !strings.Contains(err.Error(), "extends beyond") {
+		t.Fatalf("DecodeIPCRecordBatch of an overlong declared size = %v", err)
+	}
+}
+
+// TestOversizedDictionaryIsReportedAsDictionary covers a dictionary too large to
+// frame. Slicing rows never shrinks it, so the row search bottoms out at one row
+// and would otherwise blame the row for a property of the batch.
+func TestOversizedDictionaryIsReportedAsDictionary(t *testing.T) {
+	const (
+		distinct   = 24_000
+		valueBytes = 128
+	)
+	dictionaryType := &arrow.DictionaryType{
+		IndexType: arrow.PrimitiveTypes.Int32,
+		ValueType: arrow.BinaryTypes.String,
+	}
+	schema := arrow.NewSchema([]arrow.Field{{
+		Name: "category", Type: dictionaryType, Nullable: false,
+	}}, nil)
+
+	builder := array.NewDictionaryBuilder(memory.DefaultAllocator, dictionaryType)
+	values := builder.(*array.BinaryDictionaryBuilder)
+	filler := strings.Repeat("x", valueBytes)
+	for index := range distinct {
+		if err := values.AppendString(strconv.Itoa(index) + filler); err != nil {
+			t.Fatalf("append dictionary value: %v", err)
+		}
+	}
+	categories := builder.NewDictionaryArray()
+	builder.Release()
+	record := array.NewRecordBatch(schema, []arrow.Array{categories}, distinct)
+	categories.Release()
+	defer record.Release()
+
+	protocol, err := New(schema, Options{})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	_, err = protocol.EncodeRecordBatch(record)
+	if err == nil || !strings.Contains(err.Error(), "dictionary FlightData") {
+		t.Fatalf("EncodeRecordBatch with an oversized dictionary = %v", err)
 	}
 }
 
