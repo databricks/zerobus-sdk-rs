@@ -1442,7 +1442,12 @@ Waits for all pending batches to be acknowledged.
 func (s *ZerobusArrowStream) Close() error
 ```
 
-Flushes and closes the stream.
+Flushes and closes the stream. Native destruction can block while background
+shutdown finishes. Serialize `Close` with every other operation on the same
+stream. The GC finalizer schedules this cleanup asynchronously; call `Close`
+explicitly when completion and errors matter.
+An internal native shutdown infrastructure failure terminates the process
+rather than returning after incomplete native destruction.
 
 ```go
 func (s *ZerobusArrowStream) GetUnackedBatches() ([][]byte, error)

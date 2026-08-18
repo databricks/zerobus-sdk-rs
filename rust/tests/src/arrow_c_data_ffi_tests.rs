@@ -16,16 +16,19 @@ const TABLE_NAME: &str = "test_catalog.test_schema.test_table";
 mod ffi_c_data_lifetime_tests {
     use std::ffi::{c_void, CStr, CString};
     use std::ptr;
-    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    use std::sync::mpsc;
     use std::time::Duration;
 
+    use databricks_zerobus_ingest_sdk::internal::arrow_c_data::import_c_data_record_batch;
+    use databricks_zerobus_ingest_sdk::ZerobusArrowStream;
     use tonic::Status;
     use zerobus_ffi::{
-        zerobus_arrow_get_default_config, zerobus_arrow_stream_flush, zerobus_arrow_stream_free,
-        zerobus_arrow_stream_ingest_c_data, zerobus_free_error_message, zerobus_sdk_builder_build,
-        zerobus_sdk_builder_disable_tls, zerobus_sdk_builder_endpoint, zerobus_sdk_builder_new,
-        zerobus_sdk_create_arrow_stream_with_headers_provider, zerobus_sdk_free, CArrowArray,
-        CArrowSchema, CHeaders, CResult,
+        zerobus_arrow_get_default_config, zerobus_arrow_stream_close, zerobus_arrow_stream_flush,
+        zerobus_arrow_stream_free, zerobus_arrow_stream_ingest_c_data, zerobus_free_error_message,
+        zerobus_sdk_builder_build, zerobus_sdk_builder_disable_tls, zerobus_sdk_builder_endpoint,
+        zerobus_sdk_builder_new, zerobus_sdk_create_arrow_stream_with_headers_provider,
+        zerobus_sdk_free, CArrowArray, CArrowSchema, CHeaders, CResult,
     };
 
     use super::{
@@ -66,6 +69,98 @@ mod ffi_c_data_lifetime_tests {
         if let Some(release) = state.inner_release {
             unsafe { release(schema) };
         }
+    }
+
+    struct TimingArrayRelease {
+        inner_release: Option<unsafe extern "C" fn(*mut FFI_ArrowArray)>,
+        inner_private_data: *mut c_void,
+        release_count: Arc<AtomicUsize>,
+    }
+
+    unsafe extern "C" fn timing_array_release(array: *mut FFI_ArrowArray) {
+        let array = unsafe { &mut *array };
+        let state = unsafe { Box::from_raw(array.private_data.cast::<TimingArrayRelease>()) };
+        array.release = state.inner_release;
+        array.private_data = state.inner_private_data;
+        state.release_count.fetch_add(1, Ordering::SeqCst);
+        if let Some(release) = state.inner_release {
+            unsafe { release(array) };
+        }
+    }
+
+    struct LockCheckingArrayRelease {
+        inner_release: Option<unsafe extern "C" fn(*mut FFI_ArrowArray)>,
+        inner_private_data: *mut c_void,
+        stream: usize,
+        locks_available: Arc<AtomicBool>,
+        release_count: Arc<AtomicUsize>,
+    }
+
+    unsafe extern "C" fn lock_checking_array_release(array: *mut FFI_ArrowArray) {
+        let array = unsafe { &mut *array };
+        let state = unsafe { Box::from_raw(array.private_data.cast::<LockCheckingArrayRelease>()) };
+        // This intentionally mirrors the opaque-handle cast in arrow.rs. If that handle
+        // gains an outer wrapper, this test hook and the production cast must change together.
+        let stream = unsafe { &*(state.stream as *const ZerobusArrowStream) };
+        state.locks_available.store(
+            stream.retained_batch_locks_available_for_test(),
+            Ordering::SeqCst,
+        );
+        state.release_count.fetch_add(1, Ordering::SeqCst);
+        array.release = state.inner_release;
+        array.private_data = state.inner_private_data;
+        if let Some(release) = state.inner_release {
+            unsafe { release(array) };
+        }
+    }
+
+    fn exported_lock_checking_batch(
+        batch: RecordBatch,
+        stream: usize,
+        locks_available: Arc<AtomicBool>,
+        release_count: Arc<AtomicUsize>,
+    ) -> (FFI_ArrowArray, FFI_ArrowSchema) {
+        let schema = batch.schema();
+        let struct_array = StructArray::from(batch);
+        let mut array = FFI_ArrowArray::new(&struct_array.to_data());
+        let array_state = Box::new(LockCheckingArrayRelease {
+            inner_release: array.release,
+            inner_private_data: array.private_data,
+            stream,
+            locks_available,
+            release_count,
+        });
+        array.release = Some(lock_checking_array_release);
+        array.private_data = Box::into_raw(array_state).cast();
+        let schema = FFI_ArrowSchema::try_from(schema.as_ref()).unwrap();
+        (array, schema)
+    }
+
+    fn exported_timing_batch(
+        batch: RecordBatch,
+        release_count: Arc<AtomicUsize>,
+        schema_releases: Arc<AtomicUsize>,
+    ) -> (FFI_ArrowArray, FFI_ArrowSchema) {
+        let schema = batch.schema();
+        let struct_array = StructArray::from(batch);
+        let mut array = FFI_ArrowArray::new(&struct_array.to_data());
+        let array_state = Box::new(TimingArrayRelease {
+            inner_release: array.release,
+            inner_private_data: array.private_data,
+            release_count,
+        });
+        array.release = Some(timing_array_release);
+        array.private_data = Box::into_raw(array_state).cast();
+
+        let mut schema = FFI_ArrowSchema::try_from(schema.as_ref()).unwrap();
+        let schema_state = Box::new(CountingSchemaRelease {
+            inner_release: schema.release,
+            inner_private_data: schema.private_data,
+            releases: schema_releases,
+        });
+        schema.release = Some(counting_schema_release);
+        schema.private_data = Box::into_raw(schema_state).cast();
+        (array, schema)
     }
 
     fn exported_counting_batch(
@@ -217,6 +312,24 @@ mod ffi_c_data_lifetime_tests {
         .unwrap()
     }
 
+    async fn close_ffi_stream(stream: usize) -> Result<(), String> {
+        tokio::task::spawn_blocking(move || {
+            let mut result = CResult {
+                success: true,
+                error_message: ptr::null_mut(),
+                is_retryable: false,
+            };
+            if zerobus_arrow_stream_close(stream as *mut _, &mut result) {
+                Ok(())
+            } else {
+                Err(take_result_error(&mut result)
+                    .unwrap_or_else(|| "Arrow stream close failed without a message".to_string()))
+            }
+        })
+        .await
+        .unwrap()
+    }
+
     async fn free_ffi_handles(sdk: usize, stream: usize) {
         tokio::task::spawn_blocking(move || {
             zerobus_arrow_stream_free(stream as *mut _);
@@ -234,6 +347,38 @@ mod ffi_c_data_lifetime_tests {
         })
         .await
         .expect("release callback did not run before timeout");
+    }
+
+    struct TestBarrierGuard(Option<Arc<tokio::sync::Notify>>);
+
+    impl TestBarrierGuard {
+        fn release(&mut self) {
+            if let Some(proceed) = self.0.take() {
+                proceed.notify_one();
+            }
+        }
+    }
+
+    impl Drop for TestBarrierGuard {
+        fn drop(&mut self) {
+            self.release();
+        }
+    }
+
+    async fn wait_for_free_completion(
+        completion: &mut mpsc::Receiver<()>,
+    ) -> Result<(), &'static str> {
+        loop {
+            match completion.try_recv() {
+                Ok(()) => return Ok(()),
+                Err(mpsc::TryRecvError::Empty) => {
+                    tokio::time::sleep(Duration::from_millis(1)).await
+                }
+                Err(mpsc::TryRecvError::Disconnected) => {
+                    return Err("stream free thread exited without reporting completion");
+                }
+            }
+        }
     }
 
     #[tokio::test]
@@ -317,8 +462,247 @@ mod ffi_c_data_lifetime_tests {
         );
 
         free_ffi_handles(sdk, stream).await;
-        wait_for_release_count(array_releases.as_ref(), 1).await;
+        assert_eq!(
+            array_releases.load(Ordering::SeqCst),
+            1,
+            "failed unacknowledged owner must be released during stream free, not later"
+        );
         assert_eq!(schema_releases.load(Ordering::SeqCst), 1);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn ffi_c_data_owner_remains_released_after_close_then_free(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let (mock_server, server_url) = start_mock_flight_server().await?;
+        let schema = create_test_arrow_schema();
+        mock_server
+            .inject_responses(
+                TABLE_NAME,
+                vec![MockFlightResponse::BatchAck {
+                    ack_up_to_offset: 0,
+                    delay_ms: 0,
+                    ack_up_to_records: 1,
+                }],
+            )
+            .await;
+        let (sdk, stream) = create_ffi_stream(server_url, Arc::clone(&schema)).await?;
+        let array_releases = Arc::new(AtomicUsize::new(0));
+        let schema_releases = Arc::new(AtomicUsize::new(0));
+        let batch = create_test_record_batch(schema, vec![1], vec![Some("closed")]);
+        let (array, schema) = exported_counting_batch(
+            batch,
+            Arc::clone(&array_releases),
+            Arc::clone(&schema_releases),
+        );
+
+        assert_eq!(ingest_ffi_batch(stream, array, schema).await?, 0);
+        close_ffi_stream(stream).await?;
+        assert_eq!(array_releases.load(Ordering::SeqCst), 1);
+        assert_eq!(schema_releases.load(Ordering::SeqCst), 1);
+
+        free_ffi_handles(sdk, stream).await;
+        assert_eq!(array_releases.load(Ordering::SeqCst), 1);
+        assert_eq!(schema_releases.load(Ordering::SeqCst), 1);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn ffi_c_data_release_callbacks_run_without_retained_batch_locks(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let (_mock_server, server_url) = start_mock_flight_server().await?;
+        let schema = create_test_arrow_schema();
+        let (sdk, stream) = create_ffi_stream(server_url, Arc::clone(&schema)).await?;
+        let locks_available = Arc::new(AtomicBool::new(false));
+        let release_count = Arc::new(AtomicUsize::new(0));
+        let batch = create_test_record_batch(schema, vec![1], vec![Some("retained")]);
+        let (array, schema_ffi) = exported_lock_checking_batch(
+            batch,
+            stream,
+            Arc::clone(&locks_available),
+            Arc::clone(&release_count),
+        );
+        let batch = unsafe { import_c_data_record_batch(array, schema_ffi) }?;
+
+        // This intentionally mirrors the opaque-handle cast in arrow.rs. If that handle
+        // gains an outer wrapper, this test hook and the production cast must change together.
+        let stream_ref = unsafe { &*(stream as *const ZerobusArrowStream) };
+        stream_ref.retain_failed_batch_for_test(batch).await;
+        assert_eq!(release_count.load(Ordering::SeqCst), 0);
+
+        free_ffi_handles(sdk, stream).await;
+
+        assert_eq!(release_count.load(Ordering::SeqCst), 1);
+        assert!(
+            locks_available.load(Ordering::SeqCst),
+            "release callback must not run while retained-batch locks are held"
+        );
+        Ok(())
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn ffi_c_data_free_from_multithread_runtime_releases_before_return(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let (_mock_server, server_url) = start_mock_flight_server().await?;
+        let schema = create_test_arrow_schema();
+        let (sdk, stream) = create_ffi_stream(server_url, Arc::clone(&schema)).await?;
+        let array_releases = Arc::new(AtomicUsize::new(0));
+        let schema_releases = Arc::new(AtomicUsize::new(0));
+        let batch = create_test_record_batch(schema, vec![1], vec![Some("multi-thread free")]);
+        let (array, schema_ffi) = exported_counting_batch(
+            batch,
+            Arc::clone(&array_releases),
+            Arc::clone(&schema_releases),
+        );
+        let batch = unsafe { import_c_data_record_batch(array, schema_ffi) }?;
+        // This mirrors the opaque-handle cast in arrow.rs and must change with it.
+        let stream_ref = unsafe { &*(stream as *const ZerobusArrowStream) };
+        stream_ref.retain_failed_batch_for_test(batch).await;
+
+        zerobus_arrow_stream_free(stream as *mut _);
+
+        assert_eq!(array_releases.load(Ordering::SeqCst), 1);
+        assert_eq!(schema_releases.load(Ordering::SeqCst), 1);
+        tokio::task::spawn_blocking(move || zerobus_sdk_free(sdk as *mut _))
+            .await
+            .expect("sdk free task panicked");
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn ffi_c_data_request_body_owner_releases_before_free_returns(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let (mock_server, server_url) = start_mock_flight_server().await?;
+        let schema = create_test_arrow_schema();
+        mock_server
+            .inject_responses(
+                TABLE_NAME,
+                vec![MockFlightResponse::BatchAck {
+                    ack_up_to_offset: 0,
+                    delay_ms: 5_000,
+                    ack_up_to_records: 3,
+                }],
+            )
+            .await;
+        let (sdk, stream) = create_ffi_stream(server_url, Arc::clone(&schema)).await?;
+        let release_count = Arc::new(AtomicUsize::new(0));
+        let schema_releases = Arc::new(AtomicUsize::new(0));
+        let batch =
+            create_test_record_batch(schema, vec![1, 2, 3], vec![Some("a"), Some("b"), Some("c")]);
+        let (array, schema_ffi) = exported_timing_batch(
+            batch,
+            Arc::clone(&release_count),
+            Arc::clone(&schema_releases),
+        );
+
+        let (before_batch_poll_reached, before_batch_poll_proceed) = {
+            // This mirrors the opaque-handle cast in arrow.rs and must change with it.
+            let stream_ref = unsafe { &*(stream as *const ZerobusArrowStream) };
+            stream_ref
+                .arm_request_body_before_batch_poll_barrier()
+                .await
+        };
+        let mut before_batch_poll_guard = TestBarrierGuard(Some(before_batch_poll_proceed));
+        assert_eq!(ingest_ffi_batch(stream, array, schema_ffi).await?, 0);
+        tokio::time::timeout(Duration::from_secs(5), before_batch_poll_reached.notified())
+            .await
+            .expect("request body must park before consuming the queued batch");
+        assert_eq!(schema_releases.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            release_count.load(Ordering::SeqCst),
+            0,
+            "array owner must remain alive while the batch is pending"
+        );
+
+        let (
+            request_shutdown_reached,
+            request_shutdown_proceed,
+            retained_batches_cleared,
+            free_shutdown_complete_reached,
+            free_shutdown_complete_proceed,
+        ) = {
+            // This mirrors the opaque-handle cast in arrow.rs and must change with it.
+            let stream_ref = unsafe { &*(stream as *const ZerobusArrowStream) };
+            let (request_shutdown_reached, request_shutdown_proceed) =
+                stream_ref.arm_request_body_shutdown_barrier().await;
+            let retained_batches_cleared = stream_ref.arm_retained_batches_cleared_notify().await;
+            let (free_shutdown_complete_reached, free_shutdown_complete_proceed) =
+                stream_ref.arm_free_shutdown_complete_barrier().await;
+            (
+                request_shutdown_reached,
+                request_shutdown_proceed,
+                retained_batches_cleared,
+                free_shutdown_complete_reached,
+                free_shutdown_complete_proceed,
+            )
+        };
+        let mut request_shutdown_guard = TestBarrierGuard(Some(request_shutdown_proceed));
+        let mut free_shutdown_complete_guard =
+            TestBarrierGuard(Some(free_shutdown_complete_proceed));
+
+        let (free_completed_tx, mut free_completed_rx) = mpsc::channel();
+        drop(std::thread::spawn(move || {
+            zerobus_arrow_stream_free(stream as *mut _);
+            let _ = free_completed_tx.send(());
+        }));
+
+        tokio::time::timeout(Duration::from_secs(5), async {
+            tokio::select! {
+                _ = request_shutdown_reached.notified() => Ok(()),
+                _ = free_shutdown_complete_reached.notified() => Err(
+                    "free reached its pre-return boundary without shutting down the request body"
+                ),
+                result = wait_for_free_completion(&mut free_completed_rx) => {
+                    result.and(Err(
+                        "zerobus_arrow_stream_free returned before request-body shutdown"
+                    ))
+                },
+            }
+        })
+        .await
+        .expect("request body must observe forced shutdown")?;
+
+        tokio::time::timeout(Duration::from_secs(5), retained_batches_cleared.notified())
+            .await
+            .expect("destructive free must clear retained batches before waiting for request EOF");
+        assert_eq!(
+            release_count.load(Ordering::SeqCst),
+            0,
+            "the blocked request body must retain the owner after SDK collections are cleared"
+        );
+
+        before_batch_poll_guard.release();
+        request_shutdown_guard.release();
+        tokio::time::timeout(
+            Duration::from_secs(5),
+            free_shutdown_complete_reached.notified(),
+        )
+        .await
+        .expect("free must reach its completed pre-return boundary");
+
+        assert_eq!(
+            release_count.load(Ordering::SeqCst),
+            1,
+            "all request-body and SDK owners must release before the pre-return boundary"
+        );
+        assert!(matches!(
+            free_completed_rx.try_recv(),
+            Err(mpsc::TryRecvError::Empty)
+        ));
+
+        free_shutdown_complete_guard.release();
+        tokio::time::timeout(
+            Duration::from_secs(5),
+            wait_for_free_completion(&mut free_completed_rx),
+        )
+        .await
+        .expect("zerobus_arrow_stream_free did not complete after shutdown proceeded")?;
+
+        tokio::task::spawn_blocking(move || {
+            zerobus_sdk_free(sdk as *mut _);
+        })
+        .await
+        .expect("sdk free task panicked");
         Ok(())
     }
 }

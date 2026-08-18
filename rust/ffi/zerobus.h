@@ -37,6 +37,9 @@ typedef struct CHeaders {
 
 /**
  * Opaque handle for an Arrow Flight stream.
+ *
+ * FFI pointers are `Box<ZerobusArrowStream>` addresses cast to this type.
+ * Creation, validation, test-hook casts, and `Box::from_raw` must stay coupled.
  */
 typedef struct CArrowStream {
   uint8_t _private[0];
@@ -302,6 +305,20 @@ struct CArrowStream *zerobus_sdk_create_arrow_stream_with_headers_provider(struc
 
 /**
  * Frees an Arrow Flight stream instance.
+ *
+ * This call blocks until background shutdown completes, every Flight request body reaches EOF
+ * or is dropped, and all retained Arrow C Data owners are released. If shutdown takes longer
+ * than 30 seconds, it logs a warning every 30 seconds while continuing to wait. It does not
+ * return on a timeout.
+ * When the calling restrictions below are respected, no Arrow C Data release callback for this
+ * stream can run after this function returns.
+ * An internal shutdown panic, a required helper-thread spawn failure, or a helper-thread panic
+ * terminates the process rather than returning without that guarantee.
+ *
+ * Do not race this function with another operation on the same stream handle. Freeing this same
+ * stream reentrantly from one of its SDK callbacks is unsupported because shutdown would wait
+ * for the callback that is making the call. Freeing a different stream from a callback remains
+ * supported.
  */
 void zerobus_arrow_stream_free(struct CArrowStream *stream);
 
@@ -329,9 +346,10 @@ int64_t zerobus_arrow_stream_ingest_batch(struct CArrowStream *stream,
  * `ArrowArray` / `ArrowSchema` structure satisfying the Arrow C Data
  * Interface. All referenced children, dictionaries, buffers, `private_data`,
  * and release callbacks must remain valid for the lifetime required by the
- * producer contract. After ownership transfer, the SDK may invoke release
- * asynchronously on an internal runtime thread. Release callbacks must
- * therefore be thread-safe and must not unwind or throw across the C ABI.
+ * producer contract. After ownership transfer, release callbacks may run on
+ * any thread that drops the final owner, including SDK runtime/transport
+ * threads or the thread calling `zerobus_arrow_stream_free`. They must be
+ * thread-safe and must not unwind or throw across the C ABI.
  *
  * Malformed, dangling, or malicious structures are caller undefined behavior
  * and cannot be safely validated by this function.

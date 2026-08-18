@@ -68,7 +68,8 @@ Because every non-Rust SDK crosses a foreign-function boundary, keep these in mi
 
 ### Thread safety
 - Rust core is async (tokio). The FFI layer manages its own tokio runtime.
-- Go: safe for concurrent goroutines.
+- Go: concurrent ingestion is internally synchronized. Serialize `Close` with
+  every other operation on the same stream.
 - Python: async streams are safe; sync streams are single-threaded per instance.
 - TypeScript: async-safe via Node.js event loop.
 - Java: **not thread-safe** — external synchronization required for concurrent access.

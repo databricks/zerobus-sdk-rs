@@ -4,6 +4,7 @@ use crate::arrow_c_data::{CArrowArray, CArrowSchema};
 use crate::common::*;
 use arrow_ipc::{reader::StreamReader, writer::StreamWriter, CompressionType};
 use bytes::Bytes;
+use databricks_zerobus_ingest_sdk::internal::abort_arrow_stream_and_wait;
 use databricks_zerobus_ingest_sdk::internal::arrow_c_data::{
     import_c_data_record_batch, FFI_ArrowArray, FFI_ArrowSchema,
 };
@@ -11,14 +12,23 @@ use databricks_zerobus_ingest_sdk::{
     HeadersProvider, RecordBatch, StreamBuilder, ZerobusArrowStream, ZerobusError, ZerobusResult,
 };
 use std::os::raw::c_char;
+use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::ptr;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex as StdMutex};
+use std::thread;
+use std::time::Duration;
+use tracing::{error, warn};
 
 // ============================================================================
 // Arrow Flight FFI
 // ============================================================================
 
+const ARROW_STREAM_SHUTDOWN_WARNING_AFTER: Duration = Duration::from_secs(30);
+
 /// Opaque handle for an Arrow Flight stream.
+///
+/// FFI pointers are `Box<ZerobusArrowStream>` addresses cast to this type.
+/// Creation, validation, test-hook casts, and `Box::from_raw` must stay coupled.
 #[repr(C)]
 pub struct CArrowStream {
     _private: [u8; 0],
@@ -291,13 +301,102 @@ pub extern "C" fn zerobus_sdk_create_arrow_stream_with_headers_provider(
     })
 }
 
+fn abort_and_drop_arrow_stream(stream: Box<ZerobusArrowStream>) {
+    let mut stream = Some(stream);
+    let shutdown = catch_unwind(AssertUnwindSafe(|| {
+        let stream_ref = stream
+            .as_ref()
+            .expect("Arrow stream must remain owned during shutdown");
+        RUNTIME.block_on(async {
+            let shutdown = abort_arrow_stream_and_wait(stream_ref);
+            tokio::pin!(shutdown);
+            while tokio::time::timeout(ARROW_STREAM_SHUTDOWN_WARNING_AFTER, &mut shutdown)
+                .await
+                .is_err()
+            {
+                warn!(
+                    threshold_seconds = ARROW_STREAM_SHUTDOWN_WARNING_AFTER.as_secs(),
+                    "Arrow stream background shutdown is still running; continuing to wait"
+                );
+            }
+        });
+        drop(
+            stream
+                .take()
+                .expect("Arrow stream must remain owned until shutdown completes"),
+        );
+    }));
+
+    if shutdown.is_err() {
+        error!("Arrow stream shutdown or destruction panicked; aborting process");
+        std::process::abort();
+    }
+}
+
+fn abort_and_drop_arrow_stream_on_thread(stream: Box<ZerobusArrowStream>) {
+    let stream_slot = Arc::new(StdMutex::new(Some(stream)));
+    let worker_slot = Arc::clone(&stream_slot);
+    let worker = thread::Builder::new()
+        .name("zerobus-arrow-free".to_string())
+        .spawn(move || {
+            let mut slot = worker_slot
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let stream = slot
+                .take()
+                .expect("Arrow stream shutdown has exactly one owner");
+            drop(slot);
+            abort_and_drop_arrow_stream(stream);
+        });
+
+    let worker = match worker {
+        Ok(worker) => worker,
+        Err(error) => {
+            // Leaking only the stream cannot preserve the callback guarantee: an ACK
+            // can already have moved the last SDK-owned batch into the request body,
+            // which may release it after this function returns.
+            error!(%error, "Unable to start Arrow stream shutdown thread; aborting process");
+            std::process::abort();
+        }
+    };
+
+    if worker.join().is_err() {
+        error!("Arrow stream shutdown thread panicked; aborting process");
+        std::process::abort();
+    }
+}
+
 /// Frees an Arrow Flight stream instance.
+///
+/// This call blocks until background shutdown completes, every Flight request body reaches EOF
+/// or is dropped, and all retained Arrow C Data owners are released. If shutdown takes longer
+/// than 30 seconds, it logs a warning every 30 seconds while continuing to wait. It does not
+/// return on a timeout.
+/// When the calling restrictions below are respected, no Arrow C Data release callback for this
+/// stream can run after this function returns.
+/// An internal shutdown panic, a required helper-thread spawn failure, or a helper-thread panic
+/// terminates the process rather than returning without that guarantee.
+///
+/// Do not race this function with another operation on the same stream handle. Freeing this same
+/// stream reentrantly from one of its SDK callbacks is unsupported because shutdown would wait
+/// for the callback that is making the call. Freeing a different stream from a callback remains
+/// supported.
 #[no_mangle]
 pub extern "C" fn zerobus_arrow_stream_free(stream: *mut CArrowStream) {
     ffi_guard(ptr::null_mut(), (), move || {
         if !stream.is_null() {
             unsafe {
-                let _ = Box::from_raw(stream as *mut ZerobusArrowStream);
+                let stream = Box::from_raw(stream as *mut ZerobusArrowStream);
+                match tokio::runtime::Handle::try_current() {
+                    Ok(handle)
+                        if handle.runtime_flavor()
+                            == tokio::runtime::RuntimeFlavor::MultiThread =>
+                    {
+                        tokio::task::block_in_place(|| abort_and_drop_arrow_stream(stream));
+                    }
+                    Ok(_) => abort_and_drop_arrow_stream_on_thread(stream),
+                    Err(_) => abort_and_drop_arrow_stream(stream),
+                }
             }
         }
     })
@@ -365,9 +464,10 @@ pub extern "C" fn zerobus_arrow_stream_ingest_batch(
 /// `ArrowArray` / `ArrowSchema` structure satisfying the Arrow C Data
 /// Interface. All referenced children, dictionaries, buffers, `private_data`,
 /// and release callbacks must remain valid for the lifetime required by the
-/// producer contract. After ownership transfer, the SDK may invoke release
-/// asynchronously on an internal runtime thread. Release callbacks must
-/// therefore be thread-safe and must not unwind or throw across the C ABI.
+/// producer contract. After ownership transfer, release callbacks may run on
+/// any thread that drops the final owner, including SDK runtime/transport
+/// threads or the thread calling `zerobus_arrow_stream_free`. They must be
+/// thread-safe and must not unwind or throw across the C ABI.
 ///
 /// Malformed, dangling, or malicious structures are caller undefined behavior
 /// and cannot be safely validated by this function.

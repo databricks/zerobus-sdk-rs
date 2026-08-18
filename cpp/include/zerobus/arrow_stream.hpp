@@ -24,9 +24,13 @@ class Sdk;
 /// errors (the destructor swallows them) and flushes synchronously, which can
 /// block up to `flush_timeout_ms` (default 5 minutes) if the server is
 /// unresponsive. Letting the object fall out of scope drags that blocking close
-/// into the destructor.
+/// into the destructor. Native destruction also waits for background shutdown
+/// to finish and does not return on a shutdown timeout. An internal native
+/// shutdown infrastructure failure terminates the process rather than returning
+/// after incomplete native destruction.
 ///
 /// Thread safety: not safe for concurrent use from multiple threads.
+/// Destruction must not race another operation on the same stream.
 ///
 /// Only the IPC-bytes ingest path is wrapped;
 /// `zerobus_arrow_stream_ingest_batch_via_record_batch` is a functional

@@ -15,10 +15,12 @@ use tracing::{debug, error, info, warn};
 use super::acks::{pause_and_detach_sender, AckProcessOutcome, AckProcessor};
 use super::batch::{rebuild_pending_for_replay, refresh_pending_ack_deadlines, PendingBatch};
 use super::close::{CloseCoordinator, CloseFinalizer, CloseState};
-use super::connection::{FlightConnection, FlightResponseStream, RequestBodyControl};
+use super::connection::{
+    FlightConnection, FlightResponseStream, RequestBodyControl, RequestBodyRegistry,
+};
 use super::{
     configured_deadline, ArrowStreamConfigurationOptions, ArrowTableProperties, BatchSender,
-    RecordBatch, ZerobusArrowStream,
+    FlightConnectionParameters, RecordBatch, ZerobusArrowStream,
 };
 use crate::errors::ZerobusError;
 use crate::headers_provider::HeadersProvider;
@@ -38,6 +40,7 @@ pub(super) struct Supervisor {
     is_closed: Arc<AtomicBool>,
     close: CloseCoordinator,
     close_finalizer: CloseFinalizer,
+    request_bodies: RequestBodyRegistry,
     pending_batches: Arc<Mutex<Vec<PendingBatch>>>,
     recovery_attempts: Arc<AtomicU32>,
     server_error_tx: watch::Sender<Option<ZerobusError>>,
@@ -49,6 +52,27 @@ pub(super) struct Supervisor {
     sdk_identifier: Arc<str>,
     #[cfg(feature = "test-hooks")]
     test_hooks: Arc<super::TestHooks>,
+}
+
+pub(super) struct SupervisorTaskHandle {
+    worker: AbortHandle,
+    // Dropping this handle intentionally detaches the reaper during ordinary Drop.
+    #[cfg_attr(not(feature = "internal-arrow-c-data"), allow(dead_code))]
+    reaper: JoinHandle<()>,
+}
+
+impl SupervisorTaskHandle {
+    pub(super) fn abort(&self) {
+        self.worker.abort();
+    }
+
+    #[cfg(feature = "internal-arrow-c-data")]
+    pub(super) async fn abort_and_wait(self) {
+        self.worker.abort();
+        self.reaper
+            .await
+            .expect("Arrow supervisor reaper failed during shutdown");
+    }
 }
 
 impl Supervisor {
@@ -65,6 +89,7 @@ impl Supervisor {
             is_closed: Arc::clone(&stream.is_closed),
             close: stream.close.clone(),
             close_finalizer: CloseFinalizer::new(stream),
+            request_bodies: stream.request_bodies.clone(),
             pending_batches: Arc::clone(&stream.pending_batches),
             recovery_attempts: Arc::clone(&stream.recovery_attempts),
             server_error_tx: stream.server_error_tx.clone(),
@@ -79,15 +104,15 @@ impl Supervisor {
         }
     }
 
-    pub(super) fn spawn(self, initial_connection: FlightConnection) -> AbortHandle {
+    pub(super) fn spawn(self, initial_connection: FlightConnection) -> SupervisorTaskHandle {
         let (response_stream, request_body) = initial_connection.into_supervisor_io();
         let close = self.close.clone();
         let finalizer = self.close_finalizer.clone();
         let worker = spawn(self.run(response_stream, request_body));
-        let abort_handle = worker.abort_handle();
+        let worker_abort = worker.abort_handle();
         // The detached reaper owns the JoinHandle so cancelling a close caller cannot
         // lose observation of an abnormal supervisor exit.
-        spawn(async move {
+        let reaper = spawn(async move {
             let joined = worker.await;
             if matches!(close.state(), CloseState::Finalized(_)) {
                 return;
@@ -95,7 +120,10 @@ impl Supervisor {
             let outcome = Self::unfinalized_exit_outcome(joined);
             let _ = finalizer.finish(outcome).await;
         });
-        abort_handle
+        SupervisorTaskHandle {
+            worker: worker_abort,
+            reaper,
+        }
     }
 
     fn unfinalized_exit_outcome(joined: Result<ZerobusResult<()>, JoinError>) -> ZerobusResult<()> {
@@ -388,16 +416,19 @@ impl Supervisor {
     /// Completes setup, READY, replay, and sender publication as one cancellable attempt.
     /// Cancellation before publication drops an established replacement best-effort.
     async fn reconnect(&self) -> ZerobusResult<Option<FlightConnection>> {
-        let connection = ZerobusArrowStream::reconnect_transport(
-            &self.endpoint,
-            &self.tls_config,
-            self.connector_factory.as_ref(),
-            &self.table_properties,
-            &self.options,
-            &self.headers_provider,
-            &self.sdk_identifier,
-        )
-        .await?;
+        let parameters = FlightConnectionParameters {
+            endpoint: &self.endpoint,
+            tls_config: &self.tls_config,
+            connector_factory: self.connector_factory.as_ref(),
+            table_properties: &self.table_properties,
+            options: &self.options,
+            headers_provider: &self.headers_provider,
+            sdk_identifier: &self.sdk_identifier,
+            request_bodies: &self.request_bodies,
+            #[cfg(feature = "test-hooks")]
+            test_hooks: &self.test_hooks,
+        };
+        let connection = ZerobusArrowStream::reconnect_transport(&parameters).await?;
         let tx = connection.sender();
         let acked_before_disconnect = self.last_acked_records.load(Ordering::Acquire);
 
@@ -607,6 +638,8 @@ mod tests {
     use tokio::time::{timeout, Duration, Instant};
 
     use super::super::close::{CloseCoordinator, CloseFinalizer, CloseRequest, CloseState};
+    #[cfg(feature = "internal-arrow-c-data")]
+    use super::SupervisorTaskHandle;
     use super::{
         pause_and_detach_sender, BatchSender, PendingBatch, RecordBatch, Supervisor, ZerobusError,
     };
@@ -668,6 +701,23 @@ mod tests {
             Supervisor::unfinalized_exit_outcome(Ok(Ok(()))),
             Err(ZerobusError::InvalidStateError(_))
         ));
+    }
+
+    #[cfg(feature = "internal-arrow-c-data")]
+    #[tokio::test]
+    #[should_panic(expected = "Arrow supervisor reaper failed during shutdown")]
+    async fn abort_and_wait_propagates_reaper_failure() {
+        let worker = tokio::spawn(std::future::pending::<()>());
+        let worker_abort = worker.abort_handle();
+        drop(worker);
+        let reaper = tokio::spawn(async { panic!("reaper test panic") });
+
+        SupervisorTaskHandle {
+            worker: worker_abort,
+            reaper,
+        }
+        .abort_and_wait()
+        .await;
     }
 
     #[tokio::test]

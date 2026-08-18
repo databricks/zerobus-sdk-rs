@@ -10,3 +10,10 @@ pub mod arrow_c_data {
         import_c_data_record_batch, FFI_ArrowArray, FFI_ArrowSchema,
     };
 }
+
+/// Stops Arrow stream background work without flushing and waits for shutdown to complete.
+#[cfg(feature = "internal-arrow-c-data")]
+#[doc(hidden)]
+pub async fn abort_arrow_stream_and_wait(stream: &crate::ZerobusArrowStream) {
+    stream.abort_and_wait().await;
+}
