@@ -48,6 +48,13 @@
   failure into a mint stampede. The interval scales with the configured token
   refresh buffer and shrinks as the token nears expiry, down to a floor, and never
   extends past expiry.
+- OAuth credential invalidation after an auth rejection is more precise and never
+  waits on an in-flight mint. Each cached token carries a monotonic generation, and
+  invalidation records the rejected generation on the cache entry with a lock-free
+  atomic, so it never takes the per-token lock or detaches a mint. A token at or
+  below the recorded generation is dropped before its next use and is never refreshed
+  from, so the next fetch re-mints; a newer token installed by a concurrent refresh
+  has a higher generation and is kept and reused.
 
 ### Documentation
 

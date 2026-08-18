@@ -9,6 +9,10 @@ name = "rust_tests"
 path = "src/rust_tests.rs"
 
 [[test]]
+name = "oauth_token_tests"
+path = "src/oauth_token_tests.rs"
+
+[[test]]
 name = "proxy_tests"
 path = "src/proxy_tests.rs"
 
