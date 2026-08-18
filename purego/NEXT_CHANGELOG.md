@@ -38,6 +38,17 @@
   and encoder, ack-model, and opener seams let a protocol instantiate the core
   over its own payload type. Proto and JSON behavior is unchanged, and nothing is
   exposed through a public API yet.
+- Add `internal/arrowproto`, the Arrow IPC payload for the upcoming Arrow
+  ingestion path. A payload is a canonical self-contained IPC stream materialized
+  when it is built, so the core can hold it across a reconnect without pinning the
+  caller's `RecordBatch`, and it can be sliced by row so a partially acknowledged
+  batch replays only its unacknowledged suffix. Admission sizes a batch from the
+  rows it covers rather than the whole buffers it points at, because a slice
+  shares its parent's buffers and would otherwise be charged for the entire
+  parent. Nothing is exposed through a public API yet.
+- Add the `github.com/apache/arrow-go/v18` dependency. arrow-go requires
+  `google.golang.org/grpc` v1.82.0, which raises this module's grpc minimum from
+  v1.81.1.
 
 ### Breaking Changes
 
