@@ -105,17 +105,6 @@ type ZerobusArrowStream struct {
 	ptr unsafe.Pointer
 }
 
-func setArrowStreamFinalizer(stream *ZerobusArrowStream) {
-	runtime.SetFinalizer(stream, func(st *ZerobusArrowStream) {
-		// Native destruction may wait indefinitely to guarantee that no foreign
-		// release callback runs after it returns. Never block Go's sole finalizer
-		// goroutine on that wait.
-		go func() {
-			_ = st.Close()
-		}()
-	})
-}
-
 // CreateArrowStream creates an Arrow Flight stream authenticated with OAuth client credentials.
 //
 // schemaIpcBytes must be Arrow IPC stream bytes containing only the schema (no data batches).
@@ -140,7 +129,9 @@ func (s *ZerobusSdk) CreateArrowStream(
 	}
 
 	stream := &ZerobusArrowStream{ptr: ptr}
-	setArrowStreamFinalizer(stream)
+	runtime.SetFinalizer(stream, func(st *ZerobusArrowStream) {
+		st.Close() //nolint:errcheck
+	})
 	return stream, nil
 }
 
@@ -165,7 +156,9 @@ func (s *ZerobusSdk) CreateArrowStreamWithHeadersProvider(
 	}
 
 	stream := &ZerobusArrowStream{ptr: ptr}
-	setArrowStreamFinalizer(stream)
+	runtime.SetFinalizer(stream, func(st *ZerobusArrowStream) {
+		st.Close() //nolint:errcheck
+	})
 	return stream, nil
 }
 
@@ -196,12 +189,7 @@ func (st *ZerobusArrowStream) Flush() error {
 }
 
 // Close gracefully shuts down the stream after flushing all pending batches.
-// Native destruction can block while background shutdown finishes. Close must
-// be serialized with IngestBatch, Flush, and every other operation on this
-// stream. An internal native shutdown infrastructure failure terminates the
-// process rather than returning after incomplete native destruction.
-// The stream must not be used after Close returns.
-// Close is idempotent.
+// The stream must not be used after Close returns. Close is idempotent.
 func (st *ZerobusArrowStream) Close() error {
 	if st.ptr == nil {
 		return nil

@@ -196,6 +196,9 @@ pub struct ZerobusArrowStream {
     close: CloseCoordinator,
     /// Supervisor worker and reaper ownership, consumed once by terminal shutdown.
     supervisor_task: Arc<Mutex<Option<SupervisorTaskHandle>>>,
+    /// Once true, FFI destruction must wait until all foreign C Data owners are released.
+    #[cfg(feature = "internal-arrow-c-data")]
+    has_ingested_c_data: AtomicBool,
     /// Tracks every tonic-owned Flight request body until its queued owners are dropped.
     request_bodies: RequestBodyRegistry,
     /// Accepted batches not yet fully acknowledged; retained for replay or retrieval.
@@ -316,6 +319,8 @@ impl ZerobusArrowStream {
             admission_closed,
             close,
             supervisor_task,
+            #[cfg(feature = "internal-arrow-c-data")]
+            has_ingested_c_data: AtomicBool::new(false),
             request_bodies,
             pending_batches,
             pending_notify,
@@ -984,6 +989,16 @@ impl ZerobusArrowStream {
     }
 
     #[cfg(feature = "internal-arrow-c-data")]
+    pub(crate) fn mark_c_data_ingested(&self) {
+        self.has_ingested_c_data.store(true, Ordering::Release);
+    }
+
+    #[cfg(feature = "internal-arrow-c-data")]
+    pub(crate) fn has_ingested_c_data(&self) -> bool {
+        self.has_ingested_c_data.load(Ordering::Acquire)
+    }
+
+    #[cfg(feature = "internal-arrow-c-data")]
     pub(crate) async fn abort_and_wait(&self) {
         self.admission_closed.store(true, Ordering::Release);
         self.request_bodies.shutdown_all().await;
@@ -1142,10 +1157,11 @@ impl ZerobusArrowStream {
         Self::arm_test_notify(&self.test_hooks.retained_batches_cleared).await
     }
 
-    /// Test-only: retains a batch in the failed collection for destructive-free tests.
-    #[cfg(feature = "test-hooks")]
+    /// Test-only: marks and retains a foreign-owned batch for destructive-free tests.
+    #[cfg(all(feature = "test-hooks", feature = "internal-arrow-c-data"))]
     #[doc(hidden)]
     pub async fn retain_failed_batch_for_test(&self, batch: RecordBatch) {
+        self.mark_c_data_ingested();
         self.failed_batches.lock().await.push(batch);
     }
 

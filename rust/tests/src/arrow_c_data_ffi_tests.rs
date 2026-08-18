@@ -21,14 +21,16 @@ mod ffi_c_data_lifetime_tests {
     use std::time::Duration;
 
     use databricks_zerobus_ingest_sdk::internal::arrow_c_data::import_c_data_record_batch;
+    use databricks_zerobus_ingest_sdk::internal::arrow_stream_has_ingested_c_data;
     use databricks_zerobus_ingest_sdk::ZerobusArrowStream;
     use tonic::Status;
     use zerobus_ffi::{
         zerobus_arrow_get_default_config, zerobus_arrow_stream_close, zerobus_arrow_stream_flush,
-        zerobus_arrow_stream_free, zerobus_arrow_stream_ingest_c_data, zerobus_free_error_message,
-        zerobus_sdk_builder_build, zerobus_sdk_builder_disable_tls, zerobus_sdk_builder_endpoint,
-        zerobus_sdk_builder_new, zerobus_sdk_create_arrow_stream_with_headers_provider,
-        zerobus_sdk_free, CArrowArray, CArrowSchema, CHeaders, CResult,
+        zerobus_arrow_stream_free, zerobus_arrow_stream_ingest_batch,
+        zerobus_arrow_stream_ingest_c_data, zerobus_free_error_message, zerobus_sdk_builder_build,
+        zerobus_sdk_builder_disable_tls, zerobus_sdk_builder_endpoint, zerobus_sdk_builder_new,
+        zerobus_sdk_create_arrow_stream_with_headers_provider, zerobus_sdk_free, CArrowArray,
+        CArrowSchema, CHeaders, CResult,
     };
 
     use super::{
@@ -197,6 +199,15 @@ mod ffi_c_data_lifetime_tests {
         bytes
     }
 
+    fn batch_ipc_bytes(batch: &RecordBatch) -> Vec<u8> {
+        let mut bytes = Vec::new();
+        let mut writer =
+            arrow_ipc::writer::StreamWriter::try_new(&mut bytes, batch.schema().as_ref()).unwrap();
+        writer.write(batch).unwrap();
+        writer.finish().unwrap();
+        bytes
+    }
+
     extern "C" fn empty_headers(_user_data: *mut c_void) -> CHeaders {
         CHeaders {
             headers: ptr::null_mut(),
@@ -293,6 +304,30 @@ mod ffi_c_data_lifetime_tests {
         .unwrap()
     }
 
+    async fn ingest_ffi_ipc_batch(stream: usize, ipc: Vec<u8>) -> Result<i64, String> {
+        tokio::task::spawn_blocking(move || {
+            let mut result = CResult {
+                success: true,
+                error_message: ptr::null_mut(),
+                is_retryable: false,
+            };
+            let offset = zerobus_arrow_stream_ingest_batch(
+                stream as *mut _,
+                ipc.as_ptr(),
+                ipc.len(),
+                &mut result,
+            );
+            if result.success {
+                Ok(offset)
+            } else {
+                Err(take_result_error(&mut result)
+                    .unwrap_or_else(|| "IPC ingest failed without a message".to_string()))
+            }
+        })
+        .await
+        .unwrap()
+    }
+
     async fn flush_ffi_stream(stream: usize) -> Result<(), String> {
         tokio::task::spawn_blocking(move || {
             let mut result = CResult {
@@ -379,6 +414,126 @@ mod ffi_c_data_lifetime_tests {
                 }
             }
         }
+    }
+
+    async fn assert_mixed_mode_free_waits(
+        c_data_first: bool,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let (_mock_server, server_url) = start_mock_flight_server().await?;
+        let schema = create_test_arrow_schema();
+        let ipc_batch = create_test_record_batch(Arc::clone(&schema), vec![1], vec![Some("IPC")]);
+        let c_data_batch =
+            create_test_record_batch(Arc::clone(&schema), vec![2], vec![Some("C Data")]);
+        let ipc = batch_ipc_bytes(&ipc_batch);
+        let array_releases = Arc::new(AtomicUsize::new(0));
+        let schema_releases = Arc::new(AtomicUsize::new(0));
+        let (array, schema_ffi) = exported_counting_batch(
+            c_data_batch,
+            Arc::clone(&array_releases),
+            Arc::clone(&schema_releases),
+        );
+        let (sdk, stream) = create_ffi_stream(server_url, schema).await?;
+
+        if c_data_first {
+            assert_eq!(ingest_ffi_batch(stream, array, schema_ffi).await?, 0);
+            assert_eq!(ingest_ffi_ipc_batch(stream, ipc).await?, 1);
+        } else {
+            assert_eq!(ingest_ffi_ipc_batch(stream, ipc).await?, 0);
+            assert_eq!(ingest_ffi_batch(stream, array, schema_ffi).await?, 1);
+        }
+
+        // This mirrors the opaque-handle cast in arrow.rs and must change with it.
+        let stream_ref = unsafe { &*(stream as *const ZerobusArrowStream) };
+        assert!(arrow_stream_has_ingested_c_data(stream_ref));
+        let (shutdown_reached, shutdown_proceed) =
+            stream_ref.arm_free_shutdown_complete_barrier().await;
+        let mut shutdown_guard = TestBarrierGuard(Some(shutdown_proceed));
+
+        let (free_completed_tx, mut free_completed_rx) = mpsc::channel();
+        drop(std::thread::spawn(move || {
+            zerobus_arrow_stream_free(stream as *mut _);
+            let _ = free_completed_tx.send(());
+        }));
+
+        tokio::time::timeout(Duration::from_secs(5), shutdown_reached.notified())
+            .await
+            .expect("mixed-mode free must use complete C Data shutdown");
+        assert!(matches!(
+            free_completed_rx.try_recv(),
+            Err(mpsc::TryRecvError::Empty)
+        ));
+        shutdown_guard.release();
+        tokio::time::timeout(
+            Duration::from_secs(5),
+            wait_for_free_completion(&mut free_completed_rx),
+        )
+        .await
+        .expect("mixed-mode free did not complete after shutdown proceeded")?;
+
+        assert_eq!(array_releases.load(Ordering::SeqCst), 1);
+        assert_eq!(schema_releases.load(Ordering::SeqCst), 1);
+        tokio::task::spawn_blocking(move || zerobus_sdk_free(sdk as *mut _))
+            .await
+            .expect("sdk free task panicked");
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn ffi_ipc_only_free_does_not_wait_for_complete_shutdown(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let (_mock_server, server_url) = start_mock_flight_server().await?;
+        let schema = create_test_arrow_schema();
+        let batch = create_test_record_batch(Arc::clone(&schema), vec![1], vec![Some("IPC")]);
+        let (sdk, stream) = create_ffi_stream(server_url, schema).await?;
+        assert_eq!(
+            ingest_ffi_ipc_batch(stream, batch_ipc_bytes(&batch)).await?,
+            0
+        );
+        // This mirrors the opaque-handle cast in arrow.rs and must change with it.
+        let stream_ref = unsafe { &*(stream as *const ZerobusArrowStream) };
+        assert!(!arrow_stream_has_ingested_c_data(stream_ref));
+        let (_shutdown_reached, shutdown_proceed) =
+            stream_ref.arm_free_shutdown_complete_barrier().await;
+        let mut shutdown_guard = TestBarrierGuard(Some(shutdown_proceed));
+
+        let (free_completed_tx, mut free_completed_rx) = mpsc::channel();
+        drop(std::thread::spawn(move || {
+            zerobus_arrow_stream_free(stream as *mut _);
+            let _ = free_completed_tx.send(());
+        }));
+
+        let completion = tokio::time::timeout(
+            Duration::from_secs(1),
+            wait_for_free_completion(&mut free_completed_rx),
+        )
+        .await;
+        shutdown_guard.release();
+        if completion.is_err() {
+            tokio::time::timeout(
+                Duration::from_secs(5),
+                wait_for_free_completion(&mut free_completed_rx),
+            )
+            .await
+            .expect("free did not complete after releasing the test barrier")?;
+        }
+
+        tokio::task::spawn_blocking(move || zerobus_sdk_free(sdk as *mut _))
+            .await
+            .expect("sdk free task panicked");
+        completion.expect("IPC-only free must preserve best-effort nonblocking destruction")?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn ffi_ipc_then_c_data_free_waits_for_complete_shutdown(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        assert_mixed_mode_free_waits(false).await
+    }
+
+    #[tokio::test]
+    async fn ffi_c_data_then_ipc_free_waits_for_complete_shutdown(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        assert_mixed_mode_free_waits(true).await
     }
 
     #[tokio::test]
@@ -604,6 +759,9 @@ mod ffi_c_data_lifetime_tests {
         };
         let mut before_batch_poll_guard = TestBarrierGuard(Some(before_batch_poll_proceed));
         assert_eq!(ingest_ffi_batch(stream, array, schema_ffi).await?, 0);
+        // This mirrors the opaque-handle cast in arrow.rs and must change with it.
+        let stream_ref = unsafe { &*(stream as *const ZerobusArrowStream) };
+        assert!(arrow_stream_has_ingested_c_data(stream_ref));
         tokio::time::timeout(Duration::from_secs(5), before_batch_poll_reached.notified())
             .await
             .expect("request body must park before consuming the queued batch");

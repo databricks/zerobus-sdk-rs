@@ -306,19 +306,21 @@ struct CArrowStream *zerobus_sdk_create_arrow_stream_with_headers_provider(struc
 /**
  * Frees an Arrow Flight stream instance.
  *
- * This call blocks until background shutdown completes, every Flight request body reaches EOF
- * or is dropped, and all retained Arrow C Data owners are released. If shutdown takes longer
- * than 30 seconds, it logs a warning every 30 seconds while continuing to wait. It does not
- * return on a timeout.
- * When the calling restrictions below are respected, no Arrow C Data release callback for this
- * stream can run after this function returns.
- * An internal shutdown panic, a required helper-thread spawn failure, or a helper-thread panic
- * terminates the process rather than returning without that guarantee.
+ * IPC-only streams preserve best-effort, nonblocking destruction. Once a stream accepts an
+ * Arrow C Data batch, this call instead blocks until background shutdown completes, every Flight
+ * request body reaches EOF or is dropped, and all retained foreign owners are released. If that
+ * shutdown takes longer than 30 seconds, it logs a warning every 30 seconds while continuing to
+ * wait; it does not return on a timeout.
+ * When the calling restrictions below are respected, no Arrow C Data release callback for that
+ * stream can run after this function returns. During required C Data shutdown, an internal
+ * shutdown panic, a required helper-thread spawn failure, or a helper-thread panic terminates the
+ * process rather than returning without that guarantee.
  *
- * Do not race this function with another operation on the same stream handle. Freeing this same
- * stream reentrantly from one of its SDK callbacks is unsupported because shutdown would wait
- * for the callback that is making the call. Freeing a different stream from a callback remains
- * supported.
+ * Do not race this function with another operation on the same stream handle. After C Data import,
+ * freeing this same stream reentrantly from one of its SDK callbacks is unsupported because
+ * complete shutdown would wait for the callback making the call. IPC-only concurrent or reentrant
+ * free remains invalid because the opaque handle has single ownership. Freeing a different stream
+ * from a callback remains supported.
  */
 void zerobus_arrow_stream_free(struct CArrowStream *stream);
 
@@ -341,6 +343,8 @@ int64_t zerobus_arrow_stream_ingest_batch(struct CArrowStream *stream,
  * every success or error path. Their release callbacks are cleared before
  * validation, and the imported buffers may remain owned by the stream until
  * acknowledgment, recovery finalization, or stream destruction.
+ * Once valid C Data is imported, `zerobus_arrow_stream_free` uses complete
+ * shutdown for that stream; later IPC ingestion does not revert this mode.
  *
  * Every non-null pointer must address a valid, properly aligned canonical
  * `ArrowArray` / `ArrowSchema` structure satisfying the Arrow C Data

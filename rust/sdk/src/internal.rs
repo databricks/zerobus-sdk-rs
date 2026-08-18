@@ -17,3 +17,17 @@ pub mod arrow_c_data {
 pub async fn abort_arrow_stream_and_wait(stream: &crate::ZerobusArrowStream) {
     stream.abort_and_wait().await;
 }
+
+/// Marks that an Arrow stream may retain foreign Arrow C Data owners.
+#[cfg(feature = "internal-arrow-c-data")]
+#[doc(hidden)]
+pub fn mark_arrow_stream_c_data_ingested(stream: &crate::ZerobusArrowStream) {
+    stream.mark_c_data_ingested();
+}
+
+/// Returns whether Arrow stream destruction must wait for foreign C Data owners.
+#[cfg(feature = "internal-arrow-c-data")]
+#[doc(hidden)]
+pub fn arrow_stream_has_ingested_c_data(stream: &crate::ZerobusArrowStream) -> bool {
+    stream.has_ingested_c_data()
+}

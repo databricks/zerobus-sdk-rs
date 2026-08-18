@@ -460,11 +460,6 @@ access externally (the same contract as the Rust core). A single `Sdk` may
 create many streams. See [`CLAUDE.md`](https://github.com/databricks/zerobus-sdk/blob/main/cpp/CLAUDE.md)
 for the full memory-ownership and threading contract.
 
-Destroying an `ArrowStream` can block while native background shutdown
-finishes. Destruction must not race another operation on the same stream. An
-internal native shutdown infrastructure failure terminates the process rather
-than returning after incomplete native destruction.
-
 ## HTTP proxy support
 
 Like the other SDKs, the C++ SDK honors the standard proxy environment variables

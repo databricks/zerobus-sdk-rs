@@ -4,9 +4,12 @@ use crate::arrow_c_data::{CArrowArray, CArrowSchema};
 use crate::common::*;
 use arrow_ipc::{reader::StreamReader, writer::StreamWriter, CompressionType};
 use bytes::Bytes;
-use databricks_zerobus_ingest_sdk::internal::abort_arrow_stream_and_wait;
 use databricks_zerobus_ingest_sdk::internal::arrow_c_data::{
     import_c_data_record_batch, FFI_ArrowArray, FFI_ArrowSchema,
+};
+use databricks_zerobus_ingest_sdk::internal::{
+    abort_arrow_stream_and_wait, arrow_stream_has_ingested_c_data,
+    mark_arrow_stream_c_data_ingested,
 };
 use databricks_zerobus_ingest_sdk::{
     HeadersProvider, RecordBatch, StreamBuilder, ZerobusArrowStream, ZerobusError, ZerobusResult,
@@ -368,25 +371,31 @@ fn abort_and_drop_arrow_stream_on_thread(stream: Box<ZerobusArrowStream>) {
 
 /// Frees an Arrow Flight stream instance.
 ///
-/// This call blocks until background shutdown completes, every Flight request body reaches EOF
-/// or is dropped, and all retained Arrow C Data owners are released. If shutdown takes longer
-/// than 30 seconds, it logs a warning every 30 seconds while continuing to wait. It does not
-/// return on a timeout.
-/// When the calling restrictions below are respected, no Arrow C Data release callback for this
-/// stream can run after this function returns.
-/// An internal shutdown panic, a required helper-thread spawn failure, or a helper-thread panic
-/// terminates the process rather than returning without that guarantee.
+/// IPC-only streams preserve best-effort, nonblocking destruction. Once a stream accepts an
+/// Arrow C Data batch, this call instead blocks until background shutdown completes, every Flight
+/// request body reaches EOF or is dropped, and all retained foreign owners are released. If that
+/// shutdown takes longer than 30 seconds, it logs a warning every 30 seconds while continuing to
+/// wait; it does not return on a timeout.
+/// When the calling restrictions below are respected, no Arrow C Data release callback for that
+/// stream can run after this function returns. During required C Data shutdown, an internal
+/// shutdown panic, a required helper-thread spawn failure, or a helper-thread panic terminates the
+/// process rather than returning without that guarantee.
 ///
-/// Do not race this function with another operation on the same stream handle. Freeing this same
-/// stream reentrantly from one of its SDK callbacks is unsupported because shutdown would wait
-/// for the callback that is making the call. Freeing a different stream from a callback remains
-/// supported.
+/// Do not race this function with another operation on the same stream handle. After C Data import,
+/// freeing this same stream reentrantly from one of its SDK callbacks is unsupported because
+/// complete shutdown would wait for the callback making the call. IPC-only concurrent or reentrant
+/// free remains invalid because the opaque handle has single ownership. Freeing a different stream
+/// from a callback remains supported.
 #[no_mangle]
 pub extern "C" fn zerobus_arrow_stream_free(stream: *mut CArrowStream) {
     ffi_guard(ptr::null_mut(), (), move || {
         if !stream.is_null() {
             unsafe {
                 let stream = Box::from_raw(stream as *mut ZerobusArrowStream);
+                if !arrow_stream_has_ingested_c_data(&stream) {
+                    drop(stream);
+                    return;
+                }
                 match tokio::runtime::Handle::try_current() {
                     Ok(handle)
                         if handle.runtime_flavor()
@@ -459,6 +468,8 @@ pub extern "C" fn zerobus_arrow_stream_ingest_batch(
 /// every success or error path. Their release callbacks are cleared before
 /// validation, and the imported buffers may remain owned by the stream until
 /// acknowledgment, recovery finalization, or stream destruction.
+/// Once valid C Data is imported, `zerobus_arrow_stream_free` uses complete
+/// shutdown for that stream; later IPC ingestion does not revert this mode.
 ///
 /// Every non-null pointer must address a valid, properly aligned canonical
 /// `ArrowArray` / `ArrowSchema` structure satisfying the Arrow C Data
@@ -517,6 +528,7 @@ pub extern "C" fn zerobus_arrow_stream_ingest_c_data(
                 return -1;
             }
         };
+        mark_arrow_stream_c_data_ingested(stream_ref);
 
         match RUNTIME.block_on(stream_ref.ingest_batch(batch)) {
             Ok(offset) => {

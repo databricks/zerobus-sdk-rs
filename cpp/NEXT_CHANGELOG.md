@@ -16,11 +16,6 @@
   `create_arrow_stream` still take a `std::shared_ptr<HeadersProvider>` — and you
   no longer need to keep your own reference alive past `create_stream`.
 
-- Fixed `ArrowStream` destruction so it waits while native background
-  shutdown finishes. Destruction must not race another operation on the stream.
-  Internal native shutdown infrastructure failures terminate the process rather
-  than returning after incomplete native destruction.
-
 ### Documentation
 
 - Corrected custom-header examples and clarified that acknowledgment callbacks

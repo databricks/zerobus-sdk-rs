@@ -110,8 +110,7 @@ Public API is everything exported (capitalized) in the `go/` package:
 
 ## Thread safety
 
-Concurrent `Ingest` calls are internally synchronized. Serialize `Close` with
-every other operation on the same stream.
+Go SDK is safe for concurrent use from multiple goroutines. Internal synchronization handles concurrent `Ingest` calls.
 
 ## Changelog and documentation
 
