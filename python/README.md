@@ -332,25 +332,35 @@ compatibility but does not select the format.
 
 ## Error Handling
 
-SDK operation failures currently surface as `ZerobusException`. The
-`NonRetriableException` class is exported for compatibility, but the current native binding does
-not construct it. Do not use the Python exception class to decide whether an operation is safe to
-retry.
+The SDK raises two categories of exception. Handle them differently:
+
+- **Retriable** (`ZerobusException`): transient conditions such as network issues or
+  temporary server errors. Safe to retry, ideally with backoff. The SDK's built-in
+  recovery already handles many of these for you.
+- **Non-retriable** (`NonRetriableException`): fatal conditions such as invalid
+  credentials or a missing table. Retrying won't help. Fix the underlying problem.
+
+`NonRetriableException` is a subclass of `ZerobusException`, so a bare
+`except ZerobusException` still catches both.
 
 ```python
-from zerobus.sdk.shared import ZerobusException
+from zerobus.sdk.shared import ZerobusException, NonRetriableException
 
 try:
     stream.ingest_record_offset(record)
+except NonRetriableException as e:
+    # Fatal: do not retry; fix the cause (credentials, table, schema)
+    raise
 except ZerobusException as e:
-    print(f"Ingestion failed: {e}")
+    # Transient: retry with backoff
+    ...
 ```
 
 ## Handling Stream Failures
 
 The SDK automatically handles retries for transient errors. Enqueue, flush, and close
-failures all surface as `ZerobusException`. `get_unacked_records()` and
-`recreate_stream()` succeed only after the stream has already closed, which a terminal
+failures surface as `ZerobusException` or `NonRetriableException`. `get_unacked_records()`
+and `recreate_stream()` succeed only after the stream has already closed, which a terminal
 failure does. An enqueue failure leaves the stream active, so those calls fail; raise
 the original error and keep the stream. `recreate_stream()` re-queues records that were
 already accepted; it does not retry a payload that failed to enqueue.
@@ -573,9 +583,8 @@ ack.is_done() -> bool
 
 ### Exceptions
 
-- `ZerobusException(message, cause=None)` - Base exception raised by current SDK operations
-- `NonRetriableException(message, cause=None)` - Exported subclass reserved for non-retriable errors;
-  the current native binding does not construct it
+- `ZerobusException(message, cause=None)` - Base exception; retryable SDK failures are raised as this type
+- `NonRetriableException(message, cause=None)` - Subclass for fatal errors (`ZerobusError::is_retryable()` is false)
 
 ## Debugging
 

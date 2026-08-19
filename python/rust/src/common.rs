@@ -7,7 +7,7 @@ use pyo3::prelude::*;
 use pyo3::types::{PyBytes, PyDict, PyList, PyTuple};
 
 use databricks_zerobus_ingest_sdk::{
-    AckCallback as RustAckCallback, EncodedRecord, OffsetId, StreamBuilder,
+    AckCallback as RustAckCallback, EncodedRecord, OffsetId, StreamBuilder, ZerobusError,
 };
 
 /// User-agent prefix emitted by this wrapper SDK. Combined with the wrapper
@@ -563,10 +563,12 @@ pyo3::create_exception!(
     "Indicates a non-retriable error has occurred"
 );
 
-/// Map Rust SDK errors to Python exceptions
-pub fn map_error(err: impl std::fmt::Display) -> PyErr {
+/// Map Rust SDK errors to Python exceptions using `ZerobusError::is_retryable()`.
+pub fn map_error(err: ZerobusError) -> PyErr {
     let msg = err.to_string();
-    // For now, treat all errors as retriable ZerobusException
-    // We can make this more sophisticated later by examining error messages/types
-    ZerobusException::new_err(msg)
+    if err.is_retryable() {
+        ZerobusException::new_err(msg)
+    } else {
+        NonRetriableException::new_err(msg)
+    }
 }

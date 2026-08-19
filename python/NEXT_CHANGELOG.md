@@ -8,6 +8,11 @@
 
 ### Bug Fixes
 
+- Map non-retryable Rust errors to `NonRetriableException` instead of always
+  raising `ZerobusException`. Retryability follows `ZerobusError::is_retryable()`
+  (invalid credentials, missing table, schema/argument errors, and other fatal
+  conditions). `NonRetriableException` remains a subclass of `ZerobusException`.
+
 ### Documentation
 
 - Corrected README, example, and docstring snippets for record-format selection,
