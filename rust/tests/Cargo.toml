@@ -21,6 +21,10 @@ name = "multiplexed_stream_tests"
 path = "src/multiplexed_stream_tests.rs"
 
 [[test]]
+name = "persistent_stream_tests"
+path = "src/persistent_stream_tests.rs"
+
+[[test]]
 name = "arrow_tests"
 path = "src/arrow_tests.rs"
 
@@ -40,7 +44,7 @@ tonic-prost.workspace = true
 tonic-types.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
-databricks-zerobus-ingest-sdk = { path = "../sdk", features = ["testing", "test-hooks", "arrow-flight", "internal-arrow-c-data", "zeroparser"] }
+databricks-zerobus-ingest-sdk = { path = "../sdk", features = ["testing", "test-hooks", "arrow-flight", "internal-arrow-c-data", "zeroparser", "eos"] }
 zerobus-ffi = { path = "../ffi" }
 
 # Arrow Flight test dependencies
