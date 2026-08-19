@@ -14,7 +14,13 @@ import (
 	"github.com/apache/arrow-go/v18/arrow/memory"
 )
 
+// payloadOverheadBytes charges the Payload container so tiny batches still
+// consume byte capacity.
 const payloadOverheadBytes = int64(64)
+
+// admissionSlopBytes is headroom for IPC framing a buffer sum cannot see: batch
+// metadata, buffer padding, end markers. It bounds the estimate, not occupancy —
+// a smaller MaxBufferedPayloadBytes rejects every batch.
 const admissionSlopBytes = int64(64 * 1024)
 
 // Compression selects the compression used when serializing Arrow IPC batches.
