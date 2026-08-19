@@ -36,3 +36,6 @@
 ### Deprecations
 
 ### API Changes
+
+- Added the in-development persistent-stream protobuf contract for creating,
+  resuming, ingesting into, and retiring durable streams.
