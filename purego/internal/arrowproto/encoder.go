@@ -121,8 +121,10 @@ func (p *Protocol) EncodeRecordBatch(batch arrow.RecordBatch) (*Payload, error) 
 }
 
 // EstimateRecordBatchRetainedSize returns a conservative pre-materialization
-// reservation. Arrow's buffer total already covers nested children and
-// dictionaries; doubling it covers framing, compression, and buffer growth.
+// reservation: the batch sized from the rows it covers, doubled to cover
+// framing, compression, and buffer growth, plus the per-payload schema base.
+// The core admits on this value before encoding, so an over-estimate rejects a
+// batch that would have fit.
 func (p *Protocol) EstimateRecordBatchRetainedSize(
 	batch arrow.RecordBatch,
 ) (int64, error) {
@@ -215,17 +217,48 @@ func exactSchemaEqual(left, right *arrow.Schema) bool {
 		left.Metadata().Equal(right.Metadata())
 }
 
+// rowWindow is the absolute row range of one array node that a batch covers.
+// Slicing rebases only the top-level nodes: a struct's fields stay parallel to
+// the parent's offset and a list's values are reached through its offsets
+// buffer, so a child still spans the parent's whole extent and cannot report
+// its own covered rows.
+type rowWindow struct {
+	offset int64
+	length int64
+}
+
+func windowOf(data arrow.ArrayData) rowWindow {
+	return rowWindow{offset: int64(data.Offset()), length: int64(data.Len())}
+}
+
+// absentArrayData reports whether data is missing. array.Data returns a nil
+// *Data as a non-nil interface for a node without a dictionary, so the typed
+// nil has to be caught before any method call on it.
+func absentArrayData(data arrow.ArrayData) bool {
+	if data == nil {
+		return true
+	}
+	concrete, ok := data.(*array.Data)
+	return ok && concrete == nil
+}
+
 // totalRecordBufferSize sums the bytes a batch's columns hold. A slice shares
 // its parent's buffers, so a buffer's own length reports the parent's whole
 // extent: charging that would reject a ten-row slice of a million-row batch.
-// Layouts with a derivable per-row extent are charged for their own rows only;
-// the rest fall back to whole buffers, an over-estimate that reconciliation
-// corrects once the payload exists.
+// Every node — nested children included — is therefore charged from the row
+// window the batch covers rather than from buffer lengths. Layouts with no
+// per-row rule (list-view, union, run-end-encoded) still fall back to whole
+// buffers, an over-estimate that reconciliation corrects once the payload
+// exists.
 func totalRecordBufferSize(batch arrow.RecordBatch) int64 {
 	seen := make(map[*memory.Buffer]struct{})
 	var total int64
 	for _, column := range batch.Columns() {
-		size, err := addInt64Saturating(total, arrayDataSize(column.Data(), seen))
+		data := column.Data()
+		size, err := addInt64Saturating(
+			total,
+			arrayDataSize(data, windowOf(data), seen),
+		)
 		if err != nil {
 			return math.MaxInt64
 		}
@@ -234,16 +267,23 @@ func totalRecordBufferSize(batch arrow.RecordBatch) int64 {
 	return total
 }
 
-func arrayDataSize(data arrow.ArrayData, seen map[*memory.Buffer]struct{}) int64 {
-	if data == nil {
+func arrayDataSize(
+	data arrow.ArrayData,
+	window rowWindow,
+	seen map[*memory.Buffer]struct{},
+) int64 {
+	if absentArrayData(data) {
 		return 0
 	}
-	if concrete, ok := data.(*array.Data); ok && concrete == nil {
-		return 0
-	}
-	total := ownedBufferSize(data, seen)
+	total := ownedBufferSize(data, window, seen)
 	for _, child := range data.Children() {
-		size, err := addInt64Saturating(total, arrayDataSize(child, seen))
+		if absentArrayData(child) {
+			continue
+		}
+		size, err := addInt64Saturating(
+			total,
+			arrayDataSize(child, childWindow(data, window, child), seen),
+		)
 		if err != nil {
 			return math.MaxInt64
 		}
@@ -251,16 +291,60 @@ func arrayDataSize(data arrow.ArrayData, seen map[*memory.Buffer]struct{}) int64
 	}
 	// A dictionary is shared whole rather than sliced per row, so it is charged
 	// in full through the same recursion.
-	size, err := addInt64Saturating(total, arrayDataSize(data.Dictionary(), seen))
+	dictionary := data.Dictionary()
+	if absentArrayData(dictionary) {
+		return total
+	}
+	size, err := addInt64Saturating(
+		total,
+		arrayDataSize(dictionary, windowOf(dictionary), seen),
+	)
 	if err != nil {
 		return math.MaxInt64
 	}
 	return size
 }
 
+// childWindow maps a parent's covered rows onto one of its children. A child
+// carries its own offset as well, so the parent's range is applied on top of
+// it. An unrecognized nesting falls back to the child's whole extent.
+func childWindow(
+	parent arrow.ArrayData,
+	window rowWindow,
+	child arrow.ArrayData,
+) rowWindow {
+	base := int64(child.Offset())
+	switch dataType := parent.DataType().(type) {
+	case *arrow.StructType:
+		return rowWindow{offset: base + window.offset, length: window.length}
+	case *arrow.ListType, *arrow.MapType:
+		if first, last, ok := offsetRange(parent, window, false); ok {
+			return rowWindow{offset: base + first, length: last - first}
+		}
+	case *arrow.LargeListType:
+		if first, last, ok := offsetRange(parent, window, true); ok {
+			return rowWindow{offset: base + first, length: last - first}
+		}
+	case *arrow.FixedSizeListType:
+		width := int64(dataType.Len())
+		if width > 0 && window.offset <= math.MaxInt64/width &&
+			window.length <= math.MaxInt64/width {
+			return rowWindow{
+				offset: base + window.offset*width,
+				length: window.length * width,
+			}
+		}
+	}
+	return windowOf(child)
+}
+
 // ownedBufferSize charges one array node for the rows it actually covers.
-func ownedBufferSize(data arrow.ArrayData, seen map[*memory.Buffer]struct{}) int64 {
-	rows := int64(data.Len())
+func ownedBufferSize(
+	data arrow.ArrayData,
+	window rowWindow,
+	seen map[*memory.Buffer]struct{},
+) int64 {
+	rows := window.length
 	buffers := data.Buffers()
 	if rows < 0 {
 		return wholeBufferSize(buffers, seen)
@@ -271,12 +355,26 @@ func ownedBufferSize(data arrow.ArrayData, seen map[*memory.Buffer]struct{}) int
 	}
 	switch dataType := data.DataType().(type) {
 	case *arrow.StringType, *arrow.BinaryType:
-		if valueBytes, ok := variableWidthValueBytes(data, rows, false); ok {
+		if valueBytes, ok := variableWidthValueBytes(data, window, false); ok {
 			return validityBytes + (rows+1)*4 + valueBytes
 		}
 	case *arrow.LargeStringType, *arrow.LargeBinaryType:
-		if valueBytes, ok := variableWidthValueBytes(data, rows, true); ok {
+		if valueBytes, ok := variableWidthValueBytes(data, window, true); ok {
 			return validityBytes + (rows+1)*8 + valueBytes
+		}
+	case *arrow.ListType, *arrow.MapType:
+		// The values are a child node, so only the offsets are charged here.
+		if len(buffers) == 2 {
+			return validityBytes + (rows+1)*4
+		}
+	case *arrow.LargeListType:
+		if len(buffers) == 2 {
+			return validityBytes + (rows+1)*8
+		}
+	case *arrow.StructType, *arrow.FixedSizeListType:
+		// Both own a validity bitmap only; every value lives in a child.
+		if len(buffers) <= 1 {
+			return validityBytes
 		}
 	case arrow.FixedWidthDataType:
 		// A wider layout would put row data in a buffer this arithmetic does not
@@ -288,40 +386,55 @@ func ownedBufferSize(data arrow.ArrayData, seen map[*memory.Buffer]struct{}) int
 	return wholeBufferSize(buffers, seen)
 }
 
-// variableWidthValueBytes reads the offsets buffer to size exactly the values
-// this array's rows reference.
+// variableWidthValueBytes sizes exactly the values the covered rows reference.
 func variableWidthValueBytes(
 	data arrow.ArrayData,
-	rows int64,
+	window rowWindow,
 	large bool,
 ) (int64, bool) {
+	if len(data.Buffers()) != 3 {
+		return 0, false
+	}
+	first, last, ok := offsetRange(data, window, large)
+	if !ok {
+		return 0, false
+	}
+	return last - first, true
+}
+
+// offsetRange reads an offsets-buffer layout to find the first and last value
+// index the covered rows reference.
+func offsetRange(
+	data arrow.ArrayData,
+	window rowWindow,
+	large bool,
+) (first, last int64, ok bool) {
 	buffers := data.Buffers()
-	if len(buffers) != 3 || buffers[1] == nil {
-		return 0, false
+	if len(buffers) < 2 || buffers[1] == nil {
+		return 0, 0, false
 	}
-	start := int64(data.Offset())
-	end := start + rows
+	start := window.offset
+	end := start + window.length
 	if start < 0 || end < start {
-		return 0, false
+		return 0, 0, false
 	}
-	var first, last int64
 	if large {
 		offsets := arrow.Int64Traits.CastFromBytes(buffers[1].Bytes())
 		if int64(len(offsets)) <= end {
-			return 0, false
+			return 0, 0, false
 		}
 		first, last = offsets[start], offsets[end]
 	} else {
 		offsets := arrow.Int32Traits.CastFromBytes(buffers[1].Bytes())
 		if int64(len(offsets)) <= end {
-			return 0, false
+			return 0, 0, false
 		}
 		first, last = int64(offsets[start]), int64(offsets[end])
 	}
 	if first < 0 || last < first {
-		return 0, false
+		return 0, 0, false
 	}
-	return last - first, true
+	return first, last, true
 }
 
 func fixedWidthValueBytes(rows int64, bitWidth int) int64 {

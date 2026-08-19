@@ -65,6 +65,76 @@ func binaryBatch(
 	return schema, record
 }
 
+func listBatch(
+	t *testing.T,
+	allocator memory.Allocator,
+	rows int,
+	valuesPerRow int,
+) (*arrow.Schema, arrow.RecordBatch) {
+	t.Helper()
+	schema := arrow.NewSchema([]arrow.Field{{
+		Name: "value",
+		Type: arrow.ListOf(arrow.PrimitiveTypes.Int64),
+	}}, nil)
+	builder := array.NewListBuilder(allocator, arrow.PrimitiveTypes.Int64)
+	values, ok := builder.ValueBuilder().(*array.Int64Builder)
+	if !ok {
+		t.Fatalf("list value builder = %T, want *array.Int64Builder",
+			builder.ValueBuilder())
+	}
+	for i := range rows {
+		builder.Append(true)
+		for j := range valuesPerRow {
+			values.Append(int64(i*valuesPerRow + j))
+		}
+	}
+	column := builder.NewArray()
+	builder.Release()
+	record := array.NewRecordBatch(schema, []arrow.Array{column}, int64(rows))
+	column.Release()
+	return schema, record
+}
+
+// structBatch builds one struct column whose string field holds valueBytes(row)
+// bytes, so a slice's cost is dominated by a nested variable-width child.
+func structBatch(
+	t *testing.T,
+	allocator memory.Allocator,
+	rows int,
+	valueBytes func(row int) int,
+) (*arrow.Schema, arrow.RecordBatch) {
+	t.Helper()
+	structType := arrow.StructOf(
+		arrow.Field{Name: "id", Type: arrow.PrimitiveTypes.Int64},
+		arrow.Field{Name: "value", Type: arrow.BinaryTypes.String},
+	)
+	schema := arrow.NewSchema(
+		[]arrow.Field{{Name: "entry", Type: structType}},
+		nil,
+	)
+	builder := array.NewStructBuilder(allocator, structType)
+	ids, ok := builder.FieldBuilder(0).(*array.Int64Builder)
+	if !ok {
+		t.Fatalf("field 0 builder = %T, want *array.Int64Builder",
+			builder.FieldBuilder(0))
+	}
+	values, ok := builder.FieldBuilder(1).(*array.StringBuilder)
+	if !ok {
+		t.Fatalf("field 1 builder = %T, want *array.StringBuilder",
+			builder.FieldBuilder(1))
+	}
+	for i := range rows {
+		builder.Append(true)
+		ids.Append(int64(i))
+		values.Append(strings.Repeat("x", valueBytes(i)))
+	}
+	column := builder.NewArray()
+	builder.Release()
+	record := array.NewRecordBatch(schema, []arrow.Array{column}, int64(rows))
+	column.Release()
+	return schema, record
+}
+
 func readIDs(t *testing.T, data []byte) []int32 {
 	t.Helper()
 	reader, err := ipc.NewReader(bytes.NewReader(data))
@@ -302,14 +372,99 @@ func TestIPCCompressionOptionsRoundTrip(t *testing.T) {
 
 // TestTypedAdmissionChargesSliceNotParentBuffers pins the reason admission sizes
 // a batch from the rows it covers: a slice shares its parent's buffers, so a
-// whole-buffer measurement charges a small slice for the entire parent.
+// whole-buffer measurement charges a small slice for the entire parent. Nested
+// layouts are covered because slicing rebases only the top-level node, leaving
+// a struct's fields and a list's values spanning the whole parent.
 func TestTypedAdmissionChargesSliceNotParentBuffers(t *testing.T) {
 	const (
 		rows       = 20_000
 		valueBytes = 512
 		sliceRows  = 10
 	)
-	schema, record := binaryBatch(t, memory.DefaultAllocator, rows, valueBytes)
+	cases := []struct {
+		name  string
+		build func(*testing.T) (*arrow.Schema, arrow.RecordBatch)
+	}{{
+		name: "string",
+		build: func(t *testing.T) (*arrow.Schema, arrow.RecordBatch) {
+			return binaryBatch(t, memory.DefaultAllocator, rows, valueBytes)
+		},
+	}, {
+		name: "list",
+		build: func(t *testing.T) (*arrow.Schema, arrow.RecordBatch) {
+			return listBatch(t, memory.DefaultAllocator, rows, valueBytes/8)
+		},
+	}, {
+		name: "struct",
+		build: func(t *testing.T) (*arrow.Schema, arrow.RecordBatch) {
+			return structBatch(t, memory.DefaultAllocator, rows,
+				func(int) int { return valueBytes })
+		},
+	}}
+
+	for _, testCase := range cases {
+		t.Run(testCase.name, func(t *testing.T) {
+			schema, record := testCase.build(t)
+			defer record.Release()
+			protocol, err := New(schema, Options{})
+			if err != nil {
+				t.Fatalf("New: %v", err)
+			}
+
+			slice := record.NewSlice(rows-sliceRows, rows)
+			defer slice.Release()
+			estimate, err := protocol.EstimateRecordBatchRetainedSize(slice)
+			if err != nil {
+				t.Fatalf("EstimateRecordBatchRetainedSize: %v", err)
+			}
+			payload, err := protocol.EncodeRecordBatch(slice)
+			if err != nil {
+				t.Fatalf("EncodeRecordBatch: %v", err)
+			}
+			if estimate < payload.RetainedSize() {
+				t.Fatalf(
+					"slice estimate %d under-reserves its %d-byte payload",
+					estimate,
+					payload.RetainedSize(),
+				)
+			}
+			parentEstimate, err := protocol.EstimateRecordBatchRetainedSize(record)
+			if err != nil {
+				t.Fatalf("EstimateRecordBatchRetainedSize(parent): %v", err)
+			}
+			if estimate > parentEstimate/100 {
+				t.Fatalf(
+					"slice estimate %d tracks the %d-byte parent rather than its own rows",
+					estimate,
+					parentEstimate,
+				)
+			}
+		})
+	}
+}
+
+// TestNestedSliceAdmissionCoversHeavyTailRows pins that a nested child's window
+// follows its parent's offset. Sizing the wrong rows of a variable-width child
+// looks plausible on uniform data, but under-reserves once the sliced rows are
+// the large ones.
+func TestNestedSliceAdmissionCoversHeavyTailRows(t *testing.T) {
+	const (
+		rows      = 2_000
+		sliceRows = 4
+		smallLen  = 16
+		largeLen  = 256 * 1024
+	)
+	schema, record := structBatch(
+		t,
+		memory.DefaultAllocator,
+		rows,
+		func(row int) int {
+			if row >= rows-sliceRows {
+				return largeLen
+			}
+			return smallLen
+		},
+	)
 	defer record.Release()
 	protocol, err := New(schema, Options{})
 	if err != nil {
@@ -328,20 +483,9 @@ func TestTypedAdmissionChargesSliceNotParentBuffers(t *testing.T) {
 	}
 	if estimate < payload.RetainedSize() {
 		t.Fatalf(
-			"slice estimate %d under-reserves its %d-byte payload",
+			"estimate %d under-reserves the %d-byte heavy-tail payload",
 			estimate,
 			payload.RetainedSize(),
-		)
-	}
-	parentEstimate, err := protocol.EstimateRecordBatchRetainedSize(record)
-	if err != nil {
-		t.Fatalf("EstimateRecordBatchRetainedSize(parent): %v", err)
-	}
-	if estimate > parentEstimate/100 {
-		t.Fatalf(
-			"slice estimate %d tracks the %d-byte parent rather than its own rows",
-			estimate,
-			parentEstimate,
 		)
 	}
 }
