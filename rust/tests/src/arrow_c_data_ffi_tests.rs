@@ -138,6 +138,56 @@ mod ffi_c_data_lifetime_tests {
         (array, schema)
     }
 
+    struct RuntimeWaitingArrayRelease {
+        inner_release: Option<unsafe extern "C" fn(*mut FFI_ArrowArray)>,
+        inner_private_data: *mut c_void,
+        runtime: tokio::runtime::Handle,
+        runtime_progressed: Arc<AtomicBool>,
+        release_count: Arc<AtomicUsize>,
+    }
+
+    unsafe extern "C" fn runtime_waiting_array_release(array: *mut FFI_ArrowArray) {
+        let array = unsafe { &mut *array };
+        let state =
+            unsafe { Box::from_raw(array.private_data.cast::<RuntimeWaitingArrayRelease>()) };
+        let (completed_tx, completed_rx) = mpsc::sync_channel(1);
+        state.runtime.spawn(async move {
+            let _ = completed_tx.send(());
+        });
+        state.runtime_progressed.store(
+            completed_rx.recv_timeout(Duration::from_secs(2)).is_ok(),
+            Ordering::SeqCst,
+        );
+        state.release_count.fetch_add(1, Ordering::SeqCst);
+        array.release = state.inner_release;
+        array.private_data = state.inner_private_data;
+        if let Some(release) = state.inner_release {
+            unsafe { release(array) };
+        }
+    }
+
+    fn exported_runtime_waiting_batch(
+        batch: RecordBatch,
+        runtime: tokio::runtime::Handle,
+        runtime_progressed: Arc<AtomicBool>,
+        release_count: Arc<AtomicUsize>,
+    ) -> (FFI_ArrowArray, FFI_ArrowSchema) {
+        let schema = batch.schema();
+        let struct_array = StructArray::from(batch);
+        let mut array = FFI_ArrowArray::new(&struct_array.to_data());
+        let array_state = Box::new(RuntimeWaitingArrayRelease {
+            inner_release: array.release,
+            inner_private_data: array.private_data,
+            runtime,
+            runtime_progressed,
+            release_count,
+        });
+        array.release = Some(runtime_waiting_array_release);
+        array.private_data = Box::into_raw(array_state).cast();
+        let schema = FFI_ArrowSchema::try_from(schema.as_ref()).unwrap();
+        (array, schema)
+    }
+
     fn exported_timing_batch(
         batch: RecordBatch,
         release_count: Arc<AtomicUsize>,
@@ -718,6 +768,48 @@ mod ffi_c_data_lifetime_tests {
 
         assert_eq!(array_releases.load(Ordering::SeqCst), 1);
         assert_eq!(schema_releases.load(Ordering::SeqCst), 1);
+        tokio::task::spawn_blocking(move || zerobus_sdk_free(sdk as *mut _))
+            .await
+            .expect("sdk free task panicked");
+        Ok(())
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn ffi_c_data_free_offloaded_from_current_thread_runtime_allows_callback_progress(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let (_mock_server, server_url) = start_mock_flight_server().await?;
+        let schema = create_test_arrow_schema();
+        let (sdk, stream) = create_ffi_stream(server_url, Arc::clone(&schema)).await?;
+        let runtime_progressed = Arc::new(AtomicBool::new(false));
+        let release_count = Arc::new(AtomicUsize::new(0));
+        let batch =
+            create_test_record_batch(schema, vec![1], vec![Some("current-thread callback")]);
+        let (array, schema_ffi) = exported_runtime_waiting_batch(
+            batch,
+            tokio::runtime::Handle::current(),
+            Arc::clone(&runtime_progressed),
+            Arc::clone(&release_count),
+        );
+        let batch = unsafe { import_c_data_record_batch(array, schema_ffi) }?;
+        // This mirrors the opaque-handle cast in arrow.rs and must change with it.
+        let stream_ref = unsafe { &*(stream as *const ZerobusArrowStream) };
+        stream_ref.retain_failed_batch_for_test(batch).await;
+
+        tokio::time::timeout(
+            Duration::from_secs(5),
+            tokio::task::spawn_blocking(move || {
+                zerobus_arrow_stream_free(stream as *mut _);
+            }),
+        )
+        .await
+        .expect("offloaded free timed out")
+        .expect("offloaded free task panicked");
+
+        assert_eq!(release_count.load(Ordering::SeqCst), 1);
+        assert!(
+            runtime_progressed.load(Ordering::SeqCst),
+            "offloaded free must let the current-thread runtime drive callback work"
+        );
         tokio::task::spawn_blocking(move || zerobus_sdk_free(sdk as *mut _))
             .await
             .expect("sdk free task panicked");

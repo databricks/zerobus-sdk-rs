@@ -381,6 +381,12 @@ fn abort_and_drop_arrow_stream_on_thread(stream: Box<ZerobusArrowStream>) {
 /// shutdown panic, a required helper-thread spawn failure, or a helper-thread panic terminates the
 /// process rather than returning without that guarantee.
 ///
+/// Do not call this function from the only thread, event loop, or runtime lock that a release
+/// callback needs in order to complete. For example, a caller must not hold the Python GIL if a
+/// release callback must reacquire it, or block a single-threaded event loop/runtime used by that
+/// callback. Offload this synchronous function to a blocking or OS thread, release any required
+/// runtime locks, and continue servicing the event loop until the call completes.
+///
 /// Do not race this function with another operation on the same stream handle. After C Data import,
 /// freeing this same stream reentrantly from one of its SDK callbacks is unsupported because
 /// complete shutdown would wait for the callback making the call. IPC-only concurrent or reentrant
