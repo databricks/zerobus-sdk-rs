@@ -18,7 +18,7 @@ databricks-zerobus-ingest-sdk = { path = "../sdk", version = "2.0.1", features =
 arrow-ipc.workspace = true
 
 # FFI helpers
-tokio = { workspace = true, features = ["rt", "rt-multi-thread"] }
+tokio = { workspace = true, features = ["rt", "rt-multi-thread", "time"] }
 once_cell.workspace = true
 prost.workspace = true
 prost-types.workspace = true

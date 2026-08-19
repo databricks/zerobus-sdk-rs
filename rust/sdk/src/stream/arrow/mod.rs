@@ -20,7 +20,6 @@ use std::sync::Arc;
 use arrow_flight::error::FlightError;
 use bytes::Bytes;
 use tokio::sync::{mpsc, watch, Mutex, Notify, Semaphore};
-use tokio::task::AbortHandle;
 use tokio::time::{timeout, Duration, Instant};
 use tokio_retry::strategy::FixedInterval;
 use tokio_retry::RetryIf;
@@ -31,8 +30,9 @@ pub use arrow_schema::{DataType, Field, Schema as ArrowSchema, TimeUnit};
 
 use self::batch::{materialize_ipc, PendingBatch};
 use self::close::{CloseCoordinator, CloseFinalizer, CloseRequest, CloseState};
+use self::connection::RequestBodyRegistry;
 pub use self::options::ArrowStreamConfigurationOptions;
-use self::supervisor::Supervisor;
+use self::supervisor::{Supervisor, SupervisorTaskHandle};
 use crate::errors::{should_retry_initial_connection, ZerobusError};
 use crate::headers_provider::HeadersProvider;
 use crate::offset_generator::{OffsetId, OffsetIdGenerator};
@@ -54,6 +54,19 @@ mod supervisor;
 const LOG_TARGET: &str = module_path!();
 
 type BatchSender = Arc<Mutex<Option<mpsc::Sender<Result<RecordBatch, FlightError>>>>>;
+
+struct FlightConnectionParameters<'a> {
+    endpoint: &'a str,
+    tls_config: &'a Arc<dyn TlsConfig>,
+    connector_factory: Option<&'a ConnectorFactory>,
+    table_properties: &'a ArrowTableProperties,
+    options: &'a ArrowStreamConfigurationOptions,
+    headers_provider: &'a Arc<dyn HeadersProvider>,
+    sdk_identifier: &'a str,
+    request_bodies: &'a RequestBodyRegistry,
+    #[cfg(feature = "test-hooks")]
+    test_hooks: &'a Arc<TestHooks>,
+}
 
 /// Converts a configured relative timeout into an absolute monotonic-clock deadline.
 pub(super) fn configured_deadline(
@@ -91,6 +104,10 @@ struct TestHooks {
     ack_idle: TestNotifyGate,
     failed_enqueue: TestBarrierGate,
     close_finalize: TestBarrierGate,
+    request_body_before_batch_poll: TestBarrierGate,
+    request_body_shutdown: TestBarrierGate,
+    retained_batches_cleared: TestNotifyGate,
+    free_shutdown_complete: TestBarrierGate,
 }
 
 /// Properties for an Arrow Flight ingestion table.
@@ -177,8 +194,13 @@ pub struct ZerobusArrowStream {
     admission_closed: Arc<AtomicBool>,
     /// Coordinates one resumable explicit-close request with the recovery supervisor.
     close: CloseCoordinator,
-    /// Abort handle for the supervisor worker; its detached reaper remains independent.
-    supervisor_abort: Arc<Mutex<Option<AbortHandle>>>,
+    /// Supervisor worker and reaper ownership, consumed once by terminal shutdown.
+    supervisor_task: Arc<Mutex<Option<SupervisorTaskHandle>>>,
+    /// Once true, FFI destruction must wait until all foreign C Data owners are released.
+    #[cfg(feature = "internal-arrow-c-data")]
+    has_ingested_c_data: AtomicBool,
+    /// Tracks every tonic-owned Flight request body until its queued owners are dropped.
+    request_bodies: RequestBodyRegistry,
     /// Accepted batches not yet fully acknowledged; retained for replay or retrieval.
     pending_batches: Arc<Mutex<Vec<PendingBatch>>>,
     /// Wakes the ACK processor when a batch is submitted after an idle period.
@@ -274,7 +296,8 @@ impl ZerobusArrowStream {
         let failed_batches = Arc::new(Mutex::new(Vec::new()));
         let recovery_attempts = Arc::new(AtomicU32::new(0));
         let batch_tx = Arc::new(Mutex::new(None));
-        let supervisor_abort = Arc::new(Mutex::new(None));
+        let supervisor_task = Arc::new(Mutex::new(None));
+        let request_bodies = RequestBodyRegistry::default();
         let cumulative_records_assigned = Arc::new(AtomicU64::new(0));
         let submitted_records = Arc::new(AtomicU64::new(0));
         let last_acked_records = Arc::new(AtomicU64::new(0));
@@ -295,7 +318,10 @@ impl ZerobusArrowStream {
             is_closed,
             admission_closed,
             close,
-            supervisor_abort,
+            supervisor_task,
+            #[cfg(feature = "internal-arrow-c-data")]
+            has_ingested_c_data: AtomicBool::new(false),
+            request_bodies,
             pending_batches,
             pending_notify,
             request_send_failure,
@@ -325,6 +351,7 @@ impl ZerobusArrowStream {
         let table_properties = stream.table_properties.clone();
         let options = stream.options.clone();
         let headers_provider = Arc::clone(&stream.headers_provider);
+        let request_bodies = stream.request_bodies.clone();
         let strategy = FixedInterval::from_millis(options.recovery_backoff_ms)
             .take(options.recovery_retries as usize);
 
@@ -336,18 +363,24 @@ impl ZerobusArrowStream {
             let options = options.clone();
             let headers_provider = Arc::clone(&headers_provider);
             let sdk_identifier = Arc::clone(&stream.sdk_identifier);
+            let request_bodies = request_bodies.clone();
+            #[cfg(feature = "test-hooks")]
+            let test_hooks = Arc::clone(&stream.test_hooks);
 
             async move {
-                Self::try_connect(
-                    &endpoint,
-                    &tls_config,
-                    connector_factory.as_ref(),
-                    &table_properties,
-                    &options,
-                    &headers_provider,
-                    &sdk_identifier,
-                )
-                .await
+                let parameters = FlightConnectionParameters {
+                    endpoint: &endpoint,
+                    tls_config: &tls_config,
+                    connector_factory: connector_factory.as_ref(),
+                    table_properties: &table_properties,
+                    options: &options,
+                    headers_provider: &headers_provider,
+                    sdk_identifier: &sdk_identifier,
+                    request_bodies: &request_bodies,
+                    #[cfg(feature = "test-hooks")]
+                    test_hooks: &test_hooks,
+                };
+                Self::try_connect(&parameters).await
             }
         };
         // Keep auth errors globally non-retryable, but let initial setup refresh one
@@ -376,8 +409,8 @@ impl ZerobusArrowStream {
         let task = Supervisor::new(&stream).spawn(connection);
 
         {
-            let mut supervisor_abort = stream.supervisor_abort.lock().await;
-            *supervisor_abort = Some(task);
+            let mut supervisor_task = stream.supervisor_task.lock().await;
+            *supervisor_task = Some(task);
         }
 
         info!(
@@ -955,6 +988,53 @@ impl ZerobusArrowStream {
         Ok(self.failed_batches.lock().await.clone())
     }
 
+    #[cfg(feature = "internal-arrow-c-data")]
+    pub(crate) fn mark_c_data_ingested(&self) {
+        self.has_ingested_c_data.store(true, Ordering::Release);
+    }
+
+    #[cfg(feature = "internal-arrow-c-data")]
+    pub(crate) fn has_ingested_c_data(&self) -> bool {
+        self.has_ingested_c_data.load(Ordering::Acquire)
+    }
+
+    #[cfg(feature = "internal-arrow-c-data")]
+    pub(crate) async fn abort_and_wait(&self) {
+        self.admission_closed.store(true, Ordering::Release);
+        self.request_bodies.shutdown_all().await;
+
+        let task = self.supervisor_task.lock().await.take();
+        if let Some(task) = task {
+            task.abort_and_wait().await;
+        }
+
+        // A reconnect can register after the first snapshot but not after worker termination.
+        self.request_bodies.shutdown_all().await;
+
+        let (pending_batches, failed_batches) = {
+            let mut failed = self.failed_batches.lock().await;
+            let mut pending = self.pending_batches.lock().await;
+            (std::mem::take(&mut *pending), std::mem::take(&mut *failed))
+        };
+        drop((pending_batches, failed_batches));
+
+        #[cfg(feature = "test-hooks")]
+        if let Some(notify) = self.test_hooks.retained_batches_cleared.lock().await.take() {
+            notify.notify_one();
+        }
+
+        self.request_bodies.wait_for_all_eof().await;
+
+        #[cfg(feature = "test-hooks")]
+        {
+            let barrier = self.test_hooks.free_shutdown_complete.lock().await.take();
+            if let Some(barrier) = barrier {
+                barrier.reached.notify_one();
+                barrier.proceed.notified().await;
+            }
+        }
+    }
+
     /// Returns true once supervisor-owned terminal finalization publishes closure.
     pub fn is_closed(&self) -> bool {
         self.is_closed.load(Ordering::Relaxed)
@@ -1055,12 +1135,59 @@ impl ZerobusArrowStream {
         Self::arm_test_barrier(&self.test_hooks.close_finalize).await
     }
 
+    /// Test-only: parks the active request body after it observes forced shutdown but before
+    /// it reports EOF or drops transport-owned batches.
+    #[cfg(feature = "test-hooks")]
+    #[doc(hidden)]
+    pub async fn arm_request_body_shutdown_barrier(&self) -> (Arc<Notify>, Arc<Notify>) {
+        Self::arm_test_barrier(&self.test_hooks.request_body_shutdown).await
+    }
+
+    /// Test-only: parks the active request body before it polls a newly queued batch.
+    #[cfg(feature = "test-hooks")]
+    #[doc(hidden)]
+    pub async fn arm_request_body_before_batch_poll_barrier(&self) -> (Arc<Notify>, Arc<Notify>) {
+        Self::arm_test_barrier(&self.test_hooks.request_body_before_batch_poll).await
+    }
+
+    /// Test-only: notifies after destructive free clears SDK-retained batch collections.
+    #[cfg(feature = "test-hooks")]
+    #[doc(hidden)]
+    pub async fn arm_retained_batches_cleared_notify(&self) -> Arc<Notify> {
+        Self::arm_test_notify(&self.test_hooks.retained_batches_cleared).await
+    }
+
+    /// Test-only: marks and retains a foreign-owned batch for destructive-free tests.
+    #[cfg(all(feature = "test-hooks", feature = "internal-arrow-c-data"))]
+    #[doc(hidden)]
+    pub async fn retain_failed_batch_for_test(&self, batch: RecordBatch) {
+        self.mark_c_data_ingested();
+        self.failed_batches.lock().await.push(batch);
+    }
+
+    /// Test-only: reports whether destructive-free batch collection locks are available.
+    #[cfg(feature = "test-hooks")]
+    #[doc(hidden)]
+    pub fn retained_batch_locks_available_for_test(&self) -> bool {
+        let Ok(_failed) = self.failed_batches.try_lock() else {
+            return false;
+        };
+        self.pending_batches.try_lock().is_ok()
+    }
+
+    /// Test-only: parks destructive free after all request bodies and retained batches finish.
+    #[cfg(feature = "test-hooks")]
+    #[doc(hidden)]
+    pub async fn arm_free_shutdown_complete_barrier(&self) -> (Arc<Notify>, Arc<Notify>) {
+        Self::arm_test_barrier(&self.test_hooks.free_shutdown_complete).await
+    }
+
     /// Test-only: aborts the supervisor worker while leaving its finalizer reaper running.
     #[cfg(feature = "test-hooks")]
     #[doc(hidden)]
     pub async fn abort_supervisor_for_test(&self) {
-        if let Some(handle) = self.supervisor_abort.lock().await.as_ref() {
-            handle.abort();
+        if let Some(task) = self.supervisor_task.lock().await.as_ref() {
+            task.abort();
         }
     }
 
@@ -1114,11 +1241,13 @@ impl Drop for ZerobusArrowStream {
     fn drop(&mut self) {
         self.admission_closed.store(true, Ordering::Release);
         self.is_closed.store(true, Ordering::Relaxed);
+        self.request_bodies.try_shutdown_all();
         // Best-effort abort the supervisor. Drop does not preserve pending batches for
         // retrieval; call close() or let recovery reach terminal finalization first.
-        if let Ok(mut guard) = self.supervisor_abort.try_lock() {
-            if let Some(handle) = guard.take() {
-                handle.abort();
+        if let Ok(mut guard) = self.supervisor_task.try_lock() {
+            if let Some(task) = guard.take() {
+                task.abort();
+                // Dropping the reaper JoinHandle intentionally detaches ordinary Drop cleanup.
             }
         }
     }
