@@ -1,6 +1,6 @@
 [package]
 name = "zerobus-sdk-ts"
-version = "1.1.0"
+version = "1.2.0"
 authors = ["Databricks"]
 edition = "2021"
 license = "Apache-2.0"
@@ -16,7 +16,7 @@ crate-type = ["cdylib"]
 napi = { version = "2", features = ["async", "tokio_rt", "serde-json", "napi6"] }
 napi-derive = "2"
 
-databricks-zerobus-ingest-sdk = { path = "../rust/sdk", version = "2.6.0" }
+databricks-zerobus-ingest-sdk = { path = "../rust/sdk", version = "2.7.1" }
 
 tokio = { version = "1.52", features = ["macros", "rt-multi-thread"] }
 
