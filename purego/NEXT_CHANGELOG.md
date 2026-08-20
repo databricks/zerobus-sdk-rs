@@ -50,9 +50,18 @@
   values spanning the whole parent, and a batch's custom metadata is charged
   separately because it is written into the IPC message header rather than into
   any column buffer. Nothing is exposed through a public API yet.
+- Accept caller-owned Arrow IPC bytes as an ingestion input, canonicalized into
+  the same self-contained payload the typed path produces. A compressed stream is
+  measured before Arrow sees it: the IPC metadata is walked directly and the
+  uncompressed size each buffer declares is charged at admission, so a stream
+  that expands far past its wire length is refused instead of being allowed
+  through on its compressed size and then allocated for. Nothing is exposed
+  through a public API yet.
 - Add the `github.com/apache/arrow-go/v18` dependency. arrow-go requires
   `google.golang.org/grpc` v1.82.0, which raises this module's grpc minimum from
-  v1.81.1.
+  v1.81.1. `github.com/google/flatbuffers` becomes a direct dependency, having
+  been an indirect one through arrow-go, because Arrow IPC metadata is read
+  without materializing the batch it describes.
 
 ### Breaking Changes
 

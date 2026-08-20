@@ -4,13 +4,13 @@ go 1.25.0
 
 require (
 	github.com/apache/arrow-go/v18 v18.7.0
+	github.com/google/flatbuffers v25.12.19+incompatible
 	google.golang.org/grpc v1.82.0
 	google.golang.org/protobuf v1.36.11
 )
 
 require (
 	github.com/goccy/go-json v0.10.6 // indirect
-	github.com/google/flatbuffers v25.12.19+incompatible // indirect
 	github.com/klauspost/compress v1.19.0 // indirect
 	github.com/klauspost/cpuid/v2 v2.4.0 // indirect
 	github.com/pierrec/lz4/v4 v4.1.27 // indirect
