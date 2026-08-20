@@ -115,6 +115,33 @@ impl ZerobusSdk {
         StreamBuilder::new(self)
     }
 
+    /// Creates a new builder for a persistent (Eos) ingestion stream.
+    ///
+    /// Persistent streams are durable and recoverable: the server records the
+    /// stream identity and its committed offset, so a client can reconnect after
+    /// a restart and resume with exactly-once delivery into Delta. Configure the
+    /// builder like [`stream_builder`](Self::stream_builder), then call
+    /// [`build`](crate::PersistentStreamBuilder::build) to open a new stream or
+    /// [`resume`](crate::PersistentStreamBuilder::resume) to reconnect to one by
+    /// its `stream_id`.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// let stream = sdk
+    ///     .persistent_stream_builder()
+    ///     .table("catalog.schema.events")
+    ///     .oauth("client-id", "client-secret")
+    ///     .json()
+    ///     .build()
+    ///     .await?;
+    /// let id = stream.stream_id().unwrap().to_string(); // persist to resume later
+    /// ```
+    #[cfg(feature = "eos")]
+    pub fn persistent_stream_builder(&self) -> crate::PersistentStreamBuilder<'_> {
+        crate::PersistentStreamBuilder::new(StreamBuilder::new(self))
+    }
+
     /// Creates a new SDK instance with explicit configuration.
     ///
     /// This is used internally by the builder pattern. `sdk_identifier` is the

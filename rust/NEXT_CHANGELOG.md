@@ -6,6 +6,9 @@
 
 ### New Features and Improvements
 
+- Added the feature-gated `PersistentStream` API for creating durable ingestion
+  streams and resuming them by `stream_id` from the last committed offset.
+
 ### Bug Fixes
 
 - The OAuth `expires_in` field is now parsed from a quoted integer (`"3600"`) in

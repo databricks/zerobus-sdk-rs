@@ -29,8 +29,12 @@
 //!     .await?;
 //! ```
 
+#[cfg(feature = "eos")]
+mod persistent_stream_builder;
 mod sdk_builder;
 mod stream_builder;
 
+#[cfg(feature = "eos")]
+pub use persistent_stream_builder::PersistentStreamBuilder;
 pub use sdk_builder::ZerobusSdkBuilder;
 pub use stream_builder::StreamBuilder;
