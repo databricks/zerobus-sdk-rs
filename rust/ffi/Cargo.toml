@@ -1,6 +1,6 @@
 [package]
 name = "zerobus-ffi"
-version = "1.6.0"
+version = "1.7.0"
 edition = "2021"
 description = "C FFI bindings for the Zerobus Rust SDK"
 license = "Apache-2.0"
@@ -12,7 +12,7 @@ publish = false
 crate-type = ["rlib", "staticlib", "cdylib"]
 
 [dependencies]
-databricks-zerobus-ingest-sdk = { path = "../sdk", version = "2.0.1", features = ["arrow-flight", "internal-arrow-c-data", "testing"] }
+databricks-zerobus-ingest-sdk = { path = "../sdk", version = "2.7.1", features = ["arrow-flight", "internal-arrow-c-data", "testing"] }
 
 # Arrow IPC fallback plus schema and unacknowledged-batch serialization.
 arrow-ipc.workspace = true
