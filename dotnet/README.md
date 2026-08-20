@@ -429,6 +429,7 @@ dotnet test
 dotnet/
 ├── Zerobus.slnx                              # Solution file
 ├── Directory.Build.props                      # Shared build settings
+├── Directory.Packages.props                   # Central NuGet version pins
 ├── build_native.sh                            # Rust FFI build script
 ├── README.md
 ├── src/
