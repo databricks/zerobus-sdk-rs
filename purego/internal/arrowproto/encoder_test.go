@@ -157,9 +157,16 @@ func dictionaryBatch(
 	if !ok {
 		t.Fatal("dictionary builder is not a *array.BinaryDictionaryBuilder")
 	}
+	// Single-byte runes only, so each value is exactly valueBytes on the wire and
+	// the caller can predict the dictionary's total size.
+	const alphabet = "abcdefghijklmnopqrstuvwxyz" +
+		"ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789+/"
+	if distinct > len(alphabet) {
+		t.Fatalf("distinct = %d, want at most %d", distinct, len(alphabet))
+	}
 	for i := range rows {
-		value := strings.Repeat(string(rune('a'+i%distinct)), valueBytes)
-		if err := builder.AppendString(value); err != nil {
+		letter := alphabet[i%distinct : i%distinct+1]
+		if err := builder.AppendString(strings.Repeat(letter, valueBytes)); err != nil {
 			t.Fatalf("append dictionary value: %v", err)
 		}
 	}
