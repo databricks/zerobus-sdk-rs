@@ -77,6 +77,8 @@ internal-arrow-c-data = [
 ]
 # Zero-copy protobuf parser.
 zeroparser = ["dep:self_cell", "dep:prost-build"]
+# Persistent (Eos) streams; in development, API is unstable
+eos = []
 testing = ["dep:futures"]
 # Test-only deterministic seams (barriers/notifies) for the Arrow stream. Zero footprint
 # unless enabled; never enabled by FFI/production builds.

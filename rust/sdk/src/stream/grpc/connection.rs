@@ -1,51 +1,55 @@
 //! gRPC stream connection setup.
 //!
-//! This module is transport-specific: it builds the bidirectional gRPC stream
-//! used by `ZerobusStream` to talk to the Zerobus service. The Arrow Flight
-//! transport has its own equivalent in `stream/arrow/connection.rs`.
+//! This module is transport-specific: it opens the bidirectional gRPC stream
+//! used by `ZerobusStream`. It handles both stream kinds through the transport
+//! seam (`super::transport`): ephemeral streams over the `EphemeralStream` RPC
+//! and, behind the `eos` feature, persistent streams over `PersistentStream`.
+//! The Arrow Flight transport has its own equivalent under `stream/arrow/`.
 
 use std::sync::Arc;
 
 use prost::Message;
 use tokio::time::Duration;
-use tokio_stream::wrappers::ReceiverStream;
 use tonic::metadata::MetadataValue;
 use tonic::transport::Channel;
 use tracing::{debug, error, info, instrument, warn};
 
-use super::ZerobusStream;
-use crate::databricks::zerobus::ephemeral_stream_request::Payload as RequestPayload;
-use crate::databricks::zerobus::ephemeral_stream_response::Payload as ResponsePayload;
+use super::transport::{self, InboundStream, OutboundSink, TransportKind};
 use crate::databricks::zerobus::zerobus_client::ZerobusClient;
-use crate::databricks::zerobus::{
-    CreateIngestStreamRequest, EphemeralStreamRequest, EphemeralStreamResponse, RecordType,
-};
-use crate::{HeadersProvider, TableProperties, ZerobusError, ZerobusResult};
+use crate::databricks::zerobus::{CreateIngestStreamRequest, RecordType};
+use crate::{HeadersProvider, OffsetId, TableProperties, ZerobusError, ZerobusResult};
 
-impl ZerobusStream {
-    /// Creates a stream connection to the Zerobus API.
-    /// Returns a tuple containing the sender, response gRPC stream, and stream ID.
-    /// If the stream creation fails, it returns an error.
+/// A freshly opened stream connection: the outbound sink, the inbound response
+/// stream, the server-assigned `stream_id`, and (persistent resume only) the
+/// committed-offset watermark to resume from.
+pub(super) struct StreamConnection {
+    pub(super) sink: OutboundSink,
+    pub(super) inbound: InboundStream,
+    pub(super) stream_id: String,
+    pub(super) last_committed_offset: Option<OffsetId>,
+}
+
+impl super::ZerobusStream {
+    /// Opens a stream connection to the Zerobus API for the given transport
+    /// kind. Returns the sink, inbound stream, stream id, and resume watermark.
     ///
-    /// On a server-side authentication rejection it asks the headers provider to
-    /// invalidate cached credentials so the next attempt re-derives them. This
-    /// covers IdP-revoked tokens, not a same-named table recreated within the
-    /// token's lifetime, which the server accepts.
+    /// On a server-side authentication rejection it asks the headers provider
+    /// to invalidate cached credentials so the next attempt re-derives them.
+    /// This covers IdP-revoked tokens, not a same-named table recreated within
+    /// the token's lifetime, which the server accepts.
     pub(super) async fn create_stream_connection(
         channel: ZerobusClient<Channel>,
         table_properties: &TableProperties,
         headers_provider: &Arc<dyn HeadersProvider>,
         record_type: RecordType,
-    ) -> ZerobusResult<(
-        tokio::sync::mpsc::Sender<EphemeralStreamRequest>,
-        tonic::Streaming<EphemeralStreamResponse>,
-        String,
-    )> {
+        kind: &TransportKind,
+    ) -> ZerobusResult<StreamConnection> {
         let result = Self::create_stream_connection_inner(
             channel,
             table_properties,
             headers_provider,
             record_type,
+            kind,
         )
         .await;
         if let Err(err) = &result {
@@ -69,12 +73,9 @@ impl ZerobusStream {
         table_properties: &TableProperties,
         headers_provider: &Arc<dyn HeadersProvider>,
         record_type: RecordType,
+        kind: &TransportKind,
         recovery_timeout_ms: u64,
-    ) -> ZerobusResult<(
-        tokio::sync::mpsc::Sender<EphemeralStreamRequest>,
-        tonic::Streaming<EphemeralStreamResponse>,
-        String,
-    )> {
+    ) -> ZerobusResult<StreamConnection> {
         let attempt_timeout = Duration::from_millis(recovery_timeout_ms);
         let attempt_started = tokio::time::Instant::now();
         let result = tokio::time::timeout(
@@ -84,6 +85,7 @@ impl ZerobusStream {
                 table_properties,
                 headers_provider,
                 record_type,
+                kind,
             ),
         )
         .await
@@ -115,18 +117,13 @@ impl ZerobusStream {
         table_properties: &TableProperties,
         headers_provider: &Arc<dyn HeadersProvider>,
         record_type: RecordType,
-    ) -> ZerobusResult<(
-        tokio::sync::mpsc::Sender<EphemeralStreamRequest>,
-        tonic::Streaming<EphemeralStreamResponse>,
-        String,
-    )> {
-        const CHANNEL_BUFFER_SIZE: usize = 2048;
-        let (tx, rx) = tokio::sync::mpsc::channel(CHANNEL_BUFFER_SIZE);
-        let mut request_stream = tonic::Request::new(ReceiverStream::new(rx));
+        kind: &TransportKind,
+    ) -> ZerobusResult<StreamConnection> {
+        let (sink, request_body) = transport::make_outbound(kind);
+        let mut request = tonic::Request::new(request_body);
 
-        let stream_metadata = request_stream.metadata_mut();
+        let stream_metadata = request.metadata_mut();
         let headers = headers_provider.get_headers().await?;
-
         for (key, value) in headers {
             match key {
                 "x-databricks-zerobus-table-name" => {
@@ -152,12 +149,45 @@ impl ZerobusStream {
             }
         }
 
-        let mut response_grpc_stream = channel
-            .ephemeral_stream(request_stream)
-            .await
-            .map_err(ZerobusError::CreateStreamError)?
-            .into_inner();
+        let mut inbound = transport::open_rpc(&mut channel, request).await?;
 
+        let create_request = Self::build_create_request(table_properties, record_type)?;
+
+        debug!("Sending stream-open request.");
+        sink.send_open(kind, create_request).await.map_err(|_| {
+            error!(table_name = %table_properties.table_name, "Failed to send stream-open request");
+            ZerobusError::StreamClosedError(tonic::Status::internal(
+                "Failed to send stream-open request",
+            ))
+        })?;
+
+        debug!("Waiting for stream-open response.");
+        let opened = inbound.recv_open().await?;
+
+        // On a persistent resume the server does not re-send the stream_id (the
+        // client supplied it), so fall back to the id being resumed.
+        let stream_id = if opened.stream_id.is_empty() {
+            Self::resume_stream_id(kind).unwrap_or_default()
+        } else {
+            opened.stream_id
+        };
+        info!(stream_id = %stream_id, last_committed_offset = ?opened.last_committed_offset, "Successfully opened stream");
+
+        Ok(StreamConnection {
+            sink,
+            inbound,
+            stream_id,
+            last_committed_offset: opened.last_committed_offset,
+        })
+    }
+
+    /// Builds the `CreateIngestStreamRequest` sent when opening (or, on the
+    /// persistent path, creating) a stream. Encodes the descriptor for proto
+    /// streams and validates its presence.
+    fn build_create_request(
+        table_properties: &TableProperties,
+        record_type: RecordType,
+    ) -> ZerobusResult<CreateIngestStreamRequest> {
         let descriptor_proto = if record_type == RecordType::Proto {
             Some(
                 table_properties
@@ -174,56 +204,19 @@ impl ZerobusStream {
             None
         };
 
-        let create_stream_request = RequestPayload::CreateStream(CreateIngestStreamRequest {
+        Ok(CreateIngestStreamRequest {
             table_name: Some(table_properties.table_name.to_string()),
             descriptor_proto,
             record_type: Some(record_type.into()),
-        });
-
-        debug!("Sending CreateStream request.");
-        tx.send(EphemeralStreamRequest {
-            payload: Some(create_stream_request),
         })
-        .await
-        .map_err(|_| {
-            error!(table_name = %table_properties.table_name, "Failed to send CreateStream request");
-            ZerobusError::StreamClosedError(tonic::Status::internal(
-                "Failed to send CreateStream request",
-            ))
-        })?;
-        debug!("Waiting for CreateStream response.");
-        let create_stream_response = response_grpc_stream.message().await;
+    }
 
-        match create_stream_response {
-            Ok(Some(create_stream_response)) => match create_stream_response.payload {
-                Some(ResponsePayload::CreateStreamResponse(resp)) => {
-                    if let Some(stream_id) = resp.stream_id {
-                        info!(stream_id = %stream_id, "Successfully created stream");
-                        Ok((tx, response_grpc_stream, stream_id))
-                    } else {
-                        error!("Successfully created a stream but stream_id is None");
-                        Err(ZerobusError::CreateStreamError(tonic::Status::internal(
-                            "Successfully created a stream but stream_id is None",
-                        )))
-                    }
-                }
-                unexpected_message => {
-                    error!("Unexpected response from server {unexpected_message:?}");
-                    Err(ZerobusError::CreateStreamError(tonic::Status::internal(
-                        "Unexpected response from server",
-                    )))
-                }
-            },
-            Ok(None) => {
-                info!("Server closed the stream gracefully before sending CreateStream response");
-                Err(ZerobusError::CreateStreamError(tonic::Status::ok(
-                    "Stream closed gracefully by server",
-                )))
-            }
-            Err(status) => {
-                error!("CreateStream RPC failed: {status:?}");
-                Err(ZerobusError::CreateStreamError(status))
-            }
+    /// The stream id being resumed, if this is a persistent resume.
+    fn resume_stream_id(kind: &TransportKind) -> Option<String> {
+        match kind {
+            TransportKind::Ephemeral => None,
+            #[cfg(feature = "eos")]
+            TransportKind::Persistent { resume_stream_id } => resume_stream_id.clone(),
         }
     }
 }

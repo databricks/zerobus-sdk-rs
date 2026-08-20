@@ -85,6 +85,31 @@ impl<T: Clone> LandingZone<T> {
         all_items
     }
 
+    /// Removes and returns items from the front of the unobserved queue while
+    /// `pred` holds, stopping at the first item that fails it.
+    ///
+    /// Used by the persistent-stream resume path to reconcile the retained tail
+    /// against the server's committed watermark: it removes the prefix of
+    /// records the server has already durably stored (offset ≤ resume watermark)
+    /// before re-sending the rest. Only the unobserved queue is consulted:
+    /// callers reset observation (`reset_observe`) first, so every retained item
+    /// lives in the queue in offset order. One semaphore permit is released per
+    /// removed item, mirroring `remove_observed`.
+    pub fn remove_front_while<F: FnMut(&T) -> bool>(&self, mut pred: F) -> Vec<T> {
+        let mut state = self.state.lock().expect("Lock poisoned");
+        let mut permits = self.permits.lock().expect("Lock poisoned");
+        let mut removed = Vec::new();
+        while let Some(front) = state.queue.front() {
+            if !pred(front) {
+                break;
+            }
+            let item = state.queue.pop_front().expect("front just checked");
+            permits.pop_front();
+            removed.push(item);
+        }
+        removed
+    }
+
     /// Adds an item to the queue.
     ///
     /// This method will block if the maximum number of inflight requests has been reached,
