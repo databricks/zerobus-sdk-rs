@@ -489,3 +489,55 @@ func TestNestedSliceAdmissionCoversHeavyTailRows(t *testing.T) {
 		)
 	}
 }
+
+// A batch's custom metadata is written into the IPC message header, where a
+// column buffer walk cannot see it, so it is charged separately once it grows
+// past the admission slop.
+func TestTypedAdmissionChargesRecordBatchMetadata(t *testing.T) {
+	const metadataBytes = 512 * 1024
+	schema := idSchema(nil)
+	protocol, err := New(schema, Options{})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	plain := idBatch(t, memory.DefaultAllocator, schema, []int32{1})
+	defer plain.Release()
+	metadata := arrow.NewMetadata(
+		[]string{"trace"},
+		[]string{strings.Repeat("m", metadataBytes)},
+	)
+	annotated := array.NewRecordBatchWithMetadata(
+		schema,
+		plain.Columns(),
+		plain.NumRows(),
+		metadata,
+	)
+	defer annotated.Release()
+
+	plainEstimate, err := protocol.EstimateRecordBatchRetainedSize(plain)
+	if err != nil {
+		t.Fatalf("plain estimate: %v", err)
+	}
+	estimate, err := protocol.EstimateRecordBatchRetainedSize(annotated)
+	if err != nil {
+		t.Fatalf("annotated estimate: %v", err)
+	}
+	if growth := estimate - plainEstimate; growth < metadataBytes {
+		t.Fatalf(
+			"metadata grew the estimate by %d bytes, want at least %d",
+			growth,
+			metadataBytes,
+		)
+	}
+	payload, err := protocol.EncodeRecordBatch(annotated)
+	if err != nil {
+		t.Fatalf("EncodeRecordBatch: %v", err)
+	}
+	if estimate < payload.RetainedSize() {
+		t.Fatalf(
+			"estimate %d under-reserves the %d-byte annotated payload",
+			estimate,
+			payload.RetainedSize(),
+		)
+	}
+}

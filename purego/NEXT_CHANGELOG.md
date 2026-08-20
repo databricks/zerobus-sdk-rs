@@ -47,7 +47,9 @@
   shares its parent's buffers and would otherwise be charged for the entire
   parent. Nested children are sized from the same row window, since slicing
   rebases only the top-level node and leaves a struct's fields and a list's
-  values spanning the whole parent. Nothing is exposed through a public API yet.
+  values spanning the whole parent, and a batch's custom metadata is charged
+  separately because it is written into the IPC message header rather than into
+  any column buffer. Nothing is exposed through a public API yet.
 - Add the `github.com/apache/arrow-go/v18` dependency. arrow-go requires
   `google.golang.org/grpc` v1.82.0, which raises this module's grpc minimum from
   v1.81.1.

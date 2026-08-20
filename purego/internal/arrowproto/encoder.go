@@ -18,10 +18,14 @@ import (
 // consume byte capacity.
 const payloadOverheadBytes = int64(64)
 
-// admissionSlopBytes is headroom for IPC framing a buffer sum cannot see: batch
-// metadata, buffer padding, end markers. It bounds the estimate, not occupancy —
-// a smaller MaxBufferedPayloadBytes rejects every batch.
+// admissionSlopBytes is headroom for IPC framing a buffer sum cannot see:
+// buffer padding, end markers, message headers. It bounds the estimate, not
+// occupancy — a smaller MaxBufferedPayloadBytes rejects every batch.
 const admissionSlopBytes = int64(64 * 1024)
+
+// metadataEntryOverheadBytes covers the flatbuffer vector, table, and offset
+// overhead one custom metadata entry costs beyond its UTF-8 contents.
+const metadataEntryOverheadBytes = int64(32)
 
 // Compression selects the compression used when serializing Arrow IPC batches.
 type Compression uint8
@@ -127,10 +131,10 @@ func (p *Protocol) EncodeRecordBatch(batch arrow.RecordBatch) (*Payload, error) 
 }
 
 // EstimateRecordBatchRetainedSize returns a conservative pre-materialization
-// reservation: the batch sized from the rows it covers, doubled to cover
-// framing, compression, and buffer growth, plus the per-payload schema base.
-// The core admits on this value before encoding, so an over-estimate rejects a
-// batch that would have fit.
+// reservation: the batch sized from the rows it covers plus its custom
+// metadata, doubled to cover framing, compression, and buffer growth, plus the
+// per-payload schema base. The core admits on this value before encoding, so an
+// over-estimate rejects a batch that would have fit.
 func (p *Protocol) EstimateRecordBatchRetainedSize(
 	batch arrow.RecordBatch,
 ) (int64, error) {
@@ -140,7 +144,14 @@ func (p *Protocol) EstimateRecordBatchRetainedSize(
 	if err := p.validateBatch(batch); err != nil {
 		return 0, err
 	}
-	return p.admissionEstimate(totalRecordBufferSize(batch)), nil
+	inputBytes, err := addInt64Saturating(
+		totalRecordBufferSize(batch),
+		recordBatchMetadataSize(batch),
+	)
+	if err != nil {
+		return math.MaxInt64, nil
+	}
+	return p.admissionEstimate(inputBytes), nil
 }
 
 func (p *Protocol) admissionEstimate(inputBytes int64) int64 {
@@ -475,6 +486,29 @@ func wholeBufferSize(
 		}
 		seen[buffer] = struct{}{}
 		size, err := addInt64Saturating(total, int64(buffer.Len()))
+		if err != nil {
+			return math.MaxInt64
+		}
+		total = size
+	}
+	return total
+}
+
+// recordBatchMetadataSize charges a batch's custom metadata, which arrow-go
+// writes into the IPC message header. A buffer walk cannot see it, so a batch
+// carrying more of it than the slop covers would under-reserve.
+func recordBatchMetadataSize(batch arrow.RecordBatch) int64 {
+	withMetadata, ok := batch.(arrow.RecordBatchWithMetadata)
+	if !ok {
+		return 0
+	}
+	metadata := withMetadata.Metadata()
+	values := metadata.Values()
+	var total int64
+	for index, key := range metadata.Keys() {
+		entryBytes := metadataEntryOverheadBytes +
+			int64(len(key)) + int64(len(values[index]))
+		size, err := addInt64Saturating(total, entryBytes)
 		if err != nil {
 			return math.MaxInt64
 		}
