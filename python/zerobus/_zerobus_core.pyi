@@ -162,7 +162,10 @@ class StreamConfigurationOptions:
 # =============================================================================
 
 class ZerobusException(Exception):
-    """Base class for all exceptions in the Zerobus SDK."""
+    """Base class for all exceptions in the Zerobus SDK.
+
+    Retryable failures (network issues, temporary server errors) are raised as this type.
+    """
 
     ...
 
