@@ -1,10 +1,6 @@
 name: C++ CI
 
 on:
-  # No use_local_sdk input: the C++ build always compiles the Rust core from
-  # local source (BuildRustFfi.cmake runs `cargo build` in ../rust/ffi, which
-  # depends on ../rust/sdk by path), so there is no released-vs-local mode to
-  # toggle and no crates.io dependency to patch.
   workflow_call:
 
 env:
