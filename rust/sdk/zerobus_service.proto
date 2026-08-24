@@ -43,6 +43,20 @@ service Zerobus {
    * - Receive durability confirmations via IngestRecordResponse.
    */
   rpc EphemeralStream(stream EphemeralStreamRequest) returns (stream EphemeralStreamResponse);
+
+  // IN DEVELOPMENT: may change or be removed.
+  //
+  // Creates or resumes a durable (exactly-once) ingestion stream. The first
+  // message is a CreatePersistentStreamRequest (new stream) or a
+  // ResumeIngestStreamRequest (reconnect by stream_id); everything after is
+  // ingest_record / ingest_record_batch, as on EphemeralStream.
+  rpc PersistentStream(stream PersistentStreamRequest) returns (stream PersistentStreamResponse);
+
+  // IN DEVELOPMENT: may change or be removed.
+  //
+  // Permanently retires a persistent stream. Unary and idempotent; callable
+  // without an open connection. A retired stream can never be resumed.
+  rpc RetireStream(RetireStreamRequest) returns (RetireStreamResponse);
 }
 
 /*
@@ -230,4 +244,91 @@ message EphemeralStreamResponse {
     // Signal that the server will close the stream after the specified duration.
     CloseStreamSignal close_stream_signal = 3;
   }
+}
+
+// IN DEVELOPMENT: may change or be removed.
+// First message on a PersistentStream RPC when creating a new stream.
+message CreatePersistentStreamRequest {
+  // Creation parameters shared with ephemeral streams.
+  optional CreateIngestStreamRequest create_stream = 1;
+
+  // Reserved for a future client-supplied stream name.
+  reserved "stream_name";
+  reserved 2;
+}
+
+// IN DEVELOPMENT: may change or be removed.
+// First message on a PersistentStream RPC when resuming an existing stream.
+message ResumeIngestStreamRequest {
+  // How the stream to resume is identified. Only stream_id is supported by
+  // this SDK; stream_name is reserved for future server support.
+  oneof identifier {
+    // The durable stream identity returned by a prior create.
+    string stream_id = 1;
+  }
+
+  // Protocol buffer descriptor for record serialization/deserialization.
+  //
+  // Required when the stream was created with record_type PROTO. Must be
+  // compatible with the target table's schema. Not used for JSON or ARROW_IPC
+  // record types.
+  optional bytes descriptor_proto = 2;
+
+  // Record type accepted by the resumed stream. Must match the type used when
+  // the persistent stream was created.
+  optional RecordType record_type = 3;
+
+  reserved "stream_name";
+  reserved 4;
+}
+
+// IN DEVELOPMENT: may change or be removed.
+message ResumeIngestStreamResponse {
+  // Resume watermark: resume sending from last_committed_offset + 1.
+  // Absent means nothing has been committed yet (resume from 0).
+  optional int64 last_committed_offset = 1;
+}
+
+// IN DEVELOPMENT: may change or be removed.
+// A message in the PersistentStream request stream. The first message is a
+// create_stream or resume_stream; the rest are ingest_record(_batch).
+message PersistentStreamRequest {
+  oneof payload {
+    CreatePersistentStreamRequest create_stream = 1;
+    ResumeIngestStreamRequest resume_stream = 2;
+    IngestRecordRequest ingest_record = 3;
+    IngestRecordBatchRequest ingest_record_batch = 4;
+  }
+}
+
+// IN DEVELOPMENT: may change or be removed.
+// A message in the PersistentStream response stream.
+message PersistentStreamResponse {
+  oneof payload {
+    CreateIngestStreamResponse create_stream_response = 1;
+    ResumeIngestStreamResponse resume_stream_response = 2;
+    IngestRecordResponse ingest_record_response = 3;
+    CloseStreamSignal close_stream_signal = 4;
+  }
+}
+
+// IN DEVELOPMENT: may change or be removed.
+message RetireStreamRequest {
+  // Three part name of the table the stream belongs to.
+  optional string table_name = 1;
+
+  // How the stream to retire is identified. Only stream_id is currently
+  // supported; stream_name is reserved for future server support.
+  oneof identifier {
+    // The persistent stream to retire permanently.
+    string stream_id = 2;
+  }
+
+  reserved "stream_name";
+  reserved 3;
+}
+
+// IN DEVELOPMENT: may change or be removed.
+// Empty: success or failure is carried by the gRPC status code.
+message RetireStreamResponse {
 }

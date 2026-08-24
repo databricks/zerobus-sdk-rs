@@ -8,7 +8,8 @@ use databricks::zerobus::{
     ephemeral_stream_response::Payload as ResponsePayload,
     zerobus_server::{Zerobus, ZerobusServer},
     CloseStreamSignal, CreateIngestStreamResponse, EphemeralStreamRequest, EphemeralStreamResponse,
-    IngestRecordResponse,
+    IngestRecordResponse, PersistentStreamRequest, PersistentStreamResponse, RetireStreamRequest,
+    RetireStreamResponse,
 };
 use databricks_zerobus_ingest_sdk::databricks;
 use prost_types::Duration as ProtobufDuration;
@@ -147,6 +148,26 @@ impl MockZerobusServer {
 impl Zerobus for MockZerobusServer {
     type EphemeralStreamStream =
         Pin<Box<dyn Stream<Item = Result<EphemeralStreamResponse, Status>> + Send>>;
+    type PersistentStreamStream =
+        Pin<Box<dyn Stream<Item = Result<PersistentStreamResponse, Status>> + Send>>;
+
+    async fn persistent_stream(
+        &self,
+        _request: Request<Streaming<PersistentStreamRequest>>,
+    ) -> Result<Response<Self::PersistentStreamStream>, Status> {
+        Err(Status::unimplemented(
+            "persistent streams are not supported by this mock",
+        ))
+    }
+
+    async fn retire_stream(
+        &self,
+        _request: Request<RetireStreamRequest>,
+    ) -> Result<Response<RetireStreamResponse>, Status> {
+        Err(Status::unimplemented(
+            "retiring streams is not supported by this mock",
+        ))
+    }
 
     async fn ephemeral_stream(
         &self,
