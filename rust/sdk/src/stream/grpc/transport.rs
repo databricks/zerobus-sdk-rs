@@ -161,22 +161,22 @@ impl OutboundSink {
                     payload: Some(payload),
                 })
                 .await
-                .map_err(|_| Self::send_failed())
+                .map_err(|_| Self::ingest_failed())
             }
             #[cfg(feature = "eos")]
             OutboundSink::Persistent(tx) => {
-                let payload = ingest_payload_to_persistent(batch.into_request_payload(offset_id));
+                let payload = batch.into_persistent_request_payload(offset_id);
                 tx.send(PersistentStreamRequest {
                     payload: Some(payload),
                 })
                 .await
-                .map_err(|_| Self::send_failed())
+                .map_err(|_| Self::ingest_failed())
             }
         }
     }
 
-    fn send_failed() -> ZerobusError {
-        ZerobusError::StreamClosedError(tonic::Status::internal("Failed to send record"))
+    fn ingest_failed() -> ZerobusError {
+        ZerobusError::StreamClosedError(tonic::Status::internal("Failed to send batch"))
     }
 }
 
@@ -363,24 +363,5 @@ pub(super) async fn open_rpc(
                 .map_err(ZerobusError::CreateStreamError)?;
             Ok(InboundStream::Persistent(resp.into_inner()))
         }
-    }
-}
-
-/// Translates a shared ingest request payload (built by `EncodedBatch`) into
-/// the persistent envelope's oneof. The two enums are structurally identical
-/// for the ingest variants; only the create/resume-specific variants differ,
-/// and those never flow through here.
-#[cfg(feature = "eos")]
-fn ingest_payload_to_persistent(payload: EphemeralRequestPayload) -> PersistentRequestPayload {
-    match payload {
-        EphemeralRequestPayload::IngestRecord(r) => PersistentRequestPayload::IngestRecord(r),
-        EphemeralRequestPayload::IngestRecordBatch(b) => {
-            PersistentRequestPayload::IngestRecordBatch(b)
-        }
-        // `into_request_payload` only ever produces ingest variants; a create
-        // payload here would be a programming error.
-        EphemeralRequestPayload::CreateStream(_) => unreachable!(
-            "into_request_payload never yields CreateStream; create is sent by connection.rs"
-        ),
     }
 }

@@ -90,7 +90,7 @@ impl<T: Clone> LandingZone<T> {
     ///
     /// Used by the persistent-stream resume path to reconcile the retained tail
     /// against the server's committed watermark: it removes the prefix of
-    /// records the server has already durably stored (offset ≤ resume watermark)
+    /// records the server has already durably stored (offset <= resume watermark)
     /// before re-sending the rest. Only the unobserved queue is consulted:
     /// callers reset observation (`reset_observe`) first, so every retained item
     /// lives in the queue in offset order. One semaphore permit is released per

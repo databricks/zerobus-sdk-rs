@@ -224,15 +224,9 @@ impl ZerobusStream {
             let resent_records = landing_zone_recovery.observed_count();
             let resent_batches = landing_zone_recovery.reset_observe();
 
-            // Resume alignment (persistent streams). The server reports how far
-            // it has durably committed. A dropped connection can lose the ack
-            // for records the server did commit, so the retained tail can start
-            // at or below that watermark. Re-sending an already-committed offset
-            // would be rejected by the server and kill the stream (Decision 6:
-            // server rejects), so reconcile first: resolve those records'
-            // pending acks locally and re-send only the offsets above the
-            // watermark. This is not user-duplicate dedup — it realigns the
-            // SDK's retained tail with the server's durable position on resume.
+            // A dropped connection can lose ACKs for records the server already
+            // committed. Resolve retained records through the resume watermark
+            // locally, then resend only records above it.
             let mut initial_last_acked_offset: OffsetId = -1;
             if durable_wire_offset {
                 if let Some(watermark) = last_committed_offset {
@@ -369,15 +363,11 @@ impl ZerobusStream {
 
     /// Reconciles the retained landing-zone tail with the server's durable
     /// position when resuming a persistent stream: removes the prefix of records
-    /// the server has already committed (logical offset ≤ `watermark`) and
+    /// the server has already committed (logical offset <= `watermark`) and
     /// resolves their pending acks locally, so they are never re-sent.
     ///
-    /// Re-sending an already-committed offset would be rejected by the server
-    /// and kill the stream (Decision 6: server rejects), so this realignment is
-    /// what makes resume survive a lost-ack race. It is not user-duplicate
-    /// dedup — the records removed here are ones the SDK itself queued and the
-    /// server durably stored; only their acknowledgement was lost with the
-    /// dropped connection.
+    /// This realignment makes resume survive a lost-ACK race: the records were
+    /// durably stored, but their acknowledgements were lost with the connection.
     ///
     /// The caller must have reset observation first, so every retained record
     /// sits in the landing-zone queue in ascending offset order — the committed
