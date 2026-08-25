@@ -120,6 +120,18 @@ When making FFI-related changes:
   ./build_native.sh --force
   ```
 
+## NuGet lock files
+
+Direct package versions live in `Directory.Packages.props`. The full restore graph (including transitives) is pinned in `packages.lock.json` next to each project that restores NuGet packages (the SDK, tests, and the Protobuf example). JSON examples have no package references and do not use lock files. CI restore runs in locked mode and fails if those files are stale.
+
+After changing a version in `Directory.Packages.props`, regenerate the lock files:
+
+```bash
+dotnet restore
+```
+
+Commit the updated `packages.lock.json` files with the version change.
+
 ## Continuous Integration
 
 All pull requests must pass CI checks.
