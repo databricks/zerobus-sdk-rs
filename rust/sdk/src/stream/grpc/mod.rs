@@ -47,7 +47,7 @@ mod supervisor;
 mod transport;
 mod types;
 
-use transport::TransportKind;
+use transport::GrpcConnectionMode;
 use types::{IngestRequest, OneshotMap, RecordLandingZone};
 
 #[cfg(feature = "testing")]
@@ -158,7 +158,7 @@ impl ZerobusStream {
             headers_provider,
             options,
             StreamType::Ephemeral,
-            TransportKind::Ephemeral,
+            GrpcConnectionMode::Ephemeral,
         )
         .await
     }
@@ -185,7 +185,7 @@ impl ZerobusStream {
             headers_provider,
             options,
             StreamType::Persistent,
-            TransportKind::Persistent { resume_stream_id },
+            GrpcConnectionMode::Persistent { resume_stream_id },
         )
         .await
     }
@@ -200,7 +200,7 @@ impl ZerobusStream {
         headers_provider: Arc<dyn HeadersProvider>,
         options: StreamConfigurationOptions,
         stream_type: StreamType,
-        kind: TransportKind,
+        kind: GrpcConnectionMode,
     ) -> ZerobusResult<Self> {
         let (stream_init_result_tx, stream_init_result_rx) =
             tokio::sync::oneshot::channel::<ZerobusResult<supervisor::StreamInitInfo>>();

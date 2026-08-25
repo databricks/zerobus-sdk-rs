@@ -7,10 +7,9 @@
 //! 1. **Opening** — ephemeral always sends `create_stream`; persistent sends
 //!    `create_stream` (new) or `resume_stream` (reconnect), and a resume comes
 //!    back with a committed-offset watermark.
-//! 2. **Offset on the wire** — ephemeral numbers records with a fresh 0-based
-//!    counter each session (the server tracks nothing across reconnects);
-//!    persistent puts the record's durable logical offset on the wire so the
-//!    server can dedup and resume by it.
+//! 2. **Offset on the wire** — persistent SDK and wire offsets match exactly.
+//!    Ephemeral uses a fresh 0-based wire offset for each server stream while
+//!    its SDK offset preserves continuity across recovery.
 //! 3. **Response parsing** — the oneof variants live in different generated
 //!    enums.
 //!
@@ -53,7 +52,7 @@ pub(super) const CHANNEL_BUFFER_SIZE: usize = 2048;
 /// policy on the wire, and (for persistent) whether the first message is a
 /// create or a resume.
 #[derive(Clone)]
-pub(super) enum TransportKind {
+pub(super) enum GrpcConnectionMode {
     /// Ephemeral stream: `EphemeralStream` RPC, per-session 0-based wire offsets.
     Ephemeral,
     /// Persistent (Eos) stream: `PersistentStream` RPC, durable wire offsets.
@@ -63,14 +62,14 @@ pub(super) enum TransportKind {
     Persistent { resume_stream_id: Option<String> },
 }
 
-impl TransportKind {
-    /// Whether records are numbered on the wire by their durable logical offset
-    /// (persistent) rather than a fresh per-session physical counter (ephemeral).
-    pub(super) fn uses_durable_wire_offset(&self) -> bool {
+impl GrpcConnectionMode {
+    /// Whether SDK and wire offsets match. They match for persistent streams;
+    /// ephemeral streams use a fresh wire sequence for each server stream.
+    pub(super) fn wire_offsets_match(&self) -> bool {
         match self {
-            TransportKind::Ephemeral => false,
+            GrpcConnectionMode::Ephemeral => false,
             #[cfg(feature = "eos")]
-            TransportKind::Persistent { .. } => true,
+            GrpcConnectionMode::Persistent { .. } => true,
         }
     }
 }
@@ -102,18 +101,18 @@ impl OutboundSink {
     /// ignored on the resume path (the server keeps that state from creation).
     pub(super) async fn send_open(
         &self,
-        kind: &TransportKind,
+        kind: &GrpcConnectionMode,
         create: CreateIngestStreamRequest,
     ) -> ZerobusResult<()> {
         match (self, kind) {
-            (OutboundSink::Ephemeral(tx), TransportKind::Ephemeral) => tx
+            (OutboundSink::Ephemeral(tx), GrpcConnectionMode::Ephemeral) => tx
                 .send(EphemeralStreamRequest {
                     payload: Some(EphemeralRequestPayload::CreateStream(create)),
                 })
                 .await
                 .map_err(|_| Self::open_failed()),
             #[cfg(feature = "eos")]
-            (OutboundSink::Persistent(tx), TransportKind::Persistent { resume_stream_id }) => {
+            (OutboundSink::Persistent(tx), GrpcConnectionMode::Persistent { resume_stream_id }) => {
                 let payload = match resume_stream_id {
                     None => PersistentRequestPayload::CreateStream(CreatePersistentStreamRequest {
                         create_stream: Some(create),
@@ -305,9 +304,9 @@ impl InboundStream {
 ///
 /// Split from the RPC call so the connection module can attach metadata to the
 /// request before dispatching.
-pub(super) fn make_outbound(kind: &TransportKind) -> (OutboundSink, OutboundRequestStream) {
+pub(super) fn make_outbound(kind: &GrpcConnectionMode) -> (OutboundSink, OutboundRequestStream) {
     match kind {
-        TransportKind::Ephemeral => {
+        GrpcConnectionMode::Ephemeral => {
             let (tx, rx) = tokio::sync::mpsc::channel(CHANNEL_BUFFER_SIZE);
             (
                 OutboundSink::Ephemeral(tx),
@@ -315,7 +314,7 @@ pub(super) fn make_outbound(kind: &TransportKind) -> (OutboundSink, OutboundRequ
             )
         }
         #[cfg(feature = "eos")]
-        TransportKind::Persistent { .. } => {
+        GrpcConnectionMode::Persistent { .. } => {
             let (tx, rx) = tokio::sync::mpsc::channel(CHANNEL_BUFFER_SIZE);
             (
                 OutboundSink::Persistent(tx),

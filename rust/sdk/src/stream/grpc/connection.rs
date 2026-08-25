@@ -15,7 +15,7 @@ use tonic::transport::Channel;
 use tracing::{debug, error, info, instrument, warn};
 
 use super::supervisor::StreamInitInfo;
-use super::transport::{self, InboundStream, Opened, OutboundSink, TransportKind};
+use super::transport::{self, GrpcConnectionMode, InboundStream, Opened, OutboundSink};
 use crate::databricks::zerobus::zerobus_client::ZerobusClient;
 use crate::databricks::zerobus::{CreateIngestStreamRequest, RecordType};
 use crate::{HeadersProvider, TableProperties, ZerobusError, ZerobusResult};
@@ -42,7 +42,7 @@ impl super::ZerobusStream {
         table_properties: &TableProperties,
         headers_provider: &Arc<dyn HeadersProvider>,
         record_type: RecordType,
-        kind: &TransportKind,
+        kind: &GrpcConnectionMode,
     ) -> ZerobusResult<StreamConnection> {
         let result = Self::create_stream_connection_inner(
             channel,
@@ -73,7 +73,7 @@ impl super::ZerobusStream {
         table_properties: &TableProperties,
         headers_provider: &Arc<dyn HeadersProvider>,
         record_type: RecordType,
-        kind: &TransportKind,
+        kind: &GrpcConnectionMode,
         recovery_timeout_ms: u64,
     ) -> ZerobusResult<StreamConnection> {
         let attempt_timeout = Duration::from_millis(recovery_timeout_ms);
@@ -117,7 +117,7 @@ impl super::ZerobusStream {
         table_properties: &TableProperties,
         headers_provider: &Arc<dyn HeadersProvider>,
         record_type: RecordType,
-        kind: &TransportKind,
+        kind: &GrpcConnectionMode,
     ) -> ZerobusResult<StreamConnection> {
         let (sink, request_body) = transport::make_outbound(kind);
         let mut request = tonic::Request::new(request_body);
@@ -175,45 +175,53 @@ impl super::ZerobusStream {
     }
 
     fn validate_open_response(
-        kind: &TransportKind,
+        kind: &GrpcConnectionMode,
         opened: Opened,
     ) -> ZerobusResult<StreamInitInfo> {
-        let init_info = match (kind, opened) {
-            (TransportKind::Ephemeral, Opened::Created { stream_id }) => StreamInitInfo {
-                stream_id,
-                last_committed_offset: None,
+        match kind {
+            GrpcConnectionMode::Ephemeral => match opened {
+                Opened::Created { stream_id } => Ok(StreamInitInfo {
+                    stream_id,
+                    last_committed_offset: None,
+                }),
+                #[cfg(feature = "eos")]
+                _ => Err(Self::mismatched_open_response()),
             },
             #[cfg(feature = "eos")]
-            (
-                TransportKind::Persistent {
-                    resume_stream_id: None,
-                },
-                Opened::Created { stream_id },
-            ) => StreamInitInfo {
+            GrpcConnectionMode::Persistent { resume_stream_id } => {
+                Self::validate_persistent_open_response(resume_stream_id.as_deref(), opened)
+            }
+        }
+    }
+
+    #[cfg(feature = "eos")]
+    fn validate_persistent_open_response(
+        resume_stream_id: Option<&str>,
+        opened: Opened,
+    ) -> ZerobusResult<StreamInitInfo> {
+        match (resume_stream_id, opened) {
+            (None, Opened::Created { stream_id }) => Ok(StreamInitInfo {
                 stream_id,
                 last_committed_offset: None,
-            },
-            #[cfg(feature = "eos")]
+            }),
             (
-                TransportKind::Persistent {
-                    resume_stream_id: Some(stream_id),
-                },
+                Some(stream_id),
                 Opened::Resumed {
                     last_committed_offset,
                 },
-            ) => StreamInitInfo {
-                stream_id: stream_id.clone(),
+            ) => Ok(StreamInitInfo {
+                stream_id: stream_id.to_string(),
                 last_committed_offset,
-            },
-            #[cfg(feature = "eos")]
-            _ => {
-                return Err(ZerobusError::UnexpectedStreamResponseError(
-                    "Persistent stream setup response did not match the requested operation"
-                        .to_string(),
-                ));
-            }
-        };
-        Ok(init_info)
+            }),
+            _ => Err(Self::mismatched_open_response()),
+        }
+    }
+
+    #[cfg(feature = "eos")]
+    fn mismatched_open_response() -> ZerobusError {
+        ZerobusError::UnexpectedStreamResponseError(
+            "Persistent stream setup response did not match the requested operation".to_string(),
+        )
     }
 
     /// Builds the `CreateIngestStreamRequest` sent when opening (or, on the
@@ -253,8 +261,34 @@ mod tests {
     use crate::ZerobusStream;
 
     #[test]
+    fn persistent_create_accepts_create_response() {
+        let kind = GrpcConnectionMode::Persistent {
+            resume_stream_id: None,
+        };
+        let opened = Opened::Created {
+            stream_id: "created-id".to_string(),
+        };
+        let init = ZerobusStream::validate_open_response(&kind, opened).unwrap();
+        assert_eq!(init.stream_id, "created-id");
+        assert_eq!(init.last_committed_offset, None);
+    }
+
+    #[test]
+    fn persistent_resume_accepts_resume_response() {
+        let kind = GrpcConnectionMode::Persistent {
+            resume_stream_id: Some("stream-id".to_string()),
+        };
+        let opened = Opened::Resumed {
+            last_committed_offset: Some(3),
+        };
+        let init = ZerobusStream::validate_open_response(&kind, opened).unwrap();
+        assert_eq!(init.stream_id, "stream-id");
+        assert_eq!(init.last_committed_offset, Some(3));
+    }
+
+    #[test]
     fn persistent_create_rejects_resume_response() {
-        let kind = TransportKind::Persistent {
+        let kind = GrpcConnectionMode::Persistent {
             resume_stream_id: None,
         };
         let opened = Opened::Resumed {
@@ -265,7 +299,7 @@ mod tests {
 
     #[test]
     fn persistent_resume_rejects_create_response() {
-        let kind = TransportKind::Persistent {
+        let kind = GrpcConnectionMode::Persistent {
             resume_stream_id: Some("stream-id".to_string()),
         };
         let opened = Opened::Created {

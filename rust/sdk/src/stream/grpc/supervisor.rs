@@ -18,7 +18,7 @@ use tokio_util::sync::CancellationToken;
 use tonic::transport::Channel;
 use tracing::{debug, error, info, instrument, warn};
 
-use super::transport::TransportKind;
+use super::transport::GrpcConnectionMode;
 use super::types::{CallbackMessage, OneshotMap, RecordLandingZone};
 use super::{ZerobusStream, STREAM_TEARDOWN_DRAIN_TIMEOUT_MS};
 use crate::databricks::zerobus::zerobus_client::ZerobusClient;
@@ -54,7 +54,7 @@ impl ZerobusStream {
         options: StreamConfigurationOptions,
         // Mutated only on the persistent recovery path (flip create → resume);
         // that mutation is `eos`-gated, so `mut` is otherwise unused.
-        #[cfg_attr(not(feature = "eos"), allow(unused_mut))] mut kind: TransportKind,
+        #[cfg_attr(not(feature = "eos"), allow(unused_mut))] mut kind: GrpcConnectionMode,
         landing_zone: RecordLandingZone,
         oneshot_map: Arc<tokio::sync::Mutex<OneshotMap>>,
         logical_last_received_offset_id_tx: tokio::sync::watch::Sender<Option<OffsetId>>,
@@ -65,7 +65,7 @@ impl ZerobusStream {
         cancellation_token: CancellationToken,
         callback_tx: Option<tokio::sync::mpsc::UnboundedSender<CallbackMessage>>,
     ) -> ZerobusResult<()> {
-        let durable_wire_offset = kind.uses_durable_wire_offset();
+        let wire_offsets_match = kind.wire_offsets_match();
         let mut initial_stream_creation = true;
         let mut stream_init_result_tx = Some(stream_init_result_tx);
         // One-shot budget: initial setup may spend a single recovery retry to refresh a
@@ -216,7 +216,7 @@ impl ZerobusStream {
                 // A persistent stream recovers by resuming its now-known id, not
                 // by creating a fresh stream on every reconnect.
                 #[cfg(feature = "eos")]
-                if let TransportKind::Persistent { resume_stream_id } = &mut kind {
+                if let GrpcConnectionMode::Persistent { resume_stream_id } = &mut kind {
                     *resume_stream_id = Some(stream_id.clone());
                 }
                 info!(stream_id = %stream_id, "Successfully created stream");
@@ -233,7 +233,7 @@ impl ZerobusStream {
             // committed. Resolve retained records through the resume watermark
             // locally, then resend only records above it.
             let mut initial_last_acked_offset: OffsetId = -1;
-            if durable_wire_offset {
+            if wire_offsets_match {
                 if let Some(watermark) = last_committed_offset {
                     initial_last_acked_offset = watermark;
                     Self::reconcile_committed_on_resume(
@@ -284,7 +284,7 @@ impl ZerobusStream {
                 Arc::clone(&is_paused),
                 server_error_tx.clone(),
                 per_stream_token.clone(),
-                durable_wire_offset,
+                wire_offsets_match,
             );
 
             // 4. Wait for any of the two tasks to end.
@@ -368,7 +368,7 @@ impl ZerobusStream {
 
     /// Reconciles the retained landing-zone tail with the server's durable
     /// position when resuming a persistent stream: removes the prefix of records
-    /// the server has already committed (logical offset <= `watermark`) and
+    /// the server has already committed (SDK/wire offset <= `watermark`) and
     /// resolves their pending acks locally, so they are never re-sent.
     ///
     /// This realignment makes resume survive a lost-ACK race: the records were

@@ -20,18 +20,16 @@ impl ZerobusStream {
     /// Spawns a task that continuously sends records to the Zerobus API by observing the landing zone
     /// to get records and sending them through the outbound stream to the gRPC stream.
     ///
-    /// `durable_wire_offset` selects the offset policy. Ephemeral streams number
-    /// records with a fresh 0-based physical counter each session (the server
-    /// tracks nothing across reconnects). Persistent streams put the record's
-    /// durable logical offset on the wire so the server can dedup and resume by
-    /// it — that offset already lives on the landing-zone item.
+    /// Persistent SDK and wire offsets match exactly. Ephemeral streams use a
+    /// fresh 0-based wire sequence for each server stream so their SDK offsets
+    /// can preserve continuity across recovery.
     pub(super) fn spawn_sender_task(
         sink: OutboundSink,
         landing_zone: RecordLandingZone,
         is_paused: Arc<AtomicBool>,
         server_error_tx: tokio::sync::watch::Sender<Option<ZerobusError>>,
         cancellation_token: CancellationToken,
-        durable_wire_offset: bool,
+        wire_offsets_match: bool,
     ) -> tokio::task::JoinHandle<ZerobusResult<()>> {
         tokio::spawn(async move {
             let physical_offset_id_generator = OffsetIdGenerator::default();
@@ -47,7 +45,7 @@ impl ZerobusStream {
                         }
                     } => item.clone(),
                 };
-                let wire_offset = if durable_wire_offset {
+                let wire_offset = if wire_offsets_match {
                     item.offset_id
                 } else {
                     physical_offset_id_generator.next()
