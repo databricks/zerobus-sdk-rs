@@ -75,14 +75,16 @@ impl TransportKind {
     }
 }
 
-/// Outcome of opening a connection: the first server message, normalized.
-pub(super) struct Opened {
-    /// The stream identity the server assigned (create) or echoed (resume).
-    pub(super) stream_id: String,
-    /// Resume watermark: the highest offset the server has durably committed
-    /// for this stream. `None` for a freshly created stream (nothing committed
-    /// yet) and always `None` for ephemeral streams.
-    pub(super) last_committed_offset: Option<OffsetId>,
+/// Outcome of opening a connection, preserving which operation the server
+/// acknowledged so the caller can reject mismatched setup responses.
+pub(super) enum Opened {
+    Created {
+        stream_id: String,
+    },
+    #[cfg(feature = "eos")]
+    Resumed {
+        last_committed_offset: Option<OffsetId>,
+    },
 }
 
 /// The outbound half of a stream: wraps the concrete tonic request sender and
@@ -241,10 +243,7 @@ impl InboundStream {
                 match msg.payload {
                     Some(EphemeralResponsePayload::CreateStreamResponse(resp)) => {
                         let stream_id = resp.stream_id.ok_or_else(Self::missing_stream_id)?;
-                        Ok(Opened {
-                            stream_id,
-                            last_committed_offset: None,
-                        })
+                        Ok(Opened::Created { stream_id })
                     }
                     other => Err(Self::unexpected_open(&other)),
                 }
@@ -255,16 +254,13 @@ impl InboundStream {
                 match msg.payload {
                     Some(PersistentResponsePayload::CreateStreamResponse(resp)) => {
                         let stream_id = resp.stream_id.ok_or_else(Self::missing_stream_id)?;
-                        Ok(Opened {
-                            stream_id,
-                            last_committed_offset: None,
+                        Ok(Opened::Created { stream_id })
+                    }
+                    Some(PersistentResponsePayload::ResumeStreamResponse(resp)) => {
+                        Ok(Opened::Resumed {
+                            last_committed_offset: resp.last_committed_offset,
                         })
                     }
-                    Some(PersistentResponsePayload::ResumeStreamResponse(resp)) => Ok(Opened {
-                        // The caller supplied the id it asked to resume.
-                        stream_id: String::new(),
-                        last_committed_offset: resp.last_committed_offset,
-                    }),
                     other => Err(Self::unexpected_open(&other)),
                 }
             }

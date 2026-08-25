@@ -265,7 +265,12 @@ impl ZerobusStream {
         // Safe because the constructor returns before any user ingest, so no real
         // ack can race this initial value.
         if let Some(watermark) = init_info.last_committed_offset {
-            logical_offset_id_generator.set_next(watermark + 1);
+            let next_offset = watermark.checked_add(1).ok_or_else(|| {
+                ZerobusError::UnexpectedStreamResponseError(
+                    "Persistent stream offset space is exhausted".to_string(),
+                )
+            })?;
+            logical_offset_id_generator.set_next(next_offset);
             let _ = logical_last_received_offset_id_tx.send(Some(watermark));
         }
 

@@ -14,10 +14,11 @@ use tonic::metadata::MetadataValue;
 use tonic::transport::Channel;
 use tracing::{debug, error, info, instrument, warn};
 
-use super::transport::{self, InboundStream, OutboundSink, TransportKind};
+use super::supervisor::StreamInitInfo;
+use super::transport::{self, InboundStream, Opened, OutboundSink, TransportKind};
 use crate::databricks::zerobus::zerobus_client::ZerobusClient;
 use crate::databricks::zerobus::{CreateIngestStreamRequest, RecordType};
-use crate::{HeadersProvider, OffsetId, TableProperties, ZerobusError, ZerobusResult};
+use crate::{HeadersProvider, TableProperties, ZerobusError, ZerobusResult};
 
 /// A freshly opened stream connection: the outbound sink, the inbound response
 /// stream, the server-assigned `stream_id`, and (persistent resume only) the
@@ -25,8 +26,7 @@ use crate::{HeadersProvider, OffsetId, TableProperties, ZerobusError, ZerobusRes
 pub(super) struct StreamConnection {
     pub(super) sink: OutboundSink,
     pub(super) inbound: InboundStream,
-    pub(super) stream_id: String,
-    pub(super) last_committed_offset: Option<OffsetId>,
+    pub(super) init_info: StreamInitInfo,
 }
 
 impl super::ZerobusStream {
@@ -164,21 +164,56 @@ impl super::ZerobusStream {
         debug!("Waiting for stream-open response.");
         let opened = inbound.recv_open().await?;
 
-        // On a persistent resume the server does not re-send the stream_id (the
-        // client supplied it), so fall back to the id being resumed.
-        let stream_id = if opened.stream_id.is_empty() {
-            Self::resume_stream_id(kind).unwrap_or_default()
-        } else {
-            opened.stream_id
-        };
-        info!(stream_id = %stream_id, last_committed_offset = ?opened.last_committed_offset, "Successfully opened stream");
+        let init_info = Self::validate_open_response(kind, opened)?;
+        info!(stream_id = %init_info.stream_id, last_committed_offset = ?init_info.last_committed_offset, "Successfully opened stream");
 
         Ok(StreamConnection {
             sink,
             inbound,
-            stream_id,
-            last_committed_offset: opened.last_committed_offset,
+            init_info,
         })
+    }
+
+    fn validate_open_response(
+        kind: &TransportKind,
+        opened: Opened,
+    ) -> ZerobusResult<StreamInitInfo> {
+        let init_info = match (kind, opened) {
+            (TransportKind::Ephemeral, Opened::Created { stream_id }) => StreamInitInfo {
+                stream_id,
+                last_committed_offset: None,
+            },
+            #[cfg(feature = "eos")]
+            (
+                TransportKind::Persistent {
+                    resume_stream_id: None,
+                },
+                Opened::Created { stream_id },
+            ) => StreamInitInfo {
+                stream_id,
+                last_committed_offset: None,
+            },
+            #[cfg(feature = "eos")]
+            (
+                TransportKind::Persistent {
+                    resume_stream_id: Some(stream_id),
+                },
+                Opened::Resumed {
+                    last_committed_offset,
+                },
+            ) => StreamInitInfo {
+                stream_id: stream_id.clone(),
+                last_committed_offset,
+            },
+            #[cfg(feature = "eos")]
+            _ => {
+                return Err(ZerobusError::UnexpectedStreamResponseError(
+                    "Persistent stream setup response did not match the requested operation"
+                        .to_string(),
+                ));
+            }
+        };
+        Ok(init_info)
     }
 
     /// Builds the `CreateIngestStreamRequest` sent when opening (or, on the
@@ -210,13 +245,32 @@ impl super::ZerobusStream {
             record_type: Some(record_type.into()),
         })
     }
+}
 
-    /// The stream id being resumed, if this is a persistent resume.
-    fn resume_stream_id(kind: &TransportKind) -> Option<String> {
-        match kind {
-            TransportKind::Ephemeral => None,
-            #[cfg(feature = "eos")]
-            TransportKind::Persistent { resume_stream_id } => resume_stream_id.clone(),
-        }
+#[cfg(all(test, feature = "eos"))]
+mod tests {
+    use super::*;
+    use crate::ZerobusStream;
+
+    #[test]
+    fn persistent_create_rejects_resume_response() {
+        let kind = TransportKind::Persistent {
+            resume_stream_id: None,
+        };
+        let opened = Opened::Resumed {
+            last_committed_offset: Some(3),
+        };
+        assert!(ZerobusStream::validate_open_response(&kind, opened).is_err());
+    }
+
+    #[test]
+    fn persistent_resume_rejects_create_response() {
+        let kind = TransportKind::Persistent {
+            resume_stream_id: Some("stream-id".to_string()),
+        };
+        let opened = Opened::Created {
+            stream_id: "other-id".to_string(),
+        };
+        assert!(ZerobusStream::validate_open_response(&kind, opened).is_err());
     }
 }

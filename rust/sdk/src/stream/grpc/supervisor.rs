@@ -103,6 +103,9 @@ impl ZerobusStream {
             // rejection, so the retry re-mints via the headers provider. Initial setup bounds
             // that invalidation under the setup deadline so a stalled provider cannot bypass
             // the one-shot limit; reconnect keeps its existing timeout-wrapped path unchanged.
+            // A persistent create has no client-supplied id yet, so if the server creates the
+            // stream but its response is lost, retrying can create an orphaned stream. Resumes
+            // are idempotent because they use the already-minted stream id.
             let is_initial = initial_stream_creation;
             let attempt = AtomicUsize::new(0);
             let create_attempt = || {
@@ -198,8 +201,10 @@ impl ZerobusStream {
                     return Err(e);
                 }
             };
-            let stream_id = connection.stream_id;
-            let last_committed_offset = connection.last_committed_offset;
+            let StreamInitInfo {
+                stream_id,
+                last_committed_offset,
+            } = connection.init_info;
             if initial_stream_creation {
                 if let Some(stream_init_result_tx_inner) = stream_init_result_tx.take() {
                     let _ = stream_init_result_tx_inner.send(Ok(StreamInitInfo {

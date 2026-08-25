@@ -112,6 +112,14 @@ impl ZerobusStream {
                                 return Err(error);
                             }
                         };
+                        if let Err(error) = Self::validate_ack_offset(
+                            last_acked_offset,
+                            durability_ack_up_to_offset,
+                            landing_zone.observed_count(),
+                        ) {
+                            let _ = server_error_tx.send(Some(error.clone()));
+                            return Err(error);
+                        }
                         let mut last_logical_acked_offset = -2;
                         let mut map = oneshot_map.lock().await;
                         for _offset_to_ack in (last_acked_offset + 1)..=durability_ack_up_to_offset
@@ -230,5 +238,55 @@ impl ZerobusStream {
             }
             Ok(())
         })
+    }
+
+    fn validate_ack_offset(
+        last_acked_offset: OffsetId,
+        ack_offset: OffsetId,
+        pending_batches: usize,
+    ) -> ZerobusResult<()> {
+        let pending_batches = OffsetId::try_from(pending_batches).map_err(|_| {
+            ZerobusError::StreamClosedError(tonic::Status::invalid_argument(
+                "Pending batch count exceeds the supported offset range",
+            ))
+        })?;
+        let greatest_sent_offset =
+            last_acked_offset
+                .checked_add(pending_batches)
+                .ok_or_else(|| {
+                    ZerobusError::StreamClosedError(tonic::Status::invalid_argument(
+                        "Greatest sent offset exceeds the supported offset range",
+                    ))
+                })?;
+
+        if ack_offset < last_acked_offset || ack_offset > greatest_sent_offset {
+            return Err(ZerobusError::StreamClosedError(
+                tonic::Status::invalid_argument(format!(
+                    "Invalid durability ACK offset {ack_offset}; expected {last_acked_offset}..={greatest_sent_offset}"
+                )),
+            ));
+        }
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::ZerobusStream;
+
+    #[test]
+    fn ack_offset_must_not_regress() {
+        assert!(ZerobusStream::validate_ack_offset(4, 3, 2).is_err());
+    }
+
+    #[test]
+    fn ack_offset_must_not_exceed_greatest_sent() {
+        assert!(ZerobusStream::validate_ack_offset(4, 7, 2).is_err());
+    }
+
+    #[test]
+    fn duplicate_and_cumulative_ack_offsets_are_valid() {
+        assert!(ZerobusStream::validate_ack_offset(4, 4, 2).is_ok());
+        assert!(ZerobusStream::validate_ack_offset(4, 6, 2).is_ok());
     }
 }
