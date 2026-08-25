@@ -28,8 +28,9 @@
 - OAuth token lifetime is now anchored to when the token request starts rather
   than when the response arrives, so a slow response no longer makes the SDK treat
   a token as valid longer than the issuer does. A token already past its
-  (start-anchored) expiry is dead on arrival and, on a cold miss, surfaces a
-  retryable `TokenFetchError`.
+  (start-anchored) expiry is dead on arrival and surfaces a retryable
+  `TokenFetchError` when there is no still-valid cached token to serve instead,
+  including when the token cache is disabled.
 - A stalled proactive token refresh no longer hangs stream creation. For streams
   built with `.oauth(...)`, the refresh is capped at half the stream's configured
   setup budget (`recovery_timeout_ms`) — but only when the cached token has more

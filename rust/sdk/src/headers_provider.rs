@@ -74,10 +74,9 @@ pub struct OAuthHeadersProvider {
     /// How long a proactive refresh may run before it's treated as failed and the
     /// cached token is served; `None` leaves it unbounded.
     refresh_timeout: Option<Duration>,
-    /// Generation of the token last returned by `get_headers`, so `invalidate`
-    /// rejects only that token, not a newer one from a concurrent refresh. 0 means
-    /// there is no cached token to reject: nothing has been served yet, or the most
-    /// recently served token was not cacheable (a no-TTL response or a disabled cache).
+    /// Highest token generation `get_headers` has served, so `invalidate` rejects a
+    /// token this provider actually used. Stays 0 until a cacheable token is served,
+    /// and `invalidate` treats 0 as nothing to reject.
     last_served_generation: AtomicU64,
 }
 
@@ -169,9 +168,9 @@ impl HeadersProvider for OAuthHeadersProvider {
                     .await?
             }
         };
-        // Remember the served token's generation so invalidate() rejects only it.
+        // Remember the highest served generation so invalidate() rejects it.
         self.last_served_generation
-            .store(generation, Ordering::SeqCst);
+            .fetch_max(generation, Ordering::SeqCst);
         let mut headers = HashMap::new();
         headers.insert("authorization", format!("Bearer {}", token));
         headers.insert("x-databricks-zerobus-table-name", self.table_name.clone());

@@ -201,9 +201,18 @@ impl TokenCache {
         Fut: std::future::Future<Output = ZerobusResult<FetchedToken>>,
     {
         if !self.enabled {
-            return fetch(MintReason::CacheDisabled)
-                .await
-                .map(|fetched| (fetched.token, 0));
+            let fetch_started_at = Instant::now();
+            let fetched = fetch(MintReason::CacheDisabled).await?;
+            let expires_at = fetched
+                .expires_in
+                .and_then(|ttl| fetch_started_at.checked_add(ttl));
+            if expires_at.is_some_and(|deadline| deadline <= Instant::now()) {
+                // Dead on arrival, with no cached token to fall back to.
+                return Err(ZerobusError::TokenFetchError(
+                    "fetched OAuth token expired before arrival".to_string(),
+                ));
+            }
+            return Ok((fetched.token, 0));
         }
 
         let key = TokenKey::new(client_id, client_secret, table_name);
@@ -952,6 +961,37 @@ mod tests {
             .unwrap();
 
         assert_eq!(calls.load(Ordering::SeqCst), 2);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn disabled_cache_dead_on_arrival_token_surfaces_error() {
+        let cache = TokenCache::new(false, Duration::from_secs(60));
+
+        // The fetch outlasts the token's TTL, so it returns already expired. With
+        // caching off there is nothing to fall back to, so a retryable error surfaces.
+        let result = cache
+            .get_or_fetch("id", "secret", "c.s.t", |_reason| async {
+                tokio::time::sleep(Duration::from_secs(2)).await;
+                Ok(fetched("doa", Some(1)))
+            })
+            .await;
+        assert!(matches!(result, Err(ZerobusError::TokenFetchError(_))));
+    }
+
+    #[tokio::test]
+    async fn disabled_cache_serves_token_without_ttl() {
+        let cache = TokenCache::new(false, Duration::from_secs(60));
+
+        // No `expires_in` is not an expiry failure: the token is served uncached.
+        let (token, generation) = cache
+            .get_or_fetch("id", "secret", "c.s.t", |_reason| async {
+                Ok(fetched("tok", None))
+            })
+            .await
+            .unwrap();
+
+        assert_eq!(token, "tok");
+        assert_eq!(generation, 0);
     }
 
     #[tokio::test]
