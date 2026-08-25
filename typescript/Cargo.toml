@@ -16,7 +16,7 @@ crate-type = ["cdylib"]
 napi = { version = "2", features = ["async", "tokio_rt", "serde-json", "napi6"] }
 napi-derive = "2"
 
-databricks-zerobus-ingest-sdk = "2.6.0"
+databricks-zerobus-ingest-sdk = { path = "../rust/sdk", version = "2.6.0" }
 
 tokio = { version = "1.52", features = ["macros", "rt-multi-thread"] }
 
