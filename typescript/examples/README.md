@@ -88,7 +88,7 @@ const sdk = new ZerobusSdk(SERVER_ENDPOINT, DATABRICKS_WORKSPACE_URL);
 **JSON:**
 ```typescript
 const tableProperties: TableProperties = {
-    tableName: TABLE_NAME
+    tableName: TABLE_NAME,
     // No descriptor needed for JSON
 };
 ```
@@ -125,9 +125,13 @@ const stream = await sdk.createStream(
 
 ### 5. Ingest and Acknowledge
 
+Queue records, then flush once. Immediate `waitForOffset` after a single ingest is a low-volume confirmation pattern, not the default.
+
 ```typescript
-const offset = await stream.ingestRecordOffset(data);
-await stream.waitForOffset(offset);
+for (const record of records) {
+    await stream.ingestRecordOffset(record);
+}
+await stream.flush();
 ```
 
 ### 6. Close Stream
@@ -150,9 +154,10 @@ Both methods return `Promise<bigint>`, but the key difference is **when** the pr
 **Offset-based (Recommended):**
 ```typescript
 // Promise resolves immediately with offset (doesn't wait for server ack)
-const offset = await stream.ingestRecordOffset(data);
-// Do other work, then wait for acknowledgment when needed
-await stream.waitForOffset(offset);
+for (const record of records) {
+    await stream.ingestRecordOffset(record);
+}
+await stream.flush();
 ```
 
 **Future-based (Deprecated):**

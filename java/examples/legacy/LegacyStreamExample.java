@@ -19,6 +19,7 @@ import com.databricks.zerobus.examples.proto.AirQualityProto.AirQuality;
  */
 public class LegacyStreamExample {
 
+    @SuppressWarnings("deprecation")
     public static void main(String[] args) throws Exception {
         String serverEndpoint = System.getenv("ZEROBUS_SERVER_ENDPOINT");
         String workspaceUrl = System.getenv("DATABRICKS_WORKSPACE_URL");
@@ -36,14 +37,13 @@ public class LegacyStreamExample {
 
         System.out.println("=== Legacy ZerobusStream Example (Future-based) ===\n");
 
-        ZerobusSdk sdk = new ZerobusSdk(serverEndpoint, workspaceUrl);
+        try (ZerobusSdk sdk = new ZerobusSdk(serverEndpoint, workspaceUrl)) {
 
         TableProperties<AirQuality> tableProperties = new TableProperties<>(
             tableName,
             AirQuality.getDefaultInstance()
         );
 
-        @SuppressWarnings("deprecation")
         ZerobusStream<AirQuality> stream = sdk.createStream(
             tableProperties, clientId, clientSecret
         ).join();
@@ -105,8 +105,7 @@ public class LegacyStreamExample {
         System.out.println("\n--- Demonstrating recreateStream ---");
 
         // Recreate the stream (would re-ingest any unacked records if there were any)
-        @SuppressWarnings("deprecation")
-        ZerobusStream<AirQuality> newStream = sdk.recreateStream(stream).join();
+        try (ZerobusStream<AirQuality> newStream = sdk.recreateStream(stream).join()) {
         System.out.println("  New stream created successfully");
 
         // Ingest a few more records on the new stream.
@@ -114,7 +113,6 @@ public class LegacyStreamExample {
         // durability. New code should prefer the offset-based ZerobusProtoStream /
         // ZerobusJsonStream APIs.
         int newRecords = 0;
-        try {
             java.util.concurrent.CompletableFuture<Void> lastFuture = null;
             for (int i = 0; i < 3; i++) {
                 AirQuality record = AirQuality.newBuilder()
@@ -129,12 +127,10 @@ public class LegacyStreamExample {
                 lastFuture.join(); // confirm durability once
             }
             System.out.println("  " + newRecords + " new records ingested on recreated stream");
-        } finally {
-            newStream.close();
         }
 
         System.out.println("\n=== RecreateStream demo complete ===");
 
-        sdk.close();
+        }
     }
 }

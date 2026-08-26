@@ -145,7 +145,8 @@ use std::sync::Arc;
 use databricks_zerobus_ingest_sdk::{ArrowSchema, DataType, Field};
 
 let schema = Arc::new(ArrowSchema::new(vec![
-    Field::new("id", DataType::Int32, false),
+    // Delta columns are nullable unless declared NOT NULL.
+    Field::new("id", DataType::Int32, true),
     // ... other fields matching your table
 ]));
 
@@ -161,12 +162,24 @@ let mut stream = sdk
 
 ### 3. Ingest and Acknowledge
 
+**JSON / Protocol Buffers:**
+
 ```rust
 for record in records {
     // Returns once queued — do NOT wait on this offset inside the loop.
     let _offset = stream.ingest_record_offset(record).await?;
 }
 stream.flush().await?; // Confirm all pending records at once.
+```
+
+**Arrow Flight:**
+
+```rust
+for batch in record_batches {
+    // Returns once the logical batch is queued.
+    stream.ingest_batch(batch).await?;
+}
+stream.flush().await?; // Confirm every queued batch at once.
 ```
 
 ### 4. Close Stream
@@ -205,7 +218,7 @@ stream.flush().await?;
 **Single-record:**
 ```rust
 for record in records {
-    let offset = stream.ingest_record_offset(record).await?;
+    stream.ingest_record_offset(record).await?;
 }
 stream.flush().await?;
 ```

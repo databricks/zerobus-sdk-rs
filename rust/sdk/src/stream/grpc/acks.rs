@@ -191,15 +191,12 @@ impl ZerobusStream {
     /// # use databricks_zerobus_ingest_sdk::*;
     /// # async fn example(stream: ZerobusStream) -> Result<(), ZerobusError> {
     /// # let my_record = vec![1, 2, 3];
-    /// // Ingest multiple records and collect their offsets
-    /// let mut offsets = Vec::new();
+    /// // Queue records, then wait once on the last offset (or call flush()).
+    /// let mut last_offset = None;
     /// for i in 0..100 {
-    ///     let offset = stream.ingest_record_offset(vec![i as u8]).await?;
-    ///     offsets.push(offset);
+    ///     last_offset = Some(stream.ingest_record_offset(vec![i as u8]).await?);
     /// }
-    ///
-    /// // Wait for specific offsets
-    /// for offset in offsets {
+    /// if let Some(offset) = last_offset {
     ///     stream.wait_for_offset(offset).await?;
     /// }
     /// println!("All records acknowledged");
@@ -227,7 +224,7 @@ impl ZerobusStream {
     ///
     /// An iterator over individual `EncodedRecord` items. All unacknowledged records are
     /// flattened into a single sequence, regardless of how they were originally ingested
-    /// (via `ingest_record()` or `ingest_records()`).
+    /// (via `ingest_record_offset()` or `ingest_records_offset()`).
     ///
     /// # Errors
     ///
@@ -268,8 +265,8 @@ impl ZerobusStream {
     ///
     /// **Note:** This method returns the unacknowledged records as a vector of `EncodedBatch` items,
     /// where each batch corresponds to how records were ingested:
-    /// - Each `ingest_record()` call creates a single batch containing one record
-    /// - Each `ingest_records()` call creates a single batch containing multiple records
+    /// - Each `ingest_record_offset()` call creates a single batch containing one record
+    /// - Each `ingest_records_offset()` call creates a single batch containing multiple records
     ///
     /// For alternatives, see `ZerobusStream::get_unacked_records()` and `ZerobusSdk::recreate_stream()`.
     ///

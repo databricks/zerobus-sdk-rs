@@ -14,11 +14,11 @@ This directory contains an example demonstrating Arrow Flight-based data ingesti
 
 ## Overview
 
-Arrow Flight is a third record format option alongside JSON and Protocol Buffers: it sends Apache Arrow `RecordBatch` data directly to Zerobus over the Arrow Flight protocol, on the same gRPC connection. It is the best fit when your workload is naturally columnar or batched — analytics pipelines, gateways aggregating short windows of rows, wide/numeric schemas where row-by-row serialization adds noticeable CPU overhead — or when your application already produces Arrow data via pyarrow, the [arrow-rs](https://github.com/apache/arrow-rs) crates, DataFusion, Polars, or similar libraries.
+Arrow Flight is a third record format option alongside JSON and Protocol Buffers: it sends Apache Arrow `RecordBatch` data directly to Zerobus using Arrow Flight's gRPC transport. It is the best fit when your workload is naturally columnar or batched — analytics pipelines, gateways aggregating short windows of rows, wide/numeric schemas where row-by-row serialization adds noticeable CPU overhead — or when your application already produces Arrow data via pyarrow, the [arrow-rs](https://github.com/apache/arrow-rs) crates, DataFusion, Polars, or similar libraries.
 
 **Features:**
 - Columnar Arrow data sent over the Arrow Flight protocol
-- Per-batch acknowledgments with the same recovery semantics as the standard streams
+- Logical batch offsets, cumulative durability acknowledgments, and automatic recovery
 
 > **Feature flag.** The Arrow Flight API is behind the `arrow-flight` Cargo feature. The example's `Cargo.toml` enables it for you.
 
@@ -33,15 +33,11 @@ Send multiple rows per `RecordBatch`. Start with natural application-sized batch
    cargo run -p example_arrow
    ```
 
-The example ingests 100 `RecordBatch`es (3 rows each), waits for an acknowledgment every 10th batch, then calls `flush()` and `close()` at the end.
+The example queues 10 `RecordBatch`es of 10,000 rows each, calls `flush()` once
+to confirm all pending data, then closes the stream.
 
 **Expected output:**
 ```
-Acknowledged through batch 10 (offset ID 9)
-Acknowledged through batch 20 (offset ID 19)
-Acknowledged through batch 30 (offset ID 29)
-...
-Acknowledged through batch 100 (offset ID 99)
 Flushed all in-flight batches
 Stream closed successfully
 ```
@@ -55,12 +51,12 @@ use std::sync::Arc;
 use databricks_zerobus_ingest_sdk::{ArrowSchema, DataType, Field, ZerobusSdk};
 
 let schema = Arc::new(ArrowSchema::new(vec![
-    Field::new("id", DataType::Int32, false),
-    Field::new("customer_name", DataType::Utf8, false),
+    Field::new("id", DataType::Int32, true),
+    Field::new("customer_name", DataType::LargeUtf8, true),
     // ... other fields
 ]));
 
-let stream = sdk
+let mut stream = sdk
     .stream_builder()
     .table(TABLE_NAME)
     .oauth(DATABRICKS_CLIENT_ID, DATABRICKS_CLIENT_SECRET)
@@ -69,26 +65,23 @@ let stream = sdk
     .await?;
 ```
 
-**Ingest many `RecordBatch`es and wait periodically:**
+**Queue many `RecordBatch`es, then flush once:**
 
 ```rust
-use arrow_array::{Int32Array, RecordBatch, StringArray};
+use arrow_array::{Int32Array, LargeStringArray, RecordBatch};
 
-for i in 0..100 {
+const ROWS_PER_BATCH: usize = 10_000;
+
+for _ in 0..10 {
     let batch = RecordBatch::try_new(
         schema.clone(),
         vec![
-            Arc::new(Int32Array::from(vec![/* ... */])),
-            Arc::new(StringArray::from(vec![/* ... */])),
+            Arc::new(Int32Array::from(vec![0; ROWS_PER_BATCH])),
+            Arc::new(LargeStringArray::from(vec!["Customer"; ROWS_PER_BATCH])),
             // ... other columns
         ],
     )?;
-    let offset = stream.ingest_batch(batch).await?;
-
-    // Apply backpressure every 10 batches by waiting for an ack.
-    if (i + 1) % 10 == 0 {
-        stream.wait_for_offset(offset).await?;
-    }
+    stream.ingest_batch(batch).await?;
 }
 
 // Drain any in-flight batches before closing.
@@ -97,9 +90,14 @@ stream.close().await?;
 ```
 
 **Batch semantics:**
-- **All-or-nothing per `RecordBatch`**: A batch is acknowledged as a unit
-- **Single acknowledgment**: One offset ID for the whole `RecordBatch`
-- **Schema validation**: The `RecordBatch` schema must exactly match the schema configured on the stream
+- **One logical offset per input batch**: `ingest_batch` returns one SDK offset even when
+  Flight splits a large batch into multiple wire messages
+- **Cumulative durability**: `wait_for_offset` completes after every record in that logical
+  batch is durable; after a partial failure, recovery/retrieval keeps only the unacknowledged suffix
+- **Non-empty batches**: zero-row batches are rejected with `InvalidArgument` because
+  they produce no Flight data message to acknowledge
+- **Schema validation**: Each `RecordBatch` must exactly match the client schema
+  configured on the stream; the server validates that schema against the target
 
 ## IPC compression
 
@@ -129,15 +127,20 @@ To disable compression, drop the `.ipc_compression(...)` call (default is `None`
 
 To ingest into your own table, change the Arrow schema and the array values to match its columns.
 
-**1. Update the Arrow schema** (must match the Delta table column types exactly):
+**1. Update the Arrow schema** (use the target table's canonical Arrow types):
 
 ```rust
 let schema = Arc::new(ArrowSchema::new(vec![
-    Field::new("your_field_1", DataType::Utf8, false),
-    Field::new("your_field_2", DataType::Int32, false),
+    Field::new("your_field_1", DataType::LargeUtf8, true),
+    Field::new("your_field_2", DataType::Int32, true),
     Field::new("your_field_3", DataType::Boolean, true),
 ]));
 ```
+
+The runnable example's `orders_schema()` shows the canonical mappings for strings
+and timestamps. If you already have Unity Catalog columns, prefer
+`arrow_schema_from_uc_columns()` or `arrow_schema_from_uc_schema()` to construct
+the schema. Every `RecordBatch` must exactly match the schema passed to `.arrow(...)`.
 
 **2. Update the arrays in `RecordBatch::try_new`** to match the schema:
 
@@ -145,7 +148,7 @@ let schema = Arc::new(ArrowSchema::new(vec![
 let batch = RecordBatch::try_new(
     schema.clone(),
     vec![
-        Arc::new(StringArray::from(vec!["a", "b", "c"])),
+        Arc::new(LargeStringArray::from(vec!["a", "b", "c"])),
         Arc::new(Int32Array::from(vec![1, 2, 3])),
         Arc::new(BooleanArray::from(vec![Some(true), Some(false), None])),
     ],
@@ -154,4 +157,6 @@ let batch = RecordBatch::try_new(
 
 **3. Update table name and credentials** in the constants at the top of `main.rs`.
 
-> **Tip.** When in doubt about the Arrow type for a given Delta column type, the SDK validates the schema on the first batch — a mismatch fails fast with a descriptive error.
+> **Tip.** When in doubt about the Arrow type for a given Delta column type, the SDK
+> validates the schema when the stream is created. A mismatch fails fast with a
+> descriptive error.

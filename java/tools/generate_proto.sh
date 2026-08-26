@@ -15,7 +15,7 @@ PROJECT_ROOT="${SCRIPT_DIR}/.."
 TARGET_DIR="${PROJECT_ROOT}/target"
 
 # Find the shaded JAR (with dependencies)
-SHADED_JAR=$(find "${TARGET_DIR}" -name "databricks-zerobus-ingest-sdk-*-jar-with-dependencies.jar" 2>/dev/null | head -n 1)
+SHADED_JAR=$(find "${TARGET_DIR}" -name "*zerobus-ingest-sdk-*-jar-with-dependencies.jar" 2>/dev/null | head -n 1)
 
 if [ -z "${SHADED_JAR}" ] || [ ! -f "${SHADED_JAR}" ]; then
     echo "Error: Zerobus SDK JAR not found in ${TARGET_DIR}"

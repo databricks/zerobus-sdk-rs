@@ -22,7 +22,7 @@ Zerobus is a high-throughput streaming service for direct data ingestion into Da
 | TypeScript | [`typescript/`](typescript/) | [`@databricks/zerobus-ingest-sdk`](https://www.npmjs.com/package/@databricks/zerobus-ingest-sdk)               |
 | Java       | [`java/`](java/)             | [`com.databricks:zerobus-ingest-sdk`](https://central.sonatype.com/artifact/com.databricks/zerobus-ingest-sdk) |
 | C++        | [`cpp/`](cpp/)               | Source / CMake (`zerobus::zerobus`)                                                                            |
-| C#         | [`dotnet/`](dotnet/)         | [`Databricks.Zerobus`](https://www.nuget.org/packages/Databricks.Zerobus)                                      |
+| C#         | [`dotnet/`](dotnet/)         | [`Databricks.Zerobus.Ingest.Sdk`](https://www.nuget.org/packages/Databricks.Zerobus.Ingest.Sdk)                |
 
 ## Platform Support
 
@@ -139,7 +139,7 @@ Available in the Rust, Python, Go, TypeScript, and Java SDKs starting from their
 - Your workload is naturally columnar or batched — analytics pipelines, gateways aggregating short windows of rows, wide/numeric schemas where row-by-row serialization adds noticeable CPU overhead.
 - Your application already produces Arrow data — pyarrow, the [arrow-rs](https://github.com/apache/arrow-rs) crates, DataFusion, Polars, or other libraries built on Arrow.
 
-For sparse, one-row-at-a-time traffic, JSON or Protocol Buffers over the standard SDK gRPC path are usually simpler. Most SDKs ship a runnable `examples/arrow/` directory; the C++ SDK covers Arrow Flight in its [README](cpp/README.md#arrow-flight-ingestion-beta) until its examples land.
+For sparse, one-row-at-a-time traffic, JSON or Protocol Buffers over the standard SDK gRPC path are usually simpler. Most SDKs ship a runnable `examples/arrow/` directory (see each SDK's README for details).
 
 ### Acknowledgments and throughput
 

@@ -13,26 +13,27 @@ import java.util.Optional;
  * <p>Create instances using {@link ZerobusSdk#streamBuilder()}:
  *
  * <pre>{@code
- * ZerobusJsonStream stream = sdk.streamBuilder()
- *     .table("catalog.schema.table")
- *     .oauth(clientId, clientSecret)
- *     .json()
- *     .build()
- *     .join();
+ * try (ZerobusJsonStream stream = sdk.streamBuilder()
+ *         .table("catalog.schema.table")
+ *         .oauth(clientId, clientSecret)
+ *         .json()
+ *         .build()
+ *         .join()) {
+ *     // Main: Ingest objects with a serializer
+ *     Gson gson = new Gson();
+ *     for (MyData record : records) {
+ *         stream.ingestRecordOffset(record, gson::toJson);
+ *     }
+ *     stream.flush();
  *
- * // Main: Ingest objects with a serializer
- * Gson gson = new Gson();
- * long offset = stream.ingestRecordOffset(myObject, gson::toJson);
- * stream.waitForOffset(offset);
+ *     // Alt: Ingest raw JSON strings
+ *     stream.ingestRecordOffset("{\"field\": \"value\"}");
+ *     stream.flush();
  *
- * // Alt: Ingest raw JSON strings
- * stream.ingestRecordOffset("{\"field\": \"value\"}");
- *
- * // Batch ingestion
- * List<MyData> records = ...;
- * Optional<Long> batchOffset = stream.ingestRecordsOffset(records, gson::toJson);
- *
- * stream.close();
+ *     // Batch ingestion
+ *     stream.ingestRecordsOffset(records, gson::toJson);
+ *     stream.flush();
+ * }
  * }</pre>
  *
  * @see ZerobusSdk#streamBuilder()
@@ -107,6 +108,7 @@ public class ZerobusJsonStream extends BaseZerobusStream {
   // Stream creation parameters (stored for recreateStream)
   private final String clientId;
   private final String clientSecret;
+  private final HeadersProvider headersProvider;
 
   /** Package-private constructor. Use {@link ZerobusSdk#streamBuilder()} to create instances. */
   ZerobusJsonStream(
@@ -115,9 +117,20 @@ public class ZerobusJsonStream extends BaseZerobusStream {
       StreamConfigurationOptions options,
       String clientId,
       String clientSecret) {
+    this(nativeHandle, tableName, options, clientId, clientSecret, null);
+  }
+
+  ZerobusJsonStream(
+      long nativeHandle,
+      String tableName,
+      StreamConfigurationOptions options,
+      String clientId,
+      String clientSecret,
+      HeadersProvider headersProvider) {
     super(nativeHandle, tableName, options, true);
     this.clientId = clientId;
     this.clientSecret = clientSecret;
+    this.headersProvider = headersProvider;
   }
 
   /** Returns the client ID used to create this stream. */
@@ -128,6 +141,10 @@ public class ZerobusJsonStream extends BaseZerobusStream {
   /** Returns the client secret used to create this stream. */
   public String getClientSecret() {
     return clientSecret;
+  }
+
+  HeadersProvider getHeadersProvider() {
+    return headersProvider;
   }
 
   // ==================== Single Record Ingestion ====================

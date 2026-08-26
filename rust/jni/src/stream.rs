@@ -50,6 +50,16 @@ impl NativeStreamHandle {
     }
 }
 
+async fn close_native_stream(
+    stream_handle: &NativeStreamHandle,
+) -> databricks_zerobus_ingest_sdk::ZerobusResult<()> {
+    let mut guard = stream_handle.stream.lock().await;
+    if let Some(stream) = guard.as_mut() {
+        stream.close().await?;
+    }
+    Ok(())
+}
+
 /// Destroy a stream handle.
 ///
 /// # JNI Signature
@@ -390,13 +400,7 @@ pub extern "system" fn Java_com_databricks_zerobus_BaseZerobusStream_nativeClose
     let stream_handle = unsafe { NativeStreamHandle::borrow_from_raw(handle) };
 
     // Block on the async operation
-    let result = block_on(async {
-        let mut guard = stream_handle.stream.lock().await;
-        if let Some(mut stream) = guard.take() {
-            stream.close().await?;
-        }
-        Ok::<_, databricks_zerobus_ingest_sdk::ZerobusError>(())
-    });
+    let result = block_on(close_native_stream(stream_handle));
 
     if let Err(e) = result {
         throw_from_zerobus_error(&mut env, &e);
@@ -510,6 +514,10 @@ pub extern "system" fn Java_com_databricks_zerobus_BaseZerobusStream_nativeGetUn
 
     list
 }
+
+#[cfg(test)]
+#[path = "stream/tests.rs"]
+mod tests;
 
 /// Get unacked batches as a list of EncodedBatch objects.
 ///

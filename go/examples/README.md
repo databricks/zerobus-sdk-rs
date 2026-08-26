@@ -110,7 +110,13 @@ go run main.go
 
 ```go
 jsonRecord := `{"device_name": "sensor-001", "temp": 20, "humidity": 60}`
-offset, err := stream.IngestRecordOffset(jsonRecord)
+_, err := stream.IngestRecordOffset(jsonRecord)
+if err != nil {
+    log.Fatal(err)
+}
+if err := stream.Flush(); err != nil {
+    log.Fatal(err)
+}
 ```
 
 **Protocol Buffers:**
@@ -122,7 +128,13 @@ message := &pb.AirQuality{
     Humidity:   proto.Int64(60),
 }
 data, _ := proto.Marshal(message)
-offset, err := stream.IngestRecordOffset(data)
+_, err := stream.IngestRecordOffset(data)
+if err != nil {
+    log.Fatal(err)
+}
+if err := stream.Flush(); err != nil {
+    log.Fatal(err)
+}
 ```
 
 ### Batch Ingestion
@@ -134,7 +146,13 @@ records := []interface{}{
     `{"device_name": "sensor-001", "temp": 20, "humidity": 60}`,
     `{"device_name": "sensor-002", "temp": 21, "humidity": 61}`,
 }
-batchOffset, err := stream.IngestRecordsOffset(records)
+_, err := stream.IngestRecordsOffset(records)
+if err != nil {
+    log.Fatal(err)
+}
+if err := stream.Flush(); err != nil {
+    log.Fatal(err)
+}
 ```
 
 **Protocol Buffers:**
@@ -146,7 +164,13 @@ for i := 0; i < 5; i++ {
     data, _ := proto.Marshal(message)
     records = append(records, data)
 }
-batchOffset, err := stream.IngestRecordsOffset(records)
+_, err := stream.IngestRecordsOffset(records)
+if err != nil {
+    log.Fatal(err)
+}
+if err := stream.Flush(); err != nil {
+    log.Fatal(err)
+}
 ```
 
 ### Fire-and-Forget Ingestion
@@ -167,6 +191,9 @@ err = stream.IngestRecordsNowait([]interface{}{
     `{"device_name": "sensor-001", "temp": 20, "humidity": 60}`,
     `{"device_name": "sensor-002", "temp": 21, "humidity": 61}`,
 })
+if err != nil {
+    log.Fatal(err)
+}
 
 // Call stream.Flush() or stream.Close() before exiting to ensure durability.
 ```

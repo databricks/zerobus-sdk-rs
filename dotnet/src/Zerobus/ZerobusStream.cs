@@ -14,6 +14,10 @@ namespace Databricks.Zerobus;
 /// multiple threads concurrently, just like the Go SDK supports goroutines.
 /// </para>
 /// <para>
+/// Ingestion is asynchronous: <see cref="IngestRecord(string)"/> returns as soon as the
+/// record is queued; the SDK tracks its acknowledgment in the background.
+/// </para>
+/// <para>
 /// <see cref="Close()"/> performs a graceful close (flush + close) but keeps the
 /// native stream alive so callers can inspect <see cref="GetUnackedRecords"/> or
 /// recover with <c>ZerobusSdk.RecreateStream(...)</c>. Call <see cref="Dispose()"/>
@@ -54,25 +58,34 @@ public sealed class ZerobusStream : IDisposable, IAsyncDisposable
     /// Ingests a single record and returns the offset.
     /// This is the primary API for record ingestion.
     /// </summary>
+    /// <remarks>
+    /// Returns before server acknowledgment; use <see cref="Flush()"/> or
+    /// <see cref="WaitForOffset(long)"/> when acknowledgment is required.
+    /// </remarks>
     /// <param name="payload">
     /// The record payload. Pass a <see cref="string"/> for JSON records
     /// or a <c>byte[]</c> / <see cref="ReadOnlySpan{T}"/> of <see cref="byte"/>
     /// for Protocol Buffer records.
     /// </param>
-    /// <returns>The offset of the ingested record.</returns>
+    /// <returns>The logical offset assigned to this record.</returns>
     /// <exception cref="ZerobusException">Thrown if ingestion fails.</exception>
     /// <exception cref="ObjectDisposedException">Thrown if the stream has been disposed.</exception>
-    /// <exception cref="ArgumentException">
-    /// Thrown if the payload type is not <c>string</c> or <c>byte[]</c>.
-    /// </exception>
+    /// <exception cref="ArgumentNullException">Thrown if <paramref name="payload"/> is null.</exception>
     /// <example>
     /// <code>
-    /// // JSON
-    /// long offset = stream.IngestRecord("{\"id\": 1, \"message\": \"Hello\"}");
+    /// // JSON stream
+    /// for (int id = 1; id &lt;= 100; id++)
+    /// {
+    ///     jsonStream.IngestRecord($"{{\"id\": {id}, \"message\": \"Hello\"}}");
+    /// }
+    /// jsonStream.Flush();
     ///
-    /// // Protobuf
-    /// byte[] protoBytes = SerializeMyProto(myMessage);
-    /// long offset = stream.IngestRecord(protoBytes);
+    /// // Protobuf stream
+    /// foreach (var message in messages)
+    /// {
+    ///     protoStream.IngestRecord(SerializeMyProto(message));
+    /// }
+    /// protoStream.Flush();
     /// </code>
     /// </example>
     public long IngestRecord(string payload)
@@ -112,9 +125,12 @@ public sealed class ZerobusStream : IDisposable, IAsyncDisposable
     // ── Batch ingestion ──────────────────────────────────────────────────
 
     /// <summary>
-    /// Ingests a batch of JSON records and returns one offset for the entire batch.
-    /// All records in the batch must be JSON strings.
+    /// Ingests a batch of JSON records and returns its assigned offset.
     /// </summary>
+    /// <remarks>
+    /// The batch succeeds or fails as a unit. All records must be JSON strings. Prefer
+    /// this API in hot paths to amortize the per-call interop overhead.
+    /// </remarks>
     /// <param name="records">The JSON record strings to ingest.</param>
     /// <returns>The offset representing the entire batch, or -1 if the batch is empty.</returns>
     /// <exception cref="ZerobusException">Thrown if ingestion fails.</exception>
@@ -126,7 +142,8 @@ public sealed class ZerobusStream : IDisposable, IAsyncDisposable
     ///     "{\"device\": \"sensor-001\", \"temp\": 20}",
     ///     "{\"device\": \"sensor-002\", \"temp\": 21}",
     /// ];
-    /// long batchOffset = stream.IngestRecords(records);
+    /// stream.IngestRecords(records);
+    /// stream.Flush();
     /// </code>
     /// </example>
     public long IngestRecords(string[] records)
@@ -143,9 +160,12 @@ public sealed class ZerobusStream : IDisposable, IAsyncDisposable
     }
 
     /// <summary>
-    /// Ingests a batch of protobuf records and returns one offset for the entire batch.
-    /// All records in the batch must be serialised protobuf byte arrays.
+    /// Ingests a batch of protobuf records and returns its assigned offset.
     /// </summary>
+    /// <remarks>
+    /// The batch succeeds or fails as a unit. All records must be serialized protobuf
+    /// byte arrays. Prefer this API in hot paths to amortize the per-call interop overhead.
+    /// </remarks>
     /// <param name="records">The protobuf record byte spans to ingest.</param>
     /// <returns>The offset representing the entire batch, or -1 if the batch is empty.</returns>
     /// <exception cref="ZerobusException">Thrown if ingestion fails.</exception>
@@ -166,20 +186,20 @@ public sealed class ZerobusStream : IDisposable, IAsyncDisposable
     // ── Acknowledgment / flush ───────────────────────────────────────────
 
     /// <summary>
-    /// Blocks until the server acknowledges the record at the specified offset.
-    /// Use this with offsets returned from <see cref="IngestRecord(string)"/> to wait for
-    /// specific records to be durably written without waiting for all pending records.
+    /// Waits for the server to acknowledge all records through the specified offset.
     /// </summary>
-    /// <param name="offset">The offset to wait for.</param>
+    /// <remarks>
+    /// Acknowledgments are ordered, so waiting for the last offset also confirms every
+    /// earlier record. Use this for targeted waits; for a bulk run, <see cref="Flush()"/>
+    /// is simpler. Avoid waiting after every record, which limits throughput to one
+    /// record per round-trip.
+    /// </remarks>
+    /// <param name="offset">
+    /// The offset to wait for, as returned by <see cref="IngestRecord(string)"/> or
+    /// <see cref="IngestRecords(string[])"/>.
+    /// </param>
     /// <exception cref="ZerobusException">Thrown if the wait fails.</exception>
     /// <exception cref="ObjectDisposedException">Thrown if the stream has been disposed.</exception>
-    /// <example>
-    /// <code>
-    /// long offset = stream.IngestRecord(data);
-    /// // ... do other work ...
-    /// stream.WaitForOffset(offset);
-    /// </code>
-    /// </example>
     public void WaitForOffset(long offset)
     {
         WithReadLock(ptr => NativeInterop.StreamWaitForOffset(ptr, offset));
@@ -192,17 +212,22 @@ public sealed class ZerobusStream : IDisposable, IAsyncDisposable
     }
 
     /// <summary>
-    /// Blocks until all pending records have been acknowledged by the server.
-    /// This ensures durability guarantees before proceeding.
+    /// Waits for all records queued before the call to be acknowledged.
     /// </summary>
+    /// <remarks>
+    /// Records queued while the flush is in progress are not included.
+    /// </remarks>
     /// <exception cref="ZerobusException">
     /// Thrown if the flush times out or a record fails with a non-retryable error.
     /// </exception>
     /// <exception cref="ObjectDisposedException">Thrown if the stream has been disposed.</exception>
     /// <example>
     /// <code>
+    /// for (int i = 0; i &lt; 1000; i++)
+    /// {
+    ///     stream.IngestRecord(records[i]);
+    /// }
     /// stream.Flush();
-    /// Console.WriteLine("All records durably stored.");
     /// </code>
     /// </example>
     public void Flush()
@@ -239,10 +264,17 @@ public sealed class ZerobusStream : IDisposable, IAsyncDisposable
     /// }
     /// catch (ZerobusException)
     /// {
-    ///     var unacked = stream.GetUnackedRecords();
-    ///     Console.WriteLine($"Failed to acknowledge {unacked.Length} records");
-    ///     foreach (var payload in unacked)
-    ///         Console.WriteLine($"{payload.Length} bytes");
+    ///     // A flush timeout can leave the stream active. GetUnackedRecords
+    ///     // requires a closed or failed stream.
+    ///     try
+    ///     {
+    ///         var unacked = stream.GetUnackedRecords();
+    ///         Console.WriteLine($"Failed to acknowledge {unacked.Length} records");
+    ///     }
+    ///     catch (ZerobusException retrieval)
+    ///     {
+    ///         Console.WriteLine($"Could not inspect unacked records: {retrieval.Message}");
+    ///     }
     /// }
     /// </code>
     /// </example>

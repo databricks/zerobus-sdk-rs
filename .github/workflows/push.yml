@@ -142,22 +142,22 @@ jobs:
       contents: read
     uses: ./.github/workflows/ci-dotnet.yml
 
-  # Non-blocking cross-SDK jobs — run all SDK tests against the local Rust
-  # source when rust/** changes, to catch breakage before a new FFI release.
-  # These are intentionally excluded from `gate` so they don't block merging.
+  # Non-blocking cross-SDK jobs — run wrapper tests against the local Rust
+  # source when rust/** changes. Skip wrappers already selected by their own
+  # path filter to avoid running the same workflow twice.
   cross-sdk-go:
     needs: changes
-    if: needs.changes.outputs.rust == 'true'
+    if: needs.changes.outputs.rust == 'true' && needs.changes.outputs.go != 'true'
     permissions:
       id-token: write
       contents: read
     uses: ./.github/workflows/ci-go.yml
     with:
-      use_local_sdk: true
+      run_published_artifact_tests: false
 
   cross-sdk-cpp:
     needs: changes
-    if: needs.changes.outputs.rust == 'true'
+    if: needs.changes.outputs.rust == 'true' && needs.changes.outputs.cpp != 'true'
     permissions:
       id-token: write
       contents: read
@@ -165,42 +165,34 @@ jobs:
 
   cross-sdk-dotnet:
     needs: changes
-    if: needs.changes.outputs.rust == 'true'
+    if: needs.changes.outputs.rust == 'true' && needs.changes.outputs.dotnet != 'true'
     permissions:
       id-token: write
       contents: read
     uses: ./.github/workflows/ci-dotnet.yml
     with:
-      use_local_sdk: true
+      run_published_artifact_tests: false
 
   cross-sdk-python:
     needs: changes
-    if: needs.changes.outputs.rust == 'true'
+    if: needs.changes.outputs.rust == 'true' && needs.changes.outputs.python != 'true'
     permissions:
       id-token: write
       contents: read
     uses: ./.github/workflows/ci-python.yml
-    with:
-      use_local_sdk: true
 
   cross-sdk-typescript:
     needs: changes
-    if: needs.changes.outputs.rust == 'true'
+    if: needs.changes.outputs.rust == 'true' && needs.changes.outputs.typescript != 'true'
     permissions:
       id-token: write
       contents: read
     uses: ./.github/workflows/ci-typescript.yml
-    with:
-      use_local_sdk: true
-      artifact_suffix: '-local-sdk'
 
   cross-sdk-java:
     needs: changes
-    if: needs.changes.outputs.rust == 'true'
+    if: needs.changes.outputs.rust == 'true' && needs.changes.outputs.java != 'true'
     permissions:
       id-token: write
       contents: read
     uses: ./.github/workflows/ci-java.yml
-    with:
-      use_local_sdk: true
-      artifact_suffix: '-local-sdk'

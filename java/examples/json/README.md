@@ -14,9 +14,10 @@ This directory contains examples for ingesting data using `ZerobusJsonStream`.
 
 ```bash
 cd examples
+SDK_JAR=$(ls ../target/zerobus-ingest-sdk-*-jar-with-dependencies.jar | head -n 1)
 
 # Compile
-javac -d . -cp "../target/classes:$(cd .. && mvn dependency:build-classpath -q -DincludeScope=runtime -Dmdep.outputFile=/dev/stdout)" \
+javac -d . -cp "$SDK_JAR" \
   json/SingleRecordExample.java \
   json/BatchIngestionExample.java
 
@@ -28,11 +29,11 @@ export DATABRICKS_CLIENT_ID="your-client-id"
 export DATABRICKS_CLIENT_SECRET="your-client-secret"
 
 # Run single record example
-java -cp ".:../target/classes:$(cd .. && mvn dependency:build-classpath -q -DincludeScope=runtime -Dmdep.outputFile=/dev/stdout)" \
+java -cp ".:$SDK_JAR" \
   com.databricks.zerobus.examples.json.SingleRecordExample
 
 # Run batch example
-java -cp ".:../target/classes:$(cd .. && mvn dependency:build-classpath -q -DincludeScope=runtime -Dmdep.outputFile=/dev/stdout)" \
+java -cp ".:$SDK_JAR" \
   com.databricks.zerobus.examples.json.BatchIngestionExample
 ```
 
@@ -41,27 +42,49 @@ java -cp ".:../target/classes:$(cd .. && mvn dependency:build-classpath -q -Dinc
 ### Creating a JSON Stream
 
 ```java
-ZerobusJsonStream stream = sdk.streamBuilder()
-    .table(tableName)
-    .oauth(clientId, clientSecret)
-    .json()
-    .build()
-    .join();
+try (ZerobusJsonStream stream = sdk.streamBuilder()
+        .table(tableName)
+        .oauth(clientId, clientSecret)
+        .json()
+        .build()
+        .join()) {
+    // ingest...
+}
+```
+
+For custom authentication, provide the authorization and table name headers:
+
+```java
+HeadersProvider provider = () -> {
+    Map<String, String> headers = new HashMap<>();
+    headers.put("authorization", "Bearer " + System.getenv("DATABRICKS_TOKEN"));
+    headers.put("x-databricks-zerobus-table-name", tableName);
+    return headers;
+};
+
+try (ZerobusJsonStream stream = sdk.streamBuilder()
+        .table(tableName)
+        .headersProvider(provider)
+        .json()
+        .build()
+        .join()) {
+    // ingest...
+}
 ```
 
 ### Single Record Ingestion
 
 ```java
 // Method 1: Raw JSON string
-long offset = stream.ingestRecordOffset("{\"device_name\": \"sensor-1\", \"temp\": 25}");
+stream.ingestRecordOffset("{\"device_name\": \"sensor-1\", \"temp\": 25}");
 
 // Method 2: Object with serializer (Gson, Jackson, or custom)
 Map<String, Object> data = new HashMap<>();
 data.put("device_name", "sensor-1");
 data.put("temp", 25);
-offset = stream.ingestRecordOffset(data, gson::toJson);
+stream.ingestRecordOffset(data, gson::toJson);
 
-stream.waitForOffset(offset);
+stream.flush();
 ```
 
 ### Batch Ingestion
@@ -72,25 +95,23 @@ List<String> jsonBatch = Arrays.asList(
     "{\"device_name\": \"s1\", \"temp\": 20}",
     "{\"device_name\": \"s2\", \"temp\": 21}"
 );
-Optional<Long> offset = stream.ingestRecordsOffset(jsonBatch);
+stream.ingestRecordsOffset(jsonBatch);
 
 // Method 2: List of objects with serializer
 List<Map<String, Object>> objectBatch = ...;
-offset = stream.ingestRecordsOffset(objectBatch, gson::toJson);
+stream.ingestRecordsOffset(objectBatch, gson::toJson);
 
-if (offset.isPresent()) {
-    stream.waitForOffset(offset.get());
-}
+stream.flush();
 ```
 
 ### Getting Unacknowledged Records
 
 ```java
 // As JSON strings
-List<String> unacked = stream.getUnackedRecords();
+List<String> unackedJson = stream.getUnackedRecords();
 
 // As deserialized objects
-List<MyData> unacked = stream.getUnackedRecords(json -> gson.fromJson(json, MyData.class));
+List<MyData> unackedObjects = stream.getUnackedRecords(json -> gson.fromJson(json, MyData.class));
 ```
 
 ## Examples
@@ -98,11 +119,11 @@ List<MyData> unacked = stream.getUnackedRecords(json -> gson.fromJson(json, MyDa
 ### SingleRecordExample
 
 Demonstrates both single-record ingestion methods plus recreateStream:
-1. **Object with serializer** - 11 records (1 + 10)
-2. **String directly** - 11 records (1 + 10)
+1. **Object with serializer** - 10 records, then flush
+2. **String directly** - 10 records, then flush
 3. **RecreateStream demo** - 3 records
 
-**Total: 25 records**
+**Total: 23 records**
 
 ### BatchIngestionExample
 
@@ -152,7 +173,7 @@ stream.ingestRecordOffset(myObject, obj -> {
 
 | Use Case | Recommended |
 |----------|-------------|
-| Rapid prototyping | SON |
+| Rapid prototyping | JSON |
 | Data already in JSON format | JSON |
 | Schema changes frequently | JSON |
 | Production with stable schema | Proto |

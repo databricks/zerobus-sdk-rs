@@ -16,25 +16,26 @@ import java.util.Optional;
  * <p>Create instances using {@link ZerobusSdk#streamBuilder()}:
  *
  * <pre>{@code
- * ZerobusProtoStream stream = sdk.streamBuilder()
- *     .table("catalog.schema.table")
- *     .oauth(clientId, clientSecret)
- *     .compiledProto(MyProto.getDescriptor().toProto())
- *     .build()
- *     .join();
+ * try (ZerobusProtoStream stream = sdk.streamBuilder()
+ *         .table("catalog.schema.table")
+ *         .oauth(clientId, clientSecret)
+ *         .compiledProto(MyProto.getDescriptor().toProto())
+ *         .build()
+ *         .join()) {
+ *     // Ingest proto messages
+ *     for (MyProto record : records) {
+ *         stream.ingestRecordOffset(record);
+ *     }
+ *     stream.flush();
  *
- * // Ingest proto messages
- * long offset = stream.ingestRecordOffset(myProtoMessage);
- * stream.waitForOffset(offset);
+ *     // Or ingest pre-encoded bytes
+ *     stream.ingestRecordOffset(protoBytes);
+ *     stream.flush();
  *
- * // Or ingest pre-encoded bytes
- * stream.ingestRecordOffset(protoBytes);
- *
- * // Batch ingestion
- * List<MyProto> records = ...;
- * Optional<Long> batchOffset = stream.ingestRecordsOffset(records);
- *
- * stream.close();
+ *     // Batch ingestion
+ *     stream.ingestRecordsOffset(records);
+ *     stream.flush();
+ * }
  * }</pre>
  *
  * @see ZerobusSdk#streamBuilder()
@@ -45,6 +46,7 @@ public class ZerobusProtoStream extends BaseZerobusStream {
   private final byte[] descriptorProtoBytes;
   private final String clientId;
   private final String clientSecret;
+  private final HeadersProvider headersProvider;
 
   /** Package-private constructor. Use {@link ZerobusSdk#streamBuilder()} to create instances. */
   ZerobusProtoStream(
@@ -54,10 +56,22 @@ public class ZerobusProtoStream extends BaseZerobusStream {
       byte[] descriptorProtoBytes,
       String clientId,
       String clientSecret) {
+    this(nativeHandle, tableName, options, descriptorProtoBytes, clientId, clientSecret, null);
+  }
+
+  ZerobusProtoStream(
+      long nativeHandle,
+      String tableName,
+      StreamConfigurationOptions options,
+      byte[] descriptorProtoBytes,
+      String clientId,
+      String clientSecret,
+      HeadersProvider headersProvider) {
     super(nativeHandle, tableName, options, false);
     this.descriptorProtoBytes = descriptorProtoBytes;
     this.clientId = clientId;
     this.clientSecret = clientSecret;
+    this.headersProvider = headersProvider;
   }
 
   /** Returns the descriptor proto bytes used to create this stream. */
@@ -73,6 +87,10 @@ public class ZerobusProtoStream extends BaseZerobusStream {
   /** Returns the client secret used to create this stream. */
   public String getClientSecret() {
     return clientSecret;
+  }
+
+  HeadersProvider getHeadersProvider() {
+    return headersProvider;
   }
 
   // ==================== Single Record Ingestion ====================

@@ -21,8 +21,19 @@
 
 ### Documentation
 
+- Corrected installation and source-build prerequisites, separated JSON and
+  protobuf stream examples, and added a runnable generated-message example.
+- Documented the asynchronous ingestion model across the README, XML docs, and
+  examples: ingest records in a loop, then call `Flush()` once instead of waiting
+  for each record. `WaitForOffset()` is now presented as a targeted wait for a
+  specific offset.
+- Documented that `GetUnackedRecords()` can fail while the stream is still
+  active after a flush timeout, and stopped reporting success after ingest
+  failures. Pointed CONTRIBUTING at `src/Zerobus/Native/`.
+
 ### Internal Changes
 
 - Made the .NET release workflow build-only, consistent with the other SDKs. It now packs the NuGet package and uploads it as an artifact; publishing and the GitHub Release happen downstream.
+- Pin the full NuGet restore graph with `packages.lock.json` and fail CI restore when the lock files are stale (`RestoreLockedMode`).
 
 ### API Changes

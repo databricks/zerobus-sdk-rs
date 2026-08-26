@@ -28,9 +28,12 @@ pub struct HeadersProvider {}
 #[pymethods]
 impl HeadersProvider {
     #[new]
-    #[pyo3(signature = (**_kwargs))]
-    fn new(_kwargs: Option<&Bound<'_, pyo3::types::PyDict>>) -> Self {
-        // Accept and ignore kwargs to allow Python subclasses to pass their own arguments
+    #[pyo3(signature = (*_args, **_kwargs))]
+    fn new(
+        _args: &Bound<'_, pyo3::types::PyTuple>,
+        _kwargs: Option<&Bound<'_, pyo3::types::PyDict>>,
+    ) -> Self {
+        // Accept and ignore any arguments to allow Python subclasses to pass their own arguments
         Self {}
     }
 

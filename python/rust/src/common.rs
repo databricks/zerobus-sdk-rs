@@ -7,7 +7,7 @@ use pyo3::prelude::*;
 use pyo3::types::{PyBytes, PyDict, PyList, PyTuple};
 
 use databricks_zerobus_ingest_sdk::{
-    AckCallback as RustAckCallback, EncodedRecord, OffsetId, StreamBuilder,
+    AckCallback as RustAckCallback, EncodedRecord, OffsetId, StreamBuilder, ZerobusError,
 };
 
 /// User-agent prefix emitted by this wrapper SDK. Combined with the wrapper
@@ -168,7 +168,10 @@ impl TableProperties {
     }
 }
 
-/// Base class for record acknowledgment callbacks
+/// Base class for logical ingest submission acknowledgment callbacks.
+///
+/// A batch ingest is one logical submission and produces one callback, not one
+/// callback per record in the batch.
 #[pyclass(subclass, skip_from_py_object)]
 #[derive(Clone)]
 pub struct AckCallback {
@@ -186,13 +189,13 @@ impl AckCallback {
         }
     }
 
-    /// Called when a record is acknowledged by the server.
+    /// Called when a logical ingest submission is acknowledged by the server.
     fn on_ack(&self, py: Python, offset: i64) -> PyResult<()> {
         let _ = (py, offset);
         Ok(())
     }
 
-    /// Called when a record encounters an error during ingestion.
+    /// Called when a logical ingest submission encounters an error during ingestion.
     fn on_error(&self, py: Python, offset: i64, error_message: &str) -> PyResult<()> {
         let _ = (py, offset, error_message);
         Ok(())
@@ -560,10 +563,12 @@ pyo3::create_exception!(
     "Indicates a non-retriable error has occurred"
 );
 
-/// Map Rust SDK errors to Python exceptions
-pub fn map_error(err: impl std::fmt::Display) -> PyErr {
+/// Map Rust SDK errors to Python exceptions using `ZerobusError::is_retryable()`.
+pub fn map_error(err: ZerobusError) -> PyErr {
     let msg = err.to_string();
-    // For now, treat all errors as retriable ZerobusException
-    // We can make this more sophisticated later by examining error messages/types
-    ZerobusException::new_err(msg)
+    if err.is_retryable() {
+        ZerobusException::new_err(msg)
+    } else {
+        NonRetriableException::new_err(msg)
+    }
 }

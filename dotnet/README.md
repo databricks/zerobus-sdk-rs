@@ -1,11 +1,11 @@
-# Databricks.Zerobus — .NET SDK
+# Databricks.Zerobus.Ingest.Sdk — .NET SDK
 
 High-performance .NET SDK for streaming data ingestion into Databricks Delta tables using the Zerobus service. Built on the same Rust core as the Go SDK, exposed via P/Invoke (C FFI bindings).
 
 ## Requirements
 
-- **.NET 8** or **.NET 10**
-- **Rust toolchain** (for building the native `zerobus_ffi` library from source)
+- Consumers: .NET 8 or .NET 10
+- Building from source: .NET 10 SDK and a Rust toolchain
 
 ## Quick Start
 
@@ -31,19 +31,30 @@ using var stream = sdk.CreateJsonStream(
     clientSecret,
     options);
 
-// 4. Ingest records.
-long offset = stream.IngestRecord("""{"id": 1, "message": "Hello"}""");
-
-// 5. Wait for acknowledgment.
-stream.WaitForOffset(offset);
+// 4. Ingest records, then call Flush() once.
+for (int id = 1; id <= 100; id++)
+{
+    stream.IngestRecord($$"""{"id": {{id}}, "message": "Hello"}""");
+}
+stream.Flush();
 ```
+
+### Acknowledgments and throughput
+
+Ingestion is asynchronous. `IngestRecord()` and `IngestRecords()` return as soon as the
+record or batch is queued; the SDK sends it and tracks its acknowledgment in the background.
+Call `Flush()` to wait until everything queued so far is acknowledged—once after a bounded
+run, or periodically for a long-running stream. Each ingest also returns an offset.
+`WaitForOffset(offset)` waits for that offset and every earlier one to be acknowledged.
+Use it for targeted waits, but avoid waiting after every record: doing so limits throughput
+to one record per round-trip.
 
 ## Installation
 
 ### NuGet (when published)
 
 ```bash
-dotnet add package Databricks.Zerobus
+dotnet add package Databricks.Zerobus.Ingest.Sdk
 ```
 
 ### From Source
@@ -164,15 +175,21 @@ same lifecycle APIs (`Flush`, `WaitForOffset`, `Close`, `Dispose`, `GetUnackedRe
 #### `JsonZerobusStream.IngestRecord`
 
 ```csharp
-stream.IngestRecord("""{"field": "value"}""");
+for (int id = 1; id <= 100; id++)
+{
+    stream.IngestRecord($$"""{"id": {{id}}, "field": "value"}""");
+}
 stream.Flush();
 ```
 
 #### `ProtoZerobusStream.IngestRecord`
 
 ```csharp
-byte[] protoBytes = myMessage.ToByteArray();
-stream.IngestRecord(protoBytes);
+for (int id = 1; id <= 100; id++)
+{
+    byte[] protoBytes = myMessage.ToByteArray();
+    stream.IngestRecord(protoBytes);
+}
 stream.Flush();
 ```
 
@@ -182,44 +199,78 @@ The untyped stream remains available for advanced callers. Thread-safe.
 
 #### `IngestRecord`
 
-Ingests a single record and returns its offset immediately (acknowledgment happens in background).
-If you use this untyped API, JSON streams must set `RecordType.Json` and use the string overloads.
-Proto streams must provide `DescriptorProto` and use the byte-oriented overloads.
+Ingests a single record and returns its assigned offset. The record is queued for background
+sending and acknowledgment. With this untyped API, JSON streams must set
+`RecordType.Json` and use the string overloads; protobuf streams must provide
+`DescriptorProto` and use the byte-oriented overloads.
 
 ```csharp
-// JSON
-long offset = stream.IngestRecord("""{"field": "value"}""");
+var jsonOptions = options with { RecordType = RecordType.Json };
+using var jsonStream = sdk.CreateStream(
+    new TableProperties("catalog.schema.json_table"),
+    clientId,
+    clientSecret,
+    jsonOptions);
 
-// Protobuf
-byte[] protoBytes = myMessage.ToByteArray();
-long offset = stream.IngestRecord(protoBytes);
-stream.WaitForOffset(offset);
+for (int id = 1; id <= 100_000; id++)
+{
+    jsonStream.IngestRecord($$"""{"id": {{id}}, "field": "value"}""");
+
+    // Flush periodically to bound memory on long-running streams.
+    if (id % 10_000 == 0)
+        jsonStream.Flush();
+}
+jsonStream.Flush();
+```
+
+The protobuf stream works the same way, using the byte-oriented overloads:
+
+```csharp
+var protoOptions = options with { RecordType = RecordType.Proto };
+using var protoStream = sdk.CreateStream(
+    new TableProperties("catalog.schema.proto_table", descriptorProto),
+    clientId,
+    clientSecret,
+    protoOptions);
+
+for (int id = 1; id <= 100; id++)
+{
+    protoStream.IngestRecord(myMessage.ToByteArray());
+}
+protoStream.Flush();
 ```
 
 #### `IngestRecords`
 
-Ingests a batch of records and returns one offset for the whole batch.
+Ingests multiple records as one batch and returns its assigned offset. The batch succeeds
+or fails as a unit. Prefer this API in hot paths to amortize the per-call P/Invoke overhead.
 
 ```csharp
 string[] records = [
     """{"device": "sensor-001", "temp": 20}""",
     """{"device": "sensor-002", "temp": 21}""",
 ];
-long lastOffset = stream.IngestRecords(records);
-stream.WaitForOffset(lastOffset);
+
+stream.IngestRecords(records);
+stream.Flush();
 ```
 
 #### `WaitForOffset` (sync)
 
-Blocks until a specific offset is acknowledged by the server.
+Waits for the server to acknowledge all records through the specified offset.
+Acknowledgments are ordered, so waiting for the last offset also confirms every earlier
+record. Use this for targeted waits; for a bulk run, `Flush()` is simpler. Avoid waiting
+after every record, which limits throughput to one record per round-trip.
 
 ```csharp
+long offset = stream.IngestRecord("""{"type": "control"}""");
 stream.WaitForOffset(offset);
 ```
 
 #### `Flush` (sync)
 
-Blocks until all pending records are acknowledged.
+Waits for all records queued before the call to be acknowledged. Records queued while the
+flush is in progress are not included.
 
 ```csharp
 stream.Flush();
@@ -227,14 +278,26 @@ stream.Flush();
 
 #### `GetUnackedRecords`
 
-Retrieves unacknowledged records after stream failure (call after close/failure only).
+Retrieves unacknowledged records after stream failure (call after close/failure only). A flush timeout can leave the stream active, in which case `GetUnackedRecords()` throws until the stream closes.
 
 ```csharp
-ReadOnlyMemory<byte>[] unacked = stream.GetUnackedRecords();
-foreach (var payload in unacked)
+try
 {
-    // Decode as UTF-8 if you know this stream ingests JSON.
-    Console.WriteLine($"record bytes: {payload.Length}");
+    stream.Flush();
+}
+catch (ZerobusException)
+{
+    // A flush timeout can leave the stream active. GetUnackedRecords
+    // requires a closed or failed stream.
+    try
+    {
+        var unacked = stream.GetUnackedRecords();
+        Console.WriteLine($"Failed to acknowledge {unacked.Length} records");
+    }
+    catch (ZerobusException retrieval)
+    {
+        Console.WriteLine($"Could not inspect unacked records (stream may still be active): {retrieval.Message}");
+    }
 }
 ```
 
@@ -317,6 +380,16 @@ catch (ZerobusException ex)
     Console.WriteLine($"Fatal error: {ex.RawMessage}");
 }
 ```
+
+## Best Practices
+
+1. Reuse one `ZerobusSdk` instance across multiple streams.
+2. Use `using` / `await using`, or call `Close()` explicitly, so pending records are flushed.
+3. Follow the [acknowledgment and throughput](#acknowledgments-and-throughput) guidance.
+4. Prefer `IngestRecords()` in high-throughput paths to reduce P/Invoke overhead.
+5. Tune `MaxInflightRequests` for your memory and throughput requirements.
+6. Keep recovery enabled in production.
+7. Log and alert on non-retryable errors.
 
 ## Native Library Setup
 
@@ -403,6 +476,7 @@ dotnet test
 dotnet/
 ├── Zerobus.slnx                              # Solution file
 ├── Directory.Build.props                      # Shared build settings
+├── Directory.Packages.props                   # Central NuGet version pins
 ├── build_native.sh                            # Rust FFI build script
 ├── README.md
 ├── src/
@@ -439,7 +513,7 @@ dotnet/
 ## Architecture
 
 ```
-.NET SDK (Databricks.Zerobus)
+.NET SDK (Databricks.Zerobus.Ingest.Sdk)
     ↓ P/Invoke
 Rust FFI (zerobus-ffi / libzerobus_ffi)
     ↓

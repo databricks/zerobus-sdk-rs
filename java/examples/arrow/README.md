@@ -52,10 +52,9 @@ Pass both opens to your application JVM whenever you use `ZerobusArrowStream`:
 
 ```bash
 cd examples
-
-# Compile (requires Arrow JARs on classpath)
+SDK_JAR=$(ls ../target/zerobus-ingest-sdk-*-jar-with-dependencies.jar | head -n 1)
 ARROW_CP=$(echo ../target/arrow-deps/*.jar | tr ' ' ':')
-javac -d . -cp "../target/classes:$ARROW_CP" \
+javac -d . -cp "$SDK_JAR:$ARROW_CP" \
   arrow/ArrowIngestionExample.java
 
 # Set environment variables
@@ -68,7 +67,7 @@ export DATABRICKS_CLIENT_SECRET="your-client-secret"
 # Run
 java --add-opens=java.base/java.nio=ALL-UNNAMED \
      --add-opens=java.base/java.nio=org.apache.arrow.memory.core \
-     -cp ".:../target/zerobus-ingest-sdk-*-jar-with-dependencies.jar:$ARROW_CP" \
+     -cp ".:$SDK_JAR:$ARROW_CP" \
      com.databricks.zerobus.examples.arrow.ArrowIngestionExample
 ```
 
@@ -89,12 +88,14 @@ Schema schema = new Schema(Arrays.asList(
     Field.nullable("humidity", new ArrowType.Int(64, true))
 ));
 
-ZerobusArrowStream stream = sdk.streamBuilder()
-    .table(tableName)
-    .oauth(clientId, clientSecret)
-    .arrow(schema)
-    .build()
-    .join();
+try (ZerobusArrowStream stream = sdk.streamBuilder()
+        .table(tableName)
+        .oauth(clientId, clientSecret)
+        .arrow(schema)
+        .build()
+        .join()) {
+    // ingest...
+}
 ```
 
 ### Ingesting Batches
@@ -104,10 +105,8 @@ try (VectorSchemaRoot batch = VectorSchemaRoot.create(schema, allocator)) {
     // Populate the batch...
     batch.setRowCount(rowCount);
 
-    Optional<Long> offset = stream.ingestBatch(batch);
-    if (offset.isPresent()) {
-        stream.waitForOffset(offset.get());
-    }
+    stream.ingestBatch(batch);
+    stream.flush();
 }
 ```
 
@@ -118,18 +117,20 @@ Set shared and Arrow-specific options directly on the builder. Arrow-specific kn
 calling `.arrow(...)`:
 
 ```java
-ZerobusArrowStream stream = sdk.streamBuilder()
-    .table(tableName)
-    .oauth(clientId, clientSecret)
-    .flushTimeoutMs(600000)
-    .recovery(true)
-    .recoveryRetries(5)
-    .arrow(schema)
-    .maxInflightBatches(2000)
-    .ipcCompression(IPCCompressionType.ZSTD)
-    .streamPausedMaxWaitTimeMs(5000)
-    .build()
-    .join();
+try (ZerobusArrowStream stream = sdk.streamBuilder()
+        .table(tableName)
+        .oauth(clientId, clientSecret)
+        .flushTimeoutMs(600000)
+        .recovery(true)
+        .recoveryRetries(5)
+        .arrow(schema)
+        .maxInflightBatches(2000)
+        .ipcCompression(IPCCompressionType.ZSTD)
+        .streamPausedMaxWaitTimeMs(5000)
+        .build()
+        .join()) {
+    // ingest...
+}
 ```
 
 ### Recovering Unacknowledged Batches

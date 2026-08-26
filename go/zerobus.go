@@ -6,12 +6,14 @@
 //
 // # Installation
 //
-// This package requires a one-time build step to compile the Rust FFI layer:
+// This package is a CGO wrapper around a Rust core. Tagged releases and
+// checkouts that include lib/ archives do not need Rust. Consumers can install
+// with:
 //
-//	go get github.com/databricks/zerobus-sdk/go
-//	go generate github.com/databricks/zerobus-sdk/go
+//	go get github.com/databricks/zerobus-sdk/go@v1.4.0
 //
-// Prerequisites: Go 1.19+, Rust 1.70+, CGO enabled
+// Prerequisites for consumers: Go 1.21+, CGO enabled, a C compiler.
+// Rust and `go generate` are required only when rebuilding the FFI.
 //
 // # Quick Start
 //
@@ -97,7 +99,7 @@
 //
 // Errors are categorized as retryable or non-retryable:
 //
-//	ack, err := stream.IngestRecord(data)
+//	_, err := stream.IngestRecordOffset(data)
 //	if err != nil {
 //	    if zbErr, ok := err.(*zerobus.ZerobusError); ok {
 //	        if zbErr.Retryable() {
@@ -531,6 +533,9 @@ func (st *ZerobusStream) IngestRecordOffset(payload interface{}) (int64, error) 
 //	if err != nil {
 //	    log.Fatal(err)
 //	}
+//	if err := stream.Flush(); err != nil {
+//	    log.Fatal(err)
+//	}
 func (st *ZerobusStream) IngestRecordNowait(payload interface{}) error {
 	if st.ptr == nil {
 		return &ZerobusError{Message: "Stream has been closed", IsRetryable: false}
@@ -567,6 +572,12 @@ func (st *ZerobusStream) IngestRecordNowait(payload interface{}) error {
 //	    `{"field": "value1"}`,
 //	    `{"field": "value2"}`,
 //	})
+//	if err != nil {
+//	    log.Fatal(err)
+//	}
+//	if err := stream.Flush(); err != nil {
+//	    log.Fatal(err)
+//	}
 func (st *ZerobusStream) IngestRecordsNowait(records []interface{}) error {
 	if st.ptr == nil {
 		return &ZerobusError{Message: "Stream has been closed", IsRetryable: false}
@@ -636,6 +647,9 @@ func (st *ZerobusStream) IngestRecordsNowait(records []interface{}) error {
 //	}
 //	batchOffset, err := stream.IngestRecordsOffset(records)
 //	if err != nil {
+//	    log.Fatal(err)
+//	}
+//	if err := stream.Flush(); err != nil {
 //	    log.Fatal(err)
 //	}
 //	log.Printf("Batch ingested with offset: %d", batchOffset)
@@ -721,12 +735,12 @@ func (st *ZerobusStream) WaitForOffset(offset int64) error {
 
 // GetUnackedRecords retrieves all records that have not yet been acknowledged by the server.
 //
-// IMPORTANT: This method should only be called AFTER the stream has closed or failed.
-// Calling it on an active stream will return an error.
+// IMPORTANT: Call this on a failed stream before Close(). Close() nils the
+// handle and frees native resources, so a later GetUnackedRecords() call fails.
 //
 // Use this method to:
 //   - Retrieve unacknowledged records after stream failure for retry logic
-//   - Check which records weren't durably written after Close() fails
+//   - Inspect payloads that were queued but not acked, before Close()
 //   - Implement custom retry strategies after stream errors
 //
 // Returns a slice where each element is either:
@@ -737,15 +751,15 @@ func (st *ZerobusStream) WaitForOffset(offset int64) error {
 //
 // Example:
 //
-//	if err := stream.Close(); err != nil {
-//	    // Stream failed, check for unacked records
+//	if err := stream.Flush(); err != nil {
 //	    unacked, err := stream.GetUnackedRecords()
 //	    if err != nil {
-//	        log.Fatal(err)
+//	        log.Printf("could not inspect unacked records: %v", err)
+//	    } else {
+//	        log.Printf("Failed to acknowledge %d records", len(unacked))
 //	    }
-//	    log.Printf("Failed to acknowledge %d records", len(unacked))
-//	    // Retry with a new stream
 //	}
+//	_ = stream.Close()
 func (st *ZerobusStream) GetUnackedRecords() ([]interface{}, error) {
 	if st.ptr == nil {
 		return nil, &ZerobusError{Message: "Stream has been closed", IsRetryable: false}
@@ -769,7 +783,9 @@ func (st *ZerobusStream) GetUnackedRecords() ([]interface{}, error) {
 // Example:
 //
 //	for _, r := range records {
-//	    stream.IngestRecordOffset(r)
+//	    if _, err := stream.IngestRecordOffset(r); err != nil {
+//	        log.Printf("Ingest failed: %v", err)
+//	    }
 //	}
 //	if err := stream.Flush(); err != nil {
 //	    log.Printf("Flush failed: %v", err)

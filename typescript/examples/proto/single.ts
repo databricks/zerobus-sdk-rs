@@ -110,7 +110,7 @@ async function main() {
 
         // 1. Auto-encoding: Message object - SDK handles encoding
         const record1 = AirQuality.create({
-            device_name: 'sensor-001',
+            deviceName: 'sensor-001',
             temp: 22,
             humidity: 65
         });
@@ -122,7 +122,7 @@ async function main() {
 
         // 2. Pre-encoded: Buffer - pass pre-serialized bytes
         const record2 = AirQuality.create({
-            device_name: 'sensor-002',
+            deviceName: 'sensor-002',
             temp: 24,
             humidity: 70
         });
@@ -138,7 +138,7 @@ async function main() {
         let lastOffset: bigint = BigInt(0);
         for (let i = 0; i < 10; i++) {
             const record = AirQuality.create({
-                device_name: `sensor-${i.toString().padStart(3, '0')}`,
+                deviceName: `sensor-${i.toString().padStart(3, '0')}`,
                 temp: 20 + i,
                 humidity: 50 + i * 2
             });
@@ -156,7 +156,7 @@ async function main() {
 
         // 1. Auto-encoding: Message object
         const record1 = AirQuality.create({
-            device_name: 'sensor-legacy-001',
+            deviceName: 'sensor-legacy-001',
             temp: 23,
             humidity: 68
         });
@@ -166,7 +166,7 @@ async function main() {
 
         // 2. Pre-encoded: Buffer
         const record2 = AirQuality.create({
-            device_name: 'sensor-legacy-002',
+            deviceName: 'sensor-legacy-002',
             temp: 25,
             humidity: 72
         });

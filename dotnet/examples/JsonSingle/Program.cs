@@ -32,7 +32,7 @@ using var stream = sdk.CreateJsonStream(
     options);
 
 Console.WriteLine("Ingesting records...");
-var offsets = new List<long>();
+int failed = 0;
 
 for (int i = 0; i < 5; i++)
 {
@@ -48,25 +48,34 @@ for (int i = 0; i < 5; i++)
     try
     {
         long offset = stream.IngestRecord(jsonRecord);
-        Console.WriteLine($"Ingested record {i} at offset {offset}");
-        offsets.Add(offset);
+        Console.WriteLine($"Queued record {i} at offset {offset}");
     }
     catch (ZerobusException ex) when (ex.IsRetryable)
     {
+        failed++;
         Console.WriteLine($"Failed to ingest record {i} (retryable): {ex.RawMessage}");
     }
     catch (ZerobusException ex)
     {
+        failed++;
         Console.WriteLine($"Failed to ingest record {i}: {ex.RawMessage}");
     }
 }
 
-// Wait for specific offsets to be acknowledged.
-Console.WriteLine("Waiting for acknowledgments...");
-foreach (var offset in offsets)
+if (failed == 5)
 {
-    stream.WaitForOffset(offset);
-    Console.WriteLine($"Record at offset {offset} acknowledged");
+    throw new InvalidOperationException("No records were queued");
 }
 
-Console.WriteLine("All records successfully ingested and acknowledged!");
+Console.WriteLine("Waiting for acknowledgments...");
+stream.Flush();
+
+if (failed > 0)
+{
+    throw new InvalidOperationException(
+        $"{5 - failed} records flushed; {failed} ingest calls failed.");
+}
+else
+{
+    Console.WriteLine("All records successfully ingested and acknowledged!");
+}

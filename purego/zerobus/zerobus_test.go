@@ -801,7 +801,7 @@ func waitFor(t *testing.T, cond func() bool, what string) {
 	}
 }
 
-func TestFetchProtoDescriptorPublicFlow(t *testing.T) {
+func TestFetchProtoDescriptorFromUCPublicFlow(t *testing.T) {
 	uc := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
 		case r.URL.Path == "/oidc/v1/token":
@@ -867,14 +867,14 @@ func TestFetchProtoDescriptorPublicFlow(t *testing.T) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	descriptorBytes, err := sdk.FetchProtoDescriptor(
+	descriptorBytes, err := sdk.FetchProtoDescriptorFromUC(
 		ctx,
 		"main.sales.orders",
 		"id",
 		"secret",
 	)
 	if err != nil {
-		t.Fatalf("FetchProtoDescriptor() error = %v", err)
+		t.Fatalf("FetchProtoDescriptorFromUC() error = %v", err)
 	}
 	dynamic, err := sdk.CreateStream(
 		ctx,

@@ -204,7 +204,10 @@ func (st *ZerobusArrowStream) Close() error {
 
 // GetUnackedBatches returns all unacknowledged batches as Arrow IPC bytes.
 // Each []byte is a self-contained IPC stream (schema + one RecordBatch) that can
-// be re-ingested into a new stream. Only call after the stream has closed or failed.
+// be re-ingested into a new stream.
+//
+// IMPORTANT: Call this on a failed stream before Close(). Close() nils the
+// handle and frees native resources, so a later GetUnackedBatches() call fails.
 func (st *ZerobusArrowStream) GetUnackedBatches() ([][]byte, error) {
 	if st.ptr == nil {
 		return nil, &ZerobusError{Message: "Arrow stream has been closed", IsRetryable: false}

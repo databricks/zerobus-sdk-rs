@@ -1,55 +1,9 @@
-// Package zerobus is a pure-Go client for Zerobus ingestion.
-//
-// # Quick start
-//
-//	sdk, err := zerobus.New(
-//	    "https://your-workspace.zerobus.region.cloud.databricks.com",
-//	    "https://your-workspace.cloud.databricks.com",
-//	)
-//	if err != nil {
-//	    log.Fatal(err)
-//	}
-//	defer sdk.Close()
-//
-//	stream, err := sdk.CreateStream(ctx, "catalog.schema.table",
-//	    clientID, clientSecret, zerobus.WithJSON())
-//	if err != nil {
-//	    log.Fatal(err)
-//	}
-//	defer stream.Close()
-//
-// # Ingesting data
-//
-// Ingestion is asynchronous. Queue records in a loop and call Flush once.
-//
-//	for _, rec := range records {
-//	    if _, err := stream.IngestRecordOffset(rec); err != nil {
-//	        log.Fatal(err)
-//	    }
-//	}
-//	if err := stream.Flush(); err != nil { // wait once for all pending acks
-//	    log.Fatal(err)
-//	}
-//
-// For continuous streams call Flush periodically (every N records) or register
-// an ack callback with WithAckCallback. Reserve per-record WaitForOffset for
-// genuinely low-volume cases where each record must be confirmed before
-// continuing.
-//
-// Stream creation is asynchronous by default: CreateStream returns after local
-// validation while first-open runs in the background. Pass WithWaitForReady to
-// make CreateStream block until first-open succeeds or fails terminally.
-//
-// # Authentication
-//
-// CreateStream uses the Unity Catalog OAuth 2.0 client-credentials flow. For
-// custom authentication, implement HeadersProvider and use
-// CreateStreamWithProvider.
+// Package zerobus is a pure-Go client for Zerobus ingestion. Create an SDK with
+// New and a stream with CreateStream.
 package zerobus
 
 import (
 	"context"
-	"crypto/sha256"
 	"errors"
 	"fmt"
 	"net"
@@ -62,6 +16,7 @@ import (
 
 	"google.golang.org/grpc"
 	"google.golang.org/protobuf/proto"
+	"google.golang.org/protobuf/types/descriptorpb"
 
 	"github.com/databricks/zerobus-sdk/purego/internal/auth"
 	"github.com/databricks/zerobus-sdk/purego/internal/dynamicproto"
@@ -102,26 +57,15 @@ type SDK struct {
 	tokenCache                *auth.SharedTokenCache
 	httpClient                *http.Client
 	dynamicSchemaFetchTimeout time.Duration
-	dynamicSchemaCache        map[string]cachedDescriptor
 
-	// mu guards the open-stream set, descriptor cache, and closed flag.
+	// mu guards the open-stream set and closed flag.
 	mu     sync.Mutex
 	closed bool
 	// Open streams owned by this SDK.
 	streams map[*Stream]struct{}
 }
 
-type cachedDescriptor struct {
-	descriptor []byte
-	expiresAt  time.Time
-	storedAt   time.Time
-}
-
-const (
-	defaultDynamicSchemaFetchTimeout = 10 * time.Second
-	defaultDynamicSchemaCacheTTL     = 5 * time.Minute
-	maxDynamicSchemaCacheEntries     = 128
-)
+const defaultDynamicSchemaFetchTimeout = 10 * time.Second
 
 // newSDK builds an SDK around an existing connection.
 func newSDK(conn *transport.Conn, zerobusEndpoint, ucEndpoint string, cfg sdkConfig) *SDK {
@@ -136,7 +80,6 @@ func newSDK(conn *transport.Conn, zerobusEndpoint, ucEndpoint string, cfg sdkCon
 		tokenCache:                auth.NewSharedTokenCache(),
 		httpClient:                cfg.httpClient,
 		dynamicSchemaFetchTimeout: fetchTimeout,
-		dynamicSchemaCache:        make(map[string]cachedDescriptor),
 		streams:                   make(map[*Stream]struct{}),
 	}
 }
@@ -200,7 +143,6 @@ func (s *SDK) Close() error {
 		open = append(open, st)
 	}
 	s.streams = nil
-	s.dynamicSchemaCache = make(map[string]cachedDescriptor)
 	s.mu.Unlock()
 
 	errs := make([]error, len(open)+1)
@@ -258,7 +200,8 @@ func (s *SDK) CreateStreamWithProvider(
 }
 
 // FetchProtoDescriptorFromUC returns a protobuf descriptor built from a Unity
-// Catalog table schema.
+// Catalog table schema. Every call performs a fresh Unity Catalog request; the
+// SDK does not cache the result.
 func (s *SDK) FetchProtoDescriptorFromUC(
 	ctx context.Context,
 	tableName, clientID, clientSecret string,
@@ -283,15 +226,16 @@ func (s *SDK) FetchProtoDescriptorFromUC(
 	return descBytes, nil
 }
 
-// FetchProtoDescriptor returns a protobuf descriptor built from a Unity Catalog
-// table schema.
-//
-// Deprecated: use FetchProtoDescriptorFromUC.
-func (s *SDK) FetchProtoDescriptor(
-	ctx context.Context,
-	tableName, clientID, clientSecret string,
-) ([]byte, error) {
-	return s.FetchProtoDescriptorFromUC(ctx, tableName, clientID, clientSecret)
+// ColumnsFromDescriptor returns the column names declared by a serialized
+// protobuf descriptor, such as the bytes from FetchProtoDescriptorFromUC or
+// WithProto. Only top-level fields are columns; the fields of a nested message
+// belong to that column's value.
+func ColumnsFromDescriptor(raw []byte) (map[string]struct{}, error) {
+	columns, err := columnsFromDescriptor(raw)
+	if err != nil {
+		return nil, &Error{Op: "ColumnsFromDescriptor", cause: err, retryable: false}
+	}
+	return columns, nil
 }
 
 func (s *SDK) createStream(
@@ -394,11 +338,6 @@ func (s *SDK) fetchProtoDescriptor(
 		return nil, fmt.Errorf("clientSecret is required")
 	}
 
-	cacheKey := dynamicSchemaCacheKey(s.ucEndpoint, tableName, clientID, clientSecret)
-	if desc, ok := s.getDynamicDescriptorFromCache(cacheKey); ok {
-		return desc, nil
-	}
-
 	fetcher, err := ucschema.New(ucschema.Config{
 		WorkspaceEndpoint: s.ucEndpoint,
 		ClientID:          clientID,
@@ -421,71 +360,24 @@ func (s *SDK) fetchProtoDescriptor(
 	if err != nil {
 		return nil, fmt.Errorf("serialize descriptor: %w", err)
 	}
-	s.storeDynamicDescriptor(cacheKey, descBytes)
 	return descBytes, nil
 }
 
-func (s *SDK) getDynamicDescriptorFromCache(
-	cacheKey string,
-) ([]byte, bool) {
-	now := time.Now()
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if s.closed {
-		return nil, false
+func columnsFromDescriptor(raw []byte) (map[string]struct{}, error) {
+	var descriptor descriptorpb.DescriptorProto
+	if err := proto.Unmarshal(raw, &descriptor); err != nil {
+		return nil, fmt.Errorf("parse descriptor: %w", err)
 	}
-	item, ok := s.dynamicSchemaCache[cacheKey]
-	if !ok {
-		return nil, false
-	}
-	if now.After(item.expiresAt) {
-		delete(s.dynamicSchemaCache, cacheKey)
-		return nil, false
-	}
-	dup := append([]byte(nil), item.descriptor...)
-	return dup, true
-}
-
-func (s *SDK) storeDynamicDescriptor(
-	cacheKey string,
-	desc []byte,
-) {
-	now := time.Now()
-	item := cachedDescriptor{
-		descriptor: append([]byte(nil), desc...),
-		expiresAt:  now.Add(defaultDynamicSchemaCacheTTL),
-		storedAt:   now,
-	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if s.closed {
-		return
-	}
-	for key, cached := range s.dynamicSchemaCache {
-		if now.After(cached.expiresAt) {
-			delete(s.dynamicSchemaCache, key)
+	columns := make(map[string]struct{}, len(descriptor.GetField()))
+	for _, field := range descriptor.GetField() {
+		if name := field.GetName(); name != "" {
+			columns[name] = struct{}{}
 		}
 	}
-	delete(s.dynamicSchemaCache, cacheKey)
-	if len(s.dynamicSchemaCache) >= maxDynamicSchemaCacheEntries {
-		var oldestKey string
-		var oldestTime time.Time
-		for key, cached := range s.dynamicSchemaCache {
-			if oldestKey == "" || cached.storedAt.Before(oldestTime) {
-				oldestKey = key
-				oldestTime = cached.storedAt
-			}
-		}
-		if oldestKey != "" {
-			delete(s.dynamicSchemaCache, oldestKey)
-		}
+	if len(columns) == 0 {
+		return nil, errors.New("table schema descriptor has no columns")
 	}
-	s.dynamicSchemaCache[cacheKey] = item
-}
-
-func dynamicSchemaCacheKey(ucEndpoint, tableName, clientID, clientSecret string) string {
-	credential := sha256.Sum256([]byte(clientID + "\x00" + clientSecret))
-	return ucEndpoint + "\x00" + tableName + "\x00" + string(credential[:])
+	return columns, nil
 }
 
 func dynamicSchemaErrorRetryable(err error) bool {

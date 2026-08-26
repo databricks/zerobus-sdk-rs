@@ -15,9 +15,13 @@ This directory contains examples using the deprecated `ZerobusStream<T>` class.
 
 ```bash
 cd examples
+SDK_JAR=$(ls ../target/zerobus-ingest-sdk-*-jar-with-dependencies.jar | head -n 1)
 
-# Compile (requires AirQualityProto from proto folder)
-javac -d . -cp "../target/classes:$(cd .. && mvn dependency:build-classpath -q -DincludeScope=runtime -Dmdep.outputFile=/dev/stdout)" \
+# Generate AirQualityProto.java from the proto schema (not checked in)
+protoc --java_out=proto proto/air_quality.proto
+
+# Compile
+javac -d . -cp "$SDK_JAR" \
   proto/com/databricks/zerobus/examples/proto/AirQualityProto.java \
   legacy/LegacyStreamExample.java
 
@@ -29,7 +33,7 @@ export DATABRICKS_CLIENT_ID="your-client-id"
 export DATABRICKS_CLIENT_SECRET="your-client-secret"
 
 # Run
-java -cp ".:../target/classes:$(cd .. && mvn dependency:build-classpath -q -DincludeScope=runtime -Dmdep.outputFile=/dev/stdout)" \
+java -cp ".:$SDK_JAR" \
   com.databricks.zerobus.examples.legacy.LegacyStreamExample
 ```
 
@@ -74,21 +78,20 @@ stream.ingestRecord(record).join();
 ### After (ZerobusProtoStream)
 
 ```java
-ZerobusProtoStream stream = sdk.streamBuilder()
-    .table(tableName)
-    .oauth(clientId, clientSecret)
-    .compiledProto(AirQuality.getDescriptor().toProto())
-    .build()
-    .join();
+try (ZerobusProtoStream stream = sdk.streamBuilder()
+        .table(tableName)
+        .oauth(clientId, clientSecret)
+        .compiledProto(AirQuality.getDescriptor().toProto())
+        .build()
+        .join()) {
+    for (AirQuality record : records) {
+        stream.ingestRecordOffset(record);
+    }
+    stream.flush();
 
-// Non-blocking, returns offset
-long offset = stream.ingestRecordOffset(record);
-
-// Wait when needed
-stream.waitForOffset(offset);
-
-// Batch support
-Optional<Long> batchOffset = stream.ingestRecordsOffset(records);
+    stream.ingestRecordsOffset(records);
+    stream.flush();
+}
 ```
 
 ## Why Migrate?
@@ -105,7 +108,7 @@ Optional<Long> batchOffset = stream.ingestRecordsOffset(records);
 
 Demonstrates the Future-based API plus recreateStream:
 - Creates stream with `TableProperties`
-- Ingests 11 records using `ingestRecord().join()` (1 + 10)
+- Ingests 11 records using future-based API: 1 single record joined, then 10 records in a loop joining only the last future
 - Demonstrates `getUnackedRecords()` (returns empty due to type erasure)
 - Demonstrates `recreateStream()` with 3 additional records
 

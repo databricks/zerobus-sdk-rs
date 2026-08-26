@@ -25,6 +25,26 @@ jobs:
         with:
           fetch-depth: 0
 
+      - name: Validate tag against SDK version
+        if: github.ref_type == 'tag'
+        working-directory: purego
+        shell: bash
+        run: |
+          tag_version="${GITHUB_REF_NAME#purego/v}"
+          # Compare the X.Y.Z core so prerelease tags (purego/v1.2.0-rc1) still pass.
+          tag_core="${tag_version%%-*}"
+          src_version="$(sed -n 's/^const version = "\(.*\)"$/\1/p' zerobus/sdk.go)"
+          if [[ -z "$src_version" ]]; then
+            echo "Could not read the version const from purego/zerobus/sdk.go" >&2
+            exit 1
+          fi
+          if [[ "$tag_core" != "$src_version" ]]; then
+            echo "Tag $GITHUB_REF_NAME implies version $tag_core, but" \
+              "purego/zerobus/sdk.go declares $src_version" >&2
+            exit 1
+          fi
+          echo "Tag $GITHUB_REF_NAME matches SDK version $src_version."
+
       - name: Get JFrog OIDC token
         shell: bash
         run: bash "$GITHUB_WORKSPACE/.github/scripts/jfrog-oidc-token.sh"

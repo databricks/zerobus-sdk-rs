@@ -5,7 +5,7 @@ This example demonstrates record ingestion using the asynchronous API with JSON 
 
 Record Type Mode: JSON
   - Records are sent as JSON-encoded strings
-  - Uses RecordType.JSON to specify JSON serialization
+  - Omitting a descriptor from TableProperties selects JSON serialization
   - Best for dynamic schemas or when working with JSON data
 
 Use Case: Best for applications already using asyncio, async web frameworks (FastAPI, aiohttp),
@@ -28,7 +28,6 @@ import time
 from zerobus.sdk.aio import ZerobusSdk
 from zerobus.sdk.shared import (
     AckCallback,
-    RecordType,
     StreamConfigurationOptions,
     TableProperties,
 )
@@ -85,8 +84,9 @@ class CustomHeadersProvider(HeadersProvider):
     for custom headers (e.g., custom metadata, existing token management, etc.).
     """
 
-    def __init__(self, custom_token: str):
+    def __init__(self, custom_token: str, table_name: str):
         self.custom_token = custom_token
+        self.table_name = table_name
 
     def get_headers(self):
         """
@@ -97,6 +97,7 @@ class CustomHeadersProvider(HeadersProvider):
         """
         return [
             ("authorization", f"Bearer {self.custom_token}"),
+            ("x-databricks-zerobus-table-name", self.table_name),
             ("x-custom-header", "custom-value"),
         ]
 
@@ -105,23 +106,24 @@ class MyAckCallback(AckCallback):
     """
     Example acknowledgment callback that logs progress.
 
-    The callback is invoked by the SDK whenever records are acknowledged by the server.
+    The callback is invoked once per logical ingest submission. A batch call produces
+    one callback, not one callback per record in the batch.
     """
 
     def __init__(self):
         super().__init__()
-        self.ack_count = 0
+        self.submission_count = 0
 
     def on_ack(self, offset):
-        """Called when records are acknowledged by the server."""
-        self.ack_count += 1
-        # Log every 100 acknowledgments
-        if self.ack_count % 100 == 0:
-            logger.info(f"  Acknowledged up to offset: {offset} (batch #{self.ack_count})")
+        """Called when a logical ingest submission is acknowledged by the server."""
+        self.submission_count += 1
+        # Log every 100 acknowledged submissions
+        if self.submission_count % 100 == 0:
+            logger.info(f"  Acknowledged up to offset: {offset} (submission #{self.submission_count})")
 
 
 async def main():
-    print("Starting asynchronous ingestion example (Explicit JSON Mode)...")
+    print("Starting asynchronous ingestion example (JSON)...")
     print("=" * 60)
 
     # Check if credentials are configured
@@ -145,9 +147,8 @@ async def main():
         sdk = ZerobusSdk(SERVER_ENDPOINT, UNITY_CATALOG_ENDPOINT, application_name="my-app/1.0")
         logger.info("✓ SDK initialized")
 
-        # Step 2: Configure stream options with JSON record type and ack callback
+        # Step 2: Configure stream options with an ack callback
         options = StreamConfigurationOptions(
-            record_type=RecordType.JSON,
             max_inflight_records=10_000,  # Allow 10k records in flight
             recovery=True,  # Enable automatic recovery
             ack_callback=MyAckCallback(),  # Track acknowledgments
@@ -168,7 +169,7 @@ async def main():
 
         # Advanced: Custom headers provider (for special use cases only)
         # Uncomment to use custom headers instead of OAuth:
-        # custom_provider = CustomHeadersProvider(custom_token="your-custom-token")
+        # custom_provider = CustomHeadersProvider("your-custom-token", TABLE_NAME)
         # stream = await sdk.create_stream(
         #     CLIENT_ID, CLIENT_SECRET, table_properties, options,
         #     headers_provider=custom_provider
@@ -219,31 +220,11 @@ async def main():
                     logger.info(f"  Batch {batch_num + 1}: {len(batch)} records, offset: {batch_offset}")
                     success_count += len(batch)
 
-            # ========================================================================
-            # Method 3: ingest_record_nowait() - Fire-and-forget for max throughput
-            # Best for high-throughput scenarios with callback-based ack tracking
-            # ========================================================================
-            logger.info("\n3. Using ingest_record_nowait() - fire-and-forget")
-            remaining = NUM_RECORDS - success_count
-            if remaining > 0:
-                for i in range(min(100, remaining)):
-                    idx = success_count + i
-                    record_dict = create_sample_json_record(idx)
-                    stream.ingest_record_nowait(record_dict)
-
-                logger.info(f"  Queued {min(100, remaining)} records (tracking via callback)")
-                success_count += min(100, remaining)
-
-            # ========================================================================
-            # Method 4: ingest_records_nowait() - Batch fire-and-forget
-            # Best for maximum throughput with batch efficiency
-            # ========================================================================
-            logger.info("\n4. Using ingest_records_nowait() - batch fire-and-forget")
             remaining = NUM_RECORDS - success_count
             if remaining > 0:
                 batch = [create_sample_json_record(success_count + i) for i in range(remaining)]
-                stream.ingest_records_nowait(batch)
-                logger.info(f"  Queued {len(batch)} records in batch (tracking via callback)")
+                batch_offset = await stream.ingest_records_offset(batch)
+                logger.info(f"  Remaining {len(batch)} records, offset: {batch_offset}")
                 success_count += len(batch)
 
             submit_end_time = time.time()
@@ -274,8 +255,7 @@ async def main():
             print(f"  Total time: {total_duration:.2f} seconds")
             print(f"  Throughput: {records_per_second:.2f} records/sec")
             print(f"  Average latency: {avg_latency_ms:.2f} ms/record")
-            print(f"  Stream state: {stream.get_state()}")
-            print(f"  Record type: JSON (explicit)")
+            print("  Record type: JSON")
             print("=" * 60)
 
         except Exception as e:

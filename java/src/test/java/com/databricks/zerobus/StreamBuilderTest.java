@@ -261,9 +261,11 @@ public class StreamBuilderTest {
   void jsonBuildRoutesToCreateJsonStreamInternal() {
     assumeNativeLibrary();
     ZerobusSdk sdk = mock(ZerobusSdk.class);
+    HeadersProvider provider = () -> Collections.singletonMap("authorization", "Bearer token");
 
     new StreamBuilder(sdk)
         .table("cat.sch.json")
+        .headersProvider(provider)
         .oauth("json-id", "json-secret")
         .maxInflightRecords(4242)
         .json()
@@ -273,10 +275,28 @@ public class StreamBuilderTest {
         ArgumentCaptor.forClass(StreamConfigurationOptions.class);
     verify(sdk)
         .createJsonStreamInternal(
-            eq("cat.sch.json"), eq("json-id"), eq("json-secret"), opts.capture());
+            eq("cat.sch.json"), eq("json-id"), eq("json-secret"), eq(null), opts.capture());
     assertEquals(4242, opts.getValue().maxInflightRecords());
-    verify(sdk, never()).createProtoStreamInternal(any(), any(), any(), any(), any());
-    verify(sdk, never()).createArrowStreamInternal(any(), any(), any(), any(), any());
+    verify(sdk, never()).createProtoStreamInternal(any(), any(), any(), any(), any(), any());
+    verify(sdk, never()).createArrowStreamInternal(any(), any(), any(), any(), any(), any());
+  }
+
+  @Test
+  void headersProviderRoutesToCreateJsonStreamInternal() throws Exception {
+    assumeNativeLibrary();
+    ZerobusSdk sdk = mock(ZerobusSdk.class);
+    HeadersProvider provider = () -> Collections.singletonMap("authorization", "Bearer token");
+
+    StreamBuilder builder =
+        new StreamBuilder(sdk)
+            .table("cat.sch.json")
+            .oauth("unused-id", "unused-secret")
+            .headersProvider(provider);
+    assertDoesNotThrow(builder::validateRequired);
+    builder.json().build();
+
+    verify(sdk)
+        .createJsonStreamInternal(eq("cat.sch.json"), eq(null), eq(null), eq(provider), any());
   }
 
   @Test
@@ -300,10 +320,33 @@ public class StreamBuilderTest {
             eq(descriptor),
             eq("proto-id"),
             eq("proto-secret"),
+            eq(null),
             opts.capture());
     assertEquals(9, opts.getValue().recoveryRetries());
-    verify(sdk, never()).createJsonStreamInternal(any(), any(), any(), any());
-    verify(sdk, never()).createArrowStreamInternal(any(), any(), any(), any(), any());
+    verify(sdk, never()).createJsonStreamInternal(any(), any(), any(), any(), any());
+    verify(sdk, never()).createArrowStreamInternal(any(), any(), any(), any(), any(), any());
+  }
+
+  @Test
+  void arrowBuildRejectsAckCallback() {
+    AckCallback callback =
+        new AckCallback() {
+          @Override
+          public void onAck(long offsetId) {}
+
+          @Override
+          public void onError(long offsetId, String errorMessage) {}
+        };
+
+    StreamBuilder.ArrowStreamBuilder arrowBuilder =
+        builder()
+            .table("catalog.schema.table")
+            .oauth("client-id", "client-secret")
+            .ackCallback(callback)
+            .arrow(emptySchema());
+
+    IllegalStateException ex = assertThrows(IllegalStateException.class, arrowBuilder::build);
+    assertEquals("ackCallback is not supported for Arrow Flight streams", ex.getMessage());
   }
 
   @Test
@@ -324,10 +367,15 @@ public class StreamBuilderTest {
         ArgumentCaptor.forClass(ArrowStreamConfigurationOptions.class);
     verify(sdk)
         .createArrowStreamInternal(
-            eq("cat.sch.arrow"), eq(schema), eq("arrow-id"), eq("arrow-secret"), opts.capture());
+            eq("cat.sch.arrow"),
+            eq(schema),
+            eq("arrow-id"),
+            eq("arrow-secret"),
+            eq(null),
+            opts.capture());
     assertEquals(11, opts.getValue().maxInflightBatches());
     assertFalse(opts.getValue().recovery());
-    verify(sdk, never()).createJsonStreamInternal(any(), any(), any(), any());
-    verify(sdk, never()).createProtoStreamInternal(any(), any(), any(), any(), any());
+    verify(sdk, never()).createJsonStreamInternal(any(), any(), any(), any(), any());
+    verify(sdk, never()).createProtoStreamInternal(any(), any(), any(), any(), any(), any());
   }
 }

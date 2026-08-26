@@ -1,10 +1,9 @@
 package com.databricks.zerobus;
 
 /**
- * Native test helper for classloader isolation testing.
+ * Native test helpers for JNI integration testing.
  *
- * <p>Provides native methods that test class resolution from Tokio daemon threads, used by {@code
- * ClassLoaderIsolationTest} to verify that cached GlobalRefs work across classloader boundaries.
+ * <p>Provides native methods that test callbacks and class resolution from Tokio daemon threads.
  *
  * @apiNote This class is not part of the public SDK API. It lives in {@code src/main} because it
  *     must be loadable by the isolated {@link java.net.URLClassLoader} in {@code
@@ -31,4 +30,20 @@ public class NativeTestHelper {
    * @return "OK" if found in cache, or an error message
    */
   public static native String nativeTestFindClassFromDaemonThreadCached(String className);
+
+  /**
+   * Exercises {@link HeadersProvider} callbacks on one native blocking thread.
+   *
+   * @param provider the stateful provider used by the native test
+   * @return {@code "OK"} on success, otherwise an error description
+   */
+  public static native String nativeTestHeadersProviderCallbacks(HeadersProvider provider);
+
+  /**
+   * Verifies that timed-out callbacks remain serialized until their blocking JNI call returns.
+   *
+   * @param provider the stateful provider used by the native test
+   * @return {@code "OK"} on success, otherwise an error description
+   */
+  public static native String nativeTestHeadersProviderSerialization(HeadersProvider provider);
 }

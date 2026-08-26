@@ -37,6 +37,9 @@ typedef struct CHeaders {
 
 /**
  * Opaque handle for an Arrow Flight stream.
+ *
+ * FFI pointers are `Box<ZerobusArrowStream>` addresses cast to this type.
+ * Creation, validation, test-hook casts, and `Box::from_raw` must stay coupled.
  */
 typedef struct CArrowStream {
   uint8_t _private[0];
@@ -149,7 +152,8 @@ typedef struct CStreamConfigurationOptions {
    * delivered asynchronously instead of only via wait_for_offset / flush.
    * Fired serialized on a background task, so keep them lightweight;
    * ack_user_data and shared state need their own sync.
-   * ack_on_ack: once per record, in order; monotonic (offset N => all <= N).
+   * ack_on_ack: once per logical ingest submission (one batch call produces
+   * one callback), in order; monotonic (offset N => all <= N).
    * ack_on_error: relays core error text as-is; may also surface from ingest / flush.
    * A synchronously running callback can outlive close() (abort only cancels
    * at an await), so keep both pointers and ack_user_data alive until the
@@ -301,6 +305,28 @@ struct CArrowStream *zerobus_sdk_create_arrow_stream_with_headers_provider(struc
 
 /**
  * Frees an Arrow Flight stream instance.
+ *
+ * IPC-only streams preserve best-effort, nonblocking destruction. Once a stream accepts an
+ * Arrow C Data batch, this call instead blocks until background shutdown completes, every Flight
+ * request body reaches EOF or is dropped, and all retained foreign owners are released. If that
+ * shutdown takes longer than 30 seconds, it logs a warning every 30 seconds while continuing to
+ * wait; it does not return on a timeout.
+ * When the calling restrictions below are respected, no Arrow C Data release callback for that
+ * stream can run after this function returns. During required C Data shutdown, an internal
+ * shutdown panic, a required helper-thread spawn failure, or a helper-thread panic terminates the
+ * process rather than returning without that guarantee.
+ *
+ * Do not call this function from the only thread, event loop, or runtime lock that a release
+ * callback needs in order to complete. For example, a caller must not hold the Python GIL if a
+ * release callback must reacquire it, or block a single-threaded event loop/runtime used by that
+ * callback. Offload this synchronous function to a blocking or OS thread, release any required
+ * runtime locks, and continue servicing the event loop until the call completes.
+ *
+ * Do not race this function with another operation on the same stream handle. After C Data import,
+ * freeing this same stream reentrantly from one of its SDK callbacks is unsupported because
+ * complete shutdown would wait for the callback making the call. IPC-only concurrent or reentrant
+ * free remains invalid because the opaque handle has single ownership. Freeing a different stream
+ * from a callback remains supported.
  */
 void zerobus_arrow_stream_free(struct CArrowStream *stream);
 
@@ -323,14 +349,17 @@ int64_t zerobus_arrow_stream_ingest_batch(struct CArrowStream *stream,
  * every success or error path. Their release callbacks are cleared before
  * validation, and the imported buffers may remain owned by the stream until
  * acknowledgment, recovery finalization, or stream destruction.
+ * Once valid C Data is imported, `zerobus_arrow_stream_free` uses complete
+ * shutdown for that stream; later IPC ingestion does not revert this mode.
  *
  * Every non-null pointer must address a valid, properly aligned canonical
  * `ArrowArray` / `ArrowSchema` structure satisfying the Arrow C Data
  * Interface. All referenced children, dictionaries, buffers, `private_data`,
  * and release callbacks must remain valid for the lifetime required by the
- * producer contract. After ownership transfer, the SDK may invoke release
- * asynchronously on an internal runtime thread. Release callbacks must
- * therefore be thread-safe and must not unwind or throw across the C ABI.
+ * producer contract. After ownership transfer, release callbacks may run on
+ * any thread that drops the final owner, including SDK runtime/transport
+ * threads or the thread calling `zerobus_arrow_stream_free`. They must be
+ * thread-safe and must not unwind or throw across the C ABI.
  *
  * Malformed, dangling, or malicious structures are caller undefined behavior
  * and cannot be safely validated by this function.
@@ -630,7 +659,8 @@ bool zerobus_stream_ingest_json_record_async(struct CZerobusStream *stream,
 
 /**
  * Ingest a batch of protobuf records
- * Returns the offset of the last record in the batch, or -1 on error
+ * Returns the logical offset of the batch submission, or -1 on error.
+ * The core assigns one offset to the entire batch, not one per record.
  * Returns -2 if batch is empty
  */
 int64_t zerobus_stream_ingest_proto_records(struct CZerobusStream *stream,
@@ -640,7 +670,8 @@ int64_t zerobus_stream_ingest_proto_records(struct CZerobusStream *stream,
                                             struct CResult *result);
 
 /**
- * Ingest a batch of protobuf records on a background task and report the last offset via callback.
+ * Ingest a batch of protobuf records on a background task and report the batch
+ * submission offset via callback.
  */
 bool zerobus_stream_ingest_proto_records_async(struct CZerobusStream *stream,
                                                const uint8_t *const *records,
@@ -652,7 +683,8 @@ bool zerobus_stream_ingest_proto_records_async(struct CZerobusStream *stream,
 
 /**
  * Ingest a batch of JSON records
- * Returns the offset of the last record in the batch, or -1 on error
+ * Returns the logical offset of the batch submission, or -1 on error.
+ * The core assigns one offset to the entire batch, not one per record.
  * Returns -2 if batch is empty
  */
 int64_t zerobus_stream_ingest_json_records(struct CZerobusStream *stream,
@@ -661,7 +693,8 @@ int64_t zerobus_stream_ingest_json_records(struct CZerobusStream *stream,
                                            struct CResult *result);
 
 /**
- * Ingest a batch of JSON records on a background task and report the last offset via callback.
+ * Ingest a batch of JSON records on a background task and report the batch
+ * submission offset via callback.
  */
 bool zerobus_stream_ingest_json_records_async(struct CZerobusStream *stream,
                                               const char *const *json_records,

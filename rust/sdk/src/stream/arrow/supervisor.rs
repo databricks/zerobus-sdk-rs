@@ -8,16 +8,19 @@ use std::sync::Arc;
 
 use arrow_flight::error::FlightError;
 use tokio::sync::{mpsc, watch, Mutex};
-use tokio::task::{spawn, JoinHandle};
-use tokio::time::{sleep, timeout_at, Duration, Instant};
+use tokio::task::{spawn, AbortHandle, JoinError, JoinHandle};
+use tokio::time::{sleep, sleep_until, timeout_at, Duration, Instant};
 use tracing::{debug, error, info, warn};
 
-use super::acks::{pause_and_detach_sender, AckProcessor};
+use super::acks::{pause_and_detach_sender, AckProcessOutcome, AckProcessor};
 use super::batch::{rebuild_pending_for_replay, refresh_pending_ack_deadlines, PendingBatch};
-use super::connection::{FlightConnection, FlightResponseStream, RequestBodyControl};
+use super::close::{CloseCoordinator, CloseFinalizer, CloseState};
+use super::connection::{
+    FlightConnection, FlightResponseStream, RequestBodyControl, RequestBodyRegistry,
+};
 use super::{
     configured_deadline, ArrowStreamConfigurationOptions, ArrowTableProperties, BatchSender,
-    RecordBatch, ZerobusArrowStream,
+    FlightConnectionParameters, RecordBatch, ZerobusArrowStream,
 };
 use crate::errors::ZerobusError;
 use crate::headers_provider::HeadersProvider;
@@ -35,8 +38,10 @@ pub(super) struct Supervisor {
     ack_processor: AckProcessor,
     batch_tx: BatchSender,
     is_closed: Arc<AtomicBool>,
+    close: CloseCoordinator,
+    close_finalizer: CloseFinalizer,
+    request_bodies: RequestBodyRegistry,
     pending_batches: Arc<Mutex<Vec<PendingBatch>>>,
-    failed_batches: Arc<Mutex<Vec<RecordBatch>>>,
     recovery_attempts: Arc<AtomicU32>,
     server_error_tx: watch::Sender<Option<ZerobusError>>,
     cumulative_records_assigned: Arc<AtomicU64>,
@@ -46,9 +51,28 @@ pub(super) struct Supervisor {
     ingest_mutex: Arc<Mutex<()>>,
     sdk_identifier: Arc<str>,
     #[cfg(feature = "test-hooks")]
-    reconnect_rebuild_gate: super::ReconnectRebuildGate,
-    #[cfg(feature = "test-hooks")]
-    replay_send_gate: super::ReplaySendGate,
+    test_hooks: Arc<super::TestHooks>,
+}
+
+pub(super) struct SupervisorTaskHandle {
+    worker: AbortHandle,
+    // Dropping this handle intentionally detaches the reaper during ordinary Drop.
+    #[cfg_attr(not(feature = "internal-arrow-c-data"), allow(dead_code))]
+    reaper: JoinHandle<()>,
+}
+
+impl SupervisorTaskHandle {
+    pub(super) fn abort(&self) {
+        self.worker.abort();
+    }
+
+    #[cfg(feature = "internal-arrow-c-data")]
+    pub(super) async fn abort_and_wait(self) {
+        self.worker.abort();
+        self.reaper
+            .await
+            .expect("Arrow supervisor reaper failed during shutdown");
+    }
 }
 
 impl Supervisor {
@@ -63,8 +87,10 @@ impl Supervisor {
             ack_processor: AckProcessor::new(stream),
             batch_tx: Arc::clone(&stream.batch_tx),
             is_closed: Arc::clone(&stream.is_closed),
+            close: stream.close.clone(),
+            close_finalizer: CloseFinalizer::new(stream),
+            request_bodies: stream.request_bodies.clone(),
             pending_batches: Arc::clone(&stream.pending_batches),
-            failed_batches: Arc::clone(&stream.failed_batches),
             recovery_attempts: Arc::clone(&stream.recovery_attempts),
             server_error_tx: stream.server_error_tx.clone(),
             cumulative_records_assigned: Arc::clone(&stream.cumulative_records_assigned),
@@ -74,18 +100,105 @@ impl Supervisor {
             ingest_mutex: Arc::clone(&stream.ingest_mutex),
             sdk_identifier: Arc::clone(&stream.sdk_identifier),
             #[cfg(feature = "test-hooks")]
-            reconnect_rebuild_gate: Arc::clone(&stream.reconnect_rebuild_gate),
-            #[cfg(feature = "test-hooks")]
-            replay_send_gate: Arc::clone(&stream.replay_send_gate),
+            test_hooks: Arc::clone(&stream.test_hooks),
         }
     }
 
-    pub(super) fn spawn(
-        self,
-        initial_connection: FlightConnection,
-    ) -> JoinHandle<ZerobusResult<()>> {
+    pub(super) fn spawn(self, initial_connection: FlightConnection) -> SupervisorTaskHandle {
         let (response_stream, request_body) = initial_connection.into_supervisor_io();
-        spawn(self.run(response_stream, request_body))
+        let close = self.close.clone();
+        let finalizer = self.close_finalizer.clone();
+        let worker = spawn(self.run(response_stream, request_body));
+        let worker_abort = worker.abort_handle();
+        // The detached reaper owns the JoinHandle so cancelling a close caller cannot
+        // lose observation of an abnormal supervisor exit.
+        let reaper = spawn(async move {
+            let joined = worker.await;
+            if matches!(close.state(), CloseState::Finalized(_)) {
+                return;
+            }
+            let outcome = Self::unfinalized_exit_outcome(joined);
+            let _ = finalizer.finish(outcome).await;
+        });
+        SupervisorTaskHandle {
+            worker: worker_abort,
+            reaper,
+        }
+    }
+
+    fn unfinalized_exit_outcome(joined: Result<ZerobusResult<()>, JoinError>) -> ZerobusResult<()> {
+        match joined {
+            Ok(Err(error)) => Err(error),
+            Ok(Ok(())) => Err(ZerobusError::InvalidStateError(
+                "Supervisor exited successfully before close finalization".to_string(),
+            )),
+            Err(error) if error.is_cancelled() => Err(ZerobusError::InvalidStateError(
+                "Supervisor task was cancelled before close finalization".to_string(),
+            )),
+            Err(_) => Err(ZerobusError::InvalidStateError(
+                "Supervisor task panicked before close finalization".to_string(),
+            )),
+        }
+    }
+
+    fn spawn_headers_invalidation(&self, deadline: Instant) -> JoinHandle<bool> {
+        let headers_provider = Arc::clone(&self.headers_provider);
+        let timeout_ms = self.options.recovery_timeout_ms;
+        spawn(async move {
+            if timeout_at(deadline, headers_provider.invalidate())
+                .await
+                .is_ok()
+            {
+                true
+            } else {
+                warn!(target: super::LOG_TARGET,
+                    timeout_ms,
+                    "Headers provider invalidation timed out"
+                );
+                false
+            }
+        })
+    }
+
+    fn spawn_detached_headers_invalidation(&self) {
+        match configured_deadline(
+            Instant::now(),
+            Duration::from_millis(self.options.recovery_timeout_ms),
+            "recovery_timeout_ms",
+        ) {
+            Ok(deadline) => {
+                drop(self.spawn_headers_invalidation(deadline));
+            }
+            Err(error) => {
+                warn!(target: super::LOG_TARGET,
+                    error = %error,
+                    "Skipping headers provider invalidation because its deadline is unrepresentable"
+                );
+            }
+        }
+    }
+
+    fn spawn_detached_auth_invalidation(&self, error: &ZerobusError) {
+        if error.is_auth_rejection() {
+            self.spawn_detached_headers_invalidation();
+        }
+    }
+
+    async fn finish(&self, outcome: ZerobusResult<()>) -> ZerobusResult<()> {
+        self.close_finalizer.finish(outcome).await
+    }
+
+    fn finalized_result(&self) -> ZerobusResult<()> {
+        Self::result_from_close_state(self.close.state())
+    }
+
+    fn result_from_close_state(state: CloseState) -> ZerobusResult<()> {
+        match state {
+            CloseState::Finalized(result) => result,
+            CloseState::Open | CloseState::Requested(_) => Err(ZerobusError::InvalidStateError(
+                "Supervisor exited before close finalization".to_string(),
+            )),
+        }
     }
 
     async fn run(
@@ -95,82 +208,97 @@ impl Supervisor {
     ) -> ZerobusResult<()> {
         let mut response_stream = Some(initial_response_stream);
         let mut request_body = Some(initial_request_body);
-        // Carries a failed reconnect's real error into the next iteration's handling
-        // instead of round-tripping a synthetic error through a dummy stream.
         let mut pending_error: Option<ZerobusError> = None;
-        // True when `pending_error` is a reconnect auth rejection: the cached token was
-        // invalidated and we want to retry (mint a fresh one) even though auth errors
-        // classify as non-retryable — while still surfacing the original error if
-        // retries are ultimately exhausted.
         let mut reconnect_auth_retry = false;
+        let mut close_rx = self.close.subscribe();
 
         loop {
             if self.is_closed.load(Ordering::Relaxed) {
                 debug!(target: super::LOG_TARGET, "Supervisor: Stream closed, exiting");
-                return Ok(());
+                return self.finalized_result();
             }
 
-            // Run ACK processing until it returns — unless a prior reconnect attempt
-            // failed, in which case carry that real error into the handling below
-            // (preserving its message and retry classification).
-            let result = if let Some(e) = pending_error.take() {
-                Err(e)
+            let mut active_was_drained = false;
+            let active_error = if let Some(error) = pending_error.take() {
+                error
             } else {
-                self.ack_processor
-                    .process(
-                        response_stream
-                            .take()
-                            .expect("response_stream present when no pending reconnect error"),
-                        request_body
-                            .take()
-                            .expect("request_body present when no pending reconnect error"),
-                    )
+                let active_response = response_stream
+                    .as_mut()
+                    .expect("response stream present outside recovery");
+                let active_request = request_body
+                    .as_ref()
+                    .expect("request body present outside recovery");
+                match self
+                    .ack_processor
+                    .process_active(active_response, active_request, &mut close_rx, true)
                     .await
+                {
+                    Ok(AckProcessOutcome::Stopped) => return self.finalized_result(),
+                    Ok(AckProcessOutcome::Recovery { error, drained }) => {
+                        active_was_drained = drained;
+                        error
+                    }
+                    Ok(AckProcessOutcome::Close { request, outcome }) => {
+                        debug_assert_eq!(self.close.request(), Some(request));
+                        if let Err(error) = &outcome {
+                            self.spawn_detached_auth_invalidation(error);
+                        }
+                        return self.finish(outcome).await;
+                    }
+                    Err(error) => error,
+                }
             };
 
-            // Check if stream was closed during processing.
-            if self.is_closed.load(Ordering::Relaxed) {
-                debug!(target: super::LOG_TARGET, "Supervisor: Stream closed after process_acks, exiting");
-                return result;
+            if !reconnect_auth_retry {
+                self.spawn_detached_auth_invalidation(&active_error);
             }
 
-            // Handle the result.
-            match result {
-                Ok(()) => {
-                    // Stream ended gracefully.
-                    debug!(target: super::LOG_TARGET, "Supervisor: process_acks completed successfully");
-                    return Ok(());
+            if let Some(close_request) = self.close.request() {
+                if !active_was_drained {
+                    if let (Some(active_response), Some(active_request)) =
+                        (response_stream.as_mut(), request_body.as_ref())
+                    {
+                        let selected = Err(active_error.clone());
+                        match self
+                            .ack_processor
+                            .close_active_connection(
+                                active_response,
+                                active_request,
+                                &mut close_rx,
+                                close_request,
+                                Some(selected),
+                            )
+                            .await
+                        {
+                            Ok(AckProcessOutcome::Close { request, outcome }) => {
+                                debug_assert_eq!(self.close.request(), Some(request));
+                                return self.finish(outcome).await;
+                            }
+                            Ok(AckProcessOutcome::Stopped) => {
+                                return self.finalized_result();
+                            }
+                            Ok(AckProcessOutcome::Recovery { error, .. }) | Err(error) => {
+                                return self.finish(Err(error)).await;
+                            }
+                        }
+                    }
                 }
-                Err(ref error)
+                return self.finish(Err(active_error)).await;
+            }
+
+            match active_error {
+                error
                     if (error.is_retryable() || reconnect_auth_retry) && self.options.recovery =>
                 {
-                    // Retriable error (or a reconnect auth rejection we've chosen to
-                    // retry with re-minted credentials) - attempt recovery.
                     reconnect_auth_retry = false;
                     let attempts = self.recovery_attempts.fetch_add(1, Ordering::Relaxed);
                     if attempts >= self.options.recovery_retries {
                         error!(target: super::LOG_TARGET,
-                            attempts = attempts,
+                            attempts,
                             max_retries = self.options.recovery_retries,
                             "Supervisor: Max recovery retries exceeded"
                         );
-                        // Publish the terminal error before finalization (so a waiter
-                        // checking is_closed right after it already sees the real error;
-                        // reconnect-failure errors carried via pending_error are never
-                        // pre-published by ACK processing) and again after (to wake
-                        // already-parked waiters). finalize_closed also drains pending
-                        // under ingest_mutex so a concurrent ingest can't be omitted.
-                        let _ = self.server_error_tx.send(Some(error.clone()));
-                        Self::finalize_closed(
-                            &self.ingest_mutex,
-                            &self.is_closed,
-                            &self.pending_batches,
-                            &self.failed_batches,
-                            &self.last_acked_records,
-                        )
-                        .await;
-                        let _ = self.server_error_tx.send(Some(error.clone()));
-                        return result;
+                        return self.finish(Err(error.clone())).await;
                     }
 
                     info!(target: super::LOG_TARGET,
@@ -180,278 +308,285 @@ impl Supervisor {
                         "Supervisor: Attempting recovery after retriable error"
                     );
 
-                    // Atomically pause ingest and detach the sender under
-                    // ingest_mutex, so an in-flight ingest_batch either completes
-                    // before the pause or observes is_paused and buffers — it never
-                    // sees is_paused=false with a detached sender. Successful replay
-                    // lifts the gate; failed attempts remain paused for retry/finalization.
                     pause_and_detach_sender(&self.ingest_mutex, &self.is_paused, &self.batch_tx)
                         .await;
+                    response_stream = None;
+                    request_body = None;
                     self.ack_processor.clear_request_send_failure();
+                    // Close that cancels this attempt reports its trigger. Once an attempt
+                    // failure is accepted below, that failure becomes the next trigger.
+                    let recovery_error = error.clone();
 
-                    sleep(Duration::from_millis(self.options.recovery_backoff_ms)).await;
+                    let close_during_backoff = tokio::select! {
+                        biased;
+                        request = self.close.wait_for_request(&mut close_rx) => request.is_some(),
+                        _ = sleep(Duration::from_millis(self.options.recovery_backoff_ms)) => false,
+                    };
+                    if close_during_backoff {
+                        return self.finish(Err(recovery_error)).await;
+                    }
+                    if matches!(self.close.state(), CloseState::Finalized(_)) {
+                        return self.finalized_result();
+                    }
 
-                    let _ = self.server_error_tx.send(None);
-
-                    // Share one absolute timeout budget across reconnect and
-                    // auth-rejection invalidation.
-                    let recovery_timeout = Duration::from_millis(self.options.recovery_timeout_ms);
-                    let recovery_started = Instant::now();
+                    self.server_error_tx.send_replace(None);
                     let recovery_deadline = match configured_deadline(
-                        recovery_started,
-                        recovery_timeout,
+                        Instant::now(),
+                        Duration::from_millis(self.options.recovery_timeout_ms),
                         "recovery_timeout_ms",
                     ) {
                         Ok(deadline) => deadline,
-                        Err(error) => {
-                            pending_error = Some(error);
+                        Err(deadline_error) => {
+                            if self.close.has_started() {
+                                return self.finish(Err(recovery_error)).await;
+                            }
+                            pending_error = Some(deadline_error);
                             continue;
                         }
                     };
-                    let reconnect_result = timeout_at(recovery_deadline, self.reconnect()).await;
+
+                    // A ready attempt wins a simultaneous close. If sender commit completed,
+                    // the replacement is active and receives the normal graceful-close path.
+                    let reconnect_result = tokio::select! {
+                        biased;
+                        result = self.reconnect() => Some(result),
+                        request = self.close.wait_for_request(&mut close_rx) => {
+                            if request.is_some() {
+                                return self.finish(Err(recovery_error)).await;
+                            }
+                            return self.finalized_result();
+                        }
+                        _ = sleep_until(recovery_deadline) => None,
+                    };
 
                     match reconnect_result {
-                        Ok(Ok((new_response_stream, new_request_body))) => {
+                        Some(Ok(Some(connection))) => {
                             info!(target: super::LOG_TARGET, "Supervisor: Recovery successful, resuming");
                             self.recovery_attempts.store(0, Ordering::Relaxed);
-                            // is_paused was already cleared inside reconnect().
+                            let (new_response_stream, new_request_body) =
+                                connection.into_supervisor_io();
                             response_stream = Some(new_response_stream);
                             request_body = Some(new_request_body);
                         }
-                        Ok(Err(e)) => {
-                            warn!(target: super::LOG_TARGET, "Supervisor: Reconnection failed: {}", e);
-                            // Ask the provider to invalidate cached authentication
-                            // state after an auth rejection, then retry even though
-                            // such errors are otherwise non-retryable. Preserve this
-                            // reconnect error if refresh or later recovery cannot proceed.
-                            if e.is_auth_rejection() {
-                                match timeout_at(
-                                    recovery_deadline,
-                                    self.headers_provider.invalidate(),
-                                )
-                                .await
-                                {
-                                    Ok(()) => reconnect_auth_retry = true,
-                                    Err(_) => {
-                                        warn!(target: super::LOG_TARGET,
-                                            timeout_ms = self.options.recovery_timeout_ms,
-                                            "Recovery deadline reached while invalidating \
-                                             the headers provider; terminating recovery"
-                                        );
-                                        // A custom provider must not stall recovery
-                                        // indefinitely. Close with the original auth
-                                        // rejection; publish before and after
-                                        // finalization for waiter race-freedom.
-                                        let _ = self.server_error_tx.send(Some(e.clone()));
-                                        Self::finalize_closed(
-                                            &self.ingest_mutex,
-                                            &self.is_closed,
-                                            &self.pending_batches,
-                                            &self.failed_batches,
-                                            &self.last_acked_records,
-                                        )
-                                        .await;
-                                        let _ = self.server_error_tx.send(Some(e.clone()));
-                                        return Err(e);
-                                    }
-                                }
-                            }
-                            pending_error = Some(e);
+                        Some(Ok(None)) => {
+                            return self.finish(Err(recovery_error)).await;
                         }
-                        Err(_timeout) => {
+                        None => {
                             warn!(target: super::LOG_TARGET, "Supervisor: Reconnection timed out");
                             pending_error = Some(ZerobusError::ConnectionTimeout(format!(
                                 "Reconnection timed out after {}ms",
                                 self.options.recovery_timeout_ms
                             )));
                         }
-                    }
-                }
-                Err(error) => {
-                    error!(target: super::LOG_TARGET, "Supervisor: Non-retriable error, closing stream: {}", error);
-                    // Publish the terminal error before finalization (so a waiter
-                    // checking is_closed right after it already sees the real error;
-                    // reconnect-failure errors carried via pending_error are never
-                    // pre-published by ACK processing) and again after (to wake
-                    // already-parked waiters). finalize_closed drains pending under
-                    // ingest_mutex so a concurrent ingest can't be omitted.
-                    let _ = self.server_error_tx.send(Some(error.clone()));
-                    Self::finalize_closed(
-                        &self.ingest_mutex,
-                        &self.is_closed,
-                        &self.pending_batches,
-                        &self.failed_batches,
-                        &self.last_acked_records,
-                    )
-                    .await;
-                    let _ = self.server_error_tx.send(Some(error.clone()));
-                    // Ask the provider to invalidate cached authentication state after
-                    // a terminal rejection. The stream is already finalized and waiters
-                    // have the real error; bound the callback so the supervisor cannot
-                    // remain alive indefinitely.
-                    if error.is_auth_rejection() {
-                        match configured_deadline(
-                            Instant::now(),
-                            Duration::from_millis(self.options.recovery_timeout_ms),
-                            "recovery_timeout_ms",
-                        ) {
-                            Ok(deadline) => {
-                                if timeout_at(deadline, self.headers_provider.invalidate())
-                                    .await
-                                    .is_err()
-                                {
-                                    warn!(target: super::LOG_TARGET,
-                                        timeout_ms = self.options.recovery_timeout_ms,
-                                        "Terminal headers provider invalidation timed out"
-                                    );
+                        Some(Err(reconnect_error)) => {
+                            if reconnect_error.is_auth_rejection() {
+                                let mut invalidation =
+                                    self.spawn_headers_invalidation(recovery_deadline);
+                                let invalidated = tokio::select! {
+                                    biased;
+                                    request = self.close.wait_for_request(&mut close_rx) => {
+                                        if request.is_some() {
+                                            return self.finish(Err(recovery_error)).await;
+                                        }
+                                        return self.finalized_result();
+                                    }
+                                    result = &mut invalidation => result,
+                                };
+                                match invalidated {
+                                    Ok(true) => reconnect_auth_retry = true,
+                                    Ok(false) | Err(_) => {
+                                        return self.finish(Err(reconnect_error)).await;
+                                    }
                                 }
+                            } else if self.close.has_started() {
+                                return self.finish(Err(recovery_error)).await;
                             }
-                            Err(deadline_error) => {
-                                warn!(target: super::LOG_TARGET,
-                                    error = %deadline_error,
-                                    "Skipping terminal headers provider invalidation because its deadline is unrepresentable"
-                                );
-                            }
+                            pending_error = Some(reconnect_error);
                         }
                     }
-                    return Err(error);
+                }
+                error => {
+                    error!(target: super::LOG_TARGET, "Supervisor: Non-retriable error, closing stream: {}", error);
+                    return self.finish(Err(error)).await;
                 }
             }
         }
     }
 
-    /// Reconnects to the server and replays pending batches.
-    ///
-    /// On successful replay, holds `ingest_mutex` until `is_paused` is cleared so
-    /// subsequently admitted ingests send normally. Error paths remain paused for
-    /// supervisor retry or finalization.
-    async fn reconnect(&self) -> ZerobusResult<(FlightResponseStream, RequestBodyControl)> {
-        let connection = ZerobusArrowStream::reconnect_transport(
-            &self.endpoint,
-            &self.tls_config,
-            self.connector_factory.as_ref(),
-            &self.table_properties,
-            &self.options,
-            &self.headers_provider,
-            &self.sdk_identifier,
-        )
-        .await?;
-        let (response_stream, tx, request_body) = connection.into_parts();
-
-        // Counters are reset atomically with the range rebuild inside
-        // replay_pending_batches, so a concurrent ingest can't fetch_add a reset counter,
-        // fabricate a low range, and have replay drop it as fully-acked.
+    /// Completes setup, READY, replay, and sender publication as one cancellable attempt.
+    /// Cancellation before publication drops an established replacement best-effort.
+    async fn reconnect(&self) -> ZerobusResult<Option<FlightConnection>> {
+        let parameters = FlightConnectionParameters {
+            endpoint: &self.endpoint,
+            tls_config: &self.tls_config,
+            connector_factory: self.connector_factory.as_ref(),
+            table_properties: &self.table_properties,
+            options: &self.options,
+            headers_provider: &self.headers_provider,
+            sdk_identifier: &self.sdk_identifier,
+            request_bodies: &self.request_bodies,
+            #[cfg(feature = "test-hooks")]
+            test_hooks: &self.test_hooks,
+        };
+        let connection = ZerobusArrowStream::reconnect_transport(&parameters).await?;
+        let tx = connection.sender();
         let acked_before_disconnect = self.last_acked_records.load(Ordering::Acquire);
 
-        // Test seam: pause after the connection is established but before ingest_mutex is
-        // held and ranges/watermark are rebuilt, so a test can schedule a paused ingest
-        // that wins ingest_mutex first (reset/rebase race) or drive a concurrent close().
+        if self.replay_and_commit(&tx, acked_before_disconnect).await? {
+            Ok(Some(connection))
+        } else {
+            Ok(None)
+        }
+    }
+
+    async fn replay_and_commit(
+        &self,
+        tx: &mpsc::Sender<Result<RecordBatch, FlightError>>,
+        acked_before_disconnect: u64,
+    ) -> ZerobusResult<bool> {
         #[cfg(feature = "test-hooks")]
         {
-            let barrier = self.reconnect_rebuild_gate.lock().await.take();
+            let barrier = self.test_hooks.reconnect_rebuild.lock().await.take();
             if let Some(barrier) = barrier {
                 barrier.reached.notify_one();
                 barrier.proceed.notified().await;
             }
         }
 
-        // Hold ingest_mutex across the replay so no concurrent ingest interleaves.
-        let _ingest_guard = self.ingest_mutex.lock().await;
-        let replay_result = Self::replay_pending_batches(
-            &tx,
-            &self.pending_batches,
-            &self.cumulative_records_assigned,
+        let replay_batches = {
+            let _ingest_guard = self.ingest_mutex.lock().await;
+            if self.close.has_started() {
+                return Ok(false);
+            }
+            Self::prepare_pending_replay(
+                &self.pending_batches,
+                &self.cumulative_records_assigned,
+                &self.submitted_records,
+                &self.last_acked_records,
+                acked_before_disconnect,
+            )
+            .await
+        };
+
+        if !Self::send_replay_batches(
+            tx,
+            replay_batches,
             &self.submitted_records,
-            &self.last_acked_records,
-            acked_before_disconnect,
+            &self.ingest_mutex,
+            &self.close,
             #[cfg(feature = "test-hooks")]
-            Some(&self.replay_send_gate),
+            Some(&self.test_hooks.replay_send),
         )
-        .await;
+        .await?
+        {
+            return Ok(false);
+        }
 
-        // Commit the replacement sender only after replay succeeds. While ingest_mutex
-        // remains held, publish the sender before clearing the pause gate so normal ingest
-        // cannot observe an unpaused stream without its active sender.
-        Self::commit_reconnect_after_replay(replay_result, tx, &self.batch_tx, &self.is_paused)
-            .await?;
+        loop {
+            let buffered = {
+                let ingest_guard = self.ingest_mutex.lock().await;
+                if self.close.has_started() {
+                    return Ok(false);
+                }
+                let submitted = self.submitted_records.load(Ordering::Acquire);
+                let buffered = self
+                    .pending_batches
+                    .lock()
+                    .await
+                    .iter()
+                    .find_map(|batch| batch.unacknowledged_suffix(submitted));
+                if buffered.is_none() {
+                    return Ok(Self::commit_reconnect(
+                        tx.clone(),
+                        &self.pending_batches,
+                        &self.batch_tx,
+                        &self.is_paused,
+                        &self.close,
+                        &ingest_guard,
+                    )
+                    .await);
+                }
+                buffered
+            };
 
-        // ACK processing cannot resume until reconnect returns. Refresh only after replay
-        // is fully committed so connection setup, backlog sends, and sender publication do
-        // not consume any batch's new ACK budget.
-        let mut pending = self.pending_batches.lock().await;
-        refresh_pending_ack_deadlines(&mut pending, Instant::now());
-        drop(pending);
-
-        Ok((response_stream, request_body))
+            if !Self::send_replay_batch(
+                tx,
+                buffered.expect("buffered batch was selected"),
+                &self.submitted_records,
+                &self.ingest_mutex,
+                &self.close,
+                "Failed to replay buffered batch during recovery",
+            )
+            .await?
+            {
+                return Ok(false);
+            }
+        }
     }
 
-    /// Commits the replacement sender after replay. The caller holds `ingest_mutex`.
-    async fn commit_reconnect_after_replay(
-        replay_result: ZerobusResult<()>,
+    async fn commit_reconnect(
         tx: mpsc::Sender<Result<RecordBatch, FlightError>>,
+        pending_batches: &Arc<Mutex<Vec<PendingBatch>>>,
         batch_tx: &BatchSender,
         is_paused: &AtomicBool,
-    ) -> ZerobusResult<()> {
-        replay_result?;
-        {
-            let mut tx_guard = batch_tx.lock().await;
-            *tx_guard = Some(tx.clone());
+        close: &CloseCoordinator,
+        _ingest_guard: &tokio::sync::MutexGuard<'_, ()>,
+    ) -> bool {
+        if close.has_started() {
+            return false;
         }
+        let mut pending = pending_batches.lock().await;
+        let mut sender = batch_tx.lock().await;
+        refresh_pending_ack_deadlines(&mut pending, Instant::now());
+        *sender = Some(tx);
         is_paused.store(false, Ordering::Relaxed);
-        Ok(())
+        true
     }
 
-    /// Rebuilds `pending_batches` for replay after a reconnect and replays them over
-    /// `tx`: partially-acked batches (vs `acked_before_disconnect`) are sliced to their
-    /// un-acked suffix, fully-acked ones dropped.
-    ///
-    /// The rebuilt pending set and the counter reset are installed together under the
-    /// `pending_batches` lock, before any send: a replay-send failure keeps pending (and
-    /// permits) intact, and no concurrent ingest can observe reset counters against stale
-    /// ranges. The caller refreshes pending ACK timestamps together only after replay is
-    /// committed, immediately before ACK processing can resume. Caller holds `ingest_mutex`.
-    async fn replay_pending_batches(
-        tx: &mpsc::Sender<Result<RecordBatch, FlightError>>,
+    async fn prepare_pending_replay(
         pending_batches: &Arc<Mutex<Vec<PendingBatch>>>,
         cumulative_records_assigned: &Arc<AtomicU64>,
         submitted_records: &Arc<AtomicU64>,
         last_acked_records: &Arc<AtomicU64>,
         acked_before_disconnect: u64,
-        #[cfg(feature = "test-hooks")] replay_send_gate: Option<&super::ReplaySendGate>,
-    ) -> ZerobusResult<()> {
-        let replay_batches: Vec<RecordBatch> = {
-            let mut pending = pending_batches.lock().await;
+    ) -> Vec<RecordBatch> {
+        let mut pending = pending_batches.lock().await;
+        if !pending.is_empty() {
+            info!(target: super::LOG_TARGET,
+                batch_count = pending.len(),
+                acked_records = acked_before_disconnect,
+                "Replaying pending batches after recovery"
+            );
+        }
+        let (replay, new_cumulative) =
+            rebuild_pending_for_replay(&mut pending, acked_before_disconnect);
+        cumulative_records_assigned.store(new_cumulative, Ordering::Relaxed);
+        submitted_records.store(0, Ordering::Release);
+        last_acked_records.store(0, Ordering::Release);
+        replay
+    }
 
-            if !pending.is_empty() {
-                info!(target: super::LOG_TARGET,
-                    batch_count = pending.len(),
-                    acked_records = acked_before_disconnect,
-                    "Replaying pending batches after recovery"
-                );
-            }
-            let (replay, new_cumulative) =
-                rebuild_pending_for_replay(&mut pending, acked_before_disconnect);
-
-            // Reset counters together with the range install, before any send.
-            cumulative_records_assigned.store(new_cumulative, Ordering::Relaxed);
-            submitted_records.store(0, Ordering::Release);
-            last_acked_records.store(0, Ordering::Release);
-
-            replay
-        };
-
-        // Send only after the pending_batches lock is released (ingest_mutex is still
-        // held by the caller); pending stays intact on failure. The replacement response
-        // stream is not polled until replay returns, so publishing after each successful
-        // handoff cannot race a valid acknowledgement on this connection.
+    async fn send_replay_batches(
+        tx: &mpsc::Sender<Result<RecordBatch, FlightError>>,
+        replay_batches: Vec<RecordBatch>,
+        submitted_records: &Arc<AtomicU64>,
+        ingest_mutex: &Arc<Mutex<()>>,
+        close: &CloseCoordinator,
+        #[cfg(feature = "test-hooks")] replay_send_gate: Option<&super::TestBarrierGate>,
+    ) -> ZerobusResult<bool> {
         for batch in replay_batches {
-            let record_count = batch.num_rows() as u64;
-            if tx.send(Ok(batch)).await.is_err() {
-                return Err(ZerobusError::StreamClosedError(tonic::Status::internal(
-                    "Failed to replay batch during recovery",
-                )));
+            if !Self::send_replay_batch(
+                tx,
+                batch,
+                submitted_records,
+                ingest_mutex,
+                close,
+                "Failed to replay batch during recovery",
+            )
+            .await?
+            {
+                return Ok(false);
             }
-            submitted_records.fetch_add(record_count, Ordering::Release);
 
             #[cfg(feature = "test-hooks")]
             {
@@ -465,51 +600,31 @@ impl Supervisor {
                 }
             }
         }
-
-        Ok(())
+        Ok(true)
     }
 
-    /// Moves each pending batch's unacknowledged suffix to the failed list, dropping
-    /// fully acknowledged batches.
-    pub(super) async fn move_pending_to_failed(
-        pending_batches: &Arc<Mutex<Vec<PendingBatch>>>,
-        failed_batches: &Arc<Mutex<Vec<RecordBatch>>>,
-        last_acked_records: &Arc<AtomicU64>,
-    ) {
-        // Lock failed first and hold it across the pending drain so this serializes with
-        // get_unacked_batches (which uses the same order): whichever runs first drains
-        // pending; the other then sees an empty pending and the same failed snapshot.
-        // Lock order is always failed -> pending; no path takes them in the reverse.
-        let mut failed = failed_batches.lock().await;
-        let mut pending = pending_batches.lock().await;
-        let acked = last_acked_records.load(Ordering::Acquire);
-        for pb in pending.drain(..) {
-            // Slice off any durably-acked prefix so a manual retry via
-            // get_unacked_batches doesn't re-send already-persisted records.
-            if let Some(batch) = pb.unacknowledged_suffix(acked) {
-                failed.push(batch);
-            }
-        }
-    }
-
-    /// Publishes stream closure and drains pending -> failed atomically with respect to
-    /// `ingest_batch`. Holding `ingest_mutex` across the `is_closed` store and the drain
-    /// means an ingest either finishes its append before this runs (and is drained here)
-    /// or observes `is_closed` after the mutex is released (and refuses to append), so a
-    /// retrieval snapshot can never omit an accepted batch that a later call reveals.
-    pub(super) async fn finalize_closed(
+    async fn send_replay_batch(
+        tx: &mpsc::Sender<Result<RecordBatch, FlightError>>,
+        batch: RecordBatch,
+        submitted_records: &Arc<AtomicU64>,
         ingest_mutex: &Arc<Mutex<()>>,
-        is_closed: &Arc<AtomicBool>,
-        pending_batches: &Arc<Mutex<Vec<PendingBatch>>>,
-        failed_batches: &Arc<Mutex<Vec<RecordBatch>>>,
-        last_acked_records: &Arc<AtomicU64>,
-    ) {
-        let _guard = ingest_mutex.lock().await;
-        is_closed.store(true, Ordering::Relaxed);
-        Self::move_pending_to_failed(pending_batches, failed_batches, last_acked_records).await;
+        close: &CloseCoordinator,
+        failure_message: &'static str,
+    ) -> ZerobusResult<bool> {
+        let permit = tx.reserve().await.map_err(|_| {
+            ZerobusError::StreamClosedError(tonic::Status::internal(failure_message))
+        })?;
+        // Capacity waits stay outside the ingest lock. The close check and handoff share
+        // that lock with publication, ordering each replay batch wholly before or after it.
+        let _ingest_guard = ingest_mutex.lock().await;
+        if close.has_started() {
+            return Ok(false);
+        }
+        submitted_records.fetch_add(batch.num_rows() as u64, Ordering::Release);
+        permit.send(Ok(batch));
+        Ok(true)
     }
 }
-
 #[cfg(test)]
 mod tests {
     use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -517,16 +632,16 @@ mod tests {
 
     use arrow_array::Int32Array;
     use arrow_flight::error::FlightError;
-    use arrow_flight::PutResult;
     use arrow_schema::{DataType, Field, Schema as ArrowSchema};
-    use futures::stream::iter;
     use tokio::sync::{mpsc, Mutex, Semaphore};
+    use tokio::task::JoinHandle;
     use tokio::time::{timeout, Duration, Instant};
 
-    use super::super::metadata::FlightAckMetadata;
+    use super::super::close::{CloseCoordinator, CloseFinalizer, CloseRequest, CloseState};
+    #[cfg(feature = "internal-arrow-c-data")]
+    use super::SupervisorTaskHandle;
     use super::{
-        pause_and_detach_sender, AckProcessor, BatchSender, PendingBatch, RecordBatch, Supervisor,
-        ZerobusError,
+        pause_and_detach_sender, BatchSender, PendingBatch, RecordBatch, Supervisor, ZerobusError,
     };
     use crate::offset_generator::OffsetId;
 
@@ -559,90 +674,145 @@ mod tests {
         )
     }
 
+    #[test]
+    fn non_finalized_supervisor_exit_is_an_invariant_error() {
+        let request = CloseRequest {
+            target_offset: Some(0),
+            deadline: Instant::now() + Duration::from_secs(1),
+        };
+
+        for state in [CloseState::Open, CloseState::Requested(request)] {
+            assert!(matches!(
+                Supervisor::result_from_close_state(state),
+                Err(ZerobusError::InvalidStateError(_))
+            ));
+        }
+        assert!(Supervisor::result_from_close_state(CloseState::Finalized(Ok(()))).is_ok());
+    }
+
+    #[test]
+    fn reaper_preserves_worker_error_and_rejects_unfinalized_success() {
+        let returned = ZerobusError::ConnectionTimeout("worker error".to_string());
+        assert!(matches!(
+            Supervisor::unfinalized_exit_outcome(Ok(Err(returned))),
+            Err(ZerobusError::ConnectionTimeout(message)) if message == "worker error"
+        ));
+        assert!(matches!(
+            Supervisor::unfinalized_exit_outcome(Ok(Ok(()))),
+            Err(ZerobusError::InvalidStateError(_))
+        ));
+    }
+
+    #[cfg(feature = "internal-arrow-c-data")]
     #[tokio::test]
-    async fn failed_replay_leaves_sender_detached_and_closes_request_channel() {
-        let (tx, mut request_rx) = mpsc::channel::<Result<RecordBatch, FlightError>>(1);
-        let batch_tx: BatchSender = Arc::new(Mutex::new(None));
-        let is_paused = AtomicBool::new(true);
-        let replay_result = Err(ZerobusError::StreamClosedError(tonic::Status::internal(
-            "failed replay",
-        )));
+    #[should_panic(expected = "Arrow supervisor reaper failed during shutdown")]
+    async fn abort_and_wait_propagates_reaper_failure() {
+        let worker = tokio::spawn(std::future::pending::<()>());
+        let worker_abort = worker.abort_handle();
+        drop(worker);
+        let reaper = tokio::spawn(async { panic!("reaper test panic") });
 
-        let result =
-            Supervisor::commit_reconnect_after_replay(replay_result, tx, &batch_tx, &is_paused)
-                .await;
-
-        assert!(result.is_err());
-        assert!(batch_tx.lock().await.is_none());
-        assert!(is_paused.load(Ordering::Relaxed));
-        assert!(
-            request_rx.recv().await.is_none(),
-            "failed replay must drop the only replacement sender"
-        );
+        SupervisorTaskHandle {
+            worker: worker_abort,
+            reaper,
+        }
+        .abort_and_wait()
+        .await;
     }
 
     #[tokio::test]
-    async fn regressive_ack_replays_only_unacknowledged_suffix() {
+    async fn panicked_supervisor_exit_is_an_invariant_error() {
+        let worker: JoinHandle<crate::ZerobusResult<()>> =
+            tokio::spawn(async { panic!("supervisor test panic") });
+        let joined = worker.await;
+
+        assert!(matches!(
+            Supervisor::unfinalized_exit_outcome(joined),
+            Err(ZerobusError::InvalidStateError(_))
+        ));
+    }
+
+    #[tokio::test]
+    async fn close_publication_precedes_queued_replay_handoff() {
         let schema = one_col_schema();
-        let sem = Arc::new(Semaphore::new(1));
-        let pending_batches = Arc::new(Mutex::new(vec![pending_batch(
-            &sem,
-            batch_with_rows(&schema, 10),
-            0,
-            0,
-            10,
-        )]));
-        let response_stream = iter([5, 0].map(|acked_records| {
-            Ok(PutResult {
-                app_metadata: serde_json::to_vec(&FlightAckMetadata {
-                    ack_up_to_offset: 0,
-                    ack_up_to_records: acked_records,
-                    close_stream_duration_ms: None,
-                })
-                .unwrap()
-                .into(),
-            })
-        }));
-        let cumulative_records_assigned = Arc::new(AtomicU64::new(10));
-        let submitted_records = Arc::new(AtomicU64::new(10));
-        let last_acked_records = Arc::new(AtomicU64::new(0));
-        let (processor, request_body, _last_ack_rx) = AckProcessor::for_test(
-            Arc::clone(&pending_batches),
-            Arc::clone(&submitted_records),
-            Arc::clone(&last_acked_records),
-            false,
-        );
-
-        let _stream_closed = processor
-            .process(Box::pin(response_stream), request_body)
-            .await;
-
-        let acked_before_disconnect = last_acked_records.load(Ordering::Acquire);
-        assert_eq!(acked_before_disconnect, 5);
+        let ingest_mutex = Arc::new(Mutex::new(()));
+        let close = CloseCoordinator::new();
+        let submitted = Arc::new(AtomicU64::new(0));
         let (tx, mut rx) = mpsc::channel::<Result<RecordBatch, FlightError>>(1);
-        Supervisor::replay_pending_batches(
+        let request = CloseRequest {
+            target_offset: Some(0),
+            deadline: Instant::now() + Duration::from_secs(30),
+        };
+
+        let guard = ingest_mutex.lock().await;
+        let publish = async {
+            let _guard = ingest_mutex.lock().await;
+            close.publish(request);
+        };
+        tokio::pin!(publish);
+        assert!(futures::poll!(publish.as_mut()).is_pending());
+
+        let send = Supervisor::send_replay_batch(
             &tx,
-            &pending_batches,
-            &cumulative_records_assigned,
-            &submitted_records,
-            &last_acked_records,
+            batch_with_rows(&schema, 1),
+            &submitted,
+            &ingest_mutex,
+            &close,
+            "replay failed",
+        );
+        tokio::pin!(send);
+        assert!(futures::poll!(send.as_mut()).is_pending());
+        assert_eq!(tx.capacity(), 0, "the replay send must reserve capacity");
+
+        drop(guard);
+        timeout(Duration::from_secs(1), publish)
+            .await
+            .expect("close publication should acquire the mutex first");
+        assert!(close.has_started());
+        assert!(
+            !timeout(Duration::from_secs(1), send)
+                .await
+                .expect("replay send should resume after close publication")
+                .expect("replay send should not fail"),
+            "a published close must reject the queued replay handoff"
+        );
+        assert_eq!(submitted.load(Ordering::Acquire), 0);
+        assert!(matches!(
+            rx.try_recv(),
+            Err(mpsc::error::TryRecvError::Empty)
+        ));
+    }
+
+    async fn replay_pending_batches(
+        tx: &mpsc::Sender<Result<RecordBatch, FlightError>>,
+        pending_batches: &Arc<Mutex<Vec<PendingBatch>>>,
+        cumulative_records_assigned: &Arc<AtomicU64>,
+        submitted_records: &Arc<AtomicU64>,
+        last_acked_records: &Arc<AtomicU64>,
+        acked_before_disconnect: u64,
+    ) -> crate::ZerobusResult<()> {
+        let ingest_mutex = Arc::new(Mutex::new(()));
+        let close = CloseCoordinator::new();
+        let replay_batches = Supervisor::prepare_pending_replay(
+            pending_batches,
+            cumulative_records_assigned,
+            submitted_records,
+            last_acked_records,
             acked_before_disconnect,
+        )
+        .await;
+        let sent = Supervisor::send_replay_batches(
+            tx,
+            replay_batches,
+            submitted_records,
+            &ingest_mutex,
+            &close,
             #[cfg(feature = "test-hooks")]
             None,
         )
-        .await
-        .expect("replay should succeed");
-
-        let pending = pending_batches.lock().await;
-        assert_eq!(pending.len(), 1);
-        assert_eq!(pending[0].record_count(), 5);
-        assert_eq!(pending[0].record_range(), (0, 5));
-        drop(pending);
-        assert_eq!(cumulative_records_assigned.load(Ordering::Relaxed), 5);
-        assert_eq!(submitted_records.load(Ordering::Acquire), 5);
-        assert_eq!(last_acked_records.load(Ordering::Acquire), 0);
-        assert_eq!(rx.try_recv().unwrap().unwrap().num_rows(), 5);
-        assert!(rx.try_recv().is_err());
+        .await?;
+        assert!(sent, "close was not published in the unit helper");
+        Ok(())
     }
 
     /// A replay-send failure must not drop pending batches, their permits, or desync
@@ -675,17 +845,8 @@ mod tests {
         let (tx, rx) = mpsc::channel::<Result<RecordBatch, FlightError>>(4);
         drop(rx);
 
-        let res = Supervisor::replay_pending_batches(
-            &tx,
-            &pending,
-            &cumulative,
-            &submitted,
-            &last_acked,
-            0,
-            #[cfg(feature = "test-hooks")]
-            None,
-        )
-        .await;
+        let res =
+            replay_pending_batches(&tx, &pending, &cumulative, &submitted, &last_acked, 0).await;
         assert!(res.is_err(), "replay must surface the send failure");
 
         let guard = pending.lock().await;
@@ -726,59 +887,6 @@ mod tests {
         );
     }
 
-    /// With an open receiver, both batches remain pending, replay in order, and reset the
-    /// connection-relative counters.
-    #[tokio::test]
-    async fn replay_success_reinstalls_and_sends_all() {
-        let schema = one_col_schema();
-        let sem = Arc::new(Semaphore::new(4));
-        let original_enqueued_at = Instant::now() - Duration::from_secs(1);
-        let mut pending_batches = vec![
-            pending_batch(&sem, batch_with_rows(&schema, 3), 0, 0, 3),
-            pending_batch(&sem, batch_with_rows(&schema, 2), 1, 3, 5),
-        ];
-        for batch in &mut pending_batches {
-            batch.refresh_enqueued_at(original_enqueued_at);
-        }
-        let pending = Arc::new(Mutex::new(pending_batches));
-        let cumulative = Arc::new(AtomicU64::new(0));
-        let submitted = Arc::new(AtomicU64::new(0));
-        let last_acked = Arc::new(AtomicU64::new(9));
-
-        let (tx, mut rx) = mpsc::channel::<Result<RecordBatch, FlightError>>(4);
-
-        let res = Supervisor::replay_pending_batches(
-            &tx,
-            &pending,
-            &cumulative,
-            &submitted,
-            &last_acked,
-            0,
-            #[cfg(feature = "test-hooks")]
-            None,
-        )
-        .await;
-        assert!(res.is_ok());
-
-        let pending_guard = pending.lock().await;
-        assert_eq!(pending_guard.len(), 2);
-        assert!(
-            pending_guard
-                .iter()
-                .all(|batch| batch.enqueued_at() == original_enqueued_at),
-            "the replay send phase must not start pending ACK deadlines"
-        );
-        drop(pending_guard);
-        assert_eq!(cumulative.load(Ordering::Relaxed), 5);
-        assert_eq!(submitted.load(Ordering::Acquire), 5);
-        assert_eq!(last_acked.load(Ordering::Relaxed), 0);
-
-        let first = rx.try_recv().expect("first replay batch");
-        assert_eq!(first.unwrap().num_rows(), 3);
-        let second = rx.try_recv().expect("second replay batch");
-        assert_eq!(second.unwrap().num_rows(), 2);
-    }
-
     /// A fully-acked batch is dropped during replay (permit released), and a partially
     /// acked batch is sliced to its un-acked suffix.
     #[tokio::test]
@@ -797,22 +905,14 @@ mod tests {
         let last_acked = Arc::new(AtomicU64::new(4));
         let (tx, mut rx) = mpsc::channel::<Result<RecordBatch, FlightError>>(4);
 
-        let res = Supervisor::replay_pending_batches(
-            &tx,
-            &pending,
-            &cumulative,
-            &submitted,
-            &last_acked,
-            4,
-            #[cfg(feature = "test-hooks")]
-            None,
-        )
-        .await;
+        let res =
+            replay_pending_batches(&tx, &pending, &cumulative, &submitted, &last_acked, 4).await;
         assert!(res.is_ok());
 
         // Only the partially-acked batch remains, rebuilt from cumulative 0.
         let guard = pending.lock().await;
         assert_eq!(guard.len(), 1);
+        assert_eq!(guard[0].record_count(), 2);
         assert_eq!(guard[0].record_range(), (0, 2));
         drop(guard);
         assert_eq!(cumulative.load(Ordering::Relaxed), 2);
@@ -884,8 +984,13 @@ mod tests {
         // about to append): hold ingest_mutex.
         let guard = ingest_mutex.lock().await;
 
-        let fut =
-            Supervisor::finalize_closed(&ingest_mutex, &is_closed, &pending, &failed, &last_acked);
+        let fut = CloseFinalizer::finalize_closed(
+            &ingest_mutex,
+            &is_closed,
+            &pending,
+            &failed,
+            &last_acked,
+        );
         tokio::pin!(fut);
 
         // Finalization must block while the ingest holds ingest_mutex, and must not
@@ -919,5 +1024,35 @@ mod tests {
             "batch appended before mutex release must be drained into failed"
         );
         assert!(pending.lock().await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn published_close_prevents_sender_commit() {
+        let close = CloseCoordinator::new();
+        let request = CloseRequest {
+            target_offset: Some(7),
+            deadline: Instant::now() + Duration::from_secs(30),
+        };
+        close.publish(request);
+
+        let (tx, _rx) = mpsc::channel(1);
+        let pending = Arc::new(Mutex::new(Vec::new()));
+        let batch_tx: BatchSender = Arc::new(Mutex::new(None));
+        let is_paused = AtomicBool::new(true);
+        let ingest_mutex = Mutex::new(());
+        let ingest_guard = ingest_mutex.lock().await;
+        assert!(
+            !Supervisor::commit_reconnect(
+                tx,
+                &pending,
+                &batch_tx,
+                &is_paused,
+                &close,
+                &ingest_guard,
+            )
+            .await
+        );
+        assert!(batch_tx.lock().await.is_none());
+        assert!(is_paused.load(Ordering::Relaxed));
     }
 }

@@ -16,16 +16,19 @@ import org.slf4j.LoggerFactory;
  * <p>Streams should be created using {@link ZerobusSdk#createStream} and closed when no longer
  * needed.
  *
- * <p>Example usage:
+ * <p>Example usage (deprecated):
  *
  * <pre>{@code
- * ZerobusStream<MyRecord> stream = sdk.createStream(tableProperties, clientId, clientSecret).join();
- *
- * // Ingest a record and wait for acknowledgment
- * stream.ingestRecord(myRecord).join();
- *
- * // Close when done
- * stream.close();
+ * try (ZerobusStream<MyRecord> stream =
+ *         sdk.createStream(tableProperties, clientId, clientSecret).join()) {
+ *     CompletableFuture<Void> last = null;
+ *     for (MyRecord record : records) {
+ *         last = stream.ingestRecord(record);
+ *     }
+ *     if (last != null) {
+ *         last.join();
+ *     }
+ * }
  * }</pre>
  *
  * @param <RecordType> the Protocol Buffer message type for this stream

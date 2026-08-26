@@ -27,7 +27,7 @@ class TestImports(unittest.TestCase):
     def test_import_exceptions(self):
         """Test exception classes are available."""
         self.assertTrue(issubclass(ZerobusException, Exception))
-        self.assertTrue(issubclass(NonRetriableException, Exception))
+        self.assertTrue(issubclass(NonRetriableException, ZerobusException))
 
     def test_import_record_type(self):
         """Test RecordType enum is available."""

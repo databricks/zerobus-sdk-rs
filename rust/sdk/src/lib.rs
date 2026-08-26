@@ -12,7 +12,7 @@
 //!     .unity_catalog_url(uc_endpoint)
 //!     .build()?;
 //!
-//! let stream = sdk
+//! let mut stream = sdk
 //!     .stream_builder()
 //!     .table("catalog.schema.table")
 //!     .oauth(client_id, client_secret)

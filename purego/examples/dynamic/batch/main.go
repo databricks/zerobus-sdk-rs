@@ -25,6 +25,7 @@ func main() {
 	defer sdk.Close()
 
 	ctx := context.Background()
+	// Fetch the descriptor once; reuse it for every stream on this table.
 	descriptor, err := sdk.FetchProtoDescriptorFromUC(
 		ctx, cfg.TableName, cfg.ClientID, cfg.ClientSecret,
 	)

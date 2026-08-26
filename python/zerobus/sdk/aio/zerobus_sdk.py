@@ -18,21 +18,20 @@ Example:
     ...
     ...     props = TableProperties("catalog.schema.table")
     ...     stream = await sdk.create_stream(
-    ...         table_properties=props,
     ...         client_id="your-client-id",
-    ...         client_secret="your-client-secret"
+    ...         client_secret="your-client-secret",
+    ...         table_properties=props
     ...     )
     ...
     ...     # Optimized async API - returns offset directly
-    ...     offset = await stream.ingest_record_offset(b"record_data")
+    ...     offset = await stream.ingest_record_offset('{"value": "record_data"}')
     ...     print(f"Queued at offset {offset}")
     ...
     ...     # Batch API - returns one offset for the batch
-    ...     batch_offset = await stream.ingest_records_offset([b"record1", b"record2"])
-    ...
-    ...     # Fire-and-forget for maximum throughput
-    ...     stream.ingest_record_nowait(b"record_data")  # Not awaited!
-    ...     stream.ingest_records_nowait([b"record1", b"record2"])  # Not awaited!
+    ...     batch_offset = await stream.ingest_records_offset([
+    ...         '{"value": "record1"}',
+    ...         '{"value": "record2"}',
+    ...     ])
     ...
     ...     await stream.flush()  # Ensure all records are sent
     ...     await stream.close()
@@ -65,8 +64,7 @@ class ZerobusStream:
         self._inner = rust_stream
 
     async def ingest_record(self, payload: Any):
-        """
-        Ingest a single record and return a future for acknowledgment.
+        """Ingest a single record (deprecated - use ingest_record_offset).
 
         This method uses a two-stage await pattern for optimal performance:
         - First await (this method): Submits the record and returns quickly with a future
@@ -111,9 +109,9 @@ class ZerobusStream:
     def ingest_record_nowait(self, payload: Any):
         """Submit record without waiting (fire-and-forget).
 
-        Highest-throughput single-record API: returns no offset and is not awaited.
-        Use when you do not need per-record offsets; track durability with an
-        ``AckCallback`` and ``await flush()`` before close.
+        Spawns a detached task and discards enqueue errors. ``flush()`` can complete
+        before the task allocates an offset, so this is not a safe durability path.
+        Prefer ``ingest_record_offset()`` or ``ingest_records_offset()``.
         """
         return self._inner.ingest_record_nowait(payload)
 
@@ -122,7 +120,11 @@ class ZerobusStream:
         return await self._inner.ingest_records_offset(payloads)
 
     def ingest_records_nowait(self, payloads):
-        """Submit batch of records without waiting."""
+        """Submit batch of records without waiting.
+
+        Same detached-task caveats as ``ingest_record_nowait()``. Prefer
+        ``ingest_records_offset()``.
+        """
         return self._inner.ingest_records_nowait(payloads)
 
     async def wait_for_offset(self, offset: int):

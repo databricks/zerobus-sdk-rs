@@ -10,9 +10,10 @@ import (
 	"runtime"
 )
 
-// This file provides utilities for building the Rust FFI library.
-// Users must run: go generate github.com/databricks/zerobus-sdk/go
-// before building their application.
+// This file provides utilities for rebuilding the Rust FFI library.
+// Tagged releases and checkouts that include go/lib/ archives do not need
+// `go generate`. Run it, or set ZEROBUS_BUILD_RUST=1, only when rebuilding
+// the FFI from source.
 
 func init() {
 	if _, exists := os.LookupEnv("ZEROBUS_BUILD_RUST"); !exists {

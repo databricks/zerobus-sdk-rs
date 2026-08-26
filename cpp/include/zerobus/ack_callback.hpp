@@ -12,9 +12,10 @@ namespace zerobus {
 /// in `wait_for_offset()` / `flush()`. Register via
 /// `StreamOptions::ack_callback`.
 ///
-/// `on_ack` fires once per record, in monotonic offset order (offset `N` =>
-/// all `<= N` acked); `on_error` fires per unacked record on terminal failure,
-/// which may also surface from `ingest`/`flush`/`wait_for_offset()`. Callbacks
+/// `on_ack` fires once per logical ingest submission, in monotonic offset order
+/// (offset `N` => all `<= N` acked); `on_error` fires per unacked submission on
+/// terminal failure, which may also surface from `ingest`/`flush`/
+/// `wait_for_offset()`. Callbacks
 /// run serialized on a background task, possibly on another thread: synchronize
 /// shared state, keep them light, and don't call back into the owning `Stream`
 /// (that is concurrent use of a non-thread-safe object).
@@ -38,12 +39,13 @@ class AckCallback {
  public:
   virtual ~AckCallback() = default;
 
-  /// Called when the record at @p offset has been durably acknowledged.
+  /// Called when the logical submission at @p offset has been durably
+  /// acknowledged.
   virtual void on_ack(std::int64_t offset) noexcept = 0;
 
-  /// Called when the record at @p offset failed terminally.
+  /// Called when the logical submission at @p offset failed terminally.
   ///
-  /// @param offset The logical offset of the failed record.
+  /// @param offset The logical offset of the failed submission.
   /// @param error_message Human-readable error text from the core.
   virtual void on_error(std::int64_t offset,
                         const std::string& error_message) noexcept = 0;

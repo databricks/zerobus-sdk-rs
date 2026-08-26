@@ -15,8 +15,9 @@ use crate::{ZerobusError, ZerobusResult};
 /// Both values are consumed on success and error.
 /// All retained buffers, children, dictionaries, `private_data`, and release
 /// callbacks must support asynchronous cross-thread retention until released.
-/// Release callbacks may run on an arbitrary SDK runtime thread; they must be
-/// thread-safe and must not unwind.
+/// Release callbacks may run on any thread that drops the final owner,
+/// including SDK runtime/transport threads or a caller performing destructive
+/// stream teardown; they must be thread-safe and must not unwind.
 pub unsafe fn import_c_data_record_batch(
     array: FFI_ArrowArray,
     schema: FFI_ArrowSchema,

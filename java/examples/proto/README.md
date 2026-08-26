@@ -14,9 +14,13 @@ This directory contains examples for ingesting data using `ZerobusProtoStream`.
 
 ```bash
 cd examples
+SDK_JAR=$(ls ../target/zerobus-ingest-sdk-*-jar-with-dependencies.jar | head -n 1)
 
-# Compile (AirQualityProto.java is pre-generated)
-javac -d . -cp "../target/classes:$(cd .. && mvn dependency:build-classpath -q -DincludeScope=runtime -Dmdep.outputFile=/dev/stdout)" \
+# Generate AirQualityProto.java from the proto schema (not checked in)
+protoc --java_out=proto proto/air_quality.proto
+
+# Compile
+javac -d . -cp "$SDK_JAR" \
   proto/com/databricks/zerobus/examples/proto/AirQualityProto.java \
   proto/SingleRecordExample.java \
   proto/BatchIngestionExample.java
@@ -29,11 +33,11 @@ export DATABRICKS_CLIENT_ID="your-client-id"
 export DATABRICKS_CLIENT_SECRET="your-client-secret"
 
 # Run single record example
-java -cp ".:../target/classes:$(cd .. && mvn dependency:build-classpath -q -DincludeScope=runtime -Dmdep.outputFile=/dev/stdout)" \
+java -cp ".:$SDK_JAR" \
   com.databricks.zerobus.examples.proto.SingleRecordExample
 
 # Run batch example
-java -cp ".:../target/classes:$(cd .. && mvn dependency:build-classpath -q -DincludeScope=runtime -Dmdep.outputFile=/dev/stdout)" \
+java -cp ".:$SDK_JAR" \
   com.databricks.zerobus.examples.proto.BatchIngestionExample
 ```
 
@@ -42,12 +46,14 @@ java -cp ".:../target/classes:$(cd .. && mvn dependency:build-classpath -q -Dinc
 ### Creating a Proto Stream
 
 ```java
-ZerobusProtoStream stream = sdk.streamBuilder()
-    .table(tableName)
-    .oauth(clientId, clientSecret)
-    .compiledProto(AirQuality.getDescriptor().toProto())
-    .build()
-    .join();
+try (ZerobusProtoStream stream = sdk.streamBuilder()
+        .table(tableName)
+        .oauth(clientId, clientSecret)
+        .compiledProto(AirQuality.getDescriptor().toProto())
+        .build()
+        .join()) {
+    // ingest...
+}
 ```
 
 ### Single Record Ingestion
@@ -59,13 +65,13 @@ AirQuality record = AirQuality.newBuilder()
     .setTemp(25)
     .setHumidity(65)
     .build();
-long offset = stream.ingestRecordOffset(record);
+stream.ingestRecordOffset(record);
 
 // Method 2: Pre-encoded bytes
 byte[] encodedBytes = record.toByteArray();
-offset = stream.ingestRecordOffset(encodedBytes);
+stream.ingestRecordOffset(encodedBytes);
 
-stream.waitForOffset(offset);
+stream.flush();
 ```
 
 ### Batch Ingestion
@@ -73,25 +79,23 @@ stream.waitForOffset(offset);
 ```java
 // Method 1: List of messages
 List<AirQuality> messages = Arrays.asList(record1, record2, record3);
-Optional<Long> offset = stream.ingestRecordsOffset(messages);
+stream.ingestRecordsOffset(messages);
 
 // Method 2: List of pre-encoded bytes
 List<byte[]> encodedRecords = Arrays.asList(bytes1, bytes2, bytes3);
-offset = stream.ingestRecordsOffset(encodedRecords);
+stream.ingestRecordsOffset(encodedRecords);
 
-if (offset.isPresent()) {
-    stream.waitForOffset(offset.get());
-}
+stream.flush();
 ```
 
 ### Getting Unacknowledged Records
 
 ```java
 // As raw bytes
-List<byte[]> unacked = stream.getUnackedRecords();
+List<byte[]> unackedBytes = stream.getUnackedRecords();
 
 // As parsed messages
-List<AirQuality> unacked = stream.getUnackedRecords(AirQuality.parser());
+List<AirQuality> unackedMessages = stream.getUnackedRecords(AirQuality.parser());
 ```
 
 ## Examples
@@ -99,11 +103,11 @@ List<AirQuality> unacked = stream.getUnackedRecords(AirQuality.parser());
 ### SingleRecordExample
 
 Demonstrates both single-record ingestion methods plus recreateStream:
-1. **Message directly** - 11 records (1 + 10)
-2. **Pre-encoded bytes** - 11 records (1 + 10)
+1. **Message directly** - 10 records, then flush
+2. **Pre-encoded bytes** - 10 records, then flush
 3. **RecreateStream demo** - 3 records
 
-**Total: 25 records**
+**Total: 23 records**
 
 ### BatchIngestionExample
 

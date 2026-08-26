@@ -42,36 +42,43 @@ class TableProperties:
 
 class AckCallback:
     """
-    Base class for record acknowledgment callbacks.
+    Base class for logical ingest submission acknowledgment callbacks.
 
     Subclass this in Python to create custom callbacks that are invoked
-    when records are acknowledged or encounter errors.
+    once per successfully queued logical ingest submission that later
+    acknowledges or fails. A batch that is accepted by the stream produces
+    one callback, not one callback per record in the batch. Pre-queue
+    validation, size, type, and closed-stream failures raise immediately
+    and do not generate a callback. ``close()`` waits at most
+    ``callback_max_wait_time_ms`` (default 5000) for in-flight callbacks,
+    so a callback per queued submission is not guaranteed if that budget
+    expires.
 
     Example:
         class MyCallback(AckCallback):
             def on_ack(self, offset: int):
-                print(f"Record acknowledged at offset {offset}")
+                print(f"Submission acknowledged at offset {offset}")
 
             def on_error(self, offset: int, error_message: str):
-                print(f"Record at offset {offset} failed: {error_message}")
+                print(f"Submission at offset {offset} failed: {error_message}")
     """
 
     def __init__(self) -> None: ...
     def on_ack(self, offset: int) -> None:
         """
-        Called when a record is acknowledged by the server.
+        Called when a logical ingest submission is acknowledged by the server.
 
         Args:
-            offset: The offset of the acknowledged record
+            offset: The offset of the acknowledged submission
         """
         ...
 
     def on_error(self, offset: int, error_message: str) -> None:
         """
-        Called when a record encounters an error.
+        Called when a logical ingest submission encounters an error.
 
         Args:
-            offset: The offset of the failed record
+            offset: The offset of the failed submission
             error_message: Description of the error
         """
         ...
@@ -114,7 +121,7 @@ class StreamConfigurationOptions:
     """Maximum time in milliseconds to wait for callbacks to finish after calling close() (default: 5000)"""
 
     ack_callback: Optional[AckCallback]
-    """Callback to be invoked when records are acknowledged (default: None)"""
+    """Callback invoked once per successfully queued ingest submission that later acknowledges or fails (default: None)"""
 
     def __init__(
         self,
@@ -144,7 +151,7 @@ class StreamConfigurationOptions:
             record_type: Serialization format (default: RecordType.PROTO)
             stream_paused_max_wait_time_ms: Max wait time during graceful close in ms (default: None)
             callback_max_wait_time_ms: Max wait time for callbacks after close in ms (default: 5000)
-            ack_callback: Callback invoked on record acknowledgment (default: None)
+            ack_callback: Callback invoked once per successfully queued ingest submission that later acknowledges or fails (default: None)
         """
         ...
 
@@ -155,7 +162,10 @@ class StreamConfigurationOptions:
 # =============================================================================
 
 class ZerobusException(Exception):
-    """Base class for all exceptions in the Zerobus SDK."""
+    """Base class for all exceptions in the Zerobus SDK.
+
+    Retryable failures (network issues, temporary server errors) are raised as this type.
+    """
 
     ...
 
@@ -582,6 +592,13 @@ class arrow:
         ipc_compression: "arrow.IPCCompression"
         """IPC compression codec. Default: IPCCompression.None"""
 
+        stream_paused_max_wait_time_ms: Optional[int]
+        """Maximum ACK-wait cap during server-initiated graceful rotation.
+        None uses the server grace period available after reserving bounded
+        transport-cleanup time, 0 skips ACK waiting, and positive values cap the
+        ACK wait at min(value, remaining grace) milliseconds. Bounded transport
+        cleanup still runs when ACK waiting is skipped. Default: None"""
+
         def __init__(
             self,
             *,
@@ -594,6 +611,7 @@ class arrow:
             flush_timeout_ms: int = 300000,
             connection_timeout_ms: int = 30000,
             ipc_compression: "arrow.IPCCompression" = ...,
+            stream_paused_max_wait_time_ms: Optional[int] = None,
         ) -> None: ...
         def __repr__(self) -> str: ...
 

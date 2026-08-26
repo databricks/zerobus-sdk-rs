@@ -49,7 +49,7 @@ export interface LoadDescriptorOptions {
  *
  * @example
  * ```typescript
- * import { loadDescriptorProto } from '@databricks/zerobus-sdk/utils/descriptor';
+ * import { loadDescriptorProto } from '@databricks/zerobus-ingest-sdk/utils/descriptor.js';
  *
  * const descriptorBase64 = loadDescriptorProto({
  *     descriptorPath: 'schemas/air_quality_descriptor.pb',
@@ -74,7 +74,7 @@ export function loadDescriptorProto(options: LoadDescriptorOptions): string {
 
     // Find the file descriptor matching the proto file name
     const fileDescriptor = fileDescriptorSet.file.find((f: any) =>
-        f.name === protoFileName || f.name.endsWith('/' + protoFileName) || f.name.endsWith(protoFileName)
+        f.name === protoFileName || f.name.endsWith('/' + protoFileName)
     );
 
     if (!fileDescriptor) {

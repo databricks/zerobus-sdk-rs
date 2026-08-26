@@ -20,7 +20,7 @@ import time
 # Import the generated protobuf module
 import record_pb2
 
-from zerobus.sdk.shared import RecordType, StreamConfigurationOptions, TableProperties
+from zerobus.sdk.shared import StreamConfigurationOptions, TableProperties
 from zerobus.sdk.shared.headers_provider import HeadersProvider
 from zerobus.sdk.sync import ZerobusSdk
 
@@ -75,8 +75,9 @@ class CustomHeadersProvider(HeadersProvider):
     for custom headers (e.g., custom metadata, existing token management, etc.).
     """
 
-    def __init__(self, custom_token: str):
+    def __init__(self, custom_token: str, table_name: str):
         self.custom_token = custom_token
+        self.table_name = table_name
 
     def get_headers(self):
         """
@@ -87,6 +88,7 @@ class CustomHeadersProvider(HeadersProvider):
         """
         return [
             ("authorization", f"Bearer {self.custom_token}"),
+            ("x-databricks-zerobus-table-name", self.table_name),
             ("x-custom-header", "custom-value"),
         ]
 
@@ -122,16 +124,15 @@ def main():
         table_properties = TableProperties(TABLE_NAME, descriptor_bytes)
         logger.info(f"✓ Table properties configured for: {TABLE_NAME}")
 
-        # Step 3: Create stream configuration with protobuf record type
+        # Step 3: Create stream configuration
         options = StreamConfigurationOptions(
-            record_type=RecordType.PROTO,
             max_inflight_records=1000,
             recovery=True,
             recovery_timeout_ms=15000,
             recovery_backoff_ms=2000,
             recovery_retries=4,
         )
-        logger.info("✓ Stream configuration created (Protobuf mode)")
+        logger.info("✓ Stream configuration created")
 
         # Step 4: Create a stream with OAuth 2.0 authentication
         #
@@ -142,7 +143,7 @@ def main():
 
         # Advanced: Custom headers provider (for special use cases only)
         # Uncomment to use custom headers instead of OAuth:
-        # custom_provider = CustomHeadersProvider(custom_token="your-custom-token")
+        # custom_provider = CustomHeadersProvider("your-custom-token", TABLE_NAME)
         # stream = sdk.create_stream(
         #     CLIENT_ID, CLIENT_SECRET, table_properties, options,
         #     headers_provider=custom_provider
@@ -192,27 +193,11 @@ def main():
                     logger.info(f"  Batch {batch_num + 1}: {len(batch)} records, offset: {batch_offset}")
                     success_count += len(batch)
 
-            # ========================================================================
-            # Method 3: ingest_record_nowait() - Fire-and-forget
-            # ========================================================================
-            logger.info("\n3. Using ingest_record_nowait() - fire-and-forget")
-            remaining = NUM_RECORDS - success_count
-            if remaining > 0:
-                for i in range(min(10, remaining)):
-                    record = create_sample_record(success_count + i)
-                    stream.ingest_record_nowait(record)
-                logger.info(f"  Queued {min(10, remaining)} records (no wait for ack)")
-                success_count += min(10, remaining)
-
-            # ========================================================================
-            # Method 4: ingest_records_nowait() - Batch fire-and-forget
-            # ========================================================================
-            logger.info("\n4. Using ingest_records_nowait() - batch fire-and-forget")
             remaining = NUM_RECORDS - success_count
             if remaining > 0:
                 batch = [create_sample_record(success_count + i) for i in range(remaining)]
-                stream.ingest_records_nowait(batch)
-                logger.info(f"  Queued {len(batch)} records in batch (no wait for ack)")
+                batch_offset = stream.ingest_records_offset(batch)
+                logger.info(f"  Remaining {len(batch)} records, offset: {batch_offset}")
                 success_count += len(batch)
 
             # ========================================================================
@@ -221,14 +206,14 @@ def main():
             # ack = stream.ingest_record(record)  # Deprecated
             # offset = ack.wait_for_ack()  # Extra step needed
 
-            end_time = time.time()
-            duration_seconds = end_time - start_time
-            records_per_second = NUM_RECORDS / duration_seconds
-
             # Step 6: Flush and close the stream
             logger.info("\nFlushing stream...")
             stream.flush()
             logger.info("✓ Stream flushed")
+
+            end_time = time.time()
+            duration_seconds = end_time - start_time
+            records_per_second = NUM_RECORDS / duration_seconds
 
             stream.close()
             logger.info("✓ Stream closed")

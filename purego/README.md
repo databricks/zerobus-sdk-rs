@@ -6,10 +6,6 @@ A native pure-Go Zerobus ingestion SDK.
 
 PureGo requires Go 1.25 or later.
 
-## Requirements
-
-PureGo requires Go 1.25 or later.
-
 ## Quick start
 
 ```go
@@ -92,11 +88,19 @@ streams and convert it to protobuf on proto streams.
 Fetch the table schema explicitly, then create a regular proto stream. The
 stream can accept either protobuf bytes or JSON converted at ingest time.
 
+> **Fetch the descriptor once and reuse it.** `FetchProtoDescriptorFromUC`
+> performs a Unity Catalog request on every call and the SDK does not cache the
+> result. Call it once per table at startup, hold on to the returned bytes, and
+> pass them to `WithProto` for every stream you open on that table. Fetch again
+> only when the table schema changes. Calling it per stream — or per record —
+> puts a UC round-trip on your ingestion path.
+
 UC schema conversion rejects nullable array/map fields and collections that
 allow null elements or values because protobuf cannot preserve those
 distinctions. JSON ingestion also rejects explicit `null` collection fields.
 
 ```go
+// Fetch once at startup, then reuse `descriptor` for every stream on this table.
 descriptor, err := sdk.FetchProtoDescriptorFromUC(
     ctx,
     "catalog.schema.table",
@@ -130,6 +134,22 @@ if err := stream.Flush(); err != nil { // wait once at the end
 ```
 
 See `examples/dynamic/single/main.go` for a complete example.
+
+`ColumnsFromDescriptor` reports which columns a descriptor declares, without
+parsing the protobuf yourself:
+
+```go
+columns, err := zerobus.ColumnsFromDescriptor(descriptor)
+if err != nil {
+    log.Fatal(err)
+}
+if _, ok := columns["event_id"]; !ok {
+    log.Fatal("table has no event_id column")
+}
+```
+
+Only top-level fields are columns; the fields of a nested `STRUCT` belong to
+that column's value.
 
 To skip JSON conversion while retaining UC schema discovery, build dynamic
 protobuf messages from the stream descriptor:
@@ -168,7 +188,8 @@ Dynamic JSON follows protobuf JSON value rules:
 - `BIGINT` values above 2^53 should be strings to avoid JSON-number precision
   loss.
 - `STRUCT`, `ARRAY`, and `MAP` use JSON objects, arrays, and objects.
-- Unknown JSON fields are ignored.
+- Unknown JSON fields are rejected; conversion fails the ingest call rather
+  than dropping them.
 
 ## Error handling
 
@@ -222,6 +243,24 @@ Consumers can install a tagged module with:
 ```bash
 go get github.com/databricks/zerobus-sdk/purego@v0.1.0
 ```
+
+Cutting a release:
+
+- On the version-bump PR, move `NEXT_CHANGELOG.md` into `CHANGELOG.md` under a
+  `## Release v<semver>` heading — the release notes are extracted by matching
+  that exact heading — and reset `NEXT_CHANGELOG.md` for the next version.
+- Merge the bump PR, then tag its merge commit `purego/v<semver>`. The tag must
+  be reachable from `main`.
+- Releases are driven from a separate secure release environment rather than
+  from this repository: a maintainer there dispatches the `zerobus-sdk-purego`
+  workflow with the tag, first with `dry-run` enabled as a rehearsal.
+- That workflow validates the tag and the `## Release v<semver>` changelog
+  heading, invokes `release-purego.yml` here to build, vet, and test the module,
+  and scans the `purego/` source. On a real (non-dry) run it then creates the
+  GitHub Release with notes taken from `CHANGELOG.md`.
+- The Git tag is the version of record. Keep the `version` const in
+  `zerobus/sdk.go` (the gRPC user-agent) in sync with it; `release-purego.yml`
+  fails when a `purego/v*` tag disagrees.
 
 ## Regenerating the protobuf bindings
 

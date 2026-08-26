@@ -38,7 +38,7 @@ public class BatchIngestionExample {
 
         System.out.println("=== Proto Batch Ingestion Example ===\n");
 
-        ZerobusSdk sdk = new ZerobusSdk(serverEndpoint, workspaceUrl);
+        try (ZerobusSdk sdk = new ZerobusSdk(serverEndpoint, workspaceUrl)) {
         ZerobusProtoStream stream = sdk.streamBuilder()
             .table(tableName)
             .oauth(clientId, clientSecret)
@@ -149,12 +149,11 @@ public class BatchIngestionExample {
         System.out.println("\n--- Demonstrating recreateStream ---");
 
         // Recreate the stream (would re-ingest any unacked records if there were any)
-        ZerobusProtoStream newStream = sdk.recreateStream(stream).join();
+        try (ZerobusProtoStream newStream = sdk.recreateStream(stream).join()) {
         System.out.println("  New stream created successfully");
 
         // Ingest a batch on the new stream
         int newRecords = 0;
-        try {
             List<AirQuality> newBatch = new ArrayList<>();
             for (int i = 0; i < 5; i++) {
                 newBatch.add(AirQuality.newBuilder()
@@ -167,12 +166,10 @@ public class BatchIngestionExample {
             newRecords = 5;
             newStream.flush();
             System.out.println("  " + newRecords + " new records ingested on recreated stream");
-        } finally {
-            newStream.close();
         }
 
         System.out.println("\n=== RecreateStream demo complete ===");
 
-        sdk.close();
+        }
     }
 }

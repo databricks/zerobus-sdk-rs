@@ -51,7 +51,7 @@ cargo run -- \
 
 ```bash
 cargo run -- \
-  --uc-endpoint ""<your_uc_endpoint>" \
+  --uc-endpoint "<your_uc_endpoint>" \
   --client-id "your-client-id" \
   --client-secret "your-client-secret" \
   --table "catalog.schema.table_name" \

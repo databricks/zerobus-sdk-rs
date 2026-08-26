@@ -84,14 +84,14 @@ func main() {
 		batchRecords = append(batchRecords, data)
 	}
 
-	lastOffset, err := stream.IngestRecordsOffset(batchRecords)
+	batchOffset, err := stream.IngestRecordsOffset(batchRecords)
 	if err != nil {
 		log.Fatalf("Failed to ingest batch: %v", err)
 	}
-	log.Printf("Batch of %d records ingested, last offset: %d", len(batchRecords), lastOffset)
+	log.Printf("Batch of %d records ingested, batch offset: %d", len(batchRecords), batchOffset)
 
-	// Wait for the last offset to ensure the entire batch is acknowledged.
-	if err := stream.WaitForOffset(lastOffset); err != nil {
+	// Wait for the batch offset to ensure the entire batch is acknowledged.
+	if err := stream.WaitForOffset(batchOffset); err != nil {
 		log.Fatalf("Failed to wait for batch acknowledgment: %v", err)
 	}
 	log.Println("Batch acknowledged!")

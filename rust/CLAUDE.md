@@ -32,7 +32,8 @@ This is a Cargo workspace. The workspace root is `rust/Cargo.toml`.
 - `headers_provider.rs` — `HeadersProvider` trait + OAuth implementation
 - `landing_zone.rs` — Batches records before sending over gRPC
 - `record_types.rs` — `EncodedRecord`, `ProtoMessage`, `JsonString`
-- `stream/arrow/` — Arrow Flight ingestion, ACK rotation, connection, and recovery modules (Beta; behind `arrow-flight`)
+- `stream/arrow/` — Arrow Flight ingestion, ACK rotation, connection, and recovery modules
+  (Beta; behind `arrow-flight`); see `stream/arrow/README.md` for architecture and invariants
 
 ## Build commands
 
