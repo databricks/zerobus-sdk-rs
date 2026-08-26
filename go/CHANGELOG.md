@@ -19,7 +19,8 @@
 - Batch examples name the offset returned by `IngestRecordsOffset` `batchOffset`.
   Example and test modules keep the CI toolchain Go versions; the documented
   SDK minimum remains Go 1.21+.
-- Built on Rust SDK 2.7.1. Wrapper-facing notes for that core are in
+- Native libraries will be rebuilt from Rust SDK 2.7.1 at publish time. This PR
+  does not update `go/lib` (still v1.4.0 / Rust 2.6.0). Wrapper-facing notes:
   `rust/CHANGELOG.md` and https://github.com/databricks/zerobus-sdk/releases/tag/rust/v2.7.1.
 
 ### Internal Changes
