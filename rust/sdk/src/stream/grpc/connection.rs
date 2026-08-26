@@ -3,7 +3,7 @@
 //! This module is transport-specific: it opens the bidirectional gRPC stream
 //! used by `ZerobusStream`. It handles both stream kinds through the transport
 //! seam (`super::transport`): ephemeral streams over the `EphemeralStream` RPC
-//! and, behind the `eos` feature, persistent streams over `PersistentStream`.
+//! and persistent streams over `PersistentStream`.
 //! The Arrow Flight transport has its own equivalent under `stream/arrow/`.
 
 use std::sync::Arc;
@@ -15,9 +15,11 @@ use tonic::transport::Channel;
 use tracing::{debug, error, info, instrument, warn};
 
 use super::supervisor::StreamInitInfo;
-use super::transport::{self, GrpcConnectionMode, InboundStream, Opened, OutboundSink};
+use super::transport::{
+    self, GrpcConnectionMode, InboundStream, Opened, OutboundSink, StreamOpenParams,
+};
 use crate::databricks::zerobus::zerobus_client::ZerobusClient;
-use crate::databricks::zerobus::{CreateIngestStreamRequest, RecordType};
+use crate::databricks::zerobus::RecordType;
 use crate::{HeadersProvider, TableProperties, ZerobusError, ZerobusResult};
 
 /// A freshly opened stream connection: the outbound sink, the inbound response
@@ -119,10 +121,8 @@ impl super::ZerobusStream {
         record_type: RecordType,
         kind: &GrpcConnectionMode,
     ) -> ZerobusResult<StreamConnection> {
-        let (sink, request_body) = transport::make_outbound(kind);
-        let mut request = tonic::Request::new(request_body);
-
-        let stream_metadata = request.metadata_mut();
+        let outbound = transport::make_outbound(kind);
+        let mut stream_metadata = tonic::metadata::MetadataMap::new();
         let headers = headers_provider.get_headers().await?;
         for (key, value) in headers {
             match key {
@@ -149,12 +149,13 @@ impl super::ZerobusStream {
             }
         }
 
-        let mut inbound = transport::open_rpc(&mut channel, request).await?;
+        let (sink, mut inbound) =
+            transport::open_rpc(outbound, &mut channel, stream_metadata).await?;
 
-        let create_request = Self::build_create_request(table_properties, record_type)?;
+        let open_params = Self::build_open_params(table_properties, record_type)?;
 
         debug!("Sending stream-open request.");
-        sink.send_open(kind, create_request).await.map_err(|_| {
+        sink.send_open(open_params).await.map_err(|_| {
             error!(table_name = %table_properties.table_name, "Failed to send stream-open request");
             ZerobusError::StreamClosedError(tonic::Status::internal(
                 "Failed to send stream-open request",
@@ -184,17 +185,14 @@ impl super::ZerobusStream {
                     stream_id,
                     last_committed_offset: None,
                 }),
-                #[cfg(feature = "eos")]
                 _ => Err(Self::mismatched_open_response()),
             },
-            #[cfg(feature = "eos")]
             GrpcConnectionMode::Persistent { resume_stream_id } => {
                 Self::validate_persistent_open_response(resume_stream_id.as_deref(), opened)
             }
         }
     }
 
-    #[cfg(feature = "eos")]
     fn validate_persistent_open_response(
         resume_stream_id: Option<&str>,
         opened: Opened,
@@ -217,20 +215,18 @@ impl super::ZerobusStream {
         }
     }
 
-    #[cfg(feature = "eos")]
     fn mismatched_open_response() -> ZerobusError {
         ZerobusError::UnexpectedStreamResponseError(
             "Persistent stream setup response did not match the requested operation".to_string(),
         )
     }
 
-    /// Builds the `CreateIngestStreamRequest` sent when opening (or, on the
-    /// persistent path, creating) a stream. Encodes the descriptor for proto
-    /// streams and validates its presence.
-    fn build_create_request(
+    /// Resolves the schema inputs used to construct either a create or resume
+    /// opening message. Encodes and validates the descriptor for proto streams.
+    fn build_open_params(
         table_properties: &TableProperties,
         record_type: RecordType,
-    ) -> ZerobusResult<CreateIngestStreamRequest> {
+    ) -> ZerobusResult<StreamOpenParams> {
         let descriptor_proto = if record_type == RecordType::Proto {
             Some(
                 table_properties
@@ -247,15 +243,15 @@ impl super::ZerobusStream {
             None
         };
 
-        Ok(CreateIngestStreamRequest {
-            table_name: Some(table_properties.table_name.to_string()),
+        Ok(StreamOpenParams {
+            table_name: table_properties.table_name.to_string(),
             descriptor_proto,
-            record_type: Some(record_type.into()),
+            record_type,
         })
     }
 }
 
-#[cfg(all(test, feature = "eos"))]
+#[cfg(test)]
 mod tests {
     use super::*;
     use crate::ZerobusStream;

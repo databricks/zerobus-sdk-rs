@@ -16,10 +16,7 @@
 //! Everything else — the landing zone, backpressure, ack tracking, flush,
 //! close, callbacks, and the create → spawn → recover supervisor loop — is
 //! identical and stays transport-agnostic. This module normalizes the three
-//! differences behind two small enums (`OutboundSink`, `InboundStream`) plus a
-//! neutral `InboundMessage`, so the sender/receiver tasks never mention a
-//! concrete RPC. The enums carry no `dyn` and compile away to the ephemeral
-//! arm when the `eos` feature is off.
+//! differences so the sender/receiver tasks never mention a concrete RPC.
 
 use tokio_stream::wrappers::ReceiverStream;
 use tonic::transport::Channel;
@@ -29,17 +26,13 @@ use crate::databricks::zerobus::ephemeral_stream_response::Payload as EphemeralR
 use crate::databricks::zerobus::zerobus_client::ZerobusClient;
 use crate::databricks::zerobus::{
     CloseStreamSignal, CreateIngestStreamRequest, EphemeralStreamRequest, EphemeralStreamResponse,
-    IngestRecordResponse,
+    IngestRecordResponse, RecordType,
 };
-use crate::{EncodedBatch, OffsetId, ZerobusError, ZerobusResult};
+use crate::{EncodedBatch, OffsetId, OffsetIdGenerator, ZerobusError, ZerobusResult};
 
-#[cfg(feature = "eos")]
 use crate::databricks::zerobus::persistent_stream_request::Payload as PersistentRequestPayload;
-#[cfg(feature = "eos")]
 use crate::databricks::zerobus::persistent_stream_response::Payload as PersistentResponsePayload;
-#[cfg(feature = "eos")]
 use crate::databricks::zerobus::resume_ingest_stream_request::Identifier as ResumeIdentifier;
-#[cfg(feature = "eos")]
 use crate::databricks::zerobus::{
     CreatePersistentStreamRequest, PersistentStreamRequest, PersistentStreamResponse,
     ResumeIngestStreamRequest,
@@ -58,20 +51,7 @@ pub(super) enum GrpcConnectionMode {
     /// Persistent (Eos) stream: `PersistentStream` RPC, durable wire offsets.
     /// `resume_stream_id` is `Some` when reconnecting to an existing stream and
     /// `None` when creating a new one.
-    #[cfg(feature = "eos")]
     Persistent { resume_stream_id: Option<String> },
-}
-
-impl GrpcConnectionMode {
-    /// Whether SDK and wire offsets match. They match for persistent streams;
-    /// ephemeral streams use a fresh wire sequence for each server stream.
-    pub(super) fn wire_offsets_match(&self) -> bool {
-        match self {
-            GrpcConnectionMode::Ephemeral => false,
-            #[cfg(feature = "eos")]
-            GrpcConnectionMode::Persistent { .. } => true,
-        }
-    }
 }
 
 /// Outcome of opening a connection, preserving which operation the server
@@ -80,52 +60,70 @@ pub(super) enum Opened {
     Created {
         stream_id: String,
     },
-    #[cfg(feature = "eos")]
     Resumed {
         last_committed_offset: Option<OffsetId>,
     },
 }
 
+/// Schema and destination inputs needed to construct the protocol-specific
+/// opening message.
+pub(super) struct StreamOpenParams {
+    pub(super) table_name: String,
+    pub(super) descriptor_proto: Option<Vec<u8>>,
+    pub(super) record_type: RecordType,
+}
+
+impl StreamOpenParams {
+    fn into_create_request(self) -> CreateIngestStreamRequest {
+        CreateIngestStreamRequest {
+            table_name: Some(self.table_name),
+            descriptor_proto: self.descriptor_proto,
+            record_type: Some(self.record_type.into()),
+        }
+    }
+}
+
 /// The outbound half of a stream: wraps the concrete tonic request sender and
 /// exposes a single neutral `send` that both IO tasks use.
 pub(super) enum OutboundSink {
-    Ephemeral(tokio::sync::mpsc::Sender<EphemeralStreamRequest>),
-    #[cfg(feature = "eos")]
-    Persistent(tokio::sync::mpsc::Sender<PersistentStreamRequest>),
+    Ephemeral {
+        tx: tokio::sync::mpsc::Sender<EphemeralStreamRequest>,
+        wire_offsets: OffsetIdGenerator,
+    },
+    Persistent {
+        tx: tokio::sync::mpsc::Sender<PersistentStreamRequest>,
+        resume_stream_id: Option<String>,
+    },
 }
 
 impl OutboundSink {
     /// Sends the opening message: `create_stream` for a new stream (ephemeral
     /// or persistent), or `resume_stream` when reconnecting to a persistent
-    /// one. `create` carries the table name, descriptor, and record type; it is
-    /// ignored on the resume path (the server keeps that state from creation).
-    pub(super) async fn send_open(
-        &self,
-        kind: &GrpcConnectionMode,
-        create: CreateIngestStreamRequest,
-    ) -> ZerobusResult<()> {
-        match (self, kind) {
-            (OutboundSink::Ephemeral(tx), GrpcConnectionMode::Ephemeral) => tx
+    /// one. Create carries the destination table; resume carries only the
+    /// descriptor and record type needed to validate the reopened stream.
+    pub(super) async fn send_open(&self, params: StreamOpenParams) -> ZerobusResult<()> {
+        match self {
+            OutboundSink::Ephemeral { tx, .. } => tx
                 .send(EphemeralStreamRequest {
-                    payload: Some(EphemeralRequestPayload::CreateStream(create)),
+                    payload: Some(EphemeralRequestPayload::CreateStream(
+                        params.into_create_request(),
+                    )),
                 })
                 .await
                 .map_err(|_| Self::open_failed()),
-            #[cfg(feature = "eos")]
-            (OutboundSink::Persistent(tx), GrpcConnectionMode::Persistent { resume_stream_id }) => {
+            OutboundSink::Persistent {
+                tx,
+                resume_stream_id,
+            } => {
                 let payload = match resume_stream_id {
                     None => PersistentRequestPayload::CreateStream(CreatePersistentStreamRequest {
-                        create_stream: Some(create),
+                        create_stream: Some(params.into_create_request()),
                     }),
                     Some(stream_id) => {
-                        // The descriptor is fixed at creation but re-sent on
-                        // resume so the server can re-validate it against the
-                        // table schema (required for PROTO streams; absent for
-                        // JSON / Arrow, matching `create`).
                         PersistentRequestPayload::ResumeStream(ResumeIngestStreamRequest {
                             identifier: Some(ResumeIdentifier::StreamId(stream_id.clone())),
-                            descriptor_proto: create.descriptor_proto,
-                            record_type: create.record_type,
+                            descriptor_proto: params.descriptor_proto,
+                            record_type: Some(params.record_type.into()),
                         })
                     }
                 };
@@ -135,11 +133,6 @@ impl OutboundSink {
                 .await
                 .map_err(|_| Self::open_failed())
             }
-            // The sink and kind are always constructed together by
-            // `make_outbound`, so a mismatch is unreachable. Only present when
-            // more than one variant exists (i.e. `eos` is enabled).
-            #[cfg(feature = "eos")]
-            _ => Err(Self::open_failed()),
         }
     }
 
@@ -149,24 +142,26 @@ impl OutboundSink {
         ))
     }
 
-    /// Sends one ingest batch on the wire, numbered with `offset_id`.
+    /// Sends one ingest batch, mapping the SDK offset to the wire sequence for
+    /// this connection. Persistent offsets pass through unchanged; ephemeral
+    /// connections use a fresh zero-based sequence.
     pub(super) async fn send_ingest(
         &self,
         batch: EncodedBatch,
-        offset_id: OffsetId,
+        sdk_offset: OffsetId,
     ) -> ZerobusResult<()> {
+        let wire_offset = self.next_wire_offset(sdk_offset);
         match self {
-            OutboundSink::Ephemeral(tx) => {
-                let payload = batch.into_request_payload(offset_id);
+            OutboundSink::Ephemeral { tx, .. } => {
+                let payload = batch.into_request_payload(wire_offset);
                 tx.send(EphemeralStreamRequest {
                     payload: Some(payload),
                 })
                 .await
                 .map_err(|_| Self::ingest_failed())
             }
-            #[cfg(feature = "eos")]
-            OutboundSink::Persistent(tx) => {
-                let payload = batch.into_persistent_request_payload(offset_id);
+            OutboundSink::Persistent { tx, .. } => {
+                let payload = batch.into_persistent_request_payload(wire_offset);
                 tx.send(PersistentStreamRequest {
                     payload: Some(payload),
                 })
@@ -178,6 +173,13 @@ impl OutboundSink {
 
     fn ingest_failed() -> ZerobusError {
         ZerobusError::StreamClosedError(tonic::Status::internal("Failed to send batch"))
+    }
+
+    fn next_wire_offset(&self, sdk_offset: OffsetId) -> OffsetId {
+        match self {
+            OutboundSink::Ephemeral { wire_offsets, .. } => wire_offsets.next(),
+            OutboundSink::Persistent { .. } => sdk_offset,
+        }
     }
 }
 
@@ -197,7 +199,6 @@ pub(super) enum InboundMessage {
 /// yields normalized `InboundMessage`s.
 pub(super) enum InboundStream {
     Ephemeral(tonic::Streaming<EphemeralStreamResponse>),
-    #[cfg(feature = "eos")]
     Persistent(tonic::Streaming<PersistentStreamResponse>),
 }
 
@@ -215,7 +216,6 @@ impl InboundStream {
                 }
                 _ => InboundMessage::Other,
             })),
-            #[cfg(feature = "eos")]
             InboundStream::Persistent(s) => Ok(s.message().await?.map(|resp| match resp.payload {
                 Some(PersistentResponsePayload::IngestRecordResponse(ack)) => {
                     InboundMessage::Ack(ack)
@@ -247,7 +247,6 @@ impl InboundStream {
                     other => Err(Self::unexpected_open(&other)),
                 }
             }
-            #[cfg(feature = "eos")]
             InboundStream::Persistent(s) => {
                 let msg = Self::first_message(s.message().await)?;
                 match msg.payload {
@@ -293,70 +292,121 @@ impl InboundStream {
     pub(super) async fn drain(&mut self) {
         match self {
             InboundStream::Ephemeral(s) => while matches!(s.message().await, Ok(Some(_))) {},
-            #[cfg(feature = "eos")]
             InboundStream::Persistent(s) => while matches!(s.message().await, Ok(Some(_))) {},
         }
     }
 }
 
-/// Opens the outbound request channel for the given transport kind, returning
-/// the neutral sink and the raw tonic request stream to hand to the RPC.
-///
-/// Split from the RPC call so the connection module can attach metadata to the
-/// request before dispatching.
-pub(super) fn make_outbound(kind: &GrpcConnectionMode) -> (OutboundSink, OutboundRequestStream) {
+/// Both halves of a newly allocated outbound channel. Keeping them in the same
+/// variant guarantees the request stream, retained sender, and opening mode
+/// cannot disagree.
+pub(super) enum OutboundConnection {
+    Ephemeral {
+        tx: tokio::sync::mpsc::Sender<EphemeralStreamRequest>,
+        requests: ReceiverStream<EphemeralStreamRequest>,
+    },
+    Persistent {
+        tx: tokio::sync::mpsc::Sender<PersistentStreamRequest>,
+        requests: ReceiverStream<PersistentStreamRequest>,
+        resume_stream_id: Option<String>,
+    },
+}
+
+pub(super) fn make_outbound(kind: &GrpcConnectionMode) -> OutboundConnection {
     match kind {
         GrpcConnectionMode::Ephemeral => {
             let (tx, rx) = tokio::sync::mpsc::channel(CHANNEL_BUFFER_SIZE);
-            (
-                OutboundSink::Ephemeral(tx),
-                OutboundRequestStream::Ephemeral(ReceiverStream::new(rx)),
-            )
+            OutboundConnection::Ephemeral {
+                tx,
+                requests: ReceiverStream::new(rx),
+            }
         }
-        #[cfg(feature = "eos")]
-        GrpcConnectionMode::Persistent { .. } => {
+        GrpcConnectionMode::Persistent { resume_stream_id } => {
             let (tx, rx) = tokio::sync::mpsc::channel(CHANNEL_BUFFER_SIZE);
-            (
-                OutboundSink::Persistent(tx),
-                OutboundRequestStream::Persistent(ReceiverStream::new(rx)),
-            )
+            OutboundConnection::Persistent {
+                tx,
+                requests: ReceiverStream::new(rx),
+                resume_stream_id: resume_stream_id.clone(),
+            }
         }
     }
 }
 
-/// The raw request stream handed to the tonic RPC method. Kept concrete because
-/// `ZerobusClient::ephemeral_stream` / `persistent_stream` want the exact type.
-pub(super) enum OutboundRequestStream {
-    Ephemeral(ReceiverStream<EphemeralStreamRequest>),
-    #[cfg(feature = "eos")]
-    Persistent(ReceiverStream<PersistentStreamRequest>),
-}
-
-/// Dispatches the opening RPC on `channel` with `request` (metadata already
-/// attached) and returns the inbound stream. The first server message is read
-/// by the caller (`connection.rs`) so it can extract the stream_id / watermark.
+/// Dispatches the opening RPC with metadata prepared by the caller and returns
+/// both normalized connection halves.
 pub(super) async fn open_rpc(
+    outbound: OutboundConnection,
     channel: &mut ZerobusClient<Channel>,
-    request: tonic::Request<OutboundRequestStream>,
-) -> ZerobusResult<InboundStream> {
-    let (metadata, extensions, body) = request.into_parts();
-    match body {
-        OutboundRequestStream::Ephemeral(stream) => {
-            let req = tonic::Request::from_parts(metadata, extensions, stream);
+    metadata: tonic::metadata::MetadataMap,
+) -> ZerobusResult<(OutboundSink, InboundStream)> {
+    match outbound {
+        OutboundConnection::Ephemeral { tx, requests } => {
+            let mut req = tonic::Request::new(requests);
+            *req.metadata_mut() = metadata;
             let resp = channel
                 .ephemeral_stream(req)
                 .await
                 .map_err(ZerobusError::CreateStreamError)?;
-            Ok(InboundStream::Ephemeral(resp.into_inner()))
+            Ok((
+                OutboundSink::Ephemeral {
+                    tx,
+                    wire_offsets: OffsetIdGenerator::default(),
+                },
+                InboundStream::Ephemeral(resp.into_inner()),
+            ))
         }
-        #[cfg(feature = "eos")]
-        OutboundRequestStream::Persistent(stream) => {
-            let req = tonic::Request::from_parts(metadata, extensions, stream);
+        OutboundConnection::Persistent {
+            tx,
+            requests,
+            resume_stream_id,
+        } => {
+            let mut req = tonic::Request::new(requests);
+            *req.metadata_mut() = metadata;
             let resp = channel
                 .persistent_stream(req)
                 .await
                 .map_err(ZerobusError::CreateStreamError)?;
-            Ok(InboundStream::Persistent(resp.into_inner()))
+            Ok((
+                OutboundSink::Persistent {
+                    tx,
+                    resume_stream_id,
+                },
+                InboundStream::Persistent(resp.into_inner()),
+            ))
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn ephemeral_wire_offsets_restart_for_each_connection() {
+        let (tx, _rx) = tokio::sync::mpsc::channel(CHANNEL_BUFFER_SIZE);
+        let sink = OutboundSink::Ephemeral {
+            tx,
+            wire_offsets: OffsetIdGenerator::default(),
+        };
+        assert_eq!(sink.next_wire_offset(40), 0);
+        assert_eq!(sink.next_wire_offset(41), 1);
+
+        let (tx, _rx) = tokio::sync::mpsc::channel(CHANNEL_BUFFER_SIZE);
+        let recovered = OutboundSink::Ephemeral {
+            tx,
+            wire_offsets: OffsetIdGenerator::default(),
+        };
+        assert_eq!(recovered.next_wire_offset(42), 0);
+    }
+
+    #[test]
+    fn persistent_wire_offsets_match_sdk_offsets() {
+        let (tx, _rx) = tokio::sync::mpsc::channel(CHANNEL_BUFFER_SIZE);
+        let sink = OutboundSink::Persistent {
+            tx,
+            resume_stream_id: Some("stream-id".to_string()),
+        };
+        assert_eq!(sink.next_wire_offset(40), 40);
+        assert_eq!(sink.next_wire_offset(41), 41);
     }
 }

@@ -85,25 +85,22 @@ impl<T: Clone> LandingZone<T> {
         all_items
     }
 
-    /// Removes and returns items from the front of the unobserved queue while
-    /// `pred` holds, stopping at the first item that fails it.
+    /// Removes a prefix of observed items while `should_remove` returns true.
     ///
-    /// Used by the persistent-stream resume path to reconcile the retained tail
-    /// against the server's committed watermark: it removes the prefix of
-    /// records the server has already durably stored (offset <= resume watermark)
-    /// before re-sending the rest. Only the unobserved queue is consulted:
-    /// callers reset observation (`reset_observe`) first, so every retained item
-    /// lives in the queue in offset order. One semaphore permit is released per
-    /// removed item, mirroring `remove_observed`.
-    pub fn remove_front_while<F: FnMut(&T) -> bool>(&self, mut pred: F) -> Vec<T> {
+    /// Observed items stay in FIFO order. Stops at the first item that should
+    /// remain. Releases the corresponding backpressure permits.
+    pub fn remove_observed_prefix(&self, mut should_remove: impl FnMut(&T) -> bool) -> Vec<T> {
         let mut state = self.state.lock().expect("Lock poisoned");
         let mut permits = self.permits.lock().expect("Lock poisoned");
         let mut removed = Vec::new();
-        while let Some(front) = state.queue.front() {
-            if !pred(front) {
+        while let Some(front) = state.observed_items.front() {
+            if !should_remove(front) {
                 break;
             }
-            let item = state.queue.pop_front().expect("front just checked");
+            let item = state
+                .observed_items
+                .pop_front()
+                .expect("front existed before pop");
             permits.pop_front();
             removed.push(item);
         }
@@ -305,6 +302,34 @@ mod tests {
             result,
             Err(LandingZoneError::RemovingNonObservedElement)
         ));
+    }
+
+    #[tokio::test]
+    async fn test_remove_observed_prefix_preserves_fifo_suffix() {
+        let lz = LandingZone::new(4);
+        for value in 1..=4 {
+            lz.add(value).await;
+        }
+        for _ in 0..3 {
+            lz.observe().await;
+        }
+
+        assert_eq!(lz.remove_observed_prefix(|value| *value <= 2), vec![1, 2]);
+        assert_eq!(lz.reset_observe(), 1);
+        assert_eq!(lz.observe().await, 3);
+        assert_eq!(lz.observe().await, 4);
+    }
+
+    #[tokio::test]
+    async fn test_remove_observed_prefix_never_removes_unsent_items() {
+        let lz = LandingZone::new(2);
+        lz.add(1).await;
+        lz.add(2).await;
+        lz.observe().await;
+
+        assert_eq!(lz.remove_observed_prefix(|_| true), vec![1]);
+        assert_eq!(lz.len(), 1);
+        assert_eq!(lz.observe().await, 2);
     }
 
     #[tokio::test]

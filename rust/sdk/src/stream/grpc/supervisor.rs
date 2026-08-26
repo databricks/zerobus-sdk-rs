@@ -54,7 +54,7 @@ impl ZerobusStream {
         options: StreamConfigurationOptions,
         // Mutated only on the persistent recovery path (flip create → resume);
         // that mutation is `eos`-gated, so `mut` is otherwise unused.
-        #[cfg_attr(not(feature = "eos"), allow(unused_mut))] mut kind: GrpcConnectionMode,
+        mut kind: GrpcConnectionMode,
         landing_zone: RecordLandingZone,
         oneshot_map: Arc<tokio::sync::Mutex<OneshotMap>>,
         logical_last_received_offset_id_tx: tokio::sync::watch::Sender<Option<OffsetId>>,
@@ -65,7 +65,6 @@ impl ZerobusStream {
         cancellation_token: CancellationToken,
         callback_tx: Option<tokio::sync::mpsc::UnboundedSender<CallbackMessage>>,
     ) -> ZerobusResult<()> {
-        let wire_offsets_match = kind.wire_offsets_match();
         let mut initial_stream_creation = true;
         let mut stream_init_result_tx = Some(stream_init_result_tx);
         // One-shot budget: initial setup may spend a single recovery retry to refresh a
@@ -215,7 +214,6 @@ impl ZerobusStream {
                 initial_stream_creation = false;
                 // A persistent stream recovers by resuming its now-known id, not
                 // by creating a fresh stream on every reconnect.
-                #[cfg(feature = "eos")]
                 if let GrpcConnectionMode::Persistent { resume_stream_id } = &mut kind {
                     *resume_stream_id = Some(stream_id.clone());
                 }
@@ -225,17 +223,15 @@ impl ZerobusStream {
                 let _ = server_error_tx.send(None);
             }
 
-            // 2. Reset landing zone.
-            let resent_records = landing_zone_recovery.observed_count();
-            let resent_batches = landing_zone_recovery.reset_observe();
-
-            // A dropped connection can lose ACKs for records the server already
-            // committed. Resolve retained records through the resume watermark
-            // locally, then resend only records above it.
+            // A dropped persistent connection can lose ACKs for records the
+            // server already committed. During automatic recovery only, resolve
+            // the committed observed prefix locally before resetting the
+            // remaining observed records for resend. A first-process resume has
+            // an empty landing zone and only seeds the receiver watermark.
             let mut initial_last_acked_offset: OffsetId = -1;
-            if wire_offsets_match {
-                if let Some(watermark) = last_committed_offset {
-                    initial_last_acked_offset = watermark;
+            if let Some(watermark) = last_committed_offset {
+                initial_last_acked_offset = watermark;
+                if !is_initial {
                     Self::reconcile_committed_on_resume(
                         &landing_zone_recovery,
                         &oneshot_map,
@@ -246,6 +242,12 @@ impl ZerobusStream {
                     .await;
                 }
             }
+
+            // Move only the still-unacknowledged observed records back for
+            // resend. Capture counts after reconciliation so the log describes
+            // what will actually be sent again.
+            let resent_records = landing_zone_recovery.observed_count();
+            let resent_batches = landing_zone_recovery.reset_observe();
 
             if resent_batches > 0 {
                 info!(
@@ -284,7 +286,6 @@ impl ZerobusStream {
                 Arc::clone(&is_paused),
                 server_error_tx.clone(),
                 per_stream_token.clone(),
-                wire_offsets_match,
             );
 
             // 4. Wait for any of the two tasks to end.
@@ -386,7 +387,7 @@ impl ZerobusStream {
         callback_tx: &Option<tokio::sync::mpsc::UnboundedSender<CallbackMessage>>,
         watermark: OffsetId,
     ) {
-        let committed = landing_zone.remove_front_while(|item| item.offset_id <= watermark);
+        let committed = landing_zone.remove_observed_prefix(|item| item.offset_id <= watermark);
         if committed.is_empty() {
             return;
         }
