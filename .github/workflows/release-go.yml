@@ -81,7 +81,7 @@ jobs:
 
       - name: Install cargo-zigbuild (macOS cross-builds)
         if: matrix.zigbuild
-        run: cargo install cargo-zigbuild --locked --version 0.19.8
+        run: cargo install cargo-zigbuild --locked --version 0.23.0
 
       - name: Build FFI library
         if: '!matrix.zigbuild'
