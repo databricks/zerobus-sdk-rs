@@ -357,6 +357,8 @@ let sdk = ZerobusSdk::builder()
 # Ok::<(), databricks_zerobus_ingest_sdk::ZerobusError>(())
 ```
 
+When a proactive refresh fails, the SDK keeps serving the still-valid cached token rather than failing stream creation, including on non-retryable failures such as revoked credentials. The cached token is served until it actually expires, after which the next call mints a fresh one and any failure then surfaces. A proactive refresh is also capped at half the stream's [`recovery_timeout_ms`](#configuration-options), but only when the cached token has more life left than that cap, so a stalled endpoint falls back to the cached token in time. When too little of the token's life remains, the refresh runs unbounded instead, like a cold miss.
+
 ### Custom Authentication
 
 For advanced use cases, you can implement the `HeadersProvider` trait to supply your own authentication headers. This is useful for integrating with a different OAuth provider, using a centralized token caching service, or implementing alternative authentication mechanisms.

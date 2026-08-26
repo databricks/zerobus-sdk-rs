@@ -3,7 +3,9 @@ use crate::token_cache::{TokenCache, DEFAULT_REFRESH_BUFFER};
 use crate::ZerobusResult;
 use async_trait::async_trait;
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::time::Duration;
 
 /// A trait for providing custom headers for gRPC requests.
 ///
@@ -47,13 +49,14 @@ pub trait HeadersProvider: Send + Sync {
     /// Returns a `ZerobusError` if header generation fails (e.g., token request fails).
     async fn get_headers(&self) -> ZerobusResult<HashMap<&'static str, String>>;
 
-    /// Invalidates any cached authentication state so the next `get_headers`
-    /// call re-derives it from scratch.
+    /// Invalidates cached authentication state that the server just rejected.
     ///
-    /// The SDK calls this when the server rejects the supplied credentials with
-    /// an authentication error during stream creation. The default is a no-op,
-    /// which is correct for providers that hold no cache; the built-in OAuth
-    /// provider overrides it to drop its cached token so the next call re-mints.
+    /// The SDK calls this when the server rejects the supplied credentials with an
+    /// authentication error during stream creation. The default is a no-op, which is
+    /// correct for providers that hold no cache. The built-in OAuth provider clears
+    /// the rejected token from its cache, so the next `get_headers` re-mints — unless
+    /// a concurrent refresh already replaced it with a newer token, which is kept and
+    /// served without re-minting.
     async fn invalidate(&self) {}
 }
 
@@ -68,6 +71,13 @@ pub struct OAuthHeadersProvider {
     workspace_id: String,
     unity_catalog_url: String,
     token_cache: Arc<TokenCache>,
+    /// How long a proactive refresh may run before it's treated as failed and the
+    /// cached token is served; `None` leaves it unbounded.
+    refresh_timeout: Option<Duration>,
+    /// Highest token generation `get_headers` has served, so `invalidate` rejects a
+    /// token this provider actually used. Stays 0 until a cacheable token is served,
+    /// and `invalidate` treats 0 as nothing to reject.
+    last_served_generation: AtomicU64,
 }
 
 impl OAuthHeadersProvider {
@@ -92,6 +102,7 @@ impl OAuthHeadersProvider {
             workspace_id,
             unity_catalog_url,
             Arc::new(TokenCache::new(true, DEFAULT_REFRESH_BUFFER)),
+            None,
         )
     }
 
@@ -106,6 +117,7 @@ impl OAuthHeadersProvider {
         workspace_id: String,
         unity_catalog_url: String,
         token_cache: Arc<TokenCache>,
+        refresh_timeout: Option<Duration>,
     ) -> Self {
         Self {
             client_id,
@@ -114,6 +126,8 @@ impl OAuthHeadersProvider {
             workspace_id,
             unity_catalog_url,
             token_cache,
+            refresh_timeout,
+            last_served_generation: AtomicU64::new(0),
         }
     }
 }
@@ -121,24 +135,42 @@ impl OAuthHeadersProvider {
 #[async_trait]
 impl HeadersProvider for OAuthHeadersProvider {
     async fn get_headers(&self) -> ZerobusResult<HashMap<&'static str, String>> {
-        let token = self
-            .token_cache
-            .get_or_fetch(
+        let fetch = |reason| {
+            DefaultTokenFactory::fetch_token(
+                &self.unity_catalog_url,
+                &self.table_name,
                 &self.client_id,
                 &self.client_secret,
-                &self.table_name,
-                |reason| {
-                    DefaultTokenFactory::fetch_token(
-                        &self.unity_catalog_url,
-                        &self.table_name,
+                &self.workspace_id,
+                reason,
+            )
+        };
+        let (token, generation) = match self.refresh_timeout {
+            Some(refresh_timeout) => {
+                self.token_cache
+                    .get_or_fetch_within(
                         &self.client_id,
                         &self.client_secret,
-                        &self.workspace_id,
-                        reason,
+                        &self.table_name,
+                        refresh_timeout,
+                        fetch,
                     )
-                },
-            )
-            .await?;
+                    .await?
+            }
+            None => {
+                self.token_cache
+                    .get_or_fetch(
+                        &self.client_id,
+                        &self.client_secret,
+                        &self.table_name,
+                        fetch,
+                    )
+                    .await?
+            }
+        };
+        // Remember the highest served generation so invalidate() rejects it.
+        self.last_served_generation
+            .fetch_max(generation, Ordering::SeqCst);
         let mut headers = HashMap::new();
         headers.insert("authorization", format!("Bearer {}", token));
         headers.insert("x-databricks-zerobus-table-name", self.table_name.clone());
@@ -146,8 +178,14 @@ impl HeadersProvider for OAuthHeadersProvider {
     }
 
     async fn invalidate(&self) {
+        let rejected_generation = self.last_served_generation.load(Ordering::SeqCst);
         self.token_cache
-            .invalidate(&self.client_id, &self.client_secret, &self.table_name)
+            .invalidate(
+                &self.client_id,
+                &self.client_secret,
+                &self.table_name,
+                rejected_generation,
+            )
             .await;
     }
 }

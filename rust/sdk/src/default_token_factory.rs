@@ -239,13 +239,23 @@ impl DefaultTokenFactory {
     }
 
     /// Parses the OAuth `expires_in` field (token lifetime in seconds) into a
-    /// `Duration`. It is optional in the OAuth spec; if it is missing or not a
-    /// positive integer the token has no known TTL and must not be cached.
+    /// `Duration`. A plain JSON integer (`3600`) and a quoted one (`"3600"`) are
+    /// both accepted.
+    ///
+    /// `expires_in` is optional in the OAuth spec; a missing value, or one that
+    /// is not a positive integer, yields `None`.
     fn parse_expires_in(body: &serde_json::Value) -> Option<Duration> {
-        body["expires_in"]
-            .as_u64()
-            .filter(|secs| *secs > 0)
-            .map(Duration::from_secs)
+        let secs = match &body["expires_in"] {
+            serde_json::Value::Number(n) => n.as_u64(),
+            serde_json::Value::String(s) => s.trim().parse::<u64>().ok(),
+            _ => None,
+        }?;
+
+        if secs == 0 {
+            return None;
+        }
+
+        Some(Duration::from_secs(secs))
     }
 
     /// Classifies HTTP status codes as retryable or non-retryable errors.
@@ -355,20 +365,43 @@ mod tests {
 
     #[test]
     fn test_parse_expires_in() {
-        let with_ttl = serde_json::json!({ "expires_in": 3600 });
+        // A JSON integer parses to that many seconds.
+        let integer = serde_json::json!({ "expires_in": 3600 });
         assert_eq!(
-            DefaultTokenFactory::parse_expires_in(&with_ttl),
+            DefaultTokenFactory::parse_expires_in(&integer),
             Some(Duration::from_secs(3600))
         );
 
-        let missing = serde_json::json!({ "access_token": "abc" });
+        // A quoted integer parses to the same value.
+        let quoted = serde_json::json!({ "expires_in": "3600" });
+        assert_eq!(
+            DefaultTokenFactory::parse_expires_in(&quoted),
+            Some(Duration::from_secs(3600))
+        );
+
+        // Surrounding whitespace in the string is trimmed.
+        let padded = serde_json::json!({ "expires_in": " 3600 " });
+        assert_eq!(
+            DefaultTokenFactory::parse_expires_in(&padded),
+            Some(Duration::from_secs(3600))
+        );
+
+        // Absent, zero, and negative all yield no TTL.
+        let missing = serde_json::json!({});
         assert_eq!(DefaultTokenFactory::parse_expires_in(&missing), None);
 
         let zero = serde_json::json!({ "expires_in": 0 });
         assert_eq!(DefaultTokenFactory::parse_expires_in(&zero), None);
 
-        // A string value (non-integer) is not usable and yields no TTL.
-        let non_numeric = serde_json::json!({ "expires_in": "3600" });
+        let negative = serde_json::json!({ "expires_in": -1 });
+        assert_eq!(DefaultTokenFactory::parse_expires_in(&negative), None);
+
+        // A fractional value is not a whole number of seconds.
+        let fractional = serde_json::json!({ "expires_in": 3600.9 });
+        assert_eq!(DefaultTokenFactory::parse_expires_in(&fractional), None);
+
+        // A non-numeric string yields no TTL.
+        let non_numeric = serde_json::json!({ "expires_in": "abc" });
         assert_eq!(DefaultTokenFactory::parse_expires_in(&non_numeric), None);
     }
 
