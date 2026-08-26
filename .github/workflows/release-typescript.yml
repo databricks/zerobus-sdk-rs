@@ -3,6 +3,12 @@ run-name: "Build TypeScript SDK ${{ github.ref_name }}"
 
 on:
   workflow_dispatch:
+    inputs:
+      macos-binaries-release:
+        description: "Optional GitHub Release tag holding laptop-built zerobus-ingest-sdk.darwin-*.node files. Leave empty to skip macOS."
+        required: false
+        type: string
+        default: ""
 
 jobs:
   build:
@@ -82,4 +88,34 @@ jobs:
           path: |
             typescript/index.js
             typescript/index.d.ts
+          if-no-files-found: error
+
+  import-macos:
+    if: inputs.macos-binaries-release != ''
+    runs-on:
+      group: databricks-protected-runner-group
+      labels: linux-ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Download darwin .node binaries from release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REF: ${{ inputs.macos-binaries-release }}
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          gh release download "$REF" \
+            --repo "${{ github.repository }}" \
+            --pattern 'zerobus-ingest-sdk.darwin-*.node' \
+            --dir dist/
+          test -f dist/zerobus-ingest-sdk.darwin-x64.node
+          test -f dist/zerobus-ingest-sdk.darwin-arm64.node
+          ls -lh dist/zerobus-ingest-sdk.darwin-*.node
+
+      - name: Upload darwin bindings
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: bindings-macos
+          path: dist/zerobus-ingest-sdk.darwin-*.node
           if-no-files-found: error
