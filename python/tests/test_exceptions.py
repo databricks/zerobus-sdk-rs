@@ -9,6 +9,7 @@ import asyncio
 import unittest
 
 from zerobus import (
+    FederatedToken,
     HeadersProvider,
     NonRetriableException,
     StreamConfigurationOptions,
@@ -74,6 +75,19 @@ class TestNonRetriableMapping(unittest.TestCase):
         sdk = core.sync.ZerobusSdk(HOST, UC)
         self._assert_non_retriable(lambda: sdk.create_arrow_stream("catalog.schema.table", b"not-ipc", "id", "secret"))
 
+    def test_federated_non_string_callback_is_non_retriable(self):
+        # A federated IdP callback that returns a non-string is caller misuse:
+        # retrying cannot fix it, so it must be non-retriable. The supplier fails
+        # during minting, before any network, so no live server is needed.
+        sdk = _sync_sdk()
+        self._assert_non_retriable(
+            lambda: sdk.create_stream(
+                table_properties=TableProperties("catalog.schema.table"),
+                options=NO_RECOVERY,
+                auth=FederatedToken(idp_token_supplier=lambda: 123),
+            )
+        )
+
     def test_async_empty_table_name(self):
         sdk = AsyncSdk(HOST, UC)
 
@@ -102,4 +116,20 @@ class TestRetriableMapping(unittest.TestCase):
         sdk = SyncSdk(HOST, LOCAL_REFUSED)
         with self.assertRaises(ZerobusException) as ctx:
             sdk.create_stream("id", "secret", TableProperties("catalog.schema.table"), NO_RECOVERY)
+        self.assertNotIsInstance(ctx.exception, NonRetriableException)
+
+    def test_federated_callback_raises_is_base_zerobus_exception(self):
+        # A federated IdP callback that raises is a transient token-fetch failure
+        # (e.g. the external IdP was briefly unavailable): it must be retriable,
+        # like an OAuth mint error, not a fatal NonRetriableException.
+        def boom():
+            raise RuntimeError("idp temporarily unavailable")
+
+        sdk = _sync_sdk()
+        with self.assertRaises(ZerobusException) as ctx:
+            sdk.create_stream(
+                table_properties=TableProperties("catalog.schema.table"),
+                options=NO_RECOVERY,
+                auth=FederatedToken(idp_token_supplier=boom),
+            )
         self.assertNotIsInstance(ctx.exception, NonRetriableException)

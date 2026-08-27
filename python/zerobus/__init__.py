@@ -56,6 +56,7 @@ Example (Async):
 # Import from Rust core
 import zerobus._zerobus_core as _core
 from zerobus.sdk.shared.arrow import ArrowStreamConfigurationOptions, IPCCompression
+from zerobus.sdk.shared.auth import FederatedToken
 from zerobus.sdk.sync import ZerobusArrowStream, ZerobusSdk, ZerobusStream
 
 __version__ = "1.6.1"
@@ -86,6 +87,7 @@ __all__ = [
     "AckCallback",
     # Authentication
     "HeadersProvider",
+    "FederatedToken",
     # Exceptions
     "ZerobusException",
     "NonRetriableException",
