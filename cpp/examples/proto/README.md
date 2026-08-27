@@ -13,6 +13,7 @@ ingestion into Databricks Delta tables using the Zerobus C++ SDK.
 - [Batch Example](#batch-example)
   - [Running the Example](#running-the-example-1)
   - [Code Highlights](#code-highlights-1)
+  - [Batching Records You Already Hold](#batching-records-you-already-hold)
 - [Adapting for Your Custom Table](#adapting-for-your-custom-table)
 
 ## Overview
@@ -165,6 +166,7 @@ zerobus::Stream stream =
 ```
 Batch of 3 records queued; batch offset ID: 0
 Batch acknowledged at offset ID: 0
+Arena batch of 2 records queued; batch offset ID: 1
 Stream closed successfully.
 ```
 
@@ -194,6 +196,35 @@ if (batch_offset >= 0) {
 
 In a hot path you would queue **many** batches and `flush()` once, rather than
 waiting after each batch.
+
+### Batching Records You Already Hold
+
+`encode_json()` hands back one `std::vector<std::uint8_t>` per record, so the
+batch above is a natural vector-of-vectors. If your encoded records live
+somewhere else — the example packs a second batch into one contiguous arena —
+use `ProtoRecordView` instead of copying each payload into that container just
+to pass it:
+
+```cpp
+std::vector<zerobus::ProtoRecordView> views;
+for (const Span& span : spans) {          // spans index into `arena`
+  views.push_back({arena.data() + span.offset, span.size});
+}
+
+const std::int64_t offset =
+    stream.ingest_proto_records(views.data(), views.size());
+```
+
+A view borrows, so two rules apply:
+- **The bytes must outlive the call.** The core copies them before
+  `ingest_proto_records()` returns, and nothing holds the pointer afterwards.
+- **Take the pointers last.** Build the views only once the buffer they point
+  into has stopped growing; an `insert`/`push_back` that reallocates invalidates
+  every pointer taken from it earlier.
+
+`{nullptr, 0}` is a valid empty record. A null pointer with a non-zero size is
+rejected with a `ZerobusException` naming the record's index, rather than
+dereferenced inside the core.
 
 ## Adapting for Your Custom Table
 

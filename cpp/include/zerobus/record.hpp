@@ -1,12 +1,23 @@
 #ifndef ZEROBUS_RECORD_HPP
 #define ZEROBUS_RECORD_HPP
 
+#include <cstddef>
 #include <cstdint>
 #include <string>
 #include <utility>
 #include <vector>
 
 namespace zerobus {
+
+/// A non-owning view of one protobuf-encoded record, for the borrowing
+/// `Stream::ingest_proto_records()` overload.
+///
+/// The bytes must stay valid until that call returns; the core copies them
+/// before it does. `{nullptr, 0}` is a valid empty record.
+struct ProtoRecordView {
+  const std::uint8_t* data = nullptr;
+  std::size_t size = 0;
+};
 
 /// A record recovered from a stream that was closed or failed before all
 /// records were acknowledged. Returned by `Stream::get_unacked_records()`.

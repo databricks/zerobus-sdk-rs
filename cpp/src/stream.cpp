@@ -1,8 +1,8 @@
 // Implementation of Stream (declared in zerobus/stream.hpp).
 //
 // A thin forwarding layer over the zerobus_stream_* C FFI entry points. The
-// file-local helpers build the small parallel pointer/length arrays the batch
-// entry points expect, and every fallible call routes its CResult through
+// proto batch entry point's pointer/length arrays are built by
+// detail/proto_batch.hpp, and every fallible call routes its CResult through
 // detail::ResultGuard. The destructor and move-assignment close best-effort
 // (swallowing errors), whereas close() surfaces them. Public API documentation
 // lives on the header; comments here cover only implementation details.
@@ -12,6 +12,7 @@
 #include <utility>
 
 #include "detail/ffi_util.hpp"
+#include "detail/proto_batch.hpp"
 
 namespace zerobus {
 
@@ -45,39 +46,6 @@ std::int64_t checked_offset(std::int64_t offset) {
                            false);
   }
   return offset;
-}
-
-// An empty payload still needs a valid, non-null pointer to pass across the FFI
-// (paired with length 0); hand out the address of a static sentinel byte rather
-// than nullptr or a dangling data() result.
-const std::uint8_t* ptr_or_sentinel(const std::vector<std::uint8_t>& bytes) {
-  static const std::uint8_t kEmptyPayloadSentinel = 0;
-  return bytes.empty() ? &kEmptyPayloadSentinel : bytes.data();
-}
-
-// Same sentinel for the raw (pointer, length) form, so {nullptr, 0} is a valid
-// empty record instead of a null-pointer error.
-const std::uint8_t* ptr_or_sentinel(const std::uint8_t* data, std::size_t len) {
-  static const std::uint8_t kEmptyPayloadSentinel = 0;
-  return len == 0 ? &kEmptyPayloadSentinel : data;
-}
-
-// Build the parallel pointer/length arrays the batch FFI entry points expect.
-struct ProtoBatchView {
-  std::vector<const std::uint8_t*> ptrs;
-  std::vector<std::uintptr_t> lens;
-};
-
-ProtoBatchView make_proto_batch(
-    const std::vector<std::vector<std::uint8_t>>& records) {
-  ProtoBatchView v;
-  v.ptrs.reserve(records.size());
-  v.lens.reserve(records.size());
-  for (const auto& r : records) {
-    v.ptrs.push_back(ptr_or_sentinel(r));
-    v.lens.push_back(r.size());
-  }
-  return v;
 }
 
 // JSON records cross the FFI as an array of NUL-terminated C strings, so unlike
@@ -151,7 +119,7 @@ std::int64_t Stream::ingest_proto_record(const std::uint8_t* data,
   ensure_open(handle_);
   detail::ResultGuard guard;
   std::int64_t offset = zerobus_stream_ingest_proto_record(
-      handle_, ptr_or_sentinel(data, len), len, guard.ptr());
+      handle_, detail::ptr_or_sentinel(data, len), len, guard.ptr());
   guard.throw_if_error();
   return checked_offset(offset);
 }
@@ -160,7 +128,7 @@ std::int64_t Stream::ingest_proto_record(const std::uint8_t* data,
 // sentinel so an empty record still passes a non-null pointer.
 std::int64_t Stream::ingest_proto_record(
     const std::vector<std::uint8_t>& data) {
-  return ingest_proto_record(ptr_or_sentinel(data), data.size());
+  return ingest_proto_record(detail::ptr_or_sentinel(data), data.size());
 }
 
 std::int64_t Stream::ingest_json_record(const std::string& json) {
@@ -182,7 +150,24 @@ std::int64_t Stream::ingest_proto_records(
   if (records.empty()) {
     return -1;
   }
-  ProtoBatchView v = make_proto_batch(records);
+  detail::ProtoBatchView v = detail::make_proto_batch(records);
+  detail::ResultGuard guard;
+  std::int64_t offset = zerobus_stream_ingest_proto_records(
+      handle_, v.ptrs.data(), v.lens.data(), v.ptrs.size(), guard.ptr());
+  guard.throw_if_error();
+  return checked_offset(offset);
+}
+
+// Borrowing overload: v points into the caller's bytes instead of copying them.
+std::int64_t Stream::ingest_proto_records(const ProtoRecordView* records,
+                                          std::size_t num_records) {
+  ensure_open(handle_);
+  // No-op returning -1, as in the vector overload. Checked before the null
+  // guard, so a {nullptr, 0} batch is a no-op too rather than an error.
+  if (num_records == 0) {
+    return -1;
+  }
+  detail::ProtoBatchView v = detail::make_proto_batch(records, num_records);
   detail::ResultGuard guard;
   std::int64_t offset = zerobus_stream_ingest_proto_records(
       handle_, v.ptrs.data(), v.lens.data(), v.ptrs.size(), guard.ptr());

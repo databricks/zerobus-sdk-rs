@@ -78,6 +78,22 @@ class Stream {
   std::int64_t ingest_proto_records(
       const std::vector<std::vector<std::uint8_t>>& records);
 
+  /// @overload
+  /// Ingest a batch of borrowed protobuf records, skipping the copy into a
+  /// vector of vectors when the encoded records already live elsewhere (an
+  /// arena, a ring buffer, your own record type).
+  ///
+  /// @param records Pointer to @p num_records views, each borrowing bytes that
+  ///        must stay valid until this call returns.
+  /// @param num_records Number of views in @p records.
+  /// @return The single logical offset assigned to the whole batch, or -1 if
+  ///         @p num_records is 0 (a no-op).
+  /// @throws ZerobusException if @p records is null with a non-zero
+  ///         @p num_records, if a view has a null pointer with a non-zero size,
+  ///         or if the stream is closed or ingestion fails.
+  std::int64_t ingest_proto_records(const ProtoRecordView* records,
+                                    std::size_t num_records);
+
   /// Ingest a batch of JSON records, blocking until they are queued.
   ///
   /// @param records The records, each a UTF-8 JSON string.

@@ -177,6 +177,13 @@ Public API is everything under `include/zerobus/`:
 - Every FFI crossing serializes data; prefer the batch APIs
   (`ingest_proto_records`, `ingest_json_records`) over per-record calls in hot
   paths.
+- Neither batch API copies payloads: `detail/proto_batch.hpp` builds the FFI's
+  pointer/length arrays from pointers into the caller's buffers, and
+  `tests/proto_batch_test.cpp` asserts that by pointer identity (a copying
+  regression would still behave correctly). `ingest_proto_records` also takes
+  `const ProtoRecordView*` + count, for records held outside a
+  `vector<vector<uint8_t>>`. JSON has no such overload: its FFI needs
+  NUL-terminated `const char*`, so `std::string` is already the zero-copy shape.
 - Ingestion is asynchronous: `ingest_*` queues and returns. Never wait per
   record (`wait_for_offset`/`flush` in the loop); flush once at the end or flush
   periodically. Examples and doc comments must follow this pattern.
