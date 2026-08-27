@@ -15,6 +15,9 @@
   descriptor declares, so callers can inspect a table's columns without parsing
   the descriptor themselves. It accepts the bytes returned by
   `FetchProtoDescriptorFromUC` or passed to `WithProto`.
+- Speed up JSON-to-protobuf conversion, especially for wide tables, by using the
+  descriptor's indexed field lookup and skipping collection validation for
+  schemas that contain only scalar fields or records that contain no `null`.
 
 ### Bug Fixes
 

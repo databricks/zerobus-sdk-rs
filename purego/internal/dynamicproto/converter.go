@@ -16,7 +16,8 @@ import (
 
 // Converter encodes JSON payloads into protobuf bytes using a runtime descriptor.
 type Converter struct {
-	message protoreflect.MessageDescriptor
+	message                 protoreflect.MessageDescriptor
+	validateNullCollections bool
 }
 
 // NewFromDescriptorProtoBytes creates a converter from a serialized DescriptorProto.
@@ -44,7 +45,10 @@ func NewFromDescriptorProtoBytes(descBytes []byte) (*Converter, error) {
 	if message == nil {
 		return nil, fmt.Errorf("dynamicproto: missing top-level message descriptor")
 	}
-	return &Converter{message: message}, nil
+	return &Converter{
+		message:                 message,
+		validateNullCollections: hasCollectionFields(message),
+	}, nil
 }
 
 // MessageDescriptor returns the converter's runtime message descriptor.
@@ -68,8 +72,12 @@ func (c *Converter) EncodeJSONBytes(record []byte) ([]byte, error) {
 	if err := unmarshal.Unmarshal(record, msg); err != nil {
 		return nil, fmt.Errorf("dynamicproto: parse JSON payload: %w", err)
 	}
-	if err := rejectNullCollections(record, c.message); err != nil {
-		return nil, err
+	// A JSON null token always contains these exact bytes. Matches inside strings
+	// are harmless false positives that only trigger the validation pass.
+	if c.validateNullCollections && bytes.Contains(record, []byte("null")) {
+		if err := rejectNullCollections(record, c.message); err != nil {
+			return nil, err
+		}
 	}
 	out, err := proto.Marshal(msg)
 	if err != nil {
@@ -196,11 +204,32 @@ func fieldByJSONName(
 	fields protoreflect.FieldDescriptors,
 	name string,
 ) protoreflect.FieldDescriptor {
-	for i := 0; i < fields.Len(); i++ {
-		field := fields.Get(i)
-		if name == field.JSONName() || name == string(field.Name()) {
-			return field
-		}
+	if field := fields.ByJSONName(name); field != nil {
+		return field
 	}
-	return nil
+	return fields.ByTextName(name)
+}
+
+func hasCollectionFields(message protoreflect.MessageDescriptor) bool {
+	visited := make(map[protoreflect.FullName]struct{})
+	var visit func(protoreflect.MessageDescriptor) bool
+	visit = func(current protoreflect.MessageDescriptor) bool {
+		if current == nil {
+			return false
+		}
+		if _, ok := visited[current.FullName()]; ok {
+			return false
+		}
+		visited[current.FullName()] = struct{}{}
+
+		fields := current.Fields()
+		for i := 0; i < fields.Len(); i++ {
+			field := fields.Get(i)
+			if field.Cardinality() == protoreflect.Repeated || visit(field.Message()) {
+				return true
+			}
+		}
+		return false
+	}
+	return visit(message)
 }
