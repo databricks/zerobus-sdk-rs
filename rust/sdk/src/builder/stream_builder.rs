@@ -25,7 +25,9 @@ use crate::callbacks::AckCallback;
 use crate::databricks::zerobus::RecordType;
 #[cfg(feature = "testing")]
 use crate::headers_provider::NoAuthHeadersProvider;
-use crate::headers_provider::{HeadersProvider, OAuthHeadersProvider};
+use crate::headers_provider::{
+    FederatedTokenProvider, HeadersProvider, IdpTokenSupplier, OAuthHeadersProvider,
+};
 use crate::stream_configuration::StreamConfigurationOptions;
 use crate::{
     MessageDescriptor, TableProperties, ZerobusError, ZerobusResult, ZerobusSdk, ZerobusStream,
@@ -41,6 +43,16 @@ enum AuthConfig {
     OAuth {
         client_id: String,
         client_secret: String,
+    },
+    /// External-IdP federation via RFC 8693 token exchange. `client_id` is
+    /// `Some` for workload identity federation and `None` for account-level
+    /// federation. `cache_key` partitions the shared token cache for
+    /// account-level federation so distinct identities do not collide; it is
+    /// unused for workload identity federation (which keys by `client_id`).
+    Federated {
+        idp_token_supplier: IdpTokenSupplier,
+        client_id: Option<String>,
+        cache_key: Option<String>,
     },
     HeadersProvider(Arc<dyn HeadersProvider>),
     #[cfg(feature = "testing")]
@@ -109,6 +121,7 @@ impl fmt::Debug for StreamBuilder<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let auth_kind = match &self.auth {
             Some(AuthConfig::OAuth { .. }) => "OAuth",
+            Some(AuthConfig::Federated { .. }) => "Federated",
             Some(AuthConfig::HeadersProvider(_)) => "HeadersProvider",
             #[cfg(feature = "testing")]
             Some(AuthConfig::NoAuth) => "NoAuth",
@@ -133,11 +146,11 @@ impl fmt::Debug for StreamBuilder<'_> {
 const fn missing_auth_error() -> &'static str {
     #[cfg(feature = "testing")]
     {
-        "authentication is required: call .oauth(), .headers_provider(), or .no_auth()"
+        "authentication is required: call .oauth(), .federated(), .headers_provider(), or .no_auth()"
     }
     #[cfg(not(feature = "testing"))]
     {
-        "authentication is required: call .oauth() or .headers_provider()"
+        "authentication is required: call .oauth(), .federated(), or .headers_provider()"
     }
 }
 
@@ -166,6 +179,28 @@ impl<'a> StreamBuilder<'a> {
         self.auth = Some(AuthConfig::OAuth {
             client_id: client_id.into(),
             client_secret: client_secret.into(),
+        });
+        self
+    }
+
+    /// Authenticate with external-IdP federation (RFC 8693).
+    ///
+    /// `client_id`: `None` for account-level federation; a Databricks service
+    /// principal id for workload identity federation. `cache_key`: an optional
+    /// opaque partition for the shared token cache under account-level
+    /// federation, so two different identities used from one SDK instance do not
+    /// share a cached token; `None` shares by table (unused for workload, which
+    /// keys by `client_id`).
+    pub fn federated(
+        mut self,
+        idp_token_supplier: IdpTokenSupplier,
+        client_id: Option<impl Into<String>>,
+        cache_key: Option<String>,
+    ) -> Self {
+        self.auth = Some(AuthConfig::Federated {
+            idp_token_supplier,
+            client_id: client_id.map(Into::into),
+            cache_key,
         });
         self
     }
@@ -416,6 +451,27 @@ impl<'a> StreamBuilder<'a> {
                     self.sdk.unity_catalog_url.clone(),
                     Arc::clone(&self.sdk.token_cache),
                     Some(refresh_timeout),
+                )))
+            }
+            Some(AuthConfig::Federated {
+                idp_token_supplier,
+                client_id,
+                cache_key,
+            }) => {
+                // Federation mirrors OAuth's proactive-refresh bound so a stalled
+                // token exchange falls back to the cached token before the setup
+                // deadline, keeping client-credentials and token-exchange at parity.
+                let refresh_timeout =
+                    std::time::Duration::from_millis(self.grpc_config.recovery_timeout_ms) / 2;
+                Ok(Arc::new(FederatedTokenProvider::with_cache(
+                    client_id.clone(),
+                    Arc::clone(idp_token_supplier),
+                    self.table_name.clone(),
+                    self.sdk.workspace_id.clone(),
+                    self.sdk.unity_catalog_url.clone(),
+                    Arc::clone(&self.sdk.token_cache),
+                    Some(refresh_timeout),
+                    cache_key.clone(),
                 )))
             }
             Some(AuthConfig::HeadersProvider(p)) => Ok(Arc::clone(p)),

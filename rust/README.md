@@ -518,6 +518,52 @@ let client_secret = "your-client-secret".to_string();
 
 See [`examples/README.md`](https://github.com/databricks/zerobus-sdk/blob/main/rust/examples/README.md) for more information on how to get these credentials.
 
+#### External-IdP federation (e.g. Entra ID)
+
+To authenticate with an external identity provider instead of a Databricks
+OAuth secret, use the federated builder methods. You provide an
+[`IdpTokenSupplier`] callback that returns the current external IdP token; the
+SDK exchanges it for a Zerobus-scoped Databricks token (RFC 8693 token
+exchange) and caches and refreshes it, exactly like the OAuth path.
+
+```rust,ignore
+use std::sync::Arc;
+
+// Account-level federation: no Databricks service principal. The identity is
+// synced into Databricks via Automatic Identity Management (SCIM). The third
+// argument is an optional cache_key: pass a distinct value per identity if you
+// drive multiple account-level identities from one SDK instance, or `None` to
+// share the cached token by table.
+let stream = sdk
+    .stream_builder()
+    .table("catalog.schema.table")
+    .federated(
+        Arc::new(|| Box::pin(async { get_idp_token().await })),
+        None::<String>,
+        None,
+    )
+    .json()
+    .build()
+    .await?;
+
+// Workload identity federation: a Databricks service principal with a client_id
+// and no secret, with a federation policy attached. (cache_key is unused here:
+// the cache keys by the service principal client_id.)
+let stream = sdk
+    .stream_builder()
+    .table("catalog.schema.table")
+    .federated(
+        Arc::new(|| Box::pin(async { get_idp_token().await })),
+        Some("<sp-client-id>"),
+        None,
+    )
+    .json()
+    .build()
+    .await?;
+```
+
+The existing `.oauth(...)` and `.headers_provider(...)` paths are unchanged.
+
 ### 4. Create a Stream
 
 Use the `stream_builder()` API to create a stream:

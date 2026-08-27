@@ -19,6 +19,7 @@ all-features = true
 
 [dependencies]
 async-trait.workspace = true
+base64.workspace = true
 prost.workspace = true
 prost-types.workspace = true
 prost-reflect.workspace = true
