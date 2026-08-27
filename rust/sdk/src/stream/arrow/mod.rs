@@ -29,6 +29,8 @@ pub use arrow_array::RecordBatch;
 pub use arrow_schema::{DataType, Field, Schema as ArrowSchema, TimeUnit};
 
 use self::batch::{materialize_ipc, PendingBatch};
+use self::batch_stats::BatchStatsTracker;
+pub use self::batch_stats::OffsetDetails;
 use self::close::{CloseCoordinator, CloseFinalizer, CloseRequest, CloseState};
 use self::connection::RequestBodyRegistry;
 pub use self::options::ArrowStreamConfigurationOptions;
@@ -45,6 +47,7 @@ pub(crate) mod c_data;
 
 mod acks;
 mod batch;
+mod batch_stats;
 mod close;
 mod connection;
 mod metadata;
@@ -53,7 +56,8 @@ mod supervisor;
 
 const LOG_TARGET: &str = module_path!();
 
-type BatchSender = Arc<Mutex<Option<mpsc::Sender<Result<RecordBatch, FlightError>>>>>;
+type BatchItem = Result<(OffsetId, RecordBatch), FlightError>;
+type BatchSender = Arc<Mutex<Option<mpsc::Sender<BatchItem>>>>;
 
 struct FlightConnectionParameters<'a> {
     endpoint: &'a str,
@@ -64,6 +68,8 @@ struct FlightConnectionParameters<'a> {
     headers_provider: &'a Arc<dyn HeadersProvider>,
     sdk_identifier: &'a str,
     request_bodies: &'a RequestBodyRegistry,
+    /// Shared byte-size accounting; the encoder records into it on every connection.
+    batch_stats: &'a Arc<BatchStatsTracker>,
     #[cfg(feature = "test-hooks")]
     test_hooks: &'a Arc<TestHooks>,
 }
@@ -238,6 +244,9 @@ pub struct ZerobusArrowStream {
     /// Pause gate used while draining a close signal or rebuilding after failure; accepted
     /// ingests remain pending until recovery replays or finalizes them.
     is_paused: Arc<AtomicBool>,
+    /// Bounded per-offset encoded byte-size accounting for
+    /// `take_offset_details`, populated by the Flight encoder.
+    batch_stats: Arc<BatchStatsTracker>,
     /// Final value sent as the HTTP `user-agent` header on every request.
     /// Either `"zerobus-sdk-rs/<version>"` or `"zerobus-sdk-rs/<version> <application_name>"`.
     /// Re-applied to each fresh Channel built during recovery.
@@ -304,6 +313,11 @@ impl ZerobusArrowStream {
         let is_paused = Arc::new(AtomicBool::new(false));
         // Capacity mirrors the batch_tx channel so a permit holder always has a slot.
         let inflight = Arc::new(Semaphore::new(options.max_inflight_batches));
+        // Retain a few multiples of the in-flight window of recent byte sizes so a
+        // consumer that reads them per acknowledged batch never misses its own.
+        let batch_stats = Arc::new(BatchStatsTracker::new(
+            options.max_inflight_batches.saturating_mul(4),
+        ));
 
         let (server_error_tx, server_error_rx) = watch::channel(None);
         let close = CloseCoordinator::new();
@@ -342,6 +356,7 @@ impl ZerobusArrowStream {
             sdk_identifier,
             #[cfg(feature = "test-hooks")]
             test_hooks: Arc::new(TestHooks::default()),
+            batch_stats,
         };
 
         // Initialize the connection with retry logic.
@@ -366,6 +381,7 @@ impl ZerobusArrowStream {
             let request_bodies = request_bodies.clone();
             #[cfg(feature = "test-hooks")]
             let test_hooks = Arc::clone(&stream.test_hooks);
+            let batch_stats = Arc::clone(&stream.batch_stats);
 
             async move {
                 let parameters = FlightConnectionParameters {
@@ -377,6 +393,7 @@ impl ZerobusArrowStream {
                     headers_provider: &headers_provider,
                     sdk_identifier: &sdk_identifier,
                     request_bodies: &request_bodies,
+                    batch_stats: &batch_stats,
                     #[cfg(feature = "test-hooks")]
                     test_hooks: &test_hooks,
                 };
@@ -596,7 +613,7 @@ impl ZerobusArrowStream {
         {
             let _pending = self.pending_batches.lock().await;
             self.submitted_records.store(end_record, Ordering::Release);
-            send_permit.send(Ok(batch));
+            send_permit.send(Ok((offset_id, batch)));
         }
         // Notify after publishing `submitted_records`: waking earlier could let the ACK
         // processor observe the batch as buffered-but-unsent and go idle again.
@@ -836,6 +853,49 @@ impl ZerobusArrowStream {
     pub async fn wait_for_offset(&self, offset: OffsetId) -> ZerobusResult<()> {
         self.wait_for_offset_internal(offset, "Waiting for acknowledgement")
             .await
+    }
+
+    /// Consumes and returns the encoded byte sizes recorded for `offset`.
+    ///
+    /// Returns [`OffsetDetails`] with both the on-the-wire size (post-compression)
+    /// and the uncompressed encoded size of the batch at `offset`, plus running
+    /// totals for each — useful for "bytes sent" metrics without re-serialising the
+    /// `RecordBatch` yourself. Sizes are captured as the SDK encodes each batch and
+    /// accumulate every transmission, so a batch re-sent during connection recovery
+    /// counts each send.
+    ///
+    /// Call this after the batch has been sent — typically once
+    /// [`wait_for_offset`](Self::wait_for_offset) has acknowledged it. The reading
+    /// consumes the entry, so a second call for the same `offset` returns `None`.
+    /// `None` is also returned when no size is recorded — the batch has not been
+    /// encoded yet, or its entry was evicted from the bounded cache.
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// # use databricks_zerobus_ingest_sdk::*;
+    /// # use arrow_array::RecordBatch;
+    /// # async fn example(stream: ZerobusArrowStream, batches: Vec<RecordBatch>) -> Result<(), ZerobusError> {
+    /// // High throughput: queue in a loop, then flush() once — do NOT wait per batch.
+    /// for batch in &batches {
+    ///     stream.ingest_batch(batch.clone()).await?;
+    /// }
+    /// stream.flush().await?;
+    ///
+    /// // Low-volume / per-batch instrumentation only: wait on one batch, then read its size.
+    /// let offset = stream.ingest_batch(batches[0].clone()).await?;
+    /// stream.wait_for_offset(offset).await?;
+    /// if let Some(details) = stream.take_offset_details(offset) {
+    ///     println!(
+    ///         "wire {} bytes, uncompressed {} bytes",
+    ///         details.wire_byte_size, details.uncompressed_byte_size
+    ///     );
+    /// }
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub fn take_offset_details(&self, offset: OffsetId) -> Option<OffsetDetails> {
+        self.batch_stats.take(offset)
     }
 
     /// Flushes pending work, stops background I/O, and retains unacknowledged batches for
