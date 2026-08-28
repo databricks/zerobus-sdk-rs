@@ -3414,6 +3414,66 @@ mod failure_scenarios_tests {
         }
 
         #[tokio::test]
+        async fn test_recovery_waits_backoff_before_first_reconnect(
+        ) -> Result<(), Box<dyn std::error::Error>> {
+            setup_tracing();
+
+            const BACKOFF_MS: u64 = 300;
+
+            let (mock_server, server_url) = start_mock_server().await?;
+            mock_server
+                .inject_responses(
+                    TABLE_NAME,
+                    vec![
+                        MockResponse::CreateStream {
+                            stream_id: "test_stream_before_backoff".to_string(),
+                            delay_ms: 0,
+                        },
+                        MockResponse::Error {
+                            status: tonic::Status::unavailable("flapping server"),
+                            delay_ms: 0,
+                        },
+                        MockResponse::CreateStream {
+                            stream_id: "test_stream_after_backoff".to_string(),
+                            delay_ms: 0,
+                        },
+                        MockResponse::RecordAck {
+                            ack_up_to_offset: 0,
+                            delay_ms: 0,
+                        },
+                    ],
+                )
+                .await;
+
+            let sdk = ZerobusSdk::builder()
+                .endpoint(server_url.clone())
+                .unity_catalog_url("https://mock-uc.com")
+                .tls_config(Arc::new(NoTlsConfig))
+                .build()?;
+            let stream = sdk
+                .stream_builder()
+                .table(TABLE_NAME)
+                .headers_provider(Arc::new(TestHeadersProvider::default()))
+                .compiled_proto(create_test_descriptor_proto().unwrap_or_default())
+                .recovery(true)
+                .recovery_timeout_ms(5000)
+                .recovery_backoff_ms(BACKOFF_MS)
+                .build()
+                .await?;
+
+            let started = std::time::Instant::now();
+            let offset = stream.ingest_record_offset(b"pending".to_vec()).await?;
+            stream.wait_for_offset(offset).await?;
+            let elapsed = started.elapsed();
+            assert!(
+                elapsed >= std::time::Duration::from_millis(BACKOFF_MS),
+                "first reconnect skipped recovery_backoff_ms: elapsed {elapsed:?}"
+            );
+
+            Ok(())
+        }
+
+        #[tokio::test]
         async fn test_recovery_after_server_unresponsiveness(
         ) -> Result<(), Box<dyn std::error::Error>> {
             setup_tracing();

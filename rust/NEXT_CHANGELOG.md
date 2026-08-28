@@ -8,6 +8,10 @@
 
 ### Bug Fixes
 
+- After a mid-stream gRPC failure, recovery now waits `recovery_backoff_ms`
+  before the first reconnect attempt, matching Arrow. Previously only retries
+  *within* an episode were delayed, so a flapping server was reconnected in a
+  tight loop.
 - The OAuth `expires_in` field is now parsed from a quoted integer (`"3600"`) in
   addition to a plain JSON integer. A value that is missing or does not represent
   a positive integer still yields no token lifetime, as before.

@@ -62,14 +62,6 @@ impl ZerobusStream {
                 return Ok(());
             }
 
-            if !initial_stream_creation {
-                info!(
-                    pending_batches = landing_zone.len(),
-                    pending_records = landing_zone.total_count(),
-                    "Stream lost; starting recovery"
-                );
-            }
-
             let landing_zone_sender = Arc::clone(&landing_zone);
             let landing_zone_receiver = Arc::clone(&landing_zone);
             let landing_zone_recovery = Arc::clone(&landing_zone);
@@ -302,6 +294,23 @@ impl ZerobusStream {
                     )
                     .await;
                     return Err(error);
+                }
+
+                info!(
+                    pending_batches = landing_zone.len(),
+                    pending_records = landing_zone.total_count(),
+                    backoff_ms = options.recovery_backoff_ms,
+                    "Stream lost; starting recovery"
+                );
+                // FixedInterval only delays between retries in this episode; the first
+                // attempt is immediate. Sleep first so a flapping server is not hot-looped.
+                // A graceful close returns Ok and deliberately bypasses this backoff.
+                tokio::select! {
+                    _ = cancellation_token.cancelled() => {
+                        debug!("Supervisor task cancelled during recovery backoff");
+                        return Ok(());
+                    }
+                    _ = tokio::time::sleep(Duration::from_millis(options.recovery_backoff_ms)) => {}
                 }
             }
         }
