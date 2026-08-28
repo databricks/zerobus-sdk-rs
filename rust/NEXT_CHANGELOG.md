@@ -8,6 +8,8 @@
 
 ### Bug Fixes
 
+- The gRPC lack-of-ack timeout now resets only when the durability watermark
+  advances. Duplicate or stale acknowledgments no longer postpone recovery.
 - The OAuth `expires_in` field is now parsed from a quoted integer (`"3600"`) in
   addition to a plain JSON integer. A value that is missing or does not represent
   a positive integer still yields no token lifetime, as before.

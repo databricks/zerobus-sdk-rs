@@ -8,7 +8,7 @@
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
-use tokio::time::Duration;
+use tokio::time::{Duration, Instant};
 use tokio_util::sync::CancellationToken;
 use tracing::{error, info, instrument, span, Level};
 
@@ -42,6 +42,9 @@ impl ZerobusStream {
             let _guard = span.enter();
             let mut last_acked_offset = -1;
             let mut pause_deadline: Option<tokio::time::Instant> = None;
+            let ack_timeout = Duration::from_millis(options.server_lack_of_ack_timeout_ms);
+            // Inbound frames do not move this deadline; only a newer durability ACK does.
+            let mut ack_deadline = Instant::now() + ack_timeout;
             // Set when we exit because the supervisor signalled close (`recv_drain_token`).
             // On that path we drain the response stream inline so the server sees END_STREAM
             // instead of RST_STREAM. On all other exits (recovery / errors) the runtime is
@@ -72,10 +75,7 @@ impl ZerobusStream {
                         _ = tokio::time::sleep_until(deadline) => {
                             continue;
                         }
-                        res = tokio::time::timeout(
-                            Duration::from_millis(options.server_lack_of_ack_timeout_ms),
-                            response_grpc_stream.message(),
-                        ) => res,
+                        res = response_grpc_stream.message() => Ok(res),
                     }
                 } else {
                     tokio::select! {
@@ -84,8 +84,8 @@ impl ZerobusStream {
                             close_initiated = true;
                             break 'recv_loop;
                         }
-                        res = tokio::time::timeout(
-                            Duration::from_millis(options.server_lack_of_ack_timeout_ms),
+                        res = tokio::time::timeout_at(
+                            ack_deadline,
                             response_grpc_stream.message(),
                         ) => res,
                     }
@@ -108,29 +108,32 @@ impl ZerobusStream {
                                     return Err(error);
                                 }
                             };
-                            let mut last_logical_acked_offset = -2;
-                            let mut map = oneshot_map.lock().await;
-                            for _offset_to_ack in
-                                (last_acked_offset + 1)..=durability_ack_up_to_offset
-                            {
-                                if let Ok(record) = landing_zone.remove_observed() {
-                                    let logical_offset = record.offset_id;
-                                    last_logical_acked_offset = logical_offset;
+                            if durability_ack_up_to_offset > last_acked_offset {
+                                let mut last_logical_acked_offset = None;
+                                let mut map = oneshot_map.lock().await;
+                                for _offset_to_ack in
+                                    (last_acked_offset + 1)..=durability_ack_up_to_offset
+                                {
+                                    if let Ok(record) = landing_zone.remove_observed() {
+                                        let logical_offset = record.offset_id;
+                                        last_logical_acked_offset = Some(logical_offset);
 
-                                    if let Some(sender) = map.remove(&logical_offset) {
-                                        let _ = sender.send(Ok(logical_offset));
-                                    }
+                                        if let Some(sender) = map.remove(&logical_offset) {
+                                            let _ = sender.send(Ok(logical_offset));
+                                        }
 
-                                    if let Some(ref tx) = callback_tx {
-                                        let _ = tx.send(CallbackMessage::Ack(logical_offset));
+                                        if let Some(ref tx) = callback_tx {
+                                            let _ = tx.send(CallbackMessage::Ack(logical_offset));
+                                        }
                                     }
                                 }
-                            }
-                            drop(map);
-                            last_acked_offset = durability_ack_up_to_offset;
-                            if last_logical_acked_offset != -2 {
-                                let _ignore_on_channel_break = last_received_offset_id_tx
-                                    .send(Some(last_logical_acked_offset));
+                                drop(map);
+                                last_acked_offset = durability_ack_up_to_offset;
+                                ack_deadline = Instant::now() + ack_timeout;
+                                if let Some(logical_offset) = last_logical_acked_offset {
+                                    let _ignore_on_channel_break =
+                                        last_received_offset_id_tx.send(Some(logical_offset));
+                                }
                             }
                         }
                         Some(ResponsePayload::CloseStreamSignal(CloseStreamSignal {
@@ -193,10 +196,9 @@ impl ZerobusStream {
                         return Err(error);
                     }
                     Err(_timeout) => {
-                        // No message received for server_lack_of_ack_timeout_ms.
-                        if pause_deadline.is_none() && !landing_zone.is_observed_empty() {
+                        if !landing_zone.is_observed_empty() {
                             error!(
-                                "Server ack timeout: no response for {}ms",
+                                "Server ack timeout: no durable progress for {}ms",
                                 options.server_lack_of_ack_timeout_ms
                             );
                             let error = ZerobusError::StreamClosedError(
@@ -205,6 +207,7 @@ impl ZerobusStream {
                             let _ = server_error_tx.send(Some(error.clone()));
                             return Err(error);
                         }
+                        ack_deadline = Instant::now() + ack_timeout;
                     }
                 }
             }

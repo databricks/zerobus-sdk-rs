@@ -58,6 +58,12 @@ pub enum MockResponse {
         ack_up_to_offset: i64,
         delay_ms: u64,
     },
+    /// Record acknowledgment sent regardless of the triggering request offset.
+    #[allow(dead_code)]
+    RecordAckForAnyRequest {
+        ack_up_to_offset: i64,
+        delay_ms: u64,
+    },
     /// Successful record acknowledgment released explicitly by a test
     #[allow(dead_code)]
     GatedRecordAck {
@@ -532,6 +538,25 @@ async fn handle_mock_response(
             } else {
                 (true, current_index)
             }
+        }
+        MockResponse::RecordAckForAnyRequest {
+            ack_up_to_offset,
+            delay_ms,
+        } => {
+            if *delay_ms > 0 {
+                sleep(Duration::from_millis(*delay_ms)).await;
+            }
+            let response = EphemeralStreamResponse {
+                payload: Some(ResponsePayload::IngestRecordResponse(
+                    IngestRecordResponse {
+                        durability_ack_up_to_offset: Some(*ack_up_to_offset),
+                    },
+                )),
+            };
+            if tx.send(Ok(response)).await.is_err() {
+                return (false, current_index);
+            }
+            (true, current_index + 1)
         }
         MockResponse::GatedRecordAck {
             ack_up_to_offset,
