@@ -51,6 +51,8 @@ pub(super) enum GrpcConnectionMode {
     /// Persistent (Eos) stream: `PersistentStream` RPC, durable wire offsets.
     /// `resume_stream_id` is `Some` when reconnecting to an existing stream and
     /// `None` when creating a new one.
+    // Constructed by the feature-gated public API introduced in the downstream PR.
+    #[allow(dead_code)]
     Persistent { resume_stream_id: Option<String> },
 }
 

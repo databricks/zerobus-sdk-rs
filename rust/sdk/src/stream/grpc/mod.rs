@@ -101,6 +101,8 @@ pub struct ZerobusStream {
     /// from the resume response). `None` for ephemeral streams and for a
     /// freshly created persistent stream (nothing committed yet). Only read
     /// through the `eos`-gated accessor.
+    // Used by the feature-gated public API introduced in the downstream PR.
+    #[allow(dead_code)]
     pub(crate) last_committed_offset: Option<OffsetId>,
     /// Gets headers which are used in the first request to establish connection with the server.
     pub headers_provider: Arc<dyn HeadersProvider>,
@@ -169,6 +171,8 @@ impl ZerobusStream {
     /// reconnects to an existing persistent stream, reseeds its offset generator
     /// to continue after the server's committed offset, and re-sends only the
     /// records the server has not yet durably stored.
+    // Used by the feature-gated public API introduced in the downstream PR.
+    #[allow(dead_code)]
     #[instrument(level = "debug", skip_all)]
     pub(crate) async fn new_persistent_stream(
         channel: ZerobusClient<Channel>,
