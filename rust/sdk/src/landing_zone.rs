@@ -85,6 +85,28 @@ impl<T: Clone> LandingZone<T> {
         all_items
     }
 
+    /// Removes a prefix of observed items while `should_remove` returns true.
+    ///
+    /// Observed items stay in FIFO order. Stops at the first item that should
+    /// remain. Releases the corresponding backpressure permits.
+    pub fn remove_observed_prefix(&self, mut should_remove: impl FnMut(&T) -> bool) -> Vec<T> {
+        let mut state = self.state.lock().expect("Lock poisoned");
+        let mut permits = self.permits.lock().expect("Lock poisoned");
+        let mut removed = Vec::new();
+        while let Some(front) = state.observed_items.front() {
+            if !should_remove(front) {
+                break;
+            }
+            let item = state
+                .observed_items
+                .pop_front()
+                .expect("front existed before pop");
+            permits.pop_front();
+            removed.push(item);
+        }
+        removed
+    }
+
     /// Adds an item to the queue.
     ///
     /// This method will block if the maximum number of inflight requests has been reached,
@@ -280,6 +302,34 @@ mod tests {
             result,
             Err(LandingZoneError::RemovingNonObservedElement)
         ));
+    }
+
+    #[tokio::test]
+    async fn test_remove_observed_prefix_preserves_fifo_suffix() {
+        let lz = LandingZone::new(4);
+        for value in 1..=4 {
+            lz.add(value).await;
+        }
+        for _ in 0..3 {
+            lz.observe().await;
+        }
+
+        assert_eq!(lz.remove_observed_prefix(|value| *value <= 2), vec![1, 2]);
+        assert_eq!(lz.reset_observe(), 1);
+        assert_eq!(lz.observe().await, 3);
+        assert_eq!(lz.observe().await, 4);
+    }
+
+    #[tokio::test]
+    async fn test_remove_observed_prefix_never_removes_unsent_items() {
+        let lz = LandingZone::new(2);
+        lz.add(1).await;
+        lz.add(2).await;
+        lz.observe().await;
+
+        assert_eq!(lz.remove_observed_prefix(|_| true), vec![1]);
+        assert_eq!(lz.len(), 1);
+        assert_eq!(lz.observe().await, 2);
     }
 
     #[tokio::test]

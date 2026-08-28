@@ -20,6 +20,8 @@ use crate::databricks::zerobus::{
 };
 use crate::OffsetId;
 
+use crate::databricks::zerobus::persistent_stream_request::Payload as PersistentRequestPayload;
+
 /// A type alias for a protobuf-encoded record.
 pub type ProtoEncodedRecord = Vec<u8>;
 
@@ -253,6 +255,21 @@ impl EncodedBatch {
                     })),
                     offset_id: Some(offset_id),
                 })
+            }
+        }
+    }
+
+    pub(crate) fn into_persistent_request_payload(
+        self,
+        offset_id: OffsetId,
+    ) -> PersistentRequestPayload {
+        match self.into_request_payload(offset_id) {
+            RequestPayload::IngestRecord(record) => PersistentRequestPayload::IngestRecord(record),
+            RequestPayload::IngestRecordBatch(batch) => {
+                PersistentRequestPayload::IngestRecordBatch(batch)
+            }
+            RequestPayload::CreateStream(_) => {
+                unreachable!("encoded batches only produce ingest payloads")
             }
         }
     }
@@ -776,6 +793,20 @@ mod tests {
                     }
                 }
                 _ => panic!("Expected IngestRecordBatch payload"),
+            }
+        }
+
+        #[test]
+        fn test_into_persistent_request_payload() {
+            let record = r#"{"id": 1}"#.to_string();
+            let batch = EncodedBatch::Json(smallvec![record.clone()]);
+
+            match batch.into_persistent_request_payload(42) {
+                PersistentRequestPayload::IngestRecord(req) => {
+                    assert_eq!(req.offset_id, Some(42));
+                    assert_eq!(req.record, Some(IngestRequestRecord::JsonRecord(record)));
+                }
+                _ => panic!("Expected persistent IngestRecord payload"),
             }
         }
     }
