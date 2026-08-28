@@ -52,8 +52,7 @@ impl ZerobusStream {
         table_properties: TableProperties,
         headers_provider: Arc<dyn HeadersProvider>,
         options: StreamConfigurationOptions,
-        // Mutated only on the persistent recovery path (flip create → resume);
-        // that mutation is `eos`-gated, so `mut` is otherwise unused.
+        // Mutated on the persistent recovery path to flip create → resume.
         mut kind: GrpcConnectionMode,
         landing_zone: RecordLandingZone,
         oneshot_map: Arc<tokio::sync::Mutex<OneshotMap>>,
@@ -228,6 +227,8 @@ impl ZerobusStream {
             // the committed observed prefix locally before resetting the
             // remaining observed records for resend. A first-process resume has
             // an empty landing zone and only seeds the receiver watermark.
+            // TODO: Validate the resumed watermark against retained ACK and sent-offset
+            // bounds before reconciling; treat None as -1 and fail closed if out of range.
             let mut initial_last_acked_offset: OffsetId = -1;
             if let Some(watermark) = last_committed_offset {
                 initial_last_acked_offset = watermark;

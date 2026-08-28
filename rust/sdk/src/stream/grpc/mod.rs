@@ -262,6 +262,8 @@ impl ZerobusStream {
         // since the server never re-acks offsets it committed in a prior session.
         // Safe because the constructor returns before any user ingest, so no real
         // ack can race this initial value.
+        // TODO: Validate the resume watermark before spawning tasks, or cancel and abort
+        // the spawned tasks on post-initialization errors so their handles are not detached.
         if let Some(watermark) = init_info.last_committed_offset {
             let next_offset = watermark.checked_add(1).ok_or_else(|| {
                 ZerobusError::UnexpectedStreamResponseError(

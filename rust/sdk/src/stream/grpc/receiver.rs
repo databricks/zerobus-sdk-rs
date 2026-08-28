@@ -112,6 +112,9 @@ impl ZerobusStream {
                                 return Err(error);
                             }
                         };
+                        // TODO: Bound ACKs by the highest successfully sent wire offset, not
+                        // landing-zone counts; batches use one offset and observation precedes
+                        // a successful send.
                         if let Err(error) = Self::validate_ack_offset(
                             last_acked_offset,
                             durability_ack_up_to_offset,
