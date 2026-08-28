@@ -1181,8 +1181,8 @@ fn base64_decode(input: &str) -> std::result::Result<Vec<u8>, String> {
 }
 
 // =============================================================================
-// Arrow Flight Support (Beta)
-// Enabled with feature flag: cargo build --features arrow-flight
+// Arrow Flight support
+// Behind the arrow-flight feature. Enable with: npm run build:arrow
 // =============================================================================
 
 #[cfg(feature = "arrow-flight")]
@@ -1197,8 +1197,6 @@ use databricks_zerobus_ingest_sdk::{
 
 /// IPC compression type for Arrow Flight streams.
 ///
-/// **Beta**: Arrow Flight support is in Beta. The API is stabilising but
-/// may still change before reaching GA.
 #[cfg(feature = "arrow-flight")]
 #[napi]
 pub enum IpcCompressionType {
@@ -1210,8 +1208,6 @@ pub enum IpcCompressionType {
 
 /// Configuration options for Arrow Flight streams.
 ///
-/// **Beta**: Arrow Flight support is in Beta. The API is stabilising but
-/// may still change before reaching GA.
 #[cfg(feature = "arrow-flight")]
 #[napi(object)]
 #[derive(Debug, Clone)]
@@ -1268,7 +1264,6 @@ fn map_ipc_compression(value: Option<i32>) -> Option<arrow_ipc::CompressionType>
 
 /// Arrow data type enum for schema definition.
 ///
-/// **Beta**: Arrow Flight support is in Beta.
 #[cfg(feature = "arrow-flight")]
 #[napi]
 pub enum ArrowDataType {
@@ -1340,7 +1335,6 @@ fn convert_arrow_data_type(dt: i32) -> RustDataType {
 
 /// Arrow field definition for schema.
 ///
-/// **Beta**: Arrow Flight support is in Beta.
 #[cfg(feature = "arrow-flight")]
 #[napi(object)]
 #[derive(Debug, Clone)]
@@ -1358,8 +1352,6 @@ pub struct ArrowField {
 /// Unlike `TableProperties` which uses Protocol Buffers, Arrow Flight streams
 /// require an Arrow schema definition.
 ///
-/// **Beta**: Arrow Flight support is in Beta. The API is stabilising but
-/// may still change before reaching GA.
 #[cfg(feature = "arrow-flight")]
 #[napi(object)]
 #[derive(Debug, Clone)]
@@ -1392,9 +1384,6 @@ fn build_arrow_schema(fields: &[ArrowField]) -> Arc<RustArrowSchema> {
 ///
 /// This stream provides a high-performance interface for streaming Arrow data
 /// to Databricks Delta tables using the Arrow Flight protocol.
-///
-/// **Beta**: Arrow Flight support is in Beta. The API is stabilising but
-/// may still change before reaching GA.
 ///
 /// # Lifecycle
 ///
@@ -1617,9 +1606,6 @@ impl ZerobusArrowStream {
 impl ZerobusSdk {
     /// Creates a new Arrow Flight stream to a Delta table.
     ///
-    /// **Beta**: Arrow Flight support is in Beta. The API is stabilising
-    /// but may still change before reaching GA.
-    ///
     /// This method establishes an Arrow Flight connection to the Zerobus service
     /// for high-performance columnar data ingestion.
     ///
@@ -1732,8 +1718,6 @@ impl ZerobusSdk {
     }
 
     /// Recreates an Arrow stream with the same configuration and re-ingests unacknowledged batches.
-    ///
-    /// **Beta**: Arrow Flight support is in Beta.
     ///
     /// # Arguments
     ///

@@ -33,7 +33,7 @@ This is a Cargo workspace. The workspace root is `rust/Cargo.toml`.
 - `landing_zone.rs` — Batches records before sending over gRPC
 - `record_types.rs` — `EncodedRecord`, `ProtoMessage`, `JsonString`
 - `stream/arrow/` — Arrow Flight ingestion, ACK rotation, connection, and recovery modules
-  (Beta; behind `arrow-flight`); see `stream/arrow/README.md` for architecture and invariants
+  (behind `arrow-flight`); see `stream/arrow/README.md` for architecture and invariants
 
 ## Build commands
 
@@ -64,7 +64,7 @@ Any change to the Rust SDK's public API surface has cascading effects:
 
 ## Feature flags
 
-- `arrow-flight` — Arrow Flight support (Beta). API is stabilising but may still change before GA.
+- `arrow-flight` — Arrow Flight support. This generally available API remains opt-in.
 - `internal-arrow-c-data` — Unsupported wrapper-only C Data importer shared by
   the repository's native bindings. Disabled by default; external Rust users
   must not depend on its API stability.

@@ -41,7 +41,7 @@ if(DEFINED ZEROBUS_FFI_BUILD_TARGET)
 endif()
 
 # ---------------------------------------------------------------------------
-# Arrow Flight example (arrow_ingest) — Beta
+# Arrow Flight example (arrow_ingest)
 # ---------------------------------------------------------------------------
 # Uses the Apache Arrow C++ library to build RecordBatches and serialize them to
 # Arrow IPC bytes for ArrowStream::ingest_batch. Skipped if Arrow is not

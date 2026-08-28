@@ -215,9 +215,6 @@ public final class StreamBuilder {
   /**
    * Selects the Arrow Flight record format.
    *
-   * <p><b>Beta:</b> Arrow Flight ingestion is in Beta. The API is stabilising but may still change
-   * before reaching GA.
-   *
    * @param schema the Arrow schema describing the columns of the target table
    * @return an {@link ArrowStreamBuilder} that builds a {@link ZerobusArrowStream}
    */
@@ -364,11 +361,7 @@ public final class StreamBuilder {
     }
   }
 
-  /**
-   * Builds a {@link ZerobusArrowStream}. Created via {@link StreamBuilder#arrow(Schema)}.
-   *
-   * <p><b>Beta:</b> Arrow Flight ingestion is in Beta.
-   */
+  /** Builds a {@link ZerobusArrowStream}. Created via {@link StreamBuilder#arrow(Schema)}. */
   public static final class ArrowStreamBuilder {
     private final StreamBuilder base;
     private final Schema schema;

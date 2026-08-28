@@ -61,7 +61,7 @@ The Zerobus Python SDK is a thin wrapper around the [Zerobus Rust SDK](../rust/)
 - **Rust-backed performance** - Native Rust implementation via PyO3 bindings for maximum throughput
 - **Sync and Async support** - Both synchronous and asynchronous Python APIs
 - **Automatic recovery** - Built-in retry and reconnection for transient failures
-- **Multiple serialization formats** - JSON (simple) and Protocol Buffers (type-safe)
+- **Multiple serialization formats** - JSON, Protocol Buffers, and generally available Arrow Flight ingestion
 - **OAuth 2.0 authentication** - Secure authentication with client credentials, automatically refreshed
 - **Acknowledgment callbacks** - Receive notifications when records are acknowledged or encounter errors
 - **Flexible configuration** - Fine-tune timeouts, retries, and recovery behavior
@@ -113,6 +113,7 @@ and JSON) does not need `pyarrow` at all.
 
 1. **Protocol Buffers** (Recommended) - Strongly-typed schemas with compact binary encoding. More efficient over the wire and the best choice for production and high-throughput workloads.
 2. **JSON** - Simple, no schema compilation needed. Good for getting started or quick prototyping, but each record carries higher per-record overhead (text serialization plus UTF-8 validation), so it is slower than Protocol Buffers for high-volume ingestion.
+3. Arrow Flight - High-throughput columnar ingestion for applications that already produce Arrow data. Install the `arrow` extra and see the [sync](examples/sync_example_arrow.py) or [async](examples/async_example_arrow.py) example.
 
 ### Option 1: JSON (Simplest)
 

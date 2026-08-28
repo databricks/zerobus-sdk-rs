@@ -9,7 +9,7 @@ The examples are organized by stream type and demonstrate both single-record and
 **Features demonstrated:**
 - `ZerobusProtoStream` - Protocol Buffer ingestion with method-level generics
 - `ZerobusJsonStream` - JSON ingestion with flexible serialization
-- `ZerobusArrowStream` (Beta) - Arrow Flight columnar ingestion
+- `ZerobusArrowStream` - Arrow Flight columnar ingestion
 - `ZerobusStream` (deprecated) - Legacy Future-based API for backward compatibility
 
 ## Directory Structure
@@ -26,7 +26,7 @@ examples/
 │   ├── README.md
 │   ├── SingleRecordExample.java
 │   └── BatchIngestionExample.java
-├── arrow/                 (Arrow Flight examples - ZerobusArrowStream, Beta)
+├── arrow/                 (Arrow Flight examples - ZerobusArrowStream)
 │   ├── README.md
 │   └── ArrowIngestionExample.java
 └── legacy/                (Legacy examples - ZerobusStream)
@@ -41,7 +41,7 @@ examples/
 | `proto/BatchIngestionExample` | `ZerobusProtoStream` | Batch ingestion |
 | `json/SingleRecordExample` | `ZerobusJsonStream` | Single record ingestion (Object + String) |
 | `json/BatchIngestionExample` | `ZerobusJsonStream` | Batch ingestion |
-| `arrow/ArrowIngestionExample` | `ZerobusArrowStream` | Three streams demonstrating each IPC compression codec (NONE, LZ4_FRAME, ZSTD); 10 batches per stream, then flush + close (Beta) |
+| `arrow/ArrowIngestionExample` | `ZerobusArrowStream` | Three streams demonstrating each IPC compression codec (NONE, LZ4_FRAME, ZSTD); 10 batches per stream, then flush + close |
 | `legacy/LegacyStreamExample` | `ZerobusStream` | Legacy Future-based API |
 
 Each example demonstrates: queue then flush, batch ingestion, and recreateStream.
@@ -82,7 +82,7 @@ try (ZerobusJsonStream stream = sdk.streamBuilder()
 }
 ```
 
-### ZerobusArrowStream (Beta - Arrow Flight)
+### ZerobusArrowStream (Arrow Flight)
 
 ```java
 Schema schema = new Schema(Arrays.asList(
@@ -230,7 +230,7 @@ java -cp ".:$SDK_JAR" \
 |----------|--------------|-----|
 | Protocol Buffers (new code) | `ZerobusProtoStream` | Method-level generics, batch support |
 | JSON (new code) | `ZerobusJsonStream` | Clean API, no proto dependency |
-| Large columnar datasets | `ZerobusArrowStream` | Arrow Flight, high throughput (Beta) |
+| Large columnar datasets | `ZerobusArrowStream` | Arrow Flight, high throughput |
 | Existing code with `ZerobusStream` | `ZerobusStream` | Backward compatible, migrate later |
 
 ## API Comparison
@@ -241,7 +241,7 @@ java -cp ".:$SDK_JAR" \
 | Return Type | `long` offset | `long` offset | `Optional<Long>` | `CompletableFuture` |
 | Batch Support | Yes | Yes | Yes (columnar) | No |
 | Extra Deps | protobuf-java | None | arrow-vector, arrow-memory-netty | protobuf-java |
-| Status | **Recommended** | **Recommended** | **Beta** | Deprecated |
+| Status | **Recommended** | **Recommended** | Generally available | Deprecated |
 
 ## Additional Resources
 

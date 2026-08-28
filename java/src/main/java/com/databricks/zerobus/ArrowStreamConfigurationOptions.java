@@ -3,9 +3,6 @@ package com.databricks.zerobus;
 /**
  * Configuration options for Arrow Flight streams.
  *
- * <p><b>Beta:</b> Arrow Flight ingestion is in Beta. The API is stabilising but may still change
- * before reaching GA.
- *
  * <p>This class provides settings to control Arrow Flight stream behavior including performance
  * tuning, recovery, and connection management.
  *

@@ -1,4 +1,4 @@
-// Arrow Flight ingestion with the Zerobus C++ SDK (Beta).
+// Arrow Flight ingestion with the Zerobus C++ SDK.
 //
 // Arrow Flight is a third record format alongside JSON and protobuf: it streams
 // columnar Apache Arrow RecordBatches to Zerobus over the Arrow Flight

@@ -28,7 +28,7 @@ The Databricks Zerobus Ingest SDK for TypeScript provides a high-performance cli
 - **High-throughput ingestion**: Optimized for high-volume data ingestion with native Rust implementation
 - **Automatic recovery**: Built-in retry and recovery mechanisms for transient failures
 - **Flexible configuration**: Customizable stream behavior and timeouts
-- **Multiple serialization formats**: Support for JSON, Protocol Buffers, and Arrow Flight (Beta) with optional LZ4 / ZSTD compression
+- **Multiple serialization formats**: Support for JSON, Protocol Buffers, and generally available Arrow Flight ingestion with optional LZ4 / ZSTD compression
 - **Type widening**: Accept high-level types (plain objects, protobuf messages) or low-level types (strings, buffers) - automatically handles serialization
 - **Batch ingestion**: Ingest multiple records with a single acknowledgment for higher throughput
 - **OAuth 2.0 authentication**: Secure authentication with client credentials
@@ -90,10 +90,11 @@ npm run build
 
 ### Choose Your Serialization Format
 
-The SDK supports two serialization formats. **Protocol Buffers is the default** and recommended for production use:
+The SDK supports three ingestion formats. **Protocol Buffers is the default** for standard gRPC streams and recommended for production row-oriented workloads:
 
 - **Protocol Buffers (Default)** - Strongly-typed schemas, efficient binary encoding, better performance. This is the default format.
 - **JSON** - Simple, no schema compilation needed. Good for getting started quickly or when schema flexibility is needed.
+- Arrow Flight - High-performance columnar ingestion for applications that already produce Arrow data. See the [Arrow example](examples/arrow/README.md).
 
 > **Note:** If you don't specify `recordType`, the SDK will use Protocol Buffers by default. To use JSON, explicitly set `recordType: RecordType.Json`.
 

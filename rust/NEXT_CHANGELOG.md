@@ -6,6 +6,9 @@
 
 ### New Features and Improvements
 
+- Promoted Arrow Flight ingestion to general availability across its APIs,
+  documentation, and examples. The `arrow-flight` Cargo feature remains opt-in.
+
 ### Bug Fixes
 
 - The OAuth `expires_in` field is now parsed from a quoted integer (`"3600"`) in

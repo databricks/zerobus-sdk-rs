@@ -11,8 +11,8 @@ every other Zerobus SDK.
 - **Proto and JSON** ingestion, single and batched.
 - **Dynamic protobuf** — build a descriptor and encode records straight from
   Unity Catalog table metadata, with no `.proto` file or `protoc` required.
-- **Arrow Flight** ingestion (Beta) — stream Arrow record batches with optional
-  LZ4/ZSTD compression.
+- **Arrow Flight** ingestion — generally available streaming of Arrow record
+  batches with optional LZ4/ZSTD compression.
 - **Async ack callback** — register an `AckCallback` to be notified of durable
   acks and terminal errors on a background task, without blocking in
   `wait_for_offset()` / `flush()`.
@@ -131,8 +131,8 @@ However you link it, include the umbrella header:
 A record-oriented `Stream` accepts two wire formats (proto and JSON), and there
 are three ways to get your data onto one. They differ only in how the record
 schema is handled — the streaming, auth, and recovery machinery is identical.
-(For columnar data there is also a separate [Arrow Flight
-stream](#arrow-flight-ingestion-beta), Beta.)
+For columnar data, use a separate [Arrow Flight
+stream](#arrow-flight-ingestion).
 
 | Path | Format | Schema source | Extra build deps | Best for |
 |------|--------|---------------|------------------|----------|
@@ -229,7 +229,7 @@ stream.ingest_proto_records(batch);
 stream.flush();
 ```
 
-### Arrow Flight ingestion (Beta)
+### Arrow Flight ingestion
 
 Stream Arrow record batches instead of proto/JSON records. Create the stream
 with an Arrow IPC stream that encodes only the schema, then ingest each batch as
@@ -248,7 +248,6 @@ stream.close();
 ```
 
 Optional LZ4/ZSTD compression is set via `ArrowStreamOptions::ipc_compression`.
-Arrow Flight is **Beta** — the API may change.
 
 ### Custom authentication
 
@@ -322,7 +321,7 @@ canonical version):
 |------|---------|
 | `zerobus::Sdk` / `zerobus::SdkBuilder` | Connection factory; creates streams |
 | `zerobus::Stream` | Proto/JSON ingestion stream |
-| `zerobus::ArrowStream` | Arrow Flight ingestion stream (Beta) |
+| `zerobus::ArrowStream` | Arrow Flight ingestion stream |
 | `zerobus::ProtoSchema` | UC table metadata → descriptor + JSON encoder |
 | `zerobus::HeadersProvider` | Custom authentication headers |
 | `zerobus::AckCallback` | Async ack/error notifications (`AckCallback::from` adapts lambdas) |
@@ -366,7 +365,7 @@ the FFI defaults.
 | `callback_wait_policy` | `CallbackWaitPolicy` | `use_default()` | How long `close()` drains the async ack-callback task: `use_default()` (finite FFI budget), `duration(ms)`, or `forever()` (block until callbacks finish). See [Async ack callback](#async-ack-callback) |
 | `ack_callback` | `std::shared_ptr<AckCallback>` | `nullptr` | Optional async ack/error callback; `nullptr` = none. See [Async ack callback](#async-ack-callback) |
 
-### `ArrowStreamOptions` (Arrow Flight streams, Beta)
+### `ArrowStreamOptions` (Arrow Flight streams)
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
@@ -385,7 +384,7 @@ the FFI defaults.
 
 Runnable examples live under [`examples/`](examples/README.md), covering all
 three record formats — JSON and protobuf (dynamic schema from Unity Catalog),
-each with a single-record and a batch variant, plus Arrow Flight (Beta). Every
+each with a single-record and a batch variant, plus Arrow Flight. Every
 example reads its connection settings from the environment
 (`ZEROBUS_SERVER_ENDPOINT`, `DATABRICKS_WORKSPACE_URL`, `ZEROBUS_TABLE_NAME`,
 `DATABRICKS_CLIENT_ID`, `DATABRICKS_CLIENT_SECRET`). They build as part of the

@@ -94,7 +94,7 @@ class Sdk {
                        std::shared_ptr<HeadersProvider> headers_provider,
                        const StreamOptions& options = {});
 
-  /// Create an Arrow Flight stream (Beta) authenticated with OAuth client
+  /// Create an Arrow Flight stream authenticated with OAuth client
   /// credentials. `schema_ipc_bytes` is an Arrow IPC stream encoding only the
   /// schema (an empty IPC stream with just the schema message).
   ArrowStream create_arrow_stream(
@@ -103,7 +103,7 @@ class Sdk {
       const std::string& client_id, const std::string& client_secret,
       const ArrowStreamOptions& options = {});
 
-  /// Create an Arrow Flight stream (Beta) authenticated with a custom headers
+  /// Create an Arrow Flight stream authenticated with a custom headers
   /// provider.
   ArrowStream create_arrow_stream(
       const std::string& table_name,

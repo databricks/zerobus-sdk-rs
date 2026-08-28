@@ -14,16 +14,13 @@ import org.apache.arrow.vector.types.pojo.Field;
 import org.apache.arrow.vector.types.pojo.Schema;
 
 /**
- * Arrow Flight ingestion example (Beta).
+ * Arrow Flight ingestion example.
  *
  * <p>Opens three Arrow Flight streams against the same table, one per IPC compression codec
  * ({@link IPCCompressionType#NONE}, {@link IPCCompressionType#LZ4_FRAME}, {@link
  * IPCCompressionType#ZSTD}). For each stream the example ingests {@value #BATCHES_PER_STREAM}
  * batches of {@value #ROWS_PER_BATCH} rows, waits for the last offset to be acknowledged,
  * flushes pending batches, then closes the stream.
- *
- * <p>Arrow Flight ingestion is in Beta. The API is stabilising but may still change before
- * reaching GA.
  *
  * <p>Prerequisites:
  *
@@ -58,7 +55,7 @@ public class ArrowIngestionExample {
       System.exit(1);
     }
 
-    System.out.println("=== Arrow Flight Ingestion Example (Beta) ===\n");
+    System.out.println("=== Arrow Flight Ingestion Example ===\n");
 
     Schema schema =
         new Schema(

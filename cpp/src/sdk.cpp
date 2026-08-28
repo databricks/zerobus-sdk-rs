@@ -215,7 +215,7 @@ Stream Sdk::create_stream(const TableProperties& table,
   return Stream(stream, nullptr, options.ack_callback);
 }
 
-// Create an OAuth-authenticated Arrow Flight stream (Beta). The schema IPC
+// Create an OAuth-authenticated Arrow Flight stream. The schema IPC
 // bytes are required (an Arrow stream has no JSON fallback), so reject an empty
 // schema before crossing the FFI rather than letting the core fail less
 // clearly.
@@ -243,7 +243,7 @@ ArrowStream Sdk::create_arrow_stream(
   return ArrowStream(stream, nullptr);
 }
 
-// Arrow Flight stream (Beta) authenticated by a custom headers provider. As
+// Arrow Flight stream authenticated by a custom headers provider. As
 // with the proto path, provider ownership is handed to the FFI (a heap
 // shared_ptr freed via zerobus_cpp_headers_free after any in-flight
 // get_headers returns), so the ArrowStream no longer keeps its own shared_ptr.

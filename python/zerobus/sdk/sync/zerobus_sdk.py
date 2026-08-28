@@ -145,9 +145,6 @@ class ZerobusArrowStream:
     """
     Synchronous Arrow Flight stream for ingesting pyarrow RecordBatches.
 
-    **Beta**: Arrow Flight support is in Beta. The API is stabilising but may
-    still change before reaching GA.
-
     Example:
         >>> import pyarrow as pa
         >>> schema = pa.schema([("temp", pa.int32())])
@@ -245,8 +242,6 @@ class ZerobusSdk:
         """
         Create an Arrow Flight stream with OAuth client credentials.
 
-        **Beta**: Arrow Flight support is in Beta.
-
         Args:
             table_name: Fully qualified table name (catalog.schema.table).
             schema: A pyarrow.Schema defining the table schema.
@@ -268,8 +263,6 @@ class ZerobusSdk:
     ) -> ZerobusArrowStream:
         """
         Create an Arrow Flight stream with a custom headers provider.
-
-        **Beta**: Arrow Flight support is in Beta.
 
         Args:
             table_name: Fully qualified table name (catalog.schema.table).

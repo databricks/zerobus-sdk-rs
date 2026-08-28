@@ -1,8 +1,6 @@
-# Arrow Flight Examples (Beta)
+# Arrow Flight Examples
 
 This directory contains examples for ingesting data using `ZerobusArrowStream` via the Arrow Flight protocol.
-
-> **Beta**: Arrow Flight ingestion is in Beta. The API is stabilising but may still change before reaching GA.
 
 ## Overview
 
