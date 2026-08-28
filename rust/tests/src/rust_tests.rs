@@ -2930,6 +2930,71 @@ mod failure_scenarios_tests {
         }
 
         #[tokio::test]
+        async fn test_duplicate_acks_do_not_reset_server_ack_timeout(
+        ) -> Result<(), Box<dyn std::error::Error>> {
+            setup_tracing();
+
+            const ACK_TIMEOUT_MS: u64 = 200;
+            const STALE_ACK_INTERVAL_MS: u64 = 50;
+
+            let (mock_server, server_url) = start_mock_server().await?;
+            let mut responses = vec![
+                MockResponse::CreateStream {
+                    stream_id: "test_stream_duplicate_acks".to_string(),
+                    delay_ms: 0,
+                },
+                MockResponse::RecordAck {
+                    ack_up_to_offset: 0,
+                    delay_ms: 0,
+                },
+            ];
+            responses.extend((0..20).map(|_| MockResponse::RecordAckForAnyRequest {
+                ack_up_to_offset: 0,
+                delay_ms: STALE_ACK_INTERVAL_MS,
+            }));
+            mock_server.inject_responses(TABLE_NAME, responses).await;
+
+            let sdk = ZerobusSdk::builder()
+                .endpoint(server_url.clone())
+                .unity_catalog_url("https://mock-uc.com")
+                .tls_config(Arc::new(NoTlsConfig))
+                .build()?;
+            let stream = sdk
+                .stream_builder()
+                .table(TABLE_NAME)
+                .headers_provider(Arc::new(TestHeadersProvider::default()))
+                .compiled_proto(create_test_descriptor_proto().unwrap_or_default())
+                .recovery(false)
+                .server_lack_of_ack_timeout_ms(ACK_TIMEOUT_MS)
+                .build()
+                .await?;
+
+            let first = stream.ingest_record_offset(b"acked".to_vec()).await?;
+            stream.wait_for_offset(first).await?;
+
+            let pending = stream.ingest_record_offset(b"pending".to_vec()).await?;
+            for i in 0..20 {
+                stream
+                    .ingest_record_offset(format!("more-{i}").into_bytes())
+                    .await?;
+            }
+
+            let result = tokio::time::timeout(
+                std::time::Duration::from_millis(ACK_TIMEOUT_MS * 3),
+                stream.wait_for_offset(pending),
+            )
+            .await
+            .expect("duplicate acknowledgments kept the lack-of-ack timeout alive");
+            let error = result.expect_err("pending record was unexpectedly acknowledged");
+            assert!(
+                error.to_string().contains("Server ack timeout"),
+                "expected server ack timeout, got: {error}"
+            );
+
+            Ok(())
+        }
+
+        #[tokio::test]
         async fn test_get_unacked_records_after_failure() -> Result<(), Box<dyn std::error::Error>>
         {
             setup_tracing();
