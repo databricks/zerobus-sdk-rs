@@ -134,7 +134,7 @@ Instead of writing `.proto` files by hand, each SDK ships a tool to generate pro
 
 ### Arrow Flight ingestion
 
-Arrow Flight ingestion is generally available in the SDKs that expose it. It is a third record format alongside JSON and Protocol Buffers: send Apache Arrow `RecordBatch` data directly to Zerobus over the Arrow Flight protocol, on the same gRPC connection. Best fit when:
+Arrow Flight ingestion is generally available in the SDKs that expose it, from the versions in the table below. It is a third record format alongside JSON and Protocol Buffers: send Apache Arrow `RecordBatch` data directly to Zerobus over the Arrow Flight protocol, on the same gRPC connection. Best fit when:
 
 - Your workload is naturally columnar or batched — analytics pipelines, gateways aggregating short windows of rows, wide/numeric schemas where row-by-row serialization adds noticeable CPU overhead.
 - Your application already produces Arrow data — pyarrow, the [arrow-rs](https://github.com/apache/arrow-rs) crates, DataFusion, Polars, or other libraries built on Arrow.
@@ -143,13 +143,13 @@ For sparse, one-row-at-a-time traffic, JSON or Protocol Buffers over the standar
 
 | SDK | Standard gRPC | Arrow Flight |
 | --- | --- | --- |
-| Rust | Available | Available |
-| Python | Available | Available |
-| Go (cgo) | Available | Available |
+| Rust | Available | GA since 2.8.0 |
+| Python | Available | GA since 1.8.0 |
+| Go (cgo) | Available | GA since 1.6.0 |
 | Pure Go | Available | Not available |
-| TypeScript | Available | Available |
-| Java | Available | Available |
-| C++ | Available | Available |
+| TypeScript | Available | GA since 1.3.0 |
+| Java | Available | GA since 1.6.0 |
+| C++ | Available | GA since 0.3.0 |
 | .NET (C#) | Available | Not available |
 
 ### Acknowledgments and throughput
