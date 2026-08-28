@@ -48,6 +48,8 @@
 
 ### Documentation
 
+- Added a persistent JSON example demonstrating durable stream creation,
+  pipelined ingestion followed by one `flush()`, and resume by `stream_id`.
 ### Internal Changes
 
 - Added the feature-gated persistent gRPC transport, durable wire offsets,
