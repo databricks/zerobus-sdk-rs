@@ -143,13 +143,13 @@ For sparse, one-row-at-a-time traffic, JSON or Protocol Buffers over the standar
 
 | SDK | Standard gRPC | Arrow Flight |
 | --- | --- | --- |
-| Rust | Available | GA since 2.8.0 |
-| Python | Available | GA since 1.8.0 |
-| Go (cgo) | Available | GA since 1.6.0 |
+| Rust | Available | Available since 2.8.0 |
+| Python | Available | Available since 1.8.0 |
+| Go (cgo) | Available | Available since 1.6.0 |
 | Pure Go | Available | Not available |
-| TypeScript | Available | GA since 1.3.0 |
-| Java | Available | GA since 1.6.0 |
-| C++ | Available | GA since 0.3.0 |
+| TypeScript | Available | Available since 1.3.0 |
+| Java | Available | Available since 1.6.0 |
+| C++ | Available | Available since 0.3.0 |
 | .NET (C#) | Available | Not available |
 
 ### Acknowledgments and throughput
