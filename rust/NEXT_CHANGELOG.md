@@ -53,6 +53,8 @@
 - Added the feature-gated persistent gRPC transport, durable wire offsets,
   resume-watermark reconciliation after a lost acknowledgment, and validation
   for setup responses, acknowledgment bounds, and offset overflow.
+- Added a stateful persistent-stream mock and integration coverage for create,
+  flush, resume offset continuity, and unknown stream IDs.
 
 ### Breaking Changes
 
