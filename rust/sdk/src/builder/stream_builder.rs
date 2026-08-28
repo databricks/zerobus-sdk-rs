@@ -429,7 +429,27 @@ impl<'a> StreamBuilder<'a> {
     ///
     /// Returns an error if table name, authentication, or format has not been set,
     /// or if an Arrow format was selected (use `build_arrow()` instead).
-    pub async fn build(mut self) -> ZerobusResult<ZerobusStream> {
+    pub async fn build(self) -> ZerobusResult<ZerobusStream> {
+        let (channel, table_properties, headers_provider, config) = self.prepare_grpc().await?;
+        let stream =
+            ZerobusStream::new_stream(channel, table_properties, headers_provider, config).await?;
+        crate::client_warnings::record_stream_creation(stream.table_properties.table_name.as_str());
+        Ok(stream)
+    }
+
+    /// Validates the builder and resolves the pieces shared by the gRPC
+    /// terminals (`build`, and the persistent builder's `build` / `resume`):
+    /// the channel, table properties, headers provider, and finalized config
+    /// with the record type set. Rejects the Arrow format (which needs
+    /// `build_arrow()`).
+    pub(crate) async fn prepare_grpc(
+        mut self,
+    ) -> ZerobusResult<(
+        crate::databricks::zerobus::zerobus_client::ZerobusClient<tonic::transport::Channel>,
+        TableProperties,
+        Arc<dyn HeadersProvider>,
+        StreamConfigurationOptions,
+    )> {
         self.validate()?;
         let headers_provider = self.resolve_headers_provider()?;
 
@@ -464,15 +484,12 @@ impl<'a> StreamBuilder<'a> {
         };
 
         let channel = self.sdk.get_or_create_channel_zerobus_client().await?;
-        let stream = ZerobusStream::new_stream(
+        Ok((
             channel,
             table_properties,
             headers_provider,
             self.grpc_config,
-        )
-        .await?;
-        crate::client_warnings::record_stream_creation(stream.table_properties.table_name.as_str());
-        Ok(stream)
+        ))
     }
 
     /// Build and open an Arrow Flight ingestion stream.

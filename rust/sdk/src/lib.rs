@@ -48,6 +48,8 @@ mod landing_zone;
 #[cfg(feature = "testing")]
 mod multiplexed_stream;
 mod offset_generator;
+#[cfg(feature = "eos")]
+mod persistent_stream;
 mod proxy;
 mod record_types;
 pub mod schema;
@@ -58,6 +60,8 @@ pub mod stream_options;
 mod tls_config;
 mod token_cache;
 
+#[cfg(feature = "eos")]
+pub use builder::PersistentStreamBuilder;
 pub use builder::{StreamBuilder, ZerobusSdkBuilder};
 pub use callbacks::AckCallback;
 pub use default_token_factory::DefaultTokenFactory;
@@ -72,6 +76,8 @@ pub use headers_provider::{HeadersProvider, OAuthHeadersProvider};
 #[cfg(feature = "testing")]
 pub use multiplexed_stream::{MessageId, MultiplexedStream};
 pub use offset_generator::{OffsetId, OffsetIdGenerator};
+#[cfg(feature = "eos")]
+pub use persistent_stream::PersistentStream;
 pub use proxy::{ConnectorFactory, ProxyConnector};
 pub use record_types::{
     EncodedBatch, EncodedBatchIter, EncodedRecord, JsonEncodedRecord, JsonString, JsonValue,
@@ -99,14 +105,16 @@ pub mod zeroparser;
 pub mod internal;
 
 /// The type of the stream connection created with the server.
-/// Currently we only support ephemeral streams on the server side, so we support only that in the SDK as well.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum StreamType {
     /// Ephemeral streams exist only for the duration of the connection.
     /// They are not persisted and are not recoverable.
     Ephemeral,
-    /// UNSUPPORTED: Persistent streams are durable and recoverable.
+    /// Persistent (Eos) streams are durable and recoverable: the server records
+    /// the stream identity and its committed offset, so a client can reconnect
+    /// after a crash and resume with exactly-once delivery into Delta. Created
+    /// via `ZerobusSdk::persistent_stream_builder` behind the `eos` feature.
     Persistent,
 }
 
