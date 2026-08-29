@@ -37,6 +37,16 @@ internal struct CZerobusSdk
 }
 
 /// <summary>
+/// Opaque protobuf schema handle. Created by <see cref="NativeMethods.ProtoSchemaFromUcJson"/>,
+/// freed by <see cref="NativeMethods.ProtoSchemaFree"/>.
+/// </summary>
+[StructLayout(LayoutKind.Sequential)]
+internal struct CZerobusProtoSchema
+{
+    // Opaque.
+}
+
+/// <summary>
 /// Result struct returned by most FFI calls.
 /// </summary>
 [StructLayout(LayoutKind.Sequential)]
@@ -115,6 +125,55 @@ internal struct CRecordArray
 {
     public IntPtr Records; // CRecord*
     public nuint Len;
+}
+
+/// <summary>
+/// Opaque Arrow stream handle.
+/// </summary>
+[StructLayout(LayoutKind.Sequential)]
+internal struct CArrowStream
+{
+    // Opaque.
+}
+
+/// <summary>
+/// Configuration options for Arrow Flight streams, passed to the native layer.
+/// </summary>
+[StructLayout(LayoutKind.Sequential)]
+internal struct CArrowStreamConfigurationOptions
+{
+    public nuint MaxInflightBatches;
+
+    [MarshalAs(UnmanagedType.U1)]
+    public bool Recovery;
+
+    public ulong RecoveryTimeoutMs;
+    public ulong RecoveryBackoffMs;
+    public uint RecoveryRetries;
+    public ulong ServerLackOfAckTimeoutMs;
+    public ulong FlushTimeoutMs;
+    public ulong ConnectionTimeoutMs;
+
+    /// <summary>-1 = None, 0 = LZ4_FRAME, 1 = ZSTD</summary>
+    public int IpcCompression;
+
+    /// <summary>
+    /// Maximum time in ms to wait during graceful stream close.
+    /// -1 = wait full server duration, 0 = immediate, >0 = up to min(this, server).
+    /// </summary>
+    public long StreamPausedMaxWaitTimeMs;
+}
+
+/// <summary>
+/// An array of Arrow IPC-encoded batches returned by zerobus_arrow_stream_get_unacked_batches.
+/// Must be freed with zerobus_arrow_free_batch_array.
+/// </summary>
+[StructLayout(LayoutKind.Sequential)]
+internal struct CArrowBatchArray
+{
+    public IntPtr Batches; // uint8_t**
+    public IntPtr Lengths; // uintptr_t*
+    public nuint Count;
 }
 
 /// <summary>
@@ -473,4 +532,93 @@ internal static partial class NativeMethods
 
     [DllImport(LibName, CallingConvention = CallingConvention.Cdecl, EntryPoint = "zerobus_sdk_builder_free")]
     public static extern void SdkBuilderFree(IntPtr builder);
+
+    // ──── Arrow stream API ────────────────────────────────────────────────
+
+    [DllImport(LibName, CallingConvention = CallingConvention.Cdecl, EntryPoint = "zerobus_sdk_create_arrow_stream")]
+    public static extern unsafe IntPtr SdkCreateArrowStream(
+        IntPtr sdk,
+        [MarshalAs(UnmanagedType.LPUTF8Str)] string tableName,
+        byte* schemaIpcBytes,
+        nuint schemaIpcLen,
+        [MarshalAs(UnmanagedType.LPUTF8Str)] string clientId,
+        [MarshalAs(UnmanagedType.LPUTF8Str)] string clientSecret,
+        ref CArrowStreamConfigurationOptions options,
+        ref CResult result);
+
+    [DllImport(LibName, CallingConvention = CallingConvention.Cdecl, EntryPoint = "zerobus_sdk_create_arrow_stream_with_headers_provider")]
+    public static extern unsafe IntPtr SdkCreateArrowStreamWithHeadersProvider(
+        IntPtr sdk,
+        [MarshalAs(UnmanagedType.LPUTF8Str)] string tableName,
+        byte* schemaIpcBytes,
+        nuint schemaIpcLen,
+        HeadersProviderCallback headersCallback,
+        IntPtr userData,
+        ref CArrowStreamConfigurationOptions options,
+        ref CResult result);
+
+    [DllImport(LibName, CallingConvention = CallingConvention.Cdecl, EntryPoint = "zerobus_arrow_stream_free")]
+    public static extern void ArrowStreamFree(IntPtr stream);
+
+    [DllImport(LibName, CallingConvention = CallingConvention.Cdecl, EntryPoint = "zerobus_arrow_stream_ingest_batch")]
+    public static extern unsafe long ArrowStreamIngestBatch(
+        IntPtr stream,
+        byte* ipcBytes,
+        nuint ipcLen,
+        ref CResult result);
+
+    [DllImport(LibName, CallingConvention = CallingConvention.Cdecl, EntryPoint = "zerobus_arrow_stream_wait_for_offset")]
+    [return: MarshalAs(UnmanagedType.U1)]
+    public static extern bool ArrowStreamWaitForOffset(
+        IntPtr stream,
+        long offset,
+        ref CResult result);
+
+    [DllImport(LibName, CallingConvention = CallingConvention.Cdecl, EntryPoint = "zerobus_arrow_stream_flush")]
+    [return: MarshalAs(UnmanagedType.U1)]
+    public static extern bool ArrowStreamFlush(IntPtr stream, ref CResult result);
+
+    [DllImport(LibName, CallingConvention = CallingConvention.Cdecl, EntryPoint = "zerobus_arrow_stream_close")]
+    [return: MarshalAs(UnmanagedType.U1)]
+    public static extern bool ArrowStreamClose(IntPtr stream, ref CResult result);
+
+    [DllImport(LibName, CallingConvention = CallingConvention.Cdecl, EntryPoint = "zerobus_arrow_stream_get_unacked_batches")]
+    public static extern CArrowBatchArray ArrowStreamGetUnackedBatches(IntPtr stream, ref CResult result);
+
+    [DllImport(LibName, CallingConvention = CallingConvention.Cdecl, EntryPoint = "zerobus_arrow_free_batch_array")]
+    public static extern void ArrowFreeBatchArray(CArrowBatchArray array);
+
+    [DllImport(LibName, CallingConvention = CallingConvention.Cdecl, EntryPoint = "zerobus_arrow_stream_is_closed")]
+    [return: MarshalAs(UnmanagedType.U1)]
+    public static extern bool ArrowStreamIsClosed(IntPtr stream);
+
+    [DllImport(LibName, CallingConvention = CallingConvention.Cdecl, EntryPoint = "zerobus_arrow_get_default_config")]
+    public static extern CArrowStreamConfigurationOptions ArrowGetDefaultConfig();
+
+    // ──── ProtoSchema API ──────────────────────────────────────────────────
+
+    [DllImport(LibName, CallingConvention = CallingConvention.Cdecl, EntryPoint = "zerobus_proto_schema_from_uc_json")]
+    public static extern IntPtr ProtoSchemaFromUcJson(
+        [MarshalAs(UnmanagedType.LPUTF8Str)] string ucTableJson,
+        ref CResult result);
+
+    [DllImport(LibName, CallingConvention = CallingConvention.Cdecl, EntryPoint = "zerobus_proto_schema_descriptor_bytes")]
+    public static extern unsafe byte* ProtoSchemaDescriptorBytes(
+        IntPtr schema,
+        out nuint outLen);
+
+    [DllImport(LibName, CallingConvention = CallingConvention.Cdecl, EntryPoint = "zerobus_proto_schema_encode_json")]
+    [return: MarshalAs(UnmanagedType.U1)]
+    public static extern unsafe bool ProtoSchemaEncodeJson(
+        IntPtr schema,
+        [MarshalAs(UnmanagedType.LPUTF8Str)] string recordJson,
+        out byte* outData,
+        out nuint outLen,
+        ref CResult result);
+
+    [DllImport(LibName, CallingConvention = CallingConvention.Cdecl, EntryPoint = "zerobus_free_proto_bytes")]
+    public static extern unsafe void FreeProtoBytes(byte* data, nuint len);
+
+    [DllImport(LibName, CallingConvention = CallingConvention.Cdecl, EntryPoint = "zerobus_proto_schema_free")]
+    public static extern void ProtoSchemaFree(IntPtr schema);
 }

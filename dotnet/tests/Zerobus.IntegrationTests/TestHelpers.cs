@@ -1,4 +1,5 @@
 using System.Net;
+using Apache.Arrow.Flight.Server;
 using Grpc.Core;
 using Grpc.Core.Interceptors;
 using Microsoft.AspNetCore.Builder;
@@ -105,36 +106,48 @@ public static class TestDescriptor
 
 /// <summary>
 /// Manages the lifecycle of the mock gRPC server for integration tests.
-/// Starts an ASP.NET Core Kestrel server with the gRPC mock service.
+/// Starts an ASP.NET Core Kestrel server with the gRPC mock services
+/// (Zerobus EphemeralStream + Arrow Flight DoPut).
 /// </summary>
 public sealed class MockServerFixture : IAsyncDisposable
 {
     public MockZerobusServer MockServer { get; }
+    public MockFlightServer ArrowFlightServer { get; }
     public string ServerUrl { get; }
 
     private readonly WebApplication _app;
 
-    private MockServerFixture(MockZerobusServer mockServer, string serverUrl, WebApplication app)
+    private MockServerFixture(
+        MockZerobusServer mockServer,
+        MockFlightServer arrowFlightServer,
+        string serverUrl,
+        WebApplication app)
     {
         MockServer = mockServer;
+        ArrowFlightServer = arrowFlightServer;
         ServerUrl = serverUrl;
         _app = app;
     }
 
     /// <summary>
     /// Starts a new mock gRPC server on a random available port.
+    /// Serves both the Zerobus EphemeralStream and Arrow Flight DoPut RPCs.
     /// </summary>
     public static async Task<MockServerFixture> StartAsync()
     {
         var mockServer = new MockZerobusServer();
+        var arrowServer = new MockFlightServer();
 
         var builder = WebApplication.CreateBuilder();
         builder.Logging.ClearProviders(); // Suppress noisy ASP.NET Core logs in test output.
         builder.Services.AddGrpc(options =>
         {
             options.Interceptors.Add<ExceptionInterceptor>();
-        });
+        }).AddFlightServer<MockFlightServer>();
         builder.Services.AddSingleton(mockServer);
+        // Override the scoped FlightServer registration from AddFlightServer<T>
+        // with our singleton instance so tests can observe server-side state.
+        builder.Services.AddSingleton<FlightServer>(arrowServer);
         builder.WebHost.ConfigureKestrel(options =>
         {
             // Listen on 127.0.0.1 with a random port and HTTP/2 (required for gRPC).
@@ -146,6 +159,7 @@ public sealed class MockServerFixture : IAsyncDisposable
 
         var app = builder.Build();
         app.MapGrpcService<MockZerobusServer>();
+        app.MapFlightEndpoint();
 
         await app.StartAsync();
 
@@ -157,7 +171,7 @@ public sealed class MockServerFixture : IAsyncDisposable
         var serverUrl = addresses.FirstOrDefault()
             ?? throw new InvalidOperationException("No server URL was bound.");
 
-        return new MockServerFixture(mockServer, serverUrl, app);
+        return new MockServerFixture(mockServer, arrowServer, serverUrl, app);
     }
 
     public async ValueTask DisposeAsync()

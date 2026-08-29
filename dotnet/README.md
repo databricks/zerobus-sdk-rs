@@ -9,6 +9,8 @@ High-performance .NET SDK for streaming data ingestion into Databricks Delta tab
 
 ## Quick Start
 
+### Fluent StreamBuilder (recommended)
+
 ```csharp
 using Databricks.Zerobus;
 
@@ -18,13 +20,31 @@ using var sdk = ZerobusSdk.CreateBuilder()
     .UnityCatalogUrl("https://your-workspace.databricks.com")
     .Build();
 
+// 2. Create stream (fluent builder).
+using var stream = sdk.StreamBuilder()
+    .Table("catalog.schema.table")
+    .OAuth(clientId, clientSecret)
+    .MaxInflightRequests(50_000)
+    .Json()
+    .Build();
+
+// 3. Ingest records.
+long offset = stream.IngestRecord("""{"id": 1, "message": "Hello"}""");
+
+// 4. Wait for acknowledgment.
+stream.WaitForOffset(offset);
+```
+
+### Factory methods (also supported)
+
+```csharp
 // 2. Configure stream options.
 var options = StreamConfigurationOptions.Default with
 {
     MaxInflightRequests = 50_000,
 };
 
-// 3. Create stream.
+// 3. Create stream (factory method).
 using var stream = sdk.CreateJsonStream(
     "catalog.schema.table",
     clientId,
@@ -166,6 +186,83 @@ Important: `RecreateStream(stream)` transfers ownership from `stream` to the ret
 stream. The input `stream` is disposed during recreation and must not be used afterward.
 A later `Dispose()` on the original wrapper (for example at the end of a `using` scope)
 is a no-op.
+
+#### `CreateArrowStream`
+
+Creates an Arrow Flight ingestion stream with OAuth 2.0 credentials. **(Beta)**
+
+```csharp
+using var stream = sdk.CreateArrowStream(
+    "catalog.schema.table",
+    schemaIpcBytes,
+    clientId,
+    clientSecret,
+    options);  // ArrowStreamConfigurationOptions, optional
+
+stream.IngestBatch(recordBatchIpcBytes);
+stream.Flush();
+```
+
+Also available: `CreateArrowStreamAsync`, `CreateArrowStreamWithHeadersProvider`, `CreateArrowStreamWithHeadersProviderAsync`.
+
+### `ProtoSchema`
+
+Generates protobuf schemas from Unity Catalog table metadata. Useful for obtaining
+descriptor bytes for `CreateProtoStream` without compiling `.proto` files manually.
+
+```csharp
+using var schema = ProtoSchema.FromUnityCatalogJson(ucTableJson);
+byte[] descriptor = schema.GetDescriptorBytes();
+byte[] protoBytes = schema.EncodeJson("""{"id": 1, "name": "test"}""");
+```
+
+### `StreamBuilder` (fluent API)
+
+Alternative to factory methods — chain configuration then select the stream type.
+
+```csharp
+// JSON
+using var stream = sdk.StreamBuilder()
+    .Table("catalog.schema.table")
+    .OAuth(clientId, clientSecret)
+    .MaxInflightRequests(50_000)
+    .Json()
+    .Build();
+
+// Protobuf
+using var stream = sdk.StreamBuilder()
+    .Table("catalog.schema.table")
+    .OAuth(clientId, clientSecret)
+    .CompiledProto(descriptorBytes)
+    .Build();
+
+// Arrow Flight
+using var stream = sdk.StreamBuilder()
+    .Table("catalog.schema.table")
+    .OAuth(clientId, clientSecret)
+    .Arrow(schemaIpcBytes)
+    .IpcCompression(IPCCompressionType.Lz4Frame)
+    .Build();
+```
+
+All sub-builders support `Build()` (sync) and `BuildAsync()` (async).
+
+### `ZerobusArrowStream`
+
+Arrow Flight ingestion stream for columnar data. Thread-safe, implements `IDisposable` and `IAsyncDisposable`.
+
+```csharp
+long offset = stream.IngestBatch(ipcBytes);
+stream.WaitForOffset(offset);
+stream.Flush();
+
+// Async variants available
+await stream.IngestBatchAsync(ipcBytes);
+await stream.FlushAsync();
+
+// Retrieve unacknowledged batches after close/failure
+ArrowBatchInfo[] unacked = stream.GetUnackedBatches();
+```
 
 ### `JsonZerobusStream` and `ProtoZerobusStream`
 
@@ -360,6 +457,31 @@ var options = StreamConfigurationOptions.Default with
 Typed factories set `RecordType` automatically. You only need to set it manually when using
 the untyped `CreateStream` or `CreateStreamWithHeadersProvider` APIs.
 
+### `ArrowStreamConfigurationOptions`
+
+Use C# record `with` expressions to configure Arrow Flight streams:
+
+```csharp
+var options = ArrowStreamConfigurationOptions.Default with
+{
+    MaxInflightBatches = 5_000,
+    IpcCompression = IPCCompressionType.Zstd,
+};
+```
+
+| Property                     | Default | Description                            |
+| ---------------------------- | ------- | -------------------------------------- |
+| `MaxInflightBatches`         | 1,000   | Backpressure control for batches       |
+| `Recovery`                   | `true`  | Auto-recovery on failures              |
+| `RecoveryTimeoutMs`          | 15,000  | Timeout per recovery attempt           |
+| `RecoveryBackoffMs`          | 2,000   | Delay between retries                  |
+| `RecoveryRetries`            | 4       | Max recovery attempts                  |
+| `ServerLackOfAckTimeoutMs`   | 60,000  | Server ack timeout                     |
+| `FlushTimeoutMs`             | 300,000 | Flush timeout (5 min)                  |
+| `ConnectionTimeoutMs`        | 30,000  | Connection timeout                     |
+| `IpcCompression`             | `None`  | IPC compression (`None`, `Lz4Frame`, `Zstd`) |
+| `StreamPausedMaxWaitTimeMs`  | -1      | Graceful close wait (-1 = full server duration) |
+
 ### Error Handling
 
 Errors throw `ZerobusException` with an `IsRetryable` property:
@@ -461,6 +583,10 @@ The integration tests cover:
 | `IngestMultipleRecords`                             | Multiple sequential records with ack       |
 | `IngestBatchRecords`                                | Batch ingest of 5 records                  |
 | `IngestRecordsAfterClose`                           | Batch ingest after close throws            |
+| `ArrowStream_CreateAndDispose_DoesNotLeak`          | Arrow stream creation and disposal          |
+| `ArrowStream_Close_AndDispose_NoError`              | Arrow stream close then dispose             |
+| `ArrowStream_MultipleBatches_FlushThenClose`        | Arrow batch ingest, flush, and close        |
+| `StreamBuilder_Arrow_BuildsWithSchema`              | Fluent Arrow stream via StreamBuilder       |
 
 Each test gets its own mock gRPC server on a unique port, so all tests run in parallel.
 
@@ -482,12 +608,18 @@ dotnet/
 ├── src/
 │   └── Zerobus/                               # Main SDK library
 │       ├── Zerobus.csproj
-│       ├── ZerobusSdk.cs                      # SDK entry point (IDisposable)
-│       ├── ZerobusStream.cs                   # Stream for record ingestion (IDisposable)
+│       ├── ZerobusSdk.cs                      # SDK entry point + Arrow stream factories
+│       ├── ZerobusStream.cs                   # Streaming for JSON/Proto records
+│       ├── ZerobusArrowStream.cs              # Arrow Flight ingestion stream (Beta)
 │       ├── ZerobusException.cs                # Error type with IsRetryable
 │       ├── IHeadersProvider.cs                # Custom auth interface
 │       ├── RecordType.cs                      # Proto / Json / Unspecified enum
-│       ├── StreamConfigurationOptions.cs      # Config record with defaults
+│       ├── StreamConfigurationOptions.cs      # Config record for JSON/Proto streams
+│       ├── ArrowStreamConfigurationOptions.cs # Config record for Arrow Flight streams
+│       ├── IPCCompressionType.cs              # Arrow IPC compression enum
+│       ├── ArrowBatchInfo.cs                  # Unacked Arrow batch record
+│       ├── ProtoSchema.cs                     # Protobuf schema from Unity Catalog
+│       ├── StreamBuilder.cs                   # Fluent builder API
 │       ├── TableProperties.cs                 # Table name + optional descriptor
 │       ├── Properties/
 │       │   └── AssemblyInfo.cs
@@ -497,9 +629,15 @@ dotnet/
 │           └── HeadersProviderBridge.cs       # Managed→native callback bridge
 ├── tests/
 │   ├── Zerobus.Tests/                         # Unit tests (NUnit)
+│   │   ├── StreamBuilderTests.cs              # Fluent builder validation
+│   │   ├── ArrowStreamConfigurationOptionsTests.cs
+│   │   └── ProtoSchemaTests.cs
 │   └── Zerobus.IntegrationTests/              # Integration tests (NUnit + gRPC mock)
 │       ├── Zerobus.IntegrationTests.csproj
-│       ├── IntegrationTests.cs                # 11 integration tests
+│       ├── StreamCreationIntegrationTests.cs  # Stream creation scenarios
+│       ├── IngestionIntegrationTests.cs       # Ingestion scenarios
+│       ├── ArrowIntegrationTests.cs           # Arrow Flight integration tests
+│       ├── LifecycleRecoveryIntegrationTests.cs
 │       ├── MockZerobusServer.cs               # Mock gRPC server
 │       ├── TestHelpers.cs                     # Fixtures, response builders, interceptor
 │       └── Protos/
@@ -508,6 +646,7 @@ dotnet/
     ├── JsonSingle/                            # Single JSON record ingestion
     ├── JsonBatch/                             # Batch JSON record ingestion
     ├── ProtoSingle/                           # Single protobuf record ingestion
+    └── ProtoSchema/                           # ProtoSchema: UC → descriptor + JSON→proto
 ```
 
 ## Architecture
