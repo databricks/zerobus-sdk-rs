@@ -60,14 +60,25 @@ pub fn get_message_descriptor(
 }
 
 pub fn create_registry_for_version(version: ProtoVersion, message_name: &str) -> MessageRegistry {
-    let file_desc_set = load_descriptor_set(version);
+    let file_desc_set =
+        FileDescriptorSet::decode(E2E_DESCRIPTOR_SET).expect("decode descriptor file");
     let (msg_desc, file) = find_message_and_file(&file_desc_set, version.package(), message_name);
     let mut descriptor = msg_desc.clone();
     descriptor.name = Some(format!(
         "{}.{message_name}",
         file.package.as_deref().unwrap_or("")
     ));
-    MessageRegistry::from_descriptor(&descriptor)
+
+    let others: Vec<(&str, &DescriptorProto)> = file_desc_set
+        .file
+        .iter()
+        .flat_map(|f| {
+            let package = f.package.as_deref().unwrap_or("");
+            f.message_type.iter().map(move |msg| (package, msg))
+        })
+        .collect();
+
+    MessageRegistry::from_descriptors(&descriptor, &others)
 }
 
 pub fn encode_message_for_version<M: Message>(
