@@ -85,6 +85,16 @@ using var sdk = ZerobusSdk.CreateBuilder()
     .Build();
 ```
 
+`ConnectionPerStream` applies to JSON/protobuf streams. Arrow Flight streams
+already use dedicated connections and are unaffected.
+
+HTTP/2 multiplexes logical streams over one TCP connection. On high-throughput
+workloads over the public internet, packet loss and TCP retransmissions can
+cause head-of-line blocking across every stream on that connection, reducing
+aggregate throughput. Dedicated connections isolate that loss. For many
+smaller, low-throughput streams, call `ConnectionPerStream(false)`; shared
+multiplexing is recommended there to reduce connection overhead.
+
 #### `CreateJsonStream`
 
 Creates a JSON-only stream with OAuth 2.0 client credentials authentication.

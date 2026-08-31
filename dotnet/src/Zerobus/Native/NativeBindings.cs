@@ -465,6 +465,11 @@ internal static partial class NativeMethods
         IntPtr builder,
         [MarshalAs(UnmanagedType.LPUTF8Str)] string value);
 
+    [DllImport(LibName, CallingConvention = CallingConvention.Cdecl, EntryPoint = "zerobus_sdk_builder_connection_per_stream")]
+    public static extern void SdkBuilderConnectionPerStream(
+        IntPtr builder,
+        [MarshalAs(UnmanagedType.I1)] bool enabled);
+
     [DllImport(LibName, CallingConvention = CallingConvention.Cdecl, EntryPoint = "zerobus_sdk_builder_disable_tls")]
     public static extern void SdkBuilderDisableTls(IntPtr builder);
 

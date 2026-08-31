@@ -39,11 +39,19 @@ class TestNativeBindingSignatures(unittest.TestCase):
     def test_sync_create_stream_options_optional(self):
         self._assert_optional(core.sync.ZerobusSdk.create_stream, "options")
 
+    def test_sync_sdk_connection_per_stream_defaults_true(self):
+        param = inspect.signature(core.sync.ZerobusSdk).parameters["connection_per_stream"]
+        self.assertIs(param.default, True)
+
     def test_sync_create_stream_with_headers_provider_options_optional(self):
         self._assert_optional(core.sync.ZerobusSdk.create_stream_with_headers_provider, "options")
 
     def test_async_create_stream_options_optional(self):
         self._assert_optional(core.aio.ZerobusSdk.create_stream, "options")
+
+    def test_async_sdk_connection_per_stream_defaults_true(self):
+        param = inspect.signature(core.aio.ZerobusSdk).parameters["connection_per_stream"]
+        self.assertIs(param.default, True)
 
     def test_async_create_stream_with_headers_provider_options_optional(self):
         self._assert_optional(core.aio.ZerobusSdk.create_stream_with_headers_provider, "options")

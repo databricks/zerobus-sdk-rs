@@ -153,7 +153,8 @@ type ZerobusStream struct {
 }
 
 type sdkOptions struct {
-	applicationName string
+	applicationName     string
+	connectionPerStream *bool
 }
 
 // SdkOption configures a ZerobusSdk created with NewZerobusSdkWithOptions.
@@ -174,6 +175,16 @@ func WithApplicationName(name string) SdkOption {
 	}
 }
 
+// WithConnectionPerStream controls whether every JSON/protobuf ingestion
+// stream receives a dedicated gRPC connection. It is enabled by default. Pass
+// false to multiplex all streams created by the SDK over one shared HTTP/2
+// connection.
+func WithConnectionPerStream(enabled bool) SdkOption {
+	return func(options *sdkOptions) {
+		options.connectionPerStream = &enabled
+	}
+}
+
 // NewZerobusSdk creates a new SDK instance.
 //
 // Parameters:
@@ -189,7 +200,8 @@ func NewZerobusSdk(zerobusEndpoint, unityCatalogURL string) (*ZerobusSdk, error)
 
 // NewZerobusSdkWithOptions creates an SDK instance with optional settings.
 // Use WithApplicationName to add an application identifier to the user-agent
-// header sent on every Zerobus request.
+// header sent on every Zerobus request. Use WithConnectionPerStream(false) to
+// opt into sharing one connection; dedicated connections are the default.
 //
 // Application names are trimmed before use, and blank values are ignored.
 // Invalid UTF-8, NUL bytes, and values that are invalid in an HTTP header cause

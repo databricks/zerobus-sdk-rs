@@ -458,10 +458,22 @@ sdk = ZerobusSdk(
     host="https://<workspace>.zerobus.<region>.cloud.databricks.com",
     unity_catalog_url="https://<workspace-host>",
     application_name="my-app/1.0",
+    connection_per_stream=True,
 )
 ```
 
 `application_name` is optional; when set it is appended to the `user-agent` header on gRPC requests to the Zerobus server (not on the OAuth token requests to the login service). It follows the `"<product>/<version>"` convention (e.g. `my-app/1.0`).
+
+`connection_per_stream` gives every JSON/protobuf stream a dedicated gRPC
+connection by default. Set it to `False` to share one HTTP/2 connection across
+streams. Arrow Flight streams are unaffected.
+
+HTTP/2 multiplexes logical streams over one TCP connection. On high-throughput
+workloads over the public internet, packet loss and TCP retransmissions can
+cause head-of-line blocking across every stream on that connection, reducing
+aggregate throughput. Dedicated connections isolate that loss. For many
+smaller, low-throughput streams, set `connection_per_stream=False`; shared
+multiplexing is recommended there to reduce connection overhead.
 
 ```python
 # Sync

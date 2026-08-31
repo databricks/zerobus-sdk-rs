@@ -52,6 +52,22 @@ int main() {
     }
   }
 
+  // Shared-connection mode is an explicit, chainable opt-out.
+  {
+    try {
+      Sdk sdk = Sdk::builder()
+                    .endpoint("http://localhost:50051")
+                    .unity_catalog_url("http://localhost:8080")
+                    .connection_per_stream(false)
+                    .disable_tls()
+                    .build();
+      (void)sdk;
+    } catch (const ZerobusException& e) {
+      fail("building an SDK in shared-connection mode threw");
+      std::fprintf(stderr, "  what(): %s\n", e.what());
+    }
+  }
+
   // Move nulls the source handle, so both destruct safely (no double-free).
   {
     try {

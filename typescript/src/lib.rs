@@ -840,6 +840,9 @@ impl RustHeadersProvider for TsOAuthHeadersProvider {
 pub struct ZerobusSdkOptions {
     /// Identifier appended to the `user-agent` header
     pub application_name: Option<String>,
+    /// Whether every JSON/protobuf stream gets a dedicated gRPC connection.
+    /// Defaults to true.
+    pub connection_per_stream: Option<bool>,
 }
 
 /// The main SDK for interacting with the Databricks Zerobus service.
@@ -881,7 +884,8 @@ impl ZerobusSdk {
     /// * `unity_catalog_url` - The Unity Catalog endpoint URL
     ///   (e.g., "https://workspace.cloud.databricks.com")
     /// * `options` - Optional SDK configuration (see `ZerobusSdkOptions`),
-    ///   including `applicationName` for server-side attribution.
+    ///   including `applicationName` for server-side attribution and
+    ///   `connectionPerStream` for connection ownership.
     ///
     /// # Errors
     ///
@@ -910,6 +914,10 @@ impl ZerobusSdk {
             .endpoint(&zerobus_endpoint)
             .unity_catalog_url(&unity_catalog_url)
             .sdk_identifier(TS_SDK_USER_AGENT);
+        let builder = match options.connection_per_stream {
+            Some(enabled) => builder.connection_per_stream(enabled),
+            None => builder,
+        };
         let builder = match options.application_name {
             Some(name) => builder.application_name(name),
             None => builder,

@@ -81,6 +81,7 @@ extern void zerobus_sdk_builder_endpoint(CZerobusSdkBuilder* builder, const char
 extern void zerobus_sdk_builder_unity_catalog_url(CZerobusSdkBuilder* builder, const char* value);
 extern void zerobus_sdk_builder_sdk_identifier(CZerobusSdkBuilder* builder, const char* value);
 extern void zerobus_sdk_builder_application_name(CZerobusSdkBuilder* builder, const char* value);
+extern void zerobus_sdk_builder_connection_per_stream(CZerobusSdkBuilder* builder, bool enabled);
 extern CZerobusSdk* zerobus_sdk_builder_build(CZerobusSdkBuilder* builder, CResult* result);
 extern void zerobus_sdk_builder_free(CZerobusSdkBuilder* builder);
 extern void zerobus_sdk_free(CZerobusSdk* sdk);
@@ -339,6 +340,9 @@ func sdkNew(zerobusEndpoint, unityCatalogURL string, opts sdkOptions) (unsafe.Po
 		setBuilderString(builder, opts.applicationName, func(b *C.CZerobusSdkBuilder, value *C.char) {
 			C.zerobus_sdk_builder_application_name(b, value)
 		})
+	}
+	if opts.connectionPerStream != nil {
+		C.zerobus_sdk_builder_connection_per_stream(builder, C.bool(*opts.connectionPerStream))
 	}
 
 	var cres C.CResult

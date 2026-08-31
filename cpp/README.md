@@ -335,6 +335,18 @@ Key `Stream` methods: `ingest_proto_record`, `ingest_json_record`,
 
 ## Configuration
 
+`SdkBuilder::connection_per_stream(bool)` controls connection ownership for
+JSON/protobuf streams. It defaults to `true`, giving every stream a dedicated
+gRPC connection; pass `false` to multiplex streams over one shared HTTP/2
+connection. Arrow Flight streams are unaffected.
+
+HTTP/2 multiplexes logical streams over one TCP connection. On high-throughput
+workloads over the public internet, packet loss and TCP retransmissions can
+cause head-of-line blocking across every stream on that connection, reducing
+aggregate throughput. Dedicated connections isolate that loss. For many
+smaller, low-throughput streams, shared multiplexing is recommended to reduce
+connection overhead.
+
 Both option structs are plain aggregates — default-construct one and override
 only the fields you care about:
 

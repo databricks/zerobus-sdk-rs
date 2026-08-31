@@ -91,6 +91,11 @@ SdkBuilder& SdkBuilder::application_name(const std::string& value) {
   return *this;
 }
 
+SdkBuilder& SdkBuilder::connection_per_stream(bool enabled) {
+  zerobus_sdk_builder_connection_per_stream(builder_, enabled);
+  return *this;
+}
+
 SdkBuilder& SdkBuilder::disable_tls() {
   zerobus_sdk_builder_disable_tls(builder_);
   return *this;

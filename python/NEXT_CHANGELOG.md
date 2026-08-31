@@ -6,6 +6,10 @@
 
 ### New Features and Improvements
 
+- JSON and protobuf streams now use a dedicated gRPC connection by default.
+  Pass `connection_per_stream=False` to the synchronous or asynchronous
+  `ZerobusSdk` constructor to share one HTTP/2 connection across streams.
+
 ### Bug Fixes
 
 ### Documentation
