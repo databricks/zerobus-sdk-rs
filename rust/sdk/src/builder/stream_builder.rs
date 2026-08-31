@@ -569,6 +569,7 @@ mod tests {
             Arc::from(crate::DEFAULT_SDK_IDENTIFIER),
             true,
             crate::token_cache::DEFAULT_REFRESH_BUFFER,
+            true,
         )
     }
 

@@ -6,6 +6,10 @@
 
 ### New Features and Improvements
 
+- JSON and protobuf streams now use a dedicated gRPC connection by default.
+  Use `ZerobusSdk::builder().connection_per_stream(false)` to retain the prior
+  shared HTTP/2 connection behavior. Arrow Flight streams are unchanged.
+
 ### Bug Fixes
 
 - The OAuth `expires_in` field is now parsed from a quoted integer (`"3600"`) in

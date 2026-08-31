@@ -1,4 +1,5 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
+use std::net::SocketAddr;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::time::Duration;
@@ -89,6 +90,8 @@ pub struct MockZerobusServer {
     response_indices: Arc<Mutex<HashMap<String, usize>>>,
     /// Observation that a delayed setup response registered its timer.
     delayed_setup_armed: Arc<Notify>,
+    /// Distinct TCP peers used to open logical streams.
+    connection_addresses: Arc<Mutex<HashSet<SocketAddr>>>,
 }
 
 impl MockZerobusServer {
@@ -100,6 +103,7 @@ impl MockZerobusServer {
             write_count: Arc::new(Mutex::new(0)),
             response_indices: Arc::new(Mutex::new(HashMap::new())),
             delayed_setup_armed: Arc::new(Notify::new()),
+            connection_addresses: Arc::new(Mutex::new(HashSet::new())),
         }
     }
 
@@ -131,6 +135,11 @@ impl MockZerobusServer {
         *self.write_count.lock().await
     }
 
+    /// Get the number of distinct TCP connections that opened streams.
+    pub async fn get_connection_count(&self) -> usize {
+        self.connection_addresses.lock().await.len()
+    }
+
     /// Reset the server state
     #[allow(dead_code)]
     pub async fn reset(&self) {
@@ -141,6 +150,7 @@ impl MockZerobusServer {
         *self.max_offset_sent.lock().await = -1;
         *self.write_count.lock().await = 0;
         *self.stream_counter.lock().await = 0;
+        self.connection_addresses.lock().await.clear();
     }
 }
 
@@ -173,6 +183,9 @@ impl Zerobus for MockZerobusServer {
         &self,
         request: Request<Streaming<EphemeralStreamRequest>>,
     ) -> Result<Response<Self::EphemeralStreamStream>, Status> {
+        if let Some(remote_addr) = request.remote_addr() {
+            self.connection_addresses.lock().await.insert(remote_addr);
+        }
         let mut stream = request.into_inner();
         let (tx, rx) = mpsc::channel(100);
 
@@ -468,6 +481,7 @@ async fn start_mock_server_inner(
         write_count: Arc::clone(&mock_server.write_count),
         response_indices: Arc::clone(&mock_server.response_indices),
         delayed_setup_armed: Arc::clone(&mock_server.delayed_setup_armed),
+        connection_addresses: Arc::clone(&mock_server.connection_addresses),
     };
 
     let addr: std::net::SocketAddr = "127.0.0.1:0".parse()?;

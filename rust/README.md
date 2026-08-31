@@ -340,7 +340,7 @@ OAuth tokens minted via Unity Catalog have a lifetime chosen by Unity Catalog (c
 
 Caching applies only to the built-in OAuth path (`.oauth(...)`). Tokens are shared only across streams created from the same `ZerobusSdk`, so reuse a single SDK instance rather than constructing a new one per stream. Custom `HeadersProvider` implementations manage their own caching.
 
-Two builder options tune the behavior:
+SDK builder options tune connection and token behavior:
 
 ```rust
 use databricks_zerobus_ingest_sdk::ZerobusSdk;
@@ -825,6 +825,25 @@ ZEROBUS_SDK_WARNINGS_ENABLED=false
 Also accepts `0` or `no`.
 
 ## Configuration Options
+
+### SDK builder options
+
+| Method | Default | Description |
+|--------|---------|-------------|
+| `endpoint(...)` | Required | Set the Zerobus API endpoint. |
+| `unity_catalog_url(...)` | Unset | Set the Unity Catalog endpoint. Required when using built-in OAuth authentication. |
+| `tls_config(...)` | System CA certificates | Provide custom TLS configuration. |
+| `application_name(...)` | Unset | Append an application identifier to the SDK's HTTP `user-agent` header. |
+| `connection_per_stream(bool)` | `true` | Give each JSON/protobuf stream a dedicated gRPC connection. Pass `false` to multiplex streams over one shared HTTP/2 connection. Arrow Flight streams are unaffected because they already use dedicated connections. |
+| `token_cache_enabled(bool)` | `true` | Enable or disable OAuth token caching for the built-in OAuth path. |
+| `token_refresh_buffer(Duration)` | 5 minutes | Set how long before expiry a cached OAuth token is refreshed. |
+
+HTTP/2 multiplexes logical streams over one TCP connection. On high-throughput
+workloads over the public internet, packet loss and TCP retransmissions can
+cause head-of-line blocking that stalls every stream on that connection and
+reduces aggregate throughput. Dedicated connections isolate that loss. If you
+run many smaller, low-throughput streams, set `connection_per_stream(false)`;
+shared multiplexing is recommended there to reduce connection overhead.
 
 ### StreamConfigurationOptions
 
