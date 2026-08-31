@@ -22,6 +22,13 @@ class TestNativeBindingSignatures(unittest.TestCase):
             f"{fn.__qualname__} parameter '{param_name}' must default to None, " f"got {params[param_name].default!r}",
         )
 
+    def _assert_connection_per_stream_optional(self, sdk_type):
+        # Python 3.9 cannot derive a Signature from a PyO3 builtin type. Calling
+        # the constructor verifies that the default and explicit forms bind.
+        sdk_type("https://localhost", "https://localhost")
+        sdk_type("https://localhost", "https://localhost", None, True)
+        sdk_type("https://localhost", "https://localhost", None, False)
+
     def test_sync_wait_for_offset_timeout_optional(self):
         self._assert_optional(core.sync.ZerobusStream.wait_for_offset, "timeout_sec")
 
@@ -39,9 +46,8 @@ class TestNativeBindingSignatures(unittest.TestCase):
     def test_sync_create_stream_options_optional(self):
         self._assert_optional(core.sync.ZerobusSdk.create_stream, "options")
 
-    def test_sync_sdk_connection_per_stream_defaults_true(self):
-        param = inspect.signature(core.sync.ZerobusSdk).parameters["connection_per_stream"]
-        self.assertIs(param.default, True)
+    def test_sync_sdk_connection_per_stream_optional(self):
+        self._assert_connection_per_stream_optional(core.sync.ZerobusSdk)
 
     def test_sync_create_stream_with_headers_provider_options_optional(self):
         self._assert_optional(core.sync.ZerobusSdk.create_stream_with_headers_provider, "options")
@@ -49,9 +55,8 @@ class TestNativeBindingSignatures(unittest.TestCase):
     def test_async_create_stream_options_optional(self):
         self._assert_optional(core.aio.ZerobusSdk.create_stream, "options")
 
-    def test_async_sdk_connection_per_stream_defaults_true(self):
-        param = inspect.signature(core.aio.ZerobusSdk).parameters["connection_per_stream"]
-        self.assertIs(param.default, True)
+    def test_async_sdk_connection_per_stream_optional(self):
+        self._assert_connection_per_stream_optional(core.aio.ZerobusSdk)
 
     def test_async_create_stream_with_headers_provider_options_optional(self):
         self._assert_optional(core.aio.ZerobusSdk.create_stream_with_headers_provider, "options")

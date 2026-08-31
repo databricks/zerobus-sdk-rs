@@ -314,7 +314,13 @@ class sync:
     class ZerobusSdk:
         """Main entry point for synchronous Zerobus ingestion."""
 
-        def __init__(self, host: str, unity_catalog_url: str, application_name: Optional[str] = None, connection_per_stream: bool = True) -> None:
+        def __init__(
+            self,
+            host: str,
+            unity_catalog_url: str,
+            application_name: Optional[str] = None,
+            connection_per_stream: bool = True,
+        ) -> None:
             """
             Create a synchronous Zerobus SDK instance.
 
@@ -469,7 +475,13 @@ class aio:
     class ZerobusSdk:
         """Main entry point for asynchronous Zerobus ingestion."""
 
-        def __init__(self, host: str, unity_catalog_url: str, application_name: Optional[str] = None, connection_per_stream: bool = True) -> None:
+        def __init__(
+            self,
+            host: str,
+            unity_catalog_url: str,
+            application_name: Optional[str] = None,
+            connection_per_stream: bool = True,
+        ) -> None:
             """
             Create an asynchronous Zerobus SDK instance.
 

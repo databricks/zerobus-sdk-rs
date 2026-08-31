@@ -153,8 +153,7 @@ public class ZerobusSdk implements AutoCloseable {
     this.serverEndpoint = serverEndpoint;
     this.unityCatalogEndpoint = unityCatalogEndpoint;
     this.nativeHandle =
-        nativeCreate(
-            serverEndpoint, unityCatalogEndpoint, applicationName, connectionPerStream);
+        nativeCreate(serverEndpoint, unityCatalogEndpoint, applicationName, connectionPerStream);
     if (this.nativeHandle == 0) {
       throw new RuntimeException("Failed to create native SDK instance");
     }

@@ -243,9 +243,7 @@ class ZerobusSdk:
                 dedicated gRPC connection. Defaults to True. Set to False to
                 share one connection across streams.
         """
-        self._inner = _RustZerobusSdk(
-            host, unity_catalog_url, application_name, connection_per_stream
-        )
+        self._inner = _RustZerobusSdk(host, unity_catalog_url, application_name, connection_per_stream)
 
     def create_arrow_stream(
         self, table_name: str, schema, client_id: str, client_secret: str, options=None
