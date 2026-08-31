@@ -25,3 +25,5 @@ pub use grpc::ZerobusStream;
 
 #[cfg(feature = "testing")]
 pub use grpc::CallbackHandlerHarness;
+#[cfg(feature = "testing")]
+pub(crate) use grpc::StreamShutdownHandle;

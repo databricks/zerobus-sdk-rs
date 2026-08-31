@@ -1044,6 +1044,171 @@ mod failure_tests {
     }
 
     #[tokio::test]
+    async fn test_concurrent_ingest_waiting_for_capacity_fails_after_mux_poison(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        setup_tracing();
+        info!("Starting test_concurrent_ingest_waiting_for_capacity_fails_after_mux_poison");
+
+        let (mock_server, server_url) = start_mock_server().await?;
+        let first_ack = Arc::new(MockResponseGate::new());
+        mock_server
+            .inject_responses(
+                TABLE_FAIL,
+                vec![
+                    MockResponse::CreateStream {
+                        stream_id: "poisoned".to_string(),
+                        delay_ms: 0,
+                    },
+                    MockResponse::GatedRecordAck {
+                        ack_up_to_offset: 0,
+                        gate: Arc::clone(&first_ack),
+                    },
+                    MockResponse::Error {
+                        status: tonic::Status::permission_denied("sub-stream failure"),
+                        delay_ms: 0,
+                    },
+                ],
+            )
+            .await;
+
+        let sdk = create_test_sdk(&server_url).await?;
+        let opts = TestOpts {
+            max_inflight_requests: 1,
+            ..default_options()
+        };
+        let stream = create_test_stream(&sdk, TABLE_FAIL, opts).await?;
+        let mux = MultiplexedStream::new(vec![stream]);
+
+        let first = mux.ingest_record(b"fills-capacity".to_vec()).await?;
+        assert_eq!(first.stream_index(), 0);
+        assert_eq!(first.sub_offset(), 0);
+
+        const WAITERS: usize = 15;
+        let mut waiters = (0..WAITERS)
+            .map(|i| Box::pin(mux.ingest_record(format!("record-{i}").into_bytes())))
+            .collect::<Vec<_>>();
+
+        for waiter in &mut waiters {
+            assert!(
+                matches!(poll!(waiter.as_mut()), Poll::Pending),
+                "Expected every concurrent ingest to wait for capacity"
+            );
+        }
+
+        // Cross the one-second diagnostic timeout, then poll in reverse. A
+        // cancelled-and-recreated semaphore acquisition would requeue in this
+        // reverse order; a persistent acquisition retains waiter 0 at the
+        // front of the original FIFO queue.
+        tokio::time::pause();
+        tokio::time::advance(Duration::from_secs(2)).await;
+        for waiter in waiters.iter_mut().rev() {
+            assert!(
+                matches!(poll!(waiter.as_mut()), Poll::Pending),
+                "Expected every concurrent ingest to remain blocked across the diagnostic timeout"
+            );
+        }
+        tokio::time::resume();
+
+        first_ack.release();
+        let results =
+            tokio::time::timeout(Duration::from_secs(5), futures::future::join_all(waiters))
+                .await
+                .expect("ingest tasks should finish after mux poison");
+
+        let mut successes = Vec::new();
+        let mut errors = 0;
+        for (waiter_index, result) in results.into_iter().enumerate() {
+            match result {
+                Ok(message_id) => successes.push((waiter_index, message_id)),
+                Err(ZerobusError::InvalidStateError(_))
+                | Err(ZerobusError::StreamClosedError(_)) => errors += 1,
+                Err(e) => panic!("unexpected ingest error: {e:?}"),
+            }
+        }
+
+        assert_eq!(
+            successes.len(),
+            1,
+            "Only one waiter should be admitted before poison"
+        );
+        assert_eq!(successes[0].0, 0, "The oldest waiter must win the permit");
+        assert_eq!(successes[0].1.stream_index(), 0);
+        assert_eq!(successes[0].1.sub_offset(), 1);
+        assert_eq!(errors, WAITERS - 1);
+        assert!(mux.is_closed(), "Mux should report the failed sub-stream");
+        assert_eq!(mock_server.get_write_count().await, 2);
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_ingest_times_out_when_capacity_never_recovers(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        setup_tracing();
+
+        let (mock_server, server_url) = start_mock_server().await?;
+        let stalled_ack = Arc::new(MockResponseGate::new());
+        mock_server
+            .inject_responses(
+                TABLE_OK,
+                vec![
+                    MockResponse::CreateStream {
+                        stream_id: "stalled".to_string(),
+                        delay_ms: 0,
+                    },
+                    MockResponse::GatedRecordAck {
+                        ack_up_to_offset: 0,
+                        gate: Arc::clone(&stalled_ack),
+                    },
+                ],
+            )
+            .await;
+
+        let sdk = create_test_sdk(&server_url).await?;
+        let stream = create_test_stream(
+            &sdk,
+            TABLE_OK,
+            TestOpts {
+                max_inflight_requests: 1,
+                flush_timeout_ms: None,
+            },
+        )
+        .await?;
+        let mux = MultiplexedStream::new(vec![stream]);
+
+        mux.ingest_record(b"fills-capacity".to_vec()).await?;
+        let mut timed_ingest = Box::pin(mux.ingest_record(b"times-out".to_vec()));
+        assert!(
+            matches!(poll!(&mut timed_ingest), Poll::Pending),
+            "Expected ingest to wait while the first acknowledgment is gated"
+        );
+
+        tokio::time::pause();
+        tokio::time::advance(Duration::from_secs(31)).await;
+        let result = timed_ingest.await;
+        tokio::time::resume();
+        stalled_ack.release();
+
+        let message = match result {
+            Err(ZerobusError::ConnectionTimeout(message)) => message,
+            other => panic!("expected capacity timeout, got {other:?}"),
+        };
+        assert!(message.contains("sub-stream 0"), "{message}");
+        assert!(message.contains(TABLE_OK), "{message}");
+        assert!(
+            message.contains("configured timeout: 30000 ms"),
+            "{message}"
+        );
+        assert!(message.contains("max_inflight_requests: 1"), "{message}");
+        assert!(
+            !mux.is_closed(),
+            "capacity timeout should not poison the mux"
+        );
+
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn test_public_is_closed_reports_closed_substream(
     ) -> Result<(), Box<dyn std::error::Error>> {
         setup_tracing();

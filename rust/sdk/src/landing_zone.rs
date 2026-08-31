@@ -4,6 +4,8 @@ use std::sync::Arc;
 use thiserror::Error;
 use tokio::sync::{Notify, OwnedSemaphorePermit, Semaphore};
 
+pub(crate) struct CapacityReservation(OwnedSemaphorePermit);
+
 #[derive(Debug, Error)]
 pub enum LandingZoneError {
     #[error("Attempted to remove non-observed element")]
@@ -85,29 +87,33 @@ impl<T: Clone> LandingZone<T> {
         all_items
     }
 
+    pub(crate) async fn reserve_capacity(&self) -> CapacityReservation {
+        CapacityReservation(
+            self.semaphore
+                .clone()
+                .acquire_owned()
+                .await
+                .expect("Failed to acquire semaphore"),
+        )
+    }
+
+    pub(crate) fn enqueue_reserved(&self, request: T, reservation: CapacityReservation) {
+        let mut state = self.state.lock().expect("Lock poisoned");
+        let mut permits = self.permits.lock().expect("Lock poisoned");
+        state.queue.push_back(request);
+        permits.push_back(reservation.0);
+        // Unblock one of the waiting observe() calls.
+        self.new_item_notify.notify_one();
+    }
+
     /// Adds an item to the queue.
     ///
     /// This method will block if the maximum number of inflight requests has been reached,
     /// providing automatic backpressure control.
-    ///
-    /// # Arguments
-    ///
-    /// * `request` - The item to add to the queue
+    #[cfg(test)]
     pub async fn add(&self, request: T) {
-        let _permit = self
-            .semaphore
-            .clone()
-            .acquire_owned()
-            .await
-            .expect("Failed to acquire semaphore");
-        let mut state = self.state.lock().expect("Lock poisoned");
-        state.queue.push_back(request);
-        self.permits
-            .lock()
-            .expect("Lock poisoned")
-            .push_back(_permit);
-        // Unblock one of the waiting observe() calls.
-        self.new_item_notify.notify_one();
+        let reservation = self.reserve_capacity().await;
+        self.enqueue_reserved(request, reservation);
     }
 
     /// Removes and returns the next observed item.
