@@ -166,8 +166,8 @@ public final class StreamBuilder {
   /**
    * Sets the maximum number of in-flight records.
    *
-   * <p>Applies to JSON and Protocol Buffer streams. It is ignored for Arrow streams, which
-   * use {@link ArrowStreamBuilder#maxInflightBatches(int)} instead.
+   * <p>Applies to JSON and Protocol Buffer streams. It is ignored for Arrow streams, which use
+   * {@link ArrowStreamBuilder#maxInflightBatches(int)} instead.
    *
    * @param maxInflightRecords the maximum number of in-flight records
    * @return this builder for method chaining
@@ -181,8 +181,8 @@ public final class StreamBuilder {
   /**
    * Sets the acknowledgment callback.
    *
-   * <p>Applies to JSON and Protocol Buffer streams only. Arrow Flight streams do not support
-   * ACK callbacks; configuring one and calling {@link ArrowStreamBuilder#build()} throws {@link
+   * <p>Applies to JSON and Protocol Buffer streams only. Arrow Flight streams do not support ACK
+   * callbacks; configuring one and calling {@link ArrowStreamBuilder#build()} throws {@link
    * IllegalStateException}.
    *
    * @param ackCallback the acknowledgment callback
@@ -276,7 +276,10 @@ public final class StreamBuilder {
     return value == null || value.trim().isEmpty();
   }
 
-  /** Builds JSON and Protocol Buffer stream options, applying only the values that were explicitly set. */
+  /**
+   * Builds JSON and Protocol Buffer stream options, applying only the values that were explicitly
+   * set.
+   */
   StreamConfigurationOptions toStreamOptions() {
     StreamConfigurationOptions.StreamConfigurationOptionsBuilder builder =
         StreamConfigurationOptions.builder();
