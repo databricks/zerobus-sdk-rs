@@ -2,7 +2,7 @@
 
 This directory contains an example demonstrating Arrow Flight-based data ingestion into Databricks Delta tables using the Zerobus Rust SDK.
 
-Arrow Flight ingestion is generally available. The `arrow-flight` feature flag must be enabled.
+The `arrow-flight` feature flag must be enabled.
 
 ## Table of Contents
 

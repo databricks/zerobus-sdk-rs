@@ -64,7 +64,7 @@ Any change to the Rust SDK's public API surface has cascading effects:
 
 ## Feature flags
 
-- `arrow-flight` — Arrow Flight support. This generally available API remains opt-in.
+- `arrow-flight` — Arrow Flight support. Opt-in.
 - `internal-arrow-c-data` — Unsupported wrapper-only C Data importer shared by
   the repository's native bindings. Disabled by default; external Rust users
   must not depend on its API stability.

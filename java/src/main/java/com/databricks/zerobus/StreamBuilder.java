@@ -35,9 +35,10 @@ public final class StreamBuilder {
   private String clientSecret;
   private HeadersProvider headersProvider;
 
-  // Shared and gRPC configuration. A {@code null} value means "not set", so each record format
-  // falls back to its own defaults (for example Arrow defaults to 4 recovery retries while gRPC
-  // defaults to 3). This mirrors the Rust builder, which keeps separate gRPC and Arrow configs.
+  // Shared and JSON/protobuf configuration. A {@code null} value means "not set", so each record
+  // format falls back to its own defaults (for example Arrow defaults to 4 recovery retries while
+  // JSON/protobuf defaults to 3). This mirrors the Rust builder, which keeps separate JSON/protobuf
+  // and Arrow configs.
   private Integer maxInflightRecords;
   private Boolean recovery;
   private Integer recoveryTimeoutMs;
@@ -165,7 +166,7 @@ public final class StreamBuilder {
   /**
    * Sets the maximum number of in-flight records.
    *
-   * <p>Applies to JSON and Protocol Buffer (gRPC) streams. It is ignored for Arrow streams, which
+   * <p>Applies to JSON and Protocol Buffer streams. It is ignored for Arrow streams, which
    * use {@link ArrowStreamBuilder#maxInflightBatches(int)} instead.
    *
    * @param maxInflightRecords the maximum number of in-flight records
@@ -180,7 +181,7 @@ public final class StreamBuilder {
   /**
    * Sets the acknowledgment callback.
    *
-   * <p>Applies to JSON and Protocol Buffer (gRPC) streams only. Arrow Flight streams do not support
+   * <p>Applies to JSON and Protocol Buffer streams only. Arrow Flight streams do not support
    * ACK callbacks; configuring one and calling {@link ArrowStreamBuilder#build()} throws {@link
    * IllegalStateException}.
    *
@@ -275,7 +276,7 @@ public final class StreamBuilder {
     return value == null || value.trim().isEmpty();
   }
 
-  /** Builds the gRPC stream options, applying only the values that were explicitly set. */
+  /** Builds JSON and Protocol Buffer stream options, applying only the values that were explicitly set. */
   StreamConfigurationOptions toStreamOptions() {
     StreamConfigurationOptions.StreamConfigurationOptionsBuilder builder =
         StreamConfigurationOptions.builder();

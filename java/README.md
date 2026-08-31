@@ -34,7 +34,7 @@ The Databricks Zerobus Ingest SDK for Java provides a high-performance client fo
 - **Flexible configuration**: Customizable stream behavior and timeouts
 - **Protocol Buffers**: Strongly-typed schema using protobuf
 - **JSON support**: Ingest JSON records without Protocol Buffer schemas
-- **Arrow Flight**: Generally available columnar ingestion of Apache Arrow `VectorSchemaRoot` batches
+- **Arrow Flight**: Columnar ingestion of Apache Arrow `VectorSchemaRoot` batches
 - **Offset-based API**: Low-overhead alternative to CompletableFuture for high throughput
 - **OAuth 2.0 authentication**: Secure authentication with client credentials
 - **Custom authentication**: Supply request headers with `HeadersProvider`

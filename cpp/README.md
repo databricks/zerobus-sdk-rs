@@ -11,8 +11,8 @@ every other Zerobus SDK.
 - **Proto and JSON** ingestion, single and batched.
 - **Dynamic protobuf** — build a descriptor and encode records straight from
   Unity Catalog table metadata, with no `.proto` file or `protoc` required.
-- **Arrow Flight** ingestion — generally available streaming of Arrow record
-  batches with optional LZ4/ZSTD compression.
+- **Arrow Flight** ingestion — streaming of Arrow record batches with optional
+  LZ4/ZSTD compression.
 - **Async ack callback** — register an `AckCallback` to be notified of durable
   acks and terminal errors on a background task, without blocking in
   `wait_for_offset()` / `flush()`.

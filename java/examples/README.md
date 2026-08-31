@@ -241,7 +241,7 @@ java -cp ".:$SDK_JAR" \
 | Return Type | `long` offset | `long` offset | `Optional<Long>` | `CompletableFuture` |
 | Batch Support | Yes | Yes | Yes (columnar) | No |
 | Extra Deps | protobuf-java | None | arrow-vector, arrow-memory-netty | protobuf-java |
-| Status | **Recommended** | **Recommended** | Generally available | Deprecated |
+| Status | **Recommended** | **Recommended** | **Recommended** | Deprecated |
 
 ## Additional Resources
 

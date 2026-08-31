@@ -214,8 +214,9 @@ fn convert_js_to_record_payload(env: &Env, payload: Unknown) -> Result<RustRecor
 
 /// A stream for ingesting data into a Databricks Delta table.
 ///
-/// The stream manages a bidirectional gRPC connection, handles acknowledgments,
-/// and provides automatic recovery on transient failures.
+/// The stream manages JSON or Protocol Buffer ingestion over a bidirectional
+/// gRPC connection, handles acknowledgments, and provides automatic recovery
+/// on transient failures.
 ///
 /// # Example
 ///
@@ -926,7 +927,7 @@ impl ZerobusSdk {
 
     /// Creates a new ingestion stream to a Delta table.
     ///
-    /// This method establishes a bidirectional gRPC connection to the Zerobus service
+    /// This method opens a JSON or Protocol Buffer stream to the Zerobus service
     /// and prepares it for data ingestion. By default, it uses OAuth 2.0 Client Credentials
     /// authentication. For custom authentication (e.g., Personal Access Tokens), provide
     /// a custom headers_provider.

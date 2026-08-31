@@ -201,6 +201,6 @@ if (offset !== null) {
 | **Performance** | Text-based | Efficient binary encoding | High-performance columnar |
 | **Flexibility** | Easy to modify | Schema changes require regeneration | Dynamic schema |
 | **Best For** | Prototyping, simple use cases | Production, high-throughput | Analytics, data science |
-| **Status** | Stable | Stable | Generally available |
+| **Status** | Stable | Stable | Stable |
 
 **Recommendation:** Start with JSON for quick prototyping, then migrate to Protocol Buffers for production row-oriented workloads. Arrow Flight is suitable for analytics and columnar workloads.

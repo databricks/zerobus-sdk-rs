@@ -64,7 +64,7 @@ This SDK wraps the [Rust SDK](https://github.com/databricks/zerobus-sdk/tree/mai
 - **Configurable timeouts and retry policies**
 - **Immediate offset returns** for ingested records
 - **Graceful stream management** - Proper flushing and resource cleanup
-- **Arrow Flight ingestion** - Generally available high-throughput Apache Arrow RecordBatch ingestion via the Arrow Flight protocol
+- **Arrow Flight ingestion** - High-throughput Apache Arrow RecordBatch ingestion via the Arrow Flight protocol
 
 ## Getting Started
 
@@ -137,7 +137,7 @@ See [Building from Source](#building-from-source) for more build options and [Co
 
 ## Quick Start
 
-Standard gRPC streams support two serialization formats and two ingestion methods. Arrow Flight provides a separate columnar ingestion API.
+JSON and Protocol Buffers share one stream API, with two ingestion methods. Arrow Flight is a separate columnar API.
 
 **Serialization:**
 - **JSON** (Recommended for getting started): Simpler approach using JSON strings, no schema generation required
@@ -827,9 +827,7 @@ Each example includes detailed comments and demonstrates best practices for prod
 
 ## Arrow Flight Ingestion
 
-Arrow Flight ingestion is generally available.
-
-Ingest Apache Arrow RecordBatches directly into Databricks Delta tables using the Arrow Flight protocol. Use this if your pipeline already works with Arrow data. For JSON or Protocol Buffers, use the standard `ZerobusStream`.
+Ingest Apache Arrow RecordBatches directly into Databricks Delta tables using the Arrow Flight protocol. Use this if your pipeline already works with Arrow data. For JSON or Protocol Buffers, use `ZerobusStream`.
 
 See [`examples/arrow/`](examples/arrow/) for a complete working example.
 

@@ -1,4 +1,4 @@
-//! Ingestion stream over the gRPC transport (proto / JSON records).
+//! JSON and Protocol Buffer ingestion stream.
 //!
 //! `ZerobusStream` is the main user-facing type for streaming records into a
 //! Delta table. This module owns the struct, the constructor that wires
@@ -56,9 +56,10 @@ pub(super) const STREAM_TEARDOWN_DRAIN_TIMEOUT_MS: u64 = 500;
 
 /// Represents an active ingestion stream to a Databricks Delta table.
 ///
-/// A `ZerobusStream` manages a bidirectional gRPC stream for ingesting records into
-/// a Unity Catalog table. It handles authentication, automatic recovery, acknowledgment
-/// tracking, and graceful shutdown.
+/// A `ZerobusStream` manages JSON or Protocol Buffer ingestion into
+/// a Unity Catalog table over a bidirectional gRPC stream. It handles
+/// authentication, automatic recovery, acknowledgment tracking, and
+/// graceful shutdown.
 ///
 /// # Lifecycle
 ///
@@ -91,7 +92,7 @@ pub struct ZerobusStream {
     /// not just within a single table. The server returns this ID in the CreateStreamResponse
     /// after validating the table properties and establishing the gRPC connection.
     pub(crate) stream_id: Option<String>,
-    /// Type of gRPC stream that is used when sending records.
+    /// Kind of stream used when sending records.
     pub stream_type: StreamType,
     /// Gets headers which are used in the first request to establish connection with the server.
     pub headers_provider: Arc<dyn HeadersProvider>,

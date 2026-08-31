@@ -49,7 +49,7 @@ The Zerobus Rust SDK provides a robust, async-first interface for ingesting larg
 - **Flexible Configuration** - Fine-tune timeouts, retries, and recovery behavior
 - **Graceful Stream Management** - Proper flushing and acknowledgment tracking
 - **Acknowledgment Callbacks** - Receive notifications when records are acknowledged or encounter errors
-- **Arrow Flight Ingestion** (GA, opt-in) — Stream Apache Arrow `RecordBatch` data directly to Zerobus using Arrow Flight's gRPC transport. Enable with `features = ["arrow-flight"]`; see [`examples/arrow/`](https://github.com/databricks/zerobus-sdk/tree/main/rust/examples/arrow).
+- **Arrow Flight Ingestion** (opt-in) — Stream Apache Arrow `RecordBatch` data directly to Zerobus using Arrow Flight's gRPC transport. Enable with `features = ["arrow-flight"]`; see [`examples/arrow/`](https://github.com/databricks/zerobus-sdk/tree/main/rust/examples/arrow).
 - **Zeroparser** *(opt-in)* — Zero-copy, single-pass protobuf parser for runtime-known schemas. Enable with `features = ["zeroparser"]`; see [`sdk/src/zeroparser/README.md`](https://github.com/databricks/zerobus-sdk/blob/main/rust/sdk/src/zeroparser/README.md).
 
 ## Installation
@@ -92,7 +92,7 @@ tokio = { version = "1.52", features = ["macros", "rt-multi-thread"] }
 
 ## Quick Start
 
-Standard gRPC streams support two serialization formats and two ingestion methods. Arrow Flight provides a separate columnar ingestion API.
+JSON and Protocol Buffers share one stream API, with two ingestion methods. Arrow Flight is a separate columnar API.
 
 **Serialization:**
 - **JSON** (Recommended for getting started): Simpler approach using JSON strings, no schema generation required
@@ -249,7 +249,7 @@ zerobus_rust_sdk/
 
 ### JSON / Protocol Buffers Architecture Overview
 
-The following diagram describes the standard JSON/protobuf stream. Arrow Flight uses a
+The following diagram describes the JSON / Protocol Buffers stream. Arrow Flight uses a
 separate Flight request/response exchange and lifecycle state machine.
 
 ```
@@ -839,8 +839,8 @@ Also accepts `0` or `no`.
 | `flush_timeout_ms` | `u64` | 300,000 | Timeout for flush operations (ms) |
 | `record_type` | `RecordType` | `RecordType::Proto` | Record serialization format (Proto or Json) |
 | `stream_paused_max_wait_time_ms` | `Option<u64>` | `None` | Max time to wait for outstanding acknowledgments during graceful close (`None` = server grace remaining after reserving transport cleanup time, `Some(0)` = skip the ACK wait, `Some(x)` = the smaller of `x` and that remaining grace). A bounded request/response drain still runs after the ACK wait. |
-| `ack_callback` | `Option<Arc<dyn AckCallback>>` | `None` | **gRPC JSON/proto streams only.** Optional callback for acknowledgment notifications. Not supported for Arrow Flight streams. |
-| `callback_max_wait_time_ms` | `Option<u64>` | `Some(5_000)` | **gRPC JSON/proto streams only.** Maximum time to wait for callback processing to complete after closing the stream (`None` = wait indefinitely, `Some(x)` = wait up to `x` ms) |
+| `ack_callback` | `Option<Arc<dyn AckCallback>>` | `None` | JSON and Protocol Buffer streams only. Optional callback for acknowledgment notifications. Not supported for Arrow Flight streams. |
+| `callback_max_wait_time_ms` | `Option<u64>` | `Some(5_000)` | JSON and Protocol Buffer streams only. Maximum time to wait for callback processing to complete after closing the stream (`None` = wait indefinitely, `Some(x)` = wait up to `x` ms) |
 
 ### ArrowStreamConfigurationOptions
 
@@ -910,7 +910,7 @@ let stream = sdk
 
 ## Proxy Configuration
 
-Standard and Arrow Flight streams use the same proxy policy for initial connections,
+JSON / Protocol Buffer and Arrow Flight streams use the same proxy policy for initial connections,
 automatic recovery, and stream recreation. By default, the SDK uses the first non-empty
 proxy variable in this order:
 
@@ -1027,7 +1027,7 @@ let result = stream.ingest_record_offset(oversized).await;
 
 The limit applies to the total encoded size of the call — the sum of all record bytes passed to `ingest_record_offset` or `ingest_records_offset`. Split large payloads across multiple calls to stay within the limit.
 
-The default limit is set **slightly below 10 MiB** to leave headroom for the request envelope, so that a payload accepted client-side isn't later rejected by the server's transport layer. It is configurable per stream via the builder (gRPC JSON/proto streams only — Arrow Flight streams do not enforce this limit, and setting it before `build_arrow()` logs a warning):
+The default limit is set **slightly below 10 MiB** to leave headroom for the request envelope, so that a payload accepted client-side isn't later rejected by the server's transport layer. It is configurable per stream via the builder (JSON and Protocol Buffer streams only — Arrow Flight streams do not enforce this limit, and setting it before `build_arrow()` logs a warning):
 
 ```rust
 let stream = sdk

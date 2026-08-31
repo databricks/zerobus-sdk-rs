@@ -61,7 +61,7 @@ The Zerobus Python SDK is a thin wrapper around the [Zerobus Rust SDK](../rust/)
 - **Rust-backed performance** - Native Rust implementation via PyO3 bindings for maximum throughput
 - **Sync and Async support** - Both synchronous and asynchronous Python APIs
 - **Automatic recovery** - Built-in retry and reconnection for transient failures
-- **Multiple serialization formats** - JSON, Protocol Buffers, and generally available Arrow Flight ingestion
+- **Multiple serialization formats** - JSON, Protocol Buffers, and Arrow Flight ingestion
 - **OAuth 2.0 authentication** - Secure authentication with client credentials, automatically refreshed
 - **Acknowledgment callbacks** - Receive notifications when records are acknowledged or encounter errors
 - **Flexible configuration** - Fine-tune timeouts, retries, and recovery behavior

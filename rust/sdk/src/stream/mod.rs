@@ -1,6 +1,6 @@
 //! Ingestion streams, organized per transport.
 //!
-//! [`grpc`] holds proto / JSON streaming over a bidirectional gRPC stream.
+//! [`grpc`] holds JSON and Protocol Buffer streaming.
 //! [`arrow`] holds Arrow Flight streaming.
 //!
 //! TODO: lift the transport-agnostic parts of `grpc/` (callbacks,
