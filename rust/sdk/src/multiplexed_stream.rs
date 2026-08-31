@@ -20,12 +20,66 @@
 
 use futures::future::join_all;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
+use std::time::Duration;
+use tokio_util::sync::CancellationToken;
 use tracing::{error, info, warn};
 
+use crate::stream::StreamShutdownHandle;
 use crate::{
     AckCallback, EncodedBatch, EncodedRecord, OffsetId, ZerobusError, ZerobusResult, ZerobusStream,
 };
+
+const CAPACITY_WAIT_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// Ensures a cancelled poison future still shuts sub-stream tasks down, but
+/// only after all ingests admitted before poison have left the admission
+/// section. Normal completion disarms the fallback after signaling directly.
+struct PoisonCleanupGuard {
+    admission: Arc<tokio::sync::RwLock<()>>,
+    shutdown_handles: Option<Vec<StreamShutdownHandle>>,
+    runtime: tokio::runtime::Handle,
+}
+
+impl PoisonCleanupGuard {
+    fn new(
+        admission: Arc<tokio::sync::RwLock<()>>,
+        shutdown_handles: Vec<StreamShutdownHandle>,
+    ) -> Self {
+        Self {
+            admission,
+            shutdown_handles: Some(shutdown_handles),
+            runtime: tokio::runtime::Handle::current(),
+        }
+    }
+
+    fn finish(mut self) {
+        for handle in self.shutdown_handles.take().unwrap_or_default() {
+            handle.signal();
+        }
+    }
+}
+
+impl Drop for PoisonCleanupGuard {
+    fn drop(&mut self) {
+        let Some(shutdown_handles) = self.shutdown_handles.take() else {
+            return;
+        };
+
+        warn!("Mux poison cleanup was cancelled; finishing sub-stream shutdown in background");
+        let admission = Arc::clone(&self.admission);
+        drop(self.runtime.spawn(async move {
+            // This is a barrier only. Readers that were already admitted have
+            // no further await between their final checks and enqueue.
+            {
+                let _admission = admission.write().await;
+            }
+            for handle in shutdown_handles {
+                handle.signal();
+            }
+        }));
+    }
+}
 
 /// Number of bits reserved for the stream index.
 /// 6 bits supports up to 64 sub-streams.
@@ -52,7 +106,7 @@ impl std::fmt::Display for MessageId {
 }
 
 impl MessageId {
-    fn new(stream_index: usize, sub_offset: OffsetId) -> Self {
+    pub(crate) fn new(stream_index: usize, sub_offset: OffsetId) -> Self {
         debug_assert!(stream_index < (1 << STREAM_BITS));
         debug_assert!((0..=OFFSET_MASK).contains(&sub_offset));
         Self(((stream_index as i64) << (64 - STREAM_BITS)) | (sub_offset & OFFSET_MASK))
@@ -128,10 +182,15 @@ pub struct MultiplexedStream {
     streams: Vec<ZerobusStream>,
     round_robin_counter: AtomicUsize,
     is_closed: AtomicBool,
+    closed_token: CancellationToken,
+    failure_context: OnceLock<String>,
+    admission: Arc<tokio::sync::RwLock<()>>,
 }
 
 impl MultiplexedStream {
     /// Creates a multiplexed stream over the given sub-streams.
+    ///
+    /// Ingest waits up to 30 seconds for capacity on its selected sub-stream.
     ///
     /// # Panics
     ///
@@ -150,6 +209,9 @@ impl MultiplexedStream {
             streams,
             round_robin_counter: AtomicUsize::new(0),
             is_closed: AtomicBool::new(false),
+            closed_token: CancellationToken::new(),
+            failure_context: OnceLock::new(),
+            admission: Arc::new(tokio::sync::RwLock::new(())),
         }
     }
 
@@ -171,6 +233,10 @@ impl MultiplexedStream {
         if self.is_closed.swap(true, Ordering::Relaxed) {
             return;
         }
+        let _ = self
+            .failure_context
+            .set(format!("sub-stream {trigger_index} failed: {cause}"));
+        self.closed_token.cancel();
 
         error!(
             trigger_stream_index = trigger_index,
@@ -178,6 +244,21 @@ impl MultiplexedStream {
             num_streams = self.streams.len(),
             "MultiplexedStream poisoned due to sub-stream failure"
         );
+
+        let cleanup = PoisonCleanupGuard::new(
+            Arc::clone(&self.admission),
+            self.streams
+                .iter()
+                .map(ZerobusStream::shutdown_handle)
+                .collect(),
+        );
+
+        // Drain any readers already admitted before `is_closed` was set. The
+        // write lock is only a barrier: readers arriving after it is released
+        // will observe the closed state and reject the ingest.
+        {
+            let _admission = self.admission.write().await;
+        }
 
         let flush_results = join_all(self.streams.iter().map(|s| s.flush())).await;
         for (i, result) in flush_results.into_iter().enumerate() {
@@ -189,9 +270,7 @@ impl MultiplexedStream {
         // Signal each sub-stream to tear down its background tasks (gRPC
         // connection, supervisor, callback handler). Full join/abort of the
         // task handles happens later in `close` or `Drop`.
-        for s in &self.streams {
-            s.signal_shutdown();
-        }
+        cleanup.finish();
     }
 
     // TODO: if the picked sub-stream is at capacity, try the next one before
@@ -200,38 +279,102 @@ impl MultiplexedStream {
         self.round_robin_counter.fetch_add(1, Ordering::Relaxed) % self.streams.len()
     }
 
-    async fn wait_for_capacity(&self, stream: &ZerobusStream, idx: usize) -> ZerobusResult<()> {
-        let mut backoff_ms = 1u64;
-        let mut total_wait_ms = 0u64;
-        let mut logged_backpressure = false;
+    async fn reserve_capacity(
+        &self,
+        stream: &ZerobusStream,
+        idx: usize,
+    ) -> ZerobusResult<crate::landing_zone::CapacityReservation> {
+        let started_at = tokio::time::Instant::now();
+        let timeout_ms = CAPACITY_WAIT_TIMEOUT.as_millis();
+        let table_name = stream.table_properties.table_name.as_str();
+        let max_inflight_requests = stream.options.max_inflight_requests;
 
-        loop {
-            self.check_closed()?;
+        self.check_closed()?;
 
-            if stream.is_closed() {
-                let err = ZerobusError::InvalidStateError(format!(
-                    "Sub-stream {} closed unexpectedly",
-                    idx
-                ));
-                self.shutdown_on_failure(idx, &err).await;
-                return Err(err);
+        let wait_for_reservation = async {
+            let reservation = stream.reserve_capacity();
+            tokio::pin!(reservation);
+
+            match tokio::time::timeout(Duration::from_secs(1), &mut reservation).await {
+                Ok(result) => return result,
+                Err(_) => {
+                    let waited_ms = started_at.elapsed().as_millis();
+                    warn!(
+                        stream_index = idx,
+                        table_name,
+                        waited_ms,
+                        timeout_ms,
+                        max_inflight_requests,
+                        "Backpressure: sub-stream at capacity, waiting for drain"
+                    );
+                }
             }
 
-            if stream.has_capacity() {
-                return Ok(());
-            }
+            reservation.await
+        };
 
-            tokio::time::sleep(std::time::Duration::from_millis(backoff_ms)).await;
-            total_wait_ms += backoff_ms;
-            backoff_ms = (backoff_ms * 2).min(50);
-
-            if !logged_backpressure && total_wait_ms >= 1000 {
+        let result = tokio::select! {
+            result = tokio::time::timeout(CAPACITY_WAIT_TIMEOUT, wait_for_reservation) => result,
+            _ = self.closed_token.cancelled() => {
+                let waited_ms = started_at.elapsed().as_millis();
+                let cause = self.failure_context.get().map_or(
+                    "mux closed without a recorded sub-stream failure",
+                    String::as_str,
+                );
                 warn!(
                     stream_index = idx,
-                    total_wait_ms, "Backpressure: sub-stream at capacity, waiting for drain"
+                    table_name,
+                    waited_ms,
+                    max_inflight_requests,
+                    cause,
+                    "Multiplexed capacity wait cancelled by shutdown"
                 );
-                logged_backpressure = true;
+                return Err(ZerobusError::InvalidStateError(
+                    format!(
+                        "MultiplexedStream closed after {waited_ms} ms while waiting for capacity on sub-stream {idx} for table {table_name} (max_inflight_requests: {max_inflight_requests}; cause: {cause})"
+                    ),
+                ));
             }
+        };
+
+        match result {
+            Ok(Ok(reservation)) => Ok(reservation),
+            Ok(Err(e)) => Err(self.handle_ingest_error(e, stream, idx).await),
+            Err(_) => {
+                let waited_ms = started_at.elapsed().as_millis();
+                warn!(
+                    stream_index = idx,
+                    table_name,
+                    waited_ms,
+                    timeout_ms,
+                    max_inflight_requests,
+                    "Timed out waiting for multiplexed sub-stream capacity"
+                );
+                Err(ZerobusError::ConnectionTimeout(format!(
+                    "Timed out after {waited_ms} ms waiting for capacity on multiplexed sub-stream {idx} for table {table_name} (configured timeout: {timeout_ms} ms, max_inflight_requests: {max_inflight_requests})"
+                )))
+            }
+        }
+    }
+
+    async fn enqueue_reserved(
+        &self,
+        stream: &ZerobusStream,
+        idx: usize,
+        encoded_batch: EncodedBatch,
+    ) -> ZerobusResult<MessageId> {
+        let reservation = self.reserve_capacity(stream, idx).await?;
+        let enqueue_result = stream
+            .enqueue_reserved_admitted(encoded_batch, reservation, || async {
+                let admission = self.admission.read().await;
+                self.check_closed()?;
+                Ok(admission)
+            })
+            .await;
+
+        match enqueue_result {
+            Ok(off) => Ok(MessageId::new(idx, off)),
+            Err(e) => Err(self.handle_ingest_error(e, stream, idx).await),
         }
     }
 
@@ -269,13 +412,8 @@ impl MultiplexedStream {
         let record = payload.into();
         let idx = self.pick_substream();
         let stream = &self.streams[idx];
-        self.wait_for_capacity(stream, idx).await?;
-        self.check_closed()?;
-
-        match stream.ingest_record_offset(record).await {
-            Ok(off) => Ok(MessageId::new(idx, off)),
-            Err(e) => Err(self.handle_ingest_error(e, stream, idx).await),
-        }
+        let encoded_batch = stream.prepare_record(record)?;
+        self.enqueue_reserved(stream, idx, encoded_batch).await
     }
 
     /// Ingests a batch of records into a single sub-stream (round-robin).
@@ -295,13 +433,10 @@ impl MultiplexedStream {
         }
         let idx = self.pick_substream();
         let stream = &self.streams[idx];
-        self.wait_for_capacity(stream, idx).await?;
-        self.check_closed()?;
-
-        match stream.ingest_records_offset(records).await {
-            Ok(sub_offset) => Ok(sub_offset.map(|off| MessageId::new(idx, off))),
-            Err(e) => Err(self.handle_ingest_error(e, stream, idx).await),
-        }
+        let encoded_batch = stream.prepare_records(records)?;
+        self.enqueue_reserved(stream, idx, encoded_batch)
+            .await
+            .map(Some)
     }
 
     /// Waits until every record already queued on every sub-stream is
@@ -383,6 +518,7 @@ impl MultiplexedStream {
     pub async fn close(&mut self) -> ZerobusResult<()> {
         info!("Closing MultiplexedStream");
         self.is_closed.store(true, Ordering::Relaxed);
+        self.closed_token.cancel();
 
         let mut first_error: Option<ZerobusError> = None;
 
@@ -464,6 +600,7 @@ impl MultiplexedStream {
 impl Drop for MultiplexedStream {
     fn drop(&mut self) {
         self.is_closed.store(true, Ordering::Relaxed);
+        self.closed_token.cancel();
         // Fire cancellation on every sub-stream in parallel so their
         // background tasks can start unwinding concurrently. The Vec drop
         // below then runs each `ZerobusStream::Drop`, which aborts any
@@ -557,5 +694,33 @@ mod tests {
     fn test_multiplexed_ack_callback_rejects_invalid_stream_index() {
         let callback = Arc::new(RecordingMultiplexedCallback::default());
         multiplexed_ack_callback(64, callback);
+    }
+
+    #[tokio::test]
+    async fn poison_cleanup_survives_cancellation_and_waits_for_admission() {
+        let admission = Arc::new(tokio::sync::RwLock::new(()));
+        let admitted_ingest = admission.read().await;
+        let is_closed = Arc::new(AtomicBool::new(false));
+        let terminal_token = CancellationToken::new();
+        let cancellation_token = CancellationToken::new();
+        let shutdown_handle = StreamShutdownHandle::new(
+            Arc::clone(&is_closed),
+            terminal_token.clone(),
+            cancellation_token.clone(),
+        );
+
+        let cleanup = PoisonCleanupGuard::new(Arc::clone(&admission), vec![shutdown_handle]);
+        drop(cleanup);
+        tokio::task::yield_now().await;
+
+        assert!(!is_closed.load(Ordering::Relaxed));
+        assert!(!terminal_token.is_cancelled());
+        assert!(!cancellation_token.is_cancelled());
+
+        drop(admitted_ingest);
+        terminal_token.cancelled().await;
+
+        assert!(is_closed.load(Ordering::Relaxed));
+        assert!(cancellation_token.is_cancelled());
     }
 }

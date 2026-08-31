@@ -8,6 +8,9 @@
 
 ### Bug Fixes
 
+- Fixed multiplexed-stream admission during terminal sub-stream failure so
+  accepted records are retained for recovery, capacity waiters keep their FIFO
+  position, and waits fail after 30 seconds with actionable timeout context.
 - The OAuth `expires_in` field is now parsed from a quoted integer (`"3600"`) in
   addition to a plain JSON integer. A value that is missing or does not represent
   a positive integer still yields no token lifetime, as before.
