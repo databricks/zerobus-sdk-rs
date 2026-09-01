@@ -9,6 +9,7 @@ use std::sync::atomic::{AtomicI64, Ordering};
 use std::sync::Arc;
 use std::task::Poll;
 
+use arrow_array::Array;
 use arrow_flight::encode::FlightDataEncoderBuilder;
 use arrow_flight::error::FlightError;
 use arrow_flight::{FlightClient, FlightData, PutResult};
@@ -20,17 +21,61 @@ use tonic::metadata::MetadataValue;
 use tonic::transport::Channel;
 use tracing::{error, info, warn};
 
+use std::sync::Mutex as StdMutex;
+
 use super::batch::make_ipc_write_options;
 use super::metadata::{FlightAckMetadata, FlightBatchMetadata};
 use super::{
-    configured_deadline, ArrowStreamConfigurationOptions, ArrowTableProperties,
+    configured_deadline, ArrowStreamConfigurationOptions, ArrowTableProperties, BatchItem,
     FlightConnectionParameters, RecordBatch, ZerobusArrowStream,
 };
 use crate::errors::ZerobusError;
 use crate::headers_provider::HeadersProvider;
+use crate::offset_generator::OffsetId;
 use crate::proxy::{self, ConnectorFactory};
+use crate::stats::{BatchStats, StatsExporter, StreamStat};
 use crate::tls_config::TlsConfig;
 use crate::ZerobusResult;
+
+/// Best-effort uncompressed payload size of `batch`: the Arrow data bytes of its
+/// columns for the sliced rows (`ArrayData::get_slice_memory_size`). Cheap — no
+/// re-encode, and codec-independent (an in-memory `RecordBatch` is never LZ4/ZSTD
+/// compressed; that applies only to the IPC wire form). Excludes IPC framing.
+fn uncompressed_ipc_bytes(batch: &RecordBatch) -> u64 {
+    batch
+        .columns()
+        .iter()
+        .map(|col| col.to_data().get_slice_memory_size().unwrap_or(0) as u64)
+        .sum()
+}
+
+/// The batch currently being encoded: its offset and row count plus the
+/// uncompressed payload size (known at pull) and wire bytes accumulated across the
+/// FlightData frames it produces. Held in a single slot (not a per-offset map)
+/// because the encoder drains one batch's frames before pulling the next.
+struct EncodeInProgress {
+    offset: OffsetId,
+    records: u64,
+    uncompressed: u64,
+    wire: u64,
+}
+
+/// Emits a `BatchSent` for the in-progress batch (if any) and clears the slot.
+/// Called when the next batch is pulled (previous batch's frames are all out), at
+/// natural end-of-stream, and on graceful close.
+fn flush_sent(exporter: &dyn StatsExporter, pending: &StdMutex<Option<EncodeInProgress>>) {
+    let done = pending.lock().unwrap().take();
+    if let Some(p) = done {
+        exporter.record(StreamStat::BatchSent {
+            offset: p.offset,
+            stats: BatchStats {
+                records: p.records,
+                wire_bytes: p.wire,
+                uncompressed_bytes: p.uncompressed,
+            },
+        });
+    }
+}
 
 pub(super) type FlightResponseStream =
     Pin<Box<dyn Stream<Item = Result<PutResult, FlightError>> + Send>>;
@@ -41,6 +86,10 @@ type FlightRequestStream = Pin<Box<dyn Stream<Item = Result<FlightData, FlightEr
 #[derive(Clone)]
 pub(super) struct RequestBodyControl {
     shutdown: CancellationToken,
+    /// Set before `shutdown` on a graceful close so the request body flushes the
+    /// last batch's `BatchSent`; left false on recovery/rotation aborts (that batch
+    /// is replayed and re-emitted on the next connection).
+    graceful: Arc<std::sync::atomic::AtomicBool>,
     eof_rx: watch::Receiver<bool>,
 }
 
@@ -50,11 +99,18 @@ impl RequestBodyControl {
         let (_eof_tx, eof_rx) = watch::channel(true);
         Self {
             shutdown: CancellationToken::new(),
+            graceful: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             eof_rx,
         }
     }
 
     pub(super) fn shutdown(&self) {
+        self.shutdown.cancel();
+    }
+
+    /// Graceful shutdown: flush the last batch's telemetry before finishing.
+    pub(super) fn shutdown_graceful(&self) {
+        self.graceful.store(true, Ordering::Release);
         self.shutdown.cancel();
     }
 
@@ -213,12 +269,12 @@ impl Drop for RequestBodyStreamState {
 /// State owned by a single active DoPut connection.
 pub(super) struct FlightConnection {
     response_stream: FlightResponseStream,
-    batch_tx: mpsc::Sender<Result<RecordBatch, FlightError>>,
+    batch_tx: mpsc::Sender<BatchItem>,
     request_body: RequestBodyControl,
 }
 
 impl FlightConnection {
-    pub(super) fn sender(&self) -> mpsc::Sender<Result<RecordBatch, FlightError>> {
+    pub(super) fn sender(&self) -> mpsc::Sender<BatchItem> {
         self.batch_tx.clone()
     }
 
@@ -226,7 +282,7 @@ impl FlightConnection {
         self,
     ) -> (
         FlightResponseStream,
-        mpsc::Sender<Result<RecordBatch, FlightError>>,
+        mpsc::Sender<BatchItem>,
         RequestBodyControl,
     ) {
         (self.response_stream, self.batch_tx, self.request_body)
@@ -270,6 +326,7 @@ impl ZerobusArrowStream {
                 parameters.table_properties,
                 parameters.options,
                 parameters.request_bodies,
+                parameters.stats_exporter.clone(),
                 #[cfg(feature = "test-hooks")]
                 Arc::clone(parameters.test_hooks),
             )
@@ -377,16 +434,45 @@ impl ZerobusArrowStream {
     /// Builds a request body that can be stopped at a FlightData boundary and observed
     /// reaching EOF without dropping the surrounding HTTP/2 stream.
     fn make_request_stream(
-        batch_rx: mpsc::Receiver<Result<RecordBatch, FlightError>>,
+        batch_rx: mpsc::Receiver<BatchItem>,
         table_properties: &ArrowTableProperties,
         options: &ArrowStreamConfigurationOptions,
+        stats_exporter: Option<Arc<dyn StatsExporter>>,
         #[cfg(feature = "test-hooks")] test_hooks: Arc<super::TestHooks>,
     ) -> ZerobusResult<(FlightRequestStream, RequestBodyControl)> {
         let ipc_write_options = make_ipc_write_options(options.ipc_compression)?;
         let schema = Arc::clone(&table_properties.schema);
-        let batch_stream = tokio_stream::wrappers::ReceiverStream::new(batch_rx);
+        // When an exporter is registered, track the batch being encoded in a single
+        // slot: measure its uncompressed size at pull, sum wire bytes across the frames
+        // it produces, and emit `BatchSent` once the whole batch is out — when the next
+        // batch is pulled (the encoder drains one batch's frames before pulling the
+        // next), at natural end-of-stream, or on graceful close. A batch cut off by a
+        // recovery/rotation cancel is dropped and re-emitted on the next connection.
+        let pending: Arc<StdMutex<Option<EncodeInProgress>>> = Arc::new(StdMutex::new(None));
+
+        let stats_in = stats_exporter.clone();
+        let pending_in = Arc::clone(&pending);
+        let batch_stream =
+            tokio_stream::wrappers::ReceiverStream::new(batch_rx).map(move |result| {
+                result.map(|(offset, batch)| {
+                    if let Some(exporter) = &stats_in {
+                        // The previous batch's frames are all out — emit it, then start
+                        // accounting for this one.
+                        flush_sent(exporter.as_ref(), &pending_in);
+                        *pending_in.lock().unwrap() = Some(EncodeInProgress {
+                            offset,
+                            records: batch.num_rows() as u64,
+                            uncompressed: uncompressed_ipc_bytes(&batch),
+                            wire: 0,
+                        });
+                    }
+                    batch
+                })
+            });
         let offset_counter = Arc::new(AtomicI64::new(0));
         let offset_counter_clone = Arc::clone(&offset_counter);
+        let stats_out = stats_exporter.clone();
+        let pending_out = Arc::clone(&pending);
         let encoded: FlightRequestStream = Box::pin(
             FlightDataEncoderBuilder::new()
                 .with_schema(schema)
@@ -401,6 +487,15 @@ impl ZerobusArrowStream {
                             if let Ok(bytes) = metadata.to_bytes() {
                                 flight_data.app_metadata = bytes.into();
                             }
+                            if stats_out.is_some() {
+                                let wire = (flight_data.data_header.len()
+                                    + flight_data.data_body.len()
+                                    + flight_data.app_metadata.len())
+                                    as u64;
+                                if let Some(p) = pending_out.lock().unwrap().as_mut() {
+                                    p.wire += wire;
+                                }
+                            }
                         }
                         flight_data
                     })
@@ -408,6 +503,7 @@ impl ZerobusArrowStream {
         );
 
         let shutdown = CancellationToken::new();
+        let graceful = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let (eof_tx, eof_rx) = watch::channel(false);
         let mut state = RequestBodyStreamState {
             encoded: Some(encoded),
@@ -416,6 +512,9 @@ impl ZerobusArrowStream {
             #[cfg(feature = "test-hooks")]
             test: RequestBodyTestState::new(test_hooks),
         };
+        let stats_eof = stats_exporter;
+        let pending_eof = pending;
+        let graceful_poll = Arc::clone(&graceful);
         let controlled = poll_fn(move |cx| {
             if state.encoded.is_none() {
                 return Poll::Ready(None);
@@ -424,6 +523,15 @@ impl ZerobusArrowStream {
                 #[cfg(feature = "test-hooks")]
                 if state.test.poll_shutdown_barrier(cx).is_pending() {
                     return Poll::Pending;
+                }
+                // Graceful close: the last batch was fully sent + acked and will not be
+                // replayed, so flush its BatchSent. Recovery/rotation aborts leave
+                // `graceful` false and drop the batch — it is re-sent (and re-emitted)
+                // on the next connection.
+                if graceful_poll.load(Ordering::Acquire) {
+                    if let Some(exporter) = &stats_eof {
+                        flush_sent(exporter.as_ref(), &pending_eof);
+                    }
                 }
                 state.finish();
                 return Poll::Ready(None);
@@ -438,6 +546,10 @@ impl ZerobusArrowStream {
                 .expect("request body completion checked before polling");
             match encoded.as_mut().poll_next(cx) {
                 Poll::Ready(None) => {
+                    // Natural end-of-stream: emit the last batch's BatchSent.
+                    if let Some(exporter) = &stats_eof {
+                        flush_sent(exporter.as_ref(), &pending_eof);
+                    }
                     state.finish();
                     Poll::Ready(None)
                 }
@@ -447,7 +559,11 @@ impl ZerobusArrowStream {
 
         Ok((
             Box::pin(controlled),
-            RequestBodyControl { shutdown, eof_rx },
+            RequestBodyControl {
+                shutdown,
+                graceful,
+                eof_rx,
+            },
         ))
     }
 
@@ -463,16 +579,17 @@ impl ZerobusArrowStream {
         table_properties: &ArrowTableProperties,
         options: &ArrowStreamConfigurationOptions,
         request_bodies: &RequestBodyRegistry,
+        stats_exporter: Option<Arc<dyn StatsExporter>>,
         #[cfg(feature = "test-hooks")] test_hooks: Arc<super::TestHooks>,
     ) -> ZerobusResult<FlightConnection> {
         // Create channel for sending RecordBatches.
-        let (batch_tx, batch_rx) =
-            mpsc::channel::<Result<RecordBatch, FlightError>>(options.max_inflight_batches);
+        let (batch_tx, batch_rx) = mpsc::channel::<BatchItem>(options.max_inflight_batches);
 
         let (flight_data_stream, request_body) = Self::make_request_stream(
             batch_rx,
             table_properties,
             options,
+            stats_exporter,
             #[cfg(feature = "test-hooks")]
             test_hooks,
         )?;
@@ -569,13 +686,13 @@ impl ZerobusArrowStream {
         )
         .await?;
 
-        let (batch_tx, batch_rx) = mpsc::channel::<Result<RecordBatch, FlightError>>(
-            parameters.options.max_inflight_batches,
-        );
+        let (batch_tx, batch_rx) =
+            mpsc::channel::<BatchItem>(parameters.options.max_inflight_batches);
         let (flight_data_stream, request_body) = Self::make_request_stream(
             batch_rx,
             parameters.table_properties,
             parameters.options,
+            parameters.stats_exporter.clone(),
             #[cfg(feature = "test-hooks")]
             Arc::clone(parameters.test_hooks),
         )?;
@@ -652,17 +769,16 @@ mod tests {
     use std::collections::HashMap;
     use std::sync::Arc;
 
-    use arrow_flight::error::FlightError;
     use async_trait::async_trait;
     use futures::StreamExt;
     use tokio::sync::mpsc;
     use tokio::time::{timeout, Duration};
 
-    use super::super::{ArrowSchema, RecordBatch};
+    use super::super::ArrowSchema;
     use super::{
-        ArrowStreamConfigurationOptions, ArrowTableProperties, FlightClient, FlightConnection,
-        FlightResponseStream, HeadersProvider, RequestBodyControl, RequestBodyRegistry, TlsConfig,
-        ZerobusArrowStream, ZerobusResult,
+        ArrowStreamConfigurationOptions, ArrowTableProperties, BatchItem, FlightClient,
+        FlightConnection, FlightResponseStream, HeadersProvider, RequestBodyControl,
+        RequestBodyRegistry, StatsExporter, TlsConfig, ZerobusArrowStream, ZerobusResult,
     };
 
     struct PassthroughTlsConfig;
@@ -690,7 +806,7 @@ mod tests {
 
     #[tokio::test]
     async fn supervisor_handoff_does_not_retain_redundant_sender() {
-        let (batch_tx, mut batch_rx) = mpsc::channel::<Result<RecordBatch, FlightError>>(1);
+        let (batch_tx, mut batch_rx) = mpsc::channel::<BatchItem>(1);
         let response_stream: FlightResponseStream = Box::pin(futures::stream::pending());
         let connection = FlightConnection {
             response_stream,
@@ -719,6 +835,7 @@ mod tests {
             batch_rx,
             &table_properties,
             &ArrowStreamConfigurationOptions::default(),
+            None,
             #[cfg(feature = "test-hooks")]
             Arc::new(super::super::TestHooks::default()),
         )
@@ -733,6 +850,152 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn make_request_stream_emits_batch_sent() {
+        use arrow_array::Int32Array;
+        use arrow_schema::{DataType, Field};
+
+        use crate::stats::{channel_exporter, StreamStat};
+
+        let schema = Arc::new(ArrowSchema::new(vec![Field::new(
+            "id",
+            DataType::Int32,
+            false,
+        )]));
+        let table_properties = ArrowTableProperties {
+            table_name: "catalog.schema.table".to_string(),
+            schema: Arc::clone(&schema),
+        };
+        let make_batch = |rows: i32| {
+            super::super::RecordBatch::try_new(
+                Arc::clone(&schema),
+                vec![Arc::new(Int32Array::from((0..rows).collect::<Vec<_>>()))],
+            )
+            .unwrap()
+        };
+
+        let (exporter, mut rx) = channel_exporter(8);
+        let (batch_tx, batch_rx) = mpsc::channel::<BatchItem>(4);
+        let (mut request_body, _control) = ZerobusArrowStream::make_request_stream(
+            batch_rx,
+            &table_properties,
+            &ArrowStreamConfigurationOptions::default(),
+            Some(exporter as Arc<dyn StatsExporter>),
+            #[cfg(feature = "test-hooks")]
+            Arc::new(super::super::TestHooks::default()),
+        )
+        .unwrap();
+
+        // Two batches at non-contiguous offsets: the first is flushed when the second
+        // is pulled, the second (last) is flushed at end-of-stream.
+        batch_tx.send(Ok((7, make_batch(100)))).await.unwrap();
+        batch_tx.send(Ok((9, make_batch(200)))).await.unwrap();
+        drop(batch_tx);
+        while request_body.next().await.is_some() {}
+
+        let mut sent = Vec::new();
+        while let Ok(stat) = rx.try_recv() {
+            if let StreamStat::BatchSent { offset, stats } = stat {
+                sent.push((offset, stats));
+            }
+        }
+        assert_eq!(
+            sent.len(),
+            2,
+            "one BatchSent per batch, incl. the last at EOF"
+        );
+        let (o0, s0) = sent[0];
+        let (o1, s1) = sent[1];
+        assert_eq!(o0, 7);
+        assert_eq!(s0.records, 100);
+        assert_eq!(o1, 9);
+        assert_eq!(s1.records, 200);
+        for (_, s) in &sent {
+            assert!(s.uncompressed_bytes > 0, "uncompressed payload recorded");
+            assert!(
+                s.wire_bytes >= s.uncompressed_bytes,
+                "no compression: wire frame (incl. framing) >= payload: wire={} uncompressed={}",
+                s.wire_bytes,
+                s.uncompressed_bytes
+            );
+        }
+    }
+
+    /// A batch fully sent but not yet flushed (no successor, no EOF) is emitted on a
+    /// graceful close, but dropped on a recovery/rotation cancel.
+    #[cfg(feature = "arrow-flight")]
+    #[tokio::test]
+    async fn make_request_stream_last_batch_flush_depends_on_graceful() {
+        use arrow_array::Int32Array;
+        use arrow_schema::{DataType, Field};
+
+        use crate::offset_generator::OffsetId;
+        use crate::stats::{channel_exporter, StreamStat};
+
+        let schema = Arc::new(ArrowSchema::new(vec![Field::new(
+            "id",
+            DataType::Int32,
+            false,
+        )]));
+        let table_properties = ArrowTableProperties {
+            table_name: "catalog.schema.table".to_string(),
+            schema: Arc::clone(&schema),
+        };
+        let batch = super::super::RecordBatch::try_new(
+            Arc::clone(&schema),
+            vec![Arc::new(Int32Array::from((0..50).collect::<Vec<_>>()))],
+        )
+        .unwrap();
+
+        // Drive one batch fully through the encoder (schema + data frames) while
+        // keeping batch_tx open (no EOF), then shut down and observe.
+        async fn drive_then_shutdown(
+            table_properties: &ArrowTableProperties,
+            batch: super::super::RecordBatch,
+            graceful: bool,
+        ) -> Vec<OffsetId> {
+            let (exporter, mut rx) = channel_exporter(8);
+            let (batch_tx, batch_rx) = mpsc::channel::<BatchItem>(4);
+            let (mut request_body, control) = ZerobusArrowStream::make_request_stream(
+                batch_rx,
+                table_properties,
+                &ArrowStreamConfigurationOptions::default(),
+                Some(exporter as Arc<dyn StatsExporter>),
+                #[cfg(feature = "test-hooks")]
+                Arc::new(super::super::TestHooks::default()),
+            )
+            .unwrap();
+            batch_tx.send(Ok((7, batch))).await.unwrap();
+            // Pull the batch's frames (schema + record batch) so it is fully sent, but
+            // do NOT drop batch_tx — no natural EOF, so its BatchSent stays pending.
+            request_body.next().await;
+            request_body.next().await;
+            if graceful {
+                control.shutdown_graceful();
+            } else {
+                control.shutdown();
+            }
+            drop(batch_tx);
+            while request_body.next().await.is_some() {}
+            let mut sent = Vec::new();
+            while let Ok(StreamStat::BatchSent { offset, .. }) = rx.try_recv() {
+                sent.push(offset);
+            }
+            sent
+        }
+
+        assert_eq!(
+            drive_then_shutdown(&table_properties, batch.clone(), true).await,
+            vec![7],
+            "graceful close flushes the last batch"
+        );
+        assert_eq!(
+            drive_then_shutdown(&table_properties, batch, false).await,
+            Vec::<OffsetId>::new(),
+            "recovery/rotation cancel drops the last batch (re-sent on next connection)"
+        );
+    }
+
+    #[tokio::test]
     async fn request_body_remains_finished_after_natural_eof() {
         let table_properties = ArrowTableProperties {
             table_name: "catalog.schema.table".to_string(),
@@ -743,6 +1006,7 @@ mod tests {
             batch_rx,
             &table_properties,
             &ArrowStreamConfigurationOptions::default(),
+            None,
             #[cfg(feature = "test-hooks")]
             Arc::new(super::super::TestHooks::default()),
         )
@@ -767,6 +1031,7 @@ mod tests {
             batch_rx,
             &table_properties,
             &ArrowStreamConfigurationOptions::default(),
+            None,
             Arc::clone(&test_hooks),
         )
         .unwrap();
@@ -796,6 +1061,7 @@ mod tests {
         drop(eof_tx);
         let control = RequestBodyControl {
             shutdown: tokio_util::sync::CancellationToken::new(),
+            graceful: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             eof_rx,
         };
 
@@ -813,6 +1079,7 @@ mod tests {
             batch_rx,
             &table_properties,
             &ArrowStreamConfigurationOptions::default(),
+            None,
             #[cfg(feature = "test-hooks")]
             Arc::new(super::super::TestHooks::default()),
         )
@@ -844,6 +1111,7 @@ mod tests {
                 &table_properties,
                 &options,
                 &registry,
+                None,
                 #[cfg(feature = "test-hooks")]
                 Arc::new(super::super::TestHooks::default()),
             );

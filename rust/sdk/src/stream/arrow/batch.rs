@@ -199,7 +199,7 @@ pub(super) fn refresh_pending_ack_deadlines(
 pub(super) fn rebuild_pending_for_replay(
     pending: &mut Vec<PendingBatch>,
     acked_before_disconnect: u64,
-) -> (Vec<RecordBatch>, u64) {
+) -> (Vec<(OffsetId, RecordBatch)>, u64) {
     let mut rebuilt = Vec::with_capacity(pending.len());
     let mut replay = Vec::with_capacity(pending.len());
     let mut cumulative_records = 0;
@@ -215,7 +215,7 @@ pub(super) fn rebuild_pending_for_replay(
         let end_record = cumulative_records + record_count;
         cumulative_records = end_record;
 
-        replay.push(batch.clone());
+        replay.push((pending_batch.offset_id, batch.clone()));
         rebuilt.push(PendingBatch::new_at(
             batch,
             pending_batch.offset_id,

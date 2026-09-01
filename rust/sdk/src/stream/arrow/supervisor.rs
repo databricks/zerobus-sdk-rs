@@ -6,7 +6,6 @@
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::Arc;
 
-use arrow_flight::error::FlightError;
 use tokio::sync::{mpsc, watch, Mutex};
 use tokio::task::{spawn, AbortHandle, JoinError, JoinHandle};
 use tokio::time::{sleep, sleep_until, timeout_at, Duration, Instant};
@@ -19,12 +18,14 @@ use super::connection::{
     FlightConnection, FlightResponseStream, RequestBodyControl, RequestBodyRegistry,
 };
 use super::{
-    configured_deadline, ArrowStreamConfigurationOptions, ArrowTableProperties, BatchSender,
-    FlightConnectionParameters, RecordBatch, ZerobusArrowStream,
+    configured_deadline, ArrowStreamConfigurationOptions, ArrowTableProperties, BatchItem,
+    BatchSender, FlightConnectionParameters, RecordBatch, ZerobusArrowStream,
 };
 use crate::errors::ZerobusError;
 use crate::headers_provider::HeadersProvider;
+use crate::offset_generator::OffsetId;
 use crate::proxy::ConnectorFactory;
+use crate::stats::{StatsExporter, StreamStat};
 use crate::tls_config::TlsConfig;
 use crate::ZerobusResult;
 
@@ -50,6 +51,7 @@ pub(super) struct Supervisor {
     is_paused: Arc<AtomicBool>,
     ingest_mutex: Arc<Mutex<()>>,
     sdk_identifier: Arc<str>,
+    stats_exporter: Option<Arc<dyn StatsExporter>>,
     #[cfg(feature = "test-hooks")]
     test_hooks: Arc<super::TestHooks>,
 }
@@ -99,6 +101,7 @@ impl Supervisor {
             is_paused: Arc::clone(&stream.is_paused),
             ingest_mutex: Arc::clone(&stream.ingest_mutex),
             sdk_identifier: Arc::clone(&stream.sdk_identifier),
+            stats_exporter: stream.stats_exporter.clone(),
             #[cfg(feature = "test-hooks")]
             test_hooks: Arc::clone(&stream.test_hooks),
         }
@@ -363,6 +366,11 @@ impl Supervisor {
                         Some(Ok(Some(connection))) => {
                             info!(target: super::LOG_TARGET, "Supervisor: Recovery successful, resuming");
                             self.recovery_attempts.store(0, Ordering::Relaxed);
+                            if let Some(exporter) = &self.stats_exporter {
+                                exporter.record(StreamStat::Reconnected {
+                                    attempt: attempts + 1,
+                                });
+                            }
                             let (new_response_stream, new_request_body) =
                                 connection.into_supervisor_io();
                             response_stream = Some(new_response_stream);
@@ -425,6 +433,7 @@ impl Supervisor {
             headers_provider: &self.headers_provider,
             sdk_identifier: &self.sdk_identifier,
             request_bodies: &self.request_bodies,
+            stats_exporter: self.stats_exporter.clone(),
             #[cfg(feature = "test-hooks")]
             test_hooks: &self.test_hooks,
         };
@@ -441,7 +450,7 @@ impl Supervisor {
 
     async fn replay_and_commit(
         &self,
-        tx: &mpsc::Sender<Result<RecordBatch, FlightError>>,
+        tx: &mpsc::Sender<BatchItem>,
         acked_before_disconnect: u64,
     ) -> ZerobusResult<bool> {
         #[cfg(feature = "test-hooks")]
@@ -489,12 +498,11 @@ impl Supervisor {
                     return Ok(false);
                 }
                 let submitted = self.submitted_records.load(Ordering::Acquire);
-                let buffered = self
-                    .pending_batches
-                    .lock()
-                    .await
-                    .iter()
-                    .find_map(|batch| batch.unacknowledged_suffix(submitted));
+                let buffered = self.pending_batches.lock().await.iter().find_map(|batch| {
+                    batch
+                        .unacknowledged_suffix(submitted)
+                        .map(|suffix| (batch.offset_id(), suffix))
+                });
                 if buffered.is_none() {
                     return Ok(Self::commit_reconnect(
                         tx.clone(),
@@ -525,7 +533,7 @@ impl Supervisor {
     }
 
     async fn commit_reconnect(
-        tx: mpsc::Sender<Result<RecordBatch, FlightError>>,
+        tx: mpsc::Sender<BatchItem>,
         pending_batches: &Arc<Mutex<Vec<PendingBatch>>>,
         batch_tx: &BatchSender,
         is_paused: &AtomicBool,
@@ -549,7 +557,7 @@ impl Supervisor {
         submitted_records: &Arc<AtomicU64>,
         last_acked_records: &Arc<AtomicU64>,
         acked_before_disconnect: u64,
-    ) -> Vec<RecordBatch> {
+    ) -> Vec<(OffsetId, RecordBatch)> {
         let mut pending = pending_batches.lock().await;
         if !pending.is_empty() {
             info!(target: super::LOG_TARGET,
@@ -567,8 +575,8 @@ impl Supervisor {
     }
 
     async fn send_replay_batches(
-        tx: &mpsc::Sender<Result<RecordBatch, FlightError>>,
-        replay_batches: Vec<RecordBatch>,
+        tx: &mpsc::Sender<BatchItem>,
+        replay_batches: Vec<(OffsetId, RecordBatch)>,
         submitted_records: &Arc<AtomicU64>,
         ingest_mutex: &Arc<Mutex<()>>,
         close: &CloseCoordinator,
@@ -604,8 +612,8 @@ impl Supervisor {
     }
 
     async fn send_replay_batch(
-        tx: &mpsc::Sender<Result<RecordBatch, FlightError>>,
-        batch: RecordBatch,
+        tx: &mpsc::Sender<BatchItem>,
+        (offset, batch): (OffsetId, RecordBatch),
         submitted_records: &Arc<AtomicU64>,
         ingest_mutex: &Arc<Mutex<()>>,
         close: &CloseCoordinator,
@@ -621,7 +629,7 @@ impl Supervisor {
             return Ok(false);
         }
         submitted_records.fetch_add(batch.num_rows() as u64, Ordering::Release);
-        permit.send(Ok(batch));
+        permit.send(Ok((offset, batch)));
         Ok(true)
     }
 }
@@ -631,7 +639,6 @@ mod tests {
     use std::sync::Arc;
 
     use arrow_array::Int32Array;
-    use arrow_flight::error::FlightError;
     use arrow_schema::{DataType, Field, Schema as ArrowSchema};
     use tokio::sync::{mpsc, Mutex, Semaphore};
     use tokio::task::JoinHandle;
@@ -641,7 +648,8 @@ mod tests {
     #[cfg(feature = "internal-arrow-c-data")]
     use super::SupervisorTaskHandle;
     use super::{
-        pause_and_detach_sender, BatchSender, PendingBatch, RecordBatch, Supervisor, ZerobusError,
+        pause_and_detach_sender, BatchItem, BatchSender, PendingBatch, RecordBatch, Supervisor,
+        ZerobusError,
     };
     use crate::offset_generator::OffsetId;
 
@@ -738,7 +746,7 @@ mod tests {
         let ingest_mutex = Arc::new(Mutex::new(()));
         let close = CloseCoordinator::new();
         let submitted = Arc::new(AtomicU64::new(0));
-        let (tx, mut rx) = mpsc::channel::<Result<RecordBatch, FlightError>>(1);
+        let (tx, mut rx) = mpsc::channel::<BatchItem>(1);
         let request = CloseRequest {
             target_offset: Some(0),
             deadline: Instant::now() + Duration::from_secs(30),
@@ -754,7 +762,7 @@ mod tests {
 
         let send = Supervisor::send_replay_batch(
             &tx,
-            batch_with_rows(&schema, 1),
+            (0, batch_with_rows(&schema, 1)),
             &submitted,
             &ingest_mutex,
             &close,
@@ -784,7 +792,7 @@ mod tests {
     }
 
     async fn replay_pending_batches(
-        tx: &mpsc::Sender<Result<RecordBatch, FlightError>>,
+        tx: &mpsc::Sender<BatchItem>,
         pending_batches: &Arc<Mutex<Vec<PendingBatch>>>,
         cumulative_records_assigned: &Arc<AtomicU64>,
         submitted_records: &Arc<AtomicU64>,
@@ -842,7 +850,7 @@ mod tests {
         let last_acked = Arc::new(AtomicU64::new(7));
 
         // Receiver dropped -> every send fails.
-        let (tx, rx) = mpsc::channel::<Result<RecordBatch, FlightError>>(4);
+        let (tx, rx) = mpsc::channel::<BatchItem>(4);
         drop(rx);
 
         let res =
@@ -903,7 +911,7 @@ mod tests {
         let cumulative = Arc::new(AtomicU64::new(0));
         let submitted = Arc::new(AtomicU64::new(0));
         let last_acked = Arc::new(AtomicU64::new(4));
-        let (tx, mut rx) = mpsc::channel::<Result<RecordBatch, FlightError>>(4);
+        let (tx, mut rx) = mpsc::channel::<BatchItem>(4);
 
         let res =
             replay_pending_batches(&tx, &pending, &cumulative, &submitted, &last_acked, 4).await;
@@ -921,8 +929,8 @@ mod tests {
         // Fully-acked batch's permit was released; one remains.
         assert_eq!(sem.available_permits(), 3);
 
-        let replayed = rx.try_recv().expect("suffix replay batch");
-        assert_eq!(replayed.unwrap().num_rows(), 2);
+        let (_offset, replayed) = rx.try_recv().expect("suffix replay batch").unwrap();
+        assert_eq!(replayed.num_rows(), 2);
         assert!(rx.try_recv().is_err(), "only one batch should be replayed");
     }
 
@@ -932,7 +940,7 @@ mod tests {
     async fn pause_and_detach_waits_for_in_flight_ingest() {
         let ingest_mutex = Arc::new(Mutex::new(()));
         let is_paused = Arc::new(AtomicBool::new(false));
-        let (tx, _rx) = mpsc::channel::<Result<RecordBatch, FlightError>>(1);
+        let (tx, _rx) = mpsc::channel::<BatchItem>(1);
         let batch_tx: BatchSender = Arc::new(Mutex::new(Some(tx)));
 
         // Deterministic sync point: hold ingest_mutex to represent an ingest in its
