@@ -1,7 +1,7 @@
 cmake_minimum_required(VERSION 3.16)
 
 project(zerobus_cpp
-    VERSION 0.2.0
+    VERSION 0.3.0
     DESCRIPTION "Zerobus C++ SDK (wrapper over the Zerobus C FFI)"
     LANGUAGES CXX)
 

@@ -5,6 +5,28 @@ All notable changes to the Zerobus C++ SDK are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/), and this
 project adheres to [Semantic Versioning](https://semver.org/).
 
+## Release v0.3.0
+
+### New Features and Improvements
+
+- Promoted Arrow Flight ingestion to general availability across its APIs,
+  documentation, and examples.
+
+### Bug Fixes
+
+### Documentation
+
+- Built on Rust SDK 2.8.0. Wrapper-facing notes for that core are in
+  `rust/CHANGELOG.md` and https://github.com/databricks/zerobus-sdk/releases/tag/rust/v2.8.0.
+
+### Internal Changes
+
+### Breaking Changes
+
+### Deprecations
+
+### API Changes
+
 ## Release v0.2.0
 
 ### New Features and Improvements
