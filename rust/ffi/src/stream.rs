@@ -117,6 +117,11 @@ async fn build_stream_from_parts(
             base.compiled_proto(desc)
         }
         RecordType::Json => base.json(),
+        RecordType::Avro => {
+            return Err(ZerobusError::InvalidArgument(
+                "Avro record type is not supported".to_string(),
+            ))
+        }
         RecordType::Unspecified => {
             return Err(ZerobusError::InvalidArgument(
                 "Record type is not specified".to_string(),

@@ -313,6 +313,13 @@ pub extern "system" fn Java_com_databricks_zerobus_ZerobusSdk_nativeCreateStream
                     base.compiled_proto(desc)
                 }
                 RecordType::Json => base.json(),
+                RecordType::Avro => {
+                    return Err(
+                        databricks_zerobus_ingest_sdk::ZerobusError::InvalidArgument(
+                            "Avro record type is not supported".to_string(),
+                        ),
+                    );
+                }
                 RecordType::Unspecified => {
                     return Err(
                         databricks_zerobus_ingest_sdk::ZerobusError::InvalidArgument(

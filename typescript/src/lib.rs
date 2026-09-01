@@ -1086,6 +1086,11 @@ impl ZerobusSdk {
 
                 let builder = match record_type {
                     RustRecordType::Json => builder.json(),
+                    RustRecordType::Avro => {
+                        return Err(napi::Error::from_reason(
+                            "Avro record type is not supported",
+                        ))
+                    }
                     RustRecordType::Proto | RustRecordType::Unspecified => {
                         let desc = descriptor_proto.ok_or_else(|| {
                             napi::Error::from_reason(

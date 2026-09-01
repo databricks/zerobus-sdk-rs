@@ -31,6 +31,7 @@ const (
 	RecordType_RECORD_TYPE_UNSPECIFIED RecordType = 0
 	RecordType_PROTO                   RecordType = 1
 	RecordType_JSON                    RecordType = 2
+	RecordType_AVRO                    RecordType = 4
 )
 
 // Enum value maps for RecordType.
@@ -39,11 +40,13 @@ var (
 		0: "RECORD_TYPE_UNSPECIFIED",
 		1: "PROTO",
 		2: "JSON",
+		4: "AVRO",
 	}
 	RecordType_value = map[string]int32{
 		"RECORD_TYPE_UNSPECIFIED": 0,
 		"PROTO":                   1,
 		"JSON":                    2,
+		"AVRO":                    4,
 	}
 )
 
@@ -183,6 +186,57 @@ func (x *ProtoEncodedRecordBatch) GetRecords() [][]byte {
 	return nil
 }
 
+// Batch of Avro-encoded records.
+//
+// Each element is a single raw Avro binary datum (no framing). The writer
+// schema is supplied once at stream creation via
+// CreateIngestStreamRequest.avro_schema_json.
+type AvroRecordBatch struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// Array of raw Avro binary datums. Each datum must be encoded according to
+	// the writer schema provided in CreateIngestStreamRequest.avro_schema_json.
+	Records       [][]byte `protobuf:"bytes,1,rep,name=records" json:"records,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *AvroRecordBatch) Reset() {
+	*x = AvroRecordBatch{}
+	mi := &file_zerobus_service_proto_msgTypes[2]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *AvroRecordBatch) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*AvroRecordBatch) ProtoMessage() {}
+
+func (x *AvroRecordBatch) ProtoReflect() protoreflect.Message {
+	mi := &file_zerobus_service_proto_msgTypes[2]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use AvroRecordBatch.ProtoReflect.Descriptor instead.
+func (*AvroRecordBatch) Descriptor() ([]byte, []int) {
+	return file_zerobus_service_proto_rawDescGZIP(), []int{2}
+}
+
+func (x *AvroRecordBatch) GetRecords() [][]byte {
+	if x != nil {
+		return x.Records
+	}
+	return nil
+}
+
 // Request to create a new ephemeral ingestion stream.
 //
 // This message initiates the streaming session and must be the first message
@@ -202,14 +256,19 @@ type CreateIngestStreamRequest struct {
 	DescriptorProto []byte `protobuf:"bytes,3,opt,name=descriptor_proto,json=descriptorProto" json:"descriptor_proto,omitempty"`
 	// Record type that will be accepted in the stream.
 	// Defaults to PROTO for backwards compatibility.
-	RecordType    *RecordType `protobuf:"varint,4,opt,name=record_type,json=recordType,enum=databricks.zerobus.RecordType" json:"record_type,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
+	RecordType *RecordType `protobuf:"varint,4,opt,name=record_type,json=recordType,enum=databricks.zerobus.RecordType" json:"record_type,omitempty"`
+	// Avro writer schema as a JSON-encoded Avro schema string.
+	//
+	// Required when record_type is AVRO. Must be a valid Avro record schema.
+	// Ignored for all other record types.
+	AvroSchemaJson *string `protobuf:"bytes,5,opt,name=avro_schema_json,json=avroSchemaJson" json:"avro_schema_json,omitempty"`
+	unknownFields  protoimpl.UnknownFields
+	sizeCache      protoimpl.SizeCache
 }
 
 func (x *CreateIngestStreamRequest) Reset() {
 	*x = CreateIngestStreamRequest{}
-	mi := &file_zerobus_service_proto_msgTypes[2]
+	mi := &file_zerobus_service_proto_msgTypes[3]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -221,7 +280,7 @@ func (x *CreateIngestStreamRequest) String() string {
 func (*CreateIngestStreamRequest) ProtoMessage() {}
 
 func (x *CreateIngestStreamRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_zerobus_service_proto_msgTypes[2]
+	mi := &file_zerobus_service_proto_msgTypes[3]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -234,7 +293,7 @@ func (x *CreateIngestStreamRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use CreateIngestStreamRequest.ProtoReflect.Descriptor instead.
 func (*CreateIngestStreamRequest) Descriptor() ([]byte, []int) {
-	return file_zerobus_service_proto_rawDescGZIP(), []int{2}
+	return file_zerobus_service_proto_rawDescGZIP(), []int{3}
 }
 
 func (x *CreateIngestStreamRequest) GetTableName() string {
@@ -258,6 +317,13 @@ func (x *CreateIngestStreamRequest) GetRecordType() RecordType {
 	return RecordType_RECORD_TYPE_UNSPECIFIED
 }
 
+func (x *CreateIngestStreamRequest) GetAvroSchemaJson() string {
+	if x != nil && x.AvroSchemaJson != nil {
+		return *x.AvroSchemaJson
+	}
+	return ""
+}
+
 // Response confirming the creation of an ephemeral ingestion stream.
 //
 // This message is sent by the server in response to a CreateIngestStreamRequest
@@ -272,7 +338,7 @@ type CreateIngestStreamResponse struct {
 
 func (x *CreateIngestStreamResponse) Reset() {
 	*x = CreateIngestStreamResponse{}
-	mi := &file_zerobus_service_proto_msgTypes[3]
+	mi := &file_zerobus_service_proto_msgTypes[4]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -284,7 +350,7 @@ func (x *CreateIngestStreamResponse) String() string {
 func (*CreateIngestStreamResponse) ProtoMessage() {}
 
 func (x *CreateIngestStreamResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_zerobus_service_proto_msgTypes[3]
+	mi := &file_zerobus_service_proto_msgTypes[4]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -297,7 +363,7 @@ func (x *CreateIngestStreamResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use CreateIngestStreamResponse.ProtoReflect.Descriptor instead.
 func (*CreateIngestStreamResponse) Descriptor() ([]byte, []int) {
-	return file_zerobus_service_proto_rawDescGZIP(), []int{3}
+	return file_zerobus_service_proto_rawDescGZIP(), []int{4}
 }
 
 func (x *CreateIngestStreamResponse) GetStreamId() string {
@@ -321,6 +387,7 @@ type IngestRecordRequest struct {
 	//
 	//	*IngestRecordRequest_ProtoEncodedRecord
 	//	*IngestRecordRequest_JsonRecord
+	//	*IngestRecordRequest_AvroEncodedRecord
 	Record        isIngestRecordRequest_Record `protobuf_oneof:"record"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
@@ -328,7 +395,7 @@ type IngestRecordRequest struct {
 
 func (x *IngestRecordRequest) Reset() {
 	*x = IngestRecordRequest{}
-	mi := &file_zerobus_service_proto_msgTypes[4]
+	mi := &file_zerobus_service_proto_msgTypes[5]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -340,7 +407,7 @@ func (x *IngestRecordRequest) String() string {
 func (*IngestRecordRequest) ProtoMessage() {}
 
 func (x *IngestRecordRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_zerobus_service_proto_msgTypes[4]
+	mi := &file_zerobus_service_proto_msgTypes[5]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -353,7 +420,7 @@ func (x *IngestRecordRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use IngestRecordRequest.ProtoReflect.Descriptor instead.
 func (*IngestRecordRequest) Descriptor() ([]byte, []int) {
-	return file_zerobus_service_proto_rawDescGZIP(), []int{4}
+	return file_zerobus_service_proto_rawDescGZIP(), []int{5}
 }
 
 func (x *IngestRecordRequest) GetOffsetId() int64 {
@@ -388,6 +455,15 @@ func (x *IngestRecordRequest) GetJsonRecord() string {
 	return ""
 }
 
+func (x *IngestRecordRequest) GetAvroEncodedRecord() []byte {
+	if x != nil {
+		if x, ok := x.Record.(*IngestRecordRequest_AvroEncodedRecord); ok {
+			return x.AvroEncodedRecord
+		}
+	}
+	return nil
+}
+
 type isIngestRecordRequest_Record interface {
 	isIngestRecordRequest_Record()
 }
@@ -402,9 +478,17 @@ type IngestRecordRequest_JsonRecord struct {
 	JsonRecord string `protobuf:"bytes,3,opt,name=json_record,json=jsonRecord,oneof"`
 }
 
+type IngestRecordRequest_AvroEncodedRecord struct {
+	// A single raw Avro binary datum (no framing). The writer schema is supplied
+	// once at stream creation via CreateIngestStreamRequest.avro_schema_json.
+	AvroEncodedRecord []byte `protobuf:"bytes,4,opt,name=avro_encoded_record,json=avroEncodedRecord,oneof"`
+}
+
 func (*IngestRecordRequest_ProtoEncodedRecord) isIngestRecordRequest_Record() {}
 
 func (*IngestRecordRequest_JsonRecord) isIngestRecordRequest_Record() {}
+
+func (*IngestRecordRequest_AvroEncodedRecord) isIngestRecordRequest_Record() {}
 
 // Request to ingest a batch of records into the stream.
 //
@@ -421,6 +505,7 @@ type IngestRecordBatchRequest struct {
 	//
 	//	*IngestRecordBatchRequest_ProtoEncodedBatch
 	//	*IngestRecordBatchRequest_JsonBatch
+	//	*IngestRecordBatchRequest_AvroBatch
 	Batch         isIngestRecordBatchRequest_Batch `protobuf_oneof:"batch"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
@@ -428,7 +513,7 @@ type IngestRecordBatchRequest struct {
 
 func (x *IngestRecordBatchRequest) Reset() {
 	*x = IngestRecordBatchRequest{}
-	mi := &file_zerobus_service_proto_msgTypes[5]
+	mi := &file_zerobus_service_proto_msgTypes[6]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -440,7 +525,7 @@ func (x *IngestRecordBatchRequest) String() string {
 func (*IngestRecordBatchRequest) ProtoMessage() {}
 
 func (x *IngestRecordBatchRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_zerobus_service_proto_msgTypes[5]
+	mi := &file_zerobus_service_proto_msgTypes[6]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -453,7 +538,7 @@ func (x *IngestRecordBatchRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use IngestRecordBatchRequest.ProtoReflect.Descriptor instead.
 func (*IngestRecordBatchRequest) Descriptor() ([]byte, []int) {
-	return file_zerobus_service_proto_rawDescGZIP(), []int{5}
+	return file_zerobus_service_proto_rawDescGZIP(), []int{6}
 }
 
 func (x *IngestRecordBatchRequest) GetOffsetId() int64 {
@@ -488,6 +573,15 @@ func (x *IngestRecordBatchRequest) GetJsonBatch() *JsonRecordBatch {
 	return nil
 }
 
+func (x *IngestRecordBatchRequest) GetAvroBatch() *AvroRecordBatch {
+	if x != nil {
+		if x, ok := x.Batch.(*IngestRecordBatchRequest_AvroBatch); ok {
+			return x.AvroBatch
+		}
+	}
+	return nil
+}
+
 type isIngestRecordBatchRequest_Batch interface {
 	isIngestRecordBatchRequest_Batch()
 }
@@ -503,9 +597,17 @@ type IngestRecordBatchRequest_JsonBatch struct {
 	JsonBatch *JsonRecordBatch `protobuf:"bytes,3,opt,name=json_batch,json=jsonBatch,oneof"`
 }
 
+type IngestRecordBatchRequest_AvroBatch struct {
+	// Batch of Avro-encoded records. The writer schema must be provided in
+	// CreateIngestStreamRequest.avro_schema_json.
+	AvroBatch *AvroRecordBatch `protobuf:"bytes,4,opt,name=avro_batch,json=avroBatch,oneof"`
+}
+
 func (*IngestRecordBatchRequest_ProtoEncodedBatch) isIngestRecordBatchRequest_Batch() {}
 
 func (*IngestRecordBatchRequest_JsonBatch) isIngestRecordBatchRequest_Batch() {}
+
+func (*IngestRecordBatchRequest_AvroBatch) isIngestRecordBatchRequest_Batch() {}
 
 // A message in the EphemeralStream bidirectional stream.
 //
@@ -525,7 +627,7 @@ type EphemeralStreamRequest struct {
 
 func (x *EphemeralStreamRequest) Reset() {
 	*x = EphemeralStreamRequest{}
-	mi := &file_zerobus_service_proto_msgTypes[6]
+	mi := &file_zerobus_service_proto_msgTypes[7]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -537,7 +639,7 @@ func (x *EphemeralStreamRequest) String() string {
 func (*EphemeralStreamRequest) ProtoMessage() {}
 
 func (x *EphemeralStreamRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_zerobus_service_proto_msgTypes[6]
+	mi := &file_zerobus_service_proto_msgTypes[7]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -550,7 +652,7 @@ func (x *EphemeralStreamRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use EphemeralStreamRequest.ProtoReflect.Descriptor instead.
 func (*EphemeralStreamRequest) Descriptor() ([]byte, []int) {
-	return file_zerobus_service_proto_rawDescGZIP(), []int{6}
+	return file_zerobus_service_proto_rawDescGZIP(), []int{7}
 }
 
 func (x *EphemeralStreamRequest) GetPayload() isEphemeralStreamRequest_Payload {
@@ -635,7 +737,7 @@ type IngestRecordResponse struct {
 
 func (x *IngestRecordResponse) Reset() {
 	*x = IngestRecordResponse{}
-	mi := &file_zerobus_service_proto_msgTypes[7]
+	mi := &file_zerobus_service_proto_msgTypes[8]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -647,7 +749,7 @@ func (x *IngestRecordResponse) String() string {
 func (*IngestRecordResponse) ProtoMessage() {}
 
 func (x *IngestRecordResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_zerobus_service_proto_msgTypes[7]
+	mi := &file_zerobus_service_proto_msgTypes[8]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -660,7 +762,7 @@ func (x *IngestRecordResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use IngestRecordResponse.ProtoReflect.Descriptor instead.
 func (*IngestRecordResponse) Descriptor() ([]byte, []int) {
-	return file_zerobus_service_proto_rawDescGZIP(), []int{7}
+	return file_zerobus_service_proto_rawDescGZIP(), []int{8}
 }
 
 func (x *IngestRecordResponse) GetDurabilityAckUpToOffset() int64 {
@@ -681,7 +783,7 @@ type CloseStreamSignal struct {
 
 func (x *CloseStreamSignal) Reset() {
 	*x = CloseStreamSignal{}
-	mi := &file_zerobus_service_proto_msgTypes[8]
+	mi := &file_zerobus_service_proto_msgTypes[9]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -693,7 +795,7 @@ func (x *CloseStreamSignal) String() string {
 func (*CloseStreamSignal) ProtoMessage() {}
 
 func (x *CloseStreamSignal) ProtoReflect() protoreflect.Message {
-	mi := &file_zerobus_service_proto_msgTypes[8]
+	mi := &file_zerobus_service_proto_msgTypes[9]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -706,7 +808,7 @@ func (x *CloseStreamSignal) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use CloseStreamSignal.ProtoReflect.Descriptor instead.
 func (*CloseStreamSignal) Descriptor() ([]byte, []int) {
-	return file_zerobus_service_proto_rawDescGZIP(), []int{8}
+	return file_zerobus_service_proto_rawDescGZIP(), []int{9}
 }
 
 func (x *CloseStreamSignal) GetDuration() *durationpb.Duration {
@@ -734,7 +836,7 @@ type EphemeralStreamResponse struct {
 
 func (x *EphemeralStreamResponse) Reset() {
 	*x = EphemeralStreamResponse{}
-	mi := &file_zerobus_service_proto_msgTypes[9]
+	mi := &file_zerobus_service_proto_msgTypes[10]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -746,7 +848,7 @@ func (x *EphemeralStreamResponse) String() string {
 func (*EphemeralStreamResponse) ProtoMessage() {}
 
 func (x *EphemeralStreamResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_zerobus_service_proto_msgTypes[9]
+	mi := &file_zerobus_service_proto_msgTypes[10]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -759,7 +861,7 @@ func (x *EphemeralStreamResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use EphemeralStreamResponse.ProtoReflect.Descriptor instead.
 func (*EphemeralStreamResponse) Descriptor() ([]byte, []int) {
-	return file_zerobus_service_proto_rawDescGZIP(), []int{9}
+	return file_zerobus_service_proto_rawDescGZIP(), []int{10}
 }
 
 func (x *EphemeralStreamResponse) GetPayload() isEphemeralStreamResponse_Payload {
@@ -833,7 +935,7 @@ type CreatePersistentStreamRequest struct {
 
 func (x *CreatePersistentStreamRequest) Reset() {
 	*x = CreatePersistentStreamRequest{}
-	mi := &file_zerobus_service_proto_msgTypes[10]
+	mi := &file_zerobus_service_proto_msgTypes[11]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -845,7 +947,7 @@ func (x *CreatePersistentStreamRequest) String() string {
 func (*CreatePersistentStreamRequest) ProtoMessage() {}
 
 func (x *CreatePersistentStreamRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_zerobus_service_proto_msgTypes[10]
+	mi := &file_zerobus_service_proto_msgTypes[11]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -858,7 +960,7 @@ func (x *CreatePersistentStreamRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use CreatePersistentStreamRequest.ProtoReflect.Descriptor instead.
 func (*CreatePersistentStreamRequest) Descriptor() ([]byte, []int) {
-	return file_zerobus_service_proto_rawDescGZIP(), []int{10}
+	return file_zerobus_service_proto_rawDescGZIP(), []int{11}
 }
 
 func (x *CreatePersistentStreamRequest) GetCreateStream() *CreateIngestStreamRequest {
@@ -882,7 +984,7 @@ type ResumeIngestStreamRequest struct {
 	// Protocol buffer descriptor for record serialization/deserialization.
 	//
 	// Required when the stream was created with record_type PROTO. Must be
-	// compatible with the target table's schema. Not used for JSON or ARROW_IPC
+	// compatible with the target table's schema. Not used for JSON or AVRO
 	// record types.
 	DescriptorProto []byte `protobuf:"bytes,2,opt,name=descriptor_proto,json=descriptorProto" json:"descriptor_proto,omitempty"`
 	// Record type accepted by the resumed stream. Must match the type used when
@@ -894,7 +996,7 @@ type ResumeIngestStreamRequest struct {
 
 func (x *ResumeIngestStreamRequest) Reset() {
 	*x = ResumeIngestStreamRequest{}
-	mi := &file_zerobus_service_proto_msgTypes[11]
+	mi := &file_zerobus_service_proto_msgTypes[12]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -906,7 +1008,7 @@ func (x *ResumeIngestStreamRequest) String() string {
 func (*ResumeIngestStreamRequest) ProtoMessage() {}
 
 func (x *ResumeIngestStreamRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_zerobus_service_proto_msgTypes[11]
+	mi := &file_zerobus_service_proto_msgTypes[12]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -919,7 +1021,7 @@ func (x *ResumeIngestStreamRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ResumeIngestStreamRequest.ProtoReflect.Descriptor instead.
 func (*ResumeIngestStreamRequest) Descriptor() ([]byte, []int) {
-	return file_zerobus_service_proto_rawDescGZIP(), []int{11}
+	return file_zerobus_service_proto_rawDescGZIP(), []int{12}
 }
 
 func (x *ResumeIngestStreamRequest) GetIdentifier() isResumeIngestStreamRequest_Identifier {
@@ -975,7 +1077,7 @@ type ResumeIngestStreamResponse struct {
 
 func (x *ResumeIngestStreamResponse) Reset() {
 	*x = ResumeIngestStreamResponse{}
-	mi := &file_zerobus_service_proto_msgTypes[12]
+	mi := &file_zerobus_service_proto_msgTypes[13]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -987,7 +1089,7 @@ func (x *ResumeIngestStreamResponse) String() string {
 func (*ResumeIngestStreamResponse) ProtoMessage() {}
 
 func (x *ResumeIngestStreamResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_zerobus_service_proto_msgTypes[12]
+	mi := &file_zerobus_service_proto_msgTypes[13]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1000,7 +1102,7 @@ func (x *ResumeIngestStreamResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ResumeIngestStreamResponse.ProtoReflect.Descriptor instead.
 func (*ResumeIngestStreamResponse) Descriptor() ([]byte, []int) {
-	return file_zerobus_service_proto_rawDescGZIP(), []int{12}
+	return file_zerobus_service_proto_rawDescGZIP(), []int{13}
 }
 
 func (x *ResumeIngestStreamResponse) GetLastCommittedOffset() int64 {
@@ -1028,7 +1130,7 @@ type PersistentStreamRequest struct {
 
 func (x *PersistentStreamRequest) Reset() {
 	*x = PersistentStreamRequest{}
-	mi := &file_zerobus_service_proto_msgTypes[13]
+	mi := &file_zerobus_service_proto_msgTypes[14]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1040,7 +1142,7 @@ func (x *PersistentStreamRequest) String() string {
 func (*PersistentStreamRequest) ProtoMessage() {}
 
 func (x *PersistentStreamRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_zerobus_service_proto_msgTypes[13]
+	mi := &file_zerobus_service_proto_msgTypes[14]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1053,7 +1155,7 @@ func (x *PersistentStreamRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use PersistentStreamRequest.ProtoReflect.Descriptor instead.
 func (*PersistentStreamRequest) Descriptor() ([]byte, []int) {
-	return file_zerobus_service_proto_rawDescGZIP(), []int{13}
+	return file_zerobus_service_proto_rawDescGZIP(), []int{14}
 }
 
 func (x *PersistentStreamRequest) GetPayload() isPersistentStreamRequest_Payload {
@@ -1144,7 +1246,7 @@ type PersistentStreamResponse struct {
 
 func (x *PersistentStreamResponse) Reset() {
 	*x = PersistentStreamResponse{}
-	mi := &file_zerobus_service_proto_msgTypes[14]
+	mi := &file_zerobus_service_proto_msgTypes[15]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1156,7 +1258,7 @@ func (x *PersistentStreamResponse) String() string {
 func (*PersistentStreamResponse) ProtoMessage() {}
 
 func (x *PersistentStreamResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_zerobus_service_proto_msgTypes[14]
+	mi := &file_zerobus_service_proto_msgTypes[15]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1169,7 +1271,7 @@ func (x *PersistentStreamResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use PersistentStreamResponse.ProtoReflect.Descriptor instead.
 func (*PersistentStreamResponse) Descriptor() ([]byte, []int) {
-	return file_zerobus_service_proto_rawDescGZIP(), []int{14}
+	return file_zerobus_service_proto_rawDescGZIP(), []int{15}
 }
 
 func (x *PersistentStreamResponse) GetPayload() isPersistentStreamResponse_Payload {
@@ -1261,7 +1363,7 @@ type RetireStreamRequest struct {
 
 func (x *RetireStreamRequest) Reset() {
 	*x = RetireStreamRequest{}
-	mi := &file_zerobus_service_proto_msgTypes[15]
+	mi := &file_zerobus_service_proto_msgTypes[16]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1273,7 +1375,7 @@ func (x *RetireStreamRequest) String() string {
 func (*RetireStreamRequest) ProtoMessage() {}
 
 func (x *RetireStreamRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_zerobus_service_proto_msgTypes[15]
+	mi := &file_zerobus_service_proto_msgTypes[16]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1286,7 +1388,7 @@ func (x *RetireStreamRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use RetireStreamRequest.ProtoReflect.Descriptor instead.
 func (*RetireStreamRequest) Descriptor() ([]byte, []int) {
-	return file_zerobus_service_proto_rawDescGZIP(), []int{15}
+	return file_zerobus_service_proto_rawDescGZIP(), []int{16}
 }
 
 func (x *RetireStreamRequest) GetTableName() string {
@@ -1333,7 +1435,7 @@ type RetireStreamResponse struct {
 
 func (x *RetireStreamResponse) Reset() {
 	*x = RetireStreamResponse{}
-	mi := &file_zerobus_service_proto_msgTypes[16]
+	mi := &file_zerobus_service_proto_msgTypes[17]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1345,7 +1447,7 @@ func (x *RetireStreamResponse) String() string {
 func (*RetireStreamResponse) ProtoMessage() {}
 
 func (x *RetireStreamResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_zerobus_service_proto_msgTypes[16]
+	mi := &file_zerobus_service_proto_msgTypes[17]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1358,7 +1460,7 @@ func (x *RetireStreamResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use RetireStreamResponse.ProtoReflect.Descriptor instead.
 func (*RetireStreamResponse) Descriptor() ([]byte, []int) {
-	return file_zerobus_service_proto_rawDescGZIP(), []int{16}
+	return file_zerobus_service_proto_rawDescGZIP(), []int{17}
 }
 
 var File_zerobus_service_proto protoreflect.FileDescriptor
@@ -1369,26 +1471,32 @@ const file_zerobus_service_proto_rawDesc = "" +
 	"\x0fJsonRecordBatch\x12\x18\n" +
 	"\arecords\x18\x01 \x03(\tR\arecords\"3\n" +
 	"\x17ProtoEncodedRecordBatch\x12\x18\n" +
-	"\arecords\x18\x01 \x03(\fR\arecords\"\xb7\x01\n" +
+	"\arecords\x18\x01 \x03(\fR\arecords\"+\n" +
+	"\x0fAvroRecordBatch\x12\x18\n" +
+	"\arecords\x18\x01 \x03(\fR\arecords\"\xe1\x01\n" +
 	"\x19CreateIngestStreamRequest\x12\x1d\n" +
 	"\n" +
 	"table_name\x18\x01 \x01(\tR\ttableName\x12)\n" +
 	"\x10descriptor_proto\x18\x03 \x01(\fR\x0fdescriptorProto\x12?\n" +
 	"\vrecord_type\x18\x04 \x01(\x0e2\x1e.databricks.zerobus.RecordTypeR\n" +
-	"recordTypeJ\x04\b\x02\x10\x03R\tstream_id\"O\n" +
+	"recordType\x12(\n" +
+	"\x10avro_schema_json\x18\x05 \x01(\tR\x0eavroSchemaJsonJ\x04\b\x02\x10\x03R\tstream_id\"O\n" +
 	"\x1aCreateIngestStreamResponse\x12\x1b\n" +
-	"\tstream_id\x18\x01 \x01(\tR\bstreamIdJ\x04\b\x02\x10\x03R\x0elast_offset_id\"\x93\x01\n" +
+	"\tstream_id\x18\x01 \x01(\tR\bstreamIdJ\x04\b\x02\x10\x03R\x0elast_offset_id\"\xc5\x01\n" +
 	"\x13IngestRecordRequest\x12\x1b\n" +
 	"\toffset_id\x18\x01 \x01(\x03R\boffsetId\x122\n" +
 	"\x14proto_encoded_record\x18\x02 \x01(\fH\x00R\x12protoEncodedRecord\x12!\n" +
 	"\vjson_record\x18\x03 \x01(\tH\x00R\n" +
-	"jsonRecordB\b\n" +
-	"\x06record\"\xe5\x01\n" +
+	"jsonRecord\x120\n" +
+	"\x13avro_encoded_record\x18\x04 \x01(\fH\x00R\x11avroEncodedRecordB\b\n" +
+	"\x06record\"\xab\x02\n" +
 	"\x18IngestRecordBatchRequest\x12\x1b\n" +
 	"\toffset_id\x18\x01 \x01(\x03R\boffsetId\x12]\n" +
 	"\x13proto_encoded_batch\x18\x02 \x01(\v2+.databricks.zerobus.ProtoEncodedRecordBatchH\x00R\x11protoEncodedBatch\x12D\n" +
 	"\n" +
-	"json_batch\x18\x03 \x01(\v2#.databricks.zerobus.JsonRecordBatchH\x00R\tjsonBatchB\a\n" +
+	"json_batch\x18\x03 \x01(\v2#.databricks.zerobus.JsonRecordBatchH\x00R\tjsonBatch\x12D\n" +
+	"\n" +
+	"avro_batch\x18\x04 \x01(\v2#.databricks.zerobus.AvroRecordBatchH\x00R\tavroBatchB\a\n" +
 	"\x05batch\"\xa9\x02\n" +
 	"\x16EphemeralStreamRequest\x12T\n" +
 	"\rcreate_stream\x18\x01 \x01(\v2-.databricks.zerobus.CreateIngestStreamRequestH\x00R\fcreateStream\x12N\n" +
@@ -1433,12 +1541,13 @@ const file_zerobus_service_proto_rawDesc = "" +
 	"\tstream_id\x18\x02 \x01(\tH\x00R\bstreamIdB\f\n" +
 	"\n" +
 	"identifierJ\x04\b\x03\x10\x04R\vstream_name\"\x16\n" +
-	"\x14RetireStreamResponse*>\n" +
+	"\x14RetireStreamResponse*N\n" +
 	"\n" +
 	"RecordType\x12\x1b\n" +
 	"\x17RECORD_TYPE_UNSPECIFIED\x10\x00\x12\t\n" +
 	"\x05PROTO\x10\x01\x12\b\n" +
-	"\x04JSON\x10\x022\xcf\x02\n" +
+	"\x04JSON\x10\x02\x12\b\n" +
+	"\x04AVRO\x10\x04\"\x04\b\x03\x10\x032\xcf\x02\n" +
 	"\aZerobus\x12n\n" +
 	"\x0fEphemeralStream\x12*.databricks.zerobus.EphemeralStreamRequest\x1a+.databricks.zerobus.EphemeralStreamResponse(\x010\x01\x12q\n" +
 	"\x10PersistentStream\x12+.databricks.zerobus.PersistentStreamRequest\x1a,.databricks.zerobus.PersistentStreamResponse(\x010\x01\x12a\n" +
@@ -1458,60 +1567,62 @@ func file_zerobus_service_proto_rawDescGZIP() []byte {
 }
 
 var file_zerobus_service_proto_enumTypes = make([]protoimpl.EnumInfo, 1)
-var file_zerobus_service_proto_msgTypes = make([]protoimpl.MessageInfo, 17)
+var file_zerobus_service_proto_msgTypes = make([]protoimpl.MessageInfo, 18)
 var file_zerobus_service_proto_goTypes = []any{
 	(RecordType)(0),                       // 0: databricks.zerobus.RecordType
 	(*JsonRecordBatch)(nil),               // 1: databricks.zerobus.JsonRecordBatch
 	(*ProtoEncodedRecordBatch)(nil),       // 2: databricks.zerobus.ProtoEncodedRecordBatch
-	(*CreateIngestStreamRequest)(nil),     // 3: databricks.zerobus.CreateIngestStreamRequest
-	(*CreateIngestStreamResponse)(nil),    // 4: databricks.zerobus.CreateIngestStreamResponse
-	(*IngestRecordRequest)(nil),           // 5: databricks.zerobus.IngestRecordRequest
-	(*IngestRecordBatchRequest)(nil),      // 6: databricks.zerobus.IngestRecordBatchRequest
-	(*EphemeralStreamRequest)(nil),        // 7: databricks.zerobus.EphemeralStreamRequest
-	(*IngestRecordResponse)(nil),          // 8: databricks.zerobus.IngestRecordResponse
-	(*CloseStreamSignal)(nil),             // 9: databricks.zerobus.CloseStreamSignal
-	(*EphemeralStreamResponse)(nil),       // 10: databricks.zerobus.EphemeralStreamResponse
-	(*CreatePersistentStreamRequest)(nil), // 11: databricks.zerobus.CreatePersistentStreamRequest
-	(*ResumeIngestStreamRequest)(nil),     // 12: databricks.zerobus.ResumeIngestStreamRequest
-	(*ResumeIngestStreamResponse)(nil),    // 13: databricks.zerobus.ResumeIngestStreamResponse
-	(*PersistentStreamRequest)(nil),       // 14: databricks.zerobus.PersistentStreamRequest
-	(*PersistentStreamResponse)(nil),      // 15: databricks.zerobus.PersistentStreamResponse
-	(*RetireStreamRequest)(nil),           // 16: databricks.zerobus.RetireStreamRequest
-	(*RetireStreamResponse)(nil),          // 17: databricks.zerobus.RetireStreamResponse
-	(*durationpb.Duration)(nil),           // 18: google.protobuf.Duration
+	(*AvroRecordBatch)(nil),               // 3: databricks.zerobus.AvroRecordBatch
+	(*CreateIngestStreamRequest)(nil),     // 4: databricks.zerobus.CreateIngestStreamRequest
+	(*CreateIngestStreamResponse)(nil),    // 5: databricks.zerobus.CreateIngestStreamResponse
+	(*IngestRecordRequest)(nil),           // 6: databricks.zerobus.IngestRecordRequest
+	(*IngestRecordBatchRequest)(nil),      // 7: databricks.zerobus.IngestRecordBatchRequest
+	(*EphemeralStreamRequest)(nil),        // 8: databricks.zerobus.EphemeralStreamRequest
+	(*IngestRecordResponse)(nil),          // 9: databricks.zerobus.IngestRecordResponse
+	(*CloseStreamSignal)(nil),             // 10: databricks.zerobus.CloseStreamSignal
+	(*EphemeralStreamResponse)(nil),       // 11: databricks.zerobus.EphemeralStreamResponse
+	(*CreatePersistentStreamRequest)(nil), // 12: databricks.zerobus.CreatePersistentStreamRequest
+	(*ResumeIngestStreamRequest)(nil),     // 13: databricks.zerobus.ResumeIngestStreamRequest
+	(*ResumeIngestStreamResponse)(nil),    // 14: databricks.zerobus.ResumeIngestStreamResponse
+	(*PersistentStreamRequest)(nil),       // 15: databricks.zerobus.PersistentStreamRequest
+	(*PersistentStreamResponse)(nil),      // 16: databricks.zerobus.PersistentStreamResponse
+	(*RetireStreamRequest)(nil),           // 17: databricks.zerobus.RetireStreamRequest
+	(*RetireStreamResponse)(nil),          // 18: databricks.zerobus.RetireStreamResponse
+	(*durationpb.Duration)(nil),           // 19: google.protobuf.Duration
 }
 var file_zerobus_service_proto_depIdxs = []int32{
 	0,  // 0: databricks.zerobus.CreateIngestStreamRequest.record_type:type_name -> databricks.zerobus.RecordType
 	2,  // 1: databricks.zerobus.IngestRecordBatchRequest.proto_encoded_batch:type_name -> databricks.zerobus.ProtoEncodedRecordBatch
 	1,  // 2: databricks.zerobus.IngestRecordBatchRequest.json_batch:type_name -> databricks.zerobus.JsonRecordBatch
-	3,  // 3: databricks.zerobus.EphemeralStreamRequest.create_stream:type_name -> databricks.zerobus.CreateIngestStreamRequest
-	5,  // 4: databricks.zerobus.EphemeralStreamRequest.ingest_record:type_name -> databricks.zerobus.IngestRecordRequest
-	6,  // 5: databricks.zerobus.EphemeralStreamRequest.ingest_record_batch:type_name -> databricks.zerobus.IngestRecordBatchRequest
-	18, // 6: databricks.zerobus.CloseStreamSignal.duration:type_name -> google.protobuf.Duration
-	4,  // 7: databricks.zerobus.EphemeralStreamResponse.create_stream_response:type_name -> databricks.zerobus.CreateIngestStreamResponse
-	8,  // 8: databricks.zerobus.EphemeralStreamResponse.ingest_record_response:type_name -> databricks.zerobus.IngestRecordResponse
-	9,  // 9: databricks.zerobus.EphemeralStreamResponse.close_stream_signal:type_name -> databricks.zerobus.CloseStreamSignal
-	3,  // 10: databricks.zerobus.CreatePersistentStreamRequest.create_stream:type_name -> databricks.zerobus.CreateIngestStreamRequest
-	0,  // 11: databricks.zerobus.ResumeIngestStreamRequest.record_type:type_name -> databricks.zerobus.RecordType
-	11, // 12: databricks.zerobus.PersistentStreamRequest.create_stream:type_name -> databricks.zerobus.CreatePersistentStreamRequest
-	12, // 13: databricks.zerobus.PersistentStreamRequest.resume_stream:type_name -> databricks.zerobus.ResumeIngestStreamRequest
-	5,  // 14: databricks.zerobus.PersistentStreamRequest.ingest_record:type_name -> databricks.zerobus.IngestRecordRequest
-	6,  // 15: databricks.zerobus.PersistentStreamRequest.ingest_record_batch:type_name -> databricks.zerobus.IngestRecordBatchRequest
-	4,  // 16: databricks.zerobus.PersistentStreamResponse.create_stream_response:type_name -> databricks.zerobus.CreateIngestStreamResponse
-	13, // 17: databricks.zerobus.PersistentStreamResponse.resume_stream_response:type_name -> databricks.zerobus.ResumeIngestStreamResponse
-	8,  // 18: databricks.zerobus.PersistentStreamResponse.ingest_record_response:type_name -> databricks.zerobus.IngestRecordResponse
-	9,  // 19: databricks.zerobus.PersistentStreamResponse.close_stream_signal:type_name -> databricks.zerobus.CloseStreamSignal
-	7,  // 20: databricks.zerobus.Zerobus.EphemeralStream:input_type -> databricks.zerobus.EphemeralStreamRequest
-	14, // 21: databricks.zerobus.Zerobus.PersistentStream:input_type -> databricks.zerobus.PersistentStreamRequest
-	16, // 22: databricks.zerobus.Zerobus.RetireStream:input_type -> databricks.zerobus.RetireStreamRequest
-	10, // 23: databricks.zerobus.Zerobus.EphemeralStream:output_type -> databricks.zerobus.EphemeralStreamResponse
-	15, // 24: databricks.zerobus.Zerobus.PersistentStream:output_type -> databricks.zerobus.PersistentStreamResponse
-	17, // 25: databricks.zerobus.Zerobus.RetireStream:output_type -> databricks.zerobus.RetireStreamResponse
-	23, // [23:26] is the sub-list for method output_type
-	20, // [20:23] is the sub-list for method input_type
-	20, // [20:20] is the sub-list for extension type_name
-	20, // [20:20] is the sub-list for extension extendee
-	0,  // [0:20] is the sub-list for field type_name
+	3,  // 3: databricks.zerobus.IngestRecordBatchRequest.avro_batch:type_name -> databricks.zerobus.AvroRecordBatch
+	4,  // 4: databricks.zerobus.EphemeralStreamRequest.create_stream:type_name -> databricks.zerobus.CreateIngestStreamRequest
+	6,  // 5: databricks.zerobus.EphemeralStreamRequest.ingest_record:type_name -> databricks.zerobus.IngestRecordRequest
+	7,  // 6: databricks.zerobus.EphemeralStreamRequest.ingest_record_batch:type_name -> databricks.zerobus.IngestRecordBatchRequest
+	19, // 7: databricks.zerobus.CloseStreamSignal.duration:type_name -> google.protobuf.Duration
+	5,  // 8: databricks.zerobus.EphemeralStreamResponse.create_stream_response:type_name -> databricks.zerobus.CreateIngestStreamResponse
+	9,  // 9: databricks.zerobus.EphemeralStreamResponse.ingest_record_response:type_name -> databricks.zerobus.IngestRecordResponse
+	10, // 10: databricks.zerobus.EphemeralStreamResponse.close_stream_signal:type_name -> databricks.zerobus.CloseStreamSignal
+	4,  // 11: databricks.zerobus.CreatePersistentStreamRequest.create_stream:type_name -> databricks.zerobus.CreateIngestStreamRequest
+	0,  // 12: databricks.zerobus.ResumeIngestStreamRequest.record_type:type_name -> databricks.zerobus.RecordType
+	12, // 13: databricks.zerobus.PersistentStreamRequest.create_stream:type_name -> databricks.zerobus.CreatePersistentStreamRequest
+	13, // 14: databricks.zerobus.PersistentStreamRequest.resume_stream:type_name -> databricks.zerobus.ResumeIngestStreamRequest
+	6,  // 15: databricks.zerobus.PersistentStreamRequest.ingest_record:type_name -> databricks.zerobus.IngestRecordRequest
+	7,  // 16: databricks.zerobus.PersistentStreamRequest.ingest_record_batch:type_name -> databricks.zerobus.IngestRecordBatchRequest
+	5,  // 17: databricks.zerobus.PersistentStreamResponse.create_stream_response:type_name -> databricks.zerobus.CreateIngestStreamResponse
+	14, // 18: databricks.zerobus.PersistentStreamResponse.resume_stream_response:type_name -> databricks.zerobus.ResumeIngestStreamResponse
+	9,  // 19: databricks.zerobus.PersistentStreamResponse.ingest_record_response:type_name -> databricks.zerobus.IngestRecordResponse
+	10, // 20: databricks.zerobus.PersistentStreamResponse.close_stream_signal:type_name -> databricks.zerobus.CloseStreamSignal
+	8,  // 21: databricks.zerobus.Zerobus.EphemeralStream:input_type -> databricks.zerobus.EphemeralStreamRequest
+	15, // 22: databricks.zerobus.Zerobus.PersistentStream:input_type -> databricks.zerobus.PersistentStreamRequest
+	17, // 23: databricks.zerobus.Zerobus.RetireStream:input_type -> databricks.zerobus.RetireStreamRequest
+	11, // 24: databricks.zerobus.Zerobus.EphemeralStream:output_type -> databricks.zerobus.EphemeralStreamResponse
+	16, // 25: databricks.zerobus.Zerobus.PersistentStream:output_type -> databricks.zerobus.PersistentStreamResponse
+	18, // 26: databricks.zerobus.Zerobus.RetireStream:output_type -> databricks.zerobus.RetireStreamResponse
+	24, // [24:27] is the sub-list for method output_type
+	21, // [21:24] is the sub-list for method input_type
+	21, // [21:21] is the sub-list for extension type_name
+	21, // [21:21] is the sub-list for extension extendee
+	0,  // [0:21] is the sub-list for field type_name
 }
 
 func init() { file_zerobus_service_proto_init() }
@@ -1519,40 +1630,42 @@ func file_zerobus_service_proto_init() {
 	if File_zerobus_service_proto != nil {
 		return
 	}
-	file_zerobus_service_proto_msgTypes[4].OneofWrappers = []any{
+	file_zerobus_service_proto_msgTypes[5].OneofWrappers = []any{
 		(*IngestRecordRequest_ProtoEncodedRecord)(nil),
 		(*IngestRecordRequest_JsonRecord)(nil),
-	}
-	file_zerobus_service_proto_msgTypes[5].OneofWrappers = []any{
-		(*IngestRecordBatchRequest_ProtoEncodedBatch)(nil),
-		(*IngestRecordBatchRequest_JsonBatch)(nil),
+		(*IngestRecordRequest_AvroEncodedRecord)(nil),
 	}
 	file_zerobus_service_proto_msgTypes[6].OneofWrappers = []any{
+		(*IngestRecordBatchRequest_ProtoEncodedBatch)(nil),
+		(*IngestRecordBatchRequest_JsonBatch)(nil),
+		(*IngestRecordBatchRequest_AvroBatch)(nil),
+	}
+	file_zerobus_service_proto_msgTypes[7].OneofWrappers = []any{
 		(*EphemeralStreamRequest_CreateStream)(nil),
 		(*EphemeralStreamRequest_IngestRecord)(nil),
 		(*EphemeralStreamRequest_IngestRecordBatch)(nil),
 	}
-	file_zerobus_service_proto_msgTypes[9].OneofWrappers = []any{
+	file_zerobus_service_proto_msgTypes[10].OneofWrappers = []any{
 		(*EphemeralStreamResponse_CreateStreamResponse)(nil),
 		(*EphemeralStreamResponse_IngestRecordResponse)(nil),
 		(*EphemeralStreamResponse_CloseStreamSignal)(nil),
 	}
-	file_zerobus_service_proto_msgTypes[11].OneofWrappers = []any{
+	file_zerobus_service_proto_msgTypes[12].OneofWrappers = []any{
 		(*ResumeIngestStreamRequest_StreamId)(nil),
 	}
-	file_zerobus_service_proto_msgTypes[13].OneofWrappers = []any{
+	file_zerobus_service_proto_msgTypes[14].OneofWrappers = []any{
 		(*PersistentStreamRequest_CreateStream)(nil),
 		(*PersistentStreamRequest_ResumeStream)(nil),
 		(*PersistentStreamRequest_IngestRecord)(nil),
 		(*PersistentStreamRequest_IngestRecordBatch)(nil),
 	}
-	file_zerobus_service_proto_msgTypes[14].OneofWrappers = []any{
+	file_zerobus_service_proto_msgTypes[15].OneofWrappers = []any{
 		(*PersistentStreamResponse_CreateStreamResponse)(nil),
 		(*PersistentStreamResponse_ResumeStreamResponse)(nil),
 		(*PersistentStreamResponse_IngestRecordResponse)(nil),
 		(*PersistentStreamResponse_CloseStreamSignal)(nil),
 	}
-	file_zerobus_service_proto_msgTypes[15].OneofWrappers = []any{
+	file_zerobus_service_proto_msgTypes[16].OneofWrappers = []any{
 		(*RetireStreamRequest_StreamId)(nil),
 	}
 	type x struct{}
@@ -1561,7 +1674,7 @@ func file_zerobus_service_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_zerobus_service_proto_rawDesc), len(file_zerobus_service_proto_rawDesc)),
 			NumEnums:      1,
-			NumMessages:   17,
+			NumMessages:   18,
 			NumExtensions: 0,
 			NumServices:   1,
 		},

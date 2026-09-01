@@ -68,6 +68,9 @@ enum RecordType {
   RECORD_TYPE_UNSPECIFIED = 0;
   PROTO = 1;
   JSON = 2;
+  // 3 is ARROW_IPC on the Zerobus service. 
+  reserved 3;
+  AVRO = 4;
 }
 
 /*
@@ -90,6 +93,19 @@ message JsonRecordBatch {
  */
 message ProtoEncodedRecordBatch {
   // Array of protobuf-encoded records.
+  repeated bytes records = 1;
+}
+
+/*
+ * Batch of Avro-encoded records.
+ *
+ * Each element is a single raw Avro binary datum (no framing). The writer
+ * schema is supplied once at stream creation via
+ * CreateIngestStreamRequest.avro_schema_json.
+ */
+message AvroRecordBatch {
+  // Array of raw Avro binary datums. Each datum must be encoded according to
+  // the writer schema provided in CreateIngestStreamRequest.avro_schema_json.
   repeated bytes records = 1;
 }
 
@@ -121,6 +137,12 @@ message CreateIngestStreamRequest {
   // Record type that will be accepted in the stream.
   // Defaults to PROTO for backwards compatibility.
   optional RecordType record_type = 4;
+
+  // Avro writer schema as a JSON-encoded Avro schema string.
+  //
+  // Required when record_type is AVRO. Must be a valid Avro record schema.
+  // Ignored for all other record types.
+  optional string avro_schema_json = 5;
 }
 
 /*
@@ -155,6 +177,10 @@ message IngestRecordRequest {
     // provided in the CreateIngestStreamRequest.
     bytes proto_encoded_record = 2;
     string json_record = 3;
+
+    // A single raw Avro binary datum (no framing). The writer schema is supplied
+    // once at stream creation via CreateIngestStreamRequest.avro_schema_json.
+    bytes avro_encoded_record = 4;
   }
 }
 
@@ -177,6 +203,10 @@ message IngestRecordBatchRequest {
 
     // Batch of JSON-encoded records.
     JsonRecordBatch json_batch = 3;
+
+    // Batch of Avro-encoded records. The writer schema must be provided in
+    // CreateIngestStreamRequest.avro_schema_json.
+    AvroRecordBatch avro_batch = 4;
   }
 }
 
@@ -270,7 +300,7 @@ message ResumeIngestStreamRequest {
   // Protocol buffer descriptor for record serialization/deserialization.
   //
   // Required when the stream was created with record_type PROTO. Must be
-  // compatible with the target table's schema. Not used for JSON or ARROW_IPC
+  // compatible with the target table's schema. Not used for JSON or AVRO
   // record types.
   optional bytes descriptor_proto = 2;
 
