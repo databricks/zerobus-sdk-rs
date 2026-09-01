@@ -22,6 +22,9 @@ const (
 	_ = protoimpl.EnforceVersion(protoimpl.MaxVersion - 20)
 )
 
+// Record type that will be accepted in the stream.
+//
+// Defaults to RECORD_TYPE_UNSPECIFIED, which returns an error on stream creation.
 type RecordType int32
 
 const (
@@ -81,9 +84,14 @@ func (RecordType) EnumDescriptor() ([]byte, []int) {
 	return file_zerobus_service_proto_rawDescGZIP(), []int{0}
 }
 
+// Batch of JSON-encoded records.
+//
+// This message contains multiple JSON records that will be ingested together.
+// Each string in the array represents a complete JSON object.
 type JsonRecordBatch struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	Records       []string               `protobuf:"bytes,1,rep,name=records" json:"records,omitempty"`
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// Array of JSON-encoded records.
+	Records       []string `protobuf:"bytes,1,rep,name=records" json:"records,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -125,9 +133,15 @@ func (x *JsonRecordBatch) GetRecords() []string {
 	return nil
 }
 
+// Batch of protobuf-encoded records.
+//
+// This message contains multiple protobuf-encoded records that will be ingested together.
+// Each record must be serialized according to the protobuf descriptor provided in the
+// CreateIngestStreamRequest.
 type ProtoEncodedRecordBatch struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	Records       [][]byte               `protobuf:"bytes,1,rep,name=records" json:"records,omitempty"`
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// Array of protobuf-encoded records.
+	Records       [][]byte `protobuf:"bytes,1,rep,name=records" json:"records,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -169,13 +183,28 @@ func (x *ProtoEncodedRecordBatch) GetRecords() [][]byte {
 	return nil
 }
 
+// Request to create a new ephemeral ingestion stream.
+//
+// This message initiates the streaming session and must be the first message
+// sent by the client in the EphemeralStream RPC.
 type CreateIngestStreamRequest struct {
-	state           protoimpl.MessageState `protogen:"open.v1"`
-	TableName       *string                `protobuf:"bytes,1,opt,name=table_name,json=tableName" json:"table_name,omitempty"`
-	DescriptorProto []byte                 `protobuf:"bytes,3,opt,name=descriptor_proto,json=descriptorProto" json:"descriptor_proto,omitempty"`
-	RecordType      *RecordType            `protobuf:"varint,4,opt,name=record_type,json=recordType,enum=databricks.zerobus.RecordType" json:"record_type,omitempty"`
-	unknownFields   protoimpl.UnknownFields
-	sizeCache       protoimpl.SizeCache
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// Three part name of the target destination table for data ingestion.
+	//
+	// This is a required field for all stream creation requests.
+	TableName *string `protobuf:"bytes,1,opt,name=table_name,json=tableName" json:"table_name,omitempty"`
+	// Protocol buffer descriptor for record serialization/deserialization.
+	//
+	// This descriptor defines the structure of the records being ingested.
+	// It must be compatible with the target table's schema.
+	//
+	// This is a required field for all stream creation requests.
+	DescriptorProto []byte `protobuf:"bytes,3,opt,name=descriptor_proto,json=descriptorProto" json:"descriptor_proto,omitempty"`
+	// Record type that will be accepted in the stream.
+	// Defaults to PROTO for backwards compatibility.
+	RecordType    *RecordType `protobuf:"varint,4,opt,name=record_type,json=recordType,enum=databricks.zerobus.RecordType" json:"record_type,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
 }
 
 func (x *CreateIngestStreamRequest) Reset() {
@@ -229,9 +258,14 @@ func (x *CreateIngestStreamRequest) GetRecordType() RecordType {
 	return RecordType_RECORD_TYPE_UNSPECIFIED
 }
 
+// Response confirming the creation of an ephemeral ingestion stream.
+//
+// This message is sent by the server in response to a CreateIngestStreamRequest
+// and contains the stream identifier and initial offset information.
 type CreateIngestStreamResponse struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	StreamId      *string                `protobuf:"bytes,1,opt,name=stream_id,json=streamId" json:"stream_id,omitempty"`
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// Unique identifier assigned to this ephemeral ingestion stream.
+	StreamId      *string `protobuf:"bytes,1,opt,name=stream_id,json=streamId" json:"stream_id,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -273,9 +307,16 @@ func (x *CreateIngestStreamResponse) GetStreamId() string {
 	return ""
 }
 
+// Request to ingest a single record into the stream.
+//
+// This message is sent by the client after the initial CreateIngestStreamRequest
+// to stream individual records for ingestion.
 type IngestRecordRequest struct {
-	state    protoimpl.MessageState `protogen:"open.v1"`
-	OffsetId *int64                 `protobuf:"varint,1,opt,name=offset_id,json=offsetId" json:"offset_id,omitempty"`
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// Unique identifier for this record within the stream.
+	OffsetId *int64 `protobuf:"varint,1,opt,name=offset_id,json=offsetId" json:"offset_id,omitempty"`
+	// Serialized record data.
+	//
 	// Types that are valid to be assigned to Record:
 	//
 	//	*IngestRecordRequest_ProtoEncodedRecord
@@ -352,6 +393,8 @@ type isIngestRecordRequest_Record interface {
 }
 
 type IngestRecordRequest_ProtoEncodedRecord struct {
+	// The proto encoded record must be serialized according to the protobuf descriptor
+	// provided in the CreateIngestStreamRequest.
 	ProtoEncodedRecord []byte `protobuf:"bytes,2,opt,name=proto_encoded_record,json=protoEncodedRecord,oneof"`
 }
 
@@ -363,9 +406,17 @@ func (*IngestRecordRequest_ProtoEncodedRecord) isIngestRecordRequest_Record() {}
 
 func (*IngestRecordRequest_JsonRecord) isIngestRecordRequest_Record() {}
 
+// Request to ingest a batch of records into the stream.
+//
+// This message is sent by the client after the initial CreateIngestStreamRequest
+// to stream batches of records for ingestion.
 type IngestRecordBatchRequest struct {
-	state    protoimpl.MessageState `protogen:"open.v1"`
-	OffsetId *int64                 `protobuf:"varint,1,opt,name=offset_id,json=offsetId" json:"offset_id,omitempty"`
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// Unique identifier for this batch within the stream.
+	OffsetId *int64 `protobuf:"varint,1,opt,name=offset_id,json=offsetId" json:"offset_id,omitempty"`
+	// Batch of serialized records.
+	// The batch can contain multiple records encoded as either protobuf or JSON.
+	//
 	// Types that are valid to be assigned to Batch:
 	//
 	//	*IngestRecordBatchRequest_ProtoEncodedBatch
@@ -442,10 +493,13 @@ type isIngestRecordBatchRequest_Batch interface {
 }
 
 type IngestRecordBatchRequest_ProtoEncodedBatch struct {
+	// Batch of protobuf-encoded records. Each record must be serialized according to
+	// the protobuf descriptor provided in the CreateIngestStreamRequest.
 	ProtoEncodedBatch *ProtoEncodedRecordBatch `protobuf:"bytes,2,opt,name=proto_encoded_batch,json=protoEncodedBatch,oneof"`
 }
 
 type IngestRecordBatchRequest_JsonBatch struct {
+	// Batch of JSON-encoded records.
 	JsonBatch *JsonRecordBatch `protobuf:"bytes,3,opt,name=json_batch,json=jsonBatch,oneof"`
 }
 
@@ -453,6 +507,10 @@ func (*IngestRecordBatchRequest_ProtoEncodedBatch) isIngestRecordBatchRequest_Ba
 
 func (*IngestRecordBatchRequest_JsonBatch) isIngestRecordBatchRequest_Batch() {}
 
+// A message in the EphemeralStream bidirectional stream.
+//
+// This message type allows the client to send either stream creation requests
+// or record ingestion requests (individual or batched) through the same stream.
 type EphemeralStreamRequest struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	// Types that are valid to be assigned to Payload:
@@ -534,14 +592,23 @@ type isEphemeralStreamRequest_Payload interface {
 }
 
 type EphemeralStreamRequest_CreateStream struct {
+	// Initial request to create an ephemeral stream.
+	// Must be the first message in the stream.
+	// All subsequent messages should be ingest_record or ingest_record_batch.
 	CreateStream *CreateIngestStreamRequest `protobuf:"bytes,1,opt,name=create_stream,json=createStream,oneof"`
 }
 
 type EphemeralStreamRequest_IngestRecord struct {
+	// Request to ingest a record.
+	// Can only be sent after a successful create_stream request.
+	// Multiple ingest_record messages can be sent in sequence.
 	IngestRecord *IngestRecordRequest `protobuf:"bytes,2,opt,name=ingest_record,json=ingestRecord,oneof"`
 }
 
 type EphemeralStreamRequest_IngestRecordBatch struct {
+	// Request to ingest a batch of records.
+	// Can only be sent after a successful create_stream request.
+	// Multiple ingest_record_batch messages can be sent in sequence.
 	IngestRecordBatch *IngestRecordBatchRequest `protobuf:"bytes,3,opt,name=ingest_record_batch,json=ingestRecordBatch,oneof"`
 }
 
@@ -551,9 +618,17 @@ func (*EphemeralStreamRequest_IngestRecord) isEphemeralStreamRequest_Payload() {
 
 func (*EphemeralStreamRequest_IngestRecordBatch) isEphemeralStreamRequest_Payload() {}
 
+// Acknowledgment for all records up to the specified offset.
+//
+// This message is sent by the server to confirm that records have been
+// successfully ingested and are durable.
 type IngestRecordResponse struct {
-	state                   protoimpl.MessageState `protogen:"open.v1"`
-	DurabilityAckUpToOffset *int64                 `protobuf:"varint,1,opt,name=durability_ack_up_to_offset,json=durabilityAckUpToOffset" json:"durability_ack_up_to_offset,omitempty"`
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// Highest offset that has been durably acknowledged.
+	//
+	// This offset indicates that all records with
+	// offset_id <= durability_ack_up_to_offset have been made durable.
+	DurabilityAckUpToOffset *int64 `protobuf:"varint,1,opt,name=durability_ack_up_to_offset,json=durabilityAckUpToOffset" json:"durability_ack_up_to_offset,omitempty"`
 	unknownFields           protoimpl.UnknownFields
 	sizeCache               protoimpl.SizeCache
 }
@@ -595,9 +670,11 @@ func (x *IngestRecordResponse) GetDurabilityAckUpToOffset() int64 {
 	return 0
 }
 
+// Signal that the server will close the stream after the specified duration.
 type CloseStreamSignal struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	Duration      *durationpb.Duration   `protobuf:"bytes,1,opt,name=duration" json:"duration,omitempty"`
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// Duration after which the server will close the stream.
+	Duration      *durationpb.Duration `protobuf:"bytes,1,opt,name=duration" json:"duration,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -639,6 +716,10 @@ func (x *CloseStreamSignal) GetDuration() *durationpb.Duration {
 	return nil
 }
 
+// A message in the EphemeralStream response stream.
+//
+// This message type allows the server to send either stream creation responses
+// or record ingestion responses through the same stream.
 type EphemeralStreamResponse struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	// Types that are valid to be assigned to Payload:
@@ -720,14 +801,17 @@ type isEphemeralStreamResponse_Payload interface {
 }
 
 type EphemeralStreamResponse_CreateStreamResponse struct {
+	// Response to a create_stream request.
 	CreateStreamResponse *CreateIngestStreamResponse `protobuf:"bytes,1,opt,name=create_stream_response,json=createStreamResponse,oneof"`
 }
 
 type EphemeralStreamResponse_IngestRecordResponse struct {
+	// Response to ingest_record requests.
 	IngestRecordResponse *IngestRecordResponse `protobuf:"bytes,2,opt,name=ingest_record_response,json=ingestRecordResponse,oneof"`
 }
 
 type EphemeralStreamResponse_CloseStreamSignal struct {
+	// Signal that the server will close the stream after the specified duration.
 	CloseStreamSignal *CloseStreamSignal `protobuf:"bytes,3,opt,name=close_stream_signal,json=closeStreamSignal,oneof"`
 }
 
@@ -736,6 +820,546 @@ func (*EphemeralStreamResponse_CreateStreamResponse) isEphemeralStreamResponse_P
 func (*EphemeralStreamResponse_IngestRecordResponse) isEphemeralStreamResponse_Payload() {}
 
 func (*EphemeralStreamResponse_CloseStreamSignal) isEphemeralStreamResponse_Payload() {}
+
+// IN DEVELOPMENT: may change or be removed.
+// First message on a PersistentStream RPC when creating a new stream.
+type CreatePersistentStreamRequest struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// Creation parameters shared with ephemeral streams.
+	CreateStream  *CreateIngestStreamRequest `protobuf:"bytes,1,opt,name=create_stream,json=createStream" json:"create_stream,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *CreatePersistentStreamRequest) Reset() {
+	*x = CreatePersistentStreamRequest{}
+	mi := &file_zerobus_service_proto_msgTypes[10]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *CreatePersistentStreamRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*CreatePersistentStreamRequest) ProtoMessage() {}
+
+func (x *CreatePersistentStreamRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_zerobus_service_proto_msgTypes[10]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use CreatePersistentStreamRequest.ProtoReflect.Descriptor instead.
+func (*CreatePersistentStreamRequest) Descriptor() ([]byte, []int) {
+	return file_zerobus_service_proto_rawDescGZIP(), []int{10}
+}
+
+func (x *CreatePersistentStreamRequest) GetCreateStream() *CreateIngestStreamRequest {
+	if x != nil {
+		return x.CreateStream
+	}
+	return nil
+}
+
+// IN DEVELOPMENT: may change or be removed.
+// First message on a PersistentStream RPC when resuming an existing stream.
+type ResumeIngestStreamRequest struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// How the stream to resume is identified. Only stream_id is supported by
+	// this SDK; stream_name is reserved for future server support.
+	//
+	// Types that are valid to be assigned to Identifier:
+	//
+	//	*ResumeIngestStreamRequest_StreamId
+	Identifier isResumeIngestStreamRequest_Identifier `protobuf_oneof:"identifier"`
+	// Protocol buffer descriptor for record serialization/deserialization.
+	//
+	// Required when the stream was created with record_type PROTO. Must be
+	// compatible with the target table's schema. Not used for JSON or ARROW_IPC
+	// record types.
+	DescriptorProto []byte `protobuf:"bytes,2,opt,name=descriptor_proto,json=descriptorProto" json:"descriptor_proto,omitempty"`
+	// Record type accepted by the resumed stream. Must match the type used when
+	// the persistent stream was created.
+	RecordType    *RecordType `protobuf:"varint,3,opt,name=record_type,json=recordType,enum=databricks.zerobus.RecordType" json:"record_type,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *ResumeIngestStreamRequest) Reset() {
+	*x = ResumeIngestStreamRequest{}
+	mi := &file_zerobus_service_proto_msgTypes[11]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ResumeIngestStreamRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ResumeIngestStreamRequest) ProtoMessage() {}
+
+func (x *ResumeIngestStreamRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_zerobus_service_proto_msgTypes[11]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ResumeIngestStreamRequest.ProtoReflect.Descriptor instead.
+func (*ResumeIngestStreamRequest) Descriptor() ([]byte, []int) {
+	return file_zerobus_service_proto_rawDescGZIP(), []int{11}
+}
+
+func (x *ResumeIngestStreamRequest) GetIdentifier() isResumeIngestStreamRequest_Identifier {
+	if x != nil {
+		return x.Identifier
+	}
+	return nil
+}
+
+func (x *ResumeIngestStreamRequest) GetStreamId() string {
+	if x != nil {
+		if x, ok := x.Identifier.(*ResumeIngestStreamRequest_StreamId); ok {
+			return x.StreamId
+		}
+	}
+	return ""
+}
+
+func (x *ResumeIngestStreamRequest) GetDescriptorProto() []byte {
+	if x != nil {
+		return x.DescriptorProto
+	}
+	return nil
+}
+
+func (x *ResumeIngestStreamRequest) GetRecordType() RecordType {
+	if x != nil && x.RecordType != nil {
+		return *x.RecordType
+	}
+	return RecordType_RECORD_TYPE_UNSPECIFIED
+}
+
+type isResumeIngestStreamRequest_Identifier interface {
+	isResumeIngestStreamRequest_Identifier()
+}
+
+type ResumeIngestStreamRequest_StreamId struct {
+	// The durable stream identity returned by a prior create.
+	StreamId string `protobuf:"bytes,1,opt,name=stream_id,json=streamId,oneof"`
+}
+
+func (*ResumeIngestStreamRequest_StreamId) isResumeIngestStreamRequest_Identifier() {}
+
+// IN DEVELOPMENT: may change or be removed.
+type ResumeIngestStreamResponse struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// Resume watermark: resume sending from last_committed_offset + 1.
+	// Absent means nothing has been committed yet (resume from 0).
+	LastCommittedOffset *int64 `protobuf:"varint,1,opt,name=last_committed_offset,json=lastCommittedOffset" json:"last_committed_offset,omitempty"`
+	unknownFields       protoimpl.UnknownFields
+	sizeCache           protoimpl.SizeCache
+}
+
+func (x *ResumeIngestStreamResponse) Reset() {
+	*x = ResumeIngestStreamResponse{}
+	mi := &file_zerobus_service_proto_msgTypes[12]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ResumeIngestStreamResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ResumeIngestStreamResponse) ProtoMessage() {}
+
+func (x *ResumeIngestStreamResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_zerobus_service_proto_msgTypes[12]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ResumeIngestStreamResponse.ProtoReflect.Descriptor instead.
+func (*ResumeIngestStreamResponse) Descriptor() ([]byte, []int) {
+	return file_zerobus_service_proto_rawDescGZIP(), []int{12}
+}
+
+func (x *ResumeIngestStreamResponse) GetLastCommittedOffset() int64 {
+	if x != nil && x.LastCommittedOffset != nil {
+		return *x.LastCommittedOffset
+	}
+	return 0
+}
+
+// IN DEVELOPMENT: may change or be removed.
+// A message in the PersistentStream request stream. The first message is a
+// create_stream or resume_stream; the rest are ingest_record(_batch).
+type PersistentStreamRequest struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// Types that are valid to be assigned to Payload:
+	//
+	//	*PersistentStreamRequest_CreateStream
+	//	*PersistentStreamRequest_ResumeStream
+	//	*PersistentStreamRequest_IngestRecord
+	//	*PersistentStreamRequest_IngestRecordBatch
+	Payload       isPersistentStreamRequest_Payload `protobuf_oneof:"payload"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *PersistentStreamRequest) Reset() {
+	*x = PersistentStreamRequest{}
+	mi := &file_zerobus_service_proto_msgTypes[13]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *PersistentStreamRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*PersistentStreamRequest) ProtoMessage() {}
+
+func (x *PersistentStreamRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_zerobus_service_proto_msgTypes[13]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use PersistentStreamRequest.ProtoReflect.Descriptor instead.
+func (*PersistentStreamRequest) Descriptor() ([]byte, []int) {
+	return file_zerobus_service_proto_rawDescGZIP(), []int{13}
+}
+
+func (x *PersistentStreamRequest) GetPayload() isPersistentStreamRequest_Payload {
+	if x != nil {
+		return x.Payload
+	}
+	return nil
+}
+
+func (x *PersistentStreamRequest) GetCreateStream() *CreatePersistentStreamRequest {
+	if x != nil {
+		if x, ok := x.Payload.(*PersistentStreamRequest_CreateStream); ok {
+			return x.CreateStream
+		}
+	}
+	return nil
+}
+
+func (x *PersistentStreamRequest) GetResumeStream() *ResumeIngestStreamRequest {
+	if x != nil {
+		if x, ok := x.Payload.(*PersistentStreamRequest_ResumeStream); ok {
+			return x.ResumeStream
+		}
+	}
+	return nil
+}
+
+func (x *PersistentStreamRequest) GetIngestRecord() *IngestRecordRequest {
+	if x != nil {
+		if x, ok := x.Payload.(*PersistentStreamRequest_IngestRecord); ok {
+			return x.IngestRecord
+		}
+	}
+	return nil
+}
+
+func (x *PersistentStreamRequest) GetIngestRecordBatch() *IngestRecordBatchRequest {
+	if x != nil {
+		if x, ok := x.Payload.(*PersistentStreamRequest_IngestRecordBatch); ok {
+			return x.IngestRecordBatch
+		}
+	}
+	return nil
+}
+
+type isPersistentStreamRequest_Payload interface {
+	isPersistentStreamRequest_Payload()
+}
+
+type PersistentStreamRequest_CreateStream struct {
+	CreateStream *CreatePersistentStreamRequest `protobuf:"bytes,1,opt,name=create_stream,json=createStream,oneof"`
+}
+
+type PersistentStreamRequest_ResumeStream struct {
+	ResumeStream *ResumeIngestStreamRequest `protobuf:"bytes,2,opt,name=resume_stream,json=resumeStream,oneof"`
+}
+
+type PersistentStreamRequest_IngestRecord struct {
+	IngestRecord *IngestRecordRequest `protobuf:"bytes,3,opt,name=ingest_record,json=ingestRecord,oneof"`
+}
+
+type PersistentStreamRequest_IngestRecordBatch struct {
+	IngestRecordBatch *IngestRecordBatchRequest `protobuf:"bytes,4,opt,name=ingest_record_batch,json=ingestRecordBatch,oneof"`
+}
+
+func (*PersistentStreamRequest_CreateStream) isPersistentStreamRequest_Payload() {}
+
+func (*PersistentStreamRequest_ResumeStream) isPersistentStreamRequest_Payload() {}
+
+func (*PersistentStreamRequest_IngestRecord) isPersistentStreamRequest_Payload() {}
+
+func (*PersistentStreamRequest_IngestRecordBatch) isPersistentStreamRequest_Payload() {}
+
+// IN DEVELOPMENT: may change or be removed.
+// A message in the PersistentStream response stream.
+type PersistentStreamResponse struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// Types that are valid to be assigned to Payload:
+	//
+	//	*PersistentStreamResponse_CreateStreamResponse
+	//	*PersistentStreamResponse_ResumeStreamResponse
+	//	*PersistentStreamResponse_IngestRecordResponse
+	//	*PersistentStreamResponse_CloseStreamSignal
+	Payload       isPersistentStreamResponse_Payload `protobuf_oneof:"payload"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *PersistentStreamResponse) Reset() {
+	*x = PersistentStreamResponse{}
+	mi := &file_zerobus_service_proto_msgTypes[14]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *PersistentStreamResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*PersistentStreamResponse) ProtoMessage() {}
+
+func (x *PersistentStreamResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_zerobus_service_proto_msgTypes[14]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use PersistentStreamResponse.ProtoReflect.Descriptor instead.
+func (*PersistentStreamResponse) Descriptor() ([]byte, []int) {
+	return file_zerobus_service_proto_rawDescGZIP(), []int{14}
+}
+
+func (x *PersistentStreamResponse) GetPayload() isPersistentStreamResponse_Payload {
+	if x != nil {
+		return x.Payload
+	}
+	return nil
+}
+
+func (x *PersistentStreamResponse) GetCreateStreamResponse() *CreateIngestStreamResponse {
+	if x != nil {
+		if x, ok := x.Payload.(*PersistentStreamResponse_CreateStreamResponse); ok {
+			return x.CreateStreamResponse
+		}
+	}
+	return nil
+}
+
+func (x *PersistentStreamResponse) GetResumeStreamResponse() *ResumeIngestStreamResponse {
+	if x != nil {
+		if x, ok := x.Payload.(*PersistentStreamResponse_ResumeStreamResponse); ok {
+			return x.ResumeStreamResponse
+		}
+	}
+	return nil
+}
+
+func (x *PersistentStreamResponse) GetIngestRecordResponse() *IngestRecordResponse {
+	if x != nil {
+		if x, ok := x.Payload.(*PersistentStreamResponse_IngestRecordResponse); ok {
+			return x.IngestRecordResponse
+		}
+	}
+	return nil
+}
+
+func (x *PersistentStreamResponse) GetCloseStreamSignal() *CloseStreamSignal {
+	if x != nil {
+		if x, ok := x.Payload.(*PersistentStreamResponse_CloseStreamSignal); ok {
+			return x.CloseStreamSignal
+		}
+	}
+	return nil
+}
+
+type isPersistentStreamResponse_Payload interface {
+	isPersistentStreamResponse_Payload()
+}
+
+type PersistentStreamResponse_CreateStreamResponse struct {
+	CreateStreamResponse *CreateIngestStreamResponse `protobuf:"bytes,1,opt,name=create_stream_response,json=createStreamResponse,oneof"`
+}
+
+type PersistentStreamResponse_ResumeStreamResponse struct {
+	ResumeStreamResponse *ResumeIngestStreamResponse `protobuf:"bytes,2,opt,name=resume_stream_response,json=resumeStreamResponse,oneof"`
+}
+
+type PersistentStreamResponse_IngestRecordResponse struct {
+	IngestRecordResponse *IngestRecordResponse `protobuf:"bytes,3,opt,name=ingest_record_response,json=ingestRecordResponse,oneof"`
+}
+
+type PersistentStreamResponse_CloseStreamSignal struct {
+	CloseStreamSignal *CloseStreamSignal `protobuf:"bytes,4,opt,name=close_stream_signal,json=closeStreamSignal,oneof"`
+}
+
+func (*PersistentStreamResponse_CreateStreamResponse) isPersistentStreamResponse_Payload() {}
+
+func (*PersistentStreamResponse_ResumeStreamResponse) isPersistentStreamResponse_Payload() {}
+
+func (*PersistentStreamResponse_IngestRecordResponse) isPersistentStreamResponse_Payload() {}
+
+func (*PersistentStreamResponse_CloseStreamSignal) isPersistentStreamResponse_Payload() {}
+
+// IN DEVELOPMENT: may change or be removed.
+type RetireStreamRequest struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// Three part name of the table the stream belongs to.
+	TableName *string `protobuf:"bytes,1,opt,name=table_name,json=tableName" json:"table_name,omitempty"`
+	// How the stream to retire is identified. Only stream_id is currently
+	// supported; stream_name is reserved for future server support.
+	//
+	// Types that are valid to be assigned to Identifier:
+	//
+	//	*RetireStreamRequest_StreamId
+	Identifier    isRetireStreamRequest_Identifier `protobuf_oneof:"identifier"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *RetireStreamRequest) Reset() {
+	*x = RetireStreamRequest{}
+	mi := &file_zerobus_service_proto_msgTypes[15]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *RetireStreamRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*RetireStreamRequest) ProtoMessage() {}
+
+func (x *RetireStreamRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_zerobus_service_proto_msgTypes[15]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use RetireStreamRequest.ProtoReflect.Descriptor instead.
+func (*RetireStreamRequest) Descriptor() ([]byte, []int) {
+	return file_zerobus_service_proto_rawDescGZIP(), []int{15}
+}
+
+func (x *RetireStreamRequest) GetTableName() string {
+	if x != nil && x.TableName != nil {
+		return *x.TableName
+	}
+	return ""
+}
+
+func (x *RetireStreamRequest) GetIdentifier() isRetireStreamRequest_Identifier {
+	if x != nil {
+		return x.Identifier
+	}
+	return nil
+}
+
+func (x *RetireStreamRequest) GetStreamId() string {
+	if x != nil {
+		if x, ok := x.Identifier.(*RetireStreamRequest_StreamId); ok {
+			return x.StreamId
+		}
+	}
+	return ""
+}
+
+type isRetireStreamRequest_Identifier interface {
+	isRetireStreamRequest_Identifier()
+}
+
+type RetireStreamRequest_StreamId struct {
+	// The persistent stream to retire permanently.
+	StreamId string `protobuf:"bytes,2,opt,name=stream_id,json=streamId,oneof"`
+}
+
+func (*RetireStreamRequest_StreamId) isRetireStreamRequest_Identifier() {}
+
+// IN DEVELOPMENT: may change or be removed.
+// Empty: success or failure is carried by the gRPC status code.
+type RetireStreamResponse struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *RetireStreamResponse) Reset() {
+	*x = RetireStreamResponse{}
+	mi := &file_zerobus_service_proto_msgTypes[16]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *RetireStreamResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*RetireStreamResponse) ProtoMessage() {}
+
+func (x *RetireStreamResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_zerobus_service_proto_msgTypes[16]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use RetireStreamResponse.ProtoReflect.Descriptor instead.
+func (*RetireStreamResponse) Descriptor() ([]byte, []int) {
+	return file_zerobus_service_proto_rawDescGZIP(), []int{16}
+}
 
 var File_zerobus_service_proto protoreflect.FileDescriptor
 
@@ -779,14 +1403,47 @@ const file_zerobus_service_proto_rawDesc = "" +
 	"\x16create_stream_response\x18\x01 \x01(\v2..databricks.zerobus.CreateIngestStreamResponseH\x00R\x14createStreamResponse\x12`\n" +
 	"\x16ingest_record_response\x18\x02 \x01(\v2(.databricks.zerobus.IngestRecordResponseH\x00R\x14ingestRecordResponse\x12W\n" +
 	"\x13close_stream_signal\x18\x03 \x01(\v2%.databricks.zerobus.CloseStreamSignalH\x00R\x11closeStreamSignalB\t\n" +
-	"\apayload*>\n" +
+	"\apayload\"\x86\x01\n" +
+	"\x1dCreatePersistentStreamRequest\x12R\n" +
+	"\rcreate_stream\x18\x01 \x01(\v2-.databricks.zerobus.CreateIngestStreamRequestR\fcreateStreamJ\x04\b\x02\x10\x03R\vstream_name\"\xc7\x01\n" +
+	"\x19ResumeIngestStreamRequest\x12\x1d\n" +
+	"\tstream_id\x18\x01 \x01(\tH\x00R\bstreamId\x12)\n" +
+	"\x10descriptor_proto\x18\x02 \x01(\fR\x0fdescriptorProto\x12?\n" +
+	"\vrecord_type\x18\x03 \x01(\x0e2\x1e.databricks.zerobus.RecordTypeR\n" +
+	"recordTypeB\f\n" +
+	"\n" +
+	"identifierJ\x04\b\x04\x10\x05R\vstream_name\"P\n" +
+	"\x1aResumeIngestStreamResponse\x122\n" +
+	"\x15last_committed_offset\x18\x01 \x01(\x03R\x13lastCommittedOffset\"\x84\x03\n" +
+	"\x17PersistentStreamRequest\x12X\n" +
+	"\rcreate_stream\x18\x01 \x01(\v21.databricks.zerobus.CreatePersistentStreamRequestH\x00R\fcreateStream\x12T\n" +
+	"\rresume_stream\x18\x02 \x01(\v2-.databricks.zerobus.ResumeIngestStreamRequestH\x00R\fresumeStream\x12N\n" +
+	"\ringest_record\x18\x03 \x01(\v2'.databricks.zerobus.IngestRecordRequestH\x00R\fingestRecord\x12^\n" +
+	"\x13ingest_record_batch\x18\x04 \x01(\v2,.databricks.zerobus.IngestRecordBatchRequestH\x00R\x11ingestRecordBatchB\t\n" +
+	"\apayload\"\xb0\x03\n" +
+	"\x18PersistentStreamResponse\x12f\n" +
+	"\x16create_stream_response\x18\x01 \x01(\v2..databricks.zerobus.CreateIngestStreamResponseH\x00R\x14createStreamResponse\x12f\n" +
+	"\x16resume_stream_response\x18\x02 \x01(\v2..databricks.zerobus.ResumeIngestStreamResponseH\x00R\x14resumeStreamResponse\x12`\n" +
+	"\x16ingest_record_response\x18\x03 \x01(\v2(.databricks.zerobus.IngestRecordResponseH\x00R\x14ingestRecordResponse\x12W\n" +
+	"\x13close_stream_signal\x18\x04 \x01(\v2%.databricks.zerobus.CloseStreamSignalH\x00R\x11closeStreamSignalB\t\n" +
+	"\apayload\"t\n" +
+	"\x13RetireStreamRequest\x12\x1d\n" +
+	"\n" +
+	"table_name\x18\x01 \x01(\tR\ttableName\x12\x1d\n" +
+	"\tstream_id\x18\x02 \x01(\tH\x00R\bstreamIdB\f\n" +
+	"\n" +
+	"identifierJ\x04\b\x03\x10\x04R\vstream_name\"\x16\n" +
+	"\x14RetireStreamResponse*>\n" +
 	"\n" +
 	"RecordType\x12\x1b\n" +
 	"\x17RECORD_TYPE_UNSPECIFIED\x10\x00\x12\t\n" +
 	"\x05PROTO\x10\x01\x12\b\n" +
-	"\x04JSON\x10\x022y\n" +
+	"\x04JSON\x10\x022\xcf\x02\n" +
 	"\aZerobus\x12n\n" +
-	"\x0fEphemeralStream\x12*.databricks.zerobus.EphemeralStreamRequest\x1a+.databricks.zerobus.EphemeralStreamResponse(\x010\x01B=Z;github.com/databricks/zerobus-sdk/purego/internal/zerobuspb"
+	"\x0fEphemeralStream\x12*.databricks.zerobus.EphemeralStreamRequest\x1a+.databricks.zerobus.EphemeralStreamResponse(\x010\x01\x12q\n" +
+	"\x10PersistentStream\x12+.databricks.zerobus.PersistentStreamRequest\x1a,.databricks.zerobus.PersistentStreamResponse(\x010\x01\x12a\n" +
+	"\fRetireStream\x12'.databricks.zerobus.RetireStreamRequest\x1a(.databricks.zerobus.RetireStreamResponseB(\n" +
+	"\x16com.databricks.zerobusB\fZerobusProtoP\x01"
 
 var (
 	file_zerobus_service_proto_rawDescOnce sync.Once
@@ -801,20 +1458,27 @@ func file_zerobus_service_proto_rawDescGZIP() []byte {
 }
 
 var file_zerobus_service_proto_enumTypes = make([]protoimpl.EnumInfo, 1)
-var file_zerobus_service_proto_msgTypes = make([]protoimpl.MessageInfo, 10)
+var file_zerobus_service_proto_msgTypes = make([]protoimpl.MessageInfo, 17)
 var file_zerobus_service_proto_goTypes = []any{
-	(RecordType)(0),                    // 0: databricks.zerobus.RecordType
-	(*JsonRecordBatch)(nil),            // 1: databricks.zerobus.JsonRecordBatch
-	(*ProtoEncodedRecordBatch)(nil),    // 2: databricks.zerobus.ProtoEncodedRecordBatch
-	(*CreateIngestStreamRequest)(nil),  // 3: databricks.zerobus.CreateIngestStreamRequest
-	(*CreateIngestStreamResponse)(nil), // 4: databricks.zerobus.CreateIngestStreamResponse
-	(*IngestRecordRequest)(nil),        // 5: databricks.zerobus.IngestRecordRequest
-	(*IngestRecordBatchRequest)(nil),   // 6: databricks.zerobus.IngestRecordBatchRequest
-	(*EphemeralStreamRequest)(nil),     // 7: databricks.zerobus.EphemeralStreamRequest
-	(*IngestRecordResponse)(nil),       // 8: databricks.zerobus.IngestRecordResponse
-	(*CloseStreamSignal)(nil),          // 9: databricks.zerobus.CloseStreamSignal
-	(*EphemeralStreamResponse)(nil),    // 10: databricks.zerobus.EphemeralStreamResponse
-	(*durationpb.Duration)(nil),        // 11: google.protobuf.Duration
+	(RecordType)(0),                       // 0: databricks.zerobus.RecordType
+	(*JsonRecordBatch)(nil),               // 1: databricks.zerobus.JsonRecordBatch
+	(*ProtoEncodedRecordBatch)(nil),       // 2: databricks.zerobus.ProtoEncodedRecordBatch
+	(*CreateIngestStreamRequest)(nil),     // 3: databricks.zerobus.CreateIngestStreamRequest
+	(*CreateIngestStreamResponse)(nil),    // 4: databricks.zerobus.CreateIngestStreamResponse
+	(*IngestRecordRequest)(nil),           // 5: databricks.zerobus.IngestRecordRequest
+	(*IngestRecordBatchRequest)(nil),      // 6: databricks.zerobus.IngestRecordBatchRequest
+	(*EphemeralStreamRequest)(nil),        // 7: databricks.zerobus.EphemeralStreamRequest
+	(*IngestRecordResponse)(nil),          // 8: databricks.zerobus.IngestRecordResponse
+	(*CloseStreamSignal)(nil),             // 9: databricks.zerobus.CloseStreamSignal
+	(*EphemeralStreamResponse)(nil),       // 10: databricks.zerobus.EphemeralStreamResponse
+	(*CreatePersistentStreamRequest)(nil), // 11: databricks.zerobus.CreatePersistentStreamRequest
+	(*ResumeIngestStreamRequest)(nil),     // 12: databricks.zerobus.ResumeIngestStreamRequest
+	(*ResumeIngestStreamResponse)(nil),    // 13: databricks.zerobus.ResumeIngestStreamResponse
+	(*PersistentStreamRequest)(nil),       // 14: databricks.zerobus.PersistentStreamRequest
+	(*PersistentStreamResponse)(nil),      // 15: databricks.zerobus.PersistentStreamResponse
+	(*RetireStreamRequest)(nil),           // 16: databricks.zerobus.RetireStreamRequest
+	(*RetireStreamResponse)(nil),          // 17: databricks.zerobus.RetireStreamResponse
+	(*durationpb.Duration)(nil),           // 18: google.protobuf.Duration
 }
 var file_zerobus_service_proto_depIdxs = []int32{
 	0,  // 0: databricks.zerobus.CreateIngestStreamRequest.record_type:type_name -> databricks.zerobus.RecordType
@@ -823,17 +1487,31 @@ var file_zerobus_service_proto_depIdxs = []int32{
 	3,  // 3: databricks.zerobus.EphemeralStreamRequest.create_stream:type_name -> databricks.zerobus.CreateIngestStreamRequest
 	5,  // 4: databricks.zerobus.EphemeralStreamRequest.ingest_record:type_name -> databricks.zerobus.IngestRecordRequest
 	6,  // 5: databricks.zerobus.EphemeralStreamRequest.ingest_record_batch:type_name -> databricks.zerobus.IngestRecordBatchRequest
-	11, // 6: databricks.zerobus.CloseStreamSignal.duration:type_name -> google.protobuf.Duration
+	18, // 6: databricks.zerobus.CloseStreamSignal.duration:type_name -> google.protobuf.Duration
 	4,  // 7: databricks.zerobus.EphemeralStreamResponse.create_stream_response:type_name -> databricks.zerobus.CreateIngestStreamResponse
 	8,  // 8: databricks.zerobus.EphemeralStreamResponse.ingest_record_response:type_name -> databricks.zerobus.IngestRecordResponse
 	9,  // 9: databricks.zerobus.EphemeralStreamResponse.close_stream_signal:type_name -> databricks.zerobus.CloseStreamSignal
-	7,  // 10: databricks.zerobus.Zerobus.EphemeralStream:input_type -> databricks.zerobus.EphemeralStreamRequest
-	10, // 11: databricks.zerobus.Zerobus.EphemeralStream:output_type -> databricks.zerobus.EphemeralStreamResponse
-	11, // [11:12] is the sub-list for method output_type
-	10, // [10:11] is the sub-list for method input_type
-	10, // [10:10] is the sub-list for extension type_name
-	10, // [10:10] is the sub-list for extension extendee
-	0,  // [0:10] is the sub-list for field type_name
+	3,  // 10: databricks.zerobus.CreatePersistentStreamRequest.create_stream:type_name -> databricks.zerobus.CreateIngestStreamRequest
+	0,  // 11: databricks.zerobus.ResumeIngestStreamRequest.record_type:type_name -> databricks.zerobus.RecordType
+	11, // 12: databricks.zerobus.PersistentStreamRequest.create_stream:type_name -> databricks.zerobus.CreatePersistentStreamRequest
+	12, // 13: databricks.zerobus.PersistentStreamRequest.resume_stream:type_name -> databricks.zerobus.ResumeIngestStreamRequest
+	5,  // 14: databricks.zerobus.PersistentStreamRequest.ingest_record:type_name -> databricks.zerobus.IngestRecordRequest
+	6,  // 15: databricks.zerobus.PersistentStreamRequest.ingest_record_batch:type_name -> databricks.zerobus.IngestRecordBatchRequest
+	4,  // 16: databricks.zerobus.PersistentStreamResponse.create_stream_response:type_name -> databricks.zerobus.CreateIngestStreamResponse
+	13, // 17: databricks.zerobus.PersistentStreamResponse.resume_stream_response:type_name -> databricks.zerobus.ResumeIngestStreamResponse
+	8,  // 18: databricks.zerobus.PersistentStreamResponse.ingest_record_response:type_name -> databricks.zerobus.IngestRecordResponse
+	9,  // 19: databricks.zerobus.PersistentStreamResponse.close_stream_signal:type_name -> databricks.zerobus.CloseStreamSignal
+	7,  // 20: databricks.zerobus.Zerobus.EphemeralStream:input_type -> databricks.zerobus.EphemeralStreamRequest
+	14, // 21: databricks.zerobus.Zerobus.PersistentStream:input_type -> databricks.zerobus.PersistentStreamRequest
+	16, // 22: databricks.zerobus.Zerobus.RetireStream:input_type -> databricks.zerobus.RetireStreamRequest
+	10, // 23: databricks.zerobus.Zerobus.EphemeralStream:output_type -> databricks.zerobus.EphemeralStreamResponse
+	15, // 24: databricks.zerobus.Zerobus.PersistentStream:output_type -> databricks.zerobus.PersistentStreamResponse
+	17, // 25: databricks.zerobus.Zerobus.RetireStream:output_type -> databricks.zerobus.RetireStreamResponse
+	23, // [23:26] is the sub-list for method output_type
+	20, // [20:23] is the sub-list for method input_type
+	20, // [20:20] is the sub-list for extension type_name
+	20, // [20:20] is the sub-list for extension extendee
+	0,  // [0:20] is the sub-list for field type_name
 }
 
 func init() { file_zerobus_service_proto_init() }
@@ -859,13 +1537,31 @@ func file_zerobus_service_proto_init() {
 		(*EphemeralStreamResponse_IngestRecordResponse)(nil),
 		(*EphemeralStreamResponse_CloseStreamSignal)(nil),
 	}
+	file_zerobus_service_proto_msgTypes[11].OneofWrappers = []any{
+		(*ResumeIngestStreamRequest_StreamId)(nil),
+	}
+	file_zerobus_service_proto_msgTypes[13].OneofWrappers = []any{
+		(*PersistentStreamRequest_CreateStream)(nil),
+		(*PersistentStreamRequest_ResumeStream)(nil),
+		(*PersistentStreamRequest_IngestRecord)(nil),
+		(*PersistentStreamRequest_IngestRecordBatch)(nil),
+	}
+	file_zerobus_service_proto_msgTypes[14].OneofWrappers = []any{
+		(*PersistentStreamResponse_CreateStreamResponse)(nil),
+		(*PersistentStreamResponse_ResumeStreamResponse)(nil),
+		(*PersistentStreamResponse_IngestRecordResponse)(nil),
+		(*PersistentStreamResponse_CloseStreamSignal)(nil),
+	}
+	file_zerobus_service_proto_msgTypes[15].OneofWrappers = []any{
+		(*RetireStreamRequest_StreamId)(nil),
+	}
 	type x struct{}
 	out := protoimpl.TypeBuilder{
 		File: protoimpl.DescBuilder{
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_zerobus_service_proto_rawDesc), len(file_zerobus_service_proto_rawDesc)),
 			NumEnums:      1,
-			NumMessages:   10,
+			NumMessages:   17,
 			NumExtensions: 0,
 			NumServices:   1,
 		},
