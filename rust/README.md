@@ -321,6 +321,53 @@ Recovery reconnects and replays only unacknowledged batch suffixes. After a fail
 `close()`, call `get_unacked_batches()` to inspect the retained work; the returned
 set can be empty when every record was already durable.
 
+#### Telemetry *(Beta)*
+
+Arrow Flight streams do not support `ack_callback`, but you can register a
+`StatsExporter` to receive per-batch telemetry:
+
+```rust,ignore
+use databricks_zerobus_ingest_sdk::{channel_exporter, StreamStat};
+
+let (exporter, mut stats_rx) = channel_exporter(1024);
+let stream = sdk
+    .stream_builder()
+    .table("catalog.schema.table")
+    .oauth("client-id", "client-secret")
+    .arrow(schema)
+    .stats_exporter(exporter)
+    .build_arrow()
+    .await?;
+
+// Ingest in a loop, then flush() once — never wait per batch.
+for batch in batches {
+    stream.ingest_batch(batch).await?;
+}
+stream.flush().await?;
+
+// Drain telemetry elsewhere (e.g. into your metrics system).
+while let Ok(stat) = stats_rx.try_recv() {
+    if let StreamStat::BatchSent { offset, stats } = stat {
+        // stats.wire_bytes: actual on-wire bytes (after IPC compression)
+        // stats.uncompressed_bytes: Arrow payload size, independent of the wire codec
+        // stats.records: rows in the batch; offset: the batch's ingest offset
+    }
+}
+```
+
+`StreamStat` events:
+- `BatchSent { offset, stats }` — a batch was encoded and sent. `stats` is a `BatchStats`
+  with `records`, `wire_bytes`, and `uncompressed_bytes`. Emitted at **send** time, so it
+  counts every transmission (a batch replayed during recovery is re-sent and emits again)
+  and fires even for a batch that later fails or never acks.
+- `BatchAcked { offset }` — a batch was durably acknowledged. Pure durability signal;
+  byte sizes are on `BatchSent`.
+- `Reconnected { attempt }`.
+
+Implement `StatsExporter` directly for custom routing — its `record` runs inline on the
+stream's IO tasks, so keep it lightweight (the built-in `channel_exporter` hands events to
+another task and drops, counting, when its bounded buffer is full).
+
 For state ownership, replay, rotation, and concurrency invariants, see the
 [Arrow Flight maintainer architecture guide](https://github.com/databricks/zerobus-sdk/blob/main/rust/sdk/src/stream/arrow/README.md).
 

@@ -37,6 +37,7 @@ use crate::errors::{should_retry_initial_connection, ZerobusError};
 use crate::headers_provider::HeadersProvider;
 use crate::offset_generator::{OffsetId, OffsetIdGenerator};
 use crate::proxy::ConnectorFactory;
+use crate::stats::StatsExporter;
 use crate::tls_config::TlsConfig;
 use crate::ZerobusResult;
 
@@ -53,7 +54,10 @@ mod supervisor;
 
 const LOG_TARGET: &str = module_path!();
 
-type BatchSender = Arc<Mutex<Option<mpsc::Sender<Result<RecordBatch, FlightError>>>>>;
+/// One item on the encoder channel: a batch paired with its SDK offset, so byte
+/// accounting keys off the durable offset with no reconstruction.
+type BatchItem = Result<(OffsetId, RecordBatch), FlightError>;
+type BatchSender = Arc<Mutex<Option<mpsc::Sender<BatchItem>>>>;
 
 struct FlightConnectionParameters<'a> {
     endpoint: &'a str,
@@ -64,6 +68,7 @@ struct FlightConnectionParameters<'a> {
     headers_provider: &'a Arc<dyn HeadersProvider>,
     sdk_identifier: &'a str,
     request_bodies: &'a RequestBodyRegistry,
+    stats_exporter: Option<Arc<dyn StatsExporter>>,
     #[cfg(feature = "test-hooks")]
     test_hooks: &'a Arc<TestHooks>,
 }
@@ -242,6 +247,9 @@ pub struct ZerobusArrowStream {
     /// Either `"zerobus-sdk-rs/<version>"` or `"zerobus-sdk-rs/<version> <application_name>"`.
     /// Re-applied to each fresh Channel built during recovery.
     sdk_identifier: Arc<str>,
+    /// Optional telemetry sink; when set, the encoder emits `BatchSent` (with byte
+    /// sizes) per batch and the ack path emits `BatchAcked`.
+    stats_exporter: Option<Arc<dyn StatsExporter>>,
     #[cfg(feature = "test-hooks")]
     test_hooks: Arc<TestHooks>,
 }
@@ -254,6 +262,7 @@ impl ZerobusArrowStream {
     /// One available retry may refresh credentials after an authentication rejection;
     /// a second authentication rejection remains terminal.
     #[instrument(level = "debug", skip_all, fields(table_name = %table_properties.table_name))]
+    #[allow(clippy::too_many_arguments)]
     pub(crate) async fn new(
         endpoint: &str,
         tls_config: Arc<dyn TlsConfig>,
@@ -262,6 +271,7 @@ impl ZerobusArrowStream {
         headers_provider: Arc<dyn HeadersProvider>,
         options: ArrowStreamConfigurationOptions,
         sdk_identifier: Arc<str>,
+        stats_exporter: Option<Arc<dyn StatsExporter>>,
     ) -> ZerobusResult<Self> {
         // A zero bound would deadlock every ingest and panic the zero-capacity channel.
         if options.max_inflight_batches == 0 {
@@ -335,6 +345,7 @@ impl ZerobusArrowStream {
             inflight,
             server_error_tx,
             server_error_rx,
+            stats_exporter,
             cumulative_records_assigned,
             submitted_records,
             last_acked_records,
@@ -364,6 +375,7 @@ impl ZerobusArrowStream {
             let headers_provider = Arc::clone(&headers_provider);
             let sdk_identifier = Arc::clone(&stream.sdk_identifier);
             let request_bodies = request_bodies.clone();
+            let stats_exporter = stream.stats_exporter.clone();
             #[cfg(feature = "test-hooks")]
             let test_hooks = Arc::clone(&stream.test_hooks);
 
@@ -377,6 +389,7 @@ impl ZerobusArrowStream {
                     headers_provider: &headers_provider,
                     sdk_identifier: &sdk_identifier,
                     request_bodies: &request_bodies,
+                    stats_exporter,
                     #[cfg(feature = "test-hooks")]
                     test_hooks: &test_hooks,
                 };
@@ -596,7 +609,7 @@ impl ZerobusArrowStream {
         {
             let _pending = self.pending_batches.lock().await;
             self.submitted_records.store(end_record, Ordering::Release);
-            send_permit.send(Ok(batch));
+            send_permit.send(Ok((offset_id, batch)));
         }
         // Notify after publishing `submitted_records`: waking earlier could let the ACK
         // processor observe the batch as buffered-but-unsent and go idle again.
@@ -1208,6 +1221,12 @@ impl ZerobusArrowStream {
 
     pub(crate) fn headers_provider(&self) -> Arc<dyn HeadersProvider> {
         Arc::clone(&self.headers_provider)
+    }
+
+    /// The registered telemetry exporter, if any. Used to carry it across
+    /// `recreate_arrow_stream`.
+    pub(crate) fn stats_exporter(&self) -> Option<Arc<dyn StatsExporter>> {
+        self.stats_exporter.clone()
     }
 
     fn is_ingest_admission_closed(&self) -> bool {

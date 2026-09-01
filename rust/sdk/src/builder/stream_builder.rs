@@ -103,6 +103,8 @@ pub struct StreamBuilder<'a> {
     grpc_config: StreamConfigurationOptions,
     #[cfg(feature = "arrow-flight")]
     arrow_config: ArrowStreamConfigurationOptions,
+    #[cfg(feature = "arrow-flight")]
+    stats_exporter: Option<Arc<dyn crate::stats::StatsExporter>>,
 }
 
 impl fmt::Debug for StreamBuilder<'_> {
@@ -152,6 +154,8 @@ impl<'a> StreamBuilder<'a> {
             grpc_config: StreamConfigurationOptions::default(),
             #[cfg(feature = "arrow-flight")]
             arrow_config: ArrowStreamConfigurationOptions::default(),
+            #[cfg(feature = "arrow-flight")]
+            stats_exporter: None,
         }
     }
 
@@ -334,6 +338,22 @@ impl<'a> StreamBuilder<'a> {
         self
     }
 
+    /// Register a telemetry exporter (Arrow streams only).
+    ///
+    /// The exporter receives [`StreamStat`](crate::StreamStat) events (batch
+    /// acknowledgements with byte sizes, failures, reconnects). Its `record` runs
+    /// inline on the stream's IO tasks, so keep it lightweight — use
+    /// [`channel_exporter`](crate::channel_exporter) to offload heavier work.
+    ///
+    /// Supported only by Arrow Flight streams: configuring it and then calling
+    /// [`build`](Self::build) (a non-Arrow stream) is rejected. Use
+    /// [`build_arrow`](Self::build_arrow).
+    #[cfg(feature = "arrow-flight")]
+    pub fn stats_exporter(mut self, exporter: Arc<dyn crate::stats::StatsExporter>) -> Self {
+        self.stats_exporter = Some(exporter);
+        self
+    }
+
     /// Set the maximum number of in-flight Arrow batches (Arrow streams only).
     #[cfg(feature = "arrow-flight")]
     pub fn max_inflight_batches(mut self, n: usize) -> Self {
@@ -431,6 +451,13 @@ impl<'a> StreamBuilder<'a> {
     /// or if an Arrow format was selected (use `build_arrow()` instead).
     pub async fn build(mut self) -> ZerobusResult<ZerobusStream> {
         self.validate()?;
+        #[cfg(feature = "arrow-flight")]
+        if self.stats_exporter.is_some() {
+            return Err(ZerobusError::InvalidArgument(
+                "stats_exporter is only supported for Arrow Flight streams; use .build_arrow()"
+                    .into(),
+            ));
+        }
         let headers_provider = self.resolve_headers_provider()?;
 
         let (record_type, descriptor_proto, message_descriptor) = match self.format {
@@ -537,6 +564,7 @@ impl<'a> StreamBuilder<'a> {
             headers_provider,
             self.arrow_config,
             Arc::clone(&self.sdk.sdk_identifier),
+            self.stats_exporter,
         )
         .await?;
         crate::client_warnings::record_stream_creation(&table_name);
@@ -854,6 +882,28 @@ mod tests {
             Err(ZerobusError::InvalidArgument(msg)) => {
                 assert!(msg.contains("ack_callback"));
                 assert!(msg.contains("Arrow Flight"));
+            }
+            _ => panic!("expected InvalidArgument error"),
+        }
+    }
+
+    #[cfg(feature = "arrow-flight")]
+    #[tokio::test]
+    async fn build_rejects_stats_exporter_on_non_arrow_stream() {
+        let (exporter, _rx) = crate::stats::channel_exporter(4);
+        let result = test_sdk()
+            .stream_builder()
+            .table("t")
+            .oauth("a", "b")
+            .json()
+            .stats_exporter(exporter)
+            .build()
+            .await;
+
+        match result {
+            Err(ZerobusError::InvalidArgument(msg)) => {
+                assert!(msg.contains("stats_exporter"));
+                assert!(msg.contains("build_arrow"));
             }
             _ => panic!("expected InvalidArgument error"),
         }

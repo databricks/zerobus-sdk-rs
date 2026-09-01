@@ -25,6 +25,7 @@ use super::{ArrowStreamConfigurationOptions, BatchSender, ZerobusArrowStream};
 use super::{TestHooks, TestNotifyGate};
 use crate::errors::ZerobusError;
 use crate::offset_generator::OffsetId;
+use crate::stats::{StatsExporter, StreamStat};
 use crate::ZerobusResult;
 
 const ROTATION_DRAIN_TIMEOUT_MS: u64 = 500;
@@ -45,6 +46,7 @@ pub(super) struct AckProcessor {
     batch_tx: BatchSender,
     options: ArrowStreamConfigurationOptions,
     close: CloseCoordinator,
+    stats_exporter: Option<Arc<dyn StatsExporter>>,
     #[cfg(feature = "test-hooks")]
     test_hooks: Arc<TestHooks>,
 }
@@ -227,6 +229,7 @@ struct AckProgress<'a> {
     pending_batches: &'a Mutex<Vec<PendingBatch>>,
     last_ack_tx: &'a watch::Sender<Option<OffsetId>>,
     close: &'a CloseCoordinator,
+    stats_exporter: Option<&'a Arc<dyn StatsExporter>>,
     #[cfg(feature = "test-hooks")]
     ack_applied_gate: &'a TestNotifyGate,
 }
@@ -240,7 +243,7 @@ impl AckProgress<'_> {
         // `ack_up_to_records` is the durability boundary. Derive completed SDK offsets
         // from local pending ranges so an inconsistent `ack_up_to_offset` cannot advance
         // a waiter; keep the server-provided offset only for diagnostics.
-        let (effective_acked_records, max_acked_offset) = {
+        let (effective_acked_records, max_acked_offset, acked_offsets) = {
             // Ingest publishes submitted_records and commits to the active sender while
             // holding this same lock. Validation therefore cannot observe a submitted
             // watermark before its handoff, or a handoff before its watermark.
@@ -257,17 +260,22 @@ impl AckProgress<'_> {
                 .fetch_max(acked_records, Ordering::AcqRel);
             let effective_acked_records = previous_acked_records.max(acked_records);
             let mut max_acked_offset: Option<OffsetId> = None;
+            // Collect newly-acked offsets; BatchAcked is emitted after the lock is dropped.
+            let mut acked_offsets: Vec<OffsetId> = Vec::new();
             pending.retain(|pending_batch| {
                 if pending_batch.is_fully_acknowledged(effective_acked_records) {
                     let offset_id = pending_batch.offset_id();
                     max_acked_offset =
                         Some(max_acked_offset.map_or(offset_id, |offset| offset.max(offset_id)));
+                    if self.stats_exporter.is_some() {
+                        acked_offsets.push(offset_id);
+                    }
                     false
                 } else {
                     true
                 }
             });
-            (effective_acked_records, max_acked_offset)
+            (effective_acked_records, max_acked_offset, acked_offsets)
         };
         let applied_at = Instant::now();
 
@@ -288,6 +296,14 @@ impl AckProgress<'_> {
         if let Some(offset) = max_acked_offset {
             let _ = self.last_ack_tx.send(Some(offset));
             self.close.observe_ack(offset, applied_at);
+        }
+
+        // Emit durability telemetry after releasing the pending lock. Byte sizes are
+        // reported separately at send time via `BatchSent`.
+        if let Some(exporter) = self.stats_exporter {
+            for offset in acked_offsets {
+                exporter.record(StreamStat::BatchAcked { offset });
+            }
         }
 
         Ok(())
@@ -338,9 +354,15 @@ async fn pause_and_snapshot_submitted(
 impl RequestControl<'_> {
     /// Atomically stops new sends, detaches queued work, and shuts down the request body.
     /// The caller then drains the response and final status under its bounded deadline.
-    async fn half_close(&self) {
+    /// `graceful` (an explicit close, not a recovery/rotation abort) flushes the last
+    /// batch's `BatchSent` before finishing.
+    async fn half_close(&self, graceful: bool) {
         pause_and_detach_sender(self.ingest_mutex, self.is_paused, self.batch_tx).await;
-        self.request_body.shutdown();
+        if graceful {
+            self.request_body.shutdown_graceful();
+        } else {
+            self.request_body.shutdown();
+        }
     }
 }
 
@@ -360,6 +382,7 @@ impl AckProcessor {
             batch_tx: Arc::clone(&stream.batch_tx),
             options: stream.options.clone(),
             close: stream.close.clone(),
+            stats_exporter: stream.stats_exporter.clone(),
             #[cfg(feature = "test-hooks")]
             test_hooks: Arc::clone(&stream.test_hooks),
         }
@@ -391,6 +414,7 @@ impl AckProcessor {
                 ..ArrowStreamConfigurationOptions::default()
             },
             close: CloseCoordinator::new(),
+            stats_exporter: None,
             #[cfg(feature = "test-hooks")]
             test_hooks: Arc::new(TestHooks::default()),
         };
@@ -625,7 +649,9 @@ impl AckProcessor {
             mut terminal_error,
             mut close,
         } = state;
-        request.half_close().await;
+        // An explicit close (not a rotation abort) is graceful: its last batch was
+        // fully sent + acked and will not be replayed, so flush its BatchSent.
+        request.half_close(close.is_some()).await;
         let mut request_eof = Box::pin(request.request_body.wait_for_eof());
         let mut request_finished = false;
 
@@ -707,6 +733,7 @@ impl AckProcessor {
             pending_batches: self.pending_batches.as_ref(),
             last_ack_tx: &self.last_ack_tx,
             close: &self.close,
+            stats_exporter: self.stats_exporter.as_ref(),
             #[cfg(feature = "test-hooks")]
             ack_applied_gate: &self.test_hooks.ack_applied,
         }
@@ -1240,6 +1267,7 @@ mod tests {
         FlightResponseStream, OffsetId, PendingBatch, RequestBodyControl, ZerobusError,
         MAX_SERVER_ROTATION_GRACE, ROTATION_DRAIN_TIMEOUT_MS,
     };
+    use crate::stats::{channel_exporter, StreamStat};
 
     fn one_col_schema() -> Arc<ArrowSchema> {
         Arc::new(ArrowSchema::new(vec![Field::new(
@@ -1286,6 +1314,51 @@ mod tests {
             last_acked_records,
             is_paused,
         )
+    }
+
+    #[tokio::test]
+    async fn ack_emits_batch_acked_per_offset() {
+        let schema = one_col_schema();
+        let semaphore = Arc::new(Semaphore::new(4));
+        // Two batches: offset 0 (2 rows), offset 1 (3 rows).
+        let pending = Arc::new(Mutex::new(vec![
+            pending_batch(&semaphore, batch_with_rows(&schema, 2), 0, 0, 2),
+            pending_batch(&semaphore, batch_with_rows(&schema, 3), 1, 2, 5),
+        ]));
+        let (mut processor, _request_body, _last_ack_rx) = ack_processor(
+            pending,
+            Arc::new(AtomicU64::new(5)),
+            Arc::new(AtomicU64::new(0)),
+            false,
+        );
+
+        let (exporter, mut rx) = channel_exporter(8);
+        processor.stats_exporter = Some(exporter);
+
+        // Ack both batches (5 records).
+        processor
+            .ack_progress()
+            .apply(&FlightAckMetadata {
+                ack_up_to_offset: 1,
+                ack_up_to_records: 5,
+                close_stream_duration_ms: None,
+            })
+            .await
+            .unwrap();
+
+        // BatchAcked is a pure durability signal — offset only, no byte sizes.
+        let mut got = vec![rx.recv().await.unwrap(), rx.recv().await.unwrap()];
+        got.sort_by_key(|s| match s {
+            StreamStat::BatchAcked { offset } => *offset,
+            _ => -1,
+        });
+        assert_eq!(
+            got,
+            vec![
+                StreamStat::BatchAcked { offset: 0 },
+                StreamStat::BatchAcked { offset: 1 },
+            ]
+        );
     }
 
     #[test]
