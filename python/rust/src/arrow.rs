@@ -1,8 +1,5 @@
 //! PyO3 bindings for Arrow Flight stream support.
 //!
-//! **Beta**: Arrow Flight ingestion is in Beta. The API is stabilising but
-//! may still change before reaching GA.
-//!
 //! These types are always compiled into the wheel, but the Python-side API
 //! gates usage on `pyarrow` being installed at runtime.
 
@@ -121,8 +118,6 @@ impl IPCCompression {
 
 /// Configuration options for Arrow Flight streams.
 ///
-/// **Beta**: Arrow Flight ingestion is in Beta. The API is stabilising but
-/// may still change before reaching GA.
 #[pyclass(from_py_object)]
 #[derive(Clone)]
 pub struct ArrowStreamConfigurationOptions {
@@ -298,8 +293,6 @@ impl ArrowStreamConfigurationOptions {
 
 /// Synchronous Arrow Flight stream for ingesting pyarrow RecordBatches.
 ///
-/// **Beta**: Arrow Flight ingestion is in Beta. The API is stabilising but
-/// may still change before reaching GA.
 #[pyclass]
 pub struct ZerobusArrowStream {
     pub(crate) inner: Arc<RwLock<RustZerobusArrowStream>>,
@@ -415,8 +408,6 @@ impl ZerobusArrowStream {
 
 /// Asynchronous Arrow Flight stream for ingesting pyarrow RecordBatches.
 ///
-/// **Beta**: Arrow Flight ingestion is in Beta. The API is stabilising but
-/// may still change before reaching GA.
 #[pyclass(name = "AsyncZerobusArrowStream")]
 pub struct AsyncZerobusArrowStream {
     pub(crate) inner: Arc<RwLock<RustZerobusArrowStream>>,

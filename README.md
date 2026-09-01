@@ -97,49 +97,67 @@ The service principal's **Application ID** is your OAuth **Client ID**, and the 
 
 ## Ingestion APIs
 
-Pick the API that matches your data.
+Pick the record format that matches your data.
 
-### Standard gRPC ingestion
+- JSON: schema-free ingestion. Pass a JSON string or a native object (dict, map, and so on) and the SDK serializes it. No compilation step. Good for getting started or dynamic schemas.
+- Protocol Buffers: strongly-typed, schema-validated ingestion. More compact on the wire than JSON. A typical choice for production workloads that are not already producing Arrow.
+- Arrow Flight: Apache Arrow `RecordBatch` data over the Arrow Flight protocol. Best when the workload is columnar or batched, or the application already produces Arrow (pyarrow, [arrow-rs](https://github.com/apache/arrow-rs), DataFusion, Polars).
 
-Supported by all SDKs. Records are sent over a gRPC stream in one of two serialization formats:
+JSON and Protocol Buffers share one stream API, available in every SDK. Arrow Flight is a separate columnar API, available in the SDKs listed below.
 
-- **JSON** - Simple, schema-free ingestion. Pass a JSON string or native object (dict, map, etc.) and the SDK serializes it. No compilation step required. Good for getting started or dynamic schemas.
-- **Protocol Buffers** - Strongly-typed, schema-validated ingestion. More efficient over the wire. Recommended for production workloads.
+| SDK | JSON / Protobuf | Arrow Flight |
+| --- | --- | --- |
+| Rust | Available | Available since 2.8.0 |
+| Python | Available | Available since 1.8.0 |
+| Go (cgo) | Available | Available since 1.6.0 |
+| Pure Go | Available | Not available |
+| TypeScript | Available | Available since 1.3.0 |
+| Java | Available | Available since 1.6.0 |
+| C++ | Available | Available since 0.3.0 |
+| .NET (C#) | Available | Not available |
 
-#### Protocol Buffers
+### JSON and Protocol Buffers ingestion
 
-Use `proto2` syntax with `optional` fields to correctly represent nullable Delta table columns.
+Records are sent as JSON or Protocol Buffers on the same stream API.
 
-##### Delta → Protobuf Type Mappings
+For Protocol Buffers, use `proto2` syntax with `optional` fields so nullable Delta table columns are represented correctly. Instead of writing `.proto` files by hand, each SDK ships a tool that generates a protobuf schema from an existing Unity Catalog table. See the individual SDK READMEs for language-specific usage.
 
-| Delta Type                          | Proto2 Type          |
-| ----------------------------------- | -------------------- |
-| TINYINT, BYTE, INT, SMALLINT, SHORT | int32                |
-| BIGINT, LONG                        | int64                |
-| FLOAT                               | float                |
-| DOUBLE                              | double               |
-| STRING, VARCHAR                     | string               |
-| BOOLEAN                             | bool                 |
-| BINARY                              | bytes                |
-| DATE                                | int32                |
-| TIMESTAMP, TIMESTAMP_NTZ            | int64                |
-| ARRAY\<type\>                       | repeated type        |
-| MAP\<key, value\>                   | map\<key, value\>    |
-| STRUCT\<fields\>                    | nested message       |
-| VARIANT                             | string (JSON string) |
+### Arrow Flight ingestion
 
-#### Schema Generation
+Send Apache Arrow `RecordBatch` data directly to Zerobus. A good fit when:
 
-Instead of writing `.proto` files by hand, each SDK ships a tool to generate protobuf schemas directly from an existing Unity Catalog table. See the individual SDK READMEs for language-specific usage.
+- The workload is naturally columnar or batched — analytics pipelines, gateways aggregating short windows of rows, wide or numeric schemas where row-by-row serialization adds noticeable CPU overhead.
+- The application already produces Arrow data — pyarrow, the [arrow-rs](https://github.com/apache/arrow-rs) crates, DataFusion, Polars, or other libraries built on Arrow.
 
-### Arrow Flight ingestion (Beta)
+For sparse, one-row-at-a-time traffic, JSON or Protocol Buffers are usually simpler. Most SDKs that expose Arrow Flight ship a runnable `examples/arrow/` directory; see each SDK's README for details.
 
-Available in the Rust, Python, Go, TypeScript, and Java SDKs starting from their 2.0.0 releases, and in the C++ SDK from its initial `0.1.0` release. Currently in Beta — the API is stabilising but may still change before reaching GA. A third record format option alongside JSON and Protocol Buffers: send Apache Arrow `RecordBatch` data directly to Zerobus over the Arrow Flight protocol, on the same gRPC connection. Best fit when:
+### Type mappings
 
-- Your workload is naturally columnar or batched — analytics pipelines, gateways aggregating short windows of rows, wide/numeric schemas where row-by-row serialization adds noticeable CPU overhead.
-- Your application already produces Arrow data — pyarrow, the [arrow-rs](https://github.com/apache/arrow-rs) crates, DataFusion, Polars, or other libraries built on Arrow.
+Delta column types map to Arrow and proto2 as shown below. JSON is not a typed mapping: objects use the same logical types as the table, and the SDK serializes them without a compiled schema.
 
-For sparse, one-row-at-a-time traffic, JSON or Protocol Buffers over the standard SDK gRPC path are usually simpler. Most SDKs ship a runnable `examples/arrow/` directory (see each SDK's README for details).
+For Protocol Buffers, declare fields `optional` when the Delta column is nullable.
+
+| Delta Type | Arrow Type | Proto2 Type |
+| --- | --- | --- |
+| TINYINT, BYTE | `Int8` | `int32` |
+| SMALLINT, SHORT | `Int16` | `int32` |
+| INT | `Int32` | `int32` |
+| BIGINT, LONG | `Int64` | `int64` |
+| FLOAT | `Float32` | `float` |
+| DOUBLE | `Float64` | `double` |
+| STRING, VARCHAR | `LargeUtf8` | `string` |
+| BOOLEAN | `Boolean` | `bool` |
+| BINARY | `LargeBinary` | `bytes` |
+| DECIMAL | `LargeUtf8` | `string` |
+| DATE | `Date32` | `int32` (days since Unix epoch) |
+| TIMESTAMP | `Timestamp(Microsecond, UTC)` | `int64` (microseconds since Unix epoch) |
+| TIMESTAMP_NTZ | `Timestamp(Microsecond)` (no timezone) | `int64` (microseconds since Unix epoch) |
+| ARRAY\<type\> | `List` (item field `item`) | `repeated` type |
+| MAP\<key, value\> | `Map` (entries field `entries` with `keys` and `values`) | `map<key, value>` |
+| STRUCT\<fields\> | nested struct | nested message |
+| VARIANT | struct of `metadata` and `value`, both non-null `LargeBinary` | `string` (JSON) |
+
+DECIMAL is encoded as text on both paths today (`LargeUtf8` / `string`). STRING maps to Arrow `LargeUtf8`, not `Utf8`.
 
 ### Acknowledgments and throughput
 

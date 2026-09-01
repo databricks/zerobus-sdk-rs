@@ -1,8 +1,5 @@
 //! Arrow Flight stream API for high-performance Arrow data ingestion.
 //!
-//! **Beta**: This module is in Beta. The API is stabilising but may still change
-//! before reaching GA.
-//!
 //! This directory module provides [`ZerobusArrowStream`] for ingesting Arrow
 //! [`RecordBatch`] data into Databricks Delta tables using Arrow Flight. Native Rust
 //! callers use [`ZerobusArrowStream::ingest_batch`] with `RecordBatch` values; FFI

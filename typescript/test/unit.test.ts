@@ -11,7 +11,15 @@ import { execFileSync } from 'node:child_process';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
-import { ZerobusSdk, RecordType, TableProperties, StreamConfigurationOptions } from '../index';
+import {
+    ArrowDataType,
+    IpcCompressionType,
+    ZerobusArrowStream,
+    ZerobusSdk,
+    RecordType,
+    TableProperties,
+    StreamConfigurationOptions,
+} from '../index';
 import { HeadersProvider } from '../src/headers_provider';
 import { loadDescriptorProto } from '../utils/descriptor.js';
 
@@ -329,6 +337,15 @@ describe('RecordType enum', () => {
 
     it('should have Proto value', () => {
         assert.strictEqual(RecordType.Proto, 1);
+    });
+});
+
+describe('Arrow Flight exports', () => {
+    it('should include the Arrow API when built with arrow-flight', () => {
+        assert.strictEqual(ArrowDataType.Int32, 3);
+        assert.strictEqual(IpcCompressionType.Lz4Frame, 0);
+        assert.strictEqual(typeof ZerobusArrowStream, 'function');
+        assert.strictEqual(typeof ZerobusSdk.prototype.createArrowStream, 'function');
     });
 });
 

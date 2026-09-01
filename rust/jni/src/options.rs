@@ -10,7 +10,7 @@ use jni::objects::JObject;
 use jni::JNIEnv;
 use std::sync::Arc;
 
-/// Extracted gRPC stream options, ready to apply to a `StreamBuilder`.
+/// Extracted JSON/protobuf stream options, ready to apply to a `StreamBuilder`.
 pub struct ExtractedStreamOptions {
     pub max_inflight_requests: usize,
     pub recovery: bool,
@@ -36,7 +36,7 @@ pub struct ExtractedArrowStreamOptions {
     pub stream_paused_max_wait_time_ms: Option<u64>,
 }
 
-/// Read gRPC stream options from a Java options object.
+/// Read JSON/protobuf stream options from a Java options object.
 pub fn extract_stream_options(
     env: &mut JNIEnv,
     options: &JObject,
@@ -65,7 +65,7 @@ pub fn extract_stream_options(
     })
 }
 
-/// Apply extracted gRPC stream options to a builder.
+/// Apply extracted JSON/protobuf stream options to a builder.
 pub fn apply_stream_options<'a>(
     builder: StreamBuilder<'a>,
     opts: ExtractedStreamOptions,

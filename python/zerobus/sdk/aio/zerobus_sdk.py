@@ -183,8 +183,6 @@ class ZerobusArrowStream:
     """
     Asynchronous Arrow Flight stream for ingesting pyarrow RecordBatches.
 
-    **Beta**: Arrow Flight support is in Beta. The API is stabilising but may
-    still change before reaching GA.
     """
 
     def __init__(self, rust_stream: _RustAsyncZerobusArrowStream):
@@ -272,8 +270,6 @@ class ZerobusSdk:
         """
         Create an Arrow Flight stream with OAuth client credentials (async).
 
-        **Beta**: Arrow Flight support is in Beta.
-
         Args:
             table_name: Fully qualified table name (catalog.schema.table).
             schema: A pyarrow.Schema defining the table schema.
@@ -295,8 +291,6 @@ class ZerobusSdk:
     ) -> ZerobusArrowStream:
         """
         Create an Arrow Flight stream with a custom headers provider (async).
-
-        **Beta**: Arrow Flight support is in Beta.
 
         Args:
             table_name: Fully qualified table name (catalog.schema.table).

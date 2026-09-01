@@ -74,7 +74,7 @@ __all__ = [
     # Sync SDK (default)
     "ZerobusSdk",
     "ZerobusStream",
-    # Arrow (Beta)
+    # Arrow
     "ZerobusArrowStream",
     "ArrowStreamConfigurationOptions",
     "IPCCompression",

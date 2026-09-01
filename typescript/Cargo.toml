@@ -41,7 +41,7 @@ napi-build = "2"
 
 [features]
 default = []
-# Arrow Flight is in Beta - enable with: npm run build:arrow
+# Enable with: npm run build:arrow
 arrow-flight = [
     "databricks-zerobus-ingest-sdk/arrow-flight",
     "dep:arrow-array",

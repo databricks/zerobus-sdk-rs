@@ -146,7 +146,7 @@ type ZerobusSdk struct {
 	ptr unsafe.Pointer
 }
 
-// ZerobusStream represents an active bidirectional gRPC stream for ingesting records.
+// ZerobusStream represents an active JSON or Protocol Buffer stream for ingesting records.
 // Records can be ingested concurrently and will be acknowledged asynchronously.
 type ZerobusStream struct {
 	ptr unsafe.Pointer
@@ -262,7 +262,7 @@ func (s *ZerobusSdk) Free() {
 	}
 }
 
-// CreateStream creates a new bidirectional gRPC stream for ingesting records into a Databricks table.
+// CreateStream creates a new JSON or Protocol Buffer stream for ingesting records into a Databricks table.
 // This method uses OAuth 2.0 client credentials flow for authentication.
 //
 // Parameters:
@@ -346,7 +346,7 @@ type HeadersProvider interface {
 	GetHeaders() (map[string]string, error)
 }
 
-// CreateStreamWithHeadersProvider creates a new bidirectional gRPC stream using a custom headers provider.
+// CreateStreamWithHeadersProvider creates a new JSON or Protocol Buffer stream using a custom headers provider.
 // This is useful for testing or when you need custom authentication logic.
 //
 // Parameters:

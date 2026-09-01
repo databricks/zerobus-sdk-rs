@@ -1,6 +1,4 @@
-# Arrow Flight Example (Beta)
-
-> **Beta**: API is stabilising but may still change before reaching GA.
+# Arrow Flight Example
 
 High-throughput columnar ingestion via Arrow Flight. Each batch is supplied
 as an Arrow IPC stream (`tableToIPC(table, 'stream')` from `apache-arrow`).
@@ -58,7 +56,7 @@ const offset = await stream.ingestBatch(ipc);
 
 ## Run
 
-Build with Arrow support and run the example:
+Build with Arrow Flight and run the example:
 
 ```bash
 npm run build:debug:arrow

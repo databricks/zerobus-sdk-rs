@@ -1,9 +1,10 @@
 //! Shared configuration options for stream creation and operation.
 //!
-//! This module provides common configuration constants shared between gRPC and Arrow Flight streams.
+//! This module provides common configuration constants shared between JSON/protobuf
+//! and Arrow Flight streams.
 
 /// Default values for stream configuration options.
-/// These are shared between gRPC and Arrow Flight streams.
+/// These are shared between JSON/protobuf and Arrow Flight streams.
 pub mod defaults {
     /// Default: enable automatic stream recovery
     pub const RECOVERY: bool = true;

@@ -5,7 +5,7 @@ using Databricks.Zerobus.Native;
 namespace Databricks.Zerobus;
 
 /// <summary>
-/// Represents an active bidirectional gRPC stream for ingesting records.
+/// Represents an active JSON or Protocol Buffer stream for ingesting records.
 /// Records can be ingested concurrently and will be acknowledged asynchronously.
 /// </summary>
 /// <remarks>

@@ -200,7 +200,7 @@ public class StreamBuilderTest {
   @Test
   void arrowOptionsPreserveArrowDefaults() {
     // Crucially, unset shared values must fall back to Arrow's own defaults (e.g. 4 recovery
-    // retries) rather than the gRPC defaults (3).
+    // retries) rather than the JSON/protobuf defaults (3).
     ArrowStreamConfigurationOptions options = builder().arrow(emptySchema()).buildOptions();
     ArrowStreamConfigurationOptions defaults = ArrowStreamConfigurationOptions.getDefault();
 

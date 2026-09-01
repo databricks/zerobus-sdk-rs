@@ -32,7 +32,7 @@ fn warnings_enabled() -> bool {
 /// Warns that `max_ingest_payload_bytes` was configured on a builder that is
 /// creating an Arrow Flight stream, where the setting has no effect.
 ///
-/// The client-side payload-size limit only applies to gRPC JSON/proto streams
+/// The client-side payload-size limit only applies to JSON and Protocol Buffer streams
 /// created with `build()`; Arrow Flight streams (`build_arrow()`) do not read it.
 #[cfg(feature = "arrow-flight")]
 pub(crate) fn warn_payload_limit_ignored_for_arrow() {
@@ -41,8 +41,8 @@ pub(crate) fn warn_payload_limit_ignored_for_arrow() {
     }
     warn!(
         "Zerobus SDK: `max_ingest_payload_bytes` was set but is ignored for Arrow Flight \
-         streams. The client-side ingest payload-size limit only applies to gRPC JSON/proto \
-         streams created with `build()`."
+         streams. The client-side ingest payload-size limit only applies to JSON and Protocol \
+         Buffer streams created with `build()`."
     );
 }
 
