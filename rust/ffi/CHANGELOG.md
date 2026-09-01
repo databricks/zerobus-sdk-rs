@@ -1,5 +1,28 @@
 # Version changelog
 
+## Release v1.8.0
+
+### Major Changes
+
+### New Features and Improvements
+
+### Bug Fixes
+
+### Documentation
+
+- Built on Rust SDK 2.8.0. Wrapper-facing notes for that core are in
+  `rust/CHANGELOG.md` and https://github.com/databricks/zerobus-sdk/releases/tag/rust/v2.8.0.
+
+### Internal Changes
+
+### Behavior Changes
+
+### Breaking Changes
+
+### Deprecations
+
+### API Changes
+
 ## Release v1.7.0
 
 ### Major Changes
