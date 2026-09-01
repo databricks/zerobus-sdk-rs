@@ -6,6 +6,9 @@
 
 ### New Features and Improvements
 
+- Promoted Arrow Flight ingestion to general availability across its APIs,
+  documentation, and examples. The `arrow-flight` Cargo feature remains opt-in.
+
 ### Bug Fixes
 
 - Fixed multiplexed-stream admission during terminal sub-stream failure so
