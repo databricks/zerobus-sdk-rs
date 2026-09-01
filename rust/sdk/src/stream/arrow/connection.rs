@@ -9,6 +9,7 @@ use std::sync::atomic::{AtomicI64, Ordering};
 use std::sync::Arc;
 use std::task::Poll;
 
+use arrow_array::{Array, RecordBatch};
 use arrow_flight::encode::FlightDataEncoderBuilder;
 use arrow_flight::error::FlightError;
 use arrow_flight::{FlightClient, FlightData, PutResult};
@@ -21,16 +22,32 @@ use tonic::transport::Channel;
 use tracing::{error, info, warn};
 
 use super::batch::make_ipc_write_options;
+use super::batch_stats::BatchStatsTracker;
 use super::metadata::{FlightAckMetadata, FlightBatchMetadata};
 use super::{
-    configured_deadline, ArrowStreamConfigurationOptions, ArrowTableProperties,
-    FlightConnectionParameters, RecordBatch, ZerobusArrowStream,
+    configured_deadline, ArrowStreamConfigurationOptions, ArrowTableProperties, BatchItem,
+    FlightConnectionParameters, ZerobusArrowStream,
 };
 use crate::errors::ZerobusError;
 use crate::headers_provider::HeadersProvider;
 use crate::proxy::{self, ConnectorFactory};
 use crate::tls_config::TlsConfig;
 use crate::ZerobusResult;
+
+/// Best-effort uncompressed payload size of `batch`: the Arrow data bytes of its
+/// columns for the sliced rows (via `ArrayData::get_slice_memory_size`). Cheap — no
+/// re-encode, and codec-independent (an in-memory `RecordBatch` is never LZ4/ZSTD
+/// compressed; that applies only to the IPC wire form). Excludes IPC 8-byte buffer
+/// padding and the flatbuffer header, so it slightly under-estimates the true
+/// pre-compression IPC message size. Dictionary-encoded columns over-count: this
+/// counts the full dictionary each batch, while IPC sends it once plus per-batch keys.
+fn uncompressed_ipc_bytes(batch: &RecordBatch) -> u64 {
+    batch
+        .columns()
+        .iter()
+        .map(|col| col.to_data().get_slice_memory_size().unwrap_or(0) as u64)
+        .sum()
+}
 
 pub(super) type FlightResponseStream =
     Pin<Box<dyn Stream<Item = Result<PutResult, FlightError>> + Send>>;
@@ -213,12 +230,12 @@ impl Drop for RequestBodyStreamState {
 /// State owned by a single active DoPut connection.
 pub(super) struct FlightConnection {
     response_stream: FlightResponseStream,
-    batch_tx: mpsc::Sender<Result<RecordBatch, FlightError>>,
+    batch_tx: mpsc::Sender<BatchItem>,
     request_body: RequestBodyControl,
 }
 
 impl FlightConnection {
-    pub(super) fn sender(&self) -> mpsc::Sender<Result<RecordBatch, FlightError>> {
+    pub(super) fn sender(&self) -> mpsc::Sender<BatchItem> {
         self.batch_tx.clone()
     }
 
@@ -226,7 +243,7 @@ impl FlightConnection {
         self,
     ) -> (
         FlightResponseStream,
-        mpsc::Sender<Result<RecordBatch, FlightError>>,
+        mpsc::Sender<BatchItem>,
         RequestBodyControl,
     ) {
         (self.response_stream, self.batch_tx, self.request_body)
@@ -270,6 +287,7 @@ impl ZerobusArrowStream {
                 parameters.table_properties,
                 parameters.options,
                 parameters.request_bodies,
+                Some(Arc::clone(parameters.batch_stats)),
                 #[cfg(feature = "test-hooks")]
                 Arc::clone(parameters.test_hooks),
             )
@@ -377,14 +395,31 @@ impl ZerobusArrowStream {
     /// Builds a request body that can be stopped at a FlightData boundary and observed
     /// reaching EOF without dropping the surrounding HTTP/2 stream.
     fn make_request_stream(
-        batch_rx: mpsc::Receiver<Result<RecordBatch, FlightError>>,
+        batch_rx: mpsc::Receiver<BatchItem>,
         table_properties: &ArrowTableProperties,
         options: &ArrowStreamConfigurationOptions,
+        tracker: Option<Arc<BatchStatsTracker>>,
         #[cfg(feature = "test-hooks")] test_hooks: Arc<super::TestHooks>,
     ) -> ZerobusResult<(FlightRequestStream, RequestBodyControl)> {
         let ipc_write_options = make_ipc_write_options(options.ipc_compression)?;
         let schema = Arc::clone(&table_properties.schema);
-        let batch_stream = tokio_stream::wrappers::ReceiverStream::new(batch_rx);
+        // Stash each batch's OffsetId on pull, read it back when its FlightData emits
+        // (the encoder drains one batch before pulling the next). Uncompressed payload
+        // is measured from the batch here (codec-independent); wire size is read from
+        // the emitted frame below (compressed when compression is on).
+        let current_offset = Arc::new(AtomicI64::new(-1));
+        let current_offset_in = Arc::clone(&current_offset);
+        let tracker_in = tracker.clone();
+        let batch_stream =
+            tokio_stream::wrappers::ReceiverStream::new(batch_rx).map(move |result| {
+                result.map(|(offset, batch)| {
+                    current_offset_in.store(offset, Ordering::Relaxed);
+                    if let Some(tracker) = &tracker_in {
+                        tracker.record(offset, 0, uncompressed_ipc_bytes(&batch));
+                    }
+                    batch
+                })
+            });
         let offset_counter = Arc::new(AtomicI64::new(0));
         let offset_counter_clone = Arc::clone(&offset_counter);
         let encoded: FlightRequestStream = Box::pin(
@@ -400,6 +435,19 @@ impl ZerobusArrowStream {
                             let metadata = FlightBatchMetadata::new(offset);
                             if let Ok(bytes) = metadata.to_bytes() {
                                 flight_data.app_metadata = bytes.into();
+                            }
+                            if let Some(tracker) = &tracker {
+                                let offset_id = current_offset.load(Ordering::Relaxed);
+                                if offset_id >= 0 {
+                                    // Full FlightData frame actually placed on the wire
+                                    // (compressed body when compression is on). The
+                                    // uncompressed size was recorded on batch pull.
+                                    let wire = (flight_data.data_header.len()
+                                        + flight_data.data_body.len()
+                                        + flight_data.app_metadata.len())
+                                        as u64;
+                                    tracker.record(offset_id, wire, 0);
+                                }
                             }
                         }
                         flight_data
@@ -463,16 +511,17 @@ impl ZerobusArrowStream {
         table_properties: &ArrowTableProperties,
         options: &ArrowStreamConfigurationOptions,
         request_bodies: &RequestBodyRegistry,
+        tracker: Option<Arc<BatchStatsTracker>>,
         #[cfg(feature = "test-hooks")] test_hooks: Arc<super::TestHooks>,
     ) -> ZerobusResult<FlightConnection> {
         // Create channel for sending RecordBatches.
-        let (batch_tx, batch_rx) =
-            mpsc::channel::<Result<RecordBatch, FlightError>>(options.max_inflight_batches);
+        let (batch_tx, batch_rx) = mpsc::channel::<BatchItem>(options.max_inflight_batches);
 
         let (flight_data_stream, request_body) = Self::make_request_stream(
             batch_rx,
             table_properties,
             options,
+            tracker,
             #[cfg(feature = "test-hooks")]
             test_hooks,
         )?;
@@ -569,13 +618,13 @@ impl ZerobusArrowStream {
         )
         .await?;
 
-        let (batch_tx, batch_rx) = mpsc::channel::<Result<RecordBatch, FlightError>>(
-            parameters.options.max_inflight_batches,
-        );
+        let (batch_tx, batch_rx) =
+            mpsc::channel::<BatchItem>(parameters.options.max_inflight_batches);
         let (flight_data_stream, request_body) = Self::make_request_stream(
             batch_rx,
             parameters.table_properties,
             parameters.options,
+            Some(Arc::clone(parameters.batch_stats)),
             #[cfg(feature = "test-hooks")]
             Arc::clone(parameters.test_hooks),
         )?;
@@ -652,7 +701,6 @@ mod tests {
     use std::collections::HashMap;
     use std::sync::Arc;
 
-    use arrow_flight::error::FlightError;
     use async_trait::async_trait;
     use futures::StreamExt;
     use tokio::sync::mpsc;
@@ -660,9 +708,9 @@ mod tests {
 
     use super::super::{ArrowSchema, RecordBatch};
     use super::{
-        ArrowStreamConfigurationOptions, ArrowTableProperties, FlightClient, FlightConnection,
-        FlightResponseStream, HeadersProvider, RequestBodyControl, RequestBodyRegistry, TlsConfig,
-        ZerobusArrowStream, ZerobusResult,
+        ArrowStreamConfigurationOptions, ArrowTableProperties, BatchItem, FlightClient,
+        FlightConnection, FlightResponseStream, HeadersProvider, RequestBodyControl,
+        RequestBodyRegistry, TlsConfig, ZerobusArrowStream, ZerobusResult,
     };
 
     struct PassthroughTlsConfig;
@@ -690,7 +738,7 @@ mod tests {
 
     #[tokio::test]
     async fn supervisor_handoff_does_not_retain_redundant_sender() {
-        let (batch_tx, mut batch_rx) = mpsc::channel::<Result<RecordBatch, FlightError>>(1);
+        let (batch_tx, mut batch_rx) = mpsc::channel::<BatchItem>(1);
         let response_stream: FlightResponseStream = Box::pin(futures::stream::pending());
         let connection = FlightConnection {
             response_stream,
@@ -719,6 +767,7 @@ mod tests {
             batch_rx,
             &table_properties,
             &ArrowStreamConfigurationOptions::default(),
+            None,
             #[cfg(feature = "test-hooks")]
             Arc::new(super::super::TestHooks::default()),
         )
@@ -743,6 +792,7 @@ mod tests {
             batch_rx,
             &table_properties,
             &ArrowStreamConfigurationOptions::default(),
+            None,
             #[cfg(feature = "test-hooks")]
             Arc::new(super::super::TestHooks::default()),
         )
@@ -752,6 +802,189 @@ mod tests {
         while request_body.next().await.is_some() {}
         assert!(request_body.next().await.is_none());
         assert!(control.is_finished());
+    }
+
+    #[tokio::test]
+    async fn make_request_stream_records_encoded_byte_sizes() {
+        use arrow_array::Int32Array;
+        use arrow_ipc::writer::StreamWriter;
+        use arrow_schema::{DataType, Field};
+
+        use super::super::batch_stats::BatchStatsTracker;
+
+        let schema = Arc::new(ArrowSchema::new(vec![Field::new(
+            "id",
+            DataType::Int32,
+            false,
+        )]));
+        let table_properties = ArrowTableProperties {
+            table_name: "catalog.schema.table".to_string(),
+            schema: Arc::clone(&schema),
+        };
+        let make_batch = |values: Vec<i32>| {
+            RecordBatch::try_new(
+                Arc::clone(&schema),
+                vec![Arc::new(Int32Array::from(values))],
+            )
+            .unwrap()
+        };
+
+        let (batch_tx, batch_rx) = mpsc::channel::<BatchItem>(4);
+        let tracker = Arc::new(BatchStatsTracker::new(16));
+        let (mut request_body, _control) = ZerobusArrowStream::make_request_stream(
+            batch_rx,
+            &table_properties,
+            &ArrowStreamConfigurationOptions::default(),
+            Some(Arc::clone(&tracker)),
+            #[cfg(feature = "test-hooks")]
+            Arc::new(super::super::TestHooks::default()),
+        )
+        .unwrap();
+
+        // The larger batch must clear IPC buffer alignment/padding so its encoded
+        // size is unambiguously bigger than the small batch's.
+        let large = make_batch((0..400).collect());
+        batch_tx
+            .send(Ok((0, make_batch(vec![1, 2, 3]))))
+            .await
+            .unwrap();
+        batch_tx.send(Ok((1, large.clone()))).await.unwrap();
+        drop(batch_tx);
+        // Drain every encoded FlightData so the encoder records each batch.
+        while request_body.next().await.is_some() {}
+
+        // The first data message is offset 0 and the second is offset 1; idx 0 is the
+        // schema message and carries no offset.
+        let d0 = tracker.take(0).expect("offset 0 recorded");
+        let d1 = tracker.take(1).expect("offset 1 recorded");
+        assert!(d0.wire_byte_size > 0, "small batch size should be recorded");
+        assert!(
+            d1.wire_byte_size > d0.wire_byte_size,
+            "the larger batch must encode to more bytes"
+        );
+        // Uncompressed (Arrow payload buffer bytes) is populated too; with compression
+        // off the wire frame carries IPC framing on top, so wire >= uncompressed.
+        assert!(d0.uncompressed_byte_size > 0);
+        assert!(d0.wire_byte_size >= d0.uncompressed_byte_size);
+        // Cumulative wire total is monotonic and additive.
+        assert_eq!(d0.cumulative_wire_byte_size, d0.wire_byte_size);
+        assert_eq!(
+            d1.cumulative_wire_byte_size,
+            d0.wire_byte_size + d1.wire_byte_size
+        );
+
+        // Tie to a real IPC encode: the tracked per-batch size stays below a full
+        // standalone stream (schema + batch + markers) of the same batch.
+        let mut buf = Vec::new();
+        {
+            let mut writer = StreamWriter::try_new(&mut buf, &schema).unwrap();
+            writer.write(&large).unwrap();
+            writer.finish().unwrap();
+        }
+        assert!(d1.wire_byte_size <= buf.len() as u64);
+    }
+
+    #[tokio::test]
+    async fn make_request_stream_keys_bytes_by_channel_offset() {
+        use arrow_array::Int32Array;
+        use arrow_schema::{DataType, Field};
+
+        use super::super::batch_stats::BatchStatsTracker;
+
+        let schema = Arc::new(ArrowSchema::new(vec![Field::new(
+            "id",
+            DataType::Int32,
+            false,
+        )]));
+        let table_properties = ArrowTableProperties {
+            table_name: "catalog.schema.table".to_string(),
+            schema: Arc::clone(&schema),
+        };
+        let batch =
+            RecordBatch::try_new(schema, vec![Arc::new(Int32Array::from(vec![1, 2, 3]))]).unwrap();
+
+        let (batch_tx, batch_rx) = mpsc::channel::<BatchItem>(4);
+        let tracker = Arc::new(BatchStatsTracker::new(16));
+        let (mut request_body, _control) = ZerobusArrowStream::make_request_stream(
+            batch_rx,
+            &table_properties,
+            &ArrowStreamConfigurationOptions::default(),
+            Some(Arc::clone(&tracker)),
+            #[cfg(feature = "test-hooks")]
+            Arc::new(super::super::TestHooks::default()),
+        )
+        .unwrap();
+
+        // Non-contiguous offsets carried on the channel: bytes must be keyed by the
+        // offset itself, not by wire position, and a re-sent offset accumulates.
+        batch_tx.send(Ok((5, batch.clone()))).await.unwrap();
+        batch_tx.send(Ok((9, batch.clone()))).await.unwrap();
+        batch_tx.send(Ok((5, batch))).await.unwrap(); // resend of offset 5
+        drop(batch_tx);
+        while request_body.next().await.is_some() {}
+
+        let d5 = tracker.take(5).expect("offset 5 recorded");
+        let d9 = tracker.take(9).expect("offset 9 recorded");
+        // Offset 5 was sent twice, so its per-offset size is double offset 9's single send.
+        assert_eq!(d5.wire_byte_size, 2 * d9.wire_byte_size);
+        // Wire position 0/1/2 never leak in as keys.
+        assert_eq!(tracker.take(0), None);
+        assert_eq!(tracker.take(1), None);
+    }
+
+    #[tokio::test]
+    async fn make_request_stream_uncompressed_size_independent_of_compression() {
+        use arrow_array::Int32Array;
+        use arrow_ipc::CompressionType;
+        use arrow_schema::{DataType, Field};
+
+        use super::super::batch_stats::BatchStatsTracker;
+
+        let schema = Arc::new(ArrowSchema::new(vec![Field::new(
+            "id",
+            DataType::Int32,
+            false,
+        )]));
+        let table_properties = ArrowTableProperties {
+            table_name: "catalog.schema.table".to_string(),
+            schema: Arc::clone(&schema),
+        };
+        // Highly compressible payload so the compressed wire body is clearly smaller.
+        let batch =
+            RecordBatch::try_new(schema, vec![Arc::new(Int32Array::from(vec![7; 4000]))]).unwrap();
+
+        let options = ArrowStreamConfigurationOptions {
+            ipc_compression: Some(CompressionType::ZSTD),
+            ..Default::default()
+        };
+        let (batch_tx, batch_rx) = mpsc::channel::<BatchItem>(4);
+        let tracker = Arc::new(BatchStatsTracker::new(16));
+        let (mut request_body, _control) = ZerobusArrowStream::make_request_stream(
+            batch_rx,
+            &table_properties,
+            &options,
+            Some(Arc::clone(&tracker)),
+            #[cfg(feature = "test-hooks")]
+            Arc::new(super::super::TestHooks::default()),
+        )
+        .unwrap();
+
+        batch_tx.send(Ok((0, batch))).await.unwrap();
+        drop(batch_tx);
+        while request_body.next().await.is_some() {}
+
+        let d0 = tracker.take(0).expect("offset 0 recorded");
+        // Uncompressed comes from the batch (buffer sum), wire from the compressed
+        // frame; both populated, and compression shrinks the wire size well below the
+        // uncompressed encoded size for this repetitive payload.
+        assert!(d0.uncompressed_byte_size > 0);
+        assert!(d0.wire_byte_size > 0);
+        assert!(
+            d0.wire_byte_size < d0.uncompressed_byte_size,
+            "compressed wire ({}) should be smaller than uncompressed ({})",
+            d0.wire_byte_size,
+            d0.uncompressed_byte_size
+        );
     }
 
     #[cfg(feature = "test-hooks")]
@@ -767,6 +1000,7 @@ mod tests {
             batch_rx,
             &table_properties,
             &ArrowStreamConfigurationOptions::default(),
+            None,
             Arc::clone(&test_hooks),
         )
         .unwrap();
@@ -813,6 +1047,7 @@ mod tests {
             batch_rx,
             &table_properties,
             &ArrowStreamConfigurationOptions::default(),
+            None,
             #[cfg(feature = "test-hooks")]
             Arc::new(super::super::TestHooks::default()),
         )
@@ -844,6 +1079,7 @@ mod tests {
                 &table_properties,
                 &options,
                 &registry,
+                None,
                 #[cfg(feature = "test-hooks")]
                 Arc::new(super::super::TestHooks::default()),
             );

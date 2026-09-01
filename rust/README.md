@@ -317,6 +317,18 @@ Each input `RecordBatch` receives one logical SDK offset even if Flight splits i
 into several wire messages. Durability is tracked through the cumulative
 `ack_up_to_records` watermark. Arrow Flight does not support `ack_callback`.
 
+For "bytes sent" metrics, call `take_offset_details(offset)` after `wait_for_offset(offset)`:
+it returns `Some(OffsetDetails)` carrying the batch's `wire_byte_size` (actual bytes on
+the wire, after IPC compression) and `uncompressed_byte_size` (encoded size before
+compression), plus a running total for each — so you don't re-serialise the `RecordBatch`
+to measure it. All sizes accumulate every transmission, so a batch re-sent during
+connection recovery counts each send. The read consumes the entry; it returns `None`
+when no size is recorded (not yet encoded, or evicted from the bounded cache). The
+uncompressed size is codec-independent (measured from the Arrow buffers, excluding IPC
+framing), so a batch reports the same value with or without compression. As with
+`wait_for_offset`, don't wait after *every* batch in a hot loop — reserve per-batch
+waiting for low-volume or instrumentation paths.
+
 Recovery reconnects and replays only unacknowledged batch suffixes. After a failed
 `close()`, call `get_unacked_batches()` to inspect the retained work; the returned
 set can be empty when every record was already durable.
