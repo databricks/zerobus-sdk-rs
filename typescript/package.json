@@ -78,7 +78,7 @@
   "optionalDependencies": {
     "@databricks/zerobus-ingest-sdk-linux-x64-gnu": "1.3.0",
     "@databricks/zerobus-ingest-sdk-linux-arm64-gnu": "1.3.0",
-    "@databricks/zerobus-ingest-sdk-win32-x64-msvc": "1.3.0",
+    "@databricks/zerobus-ingest-sdk-win32-x64-msvc": "1.2.0",
     "@databricks/zerobus-ingest-sdk-darwin-x64": "1.3.0",
     "@databricks/zerobus-ingest-sdk-darwin-arm64": "1.3.0"
   },
