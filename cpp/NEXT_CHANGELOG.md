@@ -1,11 +1,8 @@
 # NEXT CHANGELOG
 
-## Release v0.3.0
+## Release v0.4.0
 
 ### New Features and Improvements
-
-- Promoted Arrow Flight ingestion to general availability across its APIs,
-  documentation, and examples.
 
 ### Bug Fixes
 
