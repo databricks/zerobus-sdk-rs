@@ -52,7 +52,7 @@ bytes.workspace = true
 futures.workspace = true
 serde.workspace = true
 serde_json.workspace = true
-rcgen = "0.13"
+rcgen = "0.14"
 # rcgen allows newer time releases that require Rust 1.88; keep tests compatible
 # with the workspace's Rust 1.85 Arrow dependency floor.
 time = "=0.3.36"
