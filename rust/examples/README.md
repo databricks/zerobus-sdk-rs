@@ -40,6 +40,7 @@ The SDK supports three ingestion formats and two ingestion methods:
 | [JSON Batch](json/README.md#batch-example) | JSON | Batch | `cargo run -p rust-examples-json --example json_batch` |
 | [Proto Compiled Single](proto/README.md#compiled-single-record-example) | Protocol Buffers | Single-record | `cargo run -p rust-examples-proto --example proto_compiled_single` |
 | [Proto Compiled Batch](proto/README.md#compiled-batch-example) | Protocol Buffers | Batch | `cargo run -p rust-examples-proto --example proto_compiled_batch` |
+| [Proto Multiplexed](proto/README.md#multiplexed-stream-example) | Protocol Buffers | Multiplexed | `cargo run -p rust-examples-proto --example proto_compiled_multiplexed` |
 | [Proto Dynamic](proto/README.md#dynamic-schema-example) | Protocol Buffers | Single-record (runtime schema) | `cargo run -p rust-examples-proto --example proto_dynamic_single` |
 | [Proto Dynamic Batch](proto/README.md#dynamic-batch) | Protocol Buffers | Batch (runtime schema) | `cargo run -p rust-examples-proto --example proto_dynamic_batch` |
 | [Arrow](arrow/README.md) | Arrow Flight | `RecordBatch` | `cargo run -p example_arrow` |

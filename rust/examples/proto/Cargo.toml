@@ -13,6 +13,10 @@ name = "proto_compiled_single"
 path = "compiled/single.rs"
 
 [[example]]
+name = "proto_compiled_multiplexed"
+path = "compiled/multiplexed.rs"
+
+[[example]]
 name = "proto_dynamic_batch"
 path = "dynamic/batch.rs"
 

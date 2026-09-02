@@ -482,6 +482,12 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn completed_io_task_is_not_polled_twice() {
+        let mut task = AbortOnDropHandle::new(tokio::spawn(async { Ok(()) }));
+        finish_io_task(&mut task, true).await;
+    }
+
+    #[tokio::test]
     async fn terminal_failure_is_ordered_and_cancellation_safe() {
         let sync_mutex = tokio::sync::Mutex::new(());
         let is_closed = AtomicBool::new(false);

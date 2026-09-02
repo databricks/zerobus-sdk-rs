@@ -13,6 +13,7 @@ This directory contains examples demonstrating Protocol Buffers-based data inges
 - [Compiled: Batch Example](#compiled-batch-example)
   - [Running the Example](#running-the-example-1)
   - [Code Highlights](#code-highlights-1)
+- [Multiplexed Stream Example](#multiplexed-stream-example)
 - [Dynamic Schema Example](#dynamic-schema-example)
   - [Running the Example](#running-the-example-2)
   - [Code Highlights](#code-highlights-2)
@@ -39,6 +40,7 @@ The examples are grouped by how the protobuf schema is obtained:
   are already included.
   - **`compiled/single.rs`** - Ingest records one at a time using `ingest_record_offset()`
   - **`compiled/batch.rs`** - Ingest multiple records at once using `ingest_records_offset()`
+  - **`compiled/multiplexed.rs`** - Let one logical stream route across four managed sub-streams
 - **`dynamic/`** — the schema is known only at runtime (no compiled `.proto`), and records
   are built field-by-field with `DynamicRecord`.
   - **`dynamic/single.rs`** - Build the descriptor in code and ingest dynamic records one at a time
@@ -184,6 +186,29 @@ stream.flush().await?;
 - **All-or-nothing**: The entire batch succeeds or fails as a unit
 - **Single acknowledgment**: One offset ID for the whole batch
 - **Empty batches**: Returns `None` (no-op)
+
+## Multiplexed Stream Example
+
+When you need more throughput than one gRPC stream can provide and do not need
+global ordering, the multiplexed builder creates one logical stream over
+several homogeneous sub-streams:
+
+```bash
+cargo run -p rust-examples-proto --example proto_compiled_multiplexed
+```
+
+Configure every option before the terminal `.multiplexed(4)` call. Ingest
+returns a `MessageId`; queue records, flush periodically and at the end, then
+close the mux. The complete example also shows
+`multiplexed_ack_callback` with `AckCallback<MessageId>`.
+
+`max_inflight_requests` is shared across the mux: each sub-stream receives the
+configured value divided by the stream count. Configure at least one in-flight
+request per sub-stream.
+
+Records preserve ordering within each sub-stream, but there is no global
+record, message-ID, or callback order. Callback workers for different
+sub-streams can invoke the shared callback concurrently.
 
 ## Dynamic Schema Example
 
