@@ -455,6 +455,13 @@ void zerobus_sdk_builder_sdk_identifier(struct CZerobusSdkBuilder *builder, cons
 void zerobus_sdk_builder_application_name(struct CZerobusSdkBuilder *builder, const char *value);
 
 /**
+ * Controls whether each JSON/protobuf stream receives a dedicated gRPC
+ * connection. Enabled by default. Set to false to share one connection across
+ * all streams created from the SDK. No-op on null.
+ */
+void zerobus_sdk_builder_connection_per_stream(struct CZerobusSdkBuilder *builder, bool enabled);
+
+/**
  * Selects a no-TLS gRPC channel. TLS is on by default.
  */
 void zerobus_sdk_builder_disable_tls(struct CZerobusSdkBuilder *builder);

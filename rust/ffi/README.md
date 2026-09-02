@@ -68,6 +68,25 @@ private static extern IntPtr zerobus_sdk_new(string endpoint, string ucUrl, ref 
 // Link with -lzerobus_ffi
 ```
 
+### SDK connection ownership
+
+Each JSON/protobuf stream uses a dedicated gRPC connection by default. To
+restore shared HTTP/2 multiplexing, configure the builder before consuming it:
+
+```c
+CZerobusSdkBuilder *builder = zerobus_sdk_builder_new();
+zerobus_sdk_builder_connection_per_stream(builder, false);
+```
+
+Arrow Flight streams already use dedicated connections and are unaffected.
+
+HTTP/2 multiplexes logical streams over one TCP connection. On high-throughput
+workloads over the public internet, packet loss and TCP retransmissions can
+cause head-of-line blocking across every stream on that connection, reducing
+aggregate throughput. Dedicated connections isolate that loss. For many
+smaller, low-throughput streams, shared multiplexing is recommended to reduce
+connection overhead.
+
 ### Async stream creation callback
 
 For callers that do not want to block a thread in the synchronous stream
