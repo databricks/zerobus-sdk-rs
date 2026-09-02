@@ -274,7 +274,10 @@ impl MultiplexedStream {
         let cleanup = tokio::spawn(async move {
             // Drain readers admitted before the terminal transition. New
             // readers observe the stored mux failure and reject admission.
-            let _admission = admission.write().await;
+            // Release the barrier before taking each lane's ingest mutex.
+            {
+                let _admission = admission.write().await;
+            }
             join_all(
                 failure_handles
                     .into_iter()
