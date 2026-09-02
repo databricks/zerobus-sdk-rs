@@ -1,15 +1,11 @@
-module zerobus-examples/proto-batch
+module zerobus-examples/proto-dynamic
 
-go 1.25.3
+go 1.23
 
 require (
 	github.com/databricks/zerobus-sdk/go v0.1.0
 	google.golang.org/protobuf v1.36.11
-	zerobus-examples v0.0.0
 )
 
 // Use local zerobus module
 replace github.com/databricks/zerobus-sdk/go => ../../..
-
-// Use local proto module
-replace zerobus-examples => ..

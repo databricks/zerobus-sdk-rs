@@ -20,6 +20,7 @@ require (
 	golang.org/x/sys v0.26.0 // indirect
 	golang.org/x/tools v0.26.0 // indirect
 	golang.org/x/xerrors v0.0.0-20231012003039-104605ab7028 // indirect
+	google.golang.org/protobuf v1.36.11 // indirect
 )
 
 // Use local zerobus module
