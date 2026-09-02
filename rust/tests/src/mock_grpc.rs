@@ -86,6 +86,8 @@ pub struct MockZerobusServer {
     max_offset_sent: Arc<Mutex<i64>>,
     /// Track number of writes received
     write_count: Arc<Mutex<u64>>,
+    /// Record types received in create-stream requests.
+    create_record_types: Arc<Mutex<Vec<Option<i32>>>>,
     /// Track response index across multiple connection attempts
     response_indices: Arc<Mutex<HashMap<String, usize>>>,
     /// Observation that a delayed setup response registered its timer.
@@ -101,6 +103,7 @@ impl MockZerobusServer {
             stream_counter: Arc::new(Mutex::new(0)),
             max_offset_sent: Arc::new(Mutex::new(-1)),
             write_count: Arc::new(Mutex::new(0)),
+            create_record_types: Arc::new(Mutex::new(Vec::new())),
             response_indices: Arc::new(Mutex::new(HashMap::new())),
             delayed_setup_armed: Arc::new(Notify::new()),
             connection_addresses: Arc::new(Mutex::new(HashSet::new())),
@@ -136,8 +139,21 @@ impl MockZerobusServer {
     }
 
     /// Get the number of distinct TCP connections that opened streams.
+    #[allow(dead_code)]
     pub async fn get_connection_count(&self) -> usize {
         self.connection_addresses.lock().await.len()
+    }
+
+    /// Get the number of gRPC streams that reached the create request.
+    #[allow(dead_code)]
+    pub async fn get_stream_count(&self) -> u32 {
+        *self.stream_counter.lock().await
+    }
+
+    /// Get the record types received in create-stream requests.
+    #[allow(dead_code)]
+    pub async fn get_create_record_types(&self) -> Vec<Option<i32>> {
+        self.create_record_types.lock().await.clone()
     }
 
     /// Reset the server state
@@ -151,6 +167,7 @@ impl MockZerobusServer {
         *self.write_count.lock().await = 0;
         *self.stream_counter.lock().await = 0;
         self.connection_addresses.lock().await.clear();
+        self.create_record_types.lock().await.clear();
     }
 }
 
@@ -193,6 +210,7 @@ impl Zerobus for MockZerobusServer {
         let stream_counter = Arc::clone(&self.stream_counter);
         let max_offset_sent = Arc::clone(&self.max_offset_sent);
         let write_count = Arc::clone(&self.write_count);
+        let create_record_types = Arc::clone(&self.create_record_types);
         let response_indices = Arc::clone(&self.response_indices);
         let delayed_setup_armed = Arc::clone(&self.delayed_setup_armed);
 
@@ -207,6 +225,10 @@ impl Zerobus for MockZerobusServer {
                     Ok(request) => {
                         if let Some(RequestPayload::CreateStream(create_request)) = request.payload
                         {
+                            create_record_types
+                                .lock()
+                                .await
+                                .push(create_request.record_type);
                             table_name = create_request.table_name.unwrap_or_default();
                             info!("Received CreateStream request for table: {}", table_name);
 
@@ -479,6 +501,7 @@ async fn start_mock_server_inner(
         stream_counter: Arc::clone(&mock_server.stream_counter),
         max_offset_sent: Arc::clone(&mock_server.max_offset_sent),
         write_count: Arc::clone(&mock_server.write_count),
+        create_record_types: Arc::clone(&mock_server.create_record_types),
         response_indices: Arc::clone(&mock_server.response_indices),
         delayed_setup_armed: Arc::clone(&mock_server.delayed_setup_armed),
         connection_addresses: Arc::clone(&mock_server.connection_addresses),

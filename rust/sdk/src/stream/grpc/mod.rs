@@ -345,3 +345,110 @@ impl Drop for ZerobusStream {
         }
     }
 }
+
+#[cfg(test)]
+mod initialization_tests {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    use super::*;
+
+    struct DropCounter(Arc<AtomicUsize>);
+
+    impl Drop for DropCounter {
+        fn drop(&mut self) {
+            self.0.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    #[tokio::test]
+    async fn initialization_guard_cancels_and_reaps_spawned_tasks() {
+        let cancellation_token = CancellationToken::new();
+        let drops = Arc::new(AtomicUsize::new(0));
+        let receiver_drop = DropCounter(Arc::clone(&drops));
+        let supervisor_drop = DropCounter(Arc::clone(&drops));
+        let callback_drop = DropCounter(Arc::clone(&drops));
+        let receiver_token = cancellation_token.child_token();
+        let receiver = tokio::spawn(async move {
+            let _drop = receiver_drop;
+            receiver_token.cancelled().await;
+        });
+        let supervisor_token = cancellation_token.clone();
+        let supervisor = tokio::spawn(async move {
+            let _drop = supervisor_drop;
+            supervisor_token.cancelled().await;
+            receiver.await.unwrap();
+            Ok(())
+        });
+        let callback_token = cancellation_token.clone();
+        let callback = tokio::spawn(async move {
+            let _drop = callback_drop;
+            callback_token.cancelled().await;
+        });
+        tokio::task::yield_now().await;
+
+        let guard =
+            StreamInitializationGuard::new(cancellation_token.clone(), supervisor, Some(callback));
+        drop(guard);
+
+        assert!(cancellation_token.is_cancelled());
+        for _ in 0..10 {
+            if drops.load(Ordering::Relaxed) == 3 {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+        assert_eq!(drops.load(Ordering::Relaxed), 3);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn initialization_guard_aborts_unresponsive_tasks_after_timeout() {
+        let cancellation_token = CancellationToken::new();
+        let drops = Arc::new(AtomicUsize::new(0));
+        let supervisor_drop = DropCounter(Arc::clone(&drops));
+        let callback_drop = DropCounter(Arc::clone(&drops));
+        let supervisor = tokio::spawn(async move {
+            let _drop = supervisor_drop;
+            std::future::pending::<Result<(), ZerobusError>>().await
+        });
+        let callback = tokio::spawn(async move {
+            let _drop = callback_drop;
+            std::future::pending::<()>().await
+        });
+        tokio::task::yield_now().await;
+
+        let guard =
+            StreamInitializationGuard::new(cancellation_token.clone(), supervisor, Some(callback));
+        drop(guard);
+        tokio::task::yield_now().await;
+        tokio::time::advance(std::time::Duration::from_millis(
+            INITIALIZATION_TASK_REAP_TIMEOUT_MS + 1,
+        ))
+        .await;
+        for _ in 0..10 {
+            if drops.load(Ordering::Relaxed) == 2 {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+
+        assert!(cancellation_token.is_cancelled());
+        assert_eq!(drops.load(Ordering::Relaxed), 2);
+    }
+
+    #[tokio::test]
+    async fn disarmed_initialization_guard_keeps_tasks_running() {
+        let cancellation_token = CancellationToken::new();
+        let supervisor = tokio::spawn(std::future::pending::<Result<(), ZerobusError>>());
+        let callback = tokio::spawn(std::future::pending::<()>());
+        let guard =
+            StreamInitializationGuard::new(cancellation_token.clone(), supervisor, Some(callback));
+
+        let (supervisor, callback) = guard.disarm();
+        assert!(!cancellation_token.is_cancelled());
+        assert!(!supervisor.is_finished());
+        assert!(!callback.as_ref().unwrap().is_finished());
+
+        supervisor.abort();
+        callback.unwrap().abort();
+    }
+}

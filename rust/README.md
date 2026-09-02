@@ -49,6 +49,7 @@ The Zerobus Rust SDK provides a robust, async-first interface for ingesting larg
 - **Flexible Configuration** - Fine-tune timeouts, retries, and recovery behavior
 - **Graceful Stream Management** - Proper flushing and acknowledgment tracking
 - **Acknowledgment Callbacks** - Receive notifications when records are acknowledged or encounter errors
+- **Multiplexed Streams** - Raise aggregate gRPC throughput when one stream is the bottleneck while the SDK manages sub-stream routing and lifecycles
 - **Arrow Flight Ingestion** (opt-in) — Stream Apache Arrow `RecordBatch` data directly to Zerobus using Arrow Flight's gRPC transport. Enable with `features = ["arrow-flight"]`; see [`examples/arrow/`](https://github.com/databricks/zerobus-sdk/tree/main/rust/examples/arrow).
 - **Zeroparser** *(opt-in)* — Zero-copy, single-pass protobuf parser for runtime-known schemas. Enable with `features = ["zeroparser"]`; see [`sdk/src/zeroparser/README.md`](https://github.com/databricks/zerobus-sdk/blob/main/rust/sdk/src/zeroparser/README.md).
 
@@ -610,6 +611,59 @@ stream.flush().await?; // wait once for all pending acknowledgments
 
 On the wire this is identical to `.compiled_proto(...)`; the difference is that records are built dynamically rather than from a generated struct. See the [`dynamic_proto`](https://docs.rs/databricks-zerobus-ingest-sdk/latest/databricks_zerobus_ingest_sdk/dynamic_proto/) module and the `proto_dynamic_single` example for details.
 
+#### Multiplexed gRPC Stream
+
+When you need more throughput than one gRPC stream can provide and do not
+require global ordering, select multiplexed mode after configuring an ordinary
+builder. The SDK opens all requested sub-streams, routes records with
+capacity-aware round-robin selection, and manages recovery, flush, and close:
+
+```rust
+let mut stream = sdk
+    .stream_builder()
+    .table("catalog.schema.orders")
+    .oauth(client_id, client_secret)
+    .compiled_proto(descriptor_proto)
+    .max_inflight_requests(10_000)
+    .multiplexed(4)
+    .build()
+    .await?;
+
+for record in records {
+    let _message_id = stream.ingest_record(record).await?;
+}
+stream.flush().await?;
+stream.close().await?;
+```
+
+The stream count must be between 1 and 64. JSON, compiled protobuf, and
+dynamic protobuf are supported. Arrow Flight is not; use `build_arrow()` on an
+ordinary builder instead. For maximum protobuf encoding throughput, prefer
+compiled protobuf—multiplexing addresses stream/network bottlenecks, not the
+reflection cost of constructing dynamic records.
+
+`max_inflight_requests` is a mux-wide memory and backpressure budget, not a
+per-sub-stream limit. Each sub-stream receives
+`max_inflight_requests / stream_count` capacity using integer division, and any
+remainder is unused. The budget must be at least the stream count.
+
+Each ingest returns a `MessageId` containing the selected sub-stream index and
+its local offset. Per-sub-stream ordering is preserved, but records,
+`MessageId`s, acknowledgments, and recovered unacknowledged records have no
+global order. A `MessageId` must only be used with the mux that created it.
+
+Retryable failures follow each sub-stream's configured recovery policy. If one
+sub-stream reaches a terminal failure, the entire mux is poisoned, stops
+accepting records, and shuts down every sub-stream. `flush()` waits for all
+sub-streams; `close()` flushes and closes all of them. `get_unacked_records()`
+and `get_unacked_batches()` aggregate recoverable records across streams but
+do not reconstruct submission order. There is no multiplexed recreation API.
+
+Use `multiplexed_ack_callback` with `AckCallback<MessageId>` for mux
+acknowledgments; ordinary `ack_callback` is rejected. One callback object is
+shared across the sub-stream callback workers, which may invoke it concurrently
+and without global ordering.
+
 Setters can be called in any order. The builder validates at `build()` time that both authentication and format have been configured.
 
 ### 5. Ingest Data
@@ -812,6 +866,11 @@ match stream.close().await {
 }
 ```
 
+Multiplexed streams use `multiplexed_ack_callback` with
+`AckCallback<MessageId>`. Different sub-stream workers may call it concurrently,
+so implementations must be thread-safe and must not rely on global ordering. See the complete
+[`proto_compiled_multiplexed`](examples/proto/compiled/multiplexed.rs) example.
+
 ## Client-side warnings
 
 The SDK logs a `WARN`-level message via [`tracing`](https://docs.rs/tracing) when **100 or more** streams for the same table are opened within a 60-second sliding window. This usually indicates a "one stream per record" misuse pattern. The warning fires again if the rate drops below the threshold and later surges again.
@@ -849,7 +908,7 @@ shared multiplexing is recommended there to reduce connection overhead.
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
-| `max_inflight_requests` | `usize` | 1,000,000 | Maximum unacknowledged requests in flight |
+| `max_inflight_requests` | `usize` | 1,000,000 | Maximum unacknowledged requests in flight. For a mux, this is divided evenly across sub-streams using integer division. |
 | `recovery` | `bool` | true | Enable automatic stream recovery on failure |
 | `recovery_timeout_ms` | `u64` | 15,000 | Timeout for recovery operations (ms) |
 | `recovery_backoff_ms` | `u64` | 2,000 | Delay between recovery retry attempts (ms) |
@@ -858,8 +917,8 @@ shared multiplexing is recommended there to reduce connection overhead.
 | `flush_timeout_ms` | `u64` | 300,000 | Timeout for flush operations (ms) |
 | `record_type` | `RecordType` | `RecordType::Proto` | Record serialization format (Proto or Json) |
 | `stream_paused_max_wait_time_ms` | `Option<u64>` | `None` | Max time to wait for outstanding acknowledgments during graceful close (`None` = server grace remaining after reserving transport cleanup time, `Some(0)` = skip the ACK wait, `Some(x)` = the smaller of `x` and that remaining grace). A bounded request/response drain still runs after the ACK wait. |
-| `ack_callback` | `Option<Arc<dyn AckCallback>>` | `None` | JSON and Protocol Buffer streams only. Optional callback for acknowledgment notifications. Not supported for Arrow Flight streams. |
-| `callback_max_wait_time_ms` | `Option<u64>` | `Some(5_000)` | JSON and Protocol Buffer streams only. Maximum time to wait for callback processing to complete after closing the stream (`None` = wait indefinitely, `Some(x)` = wait up to `x` ms) |
+| `ack_callback` | `Option<Arc<dyn AckCallback>>` | `None` | **Ordinary JSON and Protocol Buffer gRPC streams only.** Optional callback for acknowledgment notifications. Multiplexed streams use the builder's `multiplexed_ack_callback` method; Arrow Flight does not support acknowledgment callbacks. |
+| `callback_max_wait_time_ms` | `Option<u64>` | `Some(5_000)` | **JSON and Protocol Buffer gRPC streams only.** Maximum time to wait for callback processing to complete after closing the stream (`None` = wait indefinitely, `Some(x)` = wait up to `x` ms) |
 
 ### ArrowStreamConfigurationOptions
 
@@ -903,9 +962,9 @@ within the timeout.
 Arrow stream construction rejects `recovery_timeout_ms` and
 `server_lack_of_ack_timeout_ms` values whose deadlines cannot be represented by
 the platform monotonic clock. Server-advertised graceful-rotation periods are
-capped at one year. If `ack_callback` was configured on the builder,
-`build_arrow()` returns `ZerobusError::InvalidArgument` instead of silently
-ignoring the callback.
+capped at one year. If `ack_callback` or `multiplexed_ack_callback` was
+configured on the builder, `build_arrow()` returns
+`ZerobusError::InvalidArgument` instead of silently ignoring the callback.
 
 For internal lifecycle, offset, recovery, and concurrency details, see the
 [Arrow Flight maintainer architecture guide](https://github.com/databricks/zerobus-sdk/blob/main/rust/sdk/src/stream/arrow/README.md).
@@ -1148,6 +1207,7 @@ cargo test -p tests -- --nocapture
 9. **Validate Schemas** - Use the schema generation tool to ensure type safety (for Protocol Buffers)
 10. **Secure Credentials** - Never hardcode secrets; use environment variables or secret managers
 11. **Test Recovery** - Simulate failures to verify your error handling logic
+12. **Use Multiplexing for Stream Bottlenecks** - When you need more throughput than one gRPC stream can provide and do not require global ordering, select `.multiplexed(n)`; it does not accelerate record serialization
 
 ## API Reference
 
@@ -1233,15 +1293,26 @@ Only call after stream failure.
 
 Configure stream parameters via fluent setters; all configuration goes through the builder. See [Create a Stream](#4-create-a-stream) for usage and [Configuration Options](#configuration-options) for the full list of available setters and their defaults.
 
+Calling `multiplexed(stream_count)` consumes the ordinary builder and returns a
+`MultiplexedStreamBuilder`, which exposes only `validate()` and `build()`.
+Configure ordinary streams with `ack_callback`; configure mux streams with
+`multiplexed_ack_callback`. Each terminal build rejects the other callback type.
+
+### `MultiplexedStream`
+
+A managed group of 1–64 homogeneous gRPC sub-streams. Its `ingest_record()`
+and `ingest_records()` methods return `MessageId`s, while `flush()`, `close()`,
+and unacknowledged-record retrieval operate across all sub-streams.
+
 ### `AckCallback`
 
 Trait for receiving acknowledgment notifications.
 
 **Methods:**
 ```rust
-pub trait AckCallback: Send + Sync {
-    fn on_ack(&self, offset_id: OffsetId);
-    fn on_error(&self, offset_id: OffsetId, error_message: &str);
+pub trait AckCallback<Id = OffsetId>: Send + Sync {
+    fn on_ack(&self, id: Id);
+    fn on_error(&self, id: Id, error_message: &str);
 }
 ```
 

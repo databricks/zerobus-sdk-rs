@@ -631,6 +631,8 @@ const MAX_MULTIPLEXED_JITTER_MS: u64 = 1_000;
 pub struct MultiplexedStreamBuilder<'a> {
     inner: StreamBuilder<'a>,
     stream_count: usize,
+    #[cfg(test)]
+    jitter_delays: Option<Vec<Duration>>,
 }
 
 impl fmt::Debug for MultiplexedStreamBuilder<'_> {
@@ -648,6 +650,8 @@ impl<'a> MultiplexedStreamBuilder<'a> {
         Self {
             inner,
             stream_count,
+            #[cfg(test)]
+            jitter_delays: None,
         }
     }
 
@@ -700,9 +704,21 @@ impl<'a> MultiplexedStreamBuilder<'a> {
             .collect()
     }
 
+    #[cfg(test)]
+    fn with_jitter_delays(mut self, delays: Vec<Duration>) -> Self {
+        assert_eq!(delays.len(), self.stream_count);
+        self.jitter_delays = Some(delays);
+        self
+    }
+
     fn sample_jitter_delays(&self) -> Vec<Duration> {
         if self.stream_count == 1 {
             return vec![Duration::ZERO];
+        }
+
+        #[cfg(test)]
+        if let Some(delays) = &self.jitter_delays {
+            return delays.clone();
         }
 
         let mut rng = rand::thread_rng();
@@ -819,14 +835,20 @@ mod tests {
     use super::*;
     use std::collections::HashMap;
 
-    #[cfg(feature = "arrow-flight")]
     struct NoopAckCallback;
 
-    #[cfg(feature = "arrow-flight")]
     impl AckCallback for NoopAckCallback {
         fn on_ack(&self, _offset_id: crate::offset_generator::OffsetId) {}
 
         fn on_error(&self, _offset_id: crate::offset_generator::OffsetId, _error_message: &str) {}
+    }
+
+    struct NoopMultiplexedAckCallback;
+
+    impl AckCallback<crate::MessageId> for NoopMultiplexedAckCallback {
+        fn on_ack(&self, _message_id: crate::MessageId) {}
+
+        fn on_error(&self, _message_id: crate::MessageId, _error_message: &str) {}
     }
 
     fn test_sdk() -> ZerobusSdk {
@@ -841,6 +863,10 @@ mod tests {
             crate::token_cache::DEFAULT_REFRESH_BUFFER,
             true,
         )
+    }
+
+    fn valid_builder(sdk: &ZerobusSdk) -> StreamBuilder<'_> {
+        sdk.stream_builder().table("t").oauth("a", "b").json()
     }
 
     #[test]
@@ -888,6 +914,146 @@ mod tests {
             .dynamic_proto(md);
         assert!(format!("{builder:?}").contains("DynamicProto"));
         builder.validate().expect("validation should succeed");
+    }
+
+    #[test]
+    fn multiplexed_stream_count_validation() {
+        let sdk = test_sdk();
+        for stream_count in [1, 64] {
+            valid_builder(&sdk)
+                .multiplexed(stream_count)
+                .validate()
+                .unwrap();
+        }
+        for stream_count in [0, 65] {
+            let err = valid_builder(&sdk)
+                .multiplexed(stream_count)
+                .validate()
+                .unwrap_err();
+            assert!(matches!(err, ZerobusError::InvalidArgument(_)));
+        }
+    }
+
+    #[test]
+    fn multiplexed_inflight_capacity_is_partitioned() {
+        let sdk = test_sdk();
+        for (max_inflight_requests, stream_count, expected_per_stream) in
+            [(1_000_000, 64, 15_625), (100, 3, 33), (1, 1, 1)]
+        {
+            let builder = valid_builder(&sdk)
+                .max_inflight_requests(max_inflight_requests)
+                .multiplexed(stream_count);
+            builder.validate().unwrap();
+            assert_eq!(
+                builder.max_inflight_requests_per_stream(),
+                Some(expected_per_stream)
+            );
+        }
+
+        let err = valid_builder(&sdk)
+            .max_inflight_requests(3)
+            .multiplexed(4)
+            .validate()
+            .unwrap_err();
+        assert!(
+            matches!(err, ZerobusError::InvalidArgument(message) if message.contains("max_inflight_requests (3)") && message.contains("stream_count (4)"))
+        );
+    }
+
+    #[test]
+    fn callback_mode_validation() {
+        let sdk = test_sdk();
+        let err = valid_builder(&sdk)
+            .ack_callback(Arc::new(NoopAckCallback))
+            .multiplexed(2)
+            .validate()
+            .unwrap_err();
+        assert!(
+            matches!(err, ZerobusError::InvalidArgument(message) if message.contains("multiplexed_ack_callback"))
+        );
+
+        let ordinary_builder =
+            valid_builder(&sdk).multiplexed_ack_callback(Arc::new(NoopMultiplexedAckCallback));
+        assert!(ordinary_builder.multiplexed_callback.is_some());
+        let err = ordinary_builder.validate().unwrap_err();
+        assert!(
+            matches!(err, ZerobusError::InvalidArgument(message) if message.contains("multiplexed_ack_callback"))
+        );
+
+        valid_builder(&sdk)
+            .multiplexed_ack_callback(Arc::new(NoopMultiplexedAckCallback))
+            .multiplexed(2)
+            .validate()
+            .expect("mux builder should accept a MessageId callback");
+    }
+
+    #[test]
+    fn multiplexed_headers_providers_isolate_oauth_state() {
+        struct TestProvider;
+
+        #[async_trait::async_trait]
+        impl HeadersProvider for TestProvider {
+            async fn get_headers(&self) -> crate::ZerobusResult<HashMap<&'static str, String>> {
+                Ok(HashMap::new())
+            }
+        }
+
+        let sdk = test_sdk();
+        let oauth_providers = valid_builder(&sdk)
+            .multiplexed(2)
+            .resolve_headers_providers()
+            .unwrap();
+        assert!(!Arc::ptr_eq(&oauth_providers[0], &oauth_providers[1]));
+
+        let custom_provider: Arc<dyn HeadersProvider> = Arc::new(TestProvider);
+        let custom_providers = sdk
+            .stream_builder()
+            .table("t")
+            .headers_provider(Arc::clone(&custom_provider))
+            .json()
+            .multiplexed(2)
+            .resolve_headers_providers()
+            .unwrap();
+        assert!(Arc::ptr_eq(&custom_provider, &custom_providers[0]));
+        assert!(Arc::ptr_eq(&custom_providers[0], &custom_providers[1]));
+    }
+
+    #[test]
+    fn multiplexed_builder_debug_and_deterministic_jitter() {
+        let sdk = test_sdk();
+        let delays = vec![Duration::from_millis(900), Duration::from_millis(3)];
+        let builder = valid_builder(&sdk)
+            .multiplexed(2)
+            .with_jitter_delays(delays.clone());
+        assert!(format!("{builder:?}").contains("MultiplexedStreamBuilder"));
+        assert_eq!(builder.sample_jitter_delays(), delays);
+    }
+
+    #[test]
+    fn single_stream_mux_has_no_startup_jitter() {
+        let sdk = test_sdk();
+        assert_eq!(
+            valid_builder(&sdk).multiplexed(1).sample_jitter_delays(),
+            vec![Duration::ZERO]
+        );
+    }
+
+    #[cfg(feature = "arrow-flight")]
+    #[test]
+    fn multiplexed_builder_rejects_arrow() {
+        let sdk = test_sdk();
+        let schema = Arc::new(ArrowSchema::new(Vec::<crate::Field>::new()));
+        let err = sdk
+            .stream_builder()
+            .table("t")
+            .oauth("a", "b")
+            .arrow(schema)
+            .multiplexed(2)
+            .validate()
+            .unwrap_err();
+        assert!(
+            matches!(err, ZerobusError::InvalidArgument(message) if message.contains("build_arrow"))
+        );
     }
 
     #[test]
@@ -1103,7 +1269,7 @@ mod tests {
 
     #[cfg(feature = "arrow-flight")]
     #[tokio::test]
-    async fn arrow_builder_rejects_ack_callback() {
+    async fn arrow_builder_rejects_callbacks() {
         use arrow_schema::{DataType, Field, Schema as ArrowSchema};
 
         let sdk = test_sdk();
@@ -1112,21 +1278,31 @@ mod tests {
             DataType::Int32,
             false,
         )]));
-        let result = sdk
+        let ordinary_result = sdk
+            .stream_builder()
+            .table("t")
+            .oauth("a", "b")
+            .arrow(Arc::clone(&schema))
+            .ack_callback(Arc::new(NoopAckCallback))
+            .build_arrow()
+            .await;
+        let multiplexed_result = sdk
             .stream_builder()
             .table("t")
             .oauth("a", "b")
             .arrow(schema)
-            .ack_callback(Arc::new(NoopAckCallback))
+            .multiplexed_ack_callback(Arc::new(NoopMultiplexedAckCallback))
             .build_arrow()
             .await;
 
-        match result {
-            Err(ZerobusError::InvalidArgument(msg)) => {
-                assert!(msg.contains("ack_callback"));
-                assert!(msg.contains("Arrow Flight"));
+        for result in [ordinary_result, multiplexed_result] {
+            match result {
+                Err(ZerobusError::InvalidArgument(msg)) => {
+                    assert!(msg.contains("ack_callback"));
+                    assert!(msg.contains("Arrow Flight"));
+                }
+                _ => panic!("expected InvalidArgument error"),
             }
-            _ => panic!("expected InvalidArgument error"),
         }
     }
 
