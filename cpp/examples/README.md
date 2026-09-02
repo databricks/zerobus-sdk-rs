@@ -8,7 +8,7 @@ ingest data into Databricks Delta tables.
 - [Overview](#overview)
 - [JSON Examples](json/README.md)
 - [Protocol Buffers Examples](proto/README.md)
-- [Arrow Flight Examples](arrow/README.md) (Beta)
+- [Arrow Flight Examples](arrow/README.md)
 - [Prerequisites](#prerequisites)
   - [Create a Databricks Table](#1-create-a-databricks-table)
   - [Set Up OAuth Service Principal](#2-set-up-oauth-service-principal)
@@ -30,7 +30,7 @@ columnar `ArrowStream`:
 - **[Protocol Buffers](proto/README.md)** — Type-safe binary encoding. The
   examples build the descriptor at runtime from Unity Catalog metadata
   (`ProtoSchema::from_uc_json`), so **no `.proto` file or `protoc` is required**.
-- **[Arrow Flight](arrow/README.md)** (Beta) — Columnar Arrow `RecordBatch`
+- **[Arrow Flight](arrow/README.md)** — Columnar Arrow `RecordBatch`
   ingestion over the Arrow Flight protocol.
 
 Beyond the basic ingestion flow, several examples also demonstrate advanced
@@ -56,7 +56,7 @@ failure in [`json/single.cpp`](json/single.cpp), and Arrow IPC compression in
 | [JSON Batch](json/README.md#batch-example) | JSON | Batch | `json_batch` |
 | [Proto Single](proto/README.md#single-record-example) | Protocol Buffers | Single-record | `proto_single` |
 | [Proto Batch](proto/README.md#batch-example) | Protocol Buffers | Batch | `proto_batch` |
-| [Arrow](arrow/README.md) | Arrow Flight (Beta) | `RecordBatch` | `arrow_ingest` |
+| [Arrow](arrow/README.md) | Arrow Flight | `RecordBatch` | `arrow_ingest` |
 
 ## Prerequisites
 
@@ -206,7 +206,7 @@ zerobus::Stream stream =
     sdk.create_stream(props, client_id, client_secret, options);
 ```
 
-**Arrow Flight (Beta):**
+**Arrow Flight:**
 ```cpp
 zerobus::ArrowStream stream =
     sdk.create_arrow_stream(table_name, schema_ipc_bytes, client_id,

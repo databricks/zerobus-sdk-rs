@@ -1,5 +1,5 @@
 /**
- * Arrow Flight ingestion example (Beta).
+ * Arrow Flight ingestion example.
  *
  * Opens one Arrow Flight stream, ingests 10 batches (5 rows each) in a
  * loop, waits for the last offset to be acknowledged, flushes, and
@@ -71,7 +71,7 @@ function buildBatchIpc(batchIndex: number, rowsPerBatch: number): Buffer {
 }
 
 async function main() {
-    console.log('Arrow Flight Example (Beta)');
+    console.log('Arrow Flight Example');
     console.log('='.repeat(60));
 
     const sdk = new ZerobusSdk(SERVER_ENDPOINT, DATABRICKS_WORKSPACE_URL);

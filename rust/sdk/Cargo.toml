@@ -1,6 +1,6 @@
 [package]
 name = "databricks-zerobus-ingest-sdk"
-version = "2.7.1"
+version = "2.8.0"
 authors = ["Databricks"]
 edition = "2021"
 rust-version = "1.70"
@@ -67,7 +67,7 @@ prost-build = { version = "0.14", optional = true }
 
 [features]
 default = []
-# Arrow Flight is in Beta
+# Arrow Flight support
 arrow-flight = ["dep:arrow-flight", "dep:arrow-array", "dep:arrow-schema", "dep:arrow-ipc", "dep:futures", "dep:tonic-types"]
 # Wrapper-only Arrow C Data importer. Not a supported public Rust SDK feature.
 internal-arrow-c-data = [

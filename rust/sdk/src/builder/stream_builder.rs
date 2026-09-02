@@ -285,14 +285,14 @@ impl<'a> StreamBuilder<'a> {
         self
     }
 
-    /// Set the maximum number of in-flight requests (gRPC streams only).
+    /// Set the maximum number of in-flight requests (JSON and Protocol Buffer streams only).
     pub fn max_inflight_requests(mut self, n: usize) -> Self {
         self.grpc_config.max_inflight_requests = n;
         self
     }
 
     /// Set the maximum total encoded record byte size allowed per ingest call
-    /// (gRPC JSON/proto streams only).
+    /// (JSON and Protocol Buffer streams only).
     ///
     /// This is the sum of all record bytes passed to a single ingest call.
     /// Calls exceeding this limit fail fast with
@@ -318,7 +318,7 @@ impl<'a> StreamBuilder<'a> {
         self
     }
 
-    /// Set the acknowledgment callback (gRPC streams only).
+    /// Set the acknowledgment callback (JSON and Protocol Buffer streams only).
     ///
     /// `build_arrow()` rejects this option with
     /// [`ZerobusError::InvalidArgument`] because Arrow Flight streams do not
@@ -328,7 +328,7 @@ impl<'a> StreamBuilder<'a> {
         self
     }
 
-    /// Set the maximum wait time for callbacks after stream close (gRPC streams only).
+    /// Set the maximum wait time for callbacks after stream close (JSON and Protocol Buffer streams only).
     pub fn callback_max_wait_time_ms(mut self, ms: Option<u64>) -> Self {
         self.grpc_config.callback_max_wait_time_ms = ms;
         self
@@ -425,7 +425,7 @@ impl<'a> StreamBuilder<'a> {
         }
     }
 
-    /// Build and open a gRPC ingestion stream (JSON or compiled protobuf).
+    /// Build and open a JSON or Protocol Buffer stream.
     ///
     /// Returns an error if table name, authentication, or format has not been set,
     /// or if an Arrow format was selected (use `build_arrow()` instead).
@@ -513,7 +513,7 @@ impl<'a> StreamBuilder<'a> {
             ));
         }
 
-        // `max_ingest_payload_bytes` only applies to gRPC streams; warn if the
+        // `max_ingest_payload_bytes` only applies to JSON and Protocol Buffer streams; warn if the
         // user changed it from the default before building an Arrow stream.
         if self.grpc_config.max_ingest_payload_bytes
             != StreamConfigurationOptions::default().max_ingest_payload_bytes

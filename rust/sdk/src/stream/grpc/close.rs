@@ -4,9 +4,15 @@
 //! flag, and cancels the supervisor and callback tasks. The IO tasks observe
 //! the cancellation and unwind on their own.
 
+#[cfg(feature = "testing")]
+use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering;
+#[cfg(feature = "testing")]
+use std::sync::Arc;
 
 use tokio::time::Duration;
+#[cfg(feature = "testing")]
+use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, warn};
 
 use super::ZerobusStream;
@@ -15,6 +21,38 @@ use crate::ZerobusResult;
 /// Maximum time to wait for the supervisor task to finish during stream
 /// teardown.
 const SHUTDOWN_TIMEOUT_SECS: u64 = 1;
+
+/// Cloneable, task-independent subset of stream state needed for terminal
+/// shutdown. Multiplexed-stream poison cleanup keeps these handles so it can
+/// finish safely even if the initiating API future is cancelled.
+#[cfg(feature = "testing")]
+#[derive(Clone)]
+pub(crate) struct StreamShutdownHandle {
+    is_closed: Arc<AtomicBool>,
+    terminal_token: CancellationToken,
+    cancellation_token: CancellationToken,
+}
+
+#[cfg(feature = "testing")]
+impl StreamShutdownHandle {
+    pub(crate) fn new(
+        is_closed: Arc<AtomicBool>,
+        terminal_token: CancellationToken,
+        cancellation_token: CancellationToken,
+    ) -> Self {
+        Self {
+            is_closed,
+            terminal_token,
+            cancellation_token,
+        }
+    }
+
+    pub(crate) fn signal(&self) {
+        self.is_closed.store(true, Ordering::Relaxed);
+        self.terminal_token.cancel();
+        self.cancellation_token.cancel();
+    }
+}
 
 impl ZerobusStream {
     /// Returns whether the stream has been closed.
@@ -58,6 +96,7 @@ impl ZerobusStream {
         }
         let flush_result = self.flush().await;
         self.is_closed.store(true, Ordering::Relaxed);
+        self.terminal_token.cancel();
         self.shutdown_all_tasks_gracefully().await;
         flush_result
     }
@@ -125,7 +164,15 @@ impl ZerobusStream {
     // `close` or `Drop`.
     #[cfg(feature = "testing")]
     pub(crate) fn signal_shutdown(&self) {
-        self.is_closed.store(true, Ordering::Relaxed);
-        self.cancellation_token.cancel();
+        self.shutdown_handle().signal();
+    }
+
+    #[cfg(feature = "testing")]
+    pub(crate) fn shutdown_handle(&self) -> StreamShutdownHandle {
+        StreamShutdownHandle::new(
+            Arc::clone(&self.is_closed),
+            self.terminal_token.clone(),
+            self.cancellation_token.clone(),
+        )
     }
 }

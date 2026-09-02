@@ -198,9 +198,7 @@ if err != nil {
 // Call stream.Flush() or stream.Close() before exiting to ensure durability.
 ```
 
-## Running Arrow Flight Examples (Beta)
-
-> **Beta**: Arrow Flight ingestion is in Beta. The API is stabilising but may still change before reaching GA.
+## Running Arrow Flight Examples
 
 The Arrow Flight example demonstrates ingestion of Apache Arrow RecordBatches. The schema defined in the example must match the target Delta table's column names and types.
 

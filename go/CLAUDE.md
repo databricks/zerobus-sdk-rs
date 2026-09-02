@@ -122,8 +122,10 @@ Go SDK is safe for concurrent use from multiple goroutines. Internal synchroniza
 ## Release
 
 - Version source: git tag only (no version file in Go).
-- Tag: `go/v<semver>` → triggers `release-go.yml` → creates git tag. Go modules are resolved via git, no artifact upload needed.
-- The Go SDK links pre-built static FFI libraries from `go/lib/`. An FFI release (`ffi/v*`) must happen first if Rust FFI code changed, and the updated `.a` files must be committed to `go/lib/` before the Go release.
+- Dispatch `release-go.yml` (`workflow_dispatch`) on the version-bump branch. It builds FFI archives from `rust/` and uploads `go-lib-*` artifacts; it does not create a tag, and pushing `go/v*` does not start it. Commit the `.a` files into `go/lib/` on that branch, merge, then create the signed `go/v<semver>` tag once on the merge commit.
+- Go modules resolve via git (pkg.go.dev needs no registry upload). The tagged commit is the module, so `go/lib/` must already be in git before the tag. Never move a `go/v*` tag (Go checksum database).
+- The publisher Go job scans and uploads `go-libs-scanned`. It is not the source of the tagged libs and does not cut a GitHub Release.
+- Do not wait on an `ffi/v*` GitHub Release. That release is for C++/FFI consumers; Go rebuilds FFI from `rust/` on the version-bump branch.
 - On version bump PR: move `NEXT_CHANGELOG.md` contents to `CHANGELOG.md`, reset `NEXT_CHANGELOG.md`.
 
 ## Config

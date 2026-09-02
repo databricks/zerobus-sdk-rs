@@ -405,8 +405,6 @@ impl ZerobusSdk {
 
     /// Create a new Arrow Flight stream with OAuth authentication.
     ///
-    /// **Beta**: Arrow Flight ingestion is in Beta. The API is stabilising
-    /// but may still change before reaching GA.
     #[pyo3(signature = (table_name, schema_ipc_bytes, client_id, client_secret, options = None))]
     fn create_arrow_stream(
         &self,

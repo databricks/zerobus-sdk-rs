@@ -14,11 +14,11 @@ namespace zerobus {
 struct CArrowStream;  // opaque FFI handle (defined in zerobus.h)
 class Sdk;
 
-/// An Arrow Flight ingestion stream (Beta).
+/// An Arrow Flight ingestion stream.
 ///
 /// Records are supplied as Arrow IPC stream bytes (schema + one record batch).
 /// Created via `Sdk::create_arrow_stream`. Move-only; the destructor closes and
-/// frees the stream. The API is stabilising but may still change before GA.
+/// frees the stream.
 ///
 /// As with `Stream`, prefer calling `close()` explicitly: it surfaces close
 /// errors (the destructor swallows them) and flushes synchronously, which can

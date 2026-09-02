@@ -1,9 +1,6 @@
 """
 Arrow Flight support for the Zerobus SDK.
 
-**Beta**: Arrow Flight support is in Beta. The API is stabilising but may
-still change before reaching GA.
-
 Requires pyarrow to be installed:
     pip install databricks-zerobus-ingest-sdk[arrow]
 

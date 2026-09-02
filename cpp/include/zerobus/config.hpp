@@ -69,7 +69,7 @@ class CallbackWaitPolicy {
   State state_{Default{}};
 };
 
-/// Configuration for a gRPC ingestion stream.
+/// Configuration for a JSON or Protocol Buffer ingestion stream.
 ///
 /// The scalar defaults below are hand-kept in sync with the Rust core and sent
 /// to the FFI verbatim (see `to_c()`). `config_defaults_test` fails the build
@@ -115,7 +115,7 @@ enum class IpcCompression : std::int32_t {
   Zstd = 1,
 };
 
-/// Configuration for an Arrow Flight ingestion stream (Beta).
+/// Configuration for an Arrow Flight ingestion stream.
 ///
 /// The scalar defaults below are hand-kept in sync with the Rust core and sent
 /// to the FFI verbatim (see `to_c()`). `arrow_config_defaults_test` fails the

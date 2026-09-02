@@ -1,5 +1,5 @@
 // Implementation of ArrowStream (declared in zerobus/arrow_stream.hpp), the
-// Beta Arrow Flight ingestion path.
+// Arrow Flight ingestion path.
 //
 // Each method forwards to the zerobus_arrow_stream_* C FFI entry points and
 // routes failures through detail::ResultGuard. get_unacked_batches copies the

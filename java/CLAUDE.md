@@ -31,7 +31,7 @@ java/
 │   ├── ZerobusStream.java       # Legacy generic stream (deprecated)
 │   ├── ZerobusProtoStream.java  # Proto ingestion stream
 │   ├── ZerobusJsonStream.java   # JSON ingestion stream
-│   ├── ZerobusArrowStream.java  # Arrow Flight stream (Beta)
+│   ├── ZerobusArrowStream.java  # Arrow Flight stream
 │   ├── NativeLoader.java        # Platform-specific JNI library loading
 │   └── ...                      # Config, exceptions, callbacks
 ├── src/test/                    # JUnit 5 + Mockito tests

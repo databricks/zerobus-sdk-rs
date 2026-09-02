@@ -12,7 +12,7 @@ cpp/
 │   ├── zerobus.hpp       # Umbrella header — include this
 │   ├── sdk.hpp           # Sdk + SdkBuilder + TableProperties
 │   ├── stream.hpp        # Stream (proto/JSON ingestion)
-│   ├── arrow_stream.hpp  # ArrowStream (Arrow Flight, Beta)
+│   ├── arrow_stream.hpp  # ArrowStream (Arrow Flight)
 │   ├── proto_schema.hpp  # ProtoSchema (UC JSON → descriptor + encoder)
 │   ├── headers_provider.hpp  # HeadersProvider interface
 │   ├── ack_callback.hpp  # AckCallback interface + AckCallback::from adapter

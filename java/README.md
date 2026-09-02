@@ -13,7 +13,7 @@ The Databricks Zerobus Ingest SDK for Java provides a high-performance client fo
 - [Usage Examples](#usage-examples)
   - [Protocol Buffers Examples](#protocol-buffers-examples)
   - [JSON Examples](#json-examples)
-  - [Arrow Flight Examples (Beta)](#arrow-flight-examples-beta)
+  - [Arrow Flight Examples](#arrow-flight-examples)
 - [Authentication](#authentication)
 - [API Styles](#api-styles)
   - [Offset-Based API (Recommended)](#offset-based-api-recommended)
@@ -34,7 +34,7 @@ The Databricks Zerobus Ingest SDK for Java provides a high-performance client fo
 - **Flexible configuration**: Customizable stream behavior and timeouts
 - **Protocol Buffers**: Strongly-typed schema using protobuf
 - **JSON support**: Ingest JSON records without Protocol Buffer schemas
-- **Arrow Flight (Beta)**: Columnar ingestion of Apache Arrow `VectorSchemaRoot` batches
+- **Arrow Flight**: Columnar ingestion of Apache Arrow `VectorSchemaRoot` batches
 - **Offset-based API**: Low-overhead alternative to CompletableFuture for high throughput
 - **OAuth 2.0 authentication**: Secure authentication with client credentials
 - **Custom authentication**: Supply request headers with `HeadersProvider`
@@ -532,7 +532,7 @@ examples/
 │   ├── README.md
 │   ├── SingleRecordExample.java
 │   └── BatchIngestionExample.java
-├── arrow/                 # ZerobusArrowStream example (Beta)
+├── arrow/                 # ZerobusArrowStream example
 │   ├── README.md
 │   └── ArrowIngestionExample.java
 └── legacy/                # ZerobusStream (deprecated)
@@ -565,7 +565,7 @@ try (ZerobusJsonStream jsonStream = sdk.streamBuilder()
     // ingest...
 }
 
-// Arrow Flight (Beta)
+// Arrow Flight
 try (ZerobusArrowStream arrowStream = sdk.streamBuilder()
         .table("catalog.schema.table")
         .oauth(clientId, clientSecret)
@@ -639,7 +639,7 @@ try (ZerobusJsonStream stream = sdk.streamBuilder()
 
 See [`examples/README.md`](https://github.com/databricks/zerobus-sdk/blob/main/java/examples/README.md) for detailed documentation.
 
-### Arrow Flight Examples (Beta)
+### Arrow Flight Examples
 
 Best for columnar data, wide/numeric schemas, or applications that already produce Apache Arrow `VectorSchemaRoot` batches (Spark, pandas via PyArrow bridges, columnar gateways). Requires the `arrow-vector` and `arrow-memory-netty` dependencies plus the JDK 9+ `--add-opens` flags (see [Dependencies](#dependencies) and [`examples/arrow/README.md`](https://github.com/databricks/zerobus-sdk/blob/main/java/examples/arrow/README.md)):
 
@@ -672,8 +672,6 @@ try (ZerobusArrowStream stream = sdk.streamBuilder()
     stream.flush();
 }
 ```
-
-> **Beta.** Arrow Flight ingestion is in Beta. The API is stabilising but may still change before reaching GA.
 
 ---
 
@@ -813,7 +811,7 @@ stream.flush();
 |--------|----------|------|------|
 | **Protocol Buffers** | Production systems | Type-safe, compact, fast | Requires schema compilation |
 | **JSON** | Prototyping, flexible schemas | Human-readable, no compilation, clean API | Larger payload, slower |
-| **Arrow Flight** (Beta) | Columnar/analytics workloads, wide/numeric schemas, applications that already produce Arrow data | High throughput, native Apache Arrow types, optional IPC compression (LZ4 / ZSTD) | Requires `arrow-vector` + `arrow-memory-netty` deps and JDK 9+ `--add-opens` flags; API may still change before GA |
+| **Arrow Flight** | Columnar/analytics workloads, wide/numeric schemas, applications that already produce Arrow data | High throughput, native Apache Arrow types, optional IPC compression (LZ4 / ZSTD) | Requires `arrow-vector` + `arrow-memory-netty` deps and JDK 9+ `--add-opens` flags |
 
 ### JSON Streams (Recommended for JSON)
 
@@ -872,7 +870,7 @@ try (ZerobusJsonStream stream = sdk.streamBuilder()
 | `serverLackOfAckTimeoutMs` | 60000 | Server acknowledgment timeout (ms) |
 | `ackCallback` | None | Callback invoked on record acknowledgment |
 
-### Arrow Stream Configuration Options (Beta)
+### Arrow Stream Configuration Options
 
 Used with `ZerobusArrowStream`. Build via `ArrowStreamConfigurationOptions.builder()`.
 
@@ -1099,7 +1097,7 @@ CompletableFuture<ZerobusArrowStream> createArrowStream(
     String clientSecret
 )
 ```
-**Beta.** Creates a new Arrow Flight ingestion stream with default configuration. Requires `arrow-vector` + `arrow-memory-netty` on the classpath. _Deprecated — use [`streamBuilder()`](#streambuilder)._
+Creates a new Arrow Flight ingestion stream with default configuration. Requires `arrow-vector` + `arrow-memory-netty` on the classpath. _Deprecated — use [`streamBuilder()`](#streambuilder)._
 
 ```java
 CompletableFuture<ZerobusArrowStream> createArrowStream(
@@ -1110,12 +1108,12 @@ CompletableFuture<ZerobusArrowStream> createArrowStream(
     ArrowStreamConfigurationOptions options
 )
 ```
-**Beta.** Same as above with custom configuration. _Deprecated — use [`streamBuilder()`](#streambuilder)._
+Same as above with custom configuration. _Deprecated — use [`streamBuilder()`](#streambuilder)._
 
 ```java
 CompletableFuture<ZerobusArrowStream> recreateArrowStream(ZerobusArrowStream closedStream)
 ```
-**Beta.** Recreates an Arrow stream from a closed stream, re-ingesting unacknowledged batches and flushing.
+Recreates an Arrow stream from a closed stream, re-ingesting unacknowledged batches and flushing.
 
 ---
 
@@ -1139,7 +1137,7 @@ StreamBuilder ackCallback(AckCallback callback)  // JSON/proto only
 // Format selection -> typed sub-builder:
 JsonStreamBuilder  json()
 ProtoStreamBuilder compiledProto(DescriptorProto descriptorProto)
-ArrowStreamBuilder arrow(Schema schema)          // Beta
+ArrowStreamBuilder arrow(Schema schema)
 ```
 
 Each sub-builder exposes `build()`:
@@ -1147,7 +1145,7 @@ Each sub-builder exposes `build()`:
 ```java
 CompletableFuture<ZerobusJsonStream>  StreamBuilder.JsonStreamBuilder.build()
 CompletableFuture<ZerobusProtoStream> StreamBuilder.ProtoStreamBuilder.build()
-CompletableFuture<ZerobusArrowStream> StreamBuilder.ArrowStreamBuilder.build()   // Beta
+CompletableFuture<ZerobusArrowStream> StreamBuilder.ArrowStreamBuilder.build()
 ```
 
 `ArrowStreamBuilder` additionally supports `maxInflightBatches(int)`, `connectionTimeoutMs(long)`, `ipcCompression(IPCCompressionType)`, and `streamPausedMaxWaitTimeMs(long)`.
@@ -1254,9 +1252,7 @@ Returns unacknowledged records grouped by batch.
 
 ---
 
-### ZerobusArrowStream (Beta)
-
-> **Beta.** Arrow Flight ingestion is in Beta. The API is stabilising but may still change before reaching GA.
+### ZerobusArrowStream
 
 Stream for Apache Arrow Flight ingestion of `VectorSchemaRoot` batches. Use `ZerobusSdk.streamBuilder().arrow()` to create instances. Requires `arrow-vector` + `arrow-memory-netty` on the classpath and JDK 9+ `--add-opens` flags (see [Dependencies](#dependencies)).
 
@@ -1278,9 +1274,9 @@ Returns unacknowledged batches as serialized Arrow IPC byte arrays. After the st
 
 ---
 
-### ArrowStreamConfigurationOptions (Beta)
+### ArrowStreamConfigurationOptions
 
-Configuration options for `ZerobusArrowStream`. Build via `ArrowStreamConfigurationOptions.builder()`. See [Arrow Stream Configuration Options](#arrow-stream-configuration-options-beta) for the full table of fields and defaults.
+Configuration options for `ZerobusArrowStream`. Build via `ArrowStreamConfigurationOptions.builder()`. See [Arrow Stream Configuration Options](#arrow-stream-configuration-options) for the full table of fields and defaults.
 
 **Static Methods:**
 
@@ -1318,7 +1314,7 @@ ArrowStreamConfigurationOptions options = ArrowStreamConfigurationOptions.builde
 
 ---
 
-### IPCCompressionType (Enum, Beta)
+### IPCCompressionType (Enum)
 
 Selects the Arrow IPC compression codec applied to each batch on the wire. Set via `ArrowStreamConfigurationOptions.builder().setIpcCompression(...)`.
 

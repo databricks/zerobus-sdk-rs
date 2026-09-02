@@ -39,7 +39,7 @@ Run from `typescript/`:
 - `npm install` — Install dependencies
 - `npm run build` — Release build
 - `npm run build:debug` — Debug build (faster iteration)
-- `npm run build:arrow` — Build with Arrow Flight support
+- `npm run build:arrow` / `npm run build:debug:arrow` — Same builds with Arrow Flight
 - `npm test` — Run all tests
 - `npm run test:unit` / `npm run test:integration` — Targeted test runs
 - `cargo fmt --all` and `cargo clippy --all-targets --all-features` — Lint/format Rust code
@@ -83,7 +83,8 @@ The public API is what TypeScript consumers see — the generated `.d.ts` types 
 ## Release
 
 - Version source: `typescript/package.json` (`"version": "x.y.z"`).
-- Tag: `typescript/v<semver>` → triggers `release-typescript.yml` → builds native `.node` binaries for all platforms → publishes to npm.
+- Tag: `typescript/v<semver>` → triggers `release-typescript.yml` → builds Linux and Windows `.node` binaries with Arrow Flight (`npm run build:arrow`) → publishes to npm.
+- macOS `.node` binaries are supplied via the `macos-binaries-release` workflow input. They must be built with `npm run build:arrow`; `npm run build` omits Arrow Flight.
 - On version bump PR: update version in `package.json`, move `NEXT_CHANGELOG.md` contents to `CHANGELOG.md`, reset `NEXT_CHANGELOG.md`.
 
 ## Platform targets

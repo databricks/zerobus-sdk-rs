@@ -1,5 +1,25 @@
 # Version changelog
 
+## Release v1.6.0
+
+### New Features and Improvements
+
+- Promoted Arrow Flight ingestion to general availability across its APIs,
+  documentation, and examples.
+
+### Deprecations
+
+### Bug Fixes
+
+### Documentation
+
+- Built on Rust SDK 2.8.0. Wrapper-facing notes for that core are in
+  `rust/CHANGELOG.md` and https://github.com/databricks/zerobus-sdk/releases/tag/rust/v2.8.0.
+
+### Internal Changes
+
+### API Changes
+
 ## Release v1.5.0
 
 ### New Features and Improvements

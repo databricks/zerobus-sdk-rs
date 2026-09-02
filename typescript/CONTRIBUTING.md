@@ -32,10 +32,17 @@ This document covers TypeScript-specific development setup and workflow.
 
    This will compile the Rust code into a native Node.js addon (`.node` file) for your platform.
 
+   Arrow Flight is opt-in, same as the Rust SDK. Use `npm run build:debug:arrow` (or
+   `npm run build:arrow` for a release build) when you need `createArrowStream`.
+   Published npm binaries are built with Arrow Flight enabled.
+
 4. **Run tests:**
    ```bash
+   npm run build:debug:arrow
    npm test
    ```
+
+   Unit tests import the Arrow API, so they need an Arrow-enabled build.
 
 ## Building
 
@@ -55,6 +62,17 @@ Optimized for production:
 npm run build
 ```
 
+### Arrow Flight Build
+
+Arrow Flight is behind the `arrow-flight` Cargo feature (off by default). Enable it with:
+
+```bash
+npm run build:debug:arrow
+npm run build:arrow
+```
+
+`npm test` expects an Arrow-enabled debug build (`npm run build:debug:arrow`).
+
 ### Cross-Platform Builds
 
 Build for specific targets:
@@ -64,6 +82,9 @@ npm run build -- --target x86_64-apple-darwin
 npm run build -- --target x86_64-unknown-linux-gnu
 npm run build -- --target x86_64-pc-windows-msvc
 ```
+
+For Arrow-enabled artifacts (including darwin binaries added to a TypeScript
+release), pass the same `--target` to `npm run build:arrow`.
 
 ## Testing
 

@@ -3,9 +3,6 @@
 This directory contains an example demonstrating Arrow Flight-based data
 ingestion into Databricks Delta tables using the Zerobus C++ SDK.
 
-> **Beta**: Arrow Flight ingestion is in Beta. The API is stabilising but may
-> still change before reaching GA.
-
 ## Table of Contents
 
 - [Overview](#overview)

@@ -1,7 +1,7 @@
 //! Ingestion streams, organized per transport.
 //!
-//! [`grpc`] holds proto / JSON streaming over a bidirectional gRPC stream.
-//! [`arrow`] holds Arrow Flight streaming (Beta).
+//! [`grpc`] holds JSON and Protocol Buffer streaming.
+//! [`arrow`] holds Arrow Flight streaming.
 //!
 //! TODO: lift the transport-agnostic parts of `grpc/` (callbacks,
 //! `flush` / `wait_for_offset` / `close`, `ingest_*`) into a shared core.
@@ -25,3 +25,5 @@ pub use grpc::ZerobusStream;
 
 #[cfg(feature = "testing")]
 pub use grpc::CallbackHandlerHarness;
+#[cfg(feature = "testing")]
+pub(crate) use grpc::StreamShutdownHandle;

@@ -17,7 +17,7 @@ namespace zerobus {
 struct CZerobusStream;  // opaque FFI handle (defined in zerobus.h)
 class Sdk;
 
-/// A unidirectional ingestion stream to a single Zerobus table.
+/// A JSON or Protocol Buffer ingestion stream to a single Zerobus table.
 ///
 /// Created via `Sdk::create_stream`. Move-only; the destructor closes the
 /// stream gracefully (best effort) and frees the underlying FFI resources.

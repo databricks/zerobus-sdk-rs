@@ -65,7 +65,7 @@ jobs:
         run: npm install --no-audit --no-fund
 
       - name: Build
-        run: npm run build -- --target ${{ matrix.target }}
+        run: npm run build:arrow -- --target ${{ matrix.target }}
         env:
           CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: aarch64-linux-gnu-gcc
 
@@ -126,7 +126,7 @@ jobs:
         run: npm install --no-audit --no-fund
 
       - name: Build
-        run: npm run build:debug
+        run: npm run build:debug:arrow
 
       - name: Test
         run: npm run test:unit

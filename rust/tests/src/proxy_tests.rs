@@ -386,8 +386,8 @@ async fn test_proxy_and_no_proxy() -> Result<(), Box<dyn std::error::Error>> {
         );
     }
 
-    // === Part 6: Verify standard gRPC target TLS through the CONNECT tunnel ===
-    info!("=== Testing standard gRPC TLS through proxy ===");
+    // === Part 6: Verify JSON/protobuf target TLS through the CONNECT tunnel ===
+    info!("=== Testing JSON/protobuf TLS through proxy ===");
     {
         let (mock_server, server_url, ca_pem) = start_mock_tls_server().await?;
         mock_server
@@ -403,7 +403,7 @@ async fn test_proxy_and_no_proxy() -> Result<(), Box<dyn std::error::Error>> {
 
         assert!(
             connect_count.load(Ordering::SeqCst) > 0,
-            "Expected TLS standard gRPC traffic to use the configured proxy"
+            "Expected TLS JSON/protobuf traffic to use the configured proxy"
         );
     }
 
