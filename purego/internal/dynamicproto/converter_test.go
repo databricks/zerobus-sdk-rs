@@ -1,6 +1,7 @@
 package dynamicproto
 
 import (
+	"strconv"
 	"strings"
 	"testing"
 
@@ -38,7 +39,7 @@ func testDescriptorBytes(t *testing.T) []byte {
 	return b
 }
 
-func collectionDescriptorBytes(t *testing.T) []byte {
+func collectionDescriptorBytes(t testing.TB) []byte {
 	t.Helper()
 	desc, err := schema.DescriptorFromUCColumns([]schema.UcColumn{
 		{
@@ -68,6 +69,9 @@ func TestConverter_EncodeJSONBytes(t *testing.T) {
 	c, err := NewFromDescriptorProtoBytes(testDescriptorBytes(t))
 	if err != nil {
 		t.Fatalf("NewFromDescriptorProtoBytes() error = %v", err)
+	}
+	if c.validateNullCollections {
+		t.Fatal("scalar descriptor unexpectedly requires collection validation")
 	}
 	out, err := c.EncodeJSONBytes([]byte(`{"id": 123, "customer":"alice"}`))
 	if err != nil {
@@ -206,9 +210,13 @@ func TestConverter_RejectsNullCollections(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewFromDescriptorProtoBytes() error = %v", err)
 	}
+	if !converter.validateNullCollections {
+		t.Fatal("collection descriptor does not require collection validation")
+	}
 	for _, record := range []string{
 		`{}`,
 		`{"items":[],"lookup":{}}`,
+		`{"items":[],"lookup":{"null-key":1}}`,
 	} {
 		if _, err := converter.EncodeJSONBytes([]byte(record)); err != nil {
 			t.Fatalf("valid record %s rejected: %v", record, err)
@@ -232,6 +240,33 @@ func TestConverter_RejectsNullCollections(t *testing.T) {
 	}
 }
 
+func TestConverter_DetectsNestedCollections(t *testing.T) {
+	desc, err := schema.DescriptorFromUCColumns([]schema.UcColumn{{
+		Name:     "payload",
+		TypeName: "STRUCT",
+		TypeJSON: `{"type":"struct","fields":[{"name":"items","type":` +
+			`{"type":"array","elementType":"long","containsNull":false},"nullable":false}]}`,
+		Position: 0,
+	}}, "NestedCollections")
+	if err != nil {
+		t.Fatalf("DescriptorFromUCColumns() error = %v", err)
+	}
+	encoded, err := proto.Marshal(desc)
+	if err != nil {
+		t.Fatalf("marshal descriptor: %v", err)
+	}
+	converter, err := NewFromDescriptorProtoBytes(encoded)
+	if err != nil {
+		t.Fatalf("NewFromDescriptorProtoBytes() error = %v", err)
+	}
+	if !converter.validateNullCollections {
+		t.Fatal("nested collection descriptor does not require collection validation")
+	}
+	if _, err := converter.EncodeJSONBytes([]byte(`{"payload":{"items":[null]}}`)); err == nil {
+		t.Fatal("null nested collection element was accepted")
+	}
+}
+
 func TestConverter_RejectsMalformedDescriptor(t *testing.T) {
 	_, err := NewFromDescriptorProtoBytes([]byte{0x0a, 0x01})
 	if err == nil {
@@ -239,5 +274,64 @@ func TestConverter_RejectsMalformedDescriptor(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "parse descriptor bytes") {
 		t.Fatalf("error = %v, want descriptor parse error", err)
+	}
+}
+
+func BenchmarkConverter_EncodeJSONBytes_WideScalarRecord(b *testing.B) {
+	const columns = 105
+	desc := &descriptorpb.DescriptorProto{Name: proto.String("WideRecord")}
+	var record strings.Builder
+	record.WriteByte('{')
+	for i := 0; i < columns; i++ {
+		name := "field_" + strconv.Itoa(i)
+		desc.Field = append(desc.Field, &descriptorpb.FieldDescriptorProto{
+			Name:     proto.String(name),
+			Number:   proto.Int32(int32(i + 1)),
+			Label:    descriptorpb.FieldDescriptorProto_LABEL_OPTIONAL.Enum(),
+			Type:     descriptorpb.FieldDescriptorProto_TYPE_INT64.Enum(),
+			JsonName: proto.String(name),
+		})
+		if i > 0 {
+			record.WriteByte(',')
+		}
+		record.WriteByte('"')
+		record.WriteString(name)
+		record.WriteString(`":`)
+		record.WriteString(strconv.Itoa(i))
+	}
+	record.WriteByte('}')
+
+	encoded, err := proto.Marshal(desc)
+	if err != nil {
+		b.Fatalf("marshal descriptor: %v", err)
+	}
+	converter, err := NewFromDescriptorProtoBytes(encoded)
+	if err != nil {
+		b.Fatalf("NewFromDescriptorProtoBytes() error = %v", err)
+	}
+	payload := []byte(record.String())
+
+	b.ReportAllocs()
+	b.ResetTimer()
+	for b.Loop() {
+		if _, err := converter.EncodeJSONBytes(payload); err != nil {
+			b.Fatal(err)
+		}
+	}
+}
+
+func BenchmarkConverter_EncodeJSONBytes_CollectionsWithoutNull(b *testing.B) {
+	converter, err := NewFromDescriptorProtoBytes(collectionDescriptorBytes(b))
+	if err != nil {
+		b.Fatalf("NewFromDescriptorProtoBytes() error = %v", err)
+	}
+	payload := []byte(`{"items":[1,2,3],"lookup":{"a":1,"b":2}}`)
+
+	b.ReportAllocs()
+	b.ResetTimer()
+	for b.Loop() {
+		if _, err := converter.EncodeJSONBytes(payload); err != nil {
+			b.Fatal(err)
+		}
 	}
 }
