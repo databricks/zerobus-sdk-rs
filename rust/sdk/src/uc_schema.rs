@@ -266,6 +266,9 @@ fn is_reqwest_error_retryable(error: &reqwest::Error) -> bool {
 
 /// Parse the workspace URL, defaulting a missing scheme to `https` (matching
 /// [`ZerobusSdkBuilder::endpoint`](crate::ZerobusSdkBuilder::endpoint)).
+///
+/// Plain `http` is only permitted for loopback hosts (localhost, 127.0.0.1, ::1)
+/// to prevent sending OAuth credentials over cleartext.
 fn normalize_endpoint(unity_catalog_url: &str) -> ZerobusResult<reqwest::Url> {
     let trimmed = unity_catalog_url.trim();
     if trimmed.is_empty() {
@@ -288,6 +291,11 @@ fn normalize_endpoint(unity_catalog_url: &str) -> ZerobusResult<reqwest::Url> {
             "invalid Unity Catalog URL: expected an http or https URL with a host".to_string(),
         ));
     }
+    if url.scheme() == "http" && !is_loopback_host(&url) {
+        return Err(ZerobusError::InvalidUCEndpointError(
+            "invalid Unity Catalog URL: http is not permitted for non-loopback hosts".to_string(),
+        ));
+    }
     // Reject embedded credentials so a secret can't leak into a quoted-URL error.
     if !url.username().is_empty() || url.password().is_some() {
         return Err(ZerobusError::InvalidUCEndpointError(
@@ -295,6 +303,23 @@ fn normalize_endpoint(unity_catalog_url: &str) -> ZerobusResult<reqwest::Url> {
         ));
     }
     Ok(url)
+}
+
+fn is_loopback_host(url: &reqwest::Url) -> bool {
+    let Some(host) = url.host_str() else {
+        return false;
+    };
+    if host.eq_ignore_ascii_case("localhost") || host.to_ascii_lowercase().ends_with(".localhost") {
+        return true;
+    }
+    let ip_str = host
+        .strip_prefix('[')
+        .and_then(|h| h.strip_suffix(']'))
+        .unwrap_or(host);
+    if let Ok(ip) = ip_str.parse::<std::net::IpAddr>() {
+        return ip.is_loopback();
+    }
+    false
 }
 
 /// Append `segments` to `base`'s path, percent-encoding each one.
@@ -354,11 +379,30 @@ mod tests {
                 .as_str(),
             "http://localhost:8080/"
         );
+        assert_eq!(
+            normalize_endpoint("http://127.0.0.1:8080")
+                .unwrap()
+                .as_str(),
+            "http://127.0.0.1:8080/"
+        );
+        assert_eq!(
+            normalize_endpoint("http://[::1]:8080").unwrap().as_str(),
+            "http://[::1]:8080/"
+        );
+        assert_eq!(
+            normalize_endpoint("http://sub.localhost:8080")
+                .unwrap()
+                .as_str(),
+            "http://sub.localhost:8080/"
+        );
         for bad in [
             "",
             "   ",
             "ftp://example.com",
             "not a url",
+            // Cleartext HTTP is rejected for non-loopback hosts.
+            "http://workspace.cloud.databricks.com",
+            "http://192.168.1.1:8080",
             // Credentials in the URL would end up in error messages.
             "https://user:secret@workspace.cloud.databricks.com",
         ] {

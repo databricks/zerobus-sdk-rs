@@ -245,3 +245,19 @@ async fn empty_columns_returns_non_retryable_schema_fetch_error() {
     }
     assert!(!err.is_retryable());
 }
+
+#[tokio::test]
+async fn insecure_http_endpoint_fails_before_any_request() {
+    let err = fetch_message_descriptor("http://insecure-host.example.com", TABLE, "cid", "csec")
+        .await
+        .unwrap_err();
+    match err {
+        ZerobusError::InvalidUCEndpointError(msg) => {
+            assert!(
+                msg.contains("http is not permitted for non-loopback hosts"),
+                "got: {msg}"
+            );
+        }
+        other => panic!("expected InvalidUCEndpointError, got {other:?}"),
+    }
+}
