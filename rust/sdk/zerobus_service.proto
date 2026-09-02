@@ -68,7 +68,6 @@ enum RecordType {
   RECORD_TYPE_UNSPECIFIED = 0;
   PROTO = 1;
   JSON = 2;
-  // 3 is ARROW_IPC on the Zerobus service. 
   reserved 3;
   AVRO = 4;
 }
@@ -131,7 +130,7 @@ message CreateIngestStreamRequest {
   // This descriptor defines the structure of the records being ingested.
   // It must be compatible with the target table's schema.
   //
-  // This is a required field for all stream creation requests.
+  // Required only for streams with record_type = PROTO; ignored otherwise.
   optional bytes descriptor_proto = 3;
 
   // Record type that will be accepted in the stream.
@@ -195,7 +194,7 @@ message IngestRecordBatchRequest {
   optional int64 offset_id = 1;
 
   // Batch of serialized records.
-  // The batch can contain multiple records encoded as either protobuf or JSON.
+  // The batch can contain multiple records encoded as protobuf, JSON, or Avro.
   oneof batch {
     // Batch of protobuf-encoded records. Each record must be serialized according to
     // the protobuf descriptor provided in the CreateIngestStreamRequest.

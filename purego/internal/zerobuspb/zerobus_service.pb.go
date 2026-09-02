@@ -252,7 +252,7 @@ type CreateIngestStreamRequest struct {
 	// This descriptor defines the structure of the records being ingested.
 	// It must be compatible with the target table's schema.
 	//
-	// This is a required field for all stream creation requests.
+	// Required only for streams with record_type = PROTO; ignored otherwise.
 	DescriptorProto []byte `protobuf:"bytes,3,opt,name=descriptor_proto,json=descriptorProto" json:"descriptor_proto,omitempty"`
 	// Record type that will be accepted in the stream.
 	// Defaults to PROTO for backwards compatibility.
@@ -499,7 +499,7 @@ type IngestRecordBatchRequest struct {
 	// Unique identifier for this batch within the stream.
 	OffsetId *int64 `protobuf:"varint,1,opt,name=offset_id,json=offsetId" json:"offset_id,omitempty"`
 	// Batch of serialized records.
-	// The batch can contain multiple records encoded as either protobuf or JSON.
+	// The batch can contain multiple records encoded as protobuf, JSON, or Avro.
 	//
 	// Types that are valid to be assigned to Batch:
 	//
