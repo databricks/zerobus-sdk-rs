@@ -33,6 +33,7 @@ pub struct ZerobusSdkBuilder {
     sdk_identifier_override: Option<String>,
     token_cache_enabled: bool,
     token_refresh_buffer: Duration,
+    connection_per_stream: bool,
 }
 
 impl ZerobusSdkBuilder {
@@ -49,6 +50,7 @@ impl ZerobusSdkBuilder {
             sdk_identifier_override: None,
             token_cache_enabled: true,
             token_refresh_buffer: DEFAULT_REFRESH_BUFFER,
+            connection_per_stream: true,
         }
     }
 
@@ -105,6 +107,18 @@ impl ZerobusSdkBuilder {
     /// streams; see [`ConnectorFactory`] for semantics.
     pub fn connector_factory(mut self, factory: ConnectorFactory) -> Self {
         self.connector_factory = Some(factory);
+        self
+    }
+
+    /// Controls whether each ingestion stream gets a dedicated gRPC connection.
+    ///
+    /// This is enabled by default so streams created from the same SDK instance
+    /// do not compete for throughput on one HTTP/2 connection. Set it to `false`
+    /// to multiplex all JSON and protobuf streams from this SDK over one shared
+    /// connection. Arrow Flight streams already use dedicated connections and
+    /// are unaffected by this option.
+    pub fn connection_per_stream(mut self, enabled: bool) -> Self {
+        self.connection_per_stream = enabled;
         self
     }
 
@@ -273,6 +287,7 @@ impl ZerobusSdkBuilder {
             sdk_identifier,
             self.token_cache_enabled,
             self.token_refresh_buffer,
+            self.connection_per_stream,
         ))
     }
 }
@@ -328,6 +343,27 @@ mod tests {
             .expect("should build");
         // The cache is always present; enablement is internal state.
         let _ = &sdk.token_cache;
+    }
+
+    #[test]
+    fn test_connection_per_stream_enabled_by_default() {
+        let sdk = ZerobusSdkBuilder::new()
+            .endpoint("https://workspace.zerobus.databricks.com")
+            .build()
+            .expect("should build");
+
+        assert!(sdk.connection_per_stream);
+    }
+
+    #[test]
+    fn test_connection_per_stream_can_be_disabled() {
+        let sdk = ZerobusSdkBuilder::new()
+            .endpoint("https://workspace.zerobus.databricks.com")
+            .connection_per_stream(false)
+            .build()
+            .expect("should build");
+
+        assert!(!sdk.connection_per_stream);
     }
 
     #[test]

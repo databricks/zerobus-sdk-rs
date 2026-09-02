@@ -51,6 +51,8 @@ pub struct ZerobusSdk {
     pub zerobus_endpoint: String,
     pub unity_catalog_url: String,
     shared_channel: tokio::sync::Mutex<Option<ZerobusClient<Channel>>>,
+    /// Whether JSON/protobuf streams receive dedicated gRPC connections.
+    pub(crate) connection_per_stream: bool,
     pub(crate) workspace_id: String,
     pub(crate) tls_config: Arc<dyn TlsConfig>,
     pub(crate) connector_factory: Option<ConnectorFactory>,
@@ -131,12 +133,14 @@ impl ZerobusSdk {
         sdk_identifier: Arc<str>,
         token_cache_enabled: bool,
         token_refresh_buffer: Duration,
+        connection_per_stream: bool,
     ) -> Self {
         ZerobusSdk {
             zerobus_endpoint,
             unity_catalog_url,
             workspace_id,
             shared_channel: tokio::sync::Mutex::new(None),
+            connection_per_stream,
             tls_config,
             connector_factory,
             sdk_identifier,
@@ -300,41 +304,43 @@ impl ZerobusSdk {
         }
     }
 
-    /// Gets or creates the shared Channel for all streams.
-    /// The first call creates the Channel, subsequent calls clone it.
-    /// All clones share the same underlying TCP connection via HTTP/2 multiplexing.
+    /// Creates a dedicated client or returns a clone of the SDK's shared client,
+    /// according to the SDK's `connection_per_stream` setting.
     pub(crate) async fn get_or_create_channel_zerobus_client(
         &self,
     ) -> ZerobusResult<ZerobusClient<Channel>> {
+        if self.connection_per_stream {
+            return self.create_channel_zerobus_client();
+        }
+
         let mut guard = self.shared_channel.lock().await;
 
         if guard.is_none() {
-            // Create the channel for the first time.
-            let endpoint = Endpoint::from_shared(self.zerobus_endpoint.clone())
-                .map_err(|err| ZerobusError::ChannelCreationError(err.to_string()))?
-                .user_agent(self.sdk_identifier.as_ref())
-                .map_err(|err| ZerobusError::ChannelCreationError(err.to_string()))?;
-
-            let endpoint = self.tls_config.configure_endpoint(endpoint)?;
-
-            let host = endpoint.uri().host().unwrap_or_default().to_string();
-            let proxy_connector = proxy::resolve_connector(&host, self.connector_factory.as_ref())?;
-
-            let channel = match proxy_connector {
-                Some(pc) => endpoint.connect_with_connector_lazy(pc),
-                None => endpoint.connect_lazy(),
-            };
-
-            let client = ZerobusClient::new(channel)
-                .max_decoding_message_size(usize::MAX)
-                .max_encoding_message_size(usize::MAX);
-
-            *guard = Some(client);
+            *guard = Some(self.create_channel_zerobus_client()?);
         }
 
         Ok(guard
             .as_ref()
             .expect("Channel was just initialized")
             .clone())
+    }
+
+    fn create_channel_zerobus_client(&self) -> ZerobusResult<ZerobusClient<Channel>> {
+        let endpoint = Endpoint::from_shared(self.zerobus_endpoint.clone())
+            .map_err(|err| ZerobusError::ChannelCreationError(err.to_string()))?
+            .user_agent(self.sdk_identifier.as_ref())
+            .map_err(|err| ZerobusError::ChannelCreationError(err.to_string()))?;
+
+        let endpoint = self.tls_config.configure_endpoint(endpoint)?;
+        let host = endpoint.uri().host().unwrap_or_default().to_string();
+        let proxy_connector = proxy::resolve_connector(&host, self.connector_factory.as_ref())?;
+        let channel = match proxy_connector {
+            Some(pc) => endpoint.connect_with_connector_lazy(pc),
+            None => endpoint.connect_lazy(),
+        };
+
+        Ok(ZerobusClient::new(channel)
+            .max_decoding_message_size(usize::MAX)
+            .max_encoding_message_size(usize::MAX))
     }
 }

@@ -64,6 +64,66 @@ mod stream_initialization_and_basic_lifecycle_tests {
     }
 
     #[tokio::test]
+    async fn test_each_stream_uses_its_own_connection_by_default(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let (mock_server, server_url) = start_mock_server().await?;
+        let sdk = ZerobusSdk::builder()
+            .endpoint(server_url)
+            .tls_config(Arc::new(NoTlsConfig))
+            .build()?;
+
+        let mut stream1 = sdk
+            .stream_builder()
+            .table("test_catalog.test_schema.stream_1")
+            .headers_provider(Arc::new(TestHeadersProvider::default()))
+            .compiled_proto(create_test_descriptor_proto().expect("test descriptor should exist"))
+            .build()
+            .await?;
+        let mut stream2 = sdk
+            .stream_builder()
+            .table("test_catalog.test_schema.stream_2")
+            .headers_provider(Arc::new(TestHeadersProvider::default()))
+            .compiled_proto(create_test_descriptor_proto().expect("test descriptor should exist"))
+            .build()
+            .await?;
+
+        assert_eq!(mock_server.get_connection_count().await, 2);
+        stream1.close().await?;
+        stream2.close().await?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_streams_can_share_one_connection() -> Result<(), Box<dyn std::error::Error>> {
+        let (mock_server, server_url) = start_mock_server().await?;
+        let sdk = ZerobusSdk::builder()
+            .endpoint(server_url)
+            .tls_config(Arc::new(NoTlsConfig))
+            .connection_per_stream(false)
+            .build()?;
+
+        let mut stream1 = sdk
+            .stream_builder()
+            .table("test_catalog.test_schema.stream_1")
+            .headers_provider(Arc::new(TestHeadersProvider::default()))
+            .compiled_proto(create_test_descriptor_proto().expect("test descriptor should exist"))
+            .build()
+            .await?;
+        let mut stream2 = sdk
+            .stream_builder()
+            .table("test_catalog.test_schema.stream_2")
+            .headers_provider(Arc::new(TestHeadersProvider::default()))
+            .compiled_proto(create_test_descriptor_proto().expect("test descriptor should exist"))
+            .build()
+            .await?;
+
+        assert_eq!(mock_server.get_connection_count().await, 1);
+        stream1.close().await?;
+        stream2.close().await?;
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn test_timeouted_stream_creation() -> Result<(), Box<dyn std::error::Error>> {
         setup_tracing();
         info!("Starting test_timeouted_stream_creation");
