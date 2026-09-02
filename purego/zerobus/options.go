@@ -17,6 +17,7 @@ type sdkConfig struct {
 	tlsConfig                 *tls.Config
 	httpClient                *http.Client
 	dynamicSchemaFetchTimeout time.Duration
+	connectionPerStream       bool
 }
 
 // WithApplicationName appends a caller-supplied identifier such as "my-app/1.0"
@@ -48,6 +49,15 @@ func WithHTTPClient(client *http.Client) Option {
 		if client != nil {
 			c.httpClient = client
 		}
+	}
+}
+
+// WithConnectionPerStream configures the connection per stream flag,
+// if enabled all streams use a dedicated GRPC connection
+// else one shared connection. Default is shared connection
+func WithConnectionPerStream(enabled bool) Option {
+	return func(c *sdkConfig) {
+		c.connectionPerStream = enabled
 	}
 }
 

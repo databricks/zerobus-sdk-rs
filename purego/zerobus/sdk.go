@@ -58,6 +58,10 @@ type SDK struct {
 	httpClient                *http.Client
 	dynamicSchemaFetchTimeout time.Duration
 
+	// connection per stream
+	connectionPerStream bool
+	dialConn            func() (*transport.Conn, error)
+
 	// mu guards the open-stream set and closed flag.
 	mu     sync.Mutex
 	closed bool
@@ -80,8 +84,16 @@ func newSDK(conn *transport.Conn, zerobusEndpoint, ucEndpoint string, cfg sdkCon
 		tokenCache:                auth.NewSharedTokenCache(),
 		httpClient:                cfg.httpClient,
 		dynamicSchemaFetchTimeout: fetchTimeout,
+		connectionPerStream:       cfg.connectionPerStream,
 		streams:                   make(map[*Stream]struct{}),
 	}
+}
+
+// newSdkWithDial builds an SDK around a dial func for creating a new connection
+func newSdkWithDial(dialConn func() (*transport.Conn, error), zerobusEndpoint, ucEndpoint string, cfg sdkConfig) *SDK {
+	sdk := newSDK(nil, zerobusEndpoint, ucEndpoint, cfg)
+	sdk.dialConn = dialConn
+	return sdk
 }
 
 // New connects to the Zerobus service and returns an SDK.
@@ -122,7 +134,18 @@ func New(zerobusEndpoint, ucEndpoint string, opts ...Option) (*SDK, error) {
 		dialOpts = append(dialOpts, transport.WithTLSConfig(cfg.tlsConfig))
 	}
 
-	conn, err := transport.Dial(target, dialOpts...)
+	dialConn := func() (*transport.Conn, error) {
+		return transport.Dial(target, dialOpts...)
+	}
+
+	// Don't create a shared connection if each stream has dedicated conn
+	// pass a dialer so each stream can create its own connection
+	if cfg.connectionPerStream {
+		return newSdkWithDial(dialConn, zerobusEndpoint, ucEndpoint, cfg), nil
+	}
+
+	// shared connection using dialer
+	conn, err := dialConn()
 	if err != nil {
 		return nil, &Error{Op: "New", cause: err, retryable: false}
 	}
@@ -155,8 +178,12 @@ func (s *SDK) Close() error {
 		}()
 	}
 	wg.Wait()
-	// Close the connection after stream teardown.
-	errs[len(open)] = s.conn.Close()
+
+	if !s.connectionPerStream {
+		// Close the connection after stream teardown.
+		errs[len(open)] = s.conn.Close()
+	}
+
 	return wrapErr("Close", errors.Join(errs...))
 }
 
@@ -277,8 +304,23 @@ func (s *SDK) createStreamConfigured(
 	if sc.waitReady {
 		openingCtx = ctx
 	}
-	core, err := stream.NewProtoJSONStream(openingCtx, s.conn, params, sc.cfg, sc.callback)
+
+	// create a new connection for each stream if enabled else shared
+	conn := s.conn
+	if s.connectionPerStream {
+		streamConn, dialErr := s.dialConn()
+		if dialErr != nil {
+			return nil, wrapErr(op, dialErr)
+		}
+		conn = streamConn
+	}
+
+	core, err := stream.NewProtoJSONStream(openingCtx, conn, params, sc.cfg, sc.callback)
 	if err != nil {
+		if s.connectionPerStream {
+			// close stream connection in case of error
+			_ = conn.Close()
+		}
 		return nil, wrapErr(op, err)
 	}
 	st := &Stream{
@@ -292,11 +334,16 @@ func (s *SDK) createStreamConfigured(
 		st.jsonConverter, st.jsonConverterErr = dynamicproto.NewFromDescriptorProtoBytes(sc.descriptor)
 		st.conversionGate = make(chan struct{}, 1)
 	}
+
+	if s.connectionPerStream {
+		st.streamConn = conn
+	}
+
 	s.mu.Lock()
 	if s.closed {
 		s.mu.Unlock()
 		// Stop the stream created before Close won the race.
-		_ = core.Terminate()
+		_ = st.terminate() // this calls stream.Core.Terminate()
 		return nil, &Error{Op: op, cause: fmt.Errorf("SDK is closed"), retryable: false}
 	}
 	s.streams[st] = struct{}{}
