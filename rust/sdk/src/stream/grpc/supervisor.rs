@@ -15,11 +15,12 @@ use tokio::time::Duration;
 use tokio_retry::strategy::FixedInterval;
 use tokio_retry::RetryIf;
 use tokio_util::sync::CancellationToken;
+use tokio_util::task::AbortOnDropHandle;
 use tonic::transport::Channel;
 use tracing::{debug, error, info, instrument, warn};
 
 use super::types::{CallbackMessage, OneshotMap, RecordLandingZone};
-use super::{ZerobusStream, STREAM_TEARDOWN_DRAIN_TIMEOUT_MS};
+use super::{StreamShutdownHandle, ZerobusStream, STREAM_TEARDOWN_DRAIN_TIMEOUT_MS};
 use crate::databricks::zerobus::zerobus_client::ZerobusClient;
 use crate::errors::should_retry_initial_connection;
 use crate::{
@@ -27,7 +28,94 @@ use crate::{
     ZerobusError, ZerobusResult,
 };
 
+async fn finish_io_task(task: &mut AbortOnDropHandle<ZerobusResult<()>>, drain: bool) {
+    if drain
+        && tokio::time::timeout(
+            Duration::from_millis(STREAM_TEARDOWN_DRAIN_TIMEOUT_MS),
+            &mut *task,
+        )
+        .await
+        .is_ok()
+    {
+        return;
+    }
+
+    task.abort();
+    let _ = task.await;
+}
+
+/// Clone-independent state used to fail pending records after a mux lane
+/// reaches a terminal state. Dropping the handle still signals shutdown, so a
+/// cancelled cleanup cannot leave the lane running.
+pub(crate) struct StreamFailureHandle {
+    shutdown: StreamShutdownHandle,
+    forced_failure_token: CancellationToken,
+    sync_mutex: Arc<tokio::sync::Mutex<()>>,
+    landing_zone: RecordLandingZone,
+    oneshot_map: Arc<tokio::sync::Mutex<OneshotMap>>,
+    failed_records: Arc<RwLock<Vec<EncodedBatch>>>,
+    callback_tx: Option<tokio::sync::mpsc::UnboundedSender<CallbackMessage>>,
+}
+
+impl StreamFailureHandle {
+    fn signal(&self) {
+        self.shutdown.signal();
+        self.forced_failure_token.cancel();
+    }
+
+    pub(crate) async fn fail_and_shutdown(self, error: ZerobusError) {
+        let _ingest_guard = self.sync_mutex.lock().await;
+        let mut failed = self.failed_records.write().await;
+        let mut map = self.oneshot_map.lock().await;
+        ZerobusStream::drain_pending_records(
+            Arc::clone(&self.landing_zone),
+            &mut map,
+            &mut failed,
+            &error,
+            &self.callback_tx,
+        );
+        drop(map);
+        drop(failed);
+        self.signal();
+    }
+}
+
+impl Drop for StreamFailureHandle {
+    fn drop(&mut self) {
+        self.signal();
+    }
+}
+
 impl ZerobusStream {
+    pub(crate) fn terminal_error(&self) -> Option<ZerobusError> {
+        self.server_error_rx.borrow().clone()
+    }
+
+    pub(crate) fn failure_handle(&self) -> StreamFailureHandle {
+        StreamFailureHandle {
+            shutdown: self.shutdown_handle(),
+            forced_failure_token: self.forced_failure_token.clone(),
+            sync_mutex: Arc::clone(&self.sync_mutex),
+            landing_zone: Arc::clone(&self.landing_zone),
+            oneshot_map: Arc::clone(&self.oneshot_map),
+            failed_records: Arc::clone(&self.failed_records),
+            callback_tx: self.callback_tx.clone(),
+        }
+    }
+
+    pub(crate) async fn fail_pending_records(&self, error: &ZerobusError) {
+        let _ingest_guard = self.sync_mutex.lock().await;
+        let mut failed = self.failed_records.write().await;
+        let mut map = self.oneshot_map.lock().await;
+        Self::drain_pending_records(
+            Arc::clone(&self.landing_zone),
+            &mut map,
+            &mut failed,
+            error,
+            &self.callback_tx,
+        );
+    }
+
     /// Supervisor task is responsible for managing the stream lifecycle.
     /// It handles stream creation, recovery, and error handling.
     #[allow(clippy::too_many_arguments)]
@@ -211,10 +299,12 @@ impl ZerobusStream {
 
             // Per-stream child token
             let per_stream_token = cancellation_token.child_token();
-            // Separate token for recv_task's close path
-            let recv_drain_token = CancellationToken::new();
+            // The receiver must also observe parent cancellation if stream
+            // construction is cancelled before the supervisor is installed in
+            // a ZerobusStream.
+            let recv_drain_token = cancellation_token.child_token();
 
-            let mut recv_task = Self::spawn_receiver_task(
+            let mut recv_task = AbortOnDropHandle::new(Self::spawn_receiver_task(
                 response_grpc_stream,
                 logical_last_received_offset_id_tx.clone(),
                 landing_zone_receiver,
@@ -224,27 +314,20 @@ impl ZerobusStream {
                 server_error_tx.clone(),
                 recv_drain_token.clone(),
                 callback_tx.clone(),
-            );
-            let mut send_task = Self::spawn_sender_task(
+            ));
+            let mut send_task = AbortOnDropHandle::new(Self::spawn_sender_task(
                 tx,
                 landing_zone_sender,
                 Arc::clone(&is_paused),
                 server_error_tx.clone(),
                 per_stream_token.clone(),
-            );
+            ));
 
             // 4. Wait for any of the two tasks to end.
             let result = tokio::select! {
                 recv_result = &mut recv_task => {
                     per_stream_token.cancel();
-                    let _ = tokio::time::timeout(
-                        Duration::from_millis(STREAM_TEARDOWN_DRAIN_TIMEOUT_MS),
-                        &mut send_task,
-                    )
-                    .await;
-                    if !send_task.is_finished() {
-                        send_task.abort();
-                    }
+                    finish_io_task(&mut send_task, true).await;
                     match recv_result {
                         Ok(Err(e)) => Err(e),
                         Err(e) => Err(ZerobusError::UnexpectedStreamResponseError(
@@ -258,15 +341,12 @@ impl ZerobusStream {
                 }
                 send_result = &mut send_task => {
                     // Draining the recv_task prevents RST_STREAM(CANCEL) from being sent alongside END_STREAM.
-                    if matches!(send_result, Ok(Ok(()))) && cancellation_token.is_cancelled() {
+                    let should_drain = matches!(send_result, Ok(Ok(())))
+                        && cancellation_token.is_cancelled();
+                    if should_drain {
                         recv_drain_token.cancel();
-                        let _ = tokio::time::timeout(
-                            Duration::from_millis(STREAM_TEARDOWN_DRAIN_TIMEOUT_MS),
-                            &mut recv_task,
-                        )
-                        .await;
                     }
-                    recv_task.abort();
+                    finish_io_task(&mut recv_task, should_drain).await;
                     match send_result {
                         Ok(Err(e)) => Err(e),
                         Err(e) => Err(ZerobusError::UnexpectedStreamResponseError(
@@ -406,6 +486,12 @@ mod tests {
 
     impl Wake for NoopWake {
         fn wake(self: Arc<Self>) {}
+    }
+
+    #[tokio::test]
+    async fn completed_io_task_is_not_polled_twice() {
+        let mut task = AbortOnDropHandle::new(tokio::spawn(async { Ok(()) }));
+        finish_io_task(&mut task, true).await;
     }
 
     #[tokio::test]

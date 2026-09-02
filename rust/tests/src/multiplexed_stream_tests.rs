@@ -678,6 +678,7 @@ mod failure_tests {
         info!("Starting test_wait_for_message_id_on_failed_stream_poisons_mux");
 
         let (mock_server, server_url) = start_mock_server().await?;
+        let healthy_ack = Arc::new(MockResponseGate::new());
 
         // Stream OK: acks its record
         mock_server
@@ -688,9 +689,9 @@ mod failure_tests {
                         stream_id: "stream_ok".to_string(),
                         delay_ms: 0,
                     },
-                    MockResponse::RecordAck {
+                    MockResponse::GatedRecordAck {
                         ack_up_to_offset: 0,
-                        delay_ms: 0,
+                        gate: Arc::clone(&healthy_ack),
                     },
                 ],
             )
@@ -719,9 +720,10 @@ mod failure_tests {
         let s2 = create_test_stream(&sdk, TABLE_FAIL, default_options()).await?;
         let mux = MultiplexedStream::new(vec![s1, s2]);
 
-        // First ingest (stream 0 = OK), succeeds fully
+        // Wait on the healthy lane before another lane poisons the mux.
         let offset0 = mux.ingest_record(b"record1".to_vec()).await?;
-        mux.wait_for_message_id(offset0).await?;
+        let mut healthy_wait = Box::pin(mux.wait_for_message_id(offset0));
+        assert!(matches!(poll!(&mut healthy_wait), Poll::Pending));
 
         // Second ingest (stream 1 = FAIL) — queuing succeeds
         let offset1 = mux.ingest_record(b"record2".to_vec()).await?;
@@ -729,17 +731,22 @@ mod failure_tests {
         // But waiting for ack surfaces the sub-stream error
         let result = mux.wait_for_message_id(offset1).await;
         assert!(result.is_err(), "Expected error from failed sub-stream");
+        let sibling_result = tokio::time::timeout(Duration::from_secs(1), healthy_wait)
+            .await
+            .expect("poisoning must wake sibling acknowledgment waits");
+        healthy_ack.release();
+        assert!(sibling_result.is_err());
 
         // The sub-stream closed (non-retryable error), so the mux should be poisoned
-        // and further ingest should fail with InvalidStateError.
+        // and further ingest should preserve the terminal error.
         assert!(
             mux.is_closed(),
             "Expected mux to be poisoned after sub-stream close"
         );
         let ingest_after = mux.ingest_record(b"record3".to_vec()).await;
         assert!(
-            matches!(ingest_after, Err(ZerobusError::InvalidStateError(_))),
-            "Expected InvalidStateError on ingest after poison, got {:?}",
+            matches!(&ingest_after, Err(ZerobusError::StreamClosedError(status)) if status.code() == tonic::Code::PermissionDenied),
+            "Expected terminal error on ingest after poison, got {:?}",
             ingest_after
         );
 
@@ -753,6 +760,22 @@ mod failure_tests {
         info!("Starting test_flush_error_on_closed_substream_poisons_mux");
 
         let (mock_server, server_url) = start_mock_server().await?;
+        let healthy_ack = Arc::new(MockResponseGate::new());
+        mock_server
+            .inject_responses(
+                TABLE_OK,
+                vec![
+                    MockResponse::CreateStream {
+                        stream_id: "healthy".to_string(),
+                        delay_ms: 0,
+                    },
+                    MockResponse::GatedRecordAck {
+                        ack_up_to_offset: 0,
+                        gate: Arc::clone(&healthy_ack),
+                    },
+                ],
+            )
+            .await;
         mock_server
             .inject_responses(
                 TABLE_FAIL,
@@ -770,13 +793,18 @@ mod failure_tests {
             .await;
 
         let sdk = create_test_sdk(&server_url).await?;
-        let s1 = create_test_stream(&sdk, TABLE_FAIL, default_options()).await?;
-        let mux = MultiplexedStream::new(vec![s1]);
+        let s1 = create_test_stream(&sdk, TABLE_OK, default_options()).await?;
+        let s2 = create_test_stream(&sdk, TABLE_FAIL, default_options()).await?;
+        let mux = MultiplexedStream::new(vec![s1, s2]);
 
-        let _ = mux.ingest_record(b"data".to_vec()).await?;
+        mux.ingest_record(b"healthy".to_vec()).await?;
+        mux.ingest_record(b"failing".to_vec()).await?;
 
-        // Non-retryable error → sub-stream closes → flush errors → mux poisoned.
-        let flush_result = mux.flush().await;
+        // A terminal lane must end flush without waiting for the healthy lane.
+        let flush_result = tokio::time::timeout(Duration::from_secs(1), mux.flush())
+            .await
+            .expect("flush must not wait for a poisoned sibling");
+        healthy_ack.release();
         assert!(flush_result.is_err(), "Expected flush to fail");
         assert!(
             mux.is_closed(),
@@ -785,8 +813,8 @@ mod failure_tests {
 
         let ingest_after = mux.ingest_record(b"data".to_vec()).await;
         assert!(
-            matches!(ingest_after, Err(ZerobusError::InvalidStateError(_))),
-            "Expected InvalidStateError after poison, got {:?}",
+            matches!(&ingest_after, Err(ZerobusError::StreamClosedError(status)) if status.code() == tonic::Code::PermissionDenied),
+            "Expected terminal error after poison, got {:?}",
             ingest_after
         );
 
