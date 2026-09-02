@@ -20,6 +20,11 @@
 
 use std::fmt;
 use std::sync::Arc;
+use std::time::Duration;
+
+use futures::future::join_all;
+use rand::Rng;
+use tracing::{error, warn};
 
 use crate::callbacks::AckCallback;
 use crate::databricks::zerobus::RecordType;
@@ -28,7 +33,8 @@ use crate::headers_provider::NoAuthHeadersProvider;
 use crate::headers_provider::{HeadersProvider, OAuthHeadersProvider};
 use crate::stream_configuration::StreamConfigurationOptions;
 use crate::{
-    MessageDescriptor, TableProperties, ZerobusError, ZerobusResult, ZerobusSdk, ZerobusStream,
+    MessageDescriptor, MessageId, MultiplexedStream, TableProperties, ZerobusError, ZerobusResult,
+    ZerobusSdk, ZerobusStream,
 };
 
 #[cfg(feature = "arrow-flight")]
@@ -54,6 +60,30 @@ enum FormatConfig {
     DynamicProto(MessageDescriptor),
     #[cfg(feature = "arrow-flight")]
     Arrow(Arc<ArrowSchema>),
+}
+
+type GrpcFormat = (
+    RecordType,
+    Option<prost_types::DescriptorProto>,
+    Option<MessageDescriptor>,
+);
+
+impl FormatConfig {
+    fn into_grpc(self) -> ZerobusResult<GrpcFormat> {
+        match self {
+            Self::Json => Ok((RecordType::Json, None, None)),
+            Self::CompiledProto(descriptor) => Ok((RecordType::Proto, Some(*descriptor), None)),
+            Self::DynamicProto(descriptor) => Ok((
+                RecordType::Proto,
+                Some(descriptor.descriptor_proto().clone()),
+                Some(descriptor),
+            )),
+            #[cfg(feature = "arrow-flight")]
+            Self::Arrow(_) => Err(ZerobusError::InvalidArgument(
+                "Arrow format requires .build_arrow() instead of .build()".into(),
+            )),
+        }
+    }
 }
 
 /// A fluent builder for creating Zerobus ingestion streams.
@@ -101,6 +131,7 @@ pub struct StreamBuilder<'a> {
     auth: Option<AuthConfig>,
     format: Option<FormatConfig>,
     grpc_config: StreamConfigurationOptions,
+    multiplexed_callback: Option<Arc<dyn AckCallback<MessageId>>>,
     #[cfg(feature = "arrow-flight")]
     arrow_config: ArrowStreamConfigurationOptions,
 }
@@ -126,6 +157,11 @@ impl fmt::Debug for StreamBuilder<'_> {
             .field("table_name", &self.table_name)
             .field("auth", &auth_kind)
             .field("format", &format_kind)
+            .field("ack_callback", &self.grpc_config.ack_callback.is_some())
+            .field(
+                "multiplexed_ack_callback",
+                &self.multiplexed_callback.is_some(),
+            )
             .finish_non_exhaustive()
     }
 }
@@ -150,6 +186,7 @@ impl<'a> StreamBuilder<'a> {
             auth: None,
             format: None,
             grpc_config: StreamConfigurationOptions::default(),
+            multiplexed_callback: None,
             #[cfg(feature = "arrow-flight")]
             arrow_config: ArrowStreamConfigurationOptions::default(),
         }
@@ -286,6 +323,10 @@ impl<'a> StreamBuilder<'a> {
     }
 
     /// Set the maximum number of in-flight requests (JSON and Protocol Buffer streams only).
+    ///
+    /// For a multiplexed stream, this is a mux-wide budget. Each sub-stream
+    /// receives `n / stream_count` capacity; any remainder is unused. The
+    /// budget must be at least the number of sub-streams.
     pub fn max_inflight_requests(mut self, n: usize) -> Self {
         self.grpc_config.max_inflight_requests = n;
         self
@@ -318,17 +359,27 @@ impl<'a> StreamBuilder<'a> {
         self
     }
 
-    /// Set the acknowledgment callback (JSON and Protocol Buffer streams only).
+    /// Set the acknowledgment callback for an ordinary JSON or Protocol Buffer gRPC stream.
     ///
-    /// `build_arrow()` rejects this option with
-    /// [`ZerobusError::InvalidArgument`] because Arrow Flight streams do not
-    /// support acknowledgment callbacks.
+    /// Calling this setter again replaces the previous ordinary callback.
+    /// [`MultiplexedStreamBuilder::validate`] and `build_arrow()` reject it.
     pub fn ack_callback(mut self, callback: Arc<dyn AckCallback>) -> Self {
         self.grpc_config.ack_callback = Some(callback);
         self
     }
 
-    /// Set the maximum wait time for callbacks after stream close (JSON and Protocol Buffer streams only).
+    /// Set the acknowledgment callback for a multiplexed gRPC stream.
+    ///
+    /// The callback receives the [`MessageId`] returned by multiplexed ingest
+    /// methods. Calling this setter again replaces the previous multiplexed
+    /// callback. Ordinary `build()` and `build_arrow()` reject it.
+    pub fn multiplexed_ack_callback(mut self, callback: Arc<dyn AckCallback<MessageId>>) -> Self {
+        self.multiplexed_callback = Some(callback);
+        self
+    }
+
+    /// Set the maximum wait time for callbacks after stream close
+    /// (JSON and Protocol Buffer gRPC streams only).
     pub fn callback_max_wait_time_ms(mut self, ms: Option<u64>) -> Self {
         self.grpc_config.callback_max_wait_time_ms = ms;
         self
@@ -355,6 +406,29 @@ impl<'a> StreamBuilder<'a> {
         self
     }
 
+    /// Select a multiplexed gRPC stream composed of `stream_count` homogeneous
+    /// sub-streams.
+    ///
+    /// This is a terminal mode selection: configure table, authentication,
+    /// format, stream options, and an optional
+    /// [`multiplexed_ack_callback`](Self::multiplexed_ack_callback) before
+    /// calling it. The returned builder only supports validation and
+    /// construction.
+    ///
+    /// Use multiplexing when one logical stream is the throughput bottleneck
+    /// and global ordering is not required. Records retain ordering within
+    /// each sub-stream, but there is no global record, message-ID, or callback
+    /// order. Different sub-stream callback workers may invoke the shared
+    /// callback concurrently.
+    ///
+    /// `stream_count` must be in `1..=64` and cannot exceed the configured
+    /// `max_inflight_requests`. The mux-wide in-flight budget is divided evenly
+    /// across sub-streams using integer division. JSON, compiled protobuf, and
+    /// dynamic protobuf are supported; Arrow Flight is not.
+    pub fn multiplexed(self, stream_count: usize) -> MultiplexedStreamBuilder<'a> {
+        MultiplexedStreamBuilder::new(self, stream_count)
+    }
+
     /// Validate that the builder has all required fields configured.
     ///
     /// Returns `Ok(())` if table name, authentication, and format are all set.
@@ -376,6 +450,16 @@ impl<'a> StreamBuilder<'a> {
     /// let stream = builder.build().await?;
     /// ```
     pub fn validate(&self) -> ZerobusResult<()> {
+        self.validate_common()?;
+        if self.multiplexed_callback.is_some() {
+            return Err(ZerobusError::InvalidArgument(
+                "multiplexed_ack_callback is only valid with .multiplexed(...)".into(),
+            ));
+        }
+        Ok(())
+    }
+
+    fn validate_common(&self) -> ZerobusResult<()> {
         if self.table_name.is_empty() {
             return Err(ZerobusError::InvalidArgument(
                 "table name is required: call .table()".into(),
@@ -431,30 +515,14 @@ impl<'a> StreamBuilder<'a> {
     /// or if an Arrow format was selected (use `build_arrow()` instead).
     pub async fn build(mut self) -> ZerobusResult<ZerobusStream> {
         self.validate()?;
-        let headers_provider = self.resolve_headers_provider()?;
 
-        let (record_type, descriptor_proto, message_descriptor) = match self.format {
-            Some(FormatConfig::Json) => (RecordType::Json, None, None),
-            Some(FormatConfig::CompiledProto(desc)) => (RecordType::Proto, Some(*desc), None),
-            Some(FormatConfig::DynamicProto(md)) => {
-                // The wire descriptor is recovered from the already-resolved
-                // MessageDescriptor the caller supplied.
-                let desc = md.descriptor_proto().clone();
-                (RecordType::Proto, Some(desc), Some(md))
-            }
-            #[cfg(feature = "arrow-flight")]
-            Some(FormatConfig::Arrow(_)) => {
-                return Err(ZerobusError::InvalidArgument(
-                    "Arrow format requires .build_arrow() instead of .build()".into(),
-                ));
-            }
-            None => {
-                return Err(ZerobusError::InvalidArgument(
-                    "record format is required: call .json(), .compiled_proto(), or .dynamic_proto() before .build()"
-                        .into(),
-                ));
-            }
-        };
+        let (record_type, descriptor_proto, message_descriptor) = self
+            .format
+            .take()
+            .expect("format was validated")
+            .into_grpc()?;
+
+        let headers_provider = self.resolve_headers_provider()?;
 
         self.grpc_config.record_type = record_type;
         let table_properties = TableProperties {
@@ -479,11 +547,12 @@ impl<'a> StreamBuilder<'a> {
     ///
     /// Returns an error if table name, authentication, or format has not been set,
     /// if a non-Arrow format was selected (use `build()` instead), or if
-    /// [`ack_callback`](Self::ack_callback) was configured (callbacks are
-    /// unsupported for Arrow Flight streams).
+    /// [`ack_callback`](Self::ack_callback) or
+    /// [`multiplexed_ack_callback`](Self::multiplexed_ack_callback) was
+    /// configured (callbacks are unsupported for Arrow Flight streams).
     #[cfg(feature = "arrow-flight")]
     pub async fn build_arrow(self) -> ZerobusResult<ZerobusArrowStream> {
-        self.validate()?;
+        self.validate_common()?;
 
         let schema = match self.format.as_ref() {
             Some(FormatConfig::Arrow(schema)) => Arc::clone(schema),
@@ -499,9 +568,10 @@ impl<'a> StreamBuilder<'a> {
             }
         };
 
-        if self.grpc_config.ack_callback.is_some() {
+        if self.grpc_config.ack_callback.is_some() || self.multiplexed_callback.is_some() {
             return Err(ZerobusError::InvalidArgument(
-                "ack_callback is not supported for Arrow Flight streams".into(),
+                "ack_callback and multiplexed_ack_callback are not supported for Arrow Flight streams"
+                    .into(),
             ));
         }
 
@@ -541,6 +611,206 @@ impl<'a> StreamBuilder<'a> {
         .await?;
         crate::client_warnings::record_stream_creation(&table_name);
         Ok(stream)
+    }
+}
+
+const MAX_MULTIPLEXED_JITTER_MS: u64 = 1_000;
+
+/// Terminal builder for a [`MultiplexedStream`].
+///
+/// Obtain this from [`StreamBuilder::multiplexed`] after setting all ordinary
+/// stream options. Construction opens every sub-stream concurrently after an
+/// independently sampled delay of at most one second when more than one stream
+/// is requested. A single stream opens immediately. Construction is atomic: if
+/// any open fails, every successfully opened sub-stream is closed and the error
+/// from the lowest failing stream index is returned.
+///
+/// Dropping the build future cancels delayed and active opens and tears down
+/// any sub-streams that already opened.
+#[must_use = "a MultiplexedStreamBuilder does nothing until `.build()` is called"]
+pub struct MultiplexedStreamBuilder<'a> {
+    inner: StreamBuilder<'a>,
+    stream_count: usize,
+}
+
+impl fmt::Debug for MultiplexedStreamBuilder<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("MultiplexedStreamBuilder")
+            .field("stream_count", &self.stream_count)
+            .field("stream", &self.inner)
+            .finish()
+    }
+}
+
+#[allow(clippy::result_large_err)]
+impl<'a> MultiplexedStreamBuilder<'a> {
+    fn new(inner: StreamBuilder<'a>, stream_count: usize) -> Self {
+        Self {
+            inner,
+            stream_count,
+        }
+    }
+
+    /// Validate the common stream configuration, mux-compatible format,
+    /// callback selection, and stream count without opening a connection.
+    pub fn validate(&self) -> ZerobusResult<()> {
+        self.inner.validate_common()?;
+        let max_streams = crate::multiplexed_stream::MAX_STREAMS;
+        if !(1..=max_streams).contains(&self.stream_count) {
+            return Err(ZerobusError::InvalidArgument(format!(
+                "multiplexed stream_count must be between 1 and {max_streams}"
+            )));
+        }
+
+        if self.max_inflight_requests_per_stream().is_none() {
+            return Err(ZerobusError::InvalidArgument(format!(
+                "max_inflight_requests ({}) must be at least stream_count ({}) for multiplexed streams",
+                self.inner.grpc_config.max_inflight_requests, self.stream_count
+            )));
+        }
+
+        #[cfg(feature = "arrow-flight")]
+        if matches!(self.inner.format, Some(FormatConfig::Arrow(_))) {
+            return Err(ZerobusError::InvalidArgument(
+                "Arrow format is not supported for multiplexed streams; use .build_arrow() on an ordinary StreamBuilder"
+                    .into(),
+            ));
+        }
+
+        if self.inner.grpc_config.ack_callback.is_some() {
+            return Err(ZerobusError::InvalidArgument(
+                "ack_callback is only valid for ordinary streams; use multiplexed_ack_callback before .multiplexed(...)"
+                    .into(),
+            ));
+        }
+        Ok(())
+    }
+
+    fn max_inflight_requests_per_stream(&self) -> Option<usize> {
+        self.inner
+            .grpc_config
+            .max_inflight_requests
+            .checked_div(self.stream_count)
+            .filter(|&capacity| capacity > 0)
+    }
+
+    fn resolve_headers_providers(&self) -> ZerobusResult<Vec<Arc<dyn HeadersProvider>>> {
+        (0..self.stream_count)
+            .map(|_| self.inner.resolve_headers_provider())
+            .collect()
+    }
+
+    fn sample_jitter_delays(&self) -> Vec<Duration> {
+        if self.stream_count == 1 {
+            return vec![Duration::ZERO];
+        }
+
+        let mut rng = rand::thread_rng();
+        (0..self.stream_count)
+            .map(|_| Duration::from_millis(rng.gen_range(0..=MAX_MULTIPLEXED_JITTER_MS)))
+            .collect()
+    }
+
+    /// Build all sub-streams concurrently and return the complete mux.
+    ///
+    /// No partially constructed mux is returned. If several opens fail, the
+    /// error belonging to the lowest preassigned sub-stream index wins; all
+    /// other creation and cleanup errors are logged.
+    pub async fn build(mut self) -> ZerobusResult<MultiplexedStream> {
+        self.validate()?;
+
+        // OAuth providers keep per-stream rejection-generation state, while
+        // sharing the SDK's token cache. Custom providers preserve their Arc
+        // identity because cloning their state may not be meaningful.
+        let headers_providers = self.resolve_headers_providers()?;
+        let delays = self.sample_jitter_delays();
+        let multiplexed_callback = self.inner.multiplexed_callback.take();
+
+        let (record_type, descriptor_proto, message_descriptor) = self
+            .inner
+            .format
+            .take()
+            .expect("format was validated")
+            .into_grpc()?;
+        self.inner.grpc_config.record_type = record_type;
+
+        let table_properties = TableProperties {
+            table_name: self.inner.table_name.clone(),
+            descriptor_proto,
+            message_descriptor,
+        };
+        let channel = self
+            .inner
+            .sdk
+            .get_or_create_channel_zerobus_client()
+            .await?;
+        let max_inflight_requests_per_stream = self
+            .max_inflight_requests_per_stream()
+            .expect("in-flight capacity was validated");
+        let mut options = self.inner.grpc_config;
+        options.max_inflight_requests = max_inflight_requests_per_stream;
+
+        let opens = delays.into_iter().zip(headers_providers).enumerate().map(
+            |(stream_index, (delay, headers_provider))| {
+                let channel = channel.clone();
+                let table_properties = table_properties.clone();
+                let mut options = options.clone();
+                let multiplexed_callback = multiplexed_callback.clone();
+
+                async move {
+                    tokio::time::sleep(delay).await;
+                    options.ack_callback = multiplexed_callback.map(|callback| {
+                        crate::multiplexed_stream::multiplexed_ack_callback(stream_index, callback)
+                    });
+                    ZerobusStream::new_stream(channel, table_properties, headers_provider, options)
+                        .await
+                }
+            },
+        );
+
+        // `join_all` polls every open concurrently and preserves input order,
+        // so completion timing cannot change the assigned stream indices.
+        let results = join_all(opens).await;
+        let mut indexed_streams = Vec::with_capacity(self.stream_count);
+        let mut first_error = None;
+        for (stream_index, result) in results.into_iter().enumerate() {
+            match result {
+                Ok(stream) => indexed_streams.push((stream_index, stream)),
+                Err(err) => {
+                    error!(stream_index, error = %err, "Failed to create multiplexed sub-stream");
+                    first_error.get_or_insert(err);
+                }
+            }
+        }
+
+        if let Some(first_error) = first_error {
+            let cleanup_results = join_all(indexed_streams.into_iter().map(
+                |(successful_stream_index, mut stream)| async move {
+                    (successful_stream_index, stream.close().await)
+                },
+            ))
+            .await;
+            for (successful_stream_index, result) in cleanup_results {
+                if let Err(err) = result {
+                    warn!(
+                        stream_index = successful_stream_index,
+                        error = %err,
+                        "Failed to clean up multiplexed sub-stream after construction failure"
+                    );
+                }
+            }
+            return Err(first_error);
+        }
+
+        let streams: Vec<_> = indexed_streams
+            .into_iter()
+            .map(|(_stream_index, stream)| stream)
+            .collect();
+        debug_assert_eq!(streams.len(), self.stream_count);
+        // This is one user-initiated logical stream creation. Counting each
+        // internal lane would make the churn warning flag intentional muxes.
+        crate::client_warnings::record_stream_creation(&table_properties.table_name);
+        Ok(MultiplexedStream::new(streams))
     }
 }
 

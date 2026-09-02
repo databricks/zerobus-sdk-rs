@@ -97,6 +97,14 @@ impl<T: Clone> LandingZone<T> {
         )
     }
 
+    pub(crate) fn try_reserve_capacity(&self) -> Option<CapacityReservation> {
+        self.semaphore
+            .clone()
+            .try_acquire_owned()
+            .ok()
+            .map(CapacityReservation)
+    }
+
     pub(crate) fn enqueue_reserved(&self, request: T, reservation: CapacityReservation) {
         let mut state = self.state.lock().expect("Lock poisoned");
         let mut permits = self.permits.lock().expect("Lock poisoned");

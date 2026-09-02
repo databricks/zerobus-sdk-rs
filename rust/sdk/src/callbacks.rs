@@ -21,7 +21,7 @@
 //! }
 //! ```
 
-use crate::offset_generator::OffsetId;
+use crate::OffsetId;
 
 /// Callback trait for receiving acknowledgment notifications.
 ///
@@ -33,7 +33,10 @@ use crate::offset_generator::OffsetId;
 /// # Thread Safety and Performance
 ///
 /// Implementations must be `Send + Sync` as callbacks are invoked from
-/// a dedicated background callback handler task.
+/// background callback handler tasks. An ordinary stream has one callback
+/// worker. A multiplexed stream shares one callback object across its
+/// sub-stream workers, so calls from different sub-streams can be concurrent
+/// and have no global order.
 ///
 /// **Important**: Callbacks are executed synchronously in a separate callback handler task.
 /// Keep implementations lightweight (simple logging, metrics increment, etc.) to avoid
