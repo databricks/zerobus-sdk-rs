@@ -2,6 +2,8 @@ package arrowproto
 
 import (
 	"bytes"
+	"encoding/binary"
+	"math"
 	"strings"
 	"testing"
 
@@ -9,6 +11,7 @@ import (
 	"github.com/apache/arrow-go/v18/arrow/array"
 	"github.com/apache/arrow-go/v18/arrow/ipc"
 	"github.com/apache/arrow-go/v18/arrow/memory"
+	flatbuffers "github.com/google/flatbuffers/go"
 )
 
 func idSchema(metadata *arrow.Metadata) *arrow.Schema {
@@ -133,6 +136,74 @@ func structBatch(
 	record := array.NewRecordBatch(schema, []arrow.Array{column}, int64(rows))
 	column.Release()
 	return schema, record
+}
+
+func dictionaryBatch(
+	t *testing.T,
+	allocator memory.Allocator,
+	rows int,
+	distinct int,
+	valueBytes int,
+) (*arrow.Schema, arrow.RecordBatch) {
+	t.Helper()
+	dictionaryType := &arrow.DictionaryType{
+		IndexType: arrow.PrimitiveTypes.Int32,
+		ValueType: arrow.BinaryTypes.String,
+	}
+	schema := arrow.NewSchema([]arrow.Field{{
+		Name: "value", Type: dictionaryType, Nullable: false,
+	}}, nil)
+	builder, ok := array.NewBuilder(allocator, dictionaryType).(*array.BinaryDictionaryBuilder)
+	if !ok {
+		t.Fatal("dictionary builder is not a *array.BinaryDictionaryBuilder")
+	}
+	// Single-byte runes only, so each value is exactly valueBytes on the wire and
+	// the caller can predict the dictionary's total size.
+	const alphabet = "abcdefghijklmnopqrstuvwxyz" +
+		"ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789+/"
+	if distinct > len(alphabet) {
+		t.Fatalf("distinct = %d, want at most %d", distinct, len(alphabet))
+	}
+	for i := range rows {
+		letter := alphabet[i%distinct : i%distinct+1]
+		if err := builder.AppendString(strings.Repeat(letter, valueBytes)); err != nil {
+			t.Fatalf("append dictionary value: %v", err)
+		}
+	}
+	column := builder.NewArray()
+	builder.Release()
+	record := array.NewRecordBatch(schema, []arrow.Array{column}, int64(rows))
+	column.Release()
+	return schema, record
+}
+
+func serializeRecords(
+	t *testing.T,
+	schema *arrow.Schema,
+	records ...arrow.RecordBatch,
+) []byte {
+	return serializeRecordsWithOptions(t, schema, nil, records...)
+}
+
+func serializeRecordsWithOptions(
+	t *testing.T,
+	schema *arrow.Schema,
+	options []ipc.Option,
+	records ...arrow.RecordBatch,
+) []byte {
+	t.Helper()
+	var output bytes.Buffer
+	writerOptions := append([]ipc.Option{ipc.WithSchema(schema)}, options...)
+	writer := ipc.NewWriter(&output, writerOptions...)
+	for _, record := range records {
+		if err := writer.Write(record); err != nil {
+			t.Fatalf("write IPC record: %v", err)
+		}
+	}
+	if err := writer.Close(); err != nil {
+		t.Fatalf("close IPC writer: %v", err)
+	}
+	return bytes.Clone(output.Bytes())
 }
 
 func readIDs(t *testing.T, data []byte) []int32 {
@@ -539,5 +610,298 @@ func TestTypedAdmissionChargesRecordBatchMetadata(t *testing.T) {
 			estimate,
 			payload.RetainedSize(),
 		)
+	}
+}
+
+func TestEncodeIPCCanonicalizesAndCopiesInput(t *testing.T) {
+	schema := idSchema(nil)
+	protocol, err := New(schema, Options{})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	record := idBatch(t, memory.DefaultAllocator, schema, []int32{1, 2})
+	defer record.Release()
+
+	input := serializeRecords(t, schema, record)
+	payload, err := protocol.EncodeIPC(input)
+	if err != nil {
+		t.Fatalf("EncodeIPC: %v", err)
+	}
+	// The caller may reuse its buffer the moment EncodeIPC returns.
+	for i := range input {
+		input[i] = 0
+	}
+	if got := readIDs(t, payload.IPCBytes()); !equalInt32(got, []int32{1, 2}) {
+		t.Fatalf("canonical ids = %v", got)
+	}
+
+	if _, err := protocol.EncodeIPC([]byte("not IPC")); err == nil {
+		t.Fatal("invalid IPC accepted")
+	}
+}
+
+func TestEncodeIPCRejectsNoEmptyAndMultipleBatches(t *testing.T) {
+	schema := idSchema(nil)
+	protocol, err := New(schema, Options{})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	empty := idBatch(t, memory.DefaultAllocator, schema, nil)
+	defer empty.Release()
+	one := idBatch(t, memory.DefaultAllocator, schema, []int32{1})
+	defer one.Release()
+
+	for _, test := range []struct {
+		name string
+		data []byte
+	}{
+		{name: "no batch", data: serializeRecords(t, schema)},
+		{name: "empty batch", data: serializeRecords(t, schema, empty)},
+		{name: "multiple batches", data: serializeRecords(t, schema, one, one)},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			if _, err := protocol.EncodeIPC(test.data); err == nil {
+				t.Fatalf("EncodeIPC accepted %s", test.name)
+			}
+		})
+	}
+}
+
+// A caller supplying its own IPC bytes is the first place a payload's exactly-one-batch
+// contract can be violated from outside, so anything past the single batch is rejected
+// rather than silently dropped.
+func TestEncodeIPCRejectsTrailingBytesAndConcatenatedStreams(t *testing.T) {
+	schema := idSchema(nil)
+	protocol, err := New(schema, Options{})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	record := idBatch(t, memory.DefaultAllocator, schema, []int32{1})
+	defer record.Release()
+	batchStream := serializeRecords(t, schema, record)
+
+	for _, test := range []struct {
+		name  string
+		input []byte
+	}{
+		{
+			name:  "trailing bytes",
+			input: append(bytes.Clone(batchStream), []byte("trailing")...),
+		},
+		{
+			name:  "concatenated stream",
+			input: append(bytes.Clone(batchStream), batchStream...),
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			if _, err := protocol.EncodeIPC(test.input); err == nil {
+				t.Fatalf("EncodeIPC accepted %s", test.name)
+			}
+			if _, err := protocol.EstimateIPCRetainedSize(test.input); err == nil {
+				t.Fatalf("EstimateIPCRetainedSize accepted %s", test.name)
+			}
+		})
+	}
+}
+
+func TestUncompressedIPCAdmissionCoversCanonicalPayload(t *testing.T) {
+	schema, record := binaryBatch(t, memory.DefaultAllocator, 512, 64)
+	defer record.Release()
+	protocol, err := New(schema, Options{})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	input := serializeRecords(t, schema, record)
+	estimate, err := protocol.EstimateIPCRetainedSize(input)
+	if err != nil {
+		t.Fatalf("EstimateIPCRetainedSize: %v", err)
+	}
+	payload, err := protocol.EncodeIPC(input)
+	if err != nil {
+		t.Fatalf("EncodeIPC: %v", err)
+	}
+	if estimate < payload.RetainedSize() {
+		t.Fatalf(
+			"estimate %d under-reserves the %d-byte canonical payload",
+			estimate,
+			payload.RetainedSize(),
+		)
+	}
+}
+
+// A compressed stream weighs a fraction of what Arrow allocates for it, so the
+// estimate has to follow the sizes the buffers declare rather than the wire
+// length — that is what lets a buffer limit below the expanded size refuse the
+// stream. Reaching that number must not materialize anything.
+func TestCompressedIPCAdmissionUsesDeclaredUncompressedSizes(t *testing.T) {
+	const (
+		rows       = 4_096
+		valueBytes = 2_048
+		valueTotal = int64(rows) * valueBytes
+	)
+	schema, record := binaryBatch(t, memory.DefaultAllocator, rows, valueBytes)
+	defer record.Release()
+
+	for _, test := range []struct {
+		name   string
+		option ipc.Option
+	}{
+		{name: "LZ4", option: ipc.WithLZ4()},
+		{name: "Zstd", option: ipc.WithZstd()},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			input := serializeRecordsWithOptions(
+				t,
+				schema,
+				[]ipc.Option{test.option},
+				record,
+			)
+			if int64(len(input)) >= valueTotal/4 {
+				t.Fatalf(
+					"compressed IPC size = %d, input is not highly compressible",
+					len(input),
+				)
+			}
+
+			allocator := memory.NewCheckedAllocator(memory.DefaultAllocator)
+			protocol, err := New(schema, Options{Allocator: allocator})
+			if err != nil {
+				t.Fatalf("New: %v", err)
+			}
+			estimate, err := protocol.EstimateIPCRetainedSize(input)
+			if err != nil {
+				t.Fatalf("EstimateIPCRetainedSize: %v", err)
+			}
+			// Doubling the compressed length cannot reach this, so only the
+			// declared uncompressed sizes can account for the estimate.
+			if estimate < valueTotal {
+				t.Fatalf(
+					"compressed IPC estimate = %d, below the %d bytes its buffers declare",
+					estimate,
+					valueTotal,
+				)
+			}
+			allocator.AssertSize(t, 0)
+		})
+	}
+}
+
+// A dictionary arrives as its own IPC message, and its values — not the indices
+// in the record batch — are the large buffers, so the preflight has to charge
+// that message too or the bulk of a dictionary-encoded stream goes unmeasured.
+func TestCompressedDictionaryIPCChargesDictionaryBatch(t *testing.T) {
+	const (
+		rows       = 4_096
+		distinct   = 64
+		valueBytes = 16 * 1024
+		valueTotal = int64(distinct) * valueBytes
+	)
+	schema, record := dictionaryBatch(
+		t,
+		memory.DefaultAllocator,
+		rows,
+		distinct,
+		valueBytes,
+	)
+	defer record.Release()
+	protocol, err := New(schema, Options{})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	input := serializeRecordsWithOptions(
+		t,
+		schema,
+		[]ipc.Option{ipc.WithLZ4()},
+		record,
+	)
+	estimate, err := protocol.EstimateIPCRetainedSize(input)
+	if err != nil {
+		t.Fatalf("EstimateIPCRetainedSize: %v", err)
+	}
+	// The record batch holds only 4-byte indices, so nothing but the dictionary
+	// message can account for this much.
+	if estimate < valueTotal {
+		t.Fatalf(
+			"dictionary IPC estimate = %d, below the %d bytes its values declare",
+			estimate,
+			valueTotal,
+		)
+	}
+	payload, err := protocol.EncodeIPC(input)
+	if err != nil {
+		t.Fatalf("EncodeIPC: %v", err)
+	}
+	if estimate < payload.RetainedSize() {
+		t.Fatalf(
+			"estimate %d under-reserves the %d-byte canonical payload",
+			estimate,
+			payload.RetainedSize(),
+		)
+	}
+}
+
+func TestCompressedIPCDeclaredSizeOverflowIsRejected(t *testing.T) {
+	builder := flatbuffers.NewBuilder(128)
+
+	builder.StartObject(2)
+	compression := builder.EndObject()
+
+	builder.StartVector(16, 2, 8)
+	for index := 1; index >= 0; index-- {
+		builder.Prep(8, 16)
+		builder.PrependInt64(8)
+		builder.PrependInt64(int64(index * 8))
+	}
+	buffers := builder.EndVector(2)
+
+	builder.StartObject(5)
+	builder.PrependUOffsetTSlot(2, buffers, 0)
+	builder.PrependUOffsetTSlot(3, compression, 0)
+	recordBatch := builder.EndObject()
+	builder.Finish(recordBatch)
+
+	body := make([]byte, 16)
+	binary.LittleEndian.PutUint64(body[:8], math.MaxInt64)
+	binary.LittleEndian.PutUint64(body[8:], 1)
+	if _, err := ipcCompressedExpansion(
+		ipcRootTable(builder.FinishedBytes()),
+		body,
+	); err == nil || !strings.Contains(err.Error(), "overflow") {
+		t.Fatalf("ipcCompressedExpansion overflow error = %v", err)
+	}
+}
+
+// The preflight walks flatbuffer metadata by hand, so every malformed shape has
+// to come back as an error rather than as a panic or a usable size.
+func TestPreflightRejectsMalformedIPC(t *testing.T) {
+	schema := idSchema(nil)
+	record := idBatch(t, memory.DefaultAllocator, schema, []int32{1})
+	defer record.Release()
+	batchStream := serializeRecords(t, schema, record)
+
+	for _, test := range []struct {
+		name  string
+		input []byte
+	}{
+		{name: "empty", input: nil},
+		{name: "garbage", input: []byte("not IPC at all")},
+		{name: "truncated", input: batchStream[:len(batchStream)/2]},
+		{
+			name:  "trailing bytes",
+			input: append(bytes.Clone(batchStream), 'x'),
+		},
+		{name: "schema only", input: serializeRecords(t, schema)},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			expanded, err := preflightIPCExpansion(test.input)
+			if err == nil {
+				t.Fatalf("preflight accepted %s", test.name)
+			}
+			if expanded != 0 {
+				t.Fatalf("rejected input reported %d expanded bytes", expanded)
+			}
+		})
 	}
 }

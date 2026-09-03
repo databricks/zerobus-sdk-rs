@@ -130,6 +130,26 @@ func (p *Protocol) EncodeRecordBatch(batch arrow.RecordBatch) (*Payload, error) 
 	return p.payloadFromCanonicalIPC(serialized, uint64(batch.NumRows()))
 }
 
+// EncodeIPC canonicalizes one caller-owned Arrow IPC stream. The batch is read
+// back and reserialized rather than forwarded, so the payload carries its own
+// schema and dictionary state instead of depending on frames the caller sent
+// earlier and will not send again after a reconnect.
+func (p *Protocol) EncodeIPC(data []byte) (*Payload, error) {
+	batch, err := p.decodeOne(data)
+	if err != nil {
+		return nil, err
+	}
+	defer batch.Release()
+	serialized, err := p.serialize(batch)
+	if err != nil {
+		return nil, fmt.Errorf(
+			"arrow protocol: canonicalize IPC RecordBatch: %w",
+			err,
+		)
+	}
+	return p.payloadFromCanonicalIPC(serialized, uint64(batch.NumRows()))
+}
+
 // EstimateRecordBatchRetainedSize returns a conservative pre-materialization
 // reservation: the batch sized from the rows it covers plus its custom
 // metadata, doubled to cover framing, compression, and buffer growth, plus the
@@ -148,6 +168,26 @@ func (p *Protocol) EstimateRecordBatchRetainedSize(
 		totalRecordBufferSize(batch),
 		recordBatchMetadataSize(batch),
 	)
+	if err != nil {
+		return math.MaxInt64, nil
+	}
+	return p.admissionEstimate(inputBytes), nil
+}
+
+// EstimateIPCRetainedSize reserves for canonicalizing one caller-owned IPC
+// stream. A compressed batch declares the uncompressed size of every buffer, so
+// those declarations are read straight out of the IPC metadata and charged here:
+// Arrow allocates against them the moment it materializes the input, and by then
+// admission has already let the stream through.
+func (p *Protocol) EstimateIPCRetainedSize(data []byte) (int64, error) {
+	expandedBytes, err := preflightIPCExpansion(data)
+	if err != nil {
+		return 0, err
+	}
+	// The wire bytes and the expansion they declare are both held while the
+	// payload is rebuilt, and both scale the same way, so they are charged as one
+	// input rather than as separate terms.
+	inputBytes, err := addInt64Saturating(int64(len(data)), expandedBytes)
 	if err != nil {
 		return math.MaxInt64, nil
 	}
