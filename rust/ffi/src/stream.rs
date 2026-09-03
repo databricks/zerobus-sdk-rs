@@ -85,13 +85,20 @@ async fn build_stream_from_parts(
     sdk_ref: &databricks_zerobus_ingest_sdk::ZerobusSdk,
     table_name: String,
     descriptor_proto: Option<prost_types::DescriptorProto>,
+    avro_schema_json: Option<String>,
     auth: StreamCreateAuth,
     options: Option<CStreamConfigurationOptions>,
 ) -> Result<*mut CZerobusStream, ZerobusError> {
-    let record_type = options
-        .as_ref()
-        .map(|c| c_record_type(c.record_type))
-        .unwrap_or(RecordType::Proto);
+    // An Avro schema comes only from the dedicated avro create fns, which force
+    // the Avro format regardless of options.record_type.
+    let record_type = if avro_schema_json.is_some() {
+        RecordType::Avro
+    } else {
+        options
+            .as_ref()
+            .map(|c| c_record_type(c.record_type))
+            .unwrap_or(RecordType::Proto)
+    };
 
     let base = match auth {
         StreamCreateAuth::OAuth {
@@ -117,6 +124,16 @@ async fn build_stream_from_parts(
             base.compiled_proto(desc)
         }
         RecordType::Json => base.json(),
+        #[cfg(feature = "avro")]
+        RecordType::Avro => {
+            let schema = avro_schema_json.ok_or_else(|| {
+                ZerobusError::InvalidArgument(
+                    "Avro schema is required for Avro record type".to_string(),
+                )
+            })?;
+            base.avro(schema)
+        }
+        #[cfg(not(feature = "avro"))]
         RecordType::Avro => {
             return Err(ZerobusError::InvalidArgument(
                 "Avro record type is not supported".to_string(),
@@ -270,6 +287,17 @@ fn encoded_records_to_c_array(records_vec: Vec<EncodedRecord>) -> CRecordArray {
                     data_len,
                 }
             }
+            // Avro datums are raw bytes (like proto): is_json = false.
+            #[cfg(feature = "avro")]
+            EncodedRecord::Avro(data) => {
+                let data_len = data.len();
+                let data_ptr = Box::into_raw(data.into_boxed_slice()) as *mut u8;
+                CRecord {
+                    is_json: false,
+                    data: data_ptr,
+                    data_len,
+                }
+            }
         })
         .collect();
 
@@ -341,6 +369,7 @@ pub extern "C" fn zerobus_sdk_create_stream(
                 sdk_ref,
                 table_name_str,
                 descriptor_proto,
+                None,
                 StreamCreateAuth::OAuth {
                     client_id: client_id_str,
                     client_secret: client_secret_str,
@@ -442,6 +471,7 @@ pub extern "C" fn zerobus_sdk_create_stream_async(
                     sdk_ref,
                     table_name_str,
                     descriptor_proto,
+                    None,
                     StreamCreateAuth::OAuth {
                         client_id: client_id_str,
                         client_secret: client_secret_str,
@@ -566,6 +596,7 @@ pub extern "C" fn zerobus_sdk_create_stream_with_headers_provider(
                 sdk_ref,
                 table_name_str,
                 descriptor_proto,
+                None,
                 // Pass the pre-built provider (constructed above, before any
                 // fallible work) so its Drop still frees `user_data` on every
                 // error path in here.
@@ -686,6 +717,7 @@ pub extern "C" fn zerobus_sdk_create_stream_with_headers_provider_async(
                     sdk_ref,
                     table_name_str,
                     descriptor_proto,
+                    None,
                     StreamCreateAuth::HeadersProvider { headers_provider },
                     c_opts,
                 )
@@ -1917,4 +1949,692 @@ pub extern "C" fn zerobus_get_default_config() -> CStreamConfigurationOptions {
         ack_on_error: None,
         ack_user_data: ptr::null_mut(),
     }
+}
+
+// ============================================================================
+// Avro record format (Beta). Gated behind the `avro` feature; the C header
+// exposes these behind `#if defined(ZEROBUS_AVRO)`. Mirrors the proto create +
+// ingest surface, with the Avro writer schema (JSON) supplied at creation.
+// ============================================================================
+
+/// Create an Avro stream with OAuth authentication (Beta).
+/// avro_schema_json: the Avro writer schema as a JSON string (required).
+#[cfg(feature = "avro")]
+#[no_mangle]
+pub extern "C" fn zerobus_sdk_create_avro_stream(
+    sdk: *mut CZerobusSdk,
+    table_name: *const c_char,
+    avro_schema_json: *const c_char,
+    client_id: *const c_char,
+    client_secret: *const c_char,
+    options: *const CStreamConfigurationOptions,
+    result: *mut CResult,
+) -> *mut CZerobusStream {
+    ffi_guard(result, ptr::null_mut(), move || {
+        let sdk_ref = match validate_sdk_ptr(sdk) {
+            Ok(s) => s,
+            Err(msg) => {
+                write_error_result(result, msg, false);
+                return ptr::null_mut();
+            }
+        };
+
+        let res = RUNTIME.block_on(async {
+            let table_name_str = unsafe {
+                c_str_to_string(table_name)
+                    .map_err(|e| ZerobusError::InvalidArgument(e.to_string()))?
+            };
+            let client_id_str = unsafe {
+                c_str_to_string(client_id)
+                    .map_err(|e| ZerobusError::InvalidArgument(e.to_string()))?
+            };
+            let client_secret_str = unsafe {
+                c_str_to_string(client_secret)
+                    .map_err(|e| ZerobusError::InvalidArgument(e.to_string()))?
+            };
+            let avro_schema = unsafe {
+                c_str_to_string(avro_schema_json)
+                    .map_err(|e| ZerobusError::InvalidArgument(e.to_string()))?
+            };
+
+            let c_opts = if !options.is_null() {
+                Some(unsafe { *options })
+            } else {
+                None
+            };
+
+            build_stream_from_parts(
+                sdk_ref,
+                table_name_str,
+                None,
+                Some(avro_schema),
+                StreamCreateAuth::OAuth {
+                    client_id: client_id_str,
+                    client_secret: client_secret_str,
+                },
+                c_opts,
+            )
+            .await
+        });
+
+        match res {
+            Ok(stream_ptr) => {
+                write_success_result(result);
+                stream_ptr
+            }
+            Err(err) => {
+                if !result.is_null() {
+                    unsafe {
+                        *result = CResult::error(err);
+                    }
+                }
+                ptr::null_mut()
+            }
+        }
+    })
+}
+
+/// Create an Avro stream with OAuth authentication on a background task (Beta).
+#[cfg(feature = "avro")]
+#[no_mangle]
+pub extern "C" fn zerobus_sdk_create_avro_stream_async(
+    sdk: *mut CZerobusSdk,
+    table_name: *const c_char,
+    avro_schema_json: *const c_char,
+    client_id: *const c_char,
+    client_secret: *const c_char,
+    options: *const CStreamConfigurationOptions,
+    callback: CreateStreamAsyncCallback,
+    user_data: *mut std::ffi::c_void,
+    result: *mut CResult,
+) -> bool {
+    ffi_guard(result, false, move || {
+        if let Err(msg) = validate_sdk_ptr(sdk) {
+            write_error_result(result, msg, false);
+            return false;
+        }
+
+        let table_name_str = match unsafe { c_str_to_string(table_name) } {
+            Ok(s) => s,
+            Err(e) => {
+                write_error_result(result, e, false);
+                return false;
+            }
+        };
+        let client_id_str = match unsafe { c_str_to_string(client_id) } {
+            Ok(s) => s,
+            Err(e) => {
+                write_error_result(result, e, false);
+                return false;
+            }
+        };
+        let client_secret_str = match unsafe { c_str_to_string(client_secret) } {
+            Ok(s) => s,
+            Err(e) => {
+                write_error_result(result, e, false);
+                return false;
+            }
+        };
+        let avro_schema = match unsafe { c_str_to_string(avro_schema_json) } {
+            Ok(s) => s,
+            Err(e) => {
+                write_error_result(result, e, false);
+                return false;
+            }
+        };
+
+        let c_opts = if !options.is_null() {
+            Some(unsafe { *options })
+        } else {
+            None
+        };
+
+        let sdk_ptr = SendPtr::new(sdk);
+        let callback_user_data = SendPtr::new(user_data);
+        RUNTIME.spawn(async move {
+            let callback_result = match validate_sdk_ptr(sdk_ptr.get()) {
+                Ok(sdk_ref) => match build_stream_from_parts(
+                    sdk_ref,
+                    table_name_str,
+                    None,
+                    Some(avro_schema),
+                    StreamCreateAuth::OAuth {
+                        client_id: client_id_str,
+                        client_secret: client_secret_str,
+                    },
+                    c_opts,
+                )
+                .await
+                {
+                    Ok(stream_ptr) => {
+                        invoke_create_stream_async_callback(
+                            callback,
+                            stream_ptr,
+                            CResult::success(),
+                            callback_user_data.get(),
+                        );
+                        return;
+                    }
+                    Err(err) => CResult::error(err),
+                },
+                Err(msg) => CResult {
+                    success: false,
+                    error_message: CString::new(msg)
+                        .unwrap_or_else(|_| CString::new("SDK pointer is invalid").unwrap())
+                        .into_raw(),
+                    is_retryable: false,
+                },
+            };
+
+            invoke_create_stream_async_callback(
+                callback,
+                ptr::null_mut(),
+                callback_result,
+                callback_user_data.get(),
+            );
+        });
+
+        write_success_result(result);
+        true
+    })
+}
+
+/// Create an Avro stream with a custom headers provider callback (Beta).
+/// Ownership of `user_data` follows `zerobus_sdk_create_stream_with_headers_provider`.
+#[cfg(feature = "avro")]
+#[no_mangle]
+pub extern "C" fn zerobus_sdk_create_avro_stream_with_headers_provider(
+    sdk: *mut CZerobusSdk,
+    table_name: *const c_char,
+    avro_schema_json: *const c_char,
+    headers_callback: HeadersProviderCallback,
+    user_data: *mut std::ffi::c_void,
+    free_user_data: Option<extern "C" fn(user_data: *mut std::ffi::c_void)>,
+    options: *const CStreamConfigurationOptions,
+    result: *mut CResult,
+) -> *mut CZerobusStream {
+    ffi_guard(result, ptr::null_mut(), move || {
+        let headers_provider: Arc<dyn HeadersProvider> = Arc::new(CallbackHeadersProvider::new(
+            headers_callback,
+            user_data,
+            free_user_data,
+        ));
+
+        let sdk_ref = match validate_sdk_ptr(sdk) {
+            Ok(s) => s,
+            Err(msg) => {
+                write_error_result(result, msg, false);
+                return ptr::null_mut();
+            }
+        };
+
+        let res = RUNTIME.block_on(async {
+            let table_name_str = unsafe {
+                c_str_to_string(table_name)
+                    .map_err(|e| ZerobusError::InvalidArgument(e.to_string()))?
+            };
+            let avro_schema = unsafe {
+                c_str_to_string(avro_schema_json)
+                    .map_err(|e| ZerobusError::InvalidArgument(e.to_string()))?
+            };
+
+            let c_opts = if !options.is_null() {
+                Some(unsafe { *options })
+            } else {
+                None
+            };
+
+            build_stream_from_parts(
+                sdk_ref,
+                table_name_str,
+                None,
+                Some(avro_schema),
+                StreamCreateAuth::HeadersProvider { headers_provider },
+                c_opts,
+            )
+            .await
+        });
+
+        match res {
+            Ok(stream_ptr) => {
+                write_success_result(result);
+                stream_ptr
+            }
+            Err(err) => {
+                if !result.is_null() {
+                    unsafe {
+                        *result = CResult::error(err);
+                    }
+                }
+                ptr::null_mut()
+            }
+        }
+    })
+}
+
+/// Create an Avro stream with a custom headers provider callback on a background task (Beta).
+#[cfg(feature = "avro")]
+#[no_mangle]
+pub extern "C" fn zerobus_sdk_create_avro_stream_with_headers_provider_async(
+    sdk: *mut CZerobusSdk,
+    table_name: *const c_char,
+    avro_schema_json: *const c_char,
+    headers_callback: HeadersProviderCallback,
+    user_data: *mut std::ffi::c_void,
+    free_user_data: Option<extern "C" fn(user_data: *mut std::ffi::c_void)>,
+    options: *const CStreamConfigurationOptions,
+    callback: CreateStreamAsyncCallback,
+    callback_user_data: *mut std::ffi::c_void,
+    result: *mut CResult,
+) -> bool {
+    ffi_guard(result, false, move || {
+        let headers_provider: Arc<dyn HeadersProvider> = Arc::new(CallbackHeadersProvider::new(
+            headers_callback,
+            user_data,
+            free_user_data,
+        ));
+
+        if let Err(msg) = validate_sdk_ptr(sdk) {
+            write_error_result(result, msg, false);
+            return false;
+        }
+
+        let table_name_str = match unsafe { c_str_to_string(table_name) } {
+            Ok(s) => s,
+            Err(e) => {
+                write_error_result(result, e, false);
+                return false;
+            }
+        };
+        let avro_schema = match unsafe { c_str_to_string(avro_schema_json) } {
+            Ok(s) => s,
+            Err(e) => {
+                write_error_result(result, e, false);
+                return false;
+            }
+        };
+
+        let c_opts = if !options.is_null() {
+            Some(unsafe { *options })
+        } else {
+            None
+        };
+
+        let sdk_ptr = SendPtr::new(sdk);
+        let callback_user_data = SendPtr::new(callback_user_data);
+        RUNTIME.spawn(async move {
+            let callback_result = match validate_sdk_ptr(sdk_ptr.get()) {
+                Ok(sdk_ref) => match build_stream_from_parts(
+                    sdk_ref,
+                    table_name_str,
+                    None,
+                    Some(avro_schema),
+                    StreamCreateAuth::HeadersProvider { headers_provider },
+                    c_opts,
+                )
+                .await
+                {
+                    Ok(stream_ptr) => {
+                        invoke_create_stream_async_callback(
+                            callback,
+                            stream_ptr,
+                            CResult::success(),
+                            callback_user_data.get(),
+                        );
+                        return;
+                    }
+                    Err(err) => CResult::error(err),
+                },
+                Err(msg) => CResult {
+                    success: false,
+                    error_message: CString::new(msg)
+                        .unwrap_or_else(|_| CString::new("SDK pointer is invalid").unwrap())
+                        .into_raw(),
+                    is_retryable: false,
+                },
+            };
+
+            invoke_create_stream_async_callback(
+                callback,
+                ptr::null_mut(),
+                callback_result,
+                callback_user_data.get(),
+            );
+        });
+
+        write_success_result(result);
+        true
+    })
+}
+
+/// Ingest a pre-encoded Avro datum. Returns the offset directly, or -1 on error.
+#[cfg(feature = "avro")]
+#[no_mangle]
+pub extern "C" fn zerobus_stream_ingest_avro_record(
+    stream: *mut CZerobusStream,
+    data: *const u8,
+    data_len: usize,
+    result: *mut CResult,
+) -> i64 {
+    ffi_guard(result, -1, move || {
+        if data.is_null() {
+            write_error_result(result, "Invalid data pointer", false);
+            return -1;
+        }
+
+        let stream_ref = match validate_stream_ptr(stream) {
+            Ok(s) => s,
+            Err(msg) => {
+                write_error_result(result, msg, false);
+                return -1;
+            }
+        };
+
+        let data_slice = unsafe { std::slice::from_raw_parts(data, data_len) };
+        let data_vec = data_slice.to_vec();
+
+        let offset_res = RUNTIME.block_on(async {
+            let payload = EncodedRecord::Avro(data_vec);
+            stream_ref.ingest_record_offset(payload).await
+        });
+
+        match offset_res {
+            Ok(offset) => {
+                write_success_result(result);
+                offset
+            }
+            Err(err) => {
+                if !result.is_null() {
+                    unsafe {
+                        *result = CResult::error(err);
+                    }
+                }
+                -1
+            }
+        }
+    })
+}
+
+/// Ingest an Avro datum on a background task and report the assigned offset via callback.
+#[cfg(feature = "avro")]
+#[no_mangle]
+pub extern "C" fn zerobus_stream_ingest_avro_record_async(
+    stream: *mut CZerobusStream,
+    data: *const u8,
+    data_len: usize,
+    callback: OffsetAsyncCallback,
+    user_data: *mut std::ffi::c_void,
+    result: *mut CResult,
+) -> bool {
+    ffi_guard(result, false, move || {
+        if data.is_null() {
+            write_error_result(result, "Invalid data pointer", false);
+            return false;
+        }
+        if let Err(msg) = validate_stream_ptr(stream) {
+            write_error_result(result, msg, false);
+            return false;
+        }
+
+        let data_vec = unsafe { std::slice::from_raw_parts(data, data_len) }.to_vec();
+        let stream_arc = unsafe { clone_stream_arc(stream) };
+        let callback_user_data = SendPtr::new(user_data);
+        RUNTIME.spawn(async move {
+            match stream_arc
+                .ingest_record_offset(EncodedRecord::Avro(data_vec))
+                .await
+            {
+                Ok(offset) => invoke_offset_async_callback(
+                    callback,
+                    offset,
+                    CResult::success(),
+                    callback_user_data.get(),
+                ),
+                Err(err) => invoke_offset_async_callback(
+                    callback,
+                    -1,
+                    CResult::error(err),
+                    callback_user_data.get(),
+                ),
+            }
+        });
+
+        write_success_result(result);
+        true
+    })
+}
+
+/// Ingest a batch of Avro datums. Returns the batch offset, -1 on error, -2 if empty.
+#[cfg(feature = "avro")]
+#[no_mangle]
+pub extern "C" fn zerobus_stream_ingest_avro_records(
+    stream: *mut CZerobusStream,
+    records: *const *const u8,
+    record_lens: *const usize,
+    num_records: usize,
+    result: *mut CResult,
+) -> i64 {
+    ffi_guard(result, -1, move || {
+        if records.is_null() || record_lens.is_null() {
+            write_error_result(result, "Invalid records pointer", false);
+            return -1;
+        }
+
+        if num_records == 0 {
+            write_success_result(result);
+            return -2; // Empty batch
+        }
+
+        let stream_ref = match validate_stream_ptr(stream) {
+            Ok(s) => s,
+            Err(msg) => {
+                write_error_result(result, msg, false);
+                return -1;
+            }
+        };
+
+        let records_vec: Vec<Vec<u8>> = unsafe {
+            let records_slice = std::slice::from_raw_parts(records, num_records);
+            let lens_slice = std::slice::from_raw_parts(record_lens, num_records);
+
+            records_slice
+                .iter()
+                .zip(lens_slice.iter())
+                .map(|(ptr, len)| {
+                    let data_slice = std::slice::from_raw_parts(*ptr, *len);
+                    data_slice.to_vec()
+                })
+                .collect()
+        };
+
+        let offset_res = RUNTIME.block_on(async {
+            let payloads: Vec<EncodedRecord> =
+                records_vec.into_iter().map(EncodedRecord::Avro).collect();
+            stream_ref.ingest_records_offset(payloads).await
+        });
+
+        match offset_res {
+            Ok(Some(offset)) => {
+                write_success_result(result);
+                offset
+            }
+            Ok(None) => {
+                write_success_result(result);
+                -2 // Empty batch
+            }
+            Err(err) => {
+                if !result.is_null() {
+                    unsafe {
+                        *result = CResult::error(err);
+                    }
+                }
+                -1
+            }
+        }
+    })
+}
+
+/// Ingest a batch of Avro datums on a background task; reports the batch offset via callback.
+#[cfg(feature = "avro")]
+#[no_mangle]
+pub extern "C" fn zerobus_stream_ingest_avro_records_async(
+    stream: *mut CZerobusStream,
+    records: *const *const u8,
+    record_lens: *const usize,
+    num_records: usize,
+    callback: OffsetAsyncCallback,
+    user_data: *mut std::ffi::c_void,
+    result: *mut CResult,
+) -> bool {
+    ffi_guard(result, false, move || {
+        if records.is_null() || record_lens.is_null() {
+            write_error_result(result, "Invalid records pointer", false);
+            return false;
+        }
+
+        let callback_user_data = SendPtr::new(user_data);
+        if num_records == 0 {
+            RUNTIME.spawn(async move {
+                invoke_offset_async_callback(
+                    callback,
+                    -2,
+                    CResult::success(),
+                    callback_user_data.get(),
+                );
+            });
+            write_success_result(result);
+            return true;
+        }
+
+        if let Err(msg) = validate_stream_ptr(stream) {
+            write_error_result(result, msg, false);
+            return false;
+        }
+
+        let records_vec: Vec<Vec<u8>> = unsafe {
+            let records_slice = std::slice::from_raw_parts(records, num_records);
+            let lens_slice = std::slice::from_raw_parts(record_lens, num_records);
+            records_slice
+                .iter()
+                .zip(lens_slice.iter())
+                .map(|(ptr, len)| std::slice::from_raw_parts(*ptr, *len).to_vec())
+                .collect()
+        };
+
+        let stream_arc = unsafe { clone_stream_arc(stream) };
+        RUNTIME.spawn(async move {
+            let payloads: Vec<EncodedRecord> =
+                records_vec.into_iter().map(EncodedRecord::Avro).collect();
+            match stream_arc.ingest_records_offset(payloads).await {
+                Ok(Some(offset)) => invoke_offset_async_callback(
+                    callback,
+                    offset,
+                    CResult::success(),
+                    callback_user_data.get(),
+                ),
+                Ok(None) => invoke_offset_async_callback(
+                    callback,
+                    -2,
+                    CResult::success(),
+                    callback_user_data.get(),
+                ),
+                Err(err) => invoke_offset_async_callback(
+                    callback,
+                    -1,
+                    CResult::error(err),
+                    callback_user_data.get(),
+                ),
+            }
+        });
+
+        write_success_result(result);
+        true
+    })
+}
+
+/// Ingest an Avro datum without waiting (fire-and-forget).
+///
+/// # Safety
+/// The stream must remain valid until all background tasks spawned by this function complete.
+#[cfg(feature = "avro")]
+#[no_mangle]
+pub extern "C" fn zerobus_stream_ingest_avro_record_nowait(
+    stream: *mut CZerobusStream,
+    data: *const u8,
+    data_len: usize,
+    result: *mut CResult,
+) {
+    ffi_guard(result, (), move || {
+        if data.is_null() {
+            write_error_result(result, "Invalid data pointer", false);
+            return;
+        }
+
+        if let Err(msg) = validate_stream_ptr(stream) {
+            write_error_result(result, msg, false);
+            return;
+        }
+
+        let data_slice = unsafe { std::slice::from_raw_parts(data, data_len) };
+        let data_vec = data_slice.to_vec();
+        let stream_arc = unsafe { clone_stream_arc(stream) };
+
+        RUNTIME.spawn(async move {
+            let payload = EncodedRecord::Avro(data_vec);
+            let _ = stream_arc.ingest_record_offset(payload).await;
+        });
+
+        write_success_result(result);
+    })
+}
+
+/// Ingest a batch of Avro datums without waiting (fire-and-forget).
+///
+/// # Safety
+/// The stream must remain valid until all background tasks spawned by this function complete.
+#[cfg(feature = "avro")]
+#[no_mangle]
+pub extern "C" fn zerobus_stream_ingest_avro_records_nowait(
+    stream: *mut CZerobusStream,
+    records: *const *const u8,
+    record_lens: *const usize,
+    num_records: usize,
+    result: *mut CResult,
+) {
+    ffi_guard(result, (), move || {
+        if records.is_null() || record_lens.is_null() {
+            write_error_result(result, "Invalid records pointer", false);
+            return;
+        }
+
+        if let Err(msg) = validate_stream_ptr(stream) {
+            write_error_result(result, msg, false);
+            return;
+        }
+
+        if num_records == 0 {
+            write_success_result(result);
+            return;
+        }
+
+        let records_vec: Vec<Vec<u8>> = unsafe {
+            let records_slice = std::slice::from_raw_parts(records, num_records);
+            let lens_slice = std::slice::from_raw_parts(record_lens, num_records);
+            records_slice
+                .iter()
+                .zip(lens_slice.iter())
+                .map(|(ptr, len)| std::slice::from_raw_parts(*ptr, *len).to_vec())
+                .collect()
+        };
+
+        let stream_arc = unsafe { clone_stream_arc(stream) };
+
+        RUNTIME.spawn(async move {
+            let payloads: Vec<EncodedRecord> =
+                records_vec.into_iter().map(EncodedRecord::Avro).collect();
+            let _ = stream_arc.ingest_records_offset(payloads).await;
+        });
+
+        write_success_result(result);
+    })
 }

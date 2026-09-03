@@ -11,3 +11,6 @@ cpp_compat = true
 include = ["CZerobusSdk", "CZerobusStream", "CResult", "CStreamConfigurationOptions", "CRecord", "CRecordArray", "CHeader", "CHeaders", "CArrowStream", "CArrowStreamConfigurationOptions", "CArrowBatchArray", "CArrowArray", "CArrowSchema", "CZerobusProtoSchema"]
 
 [export.rename]
+
+[defines]
+"feature = avro" = "ZEROBUS_AVRO"
