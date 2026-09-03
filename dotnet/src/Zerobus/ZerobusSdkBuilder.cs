@@ -40,6 +40,7 @@ public sealed class ZerobusSdkBuilder : IDisposable
     private string? _unityCatalogUrl;
     private string? _sdkIdentifier;
     private string? _applicationName;
+    private bool? _connectionPerStream;
     private bool _disableTls;
     private int _consumed;  // 0 = live, 1 = consumed/disposed
 
@@ -110,6 +111,21 @@ public sealed class ZerobusSdkBuilder : IDisposable
     }
 
     /// <summary>
+    /// Controls whether every JSON/protobuf stream receives a dedicated gRPC
+    /// connection. This is enabled by default. Pass <see langword="false"/> to
+    /// share one HTTP/2 connection across streams.
+    /// </summary>
+    /// <param name="enabled">Whether to create a connection per stream.</param>
+    /// <returns>This builder, for chaining.</returns>
+    /// <exception cref="ObjectDisposedException">Thrown if the builder has been consumed or disposed.</exception>
+    public ZerobusSdkBuilder ConnectionPerStream(bool enabled)
+    {
+        ThrowIfConsumed();
+        _connectionPerStream = enabled;
+        return this;
+    }
+
+    /// <summary>
     /// Disables TLS for the gRPC connection. TLS is enabled by default.
     /// Only use this for local development or testing.
     /// </summary>
@@ -148,6 +164,8 @@ public sealed class ZerobusSdkBuilder : IDisposable
                 NativeMethods.SdkBuilderSdkIdentifier(builderPtr, _sdkIdentifier);
             if (_applicationName is not null)
                 NativeMethods.SdkBuilderApplicationName(builderPtr, _applicationName);
+            if (_connectionPerStream.HasValue)
+                NativeMethods.SdkBuilderConnectionPerStream(builderPtr, _connectionPerStream.Value);
             if (_disableTls)
                 NativeMethods.SdkBuilderDisableTls(builderPtr);
         }

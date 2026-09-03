@@ -119,6 +119,18 @@ func TestNewZerobusSdkWithOptionsSkipsNilOption(t *testing.T) {
 	sdk.Free()
 }
 
+func TestNewZerobusSdkWithOptionsAcceptsSharedConnectionMode(t *testing.T) {
+	sdk, err := NewZerobusSdkWithOptions(
+		"https://workspace.zerobus.databricks.com",
+		"https://workspace.databricks.com",
+		WithConnectionPerStream(false),
+	)
+	if err != nil {
+		t.Fatalf("NewZerobusSdkWithOptions: %v", err)
+	}
+	sdk.Free()
+}
+
 func TestNewZerobusSdkWithOptionsRejectsInvalidApplicationName(t *testing.T) {
 	sdk, err := NewZerobusSdkWithOptions(
 		"https://workspace.zerobus.databricks.com",

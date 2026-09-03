@@ -747,6 +747,16 @@ new ZerobusSdk(zerobusEndpoint: string, unityCatalogUrl: string, options?: Zerob
 - `unityCatalogUrl` (string) - The Unity Catalog endpoint (your workspace URL)
 - `options` (ZerobusSdkOptions, optional) - Additional SDK configuration:
   - `applicationName` (string, optional) - Application identifier appended to the HTTP `user-agent` header, conventionally `"<product>/<version>"` (e.g. `"my-app/1.0"`). The header becomes `zerobus-sdk-ts/<version> <applicationName>`, enabling server-side attribution.
+  - `connectionPerStream` (boolean, optional) - Gives each JSON/protobuf stream
+    a dedicated gRPC connection. Defaults to `true`; set `false` to share one
+    HTTP/2 connection. Arrow Flight streams are unaffected.
+
+HTTP/2 multiplexes logical streams over one TCP connection. On high-throughput
+workloads over the public internet, packet loss and TCP retransmissions can
+cause head-of-line blocking across every stream on that connection, reducing
+aggregate throughput. Dedicated connections isolate that loss. For many
+smaller, low-throughput streams, set `connectionPerStream: false`; shared
+multiplexing is recommended there to reduce connection overhead.
 
 **Methods:**
 

@@ -72,6 +72,16 @@ public class ZerobusSdkBuilderTests
         Assert.That(returned, Is.SameAs(builder));
     }
 
+    [Test]
+    public void ConnectionPerStream_ReturnsSameBuilderInstance()
+    {
+        using var builder = ZerobusSdk.CreateBuilder();
+
+        var returned = builder.ConnectionPerStream(false);
+
+        Assert.That(returned, Is.SameAs(builder));
+    }
+
     // -------------------------------------------------------------------------
     // Null argument guards
     // -------------------------------------------------------------------------
@@ -155,6 +165,15 @@ public class ZerobusSdkBuilderTests
         builder.Dispose();
 
         Assert.Throws<ObjectDisposedException>(() => builder.DisableTls());
+    }
+
+    [Test]
+    public void ConnectionPerStream_AfterDispose_ThrowsObjectDisposedException()
+    {
+        var builder = ZerobusSdk.CreateBuilder();
+        builder.Dispose();
+
+        Assert.Throws<ObjectDisposedException>(() => builder.ConnectionPerStream(false));
     }
 
     [Test]

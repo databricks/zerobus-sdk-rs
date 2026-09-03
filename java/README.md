@@ -1028,11 +1028,23 @@ Main entry point for the SDK.
 **Constructors:**
 ```java
 ZerobusSdk(String serverEndpoint, String unityCatalogEndpoint)
+ZerobusSdk(String serverEndpoint, String unityCatalogEndpoint, boolean connectionPerStream)
 ZerobusSdk(String serverEndpoint, String unityCatalogEndpoint, String applicationName)
+ZerobusSdk(String serverEndpoint, String unityCatalogEndpoint, String applicationName, boolean connectionPerStream)
 ```
 - `serverEndpoint` - The Zerobus gRPC endpoint (e.g., `https://<workspace-id>.zerobus.region.cloud.databricks.com`)
 - `unityCatalogEndpoint` - The Unity Catalog endpoint (your workspace URL)
 - `applicationName` (optional) - Application identifier appended to the HTTP `user-agent` header, conventionally `"<product>/<version>"` (e.g. `"my-app/1.0"`). Pass `null` to omit.
+- `connectionPerStream` (optional) - Gives each JSON/protobuf stream a dedicated
+  gRPC connection. Constructors without this argument default to `true`; pass
+  `false` to share one HTTP/2 connection. Arrow Flight streams are unaffected.
+
+HTTP/2 multiplexes logical streams over one TCP connection. On high-throughput
+workloads over the public internet, packet loss and TCP retransmissions can
+cause head-of-line blocking across every stream on that connection, reducing
+aggregate throughput. Dedicated connections isolate that loss. For many
+smaller, low-throughput streams, pass `false`; shared multiplexing is
+recommended there to reduce connection overhead.
 
 **Methods:**
 

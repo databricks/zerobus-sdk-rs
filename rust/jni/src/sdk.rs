@@ -52,7 +52,7 @@ impl NativeSdkHandle {
 ///
 /// # JNI Signature
 /// ```java
-/// private static native long nativeCreate(String serverEndpoint, String unityCatalogEndpoint, String applicationName);
+/// private static native long nativeCreate(String serverEndpoint, String unityCatalogEndpoint, String applicationName, boolean connectionPerStream);
 /// ```
 #[no_mangle]
 pub extern "system" fn Java_com_databricks_zerobus_ZerobusSdk_nativeCreate<'local>(
@@ -61,6 +61,7 @@ pub extern "system" fn Java_com_databricks_zerobus_ZerobusSdk_nativeCreate<'loca
     server_endpoint: JString<'local>,
     unity_catalog_endpoint: JString<'local>,
     application_name: JString<'local>,
+    connection_per_stream: jboolean,
 ) -> jlong {
     // Extract the endpoint strings
     let server_endpoint: String = match env.get_string(&server_endpoint) {
@@ -96,7 +97,8 @@ pub extern "system" fn Java_com_databricks_zerobus_ZerobusSdk_nativeCreate<'loca
     let builder = ZerobusSdk::builder()
         .endpoint(server_endpoint)
         .unity_catalog_url(unity_catalog_endpoint)
-        .sdk_identifier(sdk_identifier);
+        .sdk_identifier(sdk_identifier)
+        .connection_per_stream(connection_per_stream != JNI_FALSE);
     let builder = match application_name {
         Some(name) => builder.application_name(name),
         None => builder,

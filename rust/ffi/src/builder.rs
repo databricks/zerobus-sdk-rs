@@ -138,6 +138,19 @@ pub extern "C" fn zerobus_sdk_builder_application_name(
     })
 }
 
+/// Controls whether each JSON/protobuf stream receives a dedicated gRPC
+/// connection. Enabled by default. Set to false to share one connection across
+/// all streams created from the SDK. No-op on null.
+#[no_mangle]
+pub extern "C" fn zerobus_sdk_builder_connection_per_stream(
+    builder: *mut CZerobusSdkBuilder,
+    enabled: bool,
+) {
+    ffi_guard(ptr::null_mut(), (), move || unsafe {
+        with_builder(builder, |b| b.connection_per_stream(enabled))
+    })
+}
+
 /// Selects a no-TLS gRPC channel. TLS is on by default.
 #[no_mangle]
 pub extern "C" fn zerobus_sdk_builder_disable_tls(builder: *mut CZerobusSdkBuilder) {

@@ -50,6 +50,9 @@ class SdkBuilder {
   SdkBuilder& sdk_identifier(const std::string& value);
   /// Append an application identifier to the `user-agent` header.
   SdkBuilder& application_name(const std::string& value);
+  /// Give each JSON/protobuf stream a dedicated gRPC connection (default:
+  /// true). Pass false to share one connection across streams.
+  SdkBuilder& connection_per_stream(bool enabled);
   /// Select a plaintext (non-TLS) gRPC channel. TLS is on by default.
   SdkBuilder& disable_tls();
 

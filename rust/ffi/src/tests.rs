@@ -2,16 +2,16 @@ use crate::{
     c_record_type, ffi_guard, intern_header_key, validate_sdk_ptr, validate_stream_ptr,
     write_error_result, write_success_result, zerobus_free_error_message,
     zerobus_get_default_config, zerobus_sdk_builder_application_name, zerobus_sdk_builder_build,
-    zerobus_sdk_builder_disable_tls, zerobus_sdk_builder_endpoint, zerobus_sdk_builder_free,
-    zerobus_sdk_builder_new, zerobus_sdk_builder_sdk_identifier,
-    zerobus_sdk_builder_unity_catalog_url, zerobus_sdk_create_stream,
-    zerobus_sdk_create_stream_async, zerobus_sdk_create_stream_with_headers_provider_async,
-    zerobus_sdk_free, zerobus_sdk_recreate_stream_async, zerobus_stream_close_async,
-    zerobus_stream_flush_async, zerobus_stream_get_unacked_records_async,
-    zerobus_stream_ingest_json_record_async, zerobus_stream_ingest_json_records_async,
-    zerobus_stream_ingest_proto_record_async, zerobus_stream_ingest_proto_records_async,
-    zerobus_stream_wait_for_offset_async, CHeaders, CRecordArray, CResult, CallbackHeadersProvider,
-    RecordType, ZerobusError,
+    zerobus_sdk_builder_connection_per_stream, zerobus_sdk_builder_disable_tls,
+    zerobus_sdk_builder_endpoint, zerobus_sdk_builder_free, zerobus_sdk_builder_new,
+    zerobus_sdk_builder_sdk_identifier, zerobus_sdk_builder_unity_catalog_url,
+    zerobus_sdk_create_stream, zerobus_sdk_create_stream_async,
+    zerobus_sdk_create_stream_with_headers_provider_async, zerobus_sdk_free,
+    zerobus_sdk_recreate_stream_async, zerobus_stream_close_async, zerobus_stream_flush_async,
+    zerobus_stream_get_unacked_records_async, zerobus_stream_ingest_json_record_async,
+    zerobus_stream_ingest_json_records_async, zerobus_stream_ingest_proto_record_async,
+    zerobus_stream_ingest_proto_records_async, zerobus_stream_wait_for_offset_async, CHeaders,
+    CRecordArray, CResult, CallbackHeadersProvider, RecordType, ZerobusError,
 };
 use databricks_zerobus_ingest_sdk::HeadersProvider;
 use std::ffi::{CStr, CString};
@@ -317,7 +317,22 @@ fn test_builder_setters_on_null_are_safe() {
     zerobus_sdk_builder_unity_catalog_url(ptr::null_mut(), s.as_ptr());
     zerobus_sdk_builder_sdk_identifier(ptr::null_mut(), s.as_ptr());
     zerobus_sdk_builder_application_name(ptr::null_mut(), s.as_ptr());
+    zerobus_sdk_builder_connection_per_stream(ptr::null_mut(), false);
     zerobus_sdk_builder_disable_tls(ptr::null_mut());
+}
+
+#[test]
+fn test_sdk_builder_connection_per_stream_can_be_disabled() {
+    let endpoint_c = CString::new("https://workspace.zerobus.databricks.com").unwrap();
+    let builder = zerobus_sdk_builder_new();
+    zerobus_sdk_builder_endpoint(builder, endpoint_c.as_ptr());
+    zerobus_sdk_builder_connection_per_stream(builder, false);
+
+    let mut result = CResult::success();
+    let sdk = zerobus_sdk_builder_build(builder, &mut result);
+    assert!(!sdk.is_null());
+    assert!(result.success);
+    zerobus_sdk_free(sdk);
 }
 
 #[test]

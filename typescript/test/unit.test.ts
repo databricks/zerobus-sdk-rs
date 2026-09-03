@@ -52,6 +52,15 @@ describe('ZerobusSdk', () => {
             assert.ok(sdk);
         });
 
+        it('should accept shared connection mode', () => {
+            const sdk = new ZerobusSdk(
+                'https://1234567890.zerobus.us-west-2.cloud.databricks.com',
+                'https://test-workspace.cloud.databricks.com',
+                { connectionPerStream: false }
+            );
+            assert.ok(sdk);
+        });
+
         it('should accept an empty options object', () => {
             const sdk = new ZerobusSdk(
                 'https://1234567890.zerobus.us-west-2.cloud.databricks.com',

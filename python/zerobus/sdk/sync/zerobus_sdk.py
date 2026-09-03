@@ -222,7 +222,13 @@ class ZerobusArrowStream:
 class ZerobusSdk:
     """Python wrapper around Rust ZerobusSdk that provides unified create_stream API."""
 
-    def __init__(self, host: str, unity_catalog_url: str, application_name: Optional[str] = None):
+    def __init__(
+        self,
+        host: str,
+        unity_catalog_url: str,
+        application_name: Optional[str] = None,
+        connection_per_stream: bool = True,
+    ):
         """
         Create a Zerobus SDK instance.
 
@@ -233,8 +239,11 @@ class ZerobusSdk:
             application_name: Optional caller identifier (conventionally
                 "<product>/<version>") appended to the HTTP user-agent header on
                 gRPC requests toward the Zerobus server.
+            connection_per_stream: Whether each JSON/protobuf stream gets a
+                dedicated gRPC connection. Defaults to True. Set to False to
+                share one connection across streams.
         """
-        self._inner = _RustZerobusSdk(host, unity_catalog_url, application_name)
+        self._inner = _RustZerobusSdk(host, unity_catalog_url, application_name, connection_per_stream)
 
     def create_arrow_stream(
         self, table_name: str, schema, client_id: str, client_secret: str, options=None

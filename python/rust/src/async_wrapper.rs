@@ -276,11 +276,12 @@ pub struct ZerobusSdk {
 #[pymethods]
 impl ZerobusSdk {
     #[new]
-    #[pyo3(signature = (host, unity_catalog_url, application_name = None))]
+    #[pyo3(signature = (host, unity_catalog_url, application_name = None, connection_per_stream = true))]
     fn new(
         host: String,
         unity_catalog_url: String,
         application_name: Option<String>,
+        connection_per_stream: bool,
     ) -> PyResult<Self> {
         let py_version = env!("CARGO_PKG_VERSION");
         let sdk_identifier = format!("{}/{}", SDK_IDENTIFIER_PREFIX, py_version);
@@ -288,7 +289,8 @@ impl ZerobusSdk {
         let builder = RustSdk::builder()
             .endpoint(host)
             .unity_catalog_url(unity_catalog_url)
-            .sdk_identifier(sdk_identifier);
+            .sdk_identifier(sdk_identifier)
+            .connection_per_stream(connection_per_stream);
         let builder = match application_name {
             Some(application_name) => builder.application_name(application_name),
             None => builder,

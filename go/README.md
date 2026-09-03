@@ -466,6 +466,18 @@ application names use `<product>/<version>`. The existing
 `NewZerobusSdk(endpoint, unityCatalogURL)` constructor remains available when
 no options are needed.
 
+Every JSON/protobuf stream gets a dedicated gRPC connection by default. Pass
+`WithConnectionPerStream(false)` to multiplex streams over one shared HTTP/2
+connection. Arrow Flight streams already use dedicated connections and are
+unaffected.
+
+HTTP/2 multiplexes logical streams over one TCP connection. On high-throughput
+workloads over the public internet, packet loss and TCP retransmissions can
+cause head-of-line blocking across every stream on that connection, reducing
+aggregate throughput. Dedicated connections isolate that loss. For many
+smaller, low-throughput streams, shared multiplexing is recommended to reduce
+connection overhead.
+
 ### 2. Configure Authentication
 
 The SDK handles authentication automatically. You just need to provide your OAuth credentials:
@@ -1048,6 +1060,8 @@ func NewZerobusSdkWithOptions(
 ) (*ZerobusSdk, error)
 
 func WithApplicationName(name string) SdkOption
+
+func WithConnectionPerStream(enabled bool) SdkOption
 ```
 
 Creates a new SDK instance.
@@ -1058,6 +1072,9 @@ Creates a new SDK instance.
   `NewZerobusSdkWithOptions`
 - `WithApplicationName` - Appends a trimmed application identifier to the
   default wire user-agent, `zerobus-sdk-go/<version>`; blank names are ignored
+- `WithConnectionPerStream` - Controls whether each JSON/protobuf stream gets a
+  dedicated gRPC connection. The default is `true`; pass `false` to share one
+  HTTP/2 connection
 
 The original `NewZerobusSdk` constructor remains available. Use
 `NewZerobusSdkWithOptions` when the application should identify itself in

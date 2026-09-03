@@ -100,7 +100,21 @@ public class ZerobusSdk implements AutoCloseable {
    * @throws ZerobusException if the SDK cannot be initialized
    */
   public ZerobusSdk(String serverEndpoint, String unityCatalogEndpoint) {
-    this(serverEndpoint, unityCatalogEndpoint, null);
+    this(serverEndpoint, unityCatalogEndpoint, null, true);
+  }
+
+  /**
+   * Creates a new ZerobusSdk instance with configurable connection ownership.
+   *
+   * @param serverEndpoint The gRPC endpoint URL for the Zerobus service.
+   * @param unityCatalogEndpoint The Unity Catalog endpoint URL.
+   * @param connectionPerStream Whether every JSON/protobuf stream receives a dedicated gRPC
+   *     connection. Pass {@code false} to share one connection across streams.
+   * @throws ZerobusException if the SDK cannot be initialized
+   */
+  public ZerobusSdk(
+      String serverEndpoint, String unityCatalogEndpoint, boolean connectionPerStream) {
+    this(serverEndpoint, unityCatalogEndpoint, null, connectionPerStream);
   }
 
   /**
@@ -115,9 +129,31 @@ public class ZerobusSdk implements AutoCloseable {
    * @throws ZerobusException if the SDK cannot be initialized
    */
   public ZerobusSdk(String serverEndpoint, String unityCatalogEndpoint, String applicationName) {
+    this(serverEndpoint, unityCatalogEndpoint, applicationName, true);
+  }
+
+  /**
+   * Creates a new ZerobusSdk instance with an optional application identifier and configurable
+   * connection ownership.
+   *
+   * @param serverEndpoint The gRPC endpoint URL for the Zerobus service.
+   * @param unityCatalogEndpoint The Unity Catalog endpoint URL.
+   * @param applicationName Optional application identifier appended to the HTTP {@code user-agent}
+   *     header, or {@code null} to omit.
+   * @param connectionPerStream Whether every JSON/protobuf stream receives a dedicated gRPC
+   *     connection. This is {@code true} in the other constructors; pass {@code false} to share one
+   *     connection across streams.
+   * @throws ZerobusException if the SDK cannot be initialized
+   */
+  public ZerobusSdk(
+      String serverEndpoint,
+      String unityCatalogEndpoint,
+      String applicationName,
+      boolean connectionPerStream) {
     this.serverEndpoint = serverEndpoint;
     this.unityCatalogEndpoint = unityCatalogEndpoint;
-    this.nativeHandle = nativeCreate(serverEndpoint, unityCatalogEndpoint, applicationName);
+    this.nativeHandle =
+        nativeCreate(serverEndpoint, unityCatalogEndpoint, applicationName, connectionPerStream);
     if (this.nativeHandle == 0) {
       throw new RuntimeException("Failed to create native SDK instance");
     }
@@ -897,7 +933,10 @@ public class ZerobusSdk implements AutoCloseable {
   // Native methods implemented in Rust
 
   private static native long nativeCreate(
-      String serverEndpoint, String unityCatalogEndpoint, String applicationName);
+      String serverEndpoint,
+      String unityCatalogEndpoint,
+      String applicationName,
+      boolean connectionPerStream);
 
   private static native void nativeDestroy(long handle);
 

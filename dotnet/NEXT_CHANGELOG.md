@@ -4,6 +4,10 @@
 
 ### New Features and Improvements
 
+- JSON and protobuf streams now use a dedicated gRPC connection by default.
+  Call `ZerobusSdk.CreateBuilder().ConnectionPerStream(false)` to share one
+  HTTP/2 connection across streams.
+
 ### Deprecations
 
 ### Bug Fixes
