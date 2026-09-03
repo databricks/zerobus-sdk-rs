@@ -177,6 +177,7 @@ fn test_cresult_error() {
 fn test_c_record_type_mapping() {
     assert_eq!(c_record_type(1), RecordType::Proto);
     assert_eq!(c_record_type(2), RecordType::Json);
+    assert_eq!(c_record_type(4), RecordType::Avro);
     assert_eq!(c_record_type(999), RecordType::Unspecified);
     assert_eq!(c_record_type(0), RecordType::Unspecified);
 }

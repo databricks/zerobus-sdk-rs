@@ -383,6 +383,7 @@ impl Zerobus for MockZerobusServer {
                                             proto_batch.records.len()
                                         }
                                         Batch::JsonBatch(json_batch) => json_batch.records.len(),
+                                        Batch::AvroBatch(avro_batch) => avro_batch.records.len(),
                                     }
                                 } else {
                                     0
