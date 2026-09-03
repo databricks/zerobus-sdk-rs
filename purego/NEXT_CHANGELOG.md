@@ -4,6 +4,11 @@
 
 ### New Features and Improvements
 
+- Add Avro record format (Beta), behind the `avro` build tag. Select it with
+  `WithAvro(schemaJSON)` and ingest pre-encoded Avro datums via the standard
+  `IngestRecordOffset` / `IngestRecordsOffset`. Ephemeral streams only; server
+  support is pending.
+
 - Tear the connection down gracefully when the server requests a stream pause
   (`CloseStreamSignal`), as a clean `Close` already did: the client half-closes
   the request stream and drains remaining acknowledgments before reconnecting,

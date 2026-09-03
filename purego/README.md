@@ -79,6 +79,7 @@ first successful open, so it does not terminate the live stream.
 
 - **Protocol Buffers** (default): `WithProto(descriptorProto)`.
 - **JSON**: `WithJSON()`.
+- **Avro** *(Beta, requires the `avro` build tag)*: `WithAvro(schemaJSON)`; ingest pre-encoded datums via `IngestRecordOffset`. Server support is pending.
 
 `IngestJSONOffset` and `IngestJSONRecordsOffset` queue JSON directly on JSON
 streams and convert it to protobuf on proto streams.

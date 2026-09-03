@@ -78,6 +78,7 @@ type StreamOption func(*streamConfig)
 type streamConfig struct {
 	recordType zerobuspb.RecordType
 	descriptor []byte
+	avroSchema string
 	callback   AckCallback
 	waitReady  bool
 	cfg        stream.Config

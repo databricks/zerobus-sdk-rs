@@ -28,6 +28,9 @@ type StreamParams struct {
 	// DescriptorProto is the serialized message descriptor. Required when
 	// RecordType is PROTO and ignored otherwise.
 	DescriptorProto []byte
+	// AvroSchemaJSON is the Avro writer schema (JSON). Required when RecordType
+	// is AVRO and ignored otherwise.
+	AvroSchemaJSON string
 	// HeadersProvider supplies the auth (and any other) metadata headers for the
 	// stream. See HeadersProvider for timeout behavior when GetHeaders may block
 	// (e.g. token mint). When nil, the stream is opened without an auth header.
@@ -65,13 +68,16 @@ func (c *Conn) Open(ctx context.Context, p StreamParams) (*Stream, error) {
 		return nil, fmt.Errorf("transport: open: table name is required: %w", ErrInvalidParams)
 	}
 	switch p.RecordType {
-	case zerobuspb.RecordType_PROTO, zerobuspb.RecordType_JSON:
+	case zerobuspb.RecordType_PROTO, zerobuspb.RecordType_JSON, zerobuspb.RecordType_AVRO:
 		// Supported.
 	default:
 		return nil, fmt.Errorf("transport: open %q: unsupported record type %v: %w", p.TableName, p.RecordType, ErrInvalidParams)
 	}
 	if p.RecordType == zerobuspb.RecordType_PROTO && len(p.DescriptorProto) == 0 {
 		return nil, fmt.Errorf("transport: open %q: descriptor proto required for PROTO records: %w", p.TableName, ErrInvalidParams)
+	}
+	if p.RecordType == zerobuspb.RecordType_AVRO && strings.TrimSpace(p.AvroSchemaJSON) == "" {
+		return nil, fmt.Errorf("transport: open %q: avro schema required for AVRO records: %w", p.TableName, ErrInvalidParams)
 	}
 	headersCtx := ctx
 	useDefaultBudgets := false
@@ -165,6 +171,9 @@ func sendCreateStream(rpc bidiRPC[zerobuspb.EphemeralStreamRequest, zerobuspb.Ep
 	}
 	if p.RecordType == zerobuspb.RecordType_PROTO {
 		create.DescriptorProto = p.DescriptorProto
+	}
+	if p.RecordType == zerobuspb.RecordType_AVRO {
+		create.AvroSchemaJson = proto.String(p.AvroSchemaJSON)
 	}
 	req := &zerobuspb.EphemeralStreamRequest{
 		Payload: &zerobuspb.EphemeralStreamRequest_CreateStream{CreateStream: create},

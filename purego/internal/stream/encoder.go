@@ -201,6 +201,73 @@ func (jsonEncoder) retainedSize(rawBytes, recordCount int) int64 {
 	return ephemeralRetainedSize(rawBytes, recordCount)
 }
 
+// avroEncoder builds EphemeralStream payloads for pre-encoded Avro records (raw
+// binary datums), single and batched.
+type avroEncoder struct{}
+
+func (avroEncoder) encode(record []byte) (encodedMsg, error) {
+	offset := int64(math.MaxInt64)
+	// Clone so a reused caller buffer can't mutate the queued payload.
+	return &zerobuspb.EphemeralStreamRequest{
+		Payload: &zerobuspb.EphemeralStreamRequest_IngestRecord{
+			IngestRecord: &zerobuspb.IngestRecordRequest{
+				OffsetId: proto.Int64(offset),
+				Record:   &zerobuspb.IngestRecordRequest_AvroEncodedRecord{AvroEncodedRecord: bytes.Clone(record)},
+			},
+		},
+	}, nil
+}
+
+func (avroEncoder) encodeBatch(records [][]byte) (encodedMsg, error) {
+	if len(records) == 0 {
+		return nil, fmt.Errorf("stream: avro batch must not be empty")
+	}
+	copied := make([][]byte, len(records))
+	for i, r := range records {
+		copied[i] = bytes.Clone(r)
+	}
+	offset := int64(math.MaxInt64)
+	return &zerobuspb.EphemeralStreamRequest{
+		Payload: &zerobuspb.EphemeralStreamRequest_IngestRecordBatch{
+			IngestRecordBatch: &zerobuspb.IngestRecordBatchRequest{
+				OffsetId: proto.Int64(offset),
+				Batch: &zerobuspb.IngestRecordBatchRequest_AvroBatch{
+					AvroBatch: &zerobuspb.AvroRecordBatch{Records: copied},
+				},
+			},
+		},
+	}, nil
+}
+
+func (avroEncoder) decode(msg encodedMsg) [][]byte { return extractEphemeralRecords(msg) }
+
+func (avroEncoder) unitCount(encodedMsg) uint64 { return 1 }
+
+func (avroEncoder) slice(msg encodedMsg, acknowledgedPrefix uint64) (encodedMsg, error) {
+	if acknowledgedPrefix == 0 {
+		return msg, nil
+	}
+	return nil, fmt.Errorf(
+		"stream: Avro payload is atomic and cannot drop %d acknowledged units",
+		acknowledgedPrefix,
+	)
+}
+
+func (avroEncoder) maxWireSize(msg encodedMsg) int {
+	if msg == nil {
+		return 0
+	}
+	return proto.Size(msg)
+}
+
+func (avroEncoder) stampOffset(msg encodedMsg, offset int64) {
+	stampEphemeralOffset(msg, offset)
+}
+
+func (avroEncoder) retainedSize(rawBytes, recordCount int) int64 {
+	return ephemeralRetainedSize(rawBytes, recordCount)
+}
+
 func stampEphemeralOffset(msg encodedMsg, offset int64) {
 	if msg == nil {
 		return
@@ -229,6 +296,8 @@ func newEncoder(rt zerobuspb.RecordType) (encoder[encodedMsg], error) {
 		return protoEncoder{}, nil
 	case zerobuspb.RecordType_JSON:
 		return jsonEncoder{}, nil
+	case zerobuspb.RecordType_AVRO:
+		return avroEncoder{}, nil
 	default:
 		return nil, errUnsupportedRecordType(rt)
 	}
@@ -299,6 +368,8 @@ func extractEphemeralRecords(msg encodedMsg) [][]byte {
 			return [][]byte{bytes.Clone(r.ProtoEncodedRecord)}
 		case *zerobuspb.IngestRecordRequest_JsonRecord:
 			return [][]byte{[]byte(r.JsonRecord)}
+		case *zerobuspb.IngestRecordRequest_AvroEncodedRecord:
+			return [][]byte{bytes.Clone(r.AvroEncodedRecord)}
 		}
 		return nil
 	}
@@ -316,6 +387,14 @@ func extractEphemeralRecords(msg encodedMsg) [][]byte {
 			out := make([][]byte, len(recs))
 			for i, r := range recs {
 				out[i] = []byte(r)
+			}
+			return out
+		}
+		if ab := ib.GetAvroBatch(); ab != nil {
+			recs := ab.GetRecords()
+			out := make([][]byte, len(recs))
+			for i, r := range recs {
+				out[i] = bytes.Clone(r)
 			}
 			return out
 		}
