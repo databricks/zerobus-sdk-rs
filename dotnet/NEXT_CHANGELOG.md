@@ -8,6 +8,11 @@
 
 ### Bug Fixes
 
+- The SDK now identifies itself as `zerobus-sdk-dotnet/<version>` in the `User-Agent`
+  header. The identifier was only sent when the caller supplied one explicitly, so a
+  default-configured client sent the Rust core's own identifier and .NET traffic was
+  reported as Rust. An explicit `SdkIdentifier(...)` still takes precedence. No public
+  API change.
 - Fixed a use-after-free in which a custom `IHeadersProvider` could be freed
   while the Rust core was still inside a `GetHeaders()` call into it during
   connection recovery. Provider ownership is now handed to the FFI via the new

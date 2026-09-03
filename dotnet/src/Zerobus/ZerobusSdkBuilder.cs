@@ -1,3 +1,4 @@
+using System.Reflection;
 using Databricks.Zerobus.Native;
 
 namespace Databricks.Zerobus;
@@ -43,6 +44,22 @@ public sealed class ZerobusSdkBuilder : IDisposable
     private bool _disableTls;
     private int _consumed;  // 0 = live, 1 = consumed/disposed
 
+    // Sent when the caller doesn't set SdkIdentifier(); without it the Rust core's own
+    // identifier goes on the wire and .NET traffic is attributed to Rust.
+    private static readonly string DefaultSdkIdentifier = $"zerobus-sdk-dotnet/{SdkVersion()}";
+
+    // The informational version carries <Version> from the csproj, unlike AssemblyVersion,
+    // which callers may pin separately. SourceLink appends "+<commit>" to it.
+    private static string SdkVersion()
+    {
+        var informational = typeof(ZerobusSdkBuilder).Assembly
+            .GetCustomAttribute<AssemblyInformationalVersionAttribute>()?.InformationalVersion;
+
+        return string.IsNullOrEmpty(informational)
+            ? "0.0.0"
+            : informational.Split('+')[0];
+    }
+
     internal ZerobusSdkBuilder() { }
 
     /// <summary>
@@ -81,6 +98,10 @@ public sealed class ZerobusSdkBuilder : IDisposable
     /// Wrapper SDKs use this to identify themselves; end-user code should prefer
     /// <see cref="ApplicationName"/> instead.
     /// </summary>
+    /// <remarks>
+    /// Without this call the SDK sends <c>zerobus-sdk-dotnet/&lt;version&gt;</c>. A blank
+    /// or whitespace-only value falls back to that same default.
+    /// </remarks>
     /// <param name="sdkIdentifier">The SDK identifier string.</param>
     /// <returns>This builder, for chaining.</returns>
     /// <exception cref="ArgumentNullException">Thrown if <paramref name="sdkIdentifier"/> is null.</exception>
@@ -144,8 +165,11 @@ public sealed class ZerobusSdkBuilder : IDisposable
                 NativeMethods.SdkBuilderEndpoint(builderPtr, _endpoint);
             if (_unityCatalogUrl is not null)
                 NativeMethods.SdkBuilderUnityCatalogUrl(builderPtr, _unityCatalogUrl);
-            if (_sdkIdentifier is not null)
-                NativeMethods.SdkBuilderSdkIdentifier(builderPtr, _sdkIdentifier);
+            // The core substitutes its own identifier only for a literal empty override, not
+            // for whitespace, so a blank value would otherwise reach the wire verbatim.
+            NativeMethods.SdkBuilderSdkIdentifier(
+                builderPtr,
+                string.IsNullOrWhiteSpace(_sdkIdentifier) ? DefaultSdkIdentifier : _sdkIdentifier);
             if (_applicationName is not null)
                 NativeMethods.SdkBuilderApplicationName(builderPtr, _applicationName);
             if (_disableTls)
