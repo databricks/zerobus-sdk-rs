@@ -126,6 +126,7 @@ jobs:
             zerobus_sdk_builder_new \
             zerobus_sdk_builder_sdk_identifier \
             zerobus_sdk_builder_application_name \
+            zerobus_sdk_builder_connection_per_stream \
             zerobus_sdk_builder_build
           do
             if ! LC_ALL=C grep -aFq "$symbol" "$archive"; then
