@@ -131,6 +131,11 @@ pub enum ZerobusError {
     /// Returned when OAuth token fetching fails due to network or server errors.
     #[error("Token fetch failed: {0}")]
     TokenFetchError(String),
+    /// Returned when resolving a table's schema from Unity Catalog failed (see
+    /// [`crate::uc_schema`]).
+    #[error("Failed to fetch table schema from Unity Catalog: {message}.")]
+    #[non_exhaustive]
+    SchemaFetchError { message: String, retryable: bool },
 }
 
 /// List of gRPC status codes that indicate unretriable errors.
@@ -210,6 +215,7 @@ impl ZerobusError {
             ZerobusError::InvalidStateError(_) => false,
             ZerobusError::ConnectionTimeout(_) => true,
             ZerobusError::TokenFetchError(_) => true,
+            ZerobusError::SchemaFetchError { retryable, .. } => *retryable,
         }
     }
 
@@ -260,6 +266,21 @@ pub(crate) fn should_retry_initial_connection(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn schema_fetch_error_retryable_classification() {
+        let retryable_err = ZerobusError::SchemaFetchError {
+            message: "503 service unavailable".to_string(),
+            retryable: true,
+        };
+        assert!(retryable_err.is_retryable());
+
+        let non_retryable_err = ZerobusError::SchemaFetchError {
+            message: "404 not found".to_string(),
+            retryable: false,
+        };
+        assert!(!non_retryable_err.is_retryable());
+    }
 
     #[test]
     fn initial_connection_auth_retry_is_one_shot() {

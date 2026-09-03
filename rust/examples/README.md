@@ -42,6 +42,7 @@ The SDK supports three ingestion formats and two ingestion methods:
 | [Proto Compiled Batch](proto/README.md#compiled-batch-example) | Protocol Buffers | Batch | `cargo run -p rust-examples-proto --example proto_compiled_batch` |
 | [Proto Dynamic](proto/README.md#dynamic-schema-example) | Protocol Buffers | Single-record (runtime schema) | `cargo run -p rust-examples-proto --example proto_dynamic_single` |
 | [Proto Dynamic Batch](proto/README.md#dynamic-batch) | Protocol Buffers | Batch (runtime schema) | `cargo run -p rust-examples-proto --example proto_dynamic_batch` |
+| [Proto Dynamic from UC](proto/README.md#dynamic-schema-from-unity-catalog) | Protocol Buffers | Single-record (schema fetched from Unity Catalog) | `cargo run -p rust-examples-proto --example proto_dynamic_from_uc` |
 | [Arrow](arrow/README.md) | Arrow Flight | `RecordBatch` | `cargo run -p example_arrow` |
 
 ## Prerequisites

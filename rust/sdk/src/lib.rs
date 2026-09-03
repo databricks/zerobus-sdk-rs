@@ -57,6 +57,7 @@ mod stream_configuration;
 pub mod stream_options;
 mod tls_config;
 mod token_cache;
+pub mod uc_schema;
 
 pub use builder::{StreamBuilder, ZerobusSdkBuilder};
 pub use callbacks::AckCallback;

@@ -610,6 +610,43 @@ stream.flush().await?; // wait once for all pending acknowledgments
 
 On the wire this is identical to `.compiled_proto(...)`; the difference is that records are built dynamically rather than from a generated struct. See the [`dynamic_proto`](https://docs.rs/databricks-zerobus-ingest-sdk/latest/databricks_zerobus_ingest_sdk/dynamic_proto/) module and the `proto_dynamic_single` example for details.
 
+##### Fetching the Schema from Unity Catalog
+
+Rather than assembling the columns yourself, let the SDK read the table's schema from Unity Catalog. `fetch_message_descriptor` resolves the descriptor from the live table metadata; pass it to `.dynamic_proto(...)` as usual:
+
+```rust
+// Fetch the descriptor once from Unity Catalog (uses the SDK's unity_catalog_url).
+let descriptor = sdk
+    .fetch_message_descriptor("catalog.schema.orders", client_id, client_secret)
+    .await?;
+
+// Inspect it if the columns are unknown to the program...
+for field in descriptor.fields() {
+    println!("{} ({:?})", field.name(), field.kind());
+}
+
+// ...then plug it into the ordinary dynamic-proto selector. Cloning a descriptor
+// is cheap (Arc-backed), so one fetch can serve many streams.
+let mut stream = sdk
+    .stream_builder().table("catalog.schema.orders")
+    .oauth(client_id, client_secret)
+    .dynamic_proto(descriptor)
+    .build()
+    .await?;
+
+// Records are built exactly as above — `new_record()` uses the fetched schema.
+for i in 0..100_000i64 {
+    let mut record = stream.new_record()?;
+    record.set("id", i)?.set("customer_name", "Alice Smith")?;
+    let _offset = stream.ingest_record_offset(ProtoBytes(record.encode()?)).await?; // queue only
+}
+stream.flush().await?; // wait once for all pending acknowledgments
+```
+
+The fetch needs OAuth credentials able to read the table's metadata (they are presented to the Unity Catalog REST API) and `unity_catalog_url` on the SDK builder. For direct control over the endpoint — outside an `SDK`, or against a different workspace — call `uc_schema::fetch_message_descriptor(unity_catalog_url, table, client_id, client_secret)`.
+
+The fetched schema is a snapshot. Compatible schema evolution may be accepted; incompatible changes fail stream creation with `ZerobusError::CreateStreamError`, so re-fetch the descriptor before rebuilding the stream. A failed fetch surfaces as `ZerobusError::SchemaFetchError`. Note that `DATE` and `TIMESTAMP` columns map to integers (days and microseconds since the Unix epoch) — see the [`schema`](https://docs.rs/databricks-zerobus-ingest-sdk/latest/databricks_zerobus_ingest_sdk/schema/) module for the full type mapping, and [`uc_schema`](https://docs.rs/databricks-zerobus-ingest-sdk/latest/databricks_zerobus_ingest_sdk/uc_schema/) for the fetch API.
+
 Setters can be called in any order. The builder validates at `build()` time that both authentication and format have been configured.
 
 ### 5. Ingest Data
@@ -1090,6 +1127,7 @@ The `examples/` directory contains working examples covering different serializa
 | `proto/compiled/batch.rs` | Protocol Buffers | Batch | `cargo run -p rust-examples-proto --example proto_compiled_batch` |
 | `proto/dynamic/single.rs` | Protocol Buffers (runtime schema) | Single-record | `cargo run -p rust-examples-proto --example proto_dynamic_single` |
 | `proto/dynamic/batch.rs` | Protocol Buffers (runtime schema) | Batch | `cargo run -p rust-examples-proto --example proto_dynamic_batch` |
+| `proto/dynamic/from_uc.rs` | Protocol Buffers (schema fetched from Unity Catalog) | Single-record | `cargo run -p rust-examples-proto --example proto_dynamic_from_uc` |
 
 
 Check [`examples/README.md`](https://github.com/databricks/zerobus-sdk/blob/main/rust/examples/README.md) for setup instructions and detailed comparisons.
@@ -1363,6 +1401,7 @@ cargo run -p rust-examples-proto --example proto_compiled_batch
 # Build and run Protocol Buffers dynamic-schema examples
 cargo run -p rust-examples-proto --example proto_dynamic_single
 cargo run -p rust-examples-proto --example proto_dynamic_batch
+cargo run -p rust-examples-proto --example proto_dynamic_from_uc
 ```
 
 ## Community and Contributing
