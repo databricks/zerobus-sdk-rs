@@ -1,0 +1,7 @@
+# CMake build trees
+/build/
+/build-*/
+compile_commands.json
+
+# clangd index cache
+/.cache/
