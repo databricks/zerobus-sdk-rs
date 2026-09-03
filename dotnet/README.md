@@ -110,6 +110,27 @@ using var stream = sdk.CreateProtoStream(
     options);  // optional, defaults if null
 ```
 
+#### `CreateAvroStream` (Beta)
+
+Creates an Avro-only stream with OAuth 2.0 client credentials authentication.
+Requires building with `dotnet build -p:ZerobusAvro=true` (off by default).
+
+```csharp
+using var stream = sdk.CreateAvroStream(
+    "catalog.schema.table",
+    avroSchemaJson,
+    clientId,
+    clientSecret,
+    options);  // optional, defaults if null
+
+// Ingest pre-encoded Avro binary records
+byte[] avroRecord = ...;  // Avro-encoded bytes
+stream.IngestRecord(avroRecord);
+stream.Flush();
+```
+
+**Note:** Avro support is a Beta feature, ephemeral-only; server support is pending.
+
 #### `CreateStream`
 
 Creates the legacy untyped stream with OAuth 2.0 client credentials authentication.
@@ -167,10 +188,12 @@ stream. The input `stream` is disposed during recreation and must not be used af
 A later `Dispose()` on the original wrapper (for example at the end of a `using` scope)
 is a no-op.
 
-### `JsonZerobusStream` and `ProtoZerobusStream`
+### `JsonZerobusStream`, `ProtoZerobusStream`, and `AvroZerobusStream`
 
 Typed stream wrappers expose only the matching ingest overloads while preserving the
 same lifecycle APIs (`Flush`, `WaitForOffset`, `Close`, `Dispose`, `GetUnackedRecords`).
+`AvroZerobusStream` is available when the native library is built with `--features avro`
+(included in default builds).
 
 #### `JsonZerobusStream.IngestRecord`
 
@@ -189,6 +212,17 @@ for (int id = 1; id <= 100; id++)
 {
     byte[] protoBytes = myMessage.ToByteArray();
     stream.IngestRecord(protoBytes);
+}
+stream.Flush();
+```
+
+#### `AvroZerobusStream.IngestRecord` (Beta)
+
+```csharp
+for (int id = 1; id <= 100; id++)
+{
+    byte[] avroBytes = EncodeAvro(record);
+    stream.IngestRecord(avroBytes);
 }
 stream.Flush();
 ```

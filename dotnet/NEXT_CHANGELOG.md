@@ -4,6 +4,12 @@
 
 ### New Features and Improvements
 
+- Added Avro record format support (Beta, experimental).
+  `CreateAvroStream(tableName, avroSchemaJson, ...)` creates a typed
+  `AvroZerobusStream` accepting raw Avro binary payloads.
+  Feature-gated off by default; enable with `dotnet build -p:ZerobusAvro=true`.
+  Ephemeral-only; server support pending.
+
 ### Deprecations
 
 ### Bug Fixes

@@ -162,7 +162,14 @@ build_target() {
     target_path="$target_dir/$LIB_NAME"
 
     echo "→ Building $rid ($rust_target)"
-    cargo build --release --target "$rust_target"
+
+    # Build with optional features based on ZEROBUS_BUILD_FEATURES env var
+    if [[ -n "$ZEROBUS_BUILD_FEATURES" ]]; then
+        cargo build --release --features "$ZEROBUS_BUILD_FEATURES" --target "$rust_target"
+    else
+        cargo build --release --target "$rust_target"
+    fi
+
     cargo_out="../target/$rust_target/release/$LIB_NAME"
 
     if [[ ! -f "$cargo_out" ]]; then

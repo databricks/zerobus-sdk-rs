@@ -473,4 +473,94 @@ internal static partial class NativeMethods
 
     [DllImport(LibName, CallingConvention = CallingConvention.Cdecl, EntryPoint = "zerobus_sdk_builder_free")]
     public static extern void SdkBuilderFree(IntPtr builder);
+
+#if ZEROBUS_AVRO
+    // --- Avro stream creation (Beta) ---
+
+    [DllImport(LibName, CallingConvention = CallingConvention.Cdecl, EntryPoint = "zerobus_sdk_create_avro_stream")]
+    public static extern unsafe IntPtr SdkCreateAvroStream(
+        IntPtr sdk,
+        [MarshalAs(UnmanagedType.LPUTF8Str)] string tableName,
+        [MarshalAs(UnmanagedType.LPUTF8Str)] string avroSchemaJson,
+        [MarshalAs(UnmanagedType.LPUTF8Str)] string clientId,
+        [MarshalAs(UnmanagedType.LPUTF8Str)] string clientSecret,
+        ref CStreamConfigurationOptions options,
+        ref CResult result);
+
+    [DllImport(LibName, CallingConvention = CallingConvention.Cdecl, EntryPoint = "zerobus_sdk_create_avro_stream_async")]
+    [return: MarshalAs(UnmanagedType.U1)]
+    public static extern bool SdkCreateAvroStreamAsync(
+        IntPtr sdk,
+        [MarshalAs(UnmanagedType.LPUTF8Str)] string tableName,
+        [MarshalAs(UnmanagedType.LPUTF8Str)] string avroSchemaJson,
+        [MarshalAs(UnmanagedType.LPUTF8Str)] string clientId,
+        [MarshalAs(UnmanagedType.LPUTF8Str)] string clientSecret,
+        ref CStreamConfigurationOptions options,
+        CreateStreamAsyncCallback callback,
+        IntPtr userData,
+        ref CResult result);
+
+    [DllImport(LibName, CallingConvention = CallingConvention.Cdecl, EntryPoint = "zerobus_sdk_create_avro_stream_with_headers_provider")]
+    public static extern unsafe IntPtr SdkCreateAvroStreamWithHeadersProvider(
+        IntPtr sdk,
+        [MarshalAs(UnmanagedType.LPUTF8Str)] string tableName,
+        [MarshalAs(UnmanagedType.LPUTF8Str)] string avroSchemaJson,
+        HeadersProviderCallback headersCallback,
+        IntPtr userData,
+        HeadersProviderFreeCallback? freeUserData,
+        ref CStreamConfigurationOptions options,
+        ref CResult result);
+
+    [DllImport(LibName, CallingConvention = CallingConvention.Cdecl, EntryPoint = "zerobus_sdk_create_avro_stream_with_headers_provider_async")]
+    [return: MarshalAs(UnmanagedType.U1)]
+    public static extern unsafe bool SdkCreateAvroStreamWithHeadersProviderAsync(
+        IntPtr sdk,
+        [MarshalAs(UnmanagedType.LPUTF8Str)] string tableName,
+        [MarshalAs(UnmanagedType.LPUTF8Str)] string avroSchemaJson,
+        HeadersProviderCallback headersCallback,
+        IntPtr userData,
+        HeadersProviderFreeCallback? freeUserData,
+        ref CStreamConfigurationOptions options,
+        CreateStreamAsyncCallback callback,
+        IntPtr callbackUserData,
+        ref CResult result);
+
+    // --- Avro record ingestion (Beta) ---
+
+    [DllImport(LibName, CallingConvention = CallingConvention.Cdecl, EntryPoint = "zerobus_stream_ingest_avro_record")]
+    public static extern unsafe long StreamIngestAvroRecord(
+        IntPtr stream,
+        byte* data,
+        nuint dataLen,
+        ref CResult result);
+
+    [DllImport(LibName, CallingConvention = CallingConvention.Cdecl, EntryPoint = "zerobus_stream_ingest_avro_record_async")]
+    [return: MarshalAs(UnmanagedType.U1)]
+    public static extern unsafe bool StreamIngestAvroRecordAsync(
+        IntPtr stream,
+        byte* data,
+        nuint dataLen,
+        OffsetAsyncCallback callback,
+        IntPtr userData,
+        ref CResult result);
+
+    [DllImport(LibName, CallingConvention = CallingConvention.Cdecl, EntryPoint = "zerobus_stream_ingest_avro_records")]
+    public static extern unsafe long StreamIngestAvroRecords(
+        IntPtr stream,
+        byte** records,
+        nuint* recordLens,
+        nuint numRecords,
+        ref CResult result);
+
+    [DllImport(LibName, CallingConvention = CallingConvention.Cdecl, EntryPoint = "zerobus_stream_ingest_avro_records_async")]
+    [return: MarshalAs(UnmanagedType.U1)]
+    public static extern unsafe bool StreamIngestAvroRecordsAsync(
+        IntPtr stream,
+        byte** records,
+        nuint* recordLens,
+        nuint numRecords,
+        OffsetAsyncCallback callback,
+        IntPtr userData,
+        ref CResult result);
+#endif
 }

@@ -21,12 +21,22 @@
     <!-- Set to true to skip the automatic Rust build (e.g. in CI when libs are pre-built) -->
     <SkipNativeBuild Condition="'$(SkipNativeBuild)' == ''">false</SkipNativeBuild>
 
+    <!-- Enable Avro record format support (beta). Set to true to enable. -->
+    <ZerobusAvro Condition="'$(ZerobusAvro)' == ''">false</ZerobusAvro>
+
     <!-- SourceLink: Enable source debugging from NuGet packages -->
     <PublishRepositoryUrl>true</PublishRepositoryUrl>
     <EmbedUntrackedSources>true</EmbedUntrackedSources>
     <!-- Symbols are embedded in the DLL; no separate .snupkg needed -->
     <DebugType>embedded</DebugType>
     <ContinuousIntegrationBuild Condition="'$(CI)' == 'true'">true</ContinuousIntegrationBuild>
+
+    <!-- Avro support (Beta) - only define when enabled -->
+    <DefineConstants Condition="'$(ZerobusAvro)' == 'true'">$(DefineConstants);ZEROBUS_AVRO</DefineConstants>
+
+    <!-- Build features passed to Rust FFI build -->
+    <ZerobusAvroFeatures Condition="'$(ZerobusAvro)' == 'true'">avro</ZerobusAvroFeatures>
+    <ZerobusAvroFeatures Condition="'$(ZerobusAvro)' != 'true'"></ZerobusAvroFeatures>
   </PropertyGroup>
 
   <ItemGroup>
@@ -59,7 +69,8 @@
     Condition="'$(SkipNativeBuild)' != 'true' AND '$(TargetFramework)' == 'net8.0'">
     <Exec Command="bash &quot;$(MSBuildThisFileDirectory)../../build_native.sh&quot;"
       ConsoleToMSBuild="true"
-      StandardOutputImportance="high" />
+      StandardOutputImportance="high"
+      EnvironmentVariables="ZEROBUS_BUILD_FEATURES=$(ZerobusAvroFeatures)" />
   </Target>
 
   <!--

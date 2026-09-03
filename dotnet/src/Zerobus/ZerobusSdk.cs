@@ -225,6 +225,119 @@ public sealed class ZerobusSdk : IDisposable
         return new ProtoZerobusStream(stream);
     }
 
+#if ZEROBUS_AVRO
+    /// <summary>
+    /// Creates an Avro-only stream with OAuth 2.0 client credentials authentication (Beta).
+    /// This factory sets <see cref="StreamConfigurationOptions.RecordType"/> to
+    /// <see cref="RecordType.Avro"/> automatically and returns a stream wrapper that
+    /// exposes Avro ingest overloads only.
+    /// </summary>
+    /// <param name="tableName">Fully qualified table name in the form <c>catalog.schema.table</c>.</param>
+    /// <param name="avroSchemaJson">Avro writer schema as a JSON string.</param>
+    /// <param name="clientId">OAuth 2.0 client ID.</param>
+    /// <param name="clientSecret">OAuth 2.0 client secret.</param>
+    /// <param name="options">Optional stream configuration overrides.</param>
+    /// <returns>A new <see cref="AvroZerobusStream"/> ready for Avro ingestion.</returns>
+    public AvroZerobusStream CreateAvroStream(
+        string tableName,
+        string avroSchemaJson,
+        string clientId,
+        string clientSecret,
+        StreamConfigurationOptions? options = null)
+    {
+        ArgumentNullException.ThrowIfNull(tableName);
+        ArgumentNullException.ThrowIfNull(avroSchemaJson);
+        ArgumentNullException.ThrowIfNull(clientId);
+        ArgumentNullException.ThrowIfNull(clientSecret);
+
+        var nativeOpts = NativeInterop.ConvertConfig(NormalizeStreamOptions(options, RecordType.Avro));
+
+        var streamPtr = NativeInterop.SdkCreateAvroStream(
+            _ptr,
+            tableName,
+            avroSchemaJson,
+            clientId,
+            clientSecret,
+            ref nativeOpts);
+
+        return new AvroZerobusStream(new ZerobusStream(streamPtr));
+    }
+
+    /// <summary>
+    /// Creates an Avro-only stream asynchronously (Beta).
+    /// </summary>
+    public async Task<AvroZerobusStream> CreateAvroStreamAsync(
+        string tableName,
+        string avroSchemaJson,
+        string clientId,
+        string clientSecret,
+        StreamConfigurationOptions? options = null)
+    {
+        ArgumentNullException.ThrowIfNull(tableName);
+        ArgumentNullException.ThrowIfNull(avroSchemaJson);
+        ArgumentNullException.ThrowIfNull(clientId);
+        ArgumentNullException.ThrowIfNull(clientSecret);
+
+        var nativeOpts = NativeInterop.ConvertConfig(NormalizeStreamOptions(options, RecordType.Avro));
+
+        var streamPtr = await NativeInterop.SdkCreateAvroStreamAsync(
+                _ptr,
+                tableName,
+                avroSchemaJson,
+                clientId,
+                clientSecret,
+                ref nativeOpts)
+            .ConfigureAwait(false);
+
+        return new AvroZerobusStream(new ZerobusStream(streamPtr));
+    }
+
+    /// <summary>
+    /// Creates an Avro-only stream using a custom headers provider (Beta).
+    /// </summary>
+    public AvroZerobusStream CreateAvroStreamWithHeadersProvider(
+        string tableName,
+        string avroSchemaJson,
+        IHeadersProvider headersProvider,
+        StreamConfigurationOptions? options = null)
+    {
+        ArgumentNullException.ThrowIfNull(tableName);
+        ArgumentNullException.ThrowIfNull(avroSchemaJson);
+        ArgumentNullException.ThrowIfNull(headersProvider);
+
+        var stream = CreateStreamWithHeadersProviderCore(
+            new TableProperties(tableName),
+            headersProvider,
+            NormalizeStreamOptions(options, RecordType.Avro),
+            avroSchemaJson);
+
+        return new AvroZerobusStream(stream);
+    }
+
+    /// <summary>
+    /// Creates an Avro-only stream using a custom headers provider asynchronously (Beta).
+    /// </summary>
+    public async Task<AvroZerobusStream> CreateAvroStreamWithHeadersProviderAsync(
+        string tableName,
+        string avroSchemaJson,
+        IHeadersProvider headersProvider,
+        StreamConfigurationOptions? options = null)
+    {
+        ArgumentNullException.ThrowIfNull(tableName);
+        ArgumentNullException.ThrowIfNull(avroSchemaJson);
+        ArgumentNullException.ThrowIfNull(headersProvider);
+
+        var stream = await CreateStreamWithHeadersProviderCoreAsync(
+                new TableProperties(tableName),
+                headersProvider,
+                NormalizeStreamOptions(options, RecordType.Avro),
+                avroSchemaJson)
+            .ConfigureAwait(false);
+
+        return new AvroZerobusStream(stream);
+    }
+#endif
+
     private ZerobusStream CreateStreamCore(
         TableProperties tableProperties,
         string clientId,
@@ -488,6 +601,73 @@ public sealed class ZerobusSdk : IDisposable
         // The FFI owns the provider handle now; the stream keeps no reference.
         return new ZerobusStream(streamPtr);
     }
+
+#if ZEROBUS_AVRO
+    private ZerobusStream CreateStreamWithHeadersProviderCore(
+        TableProperties tableProperties,
+        IHeadersProvider headersProvider,
+        StreamConfigurationOptions? options,
+        string avroSchemaJson)
+    {
+        ValidateStreamConfiguration(tableProperties, options);
+
+        var nativeOpts = NativeInterop.ConvertConfig(options);
+
+        var bridge = new HeadersProviderBridge(headersProvider);
+
+        var handle = GCHandle.Alloc(bridge);
+        var handlePtr = GCHandle.ToIntPtr(handle);
+        var tableName = tableProperties.TableName;
+
+        IntPtr streamPtr;
+        try
+        {
+            streamPtr = NativeInterop.SdkCreateAvroStreamWithHeadersProvider(
+                _ptr,
+                tableName,
+                avroSchemaJson,
+                bridge.Callback,
+                handlePtr,
+                bridge.FreeCallback,
+                ref nativeOpts);
+        }
+        catch
+        {
+            throw;
+        }
+
+        return new ZerobusStream(streamPtr);
+    }
+
+    private async Task<ZerobusStream> CreateStreamWithHeadersProviderCoreAsync(
+        TableProperties tableProperties,
+        IHeadersProvider headersProvider,
+        StreamConfigurationOptions? options,
+        string avroSchemaJson)
+    {
+        ValidateStreamConfiguration(tableProperties, options);
+
+        var nativeOpts = NativeInterop.ConvertConfig(options);
+
+        var bridge = new HeadersProviderBridge(headersProvider);
+
+        var handle = GCHandle.Alloc(bridge);
+        var handlePtr = GCHandle.ToIntPtr(handle);
+        var tableName = tableProperties.TableName;
+
+        var streamPtr = await NativeInterop.SdkCreateAvroStreamWithHeadersProviderAsync(
+                _ptr,
+                tableName,
+                avroSchemaJson,
+                bridge.Callback,
+                handlePtr,
+                bridge.FreeCallback,
+                ref nativeOpts)
+            .ConfigureAwait(false);
+
+        return new ZerobusStream(streamPtr);
+    }
+#endif
 
     /// <summary>
     /// Recreates a JSON or Protocol Buffer stream from an existing stream.
