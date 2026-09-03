@@ -87,6 +87,31 @@ class Stream {
   /// @throws ZerobusException if the stream is closed or ingestion fails.
   std::int64_t ingest_json_records(const std::vector<std::string>& records);
 
+#if defined(ZEROBUS_AVRO)
+  /// Ingest a single Avro datum, blocking until it is queued (Beta).
+  ///
+  /// @param data Pointer to the pre-encoded Avro datum bytes.
+  /// @param len Number of bytes in @p data.
+  /// @return The logical offset assigned to the record.
+  /// @throws ZerobusException if the stream is closed or ingestion fails.
+  std::int64_t ingest_avro_record(const std::uint8_t* data, std::size_t len);
+
+  /// @overload
+  /// @param data The pre-encoded Avro datum bytes.
+  std::int64_t ingest_avro_record(const std::vector<std::uint8_t>& data);
+
+  /// Ingest a batch of Avro datums, blocking until they are queued (Beta).
+  ///
+  /// Prefer the batch APIs over per-record calls in hot paths.
+  ///
+  /// @param records The pre-encoded Avro datums to ingest.
+  /// @return The single logical offset assigned to the whole batch, or -1 if
+  ///         @p records is empty (a no-op).
+  /// @throws ZerobusException if the stream is closed or ingestion fails.
+  std::int64_t ingest_avro_records(
+      const std::vector<std::vector<std::uint8_t>>& records);
+#endif
+
   /// Block until the record at @p offset has been acknowledged by the server.
   ///
   /// @param offset A logical offset returned by an ingest call (for a batch,

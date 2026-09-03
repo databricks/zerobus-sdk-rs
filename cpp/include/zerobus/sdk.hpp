@@ -111,6 +111,28 @@ class Sdk {
       std::shared_ptr<HeadersProvider> headers_provider,
       const ArrowStreamOptions& options = {});
 
+#if defined(ZEROBUS_AVRO)
+  /// Create an Avro stream authenticated with OAuth client credentials (Beta).
+  /// @param table_name The fully-qualified table name.
+  /// @param avro_schema_json The Avro writer schema as a JSON string.
+  /// @param client_id OAuth client ID.
+  /// @param client_secret OAuth client secret.
+  /// @param options Stream configuration options.
+  /// @return An Avro ingestion stream.
+  /// @throws ZerobusException on failure.
+  Stream create_avro_stream(const std::string& table_name,
+                            const std::string& avro_schema_json,
+                            const std::string& client_id,
+                            const std::string& client_secret,
+                            const StreamOptions& options = {});
+
+  /// Create an Avro stream authenticated with a custom headers provider (Beta).
+  Stream create_avro_stream(const std::string& table_name,
+                            const std::string& avro_schema_json,
+                            std::shared_ptr<HeadersProvider> headers_provider,
+                            const StreamOptions& options = {});
+#endif
+
  private:
   friend class SdkBuilder;
   explicit Sdk(CZerobusSdk* handle) : handle_(handle) {}

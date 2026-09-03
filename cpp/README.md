@@ -9,6 +9,7 @@ every other Zerobus SDK.
 - **Exceptions** — every failure throws `zerobus::ZerobusException`, which
   carries a message and an `is_retryable()` flag.
 - **Proto and JSON** ingestion, single and batched.
+- **Avro** ingestion (Beta, requires `-DZEROBUS_ENABLE_AVRO`, ephemeral-only).
 - **Dynamic protobuf** — build a descriptor and encode records straight from
   Unity Catalog table metadata, with no `.proto` file or `protoc` required.
 - **Arrow Flight** ingestion — streaming of Arrow record batches with optional

@@ -206,6 +206,36 @@ std::int64_t Stream::ingest_json_records(
   return checked_offset(offset);
 }
 
+#if defined(ZEROBUS_AVRO)
+std::int64_t Stream::ingest_avro_record(const std::uint8_t* data,
+                                        std::size_t len) {
+  ensure_open(handle_);
+  detail::ResultGuard guard;
+  std::int64_t offset = zerobus_stream_ingest_avro_record(
+      handle_, ptr_or_sentinel(data, len), len, guard.ptr());
+  guard.throw_if_error();
+  return checked_offset(offset);
+}
+
+std::int64_t Stream::ingest_avro_record(const std::vector<std::uint8_t>& data) {
+  return ingest_avro_record(ptr_or_sentinel(data), data.size());
+}
+
+std::int64_t Stream::ingest_avro_records(
+    const std::vector<std::vector<std::uint8_t>>& records) {
+  ensure_open(handle_);
+  if (records.empty()) {
+    return -1;
+  }
+  ProtoBatchView v = make_proto_batch(records);
+  detail::ResultGuard guard;
+  std::int64_t offset = zerobus_stream_ingest_avro_records(
+      handle_, v.ptrs.data(), v.lens.data(), v.ptrs.size(), guard.ptr());
+  guard.throw_if_error();
+  return checked_offset(offset);
+}
+#endif
+
 void Stream::wait_for_offset(std::int64_t offset) {
   ensure_open(handle_);
   // Reject negative offsets (e.g. the -1 from an empty batch) before the FFI.

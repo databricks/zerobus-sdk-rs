@@ -26,6 +26,7 @@ endif()
 
 option(ZEROBUS_BUILD_TESTS "Build the Zerobus C++ SDK tests" ${ZEROBUS_IS_TOP_LEVEL})
 option(ZEROBUS_BUILD_EXAMPLES "Build the Zerobus C++ SDK examples" ${ZEROBUS_IS_TOP_LEVEL})
+option(ZEROBUS_ENABLE_AVRO "Enable Avro record format support (Beta)" OFF)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -85,6 +86,11 @@ target_include_directories(zerobus_cpp
 # Linking the FFI library PUBLIC propagates both the zerobus.h include directory
 # and the platform system libraries the Rust static library needs.
 target_link_libraries(zerobus_cpp PUBLIC zerobus::ffi)
+
+# Enable Avro support if requested.
+if(ZEROBUS_ENABLE_AVRO)
+  target_compile_definitions(zerobus_cpp PUBLIC ZEROBUS_AVRO)
+endif()
 
 if(DEFINED ZEROBUS_FFI_BUILD_TARGET)
   add_dependencies(zerobus_cpp ${ZEROBUS_FFI_BUILD_TARGET})
