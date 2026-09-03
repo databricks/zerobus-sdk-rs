@@ -44,6 +44,9 @@ else()
 
   set(_zb_cargo "${CARGO_EXECUTABLE}")
   set(_zb_cargo_flags "")
+  if(ZEROBUS_ENABLE_AVRO)
+    list(APPEND _zb_cargo_flags "--features" "avro")
+  endif()
   set(_zb_target_dir "${ZEROBUS_RUST_TARGET_DIR}")
   set(_zb_ffi_lib "${ZEROBUS_RUST_TARGET_DIR}/release/${_zb_ffi_lib_name}")
   if(_zb_ffi_instrumented)
@@ -99,7 +102,7 @@ else()
         "RUSTFLAGS=-Zsanitizer=${ZEROBUS_SANITIZE}"
         ${_zb_cargo} build ${_zb_cargo_flags} --release)
   else()
-    set(_zb_build_cmd ${_zb_cargo} build --release)
+    set(_zb_build_cmd ${_zb_cargo} build ${_zb_cargo_flags} --release)
   endif()
 
   add_custom_command(

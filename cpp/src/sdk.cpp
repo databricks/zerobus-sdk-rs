@@ -215,6 +215,56 @@ Stream Sdk::create_stream(const TableProperties& table,
   return Stream(stream, nullptr, options.ack_callback);
 }
 
+#if defined(ZEROBUS_AVRO)
+// Create an OAuth-authenticated Avro stream. The schema is a JSON string passed
+// directly to the FFI (no descriptor_proto bytes). No headers provider (null
+// second arg); the third arg keeps the ack callback (if any) alive.
+Stream Sdk::create_avro_stream(const std::string& table_name,
+                               const std::string& avro_schema_json,
+                               const std::string& client_id,
+                               const std::string& client_secret,
+                               const StreamOptions& options) {
+  detail::ResultGuard guard;
+  CStreamConfigurationOptions copts = detail::to_c(options);
+  CZerobusStream* stream = zerobus_sdk_create_avro_stream(
+      handle_, detail::checked_c_str(table_name, "table_name"),
+      detail::checked_c_str(avro_schema_json, "avro_schema_json"),
+      detail::checked_c_str(client_id, "client_id"),
+      detail::checked_c_str(client_secret, "client_secret"), &copts,
+      guard.ptr());
+  if (stream == nullptr) {
+    guard.throw_if_error();
+    throw ZerobusException("failed to create Avro stream", false);
+  }
+  return Stream(stream, nullptr, options.ack_callback);
+}
+
+// Create an Avro stream authenticated by a custom headers provider.
+Stream Sdk::create_avro_stream(
+    const std::string& table_name, const std::string& avro_schema_json,
+    std::shared_ptr<HeadersProvider> headers_provider,
+    const StreamOptions& options) {
+  if (headers_provider == nullptr) {
+    throw ZerobusException("headers_provider must not be null", false);
+  }
+  detail::ResultGuard guard;
+  CStreamConfigurationOptions copts = detail::to_c(options);
+  const char* c_table = detail::checked_c_str(table_name, "table_name");
+  const char* c_schema =
+      detail::checked_c_str(avro_schema_json, "avro_schema_json");
+  auto* owned =
+      new std::shared_ptr<HeadersProvider>(std::move(headers_provider));
+  CZerobusStream* stream = zerobus_sdk_create_avro_stream_with_headers_provider(
+      handle_, c_table, c_schema, detail::zerobus_cpp_headers_trampoline, owned,
+      detail::zerobus_cpp_headers_free, &copts, guard.ptr());
+  if (stream == nullptr) {
+    guard.throw_if_error();
+    throw ZerobusException("failed to create Avro stream", false);
+  }
+  return Stream(stream, nullptr, options.ack_callback);
+}
+#endif
+
 // Create an OAuth-authenticated Arrow Flight stream. The schema IPC
 // bytes are required (an Arrow stream has no JSON fallback), so reject an empty
 // schema before crossing the FFI rather than letting the core fail less

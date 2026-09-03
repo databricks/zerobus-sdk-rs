@@ -85,3 +85,9 @@ jobs:
       - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
       - name: Run tests
         run: cargo test --workspace
+      # The Avro C API lives behind the `avro` feature, which the default
+      # workspace build does not enable. Cover it here.
+      - name: Build and test FFI with avro
+        run: |
+          cargo build -p zerobus-ffi --features avro
+          cargo test -p zerobus-ffi --features avro

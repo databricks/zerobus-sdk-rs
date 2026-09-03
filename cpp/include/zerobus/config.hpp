@@ -16,6 +16,9 @@ enum class RecordType : std::int32_t {
   Unspecified = 0,
   Proto = 1,
   Json = 2,
+#if defined(ZEROBUS_AVRO)
+  Avro = 4,
+#endif
 };
 
 /// How long `close()` waits for the async ack-callback task to drain before
