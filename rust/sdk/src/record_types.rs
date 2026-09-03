@@ -12,6 +12,8 @@
 use prost::Message;
 use smallvec::{smallvec, SmallVec};
 
+#[cfg(feature = "avro")]
+use crate::databricks::zerobus::AvroRecordBatch;
 use crate::databricks::zerobus::{
     ephemeral_stream_request::Payload as RequestPayload,
     ingest_record_batch_request::Batch as IngestRequestBatch,
@@ -26,10 +28,16 @@ pub type ProtoEncodedRecord = Vec<u8>;
 /// A type alias for a JSON-encoded record.
 pub type JsonEncodedRecord = String;
 
+/// A type alias for an Avro-encoded record (a single raw binary datum).
+#[cfg(feature = "avro")]
+pub type AvroEncodedRecord = Vec<u8>;
+
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub enum EncodedRecord {
     Json(JsonEncodedRecord),
     Proto(ProtoEncodedRecord),
+    #[cfg(feature = "avro")]
+    Avro(AvroEncodedRecord),
 }
 
 impl From<ProtoEncodedRecord> for EncodedRecord {
@@ -66,6 +74,19 @@ pub struct ProtoBytes(pub Vec<u8>);
 impl From<ProtoBytes> for EncodedRecord {
     fn from(bytes: ProtoBytes) -> Self {
         EncodedRecord::Proto(bytes.0)
+    }
+}
+
+/// Wrapper for a pre-encoded Avro binary datum (Beta).
+///
+/// Encode against the stream's writer schema yourself; pass the raw bytes.
+#[cfg(feature = "avro")]
+pub struct AvroBytes(pub Vec<u8>);
+
+#[cfg(feature = "avro")]
+impl From<AvroBytes> for EncodedRecord {
+    fn from(bytes: AvroBytes) -> Self {
+        EncodedRecord::Avro(bytes.0)
     }
 }
 
@@ -161,6 +182,8 @@ impl<T: serde::Serialize> From<JsonValue<T>> for EncodedRecord {
 pub enum EncodedBatch {
     Proto(SmallVec<[ProtoEncodedRecord; 1]>),
     Json(SmallVec<[JsonEncodedRecord; 1]>),
+    #[cfg(feature = "avro")]
+    Avro(SmallVec<[AvroEncodedRecord; 1]>),
 }
 
 impl EncodedBatch {
@@ -173,6 +196,8 @@ impl EncodedBatch {
         match (value.into(), record_type) {
             (EncodedRecord::Json(s), RecordType::Json) => Some(EncodedBatch::Json(smallvec![s])),
             (EncodedRecord::Proto(v), RecordType::Proto) => Some(EncodedBatch::Proto(smallvec![v])),
+            #[cfg(feature = "avro")]
+            (EncodedRecord::Avro(v), RecordType::Avro) => Some(EncodedBatch::Avro(smallvec![v])),
             _ => None,
         }
     }
@@ -214,6 +239,19 @@ impl EncodedBatch {
                     },
                 )
                 .map(EncodedBatch::Proto),
+            #[cfg(feature = "avro")]
+            RecordType::Avro => batch_iter
+                .try_fold(
+                    SmallVec::with_capacity(size_hint),
+                    |mut vec, record| match record.into() {
+                        EncodedRecord::Avro(value) => {
+                            vec.push(value);
+                            Some(vec)
+                        }
+                        _ => None,
+                    },
+                )
+                .map(EncodedBatch::Avro),
             _ => None,
         }
     }
@@ -254,6 +292,24 @@ impl EncodedBatch {
                     offset_id: Some(offset_id),
                 })
             }
+            #[cfg(feature = "avro")]
+            EncodedBatch::Avro(records) if records.len() == 1 => {
+                RequestPayload::IngestRecord(IngestRecordRequest {
+                    record: Some(IngestRequestRecord::AvroEncodedRecord(
+                        records.into_iter().next().unwrap(),
+                    )),
+                    offset_id: Some(offset_id),
+                })
+            }
+            #[cfg(feature = "avro")]
+            EncodedBatch::Avro(records) => {
+                RequestPayload::IngestRecordBatch(IngestRecordBatchRequest {
+                    batch: Some(IngestRequestBatch::AvroBatch(AvroRecordBatch {
+                        records: records.into_vec(),
+                    })),
+                    offset_id: Some(offset_id),
+                })
+            }
         }
     }
 
@@ -262,6 +318,8 @@ impl EncodedBatch {
         match self {
             EncodedBatch::Proto(records) => records.len(),
             EncodedBatch::Json(records) => records.len(),
+            #[cfg(feature = "avro")]
+            EncodedBatch::Avro(records) => records.len(),
         }
     }
 
@@ -274,6 +332,8 @@ impl EncodedBatch {
         match self {
             EncodedBatch::Proto(records) => records.iter().map(|r| r.len()).sum(),
             EncodedBatch::Json(records) => records.iter().map(|s| s.len()).sum(),
+            #[cfg(feature = "avro")]
+            EncodedBatch::Avro(records) => records.iter().map(|r| r.len()).sum(),
         }
     }
 }
@@ -286,6 +346,8 @@ impl IntoIterator for EncodedBatch {
         match self {
             EncodedBatch::Proto(records) => EncodedBatchIter::Proto(records.into_iter()),
             EncodedBatch::Json(records) => EncodedBatchIter::Json(records.into_iter()),
+            #[cfg(feature = "avro")]
+            EncodedBatch::Avro(records) => EncodedBatchIter::Avro(records.into_iter()),
         }
     }
 }
@@ -293,6 +355,8 @@ impl IntoIterator for EncodedBatch {
 pub enum EncodedBatchIter {
     Proto(smallvec::IntoIter<[ProtoEncodedRecord; 1]>),
     Json(smallvec::IntoIter<[JsonEncodedRecord; 1]>),
+    #[cfg(feature = "avro")]
+    Avro(smallvec::IntoIter<[AvroEncodedRecord; 1]>),
 }
 
 impl Iterator for EncodedBatchIter {
@@ -302,6 +366,8 @@ impl Iterator for EncodedBatchIter {
         match self {
             EncodedBatchIter::Proto(iter) => iter.next().map(EncodedRecord::Proto),
             EncodedBatchIter::Json(iter) => iter.next().map(EncodedRecord::Json),
+            #[cfg(feature = "avro")]
+            EncodedBatchIter::Avro(iter) => iter.next().map(EncodedRecord::Avro),
         }
     }
 
@@ -309,6 +375,8 @@ impl Iterator for EncodedBatchIter {
         match self {
             EncodedBatchIter::Proto(iter) => iter.size_hint(),
             EncodedBatchIter::Json(iter) => iter.size_hint(),
+            #[cfg(feature = "avro")]
+            EncodedBatchIter::Avro(iter) => iter.size_hint(),
         }
     }
 }
@@ -430,6 +498,59 @@ mod tests {
 
             assert_eq!(size_of::<ProtoBytes>(), size_of::<Vec<u8>>());
             assert_eq!(size_of::<JsonString>(), size_of::<String>());
+        }
+    }
+
+    #[cfg(feature = "avro")]
+    mod avro {
+        use super::*;
+
+        #[test]
+        fn avro_bytes_to_encoded_record() {
+            let bytes = vec![1, 2, 3];
+            match EncodedRecord::from(AvroBytes(bytes.clone())) {
+                EncodedRecord::Avro(data) => assert_eq!(data, bytes),
+                _ => panic!("Expected Avro variant"),
+            }
+        }
+
+        #[test]
+        fn try_from_record_matches_avro() {
+            let batch =
+                EncodedBatch::try_from_record(AvroBytes(vec![9]), RecordType::Avro).unwrap();
+            assert!(matches!(batch, EncodedBatch::Avro(_)));
+            // Wrong record_type yields None.
+            assert!(EncodedBatch::try_from_record(AvroBytes(vec![9]), RecordType::Json).is_none());
+        }
+
+        #[test]
+        fn single_avro_record_uses_avro_encoded_record() {
+            let batch = EncodedBatch::Avro(smallvec![vec![1, 2, 3]]);
+            match batch.into_request_payload(7) {
+                RequestPayload::IngestRecord(req) => {
+                    assert_eq!(req.offset_id, Some(7));
+                    assert!(matches!(
+                        req.record,
+                        Some(IngestRequestRecord::AvroEncodedRecord(_))
+                    ));
+                }
+                _ => panic!("Expected IngestRecord"),
+            }
+        }
+
+        #[test]
+        fn multi_avro_records_use_avro_batch() {
+            let records = vec![vec![1], vec![2]];
+            let batch = EncodedBatch::Avro(SmallVec::from_vec(records.clone()));
+            assert_eq!(batch.get_record_count(), 2);
+            assert_eq!(batch.total_byte_size(), 2);
+            match batch.into_request_payload(3) {
+                RequestPayload::IngestRecordBatch(req) => match req.batch {
+                    Some(IngestRequestBatch::AvroBatch(avro)) => assert_eq!(avro.records, records),
+                    _ => panic!("Expected AvroBatch"),
+                },
+                _ => panic!("Expected IngestRecordBatch"),
+            }
         }
     }
 

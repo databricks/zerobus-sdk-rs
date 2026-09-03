@@ -36,6 +36,7 @@ impl ZerobusStream {
         table_properties: &TableProperties,
         headers_provider: &Arc<dyn HeadersProvider>,
         record_type: RecordType,
+        avro_schema_json: Option<String>,
     ) -> ZerobusResult<(
         tokio::sync::mpsc::Sender<EphemeralStreamRequest>,
         tonic::Streaming<EphemeralStreamResponse>,
@@ -46,6 +47,7 @@ impl ZerobusStream {
             table_properties,
             headers_provider,
             record_type,
+            avro_schema_json,
         )
         .await;
         if let Err(err) = &result {
@@ -69,6 +71,7 @@ impl ZerobusStream {
         table_properties: &TableProperties,
         headers_provider: &Arc<dyn HeadersProvider>,
         record_type: RecordType,
+        avro_schema_json: Option<String>,
         recovery_timeout_ms: u64,
     ) -> ZerobusResult<(
         tokio::sync::mpsc::Sender<EphemeralStreamRequest>,
@@ -84,6 +87,7 @@ impl ZerobusStream {
                 table_properties,
                 headers_provider,
                 record_type,
+                avro_schema_json,
             ),
         )
         .await
@@ -115,6 +119,7 @@ impl ZerobusStream {
         table_properties: &TableProperties,
         headers_provider: &Arc<dyn HeadersProvider>,
         record_type: RecordType,
+        avro_schema_json: Option<String>,
     ) -> ZerobusResult<(
         tokio::sync::mpsc::Sender<EphemeralStreamRequest>,
         tonic::Streaming<EphemeralStreamResponse>,
@@ -178,8 +183,7 @@ impl ZerobusStream {
             table_name: Some(table_properties.table_name.to_string()),
             descriptor_proto,
             record_type: Some(record_type.into()),
-            // Avro is not wired into the ephemeral create path yet.
-            avro_schema_json: None,
+            avro_schema_json,
         });
 
         debug!("Sending CreateStream request.");
