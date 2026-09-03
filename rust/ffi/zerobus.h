@@ -836,6 +836,139 @@ void zerobus_free_error_message(char *message);
  */
 struct CStreamConfigurationOptions zerobus_get_default_config(void);
 
+#if defined(ZEROBUS_AVRO)
+/**
+ * Create an Avro stream with OAuth authentication (Beta).
+ * avro_schema_json: the Avro writer schema as a JSON string (required).
+ */
+struct CZerobusStream *zerobus_sdk_create_avro_stream(struct CZerobusSdk *sdk,
+                                                      const char *table_name,
+                                                      const char *avro_schema_json,
+                                                      const char *client_id,
+                                                      const char *client_secret,
+                                                      const struct CStreamConfigurationOptions *options,
+                                                      struct CResult *result);
+#endif
+
+#if defined(ZEROBUS_AVRO)
+/**
+ * Create an Avro stream with OAuth authentication on a background task (Beta).
+ */
+bool zerobus_sdk_create_avro_stream_async(struct CZerobusSdk *sdk,
+                                          const char *table_name,
+                                          const char *avro_schema_json,
+                                          const char *client_id,
+                                          const char *client_secret,
+                                          const struct CStreamConfigurationOptions *options,
+                                          CreateStreamAsyncCallback callback,
+                                          void *user_data,
+                                          struct CResult *result);
+#endif
+
+#if defined(ZEROBUS_AVRO)
+/**
+ * Create an Avro stream with a custom headers provider callback (Beta).
+ * Ownership of `user_data` follows `zerobus_sdk_create_stream_with_headers_provider`.
+ */
+struct CZerobusStream *zerobus_sdk_create_avro_stream_with_headers_provider(struct CZerobusSdk *sdk,
+                                                                            const char *table_name,
+                                                                            const char *avro_schema_json,
+                                                                            HeadersProviderCallback headers_callback,
+                                                                            void *user_data,
+                                                                            void (*free_user_data)(void *user_data),
+                                                                            const struct CStreamConfigurationOptions *options,
+                                                                            struct CResult *result);
+#endif
+
+#if defined(ZEROBUS_AVRO)
+/**
+ * Create an Avro stream with a custom headers provider callback on a background task (Beta).
+ */
+bool zerobus_sdk_create_avro_stream_with_headers_provider_async(struct CZerobusSdk *sdk,
+                                                                const char *table_name,
+                                                                const char *avro_schema_json,
+                                                                HeadersProviderCallback headers_callback,
+                                                                void *user_data,
+                                                                void (*free_user_data)(void *user_data),
+                                                                const struct CStreamConfigurationOptions *options,
+                                                                CreateStreamAsyncCallback callback,
+                                                                void *callback_user_data,
+                                                                struct CResult *result);
+#endif
+
+#if defined(ZEROBUS_AVRO)
+/**
+ * Ingest a pre-encoded Avro datum. Returns the offset directly, or -1 on error.
+ */
+int64_t zerobus_stream_ingest_avro_record(struct CZerobusStream *stream,
+                                          const uint8_t *data,
+                                          uintptr_t data_len,
+                                          struct CResult *result);
+#endif
+
+#if defined(ZEROBUS_AVRO)
+/**
+ * Ingest an Avro datum on a background task and report the assigned offset via callback.
+ */
+bool zerobus_stream_ingest_avro_record_async(struct CZerobusStream *stream,
+                                             const uint8_t *data,
+                                             uintptr_t data_len,
+                                             OffsetAsyncCallback callback,
+                                             void *user_data,
+                                             struct CResult *result);
+#endif
+
+#if defined(ZEROBUS_AVRO)
+/**
+ * Ingest a batch of Avro datums. Returns the batch offset, -1 on error, -2 if empty.
+ */
+int64_t zerobus_stream_ingest_avro_records(struct CZerobusStream *stream,
+                                           const uint8_t *const *records,
+                                           const uintptr_t *record_lens,
+                                           uintptr_t num_records,
+                                           struct CResult *result);
+#endif
+
+#if defined(ZEROBUS_AVRO)
+/**
+ * Ingest a batch of Avro datums on a background task; reports the batch offset via callback.
+ */
+bool zerobus_stream_ingest_avro_records_async(struct CZerobusStream *stream,
+                                              const uint8_t *const *records,
+                                              const uintptr_t *record_lens,
+                                              uintptr_t num_records,
+                                              OffsetAsyncCallback callback,
+                                              void *user_data,
+                                              struct CResult *result);
+#endif
+
+#if defined(ZEROBUS_AVRO)
+/**
+ * Ingest an Avro datum without waiting (fire-and-forget).
+ *
+ * # Safety
+ * The stream must remain valid until all background tasks spawned by this function complete.
+ */
+void zerobus_stream_ingest_avro_record_nowait(struct CZerobusStream *stream,
+                                              const uint8_t *data,
+                                              uintptr_t data_len,
+                                              struct CResult *result);
+#endif
+
+#if defined(ZEROBUS_AVRO)
+/**
+ * Ingest a batch of Avro datums without waiting (fire-and-forget).
+ *
+ * # Safety
+ * The stream must remain valid until all background tasks spawned by this function complete.
+ */
+void zerobus_stream_ingest_avro_records_nowait(struct CZerobusStream *stream,
+                                               const uint8_t *const *records,
+                                               const uintptr_t *record_lens,
+                                               uintptr_t num_records,
+                                               struct CResult *result);
+#endif
+
 /**
  * Build a protobuf schema from Unity Catalog table metadata JSON.
  * Returns NULL on error; free with `zerobus_proto_schema_free`.

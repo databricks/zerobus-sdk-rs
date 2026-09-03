@@ -51,17 +51,24 @@ echo "Building Rust FFI library for ${GOOS}_${GOARCH}..."
 
 cd "$FFI_DIR"
 
+# Determine which features to enable
+CARGO_FEATURES=""
+if [ -n "$ZEROBUS_BUILD_FEATURES" ]; then
+    CARGO_FEATURES="--features $ZEROBUS_BUILD_FEATURES"
+    echo "Building with features: $ZEROBUS_BUILD_FEATURES"
+fi
+
 # Determine Rust target for Windows MinGW compatibility
 if [[ "$GOOS" == "windows" ]]; then
     echo "Detected Windows environment - building for GNU target..."
     TARGET="x86_64-pc-windows-gnu"
-    cargo build --release --target "$TARGET"
+    cargo build --release --target "$TARGET" $CARGO_FEATURES
 elif command -v cargo-zigbuild &> /dev/null; then
     echo "Using cargo-zigbuild for optimized build..."
-    cargo zigbuild --release
+    cargo zigbuild --release $CARGO_FEATURES
 else
     echo "Using cargo (install cargo-zigbuild for better cross-compilation)"
-    cargo build --release
+    cargo build --release $CARGO_FEATURES
 fi
 
 mkdir -p "$TARGET_LIB_DIR"

@@ -1,2 +1,4 @@
 target/
 .cargo/
+# examples/avro is a non-workspace crate; its lockfile is not tracked.
+examples/avro/Cargo.lock

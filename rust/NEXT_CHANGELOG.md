@@ -6,6 +6,10 @@
 
 ### New Features and Improvements
 
+- Add Avro record format (Beta), behind the off-by-default `avro` feature. Select it
+  with `StreamBuilder::avro(schema_json)` and ingest pre-encoded datums via `AvroBytes`.
+  Ephemeral streams only; server support is pending.
+
 - JSON and protobuf streams now use a dedicated gRPC connection by default.
   Use `ZerobusSdk::builder().connection_per_stream(false)` to retain the prior
   shared HTTP/2 connection behavior. Arrow Flight streams are unchanged.

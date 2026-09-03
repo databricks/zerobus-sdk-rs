@@ -9,6 +9,9 @@ members = [
     "tools/*",
     "tests",
 ]
+# Excluded: as a member it would force the sdk `avro` feature across the workspace
+# and break ffi/jni. Build it standalone with `cargo build` inside examples/avro.
+exclude = ["examples/avro"]
 resolver = "2"
 
 # The FFI crate catches panics at the `extern "C"` boundary via `catch_unwind`,

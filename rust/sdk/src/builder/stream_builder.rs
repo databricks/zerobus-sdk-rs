@@ -54,6 +54,9 @@ enum FormatConfig {
     DynamicProto(MessageDescriptor),
     #[cfg(feature = "arrow-flight")]
     Arrow(Arc<ArrowSchema>),
+    /// Avro writer schema as JSON.
+    #[cfg(feature = "avro")]
+    Avro(String),
 }
 
 /// A fluent builder for creating Zerobus ingestion streams.
@@ -120,6 +123,8 @@ impl fmt::Debug for StreamBuilder<'_> {
             Some(FormatConfig::DynamicProto(_)) => "DynamicProto",
             #[cfg(feature = "arrow-flight")]
             Some(FormatConfig::Arrow(_)) => "Arrow",
+            #[cfg(feature = "avro")]
+            Some(FormatConfig::Avro(_)) => "Avro",
             None => "None",
         };
         f.debug_struct("StreamBuilder")
@@ -217,6 +222,15 @@ impl<'a> StreamBuilder<'a> {
     #[cfg(feature = "arrow-flight")]
     pub fn arrow(mut self, schema: Arc<ArrowSchema>) -> Self {
         self.format = Some(FormatConfig::Arrow(schema));
+        self
+    }
+
+    /// Select Avro record format with the writer schema as JSON (Beta).
+    ///
+    /// Ingest pre-encoded datums with [`AvroBytes`](crate::AvroBytes).
+    #[cfg(feature = "avro")]
+    pub fn avro(mut self, schema_json: impl Into<String>) -> Self {
+        self.format = Some(FormatConfig::Avro(schema_json.into()));
         self
     }
 
@@ -433,14 +447,16 @@ impl<'a> StreamBuilder<'a> {
         self.validate()?;
         let headers_provider = self.resolve_headers_provider()?;
 
-        let (record_type, descriptor_proto, message_descriptor) = match self.format {
-            Some(FormatConfig::Json) => (RecordType::Json, None, None),
-            Some(FormatConfig::CompiledProto(desc)) => (RecordType::Proto, Some(*desc), None),
+        let (record_type, descriptor_proto, message_descriptor, avro_schema_json) = match self
+            .format
+        {
+            Some(FormatConfig::Json) => (RecordType::Json, None, None, None),
+            Some(FormatConfig::CompiledProto(desc)) => (RecordType::Proto, Some(*desc), None, None),
             Some(FormatConfig::DynamicProto(md)) => {
                 // The wire descriptor is recovered from the already-resolved
                 // MessageDescriptor the caller supplied.
                 let desc = md.descriptor_proto().clone();
-                (RecordType::Proto, Some(desc), Some(md))
+                (RecordType::Proto, Some(desc), Some(md), None)
             }
             #[cfg(feature = "arrow-flight")]
             Some(FormatConfig::Arrow(_)) => {
@@ -448,6 +464,8 @@ impl<'a> StreamBuilder<'a> {
                     "Arrow format requires .build_arrow() instead of .build()".into(),
                 ));
             }
+            #[cfg(feature = "avro")]
+            Some(FormatConfig::Avro(schema)) => (RecordType::Avro, None, None, Some(schema)),
             None => {
                 return Err(ZerobusError::InvalidArgument(
                     "record format is required: call .json(), .compiled_proto(), or .dynamic_proto() before .build()"
@@ -457,6 +475,7 @@ impl<'a> StreamBuilder<'a> {
         };
 
         self.grpc_config.record_type = record_type;
+        self.grpc_config.avro_schema_json = avro_schema_json;
         let table_properties = TableProperties {
             table_name: self.table_name,
             descriptor_proto,
@@ -617,6 +636,19 @@ mod tests {
             .oauth("a", "b")
             .dynamic_proto(md);
         assert!(format!("{builder:?}").contains("DynamicProto"));
+        builder.validate().expect("validation should succeed");
+    }
+
+    #[cfg(feature = "avro")]
+    #[test]
+    fn avro_sets_format_and_validates() {
+        let sdk = test_sdk();
+        let builder = sdk
+            .stream_builder()
+            .table("t")
+            .oauth("a", "b")
+            .avro(r#"{"type":"record","name":"R","fields":[]}"#);
+        assert!(format!("{builder:?}").contains("Avro"));
         builder.validate().expect("validation should succeed");
     }
 
