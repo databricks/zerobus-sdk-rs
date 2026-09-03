@@ -12,16 +12,12 @@
 
 ### Bug Fixes
 
-- Fixed gRPC stream teardown to preserve unacknowledged records, return the
-  terminal stream error from `close()`, and reliably cancel and reap background
-  tasks.
-
 ### Documentation
 
 ### Internal Changes
 
-- Hardened multiplexed-stream failure propagation, acknowledgment wakeups,
-  capacity routing, and bounded concurrent shutdown.
+- Updated multiplexed-stream failure handling to reject new ingestion and wake
+  pending message waits after a lane fails, and to close lanes concurrently.
 
 ### Breaking Changes
 

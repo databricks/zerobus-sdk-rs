@@ -93,10 +93,6 @@ impl ZerobusStream {
                             }
                         }
                     }
-                    _ = self.forced_failure_token.cancelled() => {
-                        // Loop to observe the closed flag. This token is only
-                        // cancelled when a mux sibling force-fails this lane.
-                    }
                 }
             }
 

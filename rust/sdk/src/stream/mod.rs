@@ -25,4 +25,3 @@ pub use grpc::ZerobusStream;
 
 #[cfg(feature = "testing")]
 pub use grpc::CallbackHandlerHarness;
-pub(crate) use grpc::StreamFailureHandle;

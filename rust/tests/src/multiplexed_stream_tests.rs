@@ -660,6 +660,8 @@ mod multi_stream_tests {
 
         mux.close().await?;
         assert!(mux.is_closed());
+        // A ready acknowledgment wins even though close also cancelled the mux token.
+        mux.wait_for_message_id(offset).await?;
 
         Ok(())
     }
@@ -737,8 +739,9 @@ mod failure_tests {
         healthy_ack.release();
         assert!(sibling_result.is_err());
 
-        // The sub-stream closed (non-retryable error), so the mux should be poisoned
-        // and further ingest should preserve the terminal error.
+        // The sub-stream closed (non-retryable error), so the mux should reject
+        // further ingestion with the original failure. Healthy siblings remain
+        // alive until explicit close.
         assert!(
             mux.is_closed(),
             "Expected mux to be poisoned after sub-stream close"
@@ -955,10 +958,8 @@ mod failure_tests {
     /// Poison must not lose records sitting unacked on a *healthy* sub-stream.
     ///
     /// The healthy stream's ack is delayed past the flush timeout, so the
-    /// best-effort flush in the poison path times out and the record is still
-    /// in the landing zone when the stream is torn down via signal_shutdown
-    /// (no supervisor failure → `failed_records` never populated for it).
-    /// `get_unacked_records` must report it anyway.
+    /// record remains in its landing zone until explicit close.
+    /// `get_unacked_records` must report it afterward.
     #[tokio::test]
     async fn test_get_unacked_records_includes_stranded_records_on_healthy_streams(
     ) -> Result<(), Box<dyn std::error::Error>> {

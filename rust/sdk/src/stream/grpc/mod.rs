@@ -45,17 +45,14 @@ mod sender;
 mod supervisor;
 mod types;
 
-use types::{CallbackMessage, IngestRequest, OneshotMap, RecordLandingZone};
+use types::{IngestRequest, OneshotMap, RecordLandingZone};
 
 #[cfg(feature = "testing")]
 pub use callback_handler::CallbackHandlerHarness;
-pub(crate) use close::StreamShutdownHandle;
-pub(crate) use supervisor::StreamFailureHandle;
 
 /// Maximum time to wait for the receiver/sender tasks to finish during stream
 /// teardown.
 pub(super) const STREAM_TEARDOWN_DRAIN_TIMEOUT_MS: u64 = 500;
-const INITIALIZATION_TASK_REAP_TIMEOUT_MS: u64 = STREAM_TEARDOWN_DRAIN_TIMEOUT_MS * 2;
 
 /// Represents an active ingestion stream to a Databricks Delta table.
 ///
@@ -114,8 +111,6 @@ pub struct ZerobusStream {
     /// Supervisor task that manages the stream lifecycle such as stream creation, recovery, etc.
     /// It orchestrates the receiver and sender tasks.
     supervisor_task: tokio::task::JoinHandle<Result<(), ZerobusError>>,
-    /// Whether `supervisor_task` has already been awaited to completion.
-    supervisor_reaped: bool,
     /// The generator of logical offset IDs. Used to generate monotonically increasing offset IDs, even if the stream recovers.
     logical_offset_id_generator: OffsetIdGenerator,
     /// Signal that the stream is caught up to the given offset.
@@ -130,87 +125,15 @@ pub struct ZerobusStream {
     sync_mutex: Arc<tokio::sync::Mutex<()>>,
     /// Persistent signal that wakes capacity waiters when the stream becomes terminal.
     terminal_token: CancellationToken,
-    /// Wakes acknowledgment waits when this stream is force-failed by a mux sibling.
-    forced_failure_token: CancellationToken,
     /// Watch channel for last error received from the server.
     server_error_rx: tokio::sync::watch::Receiver<Option<ZerobusError>>,
     /// Cancellation token to signal receiver and sender tasks to abort. It is sent either when stream is closed or dropped.
     cancellation_token: CancellationToken,
     /// Callback handler task that executes callbacks in a separate thread.
     callback_handler_task: Option<tokio::task::JoinHandle<()>>,
-    /// Sender retained so forced mux shutdown can fail pending callbacks.
-    callback_tx: Option<tokio::sync::mpsc::UnboundedSender<CallbackMessage>>,
     /// Resolved message descriptor for building dynamic-proto records, supplied by
     /// the builder. `None` for JSON and compiled-proto streams.
     dynamic_message_descriptor: Option<MessageDescriptor>,
-}
-
-/// Owns tasks spawned while a stream is opening. If the constructor future is
-/// cancelled before it can move those handles into `ZerobusStream`, dropping
-/// this guard cancels and aborts them instead of detaching them.
-type StreamInitializationTasks = (
-    tokio::task::JoinHandle<Result<(), ZerobusError>>,
-    Option<tokio::task::JoinHandle<()>>,
-);
-
-struct StreamInitializationGuard {
-    cancellation_token: CancellationToken,
-    runtime_handle: tokio::runtime::Handle,
-    tasks: Option<StreamInitializationTasks>,
-}
-
-impl StreamInitializationGuard {
-    fn new(
-        cancellation_token: CancellationToken,
-        supervisor_task: tokio::task::JoinHandle<Result<(), ZerobusError>>,
-        callback_handler_task: Option<tokio::task::JoinHandle<()>>,
-    ) -> Self {
-        Self {
-            cancellation_token,
-            runtime_handle: tokio::runtime::Handle::current(),
-            tasks: Some((supervisor_task, callback_handler_task)),
-        }
-    }
-
-    fn disarm(mut self) -> StreamInitializationTasks {
-        self.tasks
-            .take()
-            .expect("initialization guard must own its tasks")
-    }
-}
-
-async fn reap_initialization_task<T: Send + 'static>(mut task: tokio::task::JoinHandle<T>) {
-    if tokio::time::timeout(
-        std::time::Duration::from_millis(INITIALIZATION_TASK_REAP_TIMEOUT_MS),
-        &mut task,
-    )
-    .await
-    .is_err()
-    {
-        task.abort();
-        let _ = task.await;
-    }
-}
-
-impl Drop for StreamInitializationGuard {
-    fn drop(&mut self) {
-        let Some((supervisor, callback)) = self.tasks.take() else {
-            return;
-        };
-        self.cancellation_token.cancel();
-        // Give the supervisor time to cancel and reap its sender/receiver
-        // children. A detached, bounded reaper retains ownership of all task
-        // handles and force-aborts any task that does not cooperate.
-        let reaper = self.runtime_handle.spawn(async move {
-            let callback_reaper = async move {
-                if let Some(callback) = callback {
-                    reap_initialization_task(callback).await;
-                }
-            };
-            tokio::join!(reap_initialization_task(supervisor), callback_reaper);
-        });
-        drop(reaper);
-    }
 }
 
 impl ZerobusStream {
@@ -240,7 +163,6 @@ impl ZerobusStream {
         let (server_error_tx, server_error_rx) = tokio::sync::watch::channel(None);
         let cancellation_token = CancellationToken::new();
         let terminal_token = CancellationToken::new();
-        let forced_failure_token = CancellationToken::new();
         // Create callback channel and spawn callback handler task only if callback is defined
         let (callback_tx, callback_handler_task) = if options.ack_callback.is_some() {
             let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
@@ -271,17 +193,11 @@ impl ZerobusStream {
             cancellation_token.clone(),
             callback_tx.clone(),
         ));
-        let initialization_guard = StreamInitializationGuard::new(
-            cancellation_token.clone(),
-            supervisor_task,
-            callback_handler_task,
-        );
         let stream_id = Some(stream_init_result_rx.await.map_err(|_| {
             ZerobusError::UnexpectedStreamResponseError(
                 "Supervisor task died before stream creation".to_string(),
             )
         })??);
-        let (supervisor_task, callback_handler_task) = initialization_guard.disarm();
 
         // Cloned out before `table_properties` is moved into the struct below.
         let dynamic_message_descriptor = table_properties.message_descriptor.clone();
@@ -301,12 +217,9 @@ impl ZerobusStream {
             is_closed,
             sync_mutex,
             terminal_token,
-            forced_failure_token,
             server_error_rx,
             cancellation_token,
-            supervisor_reaped: false,
             callback_handler_task,
-            callback_tx,
             dynamic_message_descriptor,
         };
 
@@ -342,118 +255,10 @@ impl Drop for ZerobusStream {
     fn drop(&mut self) {
         self.is_closed.store(true, Ordering::Relaxed);
         self.terminal_token.cancel();
-        self.forced_failure_token.cancel();
         self.cancellation_token.cancel();
         self.supervisor_task.abort();
         if let Some(callback_handler_task) = self.callback_handler_task.take() {
             callback_handler_task.abort();
         }
-    }
-}
-
-#[cfg(test)]
-mod initialization_tests {
-    use std::sync::atomic::{AtomicUsize, Ordering};
-
-    use super::*;
-
-    struct DropCounter(Arc<AtomicUsize>);
-
-    impl Drop for DropCounter {
-        fn drop(&mut self) {
-            self.0.fetch_add(1, Ordering::Relaxed);
-        }
-    }
-
-    #[tokio::test]
-    async fn initialization_guard_cancels_and_reaps_spawned_tasks() {
-        let cancellation_token = CancellationToken::new();
-        let drops = Arc::new(AtomicUsize::new(0));
-        let receiver_drop = DropCounter(Arc::clone(&drops));
-        let supervisor_drop = DropCounter(Arc::clone(&drops));
-        let callback_drop = DropCounter(Arc::clone(&drops));
-        let receiver_token = cancellation_token.child_token();
-        let receiver = tokio::spawn(async move {
-            let _drop = receiver_drop;
-            receiver_token.cancelled().await;
-        });
-        let supervisor_token = cancellation_token.clone();
-        let supervisor = tokio::spawn(async move {
-            let _drop = supervisor_drop;
-            supervisor_token.cancelled().await;
-            receiver.await.unwrap();
-            Ok(())
-        });
-        let callback_token = cancellation_token.clone();
-        let callback = tokio::spawn(async move {
-            let _drop = callback_drop;
-            callback_token.cancelled().await;
-        });
-        tokio::task::yield_now().await;
-
-        let guard =
-            StreamInitializationGuard::new(cancellation_token.clone(), supervisor, Some(callback));
-        drop(guard);
-
-        assert!(cancellation_token.is_cancelled());
-        for _ in 0..10 {
-            if drops.load(Ordering::Relaxed) == 3 {
-                break;
-            }
-            tokio::task::yield_now().await;
-        }
-        assert_eq!(drops.load(Ordering::Relaxed), 3);
-    }
-
-    #[tokio::test(start_paused = true)]
-    async fn initialization_guard_aborts_unresponsive_tasks_after_timeout() {
-        let cancellation_token = CancellationToken::new();
-        let drops = Arc::new(AtomicUsize::new(0));
-        let supervisor_drop = DropCounter(Arc::clone(&drops));
-        let callback_drop = DropCounter(Arc::clone(&drops));
-        let supervisor = tokio::spawn(async move {
-            let _drop = supervisor_drop;
-            std::future::pending::<Result<(), ZerobusError>>().await
-        });
-        let callback = tokio::spawn(async move {
-            let _drop = callback_drop;
-            std::future::pending::<()>().await
-        });
-        tokio::task::yield_now().await;
-
-        let guard =
-            StreamInitializationGuard::new(cancellation_token.clone(), supervisor, Some(callback));
-        drop(guard);
-        tokio::task::yield_now().await;
-        tokio::time::advance(std::time::Duration::from_millis(
-            INITIALIZATION_TASK_REAP_TIMEOUT_MS + 1,
-        ))
-        .await;
-        for _ in 0..10 {
-            if drops.load(Ordering::Relaxed) == 2 {
-                break;
-            }
-            tokio::task::yield_now().await;
-        }
-
-        assert!(cancellation_token.is_cancelled());
-        assert_eq!(drops.load(Ordering::Relaxed), 2);
-    }
-
-    #[tokio::test]
-    async fn disarmed_initialization_guard_keeps_tasks_running() {
-        let cancellation_token = CancellationToken::new();
-        let supervisor = tokio::spawn(std::future::pending::<Result<(), ZerobusError>>());
-        let callback = tokio::spawn(std::future::pending::<()>());
-        let guard =
-            StreamInitializationGuard::new(cancellation_token.clone(), supervisor, Some(callback));
-
-        let (supervisor, callback) = guard.disarm();
-        assert!(!cancellation_token.is_cancelled());
-        assert!(!supervisor.is_finished());
-        assert!(!callback.as_ref().unwrap().is_finished());
-
-        supervisor.abort();
-        callback.unwrap().abort();
     }
 }
