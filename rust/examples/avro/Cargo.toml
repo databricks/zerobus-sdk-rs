@@ -1,0 +1,9 @@
+[package]
+name = "example_avro"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[dependencies]
+databricks-zerobus-ingest-sdk = { path = "../../sdk", features = ["avro"] }
+tokio = { version = "1", features = ["macros", "rt-multi-thread"] }

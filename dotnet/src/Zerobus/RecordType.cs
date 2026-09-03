@@ -19,4 +19,11 @@ public enum RecordType
     /// JSON encoded records.
     /// </summary>
     Json = 2,
+
+#if ZEROBUS_AVRO
+    /// <summary>
+    /// Avro binary encoded records (Beta feature, requires avro build flag).
+    /// </summary>
+    Avro = 4,
+#endif
 }

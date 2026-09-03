@@ -36,6 +36,10 @@ serde_json.workspace = true
 tracing.workspace = true
 tracing-subscriber = { workspace = true, features = ["fmt"] }
 
+[features]
+# Avro record format (Beta), opt-in. Gated in the C header behind ZEROBUS_AVRO.
+avro = ["databricks-zerobus-ingest-sdk/avro"]
+
 [dev-dependencies]
 arrow-array = { workspace = true, features = ["ffi"] }
 arrow-schema = { workspace = true, features = ["ffi"] }

@@ -1057,4 +1057,375 @@ internal static class NativeInterop
 
         return ptr;
     }
+
+#if ZEROBUS_AVRO
+    /// <summary>
+    /// Creates an Avro stream with OAuth credentials (Beta).
+    /// </summary>
+    public static unsafe IntPtr SdkCreateAvroStream(
+        IntPtr sdkPtr,
+        string tableName,
+        string avroSchemaJson,
+        string clientId,
+        string clientSecret,
+        ref CStreamConfigurationOptions options)
+    {
+        var result = new CResult();
+        var ptr = NativeMethods.SdkCreateAvroStream(
+            sdkPtr,
+            tableName,
+            avroSchemaJson,
+            clientId,
+            clientSecret,
+            ref options,
+            ref result);
+
+        if (ptr == IntPtr.Zero)
+        {
+            var ex = ToException(ref result);
+            throw ex ?? new ZerobusException("Failed to create Avro stream", isRetryable: false);
+        }
+
+        return ptr;
+    }
+
+    /// <summary>
+    /// Creates an Avro stream with OAuth credentials asynchronously (Beta).
+    /// </summary>
+    public static Task<IntPtr> SdkCreateAvroStreamAsync(
+        IntPtr sdkPtr,
+        string tableName,
+        string avroSchemaJson,
+        string clientId,
+        string clientSecret,
+        ref CStreamConfigurationOptions options)
+    {
+        var tcs = new TaskCompletionSource<IntPtr>(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        CreateStreamAsyncCallback callbackDelegate = (stream, result, _) =>
+        {
+            unsafe { ApplyResult(tcs, (CResult*)result, stream); }
+        };
+
+        var handle = GCHandle.Alloc(callbackDelegate);
+
+        var scheduleResult = new CResult();
+        if (!NativeMethods.SdkCreateAvroStreamAsync(
+                sdkPtr,
+                tableName,
+                avroSchemaJson,
+                clientId,
+                clientSecret,
+                ref options,
+                callbackDelegate,
+                IntPtr.Zero,
+                ref scheduleResult))
+        {
+            var ex = ToException(ref scheduleResult)
+                     ?? new ZerobusException("Failed to schedule async Avro stream creation", isRetryable: false);
+            tcs.TrySetException(ex);
+        }
+
+        _ = tcs.Task.ContinueWith(
+            _ =>
+            {
+                if (handle.IsAllocated)
+                    handle.Free();
+            },
+            TaskContinuationOptions.ExecuteSynchronously);
+
+        return tcs.Task;
+    }
+
+    /// <summary>
+    /// Creates an Avro stream with a custom headers provider (Beta).
+    /// </summary>
+    public static unsafe IntPtr SdkCreateAvroStreamWithHeadersProvider(
+        IntPtr sdkPtr,
+        string tableName,
+        string avroSchemaJson,
+        HeadersProviderCallback headersCallback,
+        IntPtr userData,
+        HeadersProviderFreeCallback? freeUserData,
+        ref CStreamConfigurationOptions options)
+    {
+        var result = new CResult();
+        var ptr = NativeMethods.SdkCreateAvroStreamWithHeadersProvider(
+            sdkPtr,
+            tableName,
+            avroSchemaJson,
+            headersCallback,
+            userData,
+            freeUserData,
+            ref options,
+            ref result);
+
+        if (ptr == IntPtr.Zero)
+        {
+            var ex = ToException(ref result);
+            throw ex ?? new ZerobusException("Failed to create Avro stream with headers provider", isRetryable: false);
+        }
+
+        return ptr;
+    }
+
+    /// <summary>
+    /// Creates an Avro stream with a custom headers provider asynchronously (Beta).
+    /// </summary>
+    public static Task<IntPtr> SdkCreateAvroStreamWithHeadersProviderAsync(
+        IntPtr sdkPtr,
+        string tableName,
+        string avroSchemaJson,
+        HeadersProviderCallback headersCallback,
+        IntPtr userData,
+        HeadersProviderFreeCallback? freeUserData,
+        ref CStreamConfigurationOptions options)
+    {
+        var tcs = new TaskCompletionSource<IntPtr>(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        CreateStreamAsyncCallback callbackDelegate = (stream, result, _) =>
+        {
+            unsafe { ApplyResult(tcs, (CResult*)result, stream); }
+        };
+
+        var handle = GCHandle.Alloc(callbackDelegate);
+
+        var scheduleResult = new CResult();
+        if (!NativeMethods.SdkCreateAvroStreamWithHeadersProviderAsync(
+                sdkPtr,
+                tableName,
+                avroSchemaJson,
+                headersCallback,
+                userData,
+                freeUserData,
+                ref options,
+                callbackDelegate,
+                IntPtr.Zero,
+                ref scheduleResult))
+        {
+            var ex = ToException(ref scheduleResult)
+                     ?? new ZerobusException("Failed to schedule async Avro stream creation", isRetryable: false);
+            tcs.TrySetException(ex);
+        }
+
+        _ = tcs.Task.ContinueWith(
+            _ =>
+            {
+                if (handle.IsAllocated)
+                    handle.Free();
+            },
+            TaskContinuationOptions.ExecuteSynchronously);
+
+        return tcs.Task;
+    }
+
+    /// <summary>
+    /// Ingests a single Avro record and returns the offset (Beta).
+    /// </summary>
+    public static unsafe long StreamIngestAvroRecord(IntPtr streamPtr, byte[] data)
+    {
+        var result = new CResult();
+        long offset;
+
+        fixed (byte* dataPtr = data)
+        {
+            offset = NativeMethods.StreamIngestAvroRecord(
+                streamPtr,
+                dataPtr,
+                (nuint)data.Length,
+                ref result);
+        }
+
+        if (offset < 0)
+        {
+            ThrowIfFailed(ref result);
+            throw new ZerobusException("Avro ingest failed with unknown error", isRetryable: false);
+        }
+
+        return offset;
+    }
+
+    /// <summary>
+    /// Ingests a single Avro record asynchronously and returns the offset (Beta).
+    /// </summary>
+    public static Task<long> StreamIngestAvroRecordAsync(
+        IntPtr streamPtr,
+        byte[] data)
+    {
+        var tcs = new TaskCompletionSource<long>(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        OffsetAsyncCallback callback = (offset, result, _) =>
+        {
+            unsafe { ApplyResult(tcs, (CResult*)result, offset); }
+        };
+
+        var handle = GCHandle.Alloc(callback);
+
+        unsafe
+        {
+            fixed (byte* dataPtr = data)
+            {
+                var scheduleResult = new CResult();
+                if (!NativeMethods.StreamIngestAvroRecordAsync(
+                        streamPtr,
+                        dataPtr,
+                        (nuint)data.Length,
+                        callback,
+                        IntPtr.Zero,
+                        ref scheduleResult))
+                {
+                    var ex = ToException(ref scheduleResult)
+                             ?? new ZerobusException("Failed to schedule async Avro ingest", isRetryable: false);
+                    tcs.TrySetException(ex);
+                }
+            }
+        }
+
+        _ = tcs.Task.ContinueWith(
+            _ =>
+            {
+                if (handle.IsAllocated)
+                    handle.Free();
+            },
+            TaskContinuationOptions.ExecuteSynchronously);
+
+        return tcs.Task;
+    }
+
+    /// <summary>
+    /// Ingests a batch of Avro records and returns the batch offset (or -1 if empty) (Beta).
+    /// </summary>
+    public static unsafe long StreamIngestAvroRecords(IntPtr streamPtr, byte[][] records)
+    {
+        if (records.Length == 0)
+            return -1;
+
+        var result = new CResult();
+        var numRecords = (nuint)records.Length;
+
+        var handles = new GCHandle[records.Length];
+        var ptrs = records.Length * IntPtr.Size <= StackAllocThresholdBytes
+            ? stackalloc IntPtr[records.Length]
+            : new IntPtr[records.Length];
+        var lens = records.Length * IntPtr.Size <= StackAllocThresholdBytes
+            ? stackalloc nuint[records.Length]
+            : new nuint[records.Length];
+
+        try
+        {
+            for (var i = 0; i < records.Length; i++)
+            {
+                handles[i] = GCHandle.Alloc(records[i], GCHandleType.Pinned);
+                ptrs[i] = handles[i].AddrOfPinnedObject();
+                lens[i] = (nuint)records[i].Length;
+            }
+
+            fixed (IntPtr* pointers = ptrs)
+            fixed (nuint* lengths = lens)
+            {
+                var offset = NativeMethods.StreamIngestAvroRecords(
+                    streamPtr,
+                    (byte**)pointers,
+                    lengths,
+                    numRecords,
+                    ref result);
+
+                if (offset == -2) return -1;
+                if (offset < 0)
+                {
+                    ThrowIfFailed(ref result);
+                    throw new ZerobusException("Avro batch ingest failed with unknown error", isRetryable: false);
+                }
+
+                return offset;
+            }
+        }
+        finally
+        {
+            for (var i = 0; i < handles.Length; i++)
+            {
+                if (handles[i].IsAllocated)
+                    handles[i].Free();
+            }
+        }
+    }
+
+    /// <summary>
+    /// Ingests a batch of Avro records asynchronously and returns the batch offset (or -1 if empty) (Beta).
+    /// </summary>
+    public static Task<long> StreamIngestAvroRecordsAsync(
+        IntPtr streamPtr,
+        byte[][] records)
+    {
+        if (records.Length == 0)
+            return Task.FromResult(-1L);
+
+        var tcs = new TaskCompletionSource<long>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var numRecords = (nuint)records.Length;
+        var handles = new GCHandle[records.Length];
+
+        var callback = new OffsetAsyncCallback((offset, result, _) =>
+        {
+            unsafe { ApplyResult(tcs, (CResult*)result, offset == -2 ? -1 : offset); }
+        });
+        var callbackHandle = GCHandle.Alloc(callback);
+
+        var ptrs = records.Length * IntPtr.Size <= StackAllocThresholdBytes
+            ? stackalloc IntPtr[records.Length]
+            : new IntPtr[records.Length];
+        var lens = records.Length * IntPtr.Size <= StackAllocThresholdBytes
+            ? stackalloc nuint[records.Length]
+            : new nuint[records.Length];
+
+        try
+        {
+            for (var i = 0; i < records.Length; i++)
+            {
+                handles[i] = GCHandle.Alloc(records[i], GCHandleType.Pinned);
+                ptrs[i] = handles[i].AddrOfPinnedObject();
+                lens[i] = (nuint)records[i].Length;
+            }
+
+            unsafe
+            {
+                fixed (IntPtr* pointers = ptrs)
+                fixed (nuint* lengths = lens)
+                {
+                    var scheduleResult = new CResult();
+                    if (!NativeMethods.StreamIngestAvroRecordsAsync(
+                            streamPtr,
+                            (byte**)pointers,
+                            lengths,
+                            numRecords,
+                            callback,
+                            IntPtr.Zero,
+                            ref scheduleResult))
+                    {
+                        var ex = ToException(ref scheduleResult)
+                                 ?? new ZerobusException("Failed to schedule async Avro batch ingest", isRetryable: false);
+                        tcs.TrySetException(ex);
+                    }
+                }
+            }
+        }
+        finally
+        {
+            for (var i = 0; i < handles.Length; i++)
+            {
+                if (handles[i].IsAllocated)
+                    handles[i].Free();
+            }
+        }
+
+        _ = tcs.Task.ContinueWith(
+            _ =>
+            {
+                if (callbackHandle.IsAllocated)
+                    callbackHandle.Free();
+            },
+            TaskContinuationOptions.ExecuteSynchronously);
+
+        return tcs.Task;
+    }
+#endif
 }
