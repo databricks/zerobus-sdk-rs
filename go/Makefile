@@ -1,12 +1,15 @@
 # Makefile for zerobus-sdk-go
 
-.PHONY: help build build-rust build-go clean fmt fmt-go fmt-rust lint lint-go lint-rust check test test-go test-rust examples release
+.PHONY: help build build-rust build-go build-avro build-avro-rust build-avro-go clean fmt fmt-go fmt-rust lint lint-go lint-rust check test test-go test-rust test-avro lint-avro examples release
 
 help:
 	@echo "Available targets:"
 	@echo "  make build          - Build both Rust FFI and Go SDK"
 	@echo "  make build-rust     - Build only the Rust FFI layer"
 	@echo "  make build-go       - Build Rust FFI, then the Go SDK"
+	@echo "  make build-avro     - Build Rust FFI with avro feature and Go SDK with avro tag"
+	@echo "  make build-avro-rust - Build only Rust FFI layer with avro feature"
+	@echo "  make build-avro-go  - Build Go SDK with avro tag"
 	@echo "  make clean          - Remove build artifacts"
 	@echo "  make fmt            - Format all code (Go and Rust)"
 	@echo "  make fmt-go         - Format Go code"
@@ -14,10 +17,12 @@ help:
 	@echo "  make lint           - Run linters on all code"
 	@echo "  make lint-go        - Run Go linters"
 	@echo "  make lint-rust      - Run Rust linters"
+	@echo "  make lint-avro      - Run Go linters with avro tag"
 	@echo "  make check          - Run all checks (fmt and lint)"
 	@echo "  make test           - Run all tests (Rust and Go)"
 	@echo "  make test-rust      - Run Rust unit tests"
 	@echo "  make test-go        - Run Go unit tests"
+	@echo "  make test-avro      - Run Go unit tests with avro tag"
 	@echo "  make examples       - Build all examples"
 	@echo "  make release        - Build release package"
 
@@ -63,6 +68,18 @@ build-go: build-rust
 	@echo "Building Go SDK..."
 	go build -v
 	@echo "✓ Go SDK built successfully"
+
+build-avro-rust:
+	@echo "Building Rust FFI layer with avro feature..."
+	ZEROBUS_BUILD_FEATURES=avro bash ./build_rust.sh
+	@echo "✓ Rust FFI layer with avro built successfully"
+
+build-avro-go: build-avro-rust
+	@echo "Building Go SDK with avro tag..."
+	go build -v -tags avro
+	@echo "✓ Go SDK with avro built successfully"
+
+build-avro: build-avro-rust build-avro-go
 
 clean:
 	@echo "Cleaning build artifacts..."
@@ -115,6 +132,16 @@ test-go:
 	go test -v -timeout 60s ./...
 	cd tests && go test -v -timeout 60s ./...
 	@echo "✓ All Go tests passed"
+
+test-avro: build-avro
+	@echo "Running Go unit tests with avro tag..."
+	go test -v -timeout 60s -tags avro ./...
+	@echo "✓ All Go tests with avro passed"
+
+lint-avro:
+	@echo "Linting Go code with avro tag..."
+	go vet -tags avro ./...
+	@echo "✓ Go code with avro linted successfully"
 
 examples: build
 	@echo "Building examples..."

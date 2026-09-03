@@ -10,6 +10,8 @@ const (
 	RecordTypeProto RecordType = 1
 	// RecordTypeJson indicates JSON encoded records
 	RecordTypeJson RecordType = 2
+	// RecordTypeAvro indicates Avro encoded records (Beta, requires avro build tag)
+	RecordTypeAvro RecordType = 4
 )
 
 // StreamConfigurationOptions contains configuration options for creating a stream

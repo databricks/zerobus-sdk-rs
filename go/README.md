@@ -58,6 +58,7 @@ This SDK wraps the [Rust SDK](https://github.com/databricks/zerobus-sdk/tree/mai
 - **Automatic OAuth 2.0 authentication** with Unity Catalog
 - **Simple JSON ingestion** - No code generation required for basic use cases
 - **Protocol Buffers support** for type-safe, efficient data encoding
+- **Avro support** (Beta, `avro` build tag) - Pre-encoded Avro datum ingestion
 - **Batch ingestion** - Ingest multiple records at once for maximum throughput
 - **Backpressure control** to manage memory usage
 - **Automatic retry and recovery** for transient failures
@@ -1505,6 +1506,37 @@ make fmt
 
 # Run linters
 make lint
+```
+
+### Building with Avro Support (Beta)
+
+Avro support is gated behind the `avro` build tag and requires Zerobus server Avro support (pending).
+
+```bash
+# Build Rust FFI with avro feature
+make build-avro-rust
+
+# Build Go SDK with avro tag
+make build-avro-go
+
+# Build both (Rust FFI with avro + Go with avro tag)
+make build-avro
+
+# Run tests with avro tag
+make test-avro
+
+# Run linters with avro tag
+make lint-avro
+```
+
+To use Avro in your own project:
+
+```bash
+# Build your code with the avro build tag
+go build -tags avro ./...
+
+# Run your code with the avro tag
+go run -tags avro main.go
 ```
 
 ### Platform-Specific Build Notes
