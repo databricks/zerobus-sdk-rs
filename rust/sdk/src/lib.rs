@@ -73,6 +73,8 @@ pub use headers_provider::{HeadersProvider, OAuthHeadersProvider};
 pub use multiplexed_stream::{MessageId, MultiplexedStream};
 pub use offset_generator::{OffsetId, OffsetIdGenerator};
 pub use proxy::{ConnectorFactory, ProxyConnector};
+#[cfg(feature = "avro")]
+pub use record_types::{AvroBytes, AvroEncodedRecord};
 pub use record_types::{
     EncodedBatch, EncodedBatchIter, EncodedRecord, JsonEncodedRecord, JsonString, JsonValue,
     ProtoBytes, ProtoEncodedRecord, ProtoMessage,

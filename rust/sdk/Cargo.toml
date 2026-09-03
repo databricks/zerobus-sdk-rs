@@ -67,6 +67,8 @@ prost-build = { version = "0.14", optional = true }
 
 [features]
 default = []
+# Avro record format (Beta), opt-in.
+avro = []
 # Arrow Flight support
 arrow-flight = ["dep:arrow-flight", "dep:arrow-array", "dep:arrow-schema", "dep:arrow-ipc", "dep:futures", "dep:tonic-types"]
 # Wrapper-only Arrow C Data importer. Not a supported public Rust SDK feature.
