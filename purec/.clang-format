@@ -1,0 +1,12 @@
+# Formatting for the Zerobus Pure C SDK. Linux brace style (function braces on
+# their own line, control-statement braces on the same line), 4-space indent,
+# 80-column limit.
+BasedOnStyle: LLVM
+IndentWidth: 4
+ColumnLimit: 80
+BreakBeforeBraces: Linux
+AlignAfterOpenBracket: Align
+AllowShortFunctionsOnASingleLine: None
+AllowShortIfStatementsOnASingleLine: false
+AllowShortLoopsOnASingleLine: false
+SortIncludes: true
