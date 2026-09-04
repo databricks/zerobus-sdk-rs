@@ -286,6 +286,7 @@ func (s *SDK) createStreamConfigured(
 		core:                    core,
 		sdk:                     s,
 		recordType:              sc.recordType,
+		avroSchemaJSON:          sc.avroSchema,
 		maxBatchRecords:         positiveOrDefault(sc.cfg.MaxBatchRecords, stream.DefaultMaxBatchRecords),
 		maxBufferedPayloadBytes: positiveOrDefault64(sc.cfg.MaxBufferedPayloadBytes, stream.DefaultMaxBufferedPayloadBytes),
 	}

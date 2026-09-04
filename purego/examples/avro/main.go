@@ -37,13 +37,20 @@ func main() {
 		log.Fatalf("create stream: %v", err)
 	}
 
-	// Raw Avro datums encoded against avroSchema (placeholder bytes here).
-	records := [][]byte{{0x02, 0x0a}, {0x04, 0x0b}}
-	for i, rec := range records {
-		if _, err := stream.IngestRecordOffset(rec); err != nil {
+	// Record objects the stream encodes against avroSchema. Queue in a loop,
+	// then Flush once — never wait per record.
+	orders := []zerobus.AvroRecord{
+		{"id": int64(1), "customer_name": "Ada"},
+		{"id": int64(2), "customer_name": "Grace"},
+	}
+	for i, order := range orders {
+		if _, err := stream.IngestAvroRecordOffset(order); err != nil {
 			log.Fatalf("ingest record %d: %v", i+1, err)
 		}
 	}
+
+	// Pre-encoded raw Avro datums (bytes) go through IngestRecordOffset:
+	//   stream.IngestRecordOffset([]byte{0x02, 0x0a})
 
 	if err := stream.Flush(); err != nil {
 		log.Fatalf("flush: %v", err)

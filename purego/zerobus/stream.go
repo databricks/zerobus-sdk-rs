@@ -2,6 +2,7 @@ package zerobus
 
 import (
 	"context"
+	"sync"
 
 	"github.com/databricks/zerobus-sdk/purego/internal/dynamicproto"
 	"github.com/databricks/zerobus-sdk/purego/internal/stream"
@@ -21,13 +22,21 @@ type Stream struct {
 	// sdk is the SDK that created this stream. Close deregisters from it so a
 	// long-lived SDK does not retain streams the caller has already closed.
 	sdk *SDK
+
+	// Avro writer schema, parsed lazily on the first AvroRecord encode and
+	// cached (avro build tag only). Empty for non-Avro streams.
+	avroSchemaJSON string
+	avroSchemaOnce sync.Once
+	avroSchema     any // parsed avro.Schema
+	avroSchemaErr  error
 }
 
-// IngestRecordOffset queues one record and returns its logical offset.
-// It blocks only on backpressure and returns -1 on error.
+// IngestRecordOffset queues one pre-encoded record and returns its logical
+// offset. It blocks only on backpressure and returns -1 on error.
 //
 // record is the raw record payload: serialized protobuf bytes for a proto
-// stream, or UTF-8 JSON bytes for a JSON stream.
+// stream, UTF-8 JSON for a JSON stream, or a raw datum for an Avro stream. For
+// Avro records the SDK can encode for you, see IngestAvroRecordOffset (avro tag).
 //
 // For throughput, queue records in a loop and call Flush once.
 func (s *Stream) IngestRecordOffset(record []byte) (int64, error) {
@@ -40,8 +49,8 @@ func (s *Stream) IngestRecordOffsetContext(ctx context.Context, record []byte) (
 	return off, wrapErr("IngestRecordOffset", err)
 }
 
-// IngestRecordsOffset queues records as one batch and returns its logical offset.
-// Empty batch returns -1 with nil error; failures return -1 with error.
+// IngestRecordsOffset queues pre-encoded records as one batch and returns its
+// logical offset. Empty batch returns -1 with nil error; failures return -1.
 //
 // Prefer this in hot paths to reduce overhead.
 func (s *Stream) IngestRecordsOffset(records [][]byte) (int64, error) {
