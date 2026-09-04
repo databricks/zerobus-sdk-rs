@@ -311,19 +311,14 @@ public sealed class MockZerobusServer : Databricks.Zerobus.Protocol.Zerobus.Zero
         string tableName)
     {
         // Count records in the batch.
-        var recordCount = 0;
-        if (req.ProtoEncodedBatch is { } protoBatch)
+        var recordCount = req.BatchCase switch
         {
-            recordCount = protoBatch.Records.Count;
-        }
-        else if (req.JsonBatch is { } jsonBatch)
-        {
-            recordCount = jsonBatch.Records.Count;
-        }
-        else if (req.AvroBatch is { } avroBatch)
-        {
-            recordCount = avroBatch.Records.Count;
-        }
+            IngestRecordBatchRequest.BatchOneofCase.ProtoEncodedBatch => req.ProtoEncodedBatch.Records.Count,
+            IngestRecordBatchRequest.BatchOneofCase.JsonBatch => req.JsonBatch.Records.Count,
+            IngestRecordBatchRequest.BatchOneofCase.AvroBatch => req.AvroBatch.Records.Count,
+            IngestRecordBatchRequest.BatchOneofCase.None => 0,
+            _ => throw new ArgumentOutOfRangeException(nameof(req.BatchCase), req.BatchCase, "Unsupported batch type."),
+        };
 
         // Update max offset.
         if (req.HasOffsetId)
