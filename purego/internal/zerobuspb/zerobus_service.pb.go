@@ -1551,8 +1551,8 @@ const file_zerobus_service_proto_rawDesc = "" +
 	"\aZerobus\x12n\n" +
 	"\x0fEphemeralStream\x12*.databricks.zerobus.EphemeralStreamRequest\x1a+.databricks.zerobus.EphemeralStreamResponse(\x010\x01\x12q\n" +
 	"\x10PersistentStream\x12+.databricks.zerobus.PersistentStreamRequest\x1a,.databricks.zerobus.PersistentStreamResponse(\x010\x01\x12a\n" +
-	"\fRetireStream\x12'.databricks.zerobus.RetireStreamRequest\x1a(.databricks.zerobus.RetireStreamResponseB(\n" +
-	"\x16com.databricks.zerobusB\fZerobusProtoP\x01"
+	"\fRetireStream\x12'.databricks.zerobus.RetireStreamRequest\x1a(.databricks.zerobus.RetireStreamResponseBF\n" +
+	"\x16com.databricks.zerobusB\fZerobusProtoP\x01\xaa\x02\x1bDatabricks.Zerobus.Protocol"
 
 var (
 	file_zerobus_service_proto_rawDescOnce sync.Once

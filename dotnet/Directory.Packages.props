@@ -18,6 +18,7 @@
 
         <!-- gRPC and Protobuf -->
         <PackageVersion Include="Grpc.AspNetCore" Version="2.76.0" />
+        <PackageVersion Include="Grpc.Net.Client" Version="2.76.0" />
         <PackageVersion Include="Grpc.Tools" Version="2.78.0" />
         <PackageVersion Include="Google.Protobuf" Version="3.33.5" />
     </ItemGroup>

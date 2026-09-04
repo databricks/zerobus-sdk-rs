@@ -1,6 +1,6 @@
 using Grpc.Core;
 using Google.Protobuf.WellKnownTypes;
-using Databricks.Zerobus.IntegrationTests.Protos;
+using Databricks.Zerobus.Protocol;
 
 namespace Databricks.Zerobus.IntegrationTests;
 
@@ -33,7 +33,7 @@ public sealed class MockResponse
 /// Mock gRPC server that implements the Zerobus EphemeralStream RPC for integration testing.
 /// Faithfully ports the Go mock_server.go implementation.
 /// </summary>
-public sealed class MockZerobusServer : Protos.Zerobus.ZerobusBase
+public sealed class MockZerobusServer : Databricks.Zerobus.Protocol.Zerobus.ZerobusBase
 {
     private readonly object _responsesLock = new();
     private readonly object _counterLock = new();
@@ -319,6 +319,10 @@ public sealed class MockZerobusServer : Protos.Zerobus.ZerobusBase
         else if (req.JsonBatch is { } jsonBatch)
         {
             recordCount = jsonBatch.Records.Count;
+        }
+        else if (req.AvroBatch is { } avroBatch)
+        {
+            recordCount = avroBatch.Records.Count;
         }
 
         // Update max offset.

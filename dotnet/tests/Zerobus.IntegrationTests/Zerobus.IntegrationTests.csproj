@@ -13,12 +13,15 @@
     <PackageReference Include="NUnit" />
     <PackageReference Include="NUnit3TestAdapter" />
     <PackageReference Include="Grpc.AspNetCore" />
+    <PackageReference Include="Grpc.Net.Client" />
     <PackageReference Include="Grpc.Tools" PrivateAssets="All" />
     <PackageReference Include="Google.Protobuf" />
   </ItemGroup>
 
   <ItemGroup>
-    <Protobuf Include="Protos\zerobus_service.proto" GrpcServices="Server" />
+    <Protobuf Include="..\..\..\rust\sdk\zerobus_service.proto"
+              Link="Protos\zerobus_service.proto"
+              GrpcServices="Both" />
   </ItemGroup>
 
   <ItemGroup>
