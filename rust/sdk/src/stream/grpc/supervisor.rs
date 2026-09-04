@@ -93,6 +93,7 @@ impl ZerobusStream {
                 let table_properties = table_properties.clone();
                 let headers_provider = Arc::clone(&headers_provider);
                 let record_type = options.record_type;
+                let avro_schema_json = options.avro_schema_json.clone();
                 let attempt = &attempt;
 
                 async move {
@@ -103,6 +104,7 @@ impl ZerobusStream {
                             &table_properties,
                             &headers_provider,
                             record_type,
+                            avro_schema_json,
                             options.recovery_timeout_ms,
                         )
                         .await
@@ -114,6 +116,7 @@ impl ZerobusStream {
                                 &table_properties,
                                 &headers_provider,
                                 record_type,
+                                avro_schema_json,
                             ),
                         )
                         .await

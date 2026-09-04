@@ -73,9 +73,11 @@ pub use headers_provider::{HeadersProvider, OAuthHeadersProvider};
 pub use multiplexed_stream::{MessageId, MultiplexedStream};
 pub use offset_generator::{OffsetId, OffsetIdGenerator};
 pub use proxy::{ConnectorFactory, ProxyConnector};
+#[cfg(feature = "avro")]
+pub use record_types::{AvroBytes, AvroEncodedRecord, AvroRecord};
 pub use record_types::{
-    EncodedBatch, EncodedBatchIter, EncodedRecord, JsonEncodedRecord, JsonString, JsonValue,
-    ProtoBytes, ProtoEncodedRecord, ProtoMessage,
+    EncodedBatch, EncodedBatchIter, EncodedRecord, IntoEncodedRecord, JsonEncodedRecord,
+    JsonString, JsonValue, ProtoBytes, ProtoEncodedRecord, ProtoMessage,
 };
 pub use sdk::{ZerobusSdk, DEFAULT_SDK_IDENTIFIER};
 #[cfg(feature = "testing")]

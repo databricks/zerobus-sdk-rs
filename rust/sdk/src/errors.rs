@@ -131,6 +131,14 @@ pub enum ZerobusError {
     /// Returned when OAuth token fetching fails due to network or server errors.
     #[error("Token fetch failed: {0}")]
     TokenFetchError(String),
+    /// Returned when Avro schema parsing fails (e.g., malformed JSON schema).
+    #[cfg(feature = "avro")]
+    #[error("Avro schema parse failed: {0}")]
+    AvroSchemaParseError(String),
+    /// Returned when Avro record encoding fails (e.g., type mismatch with schema).
+    #[cfg(feature = "avro")]
+    #[error("Avro record encoding failed: {0}")]
+    AvroEncodingError(String),
 }
 
 /// List of gRPC status codes that indicate unretriable errors.
@@ -210,6 +218,10 @@ impl ZerobusError {
             ZerobusError::InvalidStateError(_) => false,
             ZerobusError::ConnectionTimeout(_) => true,
             ZerobusError::TokenFetchError(_) => true,
+            #[cfg(feature = "avro")]
+            ZerobusError::AvroSchemaParseError(_) => false,
+            #[cfg(feature = "avro")]
+            ZerobusError::AvroEncodingError(_) => false,
         }
     }
 

@@ -11,7 +11,7 @@ use tracing::{debug, error, warn};
 
 use super::types::IngestRequest;
 use super::ZerobusStream;
-use crate::{EncodedBatch, EncodedRecord, OffsetId, ZerobusError, ZerobusResult};
+use crate::{EncodedBatch, IntoEncodedRecord, OffsetId, ZerobusError, ZerobusResult};
 
 impl ZerobusStream {
     /// Ingests a single record and returns its logical offset directly.
@@ -50,7 +50,7 @@ impl ZerobusStream {
     /// ```
     pub async fn ingest_record_offset(
         &self,
-        payload: impl Into<EncodedRecord>,
+        payload: impl IntoEncodedRecord,
     ) -> ZerobusResult<OffsetId> {
         let encoded_batch = self.prepare_record(payload)?;
         self.enqueue_prepared_batch(encoded_batch).await
@@ -94,7 +94,7 @@ impl ZerobusStream {
     pub async fn ingest_records_offset<I, T>(&self, payload: I) -> ZerobusResult<Option<OffsetId>>
     where
         I: IntoIterator<Item = T>,
-        T: Into<EncodedRecord>,
+        T: IntoEncodedRecord,
     {
         let encoded_batch = self.prepare_records(payload)?;
 
@@ -110,9 +110,14 @@ impl ZerobusStream {
     #[allow(clippy::result_large_err)]
     pub(crate) fn prepare_record(
         &self,
-        payload: impl Into<EncodedRecord>,
+        payload: impl IntoEncodedRecord,
     ) -> ZerobusResult<EncodedBatch> {
-        let encoded_batch = EncodedBatch::try_from_record(payload, self.options.record_type)
+        let schema = self.get_avro_schema()?;
+        let encoded_record = payload.into_encoded(
+            self.options.record_type,
+            schema.as_ref().map(|s| s as &dyn std::any::Any),
+        )?;
+        let encoded_batch = EncodedBatch::try_from_record(encoded_record, self.options.record_type)
             .ok_or_else(|| {
                 ZerobusError::InvalidArgument(
                     "Record type does not match stream configuration".to_string(),
@@ -126,9 +131,19 @@ impl ZerobusStream {
     pub(crate) fn prepare_records<I, T>(&self, payload: I) -> ZerobusResult<EncodedBatch>
     where
         I: IntoIterator<Item = T>,
-        T: Into<EncodedRecord>,
+        T: IntoEncodedRecord,
     {
-        let encoded_batch = EncodedBatch::try_from_batch(payload, self.options.record_type)
+        let schema = self.get_avro_schema()?;
+        let schema_any = schema.as_ref().map(|s| s as &dyn std::any::Any);
+
+        // Convert all records to EncodedRecords, collecting errors
+        let mut encoded_records = Vec::new();
+        for rec in payload.into_iter() {
+            let encoded = rec.into_encoded(self.options.record_type, schema_any)?;
+            encoded_records.push(encoded);
+        }
+
+        let encoded_batch = EncodedBatch::try_from_batch(encoded_records, self.options.record_type)
             .ok_or_else(|| {
                 ZerobusError::InvalidArgument(
                     "Record type does not match stream configuration".to_string(),
@@ -136,6 +151,37 @@ impl ZerobusStream {
             })?;
         self.validate_ingest_payload(&encoded_batch)?;
         Ok(encoded_batch)
+    }
+
+    #[cfg(feature = "avro")]
+    #[allow(clippy::result_large_err)]
+    fn get_avro_schema(&self) -> ZerobusResult<Option<apache_avro::Schema>> {
+        if self.options.record_type != crate::databricks::zerobus::RecordType::Avro {
+            return Ok(None);
+        }
+
+        let schema_json = self.options.avro_schema_json.as_ref().ok_or_else(|| {
+            ZerobusError::AvroSchemaParseError(
+                "Avro schema required but not provided in stream configuration".to_string(),
+            )
+        })?;
+
+        let result = self.avro_schema_cache.get_or_init(|| {
+            apache_avro::Schema::parse_str(schema_json).map_err(|e| {
+                ZerobusError::AvroSchemaParseError(format!("Failed to parse Avro schema: {}", e))
+            })
+        });
+
+        result
+            .as_ref()
+            .map(|schema| Some(schema.clone()))
+            .map_err(|e| e.clone())
+    }
+
+    #[cfg(not(feature = "avro"))]
+    #[allow(clippy::result_large_err)]
+    fn get_avro_schema(&self) -> ZerobusResult<Option<()>> {
+        Ok(None)
     }
 
     #[allow(clippy::result_large_err)]
