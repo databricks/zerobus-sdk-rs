@@ -16,6 +16,9 @@
 
 ### Internal Changes
 
+- Updated multiplexed-stream failure handling to reject new ingestion and wake
+  pending message waits after a lane fails, and to close lanes concurrently.
+
 ### Breaking Changes
 
 - **Adding the Avro record type extends the publicly re-exported gRPC types, which
