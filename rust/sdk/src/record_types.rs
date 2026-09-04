@@ -8,6 +8,7 @@
 //!   - [`JsonString`] - For pre-serialized JSON strings (you handle serialization)
 //!   - [`ProtoMessage`] - For protobuf messages (SDK handles serialization automatically)
 //!   - [`JsonValue`] - For JSON-serializable objects (SDK handles serialization automatically)
+//!   - [`AvroRecord`] - For Avro-serializable objects (SDK handles serialization automatically, feature-gated)
 
 use prost::Message;
 use smallvec::{smallvec, SmallVec};
@@ -175,6 +176,90 @@ impl<T: serde::Serialize> From<JsonValue<T>> for EncodedRecord {
             "Failed to serialize to JSON - ensure your type implements serde::Serialize correctly",
         );
         EncodedRecord::Json(json_string)
+    }
+}
+
+/// Wrapper for Avro-serializable objects with automatic serialization (Beta).
+///
+/// Use this when you want the SDK to handle Avro serialization for you.
+/// Pass any Rust struct or map that implements `serde::Serialize` and it will be
+/// automatically encoded as Avro binary against the stream's writer schema.
+///
+/// # Examples
+///
+/// ```no_run
+/// # use databricks_zerobus_ingest_sdk::{ZerobusStream, AvroRecord};
+/// # use serde::Serialize;
+/// #
+/// #[derive(Serialize)]
+/// struct Order {
+///     id: i64,
+///     customer_name: String,
+/// }
+///
+/// # async fn example(stream: &ZerobusStream) -> Result<(), Box<dyn std::error::Error>> {
+/// let order = Order { id: 1, customer_name: "Alice".to_string() };
+/// // Ingest an Avro object - it will be automatically serialized and encoded
+/// let _offset = stream.ingest_record_offset(AvroRecord(order)).await?;
+/// // Ingest queues the record; flush() once when done waits for all pending acks.
+/// stream.flush().await?;
+/// # Ok(())
+/// # }
+/// ```
+#[cfg(feature = "avro")]
+pub struct AvroRecord<T: serde::Serialize>(pub T);
+
+/// Sealed trait for converting records into [`EncodedRecord`] with optional schema context.
+///
+/// This trait enables schema-aware encoding for Avro records while maintaining
+/// backward compatibility with existing record types through a blanket implementation.
+/// It is intentionally sealed to prevent external implementations.
+pub trait IntoEncodedRecord: Sized {
+    fn into_encoded(
+        self,
+        record_type: RecordType,
+        avro_schema: Option<&dyn std::any::Any>,
+    ) -> crate::ZerobusResult<EncodedRecord>;
+}
+
+/// Blanket implementation for all types that implement `Into<EncodedRecord>`.
+/// This preserves backward compatibility with existing code.
+impl<T: Into<EncodedRecord>> IntoEncodedRecord for T {
+    fn into_encoded(
+        self,
+        _record_type: RecordType,
+        _avro_schema: Option<&dyn std::any::Any>,
+    ) -> crate::ZerobusResult<EncodedRecord> {
+        Ok(self.into())
+    }
+}
+
+/// Specialization for `AvroRecord<T>` that handles Avro encoding with schema context.
+#[cfg(feature = "avro")]
+impl<T: serde::Serialize> IntoEncodedRecord for AvroRecord<T> {
+    fn into_encoded(
+        self,
+        record_type: RecordType,
+        avro_schema: Option<&dyn std::any::Any>,
+    ) -> crate::ZerobusResult<EncodedRecord> {
+        if record_type != RecordType::Avro {
+            return Err(crate::ZerobusError::InvalidArgument(
+                "AvroRecord requires stream record type to be Avro".to_string(),
+            ));
+        }
+        // Schema is passed as `Any` to keep apache_avro out of the sealed trait.
+        let schema = avro_schema
+            .and_then(|s| s.downcast_ref::<apache_avro::Schema>())
+            .ok_or_else(|| {
+                crate::ZerobusError::AvroSchemaParseError(
+                    "Avro schema required for AvroRecord encoding".to_string(),
+                )
+            })?;
+        let value = apache_avro::to_value(&self.0)
+            .and_then(|v| v.resolve(schema))
+            .and_then(|resolved| apache_avro::to_avro_datum(schema, resolved))
+            .map_err(|e| crate::ZerobusError::AvroEncodingError(e.to_string()))?;
+        Ok(EncodedRecord::Avro(value))
     }
 }
 
@@ -550,6 +635,72 @@ mod tests {
                     _ => panic!("Expected AvroBatch"),
                 },
                 _ => panic!("Expected IngestRecordBatch"),
+            }
+        }
+
+        #[test]
+        fn test_avro_record_encodes_to_bytes() {
+            #[derive(Serialize)]
+            struct Order {
+                id: i64,
+                name: String,
+            }
+
+            let schema_str = r#"{"type":"record","name":"Order","fields":[{"name":"id","type":"long"},{"name":"name","type":"string"}]}"#;
+            let schema = apache_avro::Schema::parse_str(schema_str).unwrap();
+
+            let order = Order {
+                id: 123,
+                name: "Alice".to_string(),
+            };
+
+            let record = AvroRecord(order);
+            let encoded = record
+                .into_encoded(RecordType::Avro, Some(&schema as &dyn std::any::Any))
+                .unwrap();
+
+            match encoded {
+                EncodedRecord::Avro(bytes) => {
+                    assert!(!bytes.is_empty());
+                }
+                _ => panic!("Expected Avro variant"),
+            }
+        }
+
+        #[test]
+        fn test_avro_record_missing_schema_errors() {
+            #[derive(Serialize)]
+            struct Order {
+                id: i64,
+                name: String,
+            }
+
+            let order = Order {
+                id: 123,
+                name: "Alice".to_string(),
+            };
+
+            let record = AvroRecord(order);
+            let result = record.into_encoded(RecordType::Avro, None);
+
+            assert!(result.is_err());
+            assert!(result
+                .unwrap_err()
+                .to_string()
+                .contains("Avro schema required"));
+        }
+
+        #[test]
+        fn test_avro_bytes_still_works_via_blanket_impl() {
+            let bytes = vec![1, 2, 3, 4, 5];
+            let avro_bytes = AvroBytes(bytes.clone());
+
+            let result = avro_bytes.into_encoded(RecordType::Avro, None);
+
+            assert!(result.is_ok());
+            match result.unwrap() {
+                EncodedRecord::Avro(data) => assert_eq!(data, bytes),
+                _ => panic!("Expected Avro variant"),
             }
         }
     }

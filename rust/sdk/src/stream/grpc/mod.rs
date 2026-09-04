@@ -23,6 +23,9 @@ use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
+#[cfg(feature = "avro")]
+use std::sync::OnceLock;
+
 use tokio::sync::RwLock;
 use tokio_util::sync::CancellationToken;
 use tonic::transport::Channel;
@@ -136,6 +139,9 @@ pub struct ZerobusStream {
     /// Resolved message descriptor for building dynamic-proto records, supplied by
     /// the builder. `None` for JSON and compiled-proto streams.
     dynamic_message_descriptor: Option<MessageDescriptor>,
+    /// Cached Avro schema, lazily parsed from avro_schema_json on first use.
+    #[cfg(feature = "avro")]
+    avro_schema_cache: OnceLock<Result<apache_avro::Schema, ZerobusError>>,
 }
 
 impl ZerobusStream {
@@ -223,6 +229,8 @@ impl ZerobusStream {
             cancellation_token,
             callback_handler_task,
             dynamic_message_descriptor,
+            #[cfg(feature = "avro")]
+            avro_schema_cache: OnceLock::new(),
         };
 
         Ok(stream)

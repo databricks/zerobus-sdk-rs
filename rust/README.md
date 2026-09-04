@@ -50,7 +50,7 @@ The Zerobus Rust SDK provides a robust, async-first interface for ingesting larg
 - **Graceful Stream Management** - Proper flushing and acknowledgment tracking
 - **Acknowledgment Callbacks** - Receive notifications when records are acknowledged or encounter errors
 - **Arrow Flight Ingestion** (opt-in) — Stream Apache Arrow `RecordBatch` data directly to Zerobus using Arrow Flight's gRPC transport. Enable with `features = ["arrow-flight"]`; see [`examples/arrow/`](https://github.com/databricks/zerobus-sdk/tree/main/rust/examples/arrow).
-- **Avro Ingestion** *(Beta, opt-in)* — Ingest pre-encoded Avro datums on ephemeral streams. Enable with `features = ["avro"]`, select via `.avro(schema_json)`, and pass records as `AvroBytes`; see [`examples/avro/`](https://github.com/databricks/zerobus-sdk/tree/main/rust/examples/avro). Server support is pending.
+- **Avro Ingestion** *(Beta, opt-in)* — Ingest Avro records on ephemeral streams. Enable with `features = ["avro"]`, select via `.avro(schema_json)`. Serialize Rust structs/maps automatically with `AvroRecord<T>` or ingest pre-encoded datums via `AvroBytes`. See [`examples/avro/`](https://github.com/databricks/zerobus-sdk/tree/main/rust/examples/avro). Server support is pending.
 - **Zeroparser** *(opt-in)* — Zero-copy, single-pass protobuf parser for runtime-known schemas. Enable with `features = ["zeroparser"]`; see [`sdk/src/zeroparser/README.md`](https://github.com/databricks/zerobus-sdk/blob/main/rust/sdk/src/zeroparser/README.md).
 
 ## Installation

@@ -10,6 +10,11 @@
   with `StreamBuilder::avro(schema_json)` and ingest pre-encoded datums via `AvroBytes`.
   Ephemeral streams only; server support is pending.
 
+- Add `AvroRecord<T: Serialize>` wrapper for automatic Avro object serialization. Pass
+  Rust structs or serde-compatible objects to `stream.ingest_record_offset(AvroRecord(obj))`.
+  The SDK encodes the object against the stream's writer schema. Provides a simpler
+  alternative to pre-encoding with `AvroBytes`.
+
 - JSON and protobuf streams now use a dedicated gRPC connection by default.
   Use `ZerobusSdk::builder().connection_per_stream(false)` to retain the prior
   shared HTTP/2 connection behavior. Arrow Flight streams are unchanged.

@@ -41,6 +41,7 @@ hyper-util.workspace = true
 smallvec.workspace = true
 bytes.workspace = true
 self_cell = { version = "1.2", optional = true }
+apache-avro = { version = "0.20", optional = true }
 
 # Arrow Flight dependencies
 arrow-flight = { workspace = true, optional = true }
@@ -68,7 +69,7 @@ prost-build = { version = "0.14", optional = true }
 [features]
 default = []
 # Avro record format (Beta), opt-in.
-avro = []
+avro = ["dep:apache-avro"]
 # Arrow Flight support
 arrow-flight = ["dep:arrow-flight", "dep:arrow-array", "dep:arrow-schema", "dep:arrow-ipc", "dep:futures", "dep:tonic-types"]
 # Wrapper-only Arrow C Data importer. Not a supported public Rust SDK feature.
