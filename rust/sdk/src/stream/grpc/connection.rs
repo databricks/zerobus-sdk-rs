@@ -178,6 +178,8 @@ impl ZerobusStream {
             table_name: Some(table_properties.table_name.to_string()),
             descriptor_proto,
             record_type: Some(record_type.into()),
+            // Avro is not wired into the ephemeral create path yet.
+            avro_schema_json: None,
         });
 
         debug!("Sending CreateStream request.");

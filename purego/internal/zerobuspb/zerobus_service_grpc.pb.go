@@ -19,14 +19,37 @@ import (
 const _ = grpc.SupportPackageIsVersion9
 
 const (
-	Zerobus_EphemeralStream_FullMethodName = "/databricks.zerobus.Zerobus/EphemeralStream"
+	Zerobus_EphemeralStream_FullMethodName  = "/databricks.zerobus.Zerobus/EphemeralStream"
+	Zerobus_PersistentStream_FullMethodName = "/databricks.zerobus.Zerobus/PersistentStream"
+	Zerobus_RetireStream_FullMethodName     = "/databricks.zerobus.Zerobus/RetireStream"
 )
 
 // ZerobusClient is the client API for Zerobus service.
 //
 // For semantics around ctx use and closing/ending streaming RPCs, please refer to https://pkg.go.dev/google.golang.org/grpc/?tab=doc#ClientConn.NewStream.
+//
+// The Zerobus service provides streaming capabilities for ingesting data records
+// into Databricks tables with high throughput and low latency.
 type ZerobusClient interface {
+	// EphemeralStream creates a streaming session for ingesting records.
+	//
+	// This is a bidirectional streaming RPC that allows clients to:
+	// - Create new ephemeral ingestion streams by sending a CreateIngestStreamRequest.
+	// - Ingest records by sending an IngestRecordRequest.
+	// - Receive durability confirmations via IngestRecordResponse.
 	EphemeralStream(ctx context.Context, opts ...grpc.CallOption) (grpc.BidiStreamingClient[EphemeralStreamRequest, EphemeralStreamResponse], error)
+	// IN DEVELOPMENT: may change or be removed.
+	//
+	// Creates or resumes a durable (exactly-once) ingestion stream. The first
+	// message is a CreatePersistentStreamRequest (new stream) or a
+	// ResumeIngestStreamRequest (reconnect by stream_id); everything after is
+	// ingest_record / ingest_record_batch, as on EphemeralStream.
+	PersistentStream(ctx context.Context, opts ...grpc.CallOption) (grpc.BidiStreamingClient[PersistentStreamRequest, PersistentStreamResponse], error)
+	// IN DEVELOPMENT: may change or be removed.
+	//
+	// Permanently retires a persistent stream. Unary and idempotent; callable
+	// without an open connection. A retired stream can never be resumed.
+	RetireStream(ctx context.Context, in *RetireStreamRequest, opts ...grpc.CallOption) (*RetireStreamResponse, error)
 }
 
 type zerobusClient struct {
@@ -50,11 +73,55 @@ func (c *zerobusClient) EphemeralStream(ctx context.Context, opts ...grpc.CallOp
 // This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
 type Zerobus_EphemeralStreamClient = grpc.BidiStreamingClient[EphemeralStreamRequest, EphemeralStreamResponse]
 
+func (c *zerobusClient) PersistentStream(ctx context.Context, opts ...grpc.CallOption) (grpc.BidiStreamingClient[PersistentStreamRequest, PersistentStreamResponse], error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	stream, err := c.cc.NewStream(ctx, &Zerobus_ServiceDesc.Streams[1], Zerobus_PersistentStream_FullMethodName, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	x := &grpc.GenericClientStream[PersistentStreamRequest, PersistentStreamResponse]{ClientStream: stream}
+	return x, nil
+}
+
+// This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
+type Zerobus_PersistentStreamClient = grpc.BidiStreamingClient[PersistentStreamRequest, PersistentStreamResponse]
+
+func (c *zerobusClient) RetireStream(ctx context.Context, in *RetireStreamRequest, opts ...grpc.CallOption) (*RetireStreamResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(RetireStreamResponse)
+	err := c.cc.Invoke(ctx, Zerobus_RetireStream_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // ZerobusServer is the server API for Zerobus service.
 // All implementations must embed UnimplementedZerobusServer
 // for forward compatibility.
+//
+// The Zerobus service provides streaming capabilities for ingesting data records
+// into Databricks tables with high throughput and low latency.
 type ZerobusServer interface {
+	// EphemeralStream creates a streaming session for ingesting records.
+	//
+	// This is a bidirectional streaming RPC that allows clients to:
+	// - Create new ephemeral ingestion streams by sending a CreateIngestStreamRequest.
+	// - Ingest records by sending an IngestRecordRequest.
+	// - Receive durability confirmations via IngestRecordResponse.
 	EphemeralStream(grpc.BidiStreamingServer[EphemeralStreamRequest, EphemeralStreamResponse]) error
+	// IN DEVELOPMENT: may change or be removed.
+	//
+	// Creates or resumes a durable (exactly-once) ingestion stream. The first
+	// message is a CreatePersistentStreamRequest (new stream) or a
+	// ResumeIngestStreamRequest (reconnect by stream_id); everything after is
+	// ingest_record / ingest_record_batch, as on EphemeralStream.
+	PersistentStream(grpc.BidiStreamingServer[PersistentStreamRequest, PersistentStreamResponse]) error
+	// IN DEVELOPMENT: may change or be removed.
+	//
+	// Permanently retires a persistent stream. Unary and idempotent; callable
+	// without an open connection. A retired stream can never be resumed.
+	RetireStream(context.Context, *RetireStreamRequest) (*RetireStreamResponse, error)
 	mustEmbedUnimplementedZerobusServer()
 }
 
@@ -67,6 +134,12 @@ type UnimplementedZerobusServer struct{}
 
 func (UnimplementedZerobusServer) EphemeralStream(grpc.BidiStreamingServer[EphemeralStreamRequest, EphemeralStreamResponse]) error {
 	return status.Error(codes.Unimplemented, "method EphemeralStream not implemented")
+}
+func (UnimplementedZerobusServer) PersistentStream(grpc.BidiStreamingServer[PersistentStreamRequest, PersistentStreamResponse]) error {
+	return status.Error(codes.Unimplemented, "method PersistentStream not implemented")
+}
+func (UnimplementedZerobusServer) RetireStream(context.Context, *RetireStreamRequest) (*RetireStreamResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method RetireStream not implemented")
 }
 func (UnimplementedZerobusServer) mustEmbedUnimplementedZerobusServer() {}
 func (UnimplementedZerobusServer) testEmbeddedByValue()                 {}
@@ -96,17 +169,53 @@ func _Zerobus_EphemeralStream_Handler(srv interface{}, stream grpc.ServerStream)
 // This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
 type Zerobus_EphemeralStreamServer = grpc.BidiStreamingServer[EphemeralStreamRequest, EphemeralStreamResponse]
 
+func _Zerobus_PersistentStream_Handler(srv interface{}, stream grpc.ServerStream) error {
+	return srv.(ZerobusServer).PersistentStream(&grpc.GenericServerStream[PersistentStreamRequest, PersistentStreamResponse]{ServerStream: stream})
+}
+
+// This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
+type Zerobus_PersistentStreamServer = grpc.BidiStreamingServer[PersistentStreamRequest, PersistentStreamResponse]
+
+func _Zerobus_RetireStream_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(RetireStreamRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(ZerobusServer).RetireStream(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Zerobus_RetireStream_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(ZerobusServer).RetireStream(ctx, req.(*RetireStreamRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 // Zerobus_ServiceDesc is the grpc.ServiceDesc for Zerobus service.
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
 var Zerobus_ServiceDesc = grpc.ServiceDesc{
 	ServiceName: "databricks.zerobus.Zerobus",
 	HandlerType: (*ZerobusServer)(nil),
-	Methods:     []grpc.MethodDesc{},
+	Methods: []grpc.MethodDesc{
+		{
+			MethodName: "RetireStream",
+			Handler:    _Zerobus_RetireStream_Handler,
+		},
+	},
 	Streams: []grpc.StreamDesc{
 		{
 			StreamName:    "EphemeralStream",
 			Handler:       _Zerobus_EphemeralStream_Handler,
+			ServerStreams: true,
+			ClientStreams: true,
+		},
+		{
+			StreamName:    "PersistentStream",
+			Handler:       _Zerobus_PersistentStream_Handler,
 			ServerStreams: true,
 			ClientStreams: true,
 		},

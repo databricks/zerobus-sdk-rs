@@ -184,6 +184,7 @@ pub(crate) fn c_record_type(value: i32) -> RecordType {
     match value {
         1 => RecordType::Proto,
         2 => RecordType::Json,
+        4 => RecordType::Avro,
         _ => RecordType::Unspecified,
     }
 }
