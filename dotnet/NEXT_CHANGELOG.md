@@ -35,5 +35,6 @@
 
 - Made the .NET release workflow build-only, consistent with the other SDKs. It now packs the NuGet package and uploads it as an artifact; publishing and the GitHub Release happen downstream.
 - Pin the full NuGet restore graph with `packages.lock.json` and fail CI restore when the lock files are stale (`RestoreLockedMode`).
+- Generate integration-test gRPC bindings from the canonical schema and cover Avro batch accounting in the mock server.
 
 ### API Changes

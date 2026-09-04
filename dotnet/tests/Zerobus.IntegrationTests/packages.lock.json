@@ -19,6 +19,16 @@
           "Grpc.Tools": "2.76.0"
         }
       },
+      "Grpc.Net.Client": {
+        "type": "Direct",
+        "requested": "[2.76.0, )",
+        "resolved": "2.76.0",
+        "contentHash": "K1oldmqw2+Gn69nGRzZLhqSiUZwelX1GrBu/cUl9wNf1C0uB61vFS6JcxUUv9P8VoUJhFsmV44JA6lI2EUt4xw==",
+        "dependencies": {
+          "Grpc.Net.Common": "2.76.0",
+          "Microsoft.Extensions.Logging.Abstractions": "8.0.0"
+        }
+      },
       "Grpc.Tools": {
         "type": "Direct",
         "requested": "[2.78.0, )",
@@ -72,15 +82,6 @@
         "type": "Transitive",
         "resolved": "2.76.0",
         "contentHash": "cSxC2tdnFdXXuBgIn1pjc4YBx7LXTCp4M0qn+SMBS35VWZY+cEQYLWTBDDhdBH1HzU7BV+ncVZlniGQHMpRJKQ=="
-      },
-      "Grpc.Net.Client": {
-        "type": "Transitive",
-        "resolved": "2.76.0",
-        "contentHash": "K1oldmqw2+Gn69nGRzZLhqSiUZwelX1GrBu/cUl9wNf1C0uB61vFS6JcxUUv9P8VoUJhFsmV44JA6lI2EUt4xw==",
-        "dependencies": {
-          "Grpc.Net.Common": "2.76.0",
-          "Microsoft.Extensions.Logging.Abstractions": "8.0.0"
-        }
       },
       "Grpc.Net.ClientFactory": {
         "type": "Transitive",
@@ -311,6 +312,16 @@
           "Grpc.Tools": "2.76.0"
         }
       },
+      "Grpc.Net.Client": {
+        "type": "Direct",
+        "requested": "[2.76.0, )",
+        "resolved": "2.76.0",
+        "contentHash": "K1oldmqw2+Gn69nGRzZLhqSiUZwelX1GrBu/cUl9wNf1C0uB61vFS6JcxUUv9P8VoUJhFsmV44JA6lI2EUt4xw==",
+        "dependencies": {
+          "Grpc.Net.Common": "2.76.0",
+          "Microsoft.Extensions.Logging.Abstractions": "8.0.0"
+        }
+      },
       "Grpc.Tools": {
         "type": "Direct",
         "requested": "[2.78.0, )",
@@ -364,15 +375,6 @@
         "type": "Transitive",
         "resolved": "2.76.0",
         "contentHash": "cSxC2tdnFdXXuBgIn1pjc4YBx7LXTCp4M0qn+SMBS35VWZY+cEQYLWTBDDhdBH1HzU7BV+ncVZlniGQHMpRJKQ=="
-      },
-      "Grpc.Net.Client": {
-        "type": "Transitive",
-        "resolved": "2.76.0",
-        "contentHash": "K1oldmqw2+Gn69nGRzZLhqSiUZwelX1GrBu/cUl9wNf1C0uB61vFS6JcxUUv9P8VoUJhFsmV44JA6lI2EUt4xw==",
-        "dependencies": {
-          "Grpc.Net.Common": "2.76.0",
-          "Microsoft.Extensions.Logging.Abstractions": "8.0.0"
-        }
       },
       "Grpc.Net.ClientFactory": {
         "type": "Transitive",

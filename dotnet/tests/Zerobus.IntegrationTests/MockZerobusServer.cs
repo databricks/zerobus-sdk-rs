@@ -1,6 +1,6 @@
 using Grpc.Core;
 using Google.Protobuf.WellKnownTypes;
-using Databricks.Zerobus.IntegrationTests.Protos;
+using Databricks.Zerobus.Protocol;
 
 namespace Databricks.Zerobus.IntegrationTests;
 
@@ -33,7 +33,7 @@ public sealed class MockResponse
 /// Mock gRPC server that implements the Zerobus EphemeralStream RPC for integration testing.
 /// Faithfully ports the Go mock_server.go implementation.
 /// </summary>
-public sealed class MockZerobusServer : Protos.Zerobus.ZerobusBase
+public sealed class MockZerobusServer : Databricks.Zerobus.Protocol.Zerobus.ZerobusBase
 {
     private readonly object _responsesLock = new();
     private readonly object _counterLock = new();
@@ -311,15 +311,14 @@ public sealed class MockZerobusServer : Protos.Zerobus.ZerobusBase
         string tableName)
     {
         // Count records in the batch.
-        var recordCount = 0;
-        if (req.ProtoEncodedBatch is { } protoBatch)
+        var recordCount = req.BatchCase switch
         {
-            recordCount = protoBatch.Records.Count;
-        }
-        else if (req.JsonBatch is { } jsonBatch)
-        {
-            recordCount = jsonBatch.Records.Count;
-        }
+            IngestRecordBatchRequest.BatchOneofCase.ProtoEncodedBatch => req.ProtoEncodedBatch.Records.Count,
+            IngestRecordBatchRequest.BatchOneofCase.JsonBatch => req.JsonBatch.Records.Count,
+            IngestRecordBatchRequest.BatchOneofCase.AvroBatch => req.AvroBatch.Records.Count,
+            IngestRecordBatchRequest.BatchOneofCase.None => 0,
+            _ => throw new ArgumentOutOfRangeException(nameof(req.BatchCase), req.BatchCase, "Unsupported batch type."),
+        };
 
         // Update max offset.
         if (req.HasOffsetId)

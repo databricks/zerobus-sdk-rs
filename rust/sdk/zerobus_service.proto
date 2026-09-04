@@ -5,14 +5,16 @@ import "google/protobuf/duration.proto";
 package databricks.zerobus;
 
 // Canonical Zerobus gRPC service schema — the single source of truth for every
-// SDK's generated bindings: the Rust core, the Java SDK, the cgo Go SDK tests,
-// and the pure-Go SDK (purego). The Java options below apply at codegen. The
-// two Go consumers target different import paths, so neither a go_package is set
-// here — each supplies its own via a protoc `M` override at generation time
-// (see go/tests/generate_proto.sh and purego/internal/zerobuspb/gen.go).
+// SDK's generated bindings: the Rust core, the Java SDK, the .NET integration
+// tests, the cgo Go SDK tests, and the pure-Go SDK (purego). The options below
+// apply at codegen. The two Go consumers target different import paths, so
+// neither a go_package is set here — each supplies its own via a protoc `M`
+// override at generation time (see go/tests/generate_proto.sh and
+// purego/internal/zerobuspb/gen.go).
 option java_package = "com.databricks.zerobus";
 option java_outer_classname = "ZerobusProto";
 option java_multiple_files = true;
+option csharp_namespace = "Databricks.Zerobus.Protocol";
 
 // Version information for the Zerobus service.
 // Current version: v1 (package: databricks.zerobus).

@@ -440,11 +440,13 @@ dotnet test tests/Zerobus.Tests
 
 ### Integration Tests
 
-Integration tests spin up a mock gRPC server (per test) and exercise the full SDK through the native FFI layer. They require the Rust toolchain to build the native library:
+Integration tests spin up a mock gRPC server per test. SDK tests exercise the native FFI layer, while mock-server tests use generated test-only gRPC types. The suite requires the Rust toolchain to build the native library:
 
 ```bash
 dotnet test tests/Zerobus.IntegrationTests
 ```
+
+The mock server and generated test client use the canonical schema at `../rust/sdk/zerobus_service.proto`.
 
 The integration tests cover:
 
@@ -461,6 +463,7 @@ The integration tests cover:
 | `IngestMultipleRecords`                             | Multiple sequential records with ack       |
 | `IngestBatchRecords`                                | Batch ingest of 5 records                  |
 | `IngestRecordsAfterClose`                           | Batch ingest after close throws            |
+| `AvroBatchUpdatesWriteCount`                        | Avro batch updates mock write count        |
 
 Each test gets its own mock gRPC server on a unique port, so all tests run in parallel.
 
@@ -499,11 +502,9 @@ dotnet/
 │   ├── Zerobus.Tests/                         # Unit tests (NUnit)
 │   └── Zerobus.IntegrationTests/              # Integration tests (NUnit + gRPC mock)
 │       ├── Zerobus.IntegrationTests.csproj
-│       ├── IntegrationTests.cs                # 11 integration tests
+│       ├── *IntegrationTests.cs               # SDK and mock integration tests
 │       ├── MockZerobusServer.cs               # Mock gRPC server
-│       ├── TestHelpers.cs                     # Fixtures, response builders, interceptor
-│       └── Protos/
-│           └── zerobus_service.proto          # Proto definition for gRPC stubs
+│       └── TestHelpers.cs                     # Fixtures, response builders, interceptor
 └── examples/
     ├── JsonSingle/                            # Single JSON record ingestion
     ├── JsonBatch/                             # Batch JSON record ingestion

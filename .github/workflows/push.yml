@@ -75,6 +75,7 @@ jobs:
               - '.github/workflows/ci-cpp.yml'
             dotnet:
               - 'dotnet/**'
+              - 'rust/sdk/zerobus_service.proto'
               - '.github/workflows/ci-dotnet.yml'
 
   # Blocking jobs — required for merge
