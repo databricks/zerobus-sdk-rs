@@ -4,14 +4,11 @@
 //! flag, and cancels the supervisor and callback tasks. The IO tasks observe
 //! the cancellation and unwind on their own.
 
-#[cfg(feature = "testing")]
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering;
-#[cfg(feature = "testing")]
 use std::sync::Arc;
 
 use tokio::time::Duration;
-#[cfg(feature = "testing")]
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, warn};
 
@@ -25,7 +22,6 @@ const SHUTDOWN_TIMEOUT_SECS: u64 = 1;
 /// Cloneable, task-independent subset of stream state needed for terminal
 /// shutdown. Multiplexed-stream poison cleanup keeps these handles so it can
 /// finish safely even if the initiating API future is cancelled.
-#[cfg(feature = "testing")]
 #[derive(Clone)]
 pub(crate) struct StreamShutdownHandle {
     is_closed: Arc<AtomicBool>,
@@ -33,7 +29,6 @@ pub(crate) struct StreamShutdownHandle {
     cancellation_token: CancellationToken,
 }
 
-#[cfg(feature = "testing")]
 impl StreamShutdownHandle {
     pub(crate) fn new(
         is_closed: Arc<AtomicBool>,
@@ -86,15 +81,21 @@ impl ZerobusStream {
     /// # }
     /// ```
     pub async fn close(&mut self) -> ZerobusResult<()> {
-        if self.is_closed.load(Ordering::Relaxed) {
-            return Ok(());
-        }
-        if let Some(stream_id) = self.stream_id.as_deref() {
-            info!(stream_id = %stream_id, "Closing stream");
+        let already_closed = self.is_closed.load(Ordering::Relaxed);
+        let flush_result = if already_closed {
+            self.terminal_error().map_or(Ok(()), Err)
         } else {
-            error!("Stream ID is None during closing");
+            if let Some(stream_id) = self.stream_id.as_deref() {
+                info!(stream_id = %stream_id, "Closing stream");
+            } else {
+                error!("Stream ID is None during closing");
+            }
+            self.flush().await
+        };
+
+        if let Err(error) = &flush_result {
+            self.fail_pending_records(error).await;
         }
-        let flush_result = self.flush().await;
         self.is_closed.store(true, Ordering::Relaxed);
         self.terminal_token.cancel();
         self.shutdown_all_tasks_gracefully().await;
@@ -109,23 +110,29 @@ impl ZerobusStream {
         self.cancellation_token.cancel();
 
         // Shutdown supervisor task.
-        match tokio::time::timeout(
-            Duration::from_secs(SHUTDOWN_TIMEOUT_SECS),
-            &mut self.supervisor_task,
-        )
-        .await
-        {
-            Ok(_) => {
-                debug!("Supervisor task exited gracefully");
+        if !self.supervisor_reaped {
+            match tokio::time::timeout(
+                Duration::from_secs(SHUTDOWN_TIMEOUT_SECS),
+                &mut self.supervisor_task,
+            )
+            .await
+            {
+                Ok(_) => {
+                    debug!("Supervisor task exited gracefully");
+                }
+                Err(_) => {
+                    warn!("Supervisor task did not exit within timeout, aborting");
+                    self.supervisor_task.abort();
+                    let _ = (&mut self.supervisor_task).await;
+                }
             }
-            Err(_) => {
-                warn!("Supervisor task did not exit within timeout, aborting");
-                self.supervisor_task.abort();
-            }
+            self.supervisor_reaped = true;
         }
+
         // Shutdown callback handler task, if there are any callbacks.
-        if let Some(task) = self.callback_handler_task.take() {
-            Self::shutdown_callback_task(task, self.options.callback_max_wait_time_ms).await;
+        if let Some(task) = self.callback_handler_task.as_mut() {
+            Self::shutdown_callback_task_ref(task, self.options.callback_max_wait_time_ms).await;
+            self.callback_handler_task.take();
         }
     }
 
@@ -139,8 +146,15 @@ impl ZerobusStream {
         mut task: tokio::task::JoinHandle<()>,
         callback_max_wait_time_ms: Option<u64>,
     ) {
+        Self::shutdown_callback_task_ref(&mut task, callback_max_wait_time_ms).await;
+    }
+
+    async fn shutdown_callback_task_ref(
+        task: &mut tokio::task::JoinHandle<()>,
+        callback_max_wait_time_ms: Option<u64>,
+    ) {
         if let Some(callback_max_wait_time_ms) = callback_max_wait_time_ms {
-            match tokio::time::timeout(Duration::from_millis(callback_max_wait_time_ms), &mut task)
+            match tokio::time::timeout(Duration::from_millis(callback_max_wait_time_ms), &mut *task)
                 .await
             {
                 Ok(_) => {
@@ -149,11 +163,12 @@ impl ZerobusStream {
                 Err(_) => {
                     debug!("Callback handler task did not exit within timeout, aborting");
                     task.abort();
+                    let _ = task.await;
                 }
             }
         } else {
             debug!("Callback max wait time is not set, waiting indefinitely");
-            let _ = (&mut task).await;
+            let _ = task.await;
         }
     }
 
@@ -162,12 +177,10 @@ impl ZerobusStream {
     // cancellation token and `is_closed` flag, both of which are already
     // interior-mutable. The `JoinHandle`s aren't reaped here; that happens in
     // `close` or `Drop`.
-    #[cfg(feature = "testing")]
     pub(crate) fn signal_shutdown(&self) {
         self.shutdown_handle().signal();
     }
 
-    #[cfg(feature = "testing")]
     pub(crate) fn shutdown_handle(&self) -> StreamShutdownHandle {
         StreamShutdownHandle::new(
             Arc::clone(&self.is_closed),

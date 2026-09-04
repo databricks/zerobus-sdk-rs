@@ -270,7 +270,13 @@ impl ZerobusStream {
         }
     }
 
-    #[cfg(feature = "testing")]
+    pub(crate) fn try_reserve_capacity(
+        &self,
+    ) -> ZerobusResult<Option<crate::landing_zone::CapacityReservation>> {
+        self.check_open()?;
+        Ok(self.landing_zone.try_reserve_capacity())
+    }
+
     pub(crate) async fn enqueue_reserved_admitted<F, Fut, G>(
         &self,
         encoded_batch: EncodedBatch,
