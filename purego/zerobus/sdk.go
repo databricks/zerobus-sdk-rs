@@ -271,6 +271,7 @@ func (s *SDK) createStreamConfigured(
 		TableName:       tableName,
 		RecordType:      sc.recordType,
 		DescriptorProto: sc.descriptor,
+		AvroSchemaJSON:  sc.avroSchema,
 		HeadersProvider: provider,
 	}
 	openingCtx := context.WithoutCancel(ctx)
@@ -285,6 +286,7 @@ func (s *SDK) createStreamConfigured(
 		core:                    core,
 		sdk:                     s,
 		recordType:              sc.recordType,
+		avroSchemaJSON:          sc.avroSchema,
 		maxBatchRecords:         positiveOrDefault(sc.cfg.MaxBatchRecords, stream.DefaultMaxBatchRecords),
 		maxBufferedPayloadBytes: positiveOrDefault64(sc.cfg.MaxBufferedPayloadBytes, stream.DefaultMaxBufferedPayloadBytes),
 	}
@@ -319,6 +321,9 @@ func validateStreamArgs(tableName string, sc streamConfig) error {
 	}
 	if sc.recordType == zerobuspb.RecordType_PROTO && len(sc.descriptor) == 0 {
 		return fmt.Errorf("WithProto requires a non-empty descriptor proto")
+	}
+	if sc.recordType == zerobuspb.RecordType_AVRO && strings.TrimSpace(sc.avroSchema) == "" {
+		return fmt.Errorf("WithAvro requires a non-empty schema")
 	}
 	return nil
 }

@@ -79,9 +79,32 @@ first successful open, so it does not terminate the live stream.
 
 - **Protocol Buffers** (default): `WithProto(descriptorProto)`.
 - **JSON**: `WithJSON()`.
+- **Avro** *(Beta, requires the `avro` build tag)*: `WithAvro(schemaJSON)`.
+  - Ingest pre-encoded bytes: `stream.IngestRecordOffset([]byte{...})`.
+  - Ingest as objects (new): `stream.IngestRecordOffset(zerobus.AvroRecord{"field": value, ...})`.
+    Objects are encoded against the writer schema declared at stream creation.
+  - Server support is pending.
 
 `IngestJSONOffset` and `IngestJSONRecordsOffset` queue JSON directly on JSON
 streams and convert it to protobuf on proto streams.
+
+### Avro (requires `avro` build tag)
+
+Build with `-tags avro`, declare the writer schema with `WithAvro`, then ingest
+`AvroRecord` objects the stream encodes with `IngestAvroRecordOffset`, or
+pre-encoded datums (`[]byte`) with `IngestRecordOffset`:
+
+```go
+stream, _ := sdk.CreateStream(ctx, "catalog.schema.table", clientID, secret,
+    zerobus.WithAvro(`{"type":"record","name":"Order","fields":[...]}`))
+
+stream.IngestAvroRecordOffset(zerobus.AvroRecord{"id": int64(1), "customer": "Alice"})
+stream.Flush() // queue in a loop, flush once — never wait per record
+```
+
+Field names must match the schema. The schema is parsed once (on first object
+encode) and cached; encode errors surface from the `Ingest` call. See
+`examples/avro`. Server support is pending.
 
 ## Dynamic proto with UC schema fetch
 

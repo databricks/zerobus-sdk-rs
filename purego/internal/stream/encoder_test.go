@@ -5,6 +5,8 @@ import (
 	"testing"
 
 	"google.golang.org/protobuf/proto"
+
+	"github.com/databricks/zerobus-sdk/purego/internal/zerobuspb"
 )
 
 func TestProtoEncoderSetsOffsetAndPayload(t *testing.T) {
@@ -60,6 +62,56 @@ func TestProtoBatchEncoderSetsOffsetAndPayload(t *testing.T) {
 	// The batch must carry all three records, not one concatenated blob.
 	if got := len(pb.GetRecords()); got != 3 {
 		t.Fatalf("want 3 records in batch, got %d", got)
+	}
+}
+
+func TestAvroEncoderSetsOffsetAndPayload(t *testing.T) {
+	enc := avroEncoder{}
+	msg, err := enc.encode([]byte{0x02, 0x0a})
+	if err != nil {
+		t.Fatalf("encode: %v", err)
+	}
+	ir := msg.GetIngestRecord()
+	if ir == nil {
+		t.Fatal("want IngestRecord payload, got nil")
+	}
+	enc.stampOffset(msg, 9)
+	if ir.GetOffsetId() != 9 {
+		t.Fatalf("want stamped offset 9, got %d", ir.GetOffsetId())
+	}
+	if len(ir.GetAvroEncodedRecord()) != 2 {
+		t.Fatalf("want avro datum, got %v", ir.GetAvroEncodedRecord())
+	}
+	if got := enc.decode(msg); len(got) != 1 || len(got[0]) != 2 {
+		t.Fatalf("decode roundtrip mismatch: %v", got)
+	}
+}
+
+func TestAvroBatchEncoderUsesAvroBatch(t *testing.T) {
+	enc := avroEncoder{}
+	msg, err := enc.encodeBatch([][]byte{{0x01}, {0x02}, {0x03}})
+	if err != nil {
+		t.Fatalf("encodeBatch: %v", err)
+	}
+	ab := msg.GetIngestRecordBatch().GetAvroBatch()
+	if ab == nil {
+		t.Fatal("want AvroBatch, got nil")
+	}
+	if got := len(ab.GetRecords()); got != 3 {
+		t.Fatalf("want 3 records in batch, got %d", got)
+	}
+	if got := enc.decode(msg); len(got) != 3 {
+		t.Fatalf("want 3 decoded records, got %d", len(got))
+	}
+}
+
+func TestNewEncoderReturnsAvroForAvroRecordType(t *testing.T) {
+	enc, err := newEncoder(zerobuspb.RecordType_AVRO)
+	if err != nil {
+		t.Fatalf("newEncoder(AVRO): %v", err)
+	}
+	if _, ok := enc.(avroEncoder); !ok {
+		t.Fatalf("want avroEncoder, got %T", enc)
 	}
 }
 

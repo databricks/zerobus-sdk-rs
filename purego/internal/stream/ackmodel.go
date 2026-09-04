@@ -298,10 +298,11 @@ func (m resolvingHookAckModel[Resp]) resolve(resp Resp, state AckState) (AckReso
 	return m.hooks.Resolve(resp, state)
 }
 
-// newAckModel returns the proto/JSON ack model for the given record type.
+// newAckModel returns the offset-based ack model for the given record type.
+// Proto, JSON, and Avro are all ephemeral, offset-acknowledged streams.
 func newAckModel(rt zerobuspb.RecordType) (ackModel[ephemeralResp], error) {
 	switch rt {
-	case zerobuspb.RecordType_PROTO, zerobuspb.RecordType_JSON:
+	case zerobuspb.RecordType_PROTO, zerobuspb.RecordType_JSON, zerobuspb.RecordType_AVRO:
 		return offsetAckModel{}, nil
 	default:
 		return nil, errUnsupportedRecordType(rt)
