@@ -387,7 +387,7 @@ impl ZerobusSdk {
         future_into_py(py, async move {
             let sdk_guard = sdk.read().await;
             let builder = sdk_guard.stream_builder();
-            let builder = builder.federated(supplier, databricks_client_id, cache_key);
+            let builder = builder.federated_auth(supplier, databricks_client_id, cache_key);
             let builder = apply_table_and_format(builder, &table_properties);
             let builder = apply_grpc_options(builder, &opts)?;
             let stream = builder.build().await.map_err(map_error)?;

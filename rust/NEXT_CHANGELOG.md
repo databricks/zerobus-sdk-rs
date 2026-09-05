@@ -16,13 +16,13 @@
   and refreshes it through the existing `TokenCache`, and supports both
   account-level federation (no `client_id`, identity synced via Automatic
   Identity Management) and workload identity federation (a service principal
-  `client_id` with no secret). Opt in via `StreamBuilder::federated(supplier,
+  `client_id` with no secret). Opt in via `StreamBuilder::federated_auth(supplier,
   client_id)`, where `client_id` is `None` for account-level federation or the
   service principal id for workload identity. The client-credentials and
   token-exchange grants now share one request-shaping path, keeping them at
   parity. The cached lifetime of an exchanged token is additionally capped at the
   subject JWT's remaining life (`min(expires_in, exp - now)`), so it is never
-  served past the point its subject token expired. `.federated()` also takes an
+  served past the point its subject token expired. `.federated_auth()` also takes an
   optional `cache_key` that partitions the shared token cache for account-level
   federation, so two distinct identities driven from one SDK instance do not
   collide on the same table and serve each other's token. Existing `oauth(...)`

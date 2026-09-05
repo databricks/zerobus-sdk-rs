@@ -537,7 +537,7 @@ use std::sync::Arc;
 let stream = sdk
     .stream_builder()
     .table("catalog.schema.table")
-    .federated(
+    .federated_auth(
         Arc::new(|| Box::pin(async { get_idp_token().await })),
         None::<String>,
         None,
@@ -552,7 +552,7 @@ let stream = sdk
 let stream = sdk
     .stream_builder()
     .table("catalog.schema.table")
-    .federated(
+    .federated_auth(
         Arc::new(|| Box::pin(async { get_idp_token().await })),
         Some("<sp-client-id>"),
         None,

@@ -49,7 +49,7 @@ enum AuthConfig {
     /// federation. `cache_key` partitions the shared token cache for
     /// account-level federation so distinct identities do not collide; it is
     /// unused for workload identity federation (which keys by `client_id`).
-    Federated {
+    FederatedAuth {
         idp_token_supplier: IdpTokenSupplier,
         client_id: Option<String>,
         cache_key: Option<String>,
@@ -121,7 +121,7 @@ impl fmt::Debug for StreamBuilder<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let auth_kind = match &self.auth {
             Some(AuthConfig::OAuth { .. }) => "OAuth",
-            Some(AuthConfig::Federated { .. }) => "Federated",
+            Some(AuthConfig::FederatedAuth { .. }) => "FederatedAuth",
             Some(AuthConfig::HeadersProvider(_)) => "HeadersProvider",
             #[cfg(feature = "testing")]
             Some(AuthConfig::NoAuth) => "NoAuth",
@@ -146,11 +146,11 @@ impl fmt::Debug for StreamBuilder<'_> {
 const fn missing_auth_error() -> &'static str {
     #[cfg(feature = "testing")]
     {
-        "authentication is required: call .oauth(), .federated(), .headers_provider(), or .no_auth()"
+        "authentication is required: call .oauth(), .federated_auth(), .headers_provider(), or .no_auth()"
     }
     #[cfg(not(feature = "testing"))]
     {
-        "authentication is required: call .oauth(), .federated(), or .headers_provider()"
+        "authentication is required: call .oauth(), .federated_auth(), or .headers_provider()"
     }
 }
 
@@ -191,13 +191,13 @@ impl<'a> StreamBuilder<'a> {
     /// federation, so two different identities used from one SDK instance do not
     /// share a cached token; `None` shares by table (unused for workload, which
     /// keys by `client_id`).
-    pub fn federated(
+    pub fn federated_auth(
         mut self,
         idp_token_supplier: IdpTokenSupplier,
         client_id: Option<impl Into<String>>,
         cache_key: Option<String>,
     ) -> Self {
-        self.auth = Some(AuthConfig::Federated {
+        self.auth = Some(AuthConfig::FederatedAuth {
             idp_token_supplier,
             client_id: client_id.map(Into::into),
             cache_key,
@@ -453,7 +453,7 @@ impl<'a> StreamBuilder<'a> {
                     Some(refresh_timeout),
                 )))
             }
-            Some(AuthConfig::Federated {
+            Some(AuthConfig::FederatedAuth {
                 idp_token_supplier,
                 client_id,
                 cache_key,
