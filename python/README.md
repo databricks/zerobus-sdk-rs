@@ -288,6 +288,59 @@ asyncio.run(main())
 
 See the [`examples/`](examples/) directory for complete runnable examples.
 
+## Authentication
+
+`create_stream()` supports three authentication methods, in this precedence:
+`auth` (federation) > `headers_provider` > `client_id`/`client_secret`.
+
+### OAuth client credentials (default)
+
+```python
+stream = sdk.create_stream(
+    client_id="your-client-id",
+    client_secret="your-client-secret",
+    table_properties=table_properties,
+)
+```
+
+### External-IdP federation (e.g. Entra ID)
+
+Use `auth=FederatedToken(...)` to authenticate with an external identity
+provider instead of a Databricks OAuth secret. You provide a callback that
+returns the current external IdP token; the SDK exchanges it for a
+Zerobus-scoped Databricks token (RFC 8693 token exchange) and caches and
+refreshes that token for you. The callback may be synchronous (sync SDK) or
+asynchronous (async SDK).
+
+```python
+from zerobus import FederatedToken
+
+def get_idp_token():
+    # Return the current external IdP (e.g. Entra ID) access token.
+    ...
+
+# Account-level federation: no Databricks service principal. The identity is
+# synced into Databricks via Automatic Identity Management (SCIM).
+stream = sdk.create_stream(
+    table_properties=table_properties,
+    auth=FederatedToken(idp_token_supplier=get_idp_token),
+)
+
+# Workload identity federation: a Databricks service principal with a client_id
+# and no secret, with a federation policy attached.
+stream = sdk.create_stream(
+    table_properties=table_properties,
+    auth=FederatedToken(idp_token_supplier=get_idp_token, databricks_client_id="<sp-client-id>"),
+)
+```
+
+See [`examples/sync_example_federated.py`](examples/sync_example_federated.py) for a complete example.
+
+### Custom headers provider
+
+For advanced cases you can supply your own `HeadersProvider` via
+`headers_provider=`; see the [`HeadersProvider`](#headersprovider) reference.
+
 ## Configuration
 
 Configure stream behavior by passing a `StreamConfigurationOptions` object to `create_stream()`:
